@@ -444,3 +444,15 @@ fn a_focused_text_field_asks_to_be_drawn_again_for_its_caret() {
     let wake = screen.next_redraw().expect("the caret blinks");
     assert!(wake <= std::time::Instant::now() + std::time::Duration::from_secs(1));
 }
+
+#[test]
+fn aw10_the_agents_icon_in_the_dock_opens_the_agents_menu() {
+    let live = Live::new(fixtures::tasks());
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    // The dock is centered at the bottom; the agents icon is its last.
+    let found = (700..1100)
+        .step_by(12)
+        .map(|x| Point::new(x as f32, SIZE.1 - 40.0))
+        .any(|at| click(&mut screen, &live, at) == [Message::ToggleAgents]);
+    assert!(found, "the dock's agents icon opens the menu");
+}

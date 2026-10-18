@@ -556,6 +556,12 @@ fn dock<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
     } else {
         agents
     };
+    // Clicking it opens the agents menu, as the menu bar's pill does.
+    let agents: Element<'a, Message> = button(agents)
+        .on_press(Message::ToggleAgents)
+        .padding(0)
+        .style(style::button_like(style::panel(Color::TRANSPARENT, 0.0)))
+        .into();
     let separator = container(
         container("")
             .width(Length::Fixed(1.0))

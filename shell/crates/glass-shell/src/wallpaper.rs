@@ -79,7 +79,13 @@ pub fn render(wallpaper: &Wallpaper, width: u32, height: u32) -> Vec<u8> {
 
 /// [`render`], or with red and blue swapped throughout (`bgr`): B, G, R, A.
 fn paint(wallpaper: &Wallpaper, width: u32, height: u32, bgr: bool) -> Vec<u8> {
-    let order = |c: iced_core::Color| if bgr { [c.b, c.g, c.r] } else { [c.r, c.g, c.b] };
+    let order = |c: iced_core::Color| {
+        if bgr {
+            [c.b, c.g, c.r]
+        } else {
+            [c.r, c.g, c.b]
+        }
+    };
     let Some(mut shapes) = Pixmap::new(width.max(1), height.max(1)) else {
         return vec![0; (width * height * 4) as usize];
     };
