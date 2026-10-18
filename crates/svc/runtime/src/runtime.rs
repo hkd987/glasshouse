@@ -1,0 +1,714 @@
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use glass_actions::{Grant, Registry, TaskContext};
+use glass_api::{
+    ActivityKind, AgentSummary, AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalView,
+    AuditVerifyResult, Event, HandoffCard, ScopeLine, ScopeRequest, SnapshotMarker, SystemStatus,
+    TaskDetail, TaskRequest, TaskView, TileState,
+};
+use glass_audit::{ApprovalRef, AuditEvent, AuditLog, AuditRecord, EventKind};
+use glass_broker::{ApprovalDesk, DeskError};
+use glass_platform::fs::Owner;
+use glass_platform::sandbox::{Mount, Sandbox, SandboxSpec};
+use glass_platform::snapshot::{SnapshotHandle, Snapshotter};
+use glass_policy::{ActionPattern, EffectivePolicy, Policy};
+use glass_types::{AgentPrincipal, SnapshotId, TaskId, Tier, Timestamp, UserRef};
+use tokio::sync::{broadcast, oneshot};
+
+use crate::error::Result;
+use crate::task::{Gate, TakenSnapshot, Task};
+use crate::{Caller, CatalogEntry, RuntimeConfig, RuntimeError, supervise};
+
+/// Everything the runtime is built from. `glassd` assembles these from its
+/// config; tests assemble development backends.
+pub struct RuntimeParts {
+    pub config: RuntimeConfig,
+    pub policy: Policy,
+    /// Where the policy came from, for status output.
+    pub policy_source: String,
+    pub registry: Registry,
+    pub sandbox: Arc<dyn Sandbox>,
+    pub snapshots: Arc<dyn Snapshotter>,
+    pub audit: Arc<AuditLog>,
+}
+
+/// Events carry the owner's uid so subscribers only see their own tasks.
+pub(crate) type OwnedEvent = (u32, Event);
+
+pub struct Runtime {
+    pub(crate) config: RuntimeConfig,
+    pub(crate) policy: Policy,
+    policy_source: String,
+    pub(crate) registry: Registry,
+    pub(crate) desk: ApprovalDesk,
+    pub(crate) sandbox: Arc<dyn Sandbox>,
+    pub(crate) snapshots: Arc<dyn Snapshotter>,
+    audit: Arc<AuditLog>,
+    audit_ok: AtomicBool,
+    events: broadcast::Sender<OwnedEvent>,
+    tasks: Mutex<BTreeMap<TaskId, Arc<Task>>>,
+    supervisors: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl std::fmt::Debug for Runtime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Runtime")
+            .field("sandbox", &self.sandbox.kind())
+            .finish_non_exhaustive()
+    }
+}
+
+/// What planning works out, shared by `plan` and `start`.
+struct Prepared {
+    entry: CatalogEntry,
+    policy: EffectivePolicy,
+    grants: Vec<Grant>,
+    card: HandoffCard,
+}
+
+impl Runtime {
+    pub fn new(parts: RuntimeParts) -> Arc<Self> {
+        let (events, _) = broadcast::channel(1024);
+        Arc::new(Self {
+            config: parts.config,
+            policy: parts.policy,
+            policy_source: parts.policy_source,
+            registry: parts.registry,
+            desk: ApprovalDesk::new(),
+            sandbox: parts.sandbox,
+            snapshots: parts.snapshots,
+            audit: parts.audit,
+            audit_ok: AtomicBool::new(true),
+            events,
+            tasks: Mutex::new(BTreeMap::new()),
+            supervisors: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Stops every live task and waits (bounded) for their sandboxes to be
+    /// torn down. Called when the daemon exits.
+    pub async fn shutdown(&self) {
+        let live: Vec<Arc<Task>> = self
+            .tasks()
+            .values()
+            .filter(|t| t.lock().tile.is_live())
+            .cloned()
+            .collect();
+        for task in &live {
+            self.stop_task(task, "Stopped because the system is shutting down");
+        }
+        let handles: Vec<_> =
+            std::mem::take(&mut *self.supervisors.lock().unwrap_or_else(|p| p.into_inner()));
+        for handle in handles {
+            if tokio::time::timeout(std::time::Duration::from_secs(20), handle)
+                .await
+                .is_err()
+            {
+                tracing::warn!("a task did not finish tearing down in time");
+            }
+        }
+    }
+
+    fn tasks(&self) -> std::sync::MutexGuard<'_, BTreeMap<TaskId, Arc<Task>>> {
+        self.tasks.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub(crate) fn task(&self, id: TaskId) -> Option<Arc<Task>> {
+        self.tasks().get(&id).cloned()
+    }
+
+    /// The task, if `caller` may see it. Others' tasks read as not found.
+    fn authorized(&self, caller: &Caller, id: TaskId) -> Result<Arc<Task>> {
+        self.task(id)
+            .filter(|t| caller.is_admin() || t.user.uid == caller.uid)
+            .ok_or_else(|| RuntimeError::NotFound(format!("no task {}", id.short())))
+    }
+
+    // ---- recording -------------------------------------------------------
+
+    /// Appends to the audit log. A failed append marks the log unhealthy, and
+    /// the action pipeline then refuses side effects (fail closed).
+    pub(crate) fn audit(&self, event: AuditEvent) {
+        if let Err(e) = self.audit.append(event) {
+            tracing::error!(error = %e, "audit append failed; refusing further side effects");
+            self.audit_ok.store(false, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn audit_healthy(&self) -> bool {
+        self.audit_ok.load(Ordering::SeqCst)
+    }
+
+    /// An audit event pre-filled with the task's principal.
+    pub(crate) fn task_event(
+        &self,
+        task: &Task,
+        kind: EventKind,
+        summary: impl Into<String>,
+    ) -> AuditEvent {
+        let mut event = AuditEvent::new(kind, summary);
+        event.user = Some(task.user.name.clone());
+        event.agent = Some(task.entry.id.clone());
+        event.task = Some(task.id);
+        event
+    }
+
+    /// Tells subscribers the task's tile changed.
+    pub(crate) fn publish(&self, task: &Task) {
+        let view = task.view(self.desk.pending_for_task(task.id));
+        let _ = self.events.send((
+            task.user.uid,
+            Event::TaskUpdated {
+                task: Box::new(view),
+            },
+        ));
+    }
+
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<OwnedEvent> {
+        self.events.subscribe()
+    }
+
+    // ---- queries ---------------------------------------------------------
+
+    pub fn status(&self) -> SystemStatus {
+        let tasks = self.tasks();
+        SystemStatus {
+            version: env!("CARGO_PKG_VERSION").into(),
+            sandbox: self.sandbox.kind().into(),
+            policy: self.policy_source.clone(),
+            tasks_running: tasks.values().filter(|t| t.lock().tile.is_live()).count(),
+            approvals_pending: self.desk.pending(None).len(),
+        }
+    }
+
+    pub fn agents_for(&self, caller: &Caller) -> Vec<AgentSummary> {
+        let allowed = self.policy.agents_for(&caller.name);
+        self.config
+            .catalog
+            .iter()
+            .filter(|e| allowed.contains(&&e.id))
+            .map(CatalogEntry::summary)
+            .collect()
+    }
+
+    pub fn list(&self, caller: &Caller) -> Vec<TaskView> {
+        let tasks: Vec<Arc<Task>> = self.tasks().values().cloned().collect();
+        tasks
+            .iter()
+            .filter(|t| caller.is_admin() || t.user.uid == caller.uid)
+            .map(|t| t.view(self.desk.pending_for_task(t.id)))
+            .collect()
+    }
+
+    pub fn get(&self, caller: &Caller, id: TaskId) -> Result<TaskDetail> {
+        let task = self.authorized(caller, id)?;
+        Ok(task.detail(self.desk.pending_for_task(id)))
+    }
+
+    // ---- planning and starting ------------------------------------------
+
+    /// The handoff card for a request, with no side effects (DA-2).
+    pub fn plan(&self, caller: &Caller, request: &TaskRequest) -> Result<HandoffCard> {
+        Ok(self.prepare(caller, request)?.card)
+    }
+
+    fn prepare(&self, caller: &Caller, request: &TaskRequest) -> Result<Prepared> {
+        if request.prompt.trim().is_empty() {
+            return Err(RuntimeError::Invalid(
+                "describe the task in a sentence or two".into(),
+            ));
+        }
+        let entry = self
+            .config
+            .catalog
+            .iter()
+            .find(|e| e.id == request.agent)
+            .cloned()
+            .ok_or_else(|| {
+                RuntimeError::NotFound(format!("no agent {} in the catalog", request.agent))
+            })?;
+        let mut policy = self
+            .policy
+            .effective(&caller.name, &entry.id)
+            .ok_or_else(|| {
+                RuntimeError::PermissionDenied(format!(
+                    "your groups are not allowed to run {}",
+                    entry.id
+                ))
+            })?;
+
+        let known = self.registry.known_tiers();
+        for (pattern, tier) in &request.scope.restrict {
+            let pattern: ActionPattern = pattern
+                .parse()
+                .map_err(|e: glass_policy::InvalidPattern| RuntimeError::Invalid(e.to_string()))?;
+            policy
+                .restrict(pattern, *tier, &known)
+                .map_err(|e| RuntimeError::Invalid(e.to_string()))?;
+        }
+        let grants = resolve_scope(caller, &request.scope)?;
+
+        let mut asks_before = Vec::new();
+        let mut notifies = Vec::new();
+        for def in self.registry.defs() {
+            let line = format!("{} ({})", def.title, def.name);
+            match policy.tier_for(&def.name, def.default_tier).tier {
+                Tier::Ask => asks_before.push(line),
+                Tier::Notify => notifies.push(line),
+                _ => {}
+            }
+        }
+        let plan = if entry.plan.is_empty() {
+            vec![
+                "Read what it was given".into(),
+                "Do the task".into(),
+                "Report what changed".into(),
+            ]
+        } else {
+            entry.plan.clone()
+        };
+        let card = HandoffCard {
+            agent: entry.summary(),
+            prompt: request.prompt.clone(),
+            plan,
+            touches: grants
+                .iter()
+                .map(|g| ScopeLine {
+                    path: g.root.clone(),
+                    access: if g.writable {
+                        "read and change".into()
+                    } else {
+                        "read only".into()
+                    },
+                })
+                .collect(),
+            asks_before,
+            notifies,
+            cant_touch: policy.cant_touch(&known),
+        };
+        Ok(Prepared {
+            entry,
+            policy,
+            grants,
+            card,
+        })
+    }
+
+    /// Starts a task (DA-3): the scope on the card becomes the task's grants.
+    pub fn start(self: &Arc<Self>, caller: &Caller, request: TaskRequest) -> Result<TaskView> {
+        let prepared = self.prepare(caller, &request)?;
+        let live = self
+            .tasks()
+            .values()
+            .filter(|t| t.user.uid == caller.uid && t.lock().tile.is_live())
+            .count();
+        if live >= self.config.max_live_tasks_per_user {
+            return Err(RuntimeError::Conflict(format!(
+                "you already have {live} agents running; stop or wait for one first"
+            )));
+        }
+
+        let id = TaskId::new();
+        let name = format!("glass-{}", id.short());
+        let sandbox = SandboxSpec {
+            root: self.config.state_dir.join("sandboxes").join(&name),
+            name,
+            mounts: self
+                .config
+                .agent_dirs
+                .iter()
+                .map(|dir| Mount {
+                    source: dir.clone(),
+                    target: dir.clone(),
+                    writable: false,
+                })
+                .collect(),
+            user: caller.name.clone(),
+            uid: caller.uid,
+            gid: caller.gid,
+        };
+        let ctx = TaskContext {
+            principal: AgentPrincipal {
+                agent: prepared.entry.id.clone(),
+                on_behalf_of: UserRef {
+                    name: caller.name.clone(),
+                    uid: caller.uid,
+                },
+                task: id,
+            },
+            owner: Owner {
+                uid: caller.uid,
+                gid: caller.gid,
+            },
+            home: caller.home.clone(),
+            grants: prepared.grants,
+        };
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task = Arc::new(Task::new(
+            id,
+            caller.clone(),
+            prepared.entry,
+            request.prompt,
+            prepared.card.plan,
+            prepared.policy,
+            ctx,
+            sandbox,
+            prepared.card.cant_touch,
+            stop_tx,
+        ));
+        self.tasks().insert(id, Arc::clone(&task));
+
+        let mut event = self.task_event(
+            &task,
+            EventKind::TaskStarted,
+            format!("Started: {}", task.prompt),
+        );
+        event.detail = serde_json::json!({
+            "prompt": task.prompt,
+            "plan": task.plan,
+            "grants": task.ctx.grants.iter().map(|g| serde_json::json!({
+                "name": g.name, "path": g.root, "writable": g.writable
+            })).collect::<Vec<_>>(),
+            "sandbox": self.sandbox.kind(),
+        });
+        self.audit(event);
+        task.lock()
+            .note(ActivityKind::State, format!("Started by {}", caller.name));
+        self.publish(&task);
+
+        let handle = tokio::spawn(supervise::run(Arc::clone(self), Arc::clone(&task), stop_rx));
+        let mut supervisors = self.supervisors.lock().unwrap_or_else(|p| p.into_inner());
+        supervisors.retain(|h| !h.is_finished());
+        supervisors.push(handle);
+        Ok(task.view(None))
+    }
+
+    // ---- lifecycle -------------------------------------------------------
+
+    /// Holds the agent at its next safe point and shows `tile`.
+    pub(crate) fn hold(&self, task: &Task, tile: TileState, note: &str) {
+        task.gate.send_replace(Gate::Hold);
+        let mut state = task.lock();
+        state.tile = tile;
+        state.note(ActivityKind::State, note);
+    }
+
+    fn live(&self, caller: &Caller, id: TaskId) -> Result<Arc<Task>> {
+        let task = self.authorized(caller, id)?;
+        if !task.lock().tile.is_live() {
+            return Err(RuntimeError::Conflict("that task has already ended".into()));
+        }
+        Ok(task)
+    }
+
+    fn state_change(&self, task: &Task, summary: &str) {
+        self.audit(self.task_event(task, EventKind::TaskStateChanged, summary));
+        self.publish(task);
+    }
+
+    pub fn pause(&self, caller: &Caller, id: TaskId) -> Result<TaskView> {
+        let task = self.live(caller, id)?;
+        self.hold(&task, TileState::Paused, "Paused by you");
+        self.state_change(&task, "Paused");
+        Ok(task.view(self.desk.pending_for_task(id)))
+    }
+
+    pub fn resume(&self, caller: &Caller, id: TaskId) -> Result<TaskView> {
+        let task = self.live(caller, id)?;
+        if task.lock().tile == TileState::YouAreDriving {
+            return Err(RuntimeError::Conflict(
+                "you have control; hand back instead".into(),
+            ));
+        }
+        self.release(&task, "Resumed");
+        self.state_change(&task, "Resumed");
+        Ok(task.view(self.desk.pending_for_task(id)))
+    }
+
+    /// Lets the agent continue; the tile shows "Needs you" again if an ask is
+    /// still open.
+    fn release(&self, task: &Task, note: &str) {
+        let pending = self.desk.pending_for_task(task.id).is_some();
+        {
+            let mut state = task.lock();
+            state.tile = if pending {
+                TileState::NeedsYou
+            } else {
+                TileState::Working
+            };
+            state.note(ActivityKind::State, note);
+        }
+        task.gate.send_replace(Gate::Run);
+    }
+
+    /// Take over (AW-20): the agent pauses at its next safe point and the user
+    /// has control. Available at any time, including during an ask (AW-22).
+    pub async fn take_over(&self, caller: &Caller, id: TaskId) -> Result<TaskView> {
+        let task = self.live(caller, id)?;
+        self.hold(&task, TileState::YouAreDriving, "You took over");
+        let roots: Vec<PathBuf> = task
+            .ctx
+            .grants
+            .iter()
+            .filter(|g| g.writable)
+            .map(|g| g.root.clone())
+            .collect();
+        if !roots.is_empty() {
+            match self.take_snapshot(&task, &roots, "You took over").await {
+                Ok(handle) => task.lock().takeover = Some(handle),
+                Err(e) => {
+                    tracing::warn!(error = %e, "no snapshot at take over; hand back can't summarize")
+                }
+            }
+        }
+        self.state_change(&task, "User took over");
+        Ok(task.view(self.desk.pending_for_task(id)))
+    }
+
+    /// Hand back (AW-21): says in one sentence what the user changed, then
+    /// lets the agent resume from there.
+    pub async fn hand_back(&self, caller: &Caller, id: TaskId) -> Result<TaskView> {
+        let task = self.live(caller, id)?;
+        if task.lock().tile != TileState::YouAreDriving {
+            return Err(RuntimeError::Conflict(
+                "you don't have control of that task".into(),
+            ));
+        }
+        let handle = task.lock().takeover.take();
+        let summary = match handle {
+            Some(handle) => {
+                let snapshots = Arc::clone(&self.snapshots);
+                let changes = tokio::task::spawn_blocking(move || snapshots.changes_since(&handle))
+                    .await
+                    .map_err(|e| RuntimeError::Internal(e.to_string()))?
+                    .unwrap_or_default();
+                match changes.len() {
+                    0 => "You handed back without changing any files.".to_owned(),
+                    n => format!(
+                        "While you drove you changed {n} file{}: {}.",
+                        if n == 1 { "" } else { "s" },
+                        changes
+                            .iter()
+                            .take(5)
+                            .map(|c| display_path(&task.user.home, &c.path))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }
+            }
+            None => "You handed back.".to_owned(),
+        };
+        task.lock().caption = summary.clone();
+        self.release(&task, &summary);
+        self.state_change(&task, &summary);
+        Ok(task.view(self.desk.pending_for_task(id)))
+    }
+
+    /// Stops the agent now. Work done so far stays (and stays undoable).
+    pub fn stop(&self, caller: &Caller, id: TaskId) -> Result<TaskView> {
+        let task = self.live(caller, id)?;
+        self.stop_task(&task, "Stopped by you");
+        Ok(task.view(None))
+    }
+
+    fn stop_task(&self, task: &Task, note: &str) {
+        {
+            let mut state = task.lock();
+            state.tile = TileState::Stopped;
+            state.note(ActivityKind::State, note);
+        }
+        task.gate.send_replace(Gate::Ended);
+        self.desk.end_task(task.id);
+        if let Some(stop) = task.stop.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = stop.send(());
+        }
+        self.state_change(task, note);
+    }
+
+    /// Removes a finished tile. The audit log and snapshots stay.
+    pub fn dismiss(&self, caller: &Caller, id: TaskId) -> Result<()> {
+        let task = self.authorized(caller, id)?;
+        if task.lock().tile.is_live() {
+            return Err(RuntimeError::Conflict(
+                "stop the task before dismissing it".into(),
+            ));
+        }
+        self.tasks().remove(&id);
+        let _ = self
+            .events
+            .send((task.user.uid, Event::TaskRemoved { task: id }));
+        Ok(())
+    }
+
+    // ---- approvals -------------------------------------------------------
+
+    pub fn approvals(&self, caller: &Caller) -> Vec<ApprovalView> {
+        self.desk
+            .pending((!caller.is_admin()).then_some(caller.uid))
+    }
+
+    /// Answers an ask (DA-11). Only the task's own user may.
+    pub fn answer(&self, caller: &Caller, request: AnswerApproval) -> Result<ApprovalView> {
+        let view = self
+            .desk
+            .answer(request.approval, request.answer, caller.uid)
+            .map_err(|e| match e {
+                DeskError::NotFound => RuntimeError::NotFound("no such pending approval".into()),
+                DeskError::AlreadyAnswered(how) => RuntimeError::Conflict(format!("already {how}")),
+            })?;
+        let answer = match request.answer {
+            ApprovalAnswer::Approve {
+                scope: ApprovalScope::Once,
+            } => "approved once",
+            ApprovalAnswer::Approve {
+                scope: ApprovalScope::Task,
+            } => "approved for the rest of the task",
+            ApprovalAnswer::Deny => "denied",
+        };
+        if let Some(task) = self.task(view.task) {
+            let mut event = self.task_event(
+                &task,
+                EventKind::ApprovalAnswered,
+                format!("{}: {answer}", view.summary),
+            );
+            event.action = Some(view.action.clone());
+            event.approval = Some(ApprovalRef {
+                id: view.id,
+                answered_by: Some(caller.name.clone()),
+                answer: Some(answer.into()),
+                answered_at: Some(Timestamp::now()),
+            });
+            self.audit(event);
+        }
+        Ok(view)
+    }
+
+    // ---- audit -----------------------------------------------------------
+
+    /// Every record for one task, to rebuild it end to end (AU-3).
+    pub fn audit_task(&self, caller: &Caller, id: TaskId) -> Result<Vec<AuditRecord>> {
+        let task = self.authorized(caller, id)?;
+        glass_audit::read(self.audit.path(), |r| r.event.task == Some(task.id))
+            .map_err(|e| RuntimeError::Internal(e.to_string()))
+    }
+
+    pub fn audit_verify(&self, caller: &Caller) -> Result<AuditVerifyResult> {
+        if !caller.is_admin() {
+            return Err(RuntimeError::PermissionDenied(
+                "verifying the whole log needs root".into(),
+            ));
+        }
+        let report = glass_audit::verify(self.audit.path())
+            .map_err(|e| RuntimeError::Internal(e.to_string()))?;
+        Ok(AuditVerifyResult {
+            records: report.records,
+            last_hash: report.last_hash,
+        })
+    }
+
+    // ---- snapshots -------------------------------------------------------
+
+    /// Takes a snapshot of `roots`, records it on the task timeline (AW-15)
+    /// and in the audit log.
+    pub(crate) async fn take_snapshot(
+        &self,
+        task: &Task,
+        roots: &[PathBuf],
+        reason: &str,
+    ) -> std::result::Result<SnapshotHandle, String> {
+        let snapshots = Arc::clone(&self.snapshots);
+        let roots = roots.to_vec();
+        let id = SnapshotId::new();
+        let handle = tokio::task::spawn_blocking(move || snapshots.snapshot(id, &roots))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let marker = SnapshotMarker {
+            id,
+            at: Timestamp::now(),
+            reason: reason.to_owned(),
+        };
+        {
+            let mut state = task.lock();
+            state.note(ActivityKind::Snapshot, format!("Snapshot: {reason}"));
+            state.snapshots.push(TakenSnapshot {
+                marker,
+                handle: handle.clone(),
+            });
+        }
+        let mut event = self.task_event(
+            task,
+            EventKind::SnapshotTaken,
+            format!("Snapshot: {reason}"),
+        );
+        event.snapshot = Some(id);
+        event.targets = handle.parts.iter().map(|p| p.name.clone()).collect();
+        self.audit(event);
+        Ok(handle)
+    }
+}
+
+/// Validates and names the folders a task may touch. Users may grant only
+/// folders inside their home; root may grant any.
+fn resolve_scope(caller: &Caller, scope: &ScopeRequest) -> Result<Vec<Grant>> {
+    let mut grants: Vec<Grant> = Vec::new();
+    let requested = scope
+        .write
+        .iter()
+        .map(|p| (p, true))
+        .chain(scope.read.iter().map(|p| (p, false)));
+    for (path, writable) in requested {
+        if !path.is_absolute() {
+            return Err(RuntimeError::Invalid(format!(
+                "{} must be an absolute path",
+                path.display()
+            )));
+        }
+        let root = std::fs::canonicalize(path)
+            .map_err(|_| RuntimeError::NotFound(format!("{} does not exist", path.display())))?;
+        if !root.is_dir() {
+            return Err(RuntimeError::Invalid(format!(
+                "{} is not a folder; grant folders",
+                path.display()
+            )));
+        }
+        if !caller.is_admin() && !root.starts_with(&caller.home) {
+            return Err(RuntimeError::PermissionDenied(format!(
+                "{} is outside your home folder",
+                root.display()
+            )));
+        }
+        if let Some(existing) = grants.iter().find(|g| g.root == root) {
+            // Write wins over read; it comes first.
+            debug_assert!(existing.writable || !writable);
+            continue;
+        }
+        let base = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "root".into());
+        let mut name = base.clone();
+        let mut n = 2;
+        while grants.iter().any(|g| g.name == name) {
+            name = format!("{base}-{n}");
+            n += 1;
+        }
+        grants.push(Grant {
+            name,
+            root,
+            writable,
+        });
+    }
+    Ok(grants)
+}
+
+/// A host path as the user thinks of it: `~/Reports/x.csv`.
+pub(crate) fn display_path(home: &Path, path: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(rel) => format!("~/{}", rel.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
