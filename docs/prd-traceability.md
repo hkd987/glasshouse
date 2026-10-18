@@ -58,7 +58,9 @@ Tests: *unit* = crate unit tests, *pipeline* =
 
 The tile, expanded view and their states exist as data (`glass-api`) and in
 `glassctl`. [docs/design](design/README.md) maps every mockup element to its
-field. The compositor, GUI tiles and screen thumbnails are not started.
+field. The shell (`shell/`) draws the tiles and the expanded view from that
+data, on the VM's screen through `glass-shell-fb`. The compositor and screen
+thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
@@ -67,13 +69,13 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 | AW-3 Three-line feed, verb + target | **Done** (data) | `FeedLine { verb, target, text }` |
 | AW-4 Name, mode, caption, progress | **Done** (data) | `report_progress` tool |
 | AW-5 No focus stealing, draggable | Not started | shell |
-| AW-10 Expanded view < 200 ms | Partial | `task.get` answers in ~4 ms in the VM (e2e `perf`, docs/dev/performance.md); GUI not started |
-| AW-11 Pause, Stop, Take over | Partial | all three work; "Stop asks once if unsaved" not done |
-| AW-12 Now bar | **Done** (data) | `TaskDetail::now` |
-| AW-13 Activity and Changes tabs | **Done** (data) | `TaskDetail::{activity, changes}` |
-| AW-14 Can't touch panel | **Done** (data) | IT's Never rules by name, plus limits |
-| AW-15 Timeline, roll back to a marker | **Done** | pipeline `rolling_back_to_a_marker…`; undo `rolling_back_to_a_marker_removes_drafts…` |
-| AW-16 Shrink back to tile | Not started | shell |
+| AW-10 Expanded view < 200 ms | Partial | `task.get` answers in ~4 ms in the VM (e2e `perf`, docs/dev/performance.md). The shell opens a tile (or a needs-you tile's Review) into the expanded view from data in memory plus that one call, and fetches it again when the task changes (shell `aw10_*`, `aw13_the_open_task_changing_refetches_its_detail`, snapshot `expanded`). Missing: an open-to-drawn budget; a full 1440x900 frame takes ~0.2 s on the dev host in a debug build and 1.6–2 s in the emulated VM (ADR 0016) |
+| AW-11 Pause, Stop, Take over | Partial | all three work; the shell's header shows the ones that apply to the tile's state (Resume while paused, Hand back while you drive, none once ended) and calls them (`aw11_controls_follow_the_tile_state`, `aw11_header_controls_call_their_methods`, `aw10_clicking_a_tile_opens_it_and_its_header_stops_the_task`). "Stop asks once if unsaved" not done |
+| AW-12 Now bar | **Done** (data) | `TaskDetail::now`, drawn in the shell's expanded view. The left pane shows the feed, the ask's items or the receipt; a live screen needs screen agents |
+| AW-13 Activity and Changes tabs | **Done** | `TaskDetail::{activity, changes}`; the shell's tabs, snapshot rows ◇ and changes that can't be undone flagged (`aw13_*`, snapshot `expanded`) |
+| AW-14 Can't touch panel | **Done** | IT's Never rules by name, plus limits; the shell's Can't touch card (snapshot `expanded`) |
+| AW-15 Timeline, roll back to a marker | **Done** | pipeline `rolling_back_to_a_marker…`; undo `rolling_back_to_a_marker_removes_drafts…`. The shell's timeline: pick a marker, Roll back shows the dry run's report, then rolls back and shows what it did (`aw15_*`) |
+| AW-16 Shrink back to tile | **Done** | the shell's collapse button and Esc; the tiles keep updating behind the view (`aw16_esc_collapses_the_expanded_view`, `aw16_tiles_keep_updating_behind_the_expanded_view`, `aw10_clicking_a_tile_opens_it…`) |
 | AW-20 Take over pauses at a safe point within 1 s | Partial | actions agents pause at the next action boundary, ~0.2 s in the VM (e2e `perf`); display/input hand-off needs screen agents |
 | AW-21 Hand back says what changed | **Done** | pipeline + e2e `takeover` |
 | AW-22 Take over always available, even during an ask | **Done** | e2e `takeover` |
@@ -178,7 +180,7 @@ element-by-element map is in [docs/design](design/README.md).
 
 | Id | Status | Notes |
 |---|---|---|
-| DK-1 Mac-like desktop | Partial | menu bar, dock, tiles and command bar; the desktop shows on the VM's screen with live tiles and clock. No windows or input yet |
+| DK-1 Mac-like desktop | Partial | menu bar, dock, tiles, command bar and a tile's expanded view (the agent becomes the menu bar's app); the desktop shows on the VM's screen with live tiles and clock, and takes clicks and keys from evdev. No app windows yet |
 | UX-1 Chef's-choice defaults | Not started | |
 | UX-2 Setup asks ≤ 5 questions (none when enrolled), desktop in < 5 min | Not started | first-run setup (Setup mockup) |
 | UX-10 One theme restyles the whole system | Partial | the shell keeps every color and the wallpaper in one `Theme`; only Glass exists, no picker |

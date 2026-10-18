@@ -3,4 +3,5 @@
 pub mod boot;
 pub mod command_bar;
 pub mod desktop;
+pub mod expanded;
 pub mod login;

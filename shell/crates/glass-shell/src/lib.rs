@@ -2,8 +2,8 @@
 //! iced on the tiny-skia software renderer.
 //!
 //! - [`theme`]: design tokens; one [`Theme`] restyles everything (UX-10).
-//! - [`screens`]: boot, sign in, and the desktop with its menu bar, dock and
-//!   agent tiles.
+//! - [`screens`]: boot, sign in, the desktop with its menu bar, dock and
+//!   agent tiles, the command bar, and a tile's expanded view.
 //! - [`tiles`]: an agent tile drawn from a `glass_api::TaskView`, the same
 //!   data `glassctl` shows.
 //! - [`greeter`]: the sign-in screen's state, for the greeter (ADR 0019).
@@ -27,7 +27,7 @@ pub mod theme;
 pub mod tiles;
 pub mod wallpaper;
 
-use glass_types::{ApprovalId, TaskId};
+use glass_types::{ApprovalId, SnapshotId, TaskId};
 
 pub use iced_core::Size;
 pub use theme::Theme;
@@ -56,12 +56,34 @@ pub fn blank<'a>() -> Element<'a, Message> {
 /// What the user does in the shell. Each maps onto a control-API call.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
-    /// Open a tile's expanded view (`task.get`).
+    /// Open a tile's expanded view (`task.get`, AW-10).
     OpenTask(TaskId),
-    /// The needs-you tile's review button: show the items being approved.
+    /// The needs-you tile's review button: the expanded view, showing the
+    /// items being approved.
     Review(ApprovalId),
     /// `approval.answer`, approve once.
     Approve(ApprovalId),
+    /// `approval.answer`, deny.
+    Decline(ApprovalId),
+    /// Shrink the expanded view back to its tile (AW-16).
+    CloseTask,
+    /// The expanded view's right column: Activity or Changes (AW-13).
+    ShowTab(screens::expanded::Tab),
+    /// The expanded view's header (AW-11): `task.pause`, `task.resume`,
+    /// `task.stop`, `task.take_over` and `task.hand_back`.
+    Pause(TaskId),
+    Resume(TaskId),
+    Stop(TaskId),
+    TakeOver(TaskId),
+    HandBack(TaskId),
+    /// Pick a snapshot on the timeline or in the activity log (AW-15).
+    SelectSnapshot(SnapshotId),
+    /// "Roll back to 2:11 PM": first asks what it would change.
+    RollBack,
+    /// Roll back for real, after seeing what it would change.
+    ConfirmRollBack,
+    /// Close the roll back card.
+    CancelRollBack,
     /// Open the command bar (Ctrl Space).
     OpenCommandBar,
     CommandChanged(String),

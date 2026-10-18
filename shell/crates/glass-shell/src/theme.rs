@@ -73,6 +73,13 @@ pub struct TileColors {
     pub button_border: Color,
     pub track: Color,
     pub outline: Color,
+    /// Cards raised inside a dark panel: the expanded view's Now bar, its
+    /// Can't touch card, the selected row.
+    pub raised: Color,
+    /// Dividers inside a dark panel, and the selected tab.
+    pub rule: Color,
+    /// The timeline past the marker a roll back would return to.
+    pub rail: Color,
 }
 
 /// The wallpaper: a base color under soft blurred shapes.
@@ -162,6 +169,9 @@ impl Theme {
                 button_border: hex(0x3A414B),
                 track: hex(0x2A3038),
                 outline: hex(0x2A3038),
+                raised: hex(0x1E2228),
+                rule: hex(0x262B32),
+                rail: hex(0x4A5361),
             },
         }
     }

@@ -7,9 +7,13 @@
 
 use std::path::{Path, PathBuf};
 
+use glass_api::TaskDetail;
 use glass_shell::render::{Frame, frame};
+use glass_shell::screens::expanded::{self, Expanded, Tab};
 use glass_shell::screens::{boot, command_bar, desktop, login};
 use glass_shell::{Message, Size, Theme, fixtures};
+use glass_types::Timestamp;
+use time::OffsetDateTime;
 
 const SCREEN: (f32, f32) = (1440.0, 900.0);
 
@@ -63,6 +67,44 @@ fn render_command_bar() -> Frame {
         size(),
         1.0,
     )
+}
+
+/// A tile opened into the expanded view, over the desktop.
+fn render_expanded_from(detail: &TaskDetail, now: Timestamp) -> Frame {
+    let theme = Theme::glass();
+    let tasks = fixtures::tasks();
+    let state = fixtures::expanded_desktop(&tasks, &detail.view.agent_name);
+    let view = Expanded {
+        task: &detail.view,
+        detail: Some(detail),
+        tab: Tab::Activity,
+        selected: None,
+        rollback: None,
+        now: OffsetDateTime::from_unix_timestamp(now.unix_seconds()).unwrap(),
+    };
+    frame(
+        desktop::view(
+            &theme,
+            &state,
+            Vec::new(),
+            |_| None,
+            Some(expanded::overlay(&theme, &view)),
+            SCREEN,
+        ),
+        size(),
+        1.0,
+    )
+}
+
+/// The Expanded artboard.
+fn render_expanded() -> Frame {
+    render_expanded_from(&fixtures::invoice_detail(), fixtures::expanded_now())
+}
+
+/// A needs-you tile's Review: the ask's items and answers.
+fn render_expanded_review() -> Frame {
+    let tasks = fixtures::tasks();
+    render_expanded_from(&fixtures::expense_detail(&tasks[0]), fixtures::now())
 }
 
 fn close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {
@@ -150,6 +192,52 @@ fn command_bar_sits_over_the_dimmed_desktop() {
 }
 
 #[test]
+fn aw10_expanded_view_has_header_panes_and_timeline_in_place() {
+    let f = render_expanded();
+    let panel = [21, 24, 29];
+    assert!(
+        close(f.pixel(600, 600), panel, 4),
+        "{:?}",
+        f.pixel(600, 600)
+    );
+    // Take over, the header's primary button (AW-11).
+    assert!(
+        close(f.pixel(1300, 65), [61, 107, 255], 8),
+        "{:?}",
+        f.pixel(1300, 65)
+    );
+    // The Now bar (AW-12) and the rule before the right column (AW-13).
+    assert!(
+        close(f.pixel(900, 690), [30, 34, 40], 4),
+        "{:?}",
+        f.pixel(900, 690)
+    );
+    assert!(
+        close(f.pixel(1032, 400), [38, 43, 50], 4),
+        "{:?}",
+        f.pixel(1032, 400)
+    );
+    // The timeline is lit up to the snapshot Roll back returns to (AW-15).
+    assert!(
+        close(f.pixel(250, 758), [61, 107, 255], 8),
+        "{:?}",
+        f.pixel(250, 758)
+    );
+    assert!(
+        close(f.pixel(1000, 758), [74, 83, 97], 8),
+        "{:?}",
+        f.pixel(1000, 758)
+    );
+    // The tiles are tucked away; the menu bar and dock stay.
+    assert!(
+        close(f.pixel(1200, 300), panel, 4),
+        "no tile over the right column"
+    );
+    let dock = f.pixel(470, 830);
+    assert!(dock.iter().take(3).all(|&c| c > 120), "dock: {dock:?}");
+}
+
+#[test]
 fn rendering_is_deterministic() {
     assert_eq!(render_desktop().rgba, render_desktop().rgba);
 }
@@ -191,4 +279,6 @@ fn screens_match_their_snapshots() {
     snapshot("login", &render_login());
     snapshot("desktop", &render_desktop());
     snapshot("command-bar", &render_command_bar());
+    snapshot("expanded", &render_expanded());
+    snapshot("expanded-review", &render_expanded_review());
 }

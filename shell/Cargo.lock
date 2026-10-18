@@ -570,6 +570,7 @@ dependencies = [
  "glass-api",
  "glass-rpc",
  "glass-shell",
+ "glass-types",
  "time",
  "tokio",
 ]
