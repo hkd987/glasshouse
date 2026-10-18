@@ -16,3 +16,6 @@ __pycache__/
 
 # Parallel agents work in their own git worktrees here.
 /.claude/worktrees/
+
+# The desktop shell workspace (shell/README.md).
+/shell/target/

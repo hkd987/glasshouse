@@ -1,0 +1,381 @@
+//! The desktop (DK-1, the Desktop artboard): a menu bar across the top, a
+//! dock at the bottom, windows with their controls on the left, and the
+//! agent tiles stacked at the top right, needs-you first (AW-1).
+
+use glass_api::{TaskView, TileState};
+use glass_types::Timestamp;
+use iced_core::alignment::{Horizontal, Vertical};
+use iced_core::{Color, Length, Padding};
+use iced_widget::{Column, Row, column, container, image, pin, row, stack, text};
+
+use crate::theme::{Surface, hex};
+use crate::{Element, Message, Theme, fonts, icons, style, tiles, wallpaper};
+
+/// What the desktop shows, besides windows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Desktop<'a> {
+    /// From `task.list`.
+    pub tasks: &'a [TaskView],
+    pub now: Timestamp,
+    /// The menu bar clock, in the user's locale ("Mon Oct 19  2:14 PM").
+    pub clock: String,
+    /// The focused app, bold in the menu bar, and its menus.
+    pub app: String,
+    pub menus: Vec<String>,
+    /// The calendar's dock icon: month and day.
+    pub date: (String, u8),
+    /// False collapses the tile stack, as while the command bar is open.
+    pub tiles_visible: bool,
+}
+
+/// An app window: the shell draws its frame (controls on the left, the
+/// title centered); the app draws the content.
+pub struct Window<'a> {
+    pub title: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub content: Element<'a, Message>,
+}
+
+/// Room at the top right for the tile stack.
+const TILES_TOP: f32 = 48.0;
+const TILES_RIGHT: f32 = 24.0;
+
+/// The desktop. `overlay` (the command bar) goes over windows and tiles,
+/// under the menu bar and dock.
+pub fn view<'a>(
+    theme: &Theme,
+    desktop: &Desktop<'a>,
+    windows: Vec<Window<'a>>,
+    thumbnail: impl Fn(&'a TaskView) -> Option<Element<'a, Message>>,
+    overlay: Option<Element<'a, Message>>,
+    size: (f32, f32),
+) -> Element<'a, Message> {
+    let mut layers: Vec<Element<'a, Message>> = vec![
+        image(wallpaper::handle(&theme.wallpaper, size.0, size.1))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .content_fit(iced_core::ContentFit::Fill)
+            .into(),
+    ];
+    for window in windows {
+        layers.push(
+            pin(frame(
+                theme,
+                window.title,
+                window.content,
+                window.width,
+                window.height,
+            ))
+            .x(window.x)
+            .y(window.y)
+            .into(),
+        );
+    }
+    if desktop.tiles_visible {
+        layers.push(
+            pin(tile_stack(theme, desktop, &thumbnail))
+                .x(size.0 - TILES_RIGHT - tiles::WIDTH)
+                .y(TILES_TOP)
+                .into(),
+        );
+    }
+    layers.extend(overlay);
+    layers.push(menu_bar(theme, desktop));
+    layers.push(
+        container(dock(theme, desktop))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Horizontal::Center)
+            .align_y(Vertical::Bottom)
+            .padding(Padding {
+                bottom: 10.0,
+                ..Padding::ZERO
+            })
+            .into(),
+    );
+    iced_widget::Stack::with_children(layers)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Needs-you tiles first, then the rest oldest first, so the newest sits at
+/// the bottom (AW-1). Ended tiles that were dismissed aren't in the list.
+pub fn ordered(tasks: &[TaskView]) -> Vec<&TaskView> {
+    let mut ordered: Vec<&TaskView> = tasks.iter().collect();
+    ordered.sort_by_key(|t| (t.state != TileState::NeedsYou, t.started_at.unix_seconds()));
+    ordered
+}
+
+fn tile_stack<'a>(
+    theme: &Theme,
+    desktop: &Desktop<'a>,
+    thumbnail: &impl Fn(&'a TaskView) -> Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let tiles = ordered(desktop.tasks)
+        .into_iter()
+        .map(|task| tiles::view(theme, task, desktop.now, thumbnail(task)));
+    Column::with_children(tiles).spacing(12).into()
+}
+
+fn menu_bar<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
+    let bar = theme.menu_bar;
+    let label = |s: String, font| text(s).size(13).font(font).color(bar.text);
+    let mut left = Row::new()
+        .spacing(20)
+        .align_y(Vertical::Center)
+        .push(icons::view(&icons::MARK_SMALL, bar.text, 16.0, 16.0))
+        .push(label(desktop.app.clone(), fonts::SEMIBOLD));
+    for menu in &desktop.menus {
+        left = left.push(label(menu.clone(), fonts::SANS));
+    }
+    let right = row![
+        agents_pill(theme, desktop.tasks),
+        icons::view(&icons::SPARK, bar.text, 16.0, 16.0),
+        icons::view(&icons::WIFI, bar.text, 17.0, 17.0),
+        icons::view(&icons::BATTERY, bar.text, 24.0, 13.0),
+        label(desktop.clock.clone(), fonts::SANS),
+    ]
+    .spacing(16)
+    .align_y(Vertical::Center);
+    container(row![left, iced_widget::space().width(Length::Fill), right].align_y(Vertical::Center))
+        .width(Length::Fill)
+        .height(Length::Fixed(32.0))
+        .padding(Padding::from([0.0, 16.0]))
+        .center_y(Length::Fixed(32.0))
+        .style(move |_| style::panel(bar.background, 0.0))
+        .into()
+}
+
+/// "● ● ● 3 agents": one dot per agent, orange for any that need you.
+fn agents_pill<'a>(theme: &Theme, tasks: &[TaskView]) -> Element<'a, Message> {
+    let count = tasks.iter().filter(|t| t.state.is_live()).count();
+    let mut dots = Row::new().spacing(6).align_y(Vertical::Center);
+    for color in status_dots(theme, tasks) {
+        dots = dots.push(dot(color, 7.0));
+    }
+    let label = match count {
+        1 => "1 agent".to_owned(),
+        n => format!("{n} agents"),
+    };
+    let bar = theme.menu_bar;
+    container(
+        row![dots, text(label).size(13).color(bar.text)]
+            .spacing(6)
+            .align_y(Vertical::Center),
+    )
+    .padding(Padding::from([0.0, 9.0]))
+    .center_y(Length::Fixed(22.0))
+    .style(move |_| style::panel(bar.fill, 11.0))
+    .into()
+}
+
+/// Up to three dots for the live agents, the ones that need you last so
+/// the orange one stands at the end.
+fn status_dots(theme: &Theme, tasks: &[TaskView]) -> Vec<Color> {
+    let mut live: Vec<&TaskView> = tasks.iter().filter(|t| t.state.is_live()).collect();
+    live.sort_by_key(|t| (t.state == TileState::NeedsYou, t.started_at.unix_seconds()));
+    let skip = live.len().saturating_sub(3);
+    live.into_iter()
+        .skip(skip)
+        .map(|t| tiles::state_color(theme, t.state))
+        .collect()
+}
+
+fn dot<'a>(color: Color, size: f32) -> Element<'a, Message> {
+    container("")
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .style(move |_| style::dot(color, size))
+        .into()
+}
+
+/// The window frame: title bar with the controls on the left (DK-1).
+fn frame<'a>(
+    theme: &Theme,
+    title: String,
+    content: Element<'a, Message>,
+    width: f32,
+    height: f32,
+) -> Element<'a, Message> {
+    let w = theme.window;
+    let controls = row![
+        dot(w.controls, 12.0),
+        dot(w.controls, 12.0),
+        dot(w.controls, 12.0)
+    ]
+    .spacing(8);
+    let title_bar = container(
+        stack![
+            container(controls)
+                .height(Length::Fill)
+                .padding(Padding::from([0.0, 14.0]))
+                .align_y(Vertical::Center),
+            container(text(title).size(13).font(fonts::MEDIUM).color(w.text))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Center),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(44.0))
+    .style(move |_| style::panel(w.title_bar, 0.0));
+    let divider = container("")
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(move |_| style::panel(w.divider, 0.0));
+    container(column![title_bar, divider, content])
+        .width(Length::Fixed(width))
+        .height(Length::Fixed(height))
+        .clip(true)
+        .style(move |_| iced_widget::container::Style {
+            text_color: Some(w.text),
+            shadow: style::shadow(0.12, 12.0, 32.0),
+            ..style::outlined(w.background, 12.0, 1.0, w.border)
+        })
+        .into()
+}
+
+/// The dock: apps, then the agents button with a badge for asks waiting.
+fn dock<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
+    let d: Surface = theme.dock;
+    let app = |fill: Color, content: Element<'a, Message>| -> Element<'a, Message> {
+        container(content)
+            .center(Length::Fixed(52.0))
+            .style(move |_| style::panel(fill, 14.0))
+            .into()
+    };
+    let glyph = |icon: &icons::Icon, color: Color, s: f32| icons::view(icon, color, s, s);
+    let white = hex(0xFFFFFF);
+    let (month, day) = (&desktop.date.0, desktop.date.1);
+    let calendar = column![
+        text(month.clone())
+            .size(9)
+            .font(fonts::SEMIBOLD)
+            .color(hex(0xC53030)),
+        text(day.to_string())
+            .size(22)
+            .font(fonts::MEDIUM)
+            .color(hex(0x14171C))
+            .line_height(1.0),
+    ]
+    .align_x(Horizontal::Center);
+    // Every item keeps a slot under it for the running indicator, so open
+    // and closed apps line up.
+    let slot = |tile: Element<'a, Message>, running: bool| -> Element<'a, Message> {
+        let indicator = if running {
+            hex(0x14171C)
+        } else {
+            Color::TRANSPARENT
+        };
+        column![tile, dot(indicator, 4.0)]
+            .spacing(4)
+            .align_x(Horizontal::Center)
+            .into()
+    };
+    let needs = desktop
+        .tasks
+        .iter()
+        .filter(|t| t.state == TileState::NeedsYou)
+        .count();
+    let mut agent_dots = Row::new().spacing(4).align_y(Vertical::Center);
+    for color in status_dots(theme, desktop.tasks) {
+        agent_dots = agent_dots.push(dot(color, 7.0));
+    }
+    let agents = app(hex(0x15181D), agent_dots.into());
+    let agents: Element<'a, Message> = if needs > 0 {
+        let attention = theme.attention;
+        // The badge counts the asks waiting; it overlaps the corner.
+        stack![
+            container(agents).padding(Padding {
+                right: 6.0,
+                ..Padding::ZERO
+            }),
+            container(
+                container(
+                    text(needs.to_string())
+                        .size(12)
+                        .font(fonts::SEMIBOLD)
+                        .color(hex(0x1A1206))
+                )
+                .center(Length::Fixed(20.0))
+                .style(move |_| style::panel(attention, 10.0)),
+            )
+            .width(Length::Fixed(58.0))
+            .align_x(Horizontal::Right),
+        ]
+        .into()
+    } else {
+        agents
+    };
+    let separator = container(
+        container("")
+            .width(Length::Fixed(1.0))
+            .height(Length::Fixed(44.0))
+            .style(move |_| style::panel(d.fill, 0.0)),
+    )
+    .center_y(Length::Fixed(52.0));
+    let items = row![
+        slot(
+            app(hex(0xE9ECEF), glyph(&icons::LAUNCHER, hex(0x5F6875), 24.0)),
+            false
+        ),
+        slot(
+            app(hex(0x2F7BEA), glyph(&icons::FOLDER, white, 26.0)),
+            false
+        ),
+        slot(app(hex(0x1E9BF0), glyph(&icons::MAIL, white, 26.0)), false),
+        slot(app(white, calendar.into()), false),
+        slot(app(hex(0x0E8A8A), glyph(&icons::GLOBE, white, 26.0)), true),
+        slot(app(hex(0x6E56E8), glyph(&icons::BAG, white, 26.0)), false),
+        slot(app(hex(0x5F6875), glyph(&icons::GEAR, white, 26.0)), false),
+        separator,
+        agents,
+    ]
+    .spacing(10)
+    .align_y(Vertical::Top);
+    container(items)
+        .padding(Padding {
+            top: 10.0,
+            right: 10.0,
+            bottom: 0.0,
+            left: 10.0,
+        })
+        .height(Length::Fixed(72.0))
+        .style(move |_| iced_widget::container::Style {
+            shadow: style::shadow(0.25, 10.0, 30.0),
+            ..style::outlined(d.background, 22.0, 1.0, d.border)
+        })
+        .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures;
+
+    #[test]
+    fn aw1_needs_you_tiles_come_first_then_oldest_to_newest() {
+        let tasks = fixtures::tasks();
+        let names: Vec<&str> = ordered(&tasks)
+            .iter()
+            .map(|t| t.agent_name.as_str())
+            .collect();
+        assert_eq!(names, ["Expense agent", "Meeting prep", "Invoice agent"]);
+    }
+
+    #[test]
+    fn the_status_dots_put_the_orange_one_last() {
+        let theme = Theme::glass();
+        let dots = status_dots(&theme, &fixtures::tasks());
+        assert_eq!(dots.len(), 3);
+        assert_eq!(dots[2], theme.attention);
+        assert_eq!(dots[0], theme.accent);
+    }
+}

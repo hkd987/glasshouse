@@ -1,0 +1,61 @@
+# The desktop shell (PRD UI-4, ADR 0009): its own workspace, so the core
+# (`make build`, `make test`) never compiles the UI toolkit. It reaches the
+# rest of Glasshouse only through the control API crates (glass-api,
+# glass-rpc), like any other client.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license-file = "../LICENSE"
+publish = false
+
+[workspace.dependencies]
+glass-shell = { path = "crates/glass-shell" }
+# The control API contract, shared with glassd and glassctl.
+glass-api = { path = "../crates/lib/api" }
+glass-rpc = { path = "../crates/lib/rpc" }
+glass-types = { path = "../crates/lib/types" }
+
+# iced with only the tiny-skia software renderer: no wgpu, no winit. The
+# compositor (M2) drives the UI itself, so a windowing layer isn't needed.
+iced_core = "0.14.0"
+iced_widget = "0.14.0"
+iced_runtime = "0.14.0"
+iced_renderer = { version = "0.14.0", default-features = false, features = ["tiny-skia", "image"] }
+iced_tiny_skia = { version = "0.14.1", default-features = false }
+# Already compiled as iced_tiny_skia's own dependencies: icons and the
+# wallpaper are drawn with them, so no SVG library (resvg) is needed.
+tiny-skia = { version = "0.11.4", default-features = false, features = ["std", "simd"] }
+kurbo = "0.10.4"
+# iced_tiny_skia always links softbuffer, which needs one backend to
+# compile. KMS (DRM dumb buffers) is the smallest, and the one a compositor
+# without a GPU driver would present through.
+softbuffer = { version = "0.4.8", default-features = false, features = ["kms"] }
+png = "0.18"
+anyhow = "1.0.100"
+tokio = { version = "1.48", features = ["rt", "macros"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+print_stdout = "warn"
+
+[profile.dev]
+split-debuginfo = "unpacked"
+
+# Rasterizing and shaping text unoptimized makes a 1440x900 frame take
+# seconds; dependencies build once, so optimize them even in dev.
+[profile.dev.package."*"]
+debug = false
+opt-level = 2

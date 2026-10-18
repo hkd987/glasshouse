@@ -11,6 +11,9 @@ dependencies, for the FreeBSD target) and writes:
                    components' licenses (os/freebsd/legal, written by
                    base_notices.py). The Settings "Legal notices" page shows
                    this file.
+  --assets DIR     Also reproduce the licenses of non-crate assets shipped
+                   from DIR (fonts: shell/assets/fonts), one section per
+                   license file. Repeatable.
   --sbom FILE      A CycloneDX 1.5 JSON SBOM. Admins and customer security
                    teams only (BR-4): never stage it into the image or
                    publish it.
@@ -38,6 +41,8 @@ REPO = Path(__file__).resolve().parents[2]
 BASE_LEGAL = REPO / "os/freebsd/legal"
 TARGET = "x86_64-unknown-freebsd"
 LICENSE_FILE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|UNLICENSE|COPYRIGHT)", re.I)
+# Asset licenses also include font licenses (OFL-Geist.txt).
+ASSET_LICENSE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|OFL)", re.I)
 
 
 def metadata() -> dict:
@@ -117,7 +122,20 @@ def base_legal(name: str) -> str:
     return path.read_text().strip() if path.exists() else ""
 
 
-def write_notices(path: Path, packages: list[dict], base: str) -> list[str]:
+def asset_licenses(dirs: list[Path]) -> list[tuple[str, str]]:
+    """(label, text) for each license file in the asset directories."""
+    found = []
+    for d in dirs:
+        if not d.is_dir():
+            sys.exit(f"notices: no asset directory {d}")
+        for f in sorted(d.iterdir()):
+            if f.is_file() and ASSET_LICENSE.match(f.name):
+                label = f.resolve().relative_to(REPO) if f.resolve().is_relative_to(REPO) else f
+                found.append((str(label), f.read_text(errors="replace").strip()))
+    return found
+
+
+def write_notices(path: Path, packages: list[dict], base: str, assets: list[tuple[str, str]]) -> list[str]:
     """Writes the notices file; identical license texts (most Apache-2.0
     copies) are printed once and referenced. Returns crates that ship no
     license file of their own."""
@@ -153,6 +171,10 @@ def write_notices(path: Path, packages: list[dict], base: str) -> list[str]:
                 refs[text] = f"[{len(texts)}]"
             out.append(f"  {name}: license text {refs[text]}")
         out.append("")
+    if assets:
+        out += [rule, "Fonts and other assets", rule, ""]
+        for label, text in assets:
+            out += [label, "", text, "", "-" * 78, ""]
     out += [rule, "License texts", rule, ""]
     for i, text in enumerate(texts, 1):
         out += [f"[{i}]", "", text, "", "-" * 78, ""]
@@ -192,6 +214,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--package", action="append", required=True, help="a shipped workspace binary")
     ap.add_argument("--notices", type=Path)
+    ap.add_argument("--assets", type=Path, action="append", default=[], help="a directory of shipped assets")
     ap.add_argument("--sbom", type=Path)
     ap.add_argument("--base-txz", type=Path, help="FreeBSD base.txz, for the base COPYRIGHT")
     args = ap.parse_args()
@@ -208,7 +231,8 @@ def main() -> int:
         print(f"notices: {problem}", file=sys.stderr)
 
     if args.notices:
-        bare = write_notices(args.notices, packages, base_copyright(args.base_txz))
+        assets = asset_licenses(args.assets)
+        bare = write_notices(args.notices, packages, base_copyright(args.base_txz), assets)
         print(f"notices: {len(packages)} crates -> {args.notices}", file=sys.stderr)
         for name in bare:
             print(f"notices: {name} ships no license file; listed by SPDX id only", file=sys.stderr)

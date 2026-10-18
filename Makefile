@@ -21,7 +21,7 @@ export FREEBSD_PROFILE
 export DIST_PROFILE := $(FREEBSD_PROFILE)
 
 .PHONY: help build check test lint lint-all fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
-	test-env image-release legal-base ci clean
+	test-env image-release legal-base ci clean shell shell-test shell-lint shell-preview
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -80,7 +80,24 @@ image-release: ## Build a shippable image: release profile (thin LTO), baked qco
 		{ echo "image-release: set the legal contact first, or ALLOW_DRAFT_LEGAL=1 for a test image"; exit 1; }
 	$(MAKE) freebsd image FREEBSD_PROFILE=release
 
-ci: lint-all test ## What CI runs on every change
+# The desktop shell (UI-4, ADR 0009) is its own workspace under shell/, so
+# the targets above never compile the UI toolkit. See shell/README.md.
+SHELL_MANIFEST := --manifest-path shell/Cargo.toml
+
+shell: ## Build the desktop shell (separate workspace; iced with the software renderer)
+	cargo build $(SHELL_MANIFEST) --workspace
+
+shell-test: ## Desktop shell tests, including the screen snapshots
+	cargo test $(SHELL_MANIFEST) --workspace
+
+shell-lint: ## Desktop shell formatting and clippy (warnings are errors)
+	cargo fmt $(SHELL_MANIFEST) --all --check
+	cargo clippy $(SHELL_MANIFEST) --workspace --all-targets -- -D warnings
+
+shell-preview: ## Render the shell's screens to PNG in build/shell-preview (SOCKET=... for live tiles)
+	cargo run $(SHELL_MANIFEST) -p glass-shell-preview -- --out build/shell-preview $(if $(SOCKET),--socket $(SOCKET))
+
+ci: lint-all test shell-lint shell-test ## What CI runs on every change
 
 clean: ## Remove build outputs (keeps downloaded FreeBSD images in build/cache)
 	cargo clean

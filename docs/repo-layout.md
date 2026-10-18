@@ -14,12 +14,14 @@ crates/svc/<name>    service implementations hosted by daemons
 crates/bin/<name>    executables: daemons, CLIs, agents, tools
 tests/<suite>        end-to-end suites that drive a running system
 os/freebsd/          everything that becomes the OS image: overlay, image and VM tooling
+shell/               the desktop shell UI (ADR 0009): its own Cargo workspace, so the
+                     core never compiles the UI toolkit; a control-API client (shell/README.md)
 tools/               developer tooling (checks, dev runners, screenshots, legal notices)
 docs/                architecture, decisions (adr/), developer guides (dev/)
 ```
 
-Future top-level areas, when they start: `shell/` (compositor and shell UI,
-ADR 0009), `apps/` (first-party TypeScript web apps; their OS actions stay
+Future top-level areas, when they start: the compositor (M2, next to the
+shell in `shell/`), `apps/` (first-party TypeScript web apps; their OS actions stay
 in `crates/apps`), `agents/` (agent
 harness bundles, ADR 0010), `console/` (admin console), `gateway/` if the
 model gateway outgrows a crate.

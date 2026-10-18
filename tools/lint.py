@@ -15,6 +15,8 @@ and untracked files. Each check runs only when its inputs changed:
                dependencies (docs/dev/build-performance.md)
   layering     any Cargo.toml or tools/check-layers.py
   art          tools/branding/ or the overlay's branding outputs
+  clippy       the desktop shell's workspace, when anything under shell/
+               changed
   shellcheck   the changed shell scripts
   python       the changed .py files compile
 
@@ -95,6 +97,13 @@ def plan(files: set[str], everything: bool) -> list[tuple[str, list[str]]]:
                       ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))
         steps.append(("clippy (FreeBSD)",
                       ["cargo", "clippy", "--workspace", "--target", FREEBSD, "--", "-D", "warnings"]))
+
+    # The desktop shell is its own workspace (shell/README.md); `make
+    # shell-lint` covers it in full, so `--all` leaves it to that.
+    if not everything and any(f.startswith("shell/") for f in files):
+        steps.append(("clippy (shell)",
+                      ["cargo", "clippy", "--manifest-path", "shell/Cargo.toml", "--workspace",
+                       "--all-targets", "--", "-D", "warnings"]))
 
     if everything or any(f.endswith("Cargo.toml") or f == "tools/check-layers.py" for f in files):
         steps.append(("layering", ["tools/check-layers.py"]))
