@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Usage: fetch.sh [--print-pins]
+# Usage: fetch.sh [--print-pins | src]
 # Downloads the pinned FreeBSD VM image and base.txz into build/cache/freebsd/<release>/,
+# or with `src` only src.txz (for the base system's notices, `make legal-base`),
 # verifies their SHA256 against release.env, and decompresses the VM image once.
 # Idempotent: verified files are stamped and skipped on later runs.
 # --print-pins prints upstream SHA256s for the configured release (for bumping release.env).
@@ -11,9 +12,12 @@ need curl sha256sum xz
 
 if [[ ${1:-} == --print-pins ]]; then
 	img=$(curl -fsS "$FREEBSD_VM_IMAGE_URL/CHECKSUM.SHA256" | sed -n "s/^SHA256 ($FREEBSD_VM_IMAGE) = //p")
-	base=$(curl -fsS "$FREEBSD_BASE_URL/MANIFEST" | awk -v f="$FREEBSD_BASE_TXZ" '$1 == f { print $2 }')
+	manifest=$(curl -fsS "$FREEBSD_BASE_URL/MANIFEST")
+	base=$(awk -v f="$FREEBSD_BASE_TXZ" '$1 == f { print $2 }' <<<"$manifest")
+	src=$(awk -v f="$FREEBSD_SRC_TXZ" '$1 == f { print $2 }' <<<"$manifest")
 	echo "FREEBSD_VM_IMAGE_SHA256=${img:?not found upstream}"
 	echo "FREEBSD_BASE_TXZ_SHA256=${base:?not found upstream}"
+	echo "FREEBSD_SRC_TXZ_SHA256=${src:?not found upstream}"
 	exit 0
 fi
 
@@ -38,6 +42,10 @@ fetch() {
 }
 
 mkdir -p "$CACHE_DIR"
+if [[ ${1:-} == src ]]; then
+	fetch "$FREEBSD_BASE_URL/$FREEBSD_SRC_TXZ" "$CACHE_DIR/$FREEBSD_SRC_TXZ" "$FREEBSD_SRC_TXZ_SHA256"
+	exit 0
+fi
 fetch "$FREEBSD_VM_IMAGE_URL/$FREEBSD_VM_IMAGE" "$CACHE_DIR/$FREEBSD_VM_IMAGE" "$FREEBSD_VM_IMAGE_SHA256"
 fetch "$FREEBSD_BASE_URL/$FREEBSD_BASE_TXZ" "$CACHE_DIR/$FREEBSD_BASE_TXZ" "$FREEBSD_BASE_TXZ_SHA256"
 

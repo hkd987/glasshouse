@@ -1,0 +1,36 @@
+Source code offer
+
+The base system includes components under licenses that require
+their source code to be available with the binaries, such as the
+Common Development and Distribution License (CDDL) and the GNU
+licenses. The complete corresponding source of the base system,
+including every component below, is the unmodified source release
+this software was built from:
+
+  15.1-RELEASE src.txz, SHA-256 cf5762da53fd52e1eaf0f9ceee9bf58cbe314c821031d0d9ffa76823185a89e1
+
+For at least three years from the date you received this software,
+the source is available on request, on a physical medium or as a
+download, for no more than the cost of providing it. Write to:
+
+  [LEGAL CONTACT: to be set before the first pilot image]
+
+Components (* = the license text also offers a permissive choice):
+
+  cddl/contrib/opensolaris      CDDL-1.0
+  contrib/dialog                LGPL
+  contrib/diff                  LGPL
+  contrib/ntp                   GPL-3.0, LGPL *
+  contrib/pam-krb5              GPL-2.0
+  contrib/xz                    LGPL
+  crypto/krb5                   GPL-2.0 *
+  crypto/libecc                 GPL-2.0
+  crypto/openssl                GPL-2.0 *
+  gnu                           LGPL
+  sys/cddl/contrib/opensolaris  CDDL-1.0
+  sys/contrib/device-tree       GPL-2.0
+  sys/contrib/openzfs           CDDL-1.0 *
+  sys/contrib/xen               GPL-2.0
+  sys/contrib/zstd              LGPL *
+  sys/dev/vmware/pvscsi         GPL-2.0
+  sys/dev/vmware/vmci           GPL-2.0

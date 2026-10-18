@@ -157,8 +157,8 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 | Id | Status | Notes |
 |---|---|---|
 | BR-1 No FreeBSD where users look; system identity says Glasshouse | Partial | Overlay layer done: os-release, motd, boot menu brand, logo and title, our splash, muted boot, login screen art and banner, SSH version, login tips, our own strings (`tools/branding/art.py`). e2e branding check; boot screens recorded with `bootshots.py`. The UEFI loader's banner, kernel identity, base tools and man pages need our own base build, and the kernel's reported name needs a decision (ADR 0011) |
-| BR-2 License notices in Settings → Legal notices and docs | Partial | `tools/legal/notices.py` generates `NOTICES.txt` for every shipped crate plus the base `COPYRIGHT`, staged into the image (e2e checks it). The Settings page waits for the shell; per-component base notices wait for the base build |
-| BR-3 Source offer for GPL components | Not started | No GPL code ships today. The base system's CDDL code (OpenZFS, DTrace) carries a similar source obligation: legal review needed (ADR 0011) |
+| BR-2 License notices in Settings → Legal notices and docs | Partial | `NOTICES.txt` in the image: every shipped crate (`tools/legal/notices.py`), the base `COPYRIGHT`, and every imported base component's license texts from the release source (`tools/legal/base_notices.py`, 96 components). e2e `check-branding.sh` checks it. The Settings page waits for the shell |
+| BR-3 Source offer for GPL components | Partial | `NOTICES.txt` opens with the source offer: the 17 base components under CDDL or GNU licenses (5 also offer a permissive choice) and the unmodified source release by SHA-256. Missing: the legal contact (`make image-release` refuses until it's set) and legal review of the list. None of our own code is copyleft |
 | BR-4 Full base details and SBOM to security teams under NDA, admins only | Partial | `make sbom` writes a CycloneDX SBOM to `build/`, never staged into the image. Admin export comes with the console (EP-10) |
 
 ## UI stack

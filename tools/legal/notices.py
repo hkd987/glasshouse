@@ -4,10 +4,13 @@
 Walks the dependency graph of the binaries we ship (normal and build
 dependencies, for the FreeBSD target) and writes:
 
-  --notices FILE   NOTICES.txt for the image: every third-party crate with
-                   its license and the license texts it ships, plus the base
-                   system's copyright notice. The Settings "Legal notices"
-                   page shows this file.
+  --notices FILE   NOTICES.txt for the image: the source offer for the base
+                   system's copyleft components (BR-3), every third-party
+                   crate with its license and the license texts it ships,
+                   and the base system's copyright notice and imported
+                   components' licenses (os/freebsd/legal, written by
+                   base_notices.py). The Settings "Legal notices" page shows
+                   this file.
   --sbom FILE      A CycloneDX 1.5 JSON SBOM. Admins and customer security
                    teams only (BR-4): never stage it into the image or
                    publish it.
@@ -32,6 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+BASE_LEGAL = REPO / "os/freebsd/legal"
 TARGET = "x86_64-unknown-freebsd"
 LICENSE_FILE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|UNLICENSE|COPYRIGHT)", re.I)
 
@@ -108,6 +112,11 @@ def base_copyright(base_txz: Path | None) -> str:
     return cached.read_text(errors="replace").strip()
 
 
+def base_legal(name: str) -> str:
+    path = BASE_LEGAL / name
+    return path.read_text().strip() if path.exists() else ""
+
+
 def write_notices(path: Path, packages: list[dict], base: str) -> list[str]:
     """Writes the notices file; identical license texts (most Apache-2.0
     copies) are printed once and referenced. Returns crates that ship no
@@ -121,8 +130,14 @@ def write_notices(path: Path, packages: list[dict], base: str) -> list[str]:
         "is reproduced below as that license requires.",
         "",
     ]
+    offer = base_legal("source-offer.txt")
+    if offer:
+        out += [rule, offer, ""]
     if base:
         out += [rule, "Base system", rule, "", base, ""]
+    imported = base_legal("base-notices.txt")
+    if imported:
+        out += [rule, imported, ""]
     out += [rule, "Third-party components", rule, ""]
     for p in packages:
         out += [f"{p['name']} {p['version']}", f"  License: {p.get('license') or 'see below'}"]

@@ -42,6 +42,10 @@ check "glassctl" "$(su demo -c 'glassctl status; glassctl agents; glassctl --hel
 require "legal notices ship (BR-2)" test -s /usr/local/share/glasshouse/legal/NOTICES.txt
 require "base-system notice reproduced (BR-2)" \
 	grep -q 'The FreeBSD Project' /usr/local/share/glasshouse/legal/NOTICES.txt
+require "imported components' licenses reproduced (BR-2)" \
+	grep -q '^sys/contrib/openzfs ' /usr/local/share/glasshouse/legal/NOTICES.txt
+require "source offer for copyleft components (BR-3)" \
+	grep -q '^Source code offer' /usr/local/share/glasshouse/legal/NOTICES.txt
 
 echo "PENDING kernel identity: uname -s says $(uname -s) (needs our own base build)"
 echo "PENDING base tools: freebsd-version, freebsd-update and pkg keep their names"

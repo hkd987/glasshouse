@@ -21,7 +21,7 @@ export FREEBSD_PROFILE
 export DIST_PROFILE := $(FREEBSD_PROFILE)
 
 .PHONY: help build check test lint fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
-	test-env image-release ci clean
+	test-env image-release legal-base ci clean
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -51,6 +51,10 @@ check-layers: ## Enforce crate layering and manifest conventions
 deny: ## Check dependency licenses and advisories (needs cargo-deny)
 	cargo deny check licenses bans sources
 
+legal-base: ## Regenerate the base system's notices and source offer from its src.txz (BR-2, BR-3)
+	os/freebsd/scripts/fetch.sh src
+	tools/legal/base_notices.py
+
 sbom: ## Software bill of materials, admins and security reviews only (BR-4); never ship it
 	tools/legal/notices.py $(addprefix --package ,$(SHIPPED)) --sbom build/sbom/glasshouse.cdx.json
 
@@ -72,6 +76,8 @@ test-env: ## First-time setup of a full test environment (tools, image, VM, depl
 	@echo "Test environment ready. Try: make vm-ssh, then: su demo; glassctl agents"
 
 image-release: ## Build a shippable image: release profile (thin LTO), baked qcow2
+	@tools/legal/base_notices.py --check || [ -n "$(ALLOW_DRAFT_LEGAL)" ] || \
+		{ echo "image-release: set the legal contact first, or ALLOW_DRAFT_LEGAL=1 for a test image"; exit 1; }
 	$(MAKE) freebsd image FREEBSD_PROFILE=release
 
 ci: lint test ## What CI runs on every change
