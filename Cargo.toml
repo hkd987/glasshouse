@@ -57,6 +57,28 @@ todo = "warn"
 unwrap_used = "warn"
 print_stdout = "warn"
 
+# Build speed (see docs/dev/build-performance.md).
+#
+# dev: full debug info for our crates, none for dependencies, and debug info
+# left in the object files instead of copied into binaries: faster links and a
+# smaller target/ without losing backtraces or breakpoints in our own code.
+[profile.dev]
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+debug = false
+
+# The FreeBSD VM edit-deploy-test loop (`make vm-deploy`): optimized enough
+# to behave like release, but incremental and without LTO so a one-crate
+# change rebuilds in seconds. Never ship it.
+[profile.vm]
+inherits = "release"
+lto = false
+incremental = true
+codegen-units = 256
+opt-level = 1
+
+# What ships in images.
 [profile.release]
 lto = "thin"
 strip = "debuginfo"

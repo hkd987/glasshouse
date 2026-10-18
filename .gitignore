@@ -7,3 +7,9 @@
 *.swp
 .idea/
 .vscode/
+
+# Personal Claude Code settings.
+.claude/settings.local.json
+
+# Python bytecode from the tools/ scripts.
+__pycache__/

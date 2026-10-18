@@ -43,7 +43,7 @@ os/freebsd/scripts/check-host-deps.sh       # or: make freebsd-host-deps
 ```sh
 make freebsd-fetch freebsd-sysroot   # once per release (about 2 min, cached)
 make vm-up vm-wait                   # first boot about 100 s under TCG
-cargo build --release --target x86_64-unknown-freebsd
+make freebsd                         # cross-compile (fast `vm` profile; ~3 s after an edit)
 make vm-deploy                       # stage + deploy, about 8 s
 make vm-run CMD="glassctl status"    # or: make vm-ssh
 make vm-reset                        # throw the disk away; the next vm-up is a fresh first boot
@@ -66,7 +66,8 @@ VM knobs (environment variables): `VM_CPUS` (2), `VM_MEM` (4096), `VM_DISK_SIZE`
 1. `stage-dist.sh` wipes `build/dist/freebsd/` and copies `overlay/` into it.
 2. It then installs each `dist.manifest` binary from
    `${CARGO_TARGET_DIR:-target}/x86_64-unknown-freebsd/${DIST_PROFILE:-release}/`. If any binary
-   is missing, it fails and lists them all.
+   is missing, it fails and lists them all. Through `make`, `DIST_PROFILE` follows
+   `FREEBSD_PROFILE` (`vm` by default; `make image-release` uses `release`).
 3. `deploy.sh` tars the staging root (files and symlinks only, owned by root:wheel), extracts it at
    `/` in the guest, and deletes files that a previous deploy installed but the payload no longer
    contains. The list is kept in `/var/db/glasshouse-deploy.files`.

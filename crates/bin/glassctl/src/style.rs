@@ -1,5 +1,6 @@
-//! Terminal styling. Colors only when stdout is a terminal and `NO_COLOR` is
-//! unset.
+//! Terminal styling. Colors when stdout is a terminal, or when
+//! `CLICOLOR_FORCE` is set (for captured output such as screenshots), and
+//! never when `NO_COLOR` is set.
 
 use std::io::IsTerminal;
 use std::sync::OnceLock;
@@ -8,7 +9,10 @@ use glass_api::TileState;
 
 fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none())
+    *ON.get_or_init(|| {
+        let forced = std::env::var("CLICOLOR_FORCE").is_ok_and(|v| !v.is_empty() && v != "0");
+        std::env::var_os("NO_COLOR").is_none() && (forced || std::io::stdout().is_terminal())
+    })
 }
 
 fn paint(code: &str, text: &str) -> String {
