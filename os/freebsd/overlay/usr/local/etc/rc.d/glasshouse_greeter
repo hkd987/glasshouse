@@ -7,7 +7,8 @@
 # The sign-in screen on the first virtual terminal (ADR 0019): glass-greeter
 # checks passwords with PAM, starts the person's desktop, and shows the
 # sign-in screen again when they sign out. getty can't share ttyv0 with it:
-# starting turns getty off there in /etc/ttys, stopping turns it back on.
+# starting turns getty off there in /etc/ttys, and stopping turns it back on
+# once the greeter is disabled.
 
 # rc.subr reads the rc variables below, and FreeBSD's sh has `local`.
 # shellcheck disable=SC1091,SC2034,SC3043
@@ -24,7 +25,14 @@ command="/usr/sbin/daemon"
 command_args="-f -p ${pidfile} -o /var/log/glass-greeter.log ${procname}"
 
 start_precmd="glasshouse_greeter_getty off"
-stop_postcmd="glasshouse_greeter_getty onifexists"
+stop_postcmd="glasshouse_greeter_stopped"
+
+# A restart, or a shutdown while the greeter is on, leaves getty off: one
+# started in between would draw its login prompt over the sign-in screen.
+glasshouse_greeter_stopped()
+{
+	checkyesno glasshouse_greeter_configured || glasshouse_greeter_getty onifexists
+}
 
 # glasshouse_greeter_getty off|onifexists: whether getty runs on ttyv0.
 glasshouse_greeter_getty()
@@ -40,5 +48,7 @@ glasshouse_greeter_getty()
 
 load_rc_config "$name"
 : "${glasshouse_greeter_enable:=NO}"
+# What rc.conf says: `onestop` turns the rcvar on for itself.
+glasshouse_greeter_configured="$glasshouse_greeter_enable"
 
 run_rc_command "$1"

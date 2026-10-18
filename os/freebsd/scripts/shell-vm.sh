@@ -35,7 +35,8 @@ stop)
 	exit
 	;;
 greeter-off)
-	vm_ssh 'service glasshouse_greeter onestop >/dev/null 2>&1; sysrc -q glasshouse_greeter_enable=NO >/dev/null
+	# Disabled first, so stopping gives ttyv0 back to getty.
+	vm_ssh 'sysrc -q glasshouse_greeter_enable=NO >/dev/null; service glasshouse_greeter onestop >/dev/null 2>&1
 		pkill -x glass-shell-fb; true'
 	exit
 	;;

@@ -70,8 +70,9 @@ environment, `setlogin`, PAM session modules, lastlog.
   exits. The screen and the desktop each put the terminal back to text on
   SIGTERM, so the console login reappears.
 - `rc.d/glasshouse_greeter` runs it under `daemon(8)` and turns `getty` on
-  `ttyv0` off at start and back on at stop (`/etc/ttys`, then `init`
-  rereads it).
+  `ttyv0` off at start (`/etc/ttys`, then `init` rereads it). It turns it
+  back on only when the service is disabled: a getty started during a
+  restart drew its login prompt over the new sign-in screen.
 - Checked on the dev VM: it boots into the sign-in screen; a wrong password
   is refused after two seconds; `demo` signs in to their desktop with live
   tiles; signing out returns to the sign-in screen with the devices back
