@@ -61,7 +61,7 @@ impl Handler for AgentApi {
                         name: "glasshouse".into(),
                         version: env!("CARGO_PKG_VERSION").into(),
                     },
-                    instructions: Some(instructions(&task)),
+                    instructions: Some(instructions(&self.rt, &task)),
                 })
             }
             mcp::methods::PING => Ok(json!({})),
@@ -124,7 +124,10 @@ impl AgentApi {
                 annotations: Some(ToolAnnotations {
                     read_only_hint: Some(def.side_effect == SideEffect::None),
                     destructive_hint: Some(def.side_effect == SideEffect::Irreversible),
-                    open_world_hint: Some(def.side_effect == SideEffect::Irreversible),
+                    open_world_hint: Some(matches!(
+                        def.side_effect,
+                        SideEffect::Irreversible | SideEffect::Disclose
+                    )),
                     ..Default::default()
                 }),
             });
@@ -133,7 +136,7 @@ impl AgentApi {
     }
 }
 
-fn instructions(task: &Task) -> String {
+fn instructions(rt: &Runtime, task: &Task) -> String {
     let folders = if task.ctx.grants.is_empty() {
         "none".to_owned()
     } else {
@@ -169,6 +172,20 @@ fn instructions(task: &Task) -> String {
             .map_or("Folder", |g| g.name.as_str()),
         progress = REPORT_PROGRESS_TOOL,
     );
+    // The model gateway (ADR 0018): the one way to a model from a jail.
+    let gateway = rt
+        .registry
+        .get(&glass_gateway::MODEL_COMPLETE.parse().expect("static name"))
+        .map(|(def, _)| def)
+        .filter(|def| task.policy.tier_for(&def.name, def.default_tier).tier != Tier::Never);
+    if let Some(def) = gateway {
+        text.push_str(&format!(
+            "\nWhen you need an AI model, call {}. There is no other network: the OS picks a model IT approved \
+             for the data you have read, and secrets and personal details become placeholders such as \
+             [redacted:email#1] before anything leaves.",
+            def.mcp_name()
+        ));
+    }
     {
         let state = task.lock();
         if !state.title_fixed {

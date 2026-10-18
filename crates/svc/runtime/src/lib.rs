@@ -6,7 +6,9 @@
 //! - Each task runs one agent in its own sandbox. The agent's only way out is
 //!   the task's MCP socket ([`agent_api`]); every tool call goes through the
 //!   action pipeline in `execute`: hold while paused → preview → decide →
-//!   ask → snapshot → invoke → record.
+//!   ask → snapshot → invoke → record. Model calls (`model.complete`) take
+//!   the same path, routed by the labels of what the task has read and sent
+//!   through the model gateway (ADR 0018).
 //! - [`ControlApi`] serves the `glass-api` control socket for `glassctl` and
 //!   the desktop shell.
 //!
@@ -21,6 +23,7 @@ mod control_api;
 mod error;
 mod execute;
 mod labels;
+mod model;
 mod runtime;
 mod supervise;
 mod tailor;

@@ -11,6 +11,7 @@ use glass_api::{
 };
 use glass_audit::{ApprovalRef, AuditEvent, AuditLog, AuditRecord, EventKind};
 use glass_broker::{ApprovalDesk, DeskError};
+use glass_gateway::Gateway;
 use glass_platform::fs::Owner;
 use glass_platform::sandbox::{Mount, Sandbox, SandboxSpec};
 use glass_platform::snapshot::{SnapshotHandle, Snapshotter};
@@ -38,6 +39,9 @@ pub struct RuntimeParts {
     pub sandbox: Arc<dyn Sandbox>,
     pub snapshots: Arc<dyn Snapshotter>,
     pub audit: Arc<AuditLog>,
+    /// The model providers this machine can reach (ADR 0018). An empty
+    /// gateway refuses every model call.
+    pub gateway: Arc<Gateway>,
 }
 
 /// Events carry the owner's uid so subscribers only see their own tasks.
@@ -51,6 +55,7 @@ pub struct Runtime {
     pub(crate) desk: ApprovalDesk,
     pub(crate) sandbox: Arc<dyn Sandbox>,
     pub(crate) snapshots: Arc<dyn Snapshotter>,
+    pub(crate) gateway: Arc<Gateway>,
     /// Users' layers on catalog agents (TL-2).
     pub(crate) layers: LayerStore,
     audit: Arc<AuditLog>,
@@ -101,6 +106,7 @@ impl Runtime {
             desk: ApprovalDesk::new(),
             sandbox: parts.sandbox,
             snapshots: parts.snapshots,
+            gateway: parts.gateway,
             audit: parts.audit,
             audit_ok: AtomicBool::new(true),
             events,
@@ -332,11 +338,8 @@ impl Runtime {
                     .map_or_else(|| name.to_string(), |(def, _)| def.title.clone())
             }),
             max_label: Some(policy.max_label()),
-            model: if entry.model.is_empty() {
-                "No model (scripted agent)".into()
-            } else {
-                entry.model.clone()
-            },
+            // Where policy would route this task's data (DP-2, ADR 0018).
+            model: self.model_line(&entry, &policy, &grants, &caller.home),
             layer: layer.map(|l| l.line),
         };
         Ok(Prepared {

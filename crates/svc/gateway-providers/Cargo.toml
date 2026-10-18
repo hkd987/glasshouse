@@ -1,0 +1,24 @@
+[package]
+name = "glass-gateway-providers"
+description = "Model providers that leave the machine: Anthropic Messages and Amazon Bedrock over HTTPS with the base system's OpenSSL."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+# The only crate with an HTTP and TLS stack (ADR 0018). Keep it that way:
+# nothing else in the workspace may depend on native-tls or OpenSSL.
+[dependencies]
+glass-gateway.workspace = true
+glass-policy.workspace = true
+hex.workspace = true
+httparse.workspace = true
+native-tls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time.workspace = true
+
+[lints]
+workspace = true

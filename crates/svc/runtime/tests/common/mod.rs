@@ -17,6 +17,7 @@ use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
 use glass_app_system::{SystemOps, SystemProvider};
 use glass_audit::{AuditLog, Durability};
+use glass_gateway::{Gateway, ModelAction, ProviderError, ScriptedProvider};
 use glass_platform::sandbox::HostSandbox;
 use glass_platform::snapshot::CopySnapshotter;
 use glass_platform::system;
@@ -32,6 +33,8 @@ pub struct Harness {
     pub rt: Arc<Runtime>,
     pub me: Caller,
     pub machine: Arc<FakeMachine>,
+    /// The model provider `scripted` in policy reaches; what it was sent.
+    pub model: Arc<ScriptedProvider>,
 }
 
 impl Harness {
@@ -104,6 +107,8 @@ pub async fn eventually(mut check: impl FnMut() -> bool) {
     panic!("condition never became true");
 }
 
+/// A harness whose policy is the default plus `policy_extra`, in which
+/// `{me}` stands for the test user's login name and `{home}` for their home.
 pub fn harness_with(policy_extra: &str) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let meta = fs::metadata(dir.path()).unwrap();
@@ -123,9 +128,12 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     fs::write(home.join("Finance/q3.csv"), "secret numbers\n").unwrap();
 
     let policy_text = format!(
-        "{}\n[[label]]\npath = \"{}/Finance\"\nlabel = \"confidential\"\n{policy_extra}",
+        "{}\n[[label]]\npath = \"{}/Finance\"\nlabel = \"confidential\"\n{}",
         glass_policy::DEFAULT_POLICY,
-        home.display()
+        home.display(),
+        policy_extra
+            .replace("{me}", &account.name)
+            .replace("{home}", &home.display().to_string())
     );
     let policy = Policy::from_toml(&policy_text).unwrap();
     let mut registry = Registry::new();
@@ -139,11 +147,20 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     registry
         .register(Arc::new(HelpdeskProvider::new(dir.path().join("outbox"))))
         .unwrap();
+    registry.register(Arc::new(ModelAction)).unwrap();
+    // Policy names these providers; `down` is always rate limited (MP-8).
+    let model = Arc::new(ScriptedProvider::echo());
+    let gateway = Gateway::new().with("scripted", model.clone()).with(
+        "down",
+        Arc::new(ScriptedProvider::failing(ProviderError::Unavailable(
+            "rate limited".into(),
+        ))),
+    );
 
     let rt = Runtime::new(RuntimeParts {
         config: RuntimeConfig {
             state_dir: dir.path().join("state"),
-            catalog: vec![it_agent(), invoice_demo(), claude_code()],
+            catalog: vec![it_agent(), invoice_demo(), claude_code(), writer()],
             agent_dirs: Vec::new(),
             max_live_tasks_per_user: 4,
             harness: Some("claude-code".parse().unwrap()),
@@ -157,6 +174,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         audit: Arc::new(
             AuditLog::open(dir.path().join("audit.log"), Durability::Buffered).unwrap(),
         ),
+        gateway: Arc::new(gateway),
     });
     let me = Caller {
         name: account.name,
@@ -169,6 +187,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         rt,
         me,
         machine,
+        model,
     }
 }
 
@@ -209,6 +228,7 @@ pub fn rebuild_with(h: &Harness, policy: &str, catalog: Vec<CatalogEntry>) -> Ar
         sandbox: Arc::new(HostSandbox),
         snapshots: Arc::new(CopySnapshotter::new(h.dir.path().join("snapshots"))),
         audit: Arc::new(AuditLog::open(h.audit_path(), Durability::Buffered).unwrap()),
+        gateway: Arc::new(Gateway::new()),
     })
 }
 
@@ -278,6 +298,30 @@ pub fn invoice_demo() -> CatalogEntry {
                 default: Some(serde_json::Value::Bool(true)),
             },
         ],
+    }
+}
+
+/// A model-backed agent (ADR 0018), whose users may pick a model in a
+/// layer (TL-1). Policy decides whether that model may be used.
+pub fn writer() -> CatalogEntry {
+    CatalogEntry {
+        id: "writer".parse().unwrap(),
+        name: "Writer".into(),
+        version: "1".into(),
+        model: String::new(),
+        description: String::new(),
+        mode: glass_api::AgentMode::Actions,
+        program: "/bin/sleep".into(),
+        attended: false,
+        args: vec!["30".into()],
+        plan: vec!["Read".into(), "Draft".into()],
+        customize: vec![CustomizationPoint {
+            key: "model".into(),
+            title: "Model".into(),
+            kind: PointKind::Text,
+            choices: Vec::new(),
+            default: None,
+        }],
     }
 }
 

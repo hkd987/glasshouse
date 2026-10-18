@@ -7,8 +7,9 @@
 #   3. sleep: that task pauses before the machine sleeps and resumes after
 #   4. crash recovery: kill -9 glassd mid-task; on restart it removes the
 #      orphaned jail and the audit log is intact
-#   5. branding: no base-system name where a user looks (BR-1, BR-2)
-#   6. root checks: audit chain verifies, no jails or mounts left behind
+#   5. the model gateway with the scripted provider, under a test policy
+#   6. branding: no base-system name where a user looks (BR-1, BR-2)
+#   7. root checks: audit chain verifies, no jails or mounts left behind
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -58,6 +59,24 @@ after=$("$vm" run "$glass_jails")
 [[ $after -eq 0 ]] || { echo "FAIL $after orphaned jails survived the restart"; exit 1; }
 "$vm" run "grep -q 'removed a sandbox left behind' /var/log/glassd.log"
 echo "PASS crash recovery (orphaned jail removed on restart)"
+
+step "model gateway, scripted provider (DP-1, DP-2, DP-3, DP-5)"
+# The scenario needs a model in policy: install the test policy (the default
+# plus a scripted model the attended claude-code entry may call), restart
+# glassd, run it, then put back whatever policy was there.
+policy=/usr/local/etc/glasshouse/policy.toml
+"$vm" run "set -e
+if [ -e $policy ]; then mv $policy $policy.e2e-saved; fi
+$e2e models-policy >$policy
+service glassd restart </dev/null >/tmp/glassd-models.log 2>&1
+for i in \$(jot 120); do glassctl status >/dev/null 2>&1 && break; sleep 0.5; done
+status=0
+su demo -c '$e2e models' || status=\$?
+rm -f $policy
+if [ -e $policy.e2e-saved ]; then mv $policy.e2e-saved $policy; fi
+service glassd restart </dev/null >>/tmp/glassd-models.log 2>&1
+for i in \$(jot 120); do glassctl status >/dev/null 2>&1 && break; sleep 0.5; done
+exit \$status"
 
 step "branding (BR-1, BR-2)"
 "$vm" scp-in "$repo/tests/e2e/check-branding.sh" /tmp/check-branding.sh

@@ -10,6 +10,9 @@ max_live_tasks_per_user = 8
 # Take over on an ended task carries on in this attended agent: the user's
 # own Claude Code, connected through glass-mcp.
 harness = "claude-code"
+# Credentials for the model providers policy names (ADR 0018): root-owned,
+# mode 600, or glassd refuses it. Not shipped; IT or its tooling writes it.
+model_secrets = "/usr/local/etc/glasshouse/model-secrets.toml"
 
 [sandbox]
 backend = "jail"

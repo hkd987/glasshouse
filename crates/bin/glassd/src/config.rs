@@ -30,6 +30,12 @@ pub struct Config {
     /// such as `claude-code` (HX-1). Unset turns that off.
     #[serde(default)]
     pub harness: Option<AgentId>,
+    /// Credentials for policy's model providers: the stand-in for the
+    /// secrets broker (MP-4, ADR 0018). Read only if it is a regular file
+    /// owned by glassd's user that nobody else can read. Keep it outside
+    /// every directory mounted into a jail.
+    #[serde(default = "default_model_secrets")]
+    pub model_secrets: PathBuf,
     #[serde(default)]
     pub sandbox: SandboxConfig,
     #[serde(default)]
@@ -103,6 +109,10 @@ fn default_policy() -> PathBuf {
     "/usr/local/etc/glasshouse/policy.toml".into()
 }
 
+fn default_model_secrets() -> PathBuf {
+    "/usr/local/etc/glasshouse/model-secrets.toml".into()
+}
+
 fn default_max_live() -> usize {
     8
 }
@@ -159,6 +169,22 @@ impl Config {
                 );
             }
         }
+        // Every jail sees the base mounts and the agent directories.
+        let base = self
+            .sandbox
+            .base_mounts
+            .clone()
+            .unwrap_or_else(|| glass_platform::sandbox::JailConfig::default().base_mounts);
+        if base
+            .iter()
+            .chain(&self.sandbox.agent_dirs)
+            .any(|dir| self.model_secrets.starts_with(dir))
+        {
+            bail!(
+                "model_secrets {} is inside a directory mounted into every jail",
+                self.model_secrets.display()
+            );
+        }
         if let Some(harness) = &self.harness
             && !self.agents.iter().any(|a| &a.id == harness && a.attended)
         {
@@ -187,6 +213,22 @@ mod tests {
             config.audit_log(),
             PathBuf::from("/var/db/glasshouse/audit/audit.log")
         );
+        assert_eq!(
+            config.model_secrets,
+            PathBuf::from("/usr/local/etc/glasshouse/model-secrets.toml")
+        );
+    }
+
+    #[test]
+    fn mp4_model_secrets_stay_out_of_jails() {
+        for inside in [
+            "/usr/local/libexec/glasshouse/keys.toml",
+            "/usr/share/keys.toml",
+        ] {
+            let config: Config =
+                toml::from_str(&format!("model_secrets = \"{inside}\"\n")).unwrap();
+            assert!(config.validate().is_err(), "{inside}");
+        }
     }
 
     #[test]

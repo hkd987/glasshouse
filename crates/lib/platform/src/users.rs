@@ -14,6 +14,13 @@ pub struct UserInfo {
     pub home: PathBuf,
 }
 
+/// The uid this process runs with: who owns what it may read privately,
+/// such as glassd's model secrets file.
+pub fn effective_uid() -> u32 {
+    // SAFETY: geteuid takes no arguments, touches no memory and can't fail.
+    unsafe { libc::geteuid() }
+}
+
 pub fn by_uid(uid: u32) -> Option<UserInfo> {
     lookup(|pwd, buf, result| {
         // SAFETY: `pwd`, `buf` and `result` are valid for writes for the

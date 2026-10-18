@@ -13,7 +13,7 @@ use glass_api::{
 use glass_platform::sandbox::SandboxSpec;
 use glass_platform::snapshot::SnapshotHandle;
 use glass_policy::EffectivePolicy;
-use glass_types::{TaskId, Timestamp};
+use glass_types::{Label, TaskId, Timestamp};
 use serde_json::Value;
 use tokio::sync::{oneshot, watch};
 
@@ -93,6 +93,9 @@ pub(crate) struct TaskState {
     /// The title stays as it is: the request gave it, or the agent already
     /// renamed the task.
     pub title_fixed: bool,
+    /// The most sensitive label of anything the task has read (DP-11).
+    /// Model calls carry it, so it decides where they may go (DP-2).
+    pub data_label: Option<Label>,
 }
 
 /// Everything fixed when a task starts.
@@ -171,6 +174,7 @@ impl Task {
                 connected: false,
                 title: new.title,
                 title_fixed: new.title_fixed,
+                data_label: None,
             }),
         }
     }

@@ -1,6 +1,8 @@
 //! The first-party app set (NV-3): every app glassd ships, registered in one
 //! place. Adding an app is a new crate under `crates/apps/` and one line
-//! here; glassd and `glassctl policy check` both read this list.
+//! here; glassd and `glassctl policy check` both read this list. The model
+//! gateway's `model.complete` is declared here too, so policy, handoff cards
+//! and `tools/list` treat it like any action (ADR 0018).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,6 +12,7 @@ use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
 use glass_app_system::{HostSystem, SystemOps, SystemProvider};
+use glass_gateway::ModelAction;
 
 /// What the apps need from the machine's configuration and policy.
 #[derive(Debug, Clone)]
@@ -43,6 +46,7 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
         setup.restartable_services,
     )))?;
     registry.register(Arc::new(HelpdeskProvider::new(setup.helpdesk_outbox)))?;
+    registry.register(Arc::new(ModelAction))?;
     Ok(registry)
 }
 
@@ -63,6 +67,7 @@ mod tests {
             "mail.send",
             "system.network.check",
             "helpdesk.ticket.create",
+            "model.complete",
         ] {
             assert!(names.iter().any(|n| n == expected), "{expected}");
         }
