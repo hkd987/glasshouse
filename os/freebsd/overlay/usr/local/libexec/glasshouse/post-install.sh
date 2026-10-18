@@ -3,7 +3,7 @@
 # Runs after every deploy and image bake. Must stay idempotent.
 #
 # - creates the daemon's state and run directories with the right modes;
-# - enables glassd at boot;
+# - enables glassd and the sign-in screen at boot;
 # - brands the system: no base-system name where users look (BR-1);
 # - seeds demo data for the `demo` user, if that user exists and has none.
 
@@ -13,6 +13,8 @@ install -d -o root -g wheel -m 0700 /var/db/glasshouse
 install -d -o root -g wheel -m 0755 /var/run/glasshouse
 
 sysrc -q glassd_enable=YES >/dev/null
+# The machine boots into the sign-in screen (ADR 0019).
+sysrc -q glasshouse_greeter_enable=YES >/dev/null
 
 # BR-1. Identity and login message come from rc.d/glasshouse_identity; the
 # base writers it replaces are turned off.

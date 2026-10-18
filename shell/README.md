@@ -42,8 +42,11 @@ command bar; Esc closes the command bar, then the agents menu, then the
 expanded view. Its log is
 `/var/log/glass-shell-fb.log` in the VM.
 
-`make greeter-vm` installs `glass-greeter` (ADR 0019) as well and turns on
-`rc.d/glasshouse_greeter`, as a machine boots: the sign-in screen on the
+Images ship `glass-greeter` (ADR 0019) and `glass-shell-fb` with the rest
+(`os/freebsd/dist.manifest`, built by `make freebsd`), and `post-install.sh`
+turns on `rc.d/glasshouse_greeter`, so a machine, and the dev VM after
+`make freebsd vm-deploy`, boots into the sign-in screen. `make greeter-vm`
+installs debug builds instead: the sign-in screen on the
 first virtual terminal, PAM checks the password (`demo` on development
 VMs), and the desktop starts as that person through `su -l`. Shift Super Q
 signs out back to the sign-in screen. The greeter stays on across reboots

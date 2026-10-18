@@ -10,7 +10,8 @@
 # `greeter` installs the sign-in screen too (glass-greeter, ADR 0019) and turns it on, as a
 # machine boots: sign in as demo (password demo on development VMs) and the desktop starts;
 # Shift Super Q (`vm.sh key shift-meta_l-q`) signs out. `greeter-off` gives ttyv0 back to the
-# console. `make greeter-vm` builds both and runs `greeter`.
+# console until the next deploy, which turns it on again as images have it. `make greeter-vm`
+# builds both (debug) and runs `greeter`; `make freebsd vm-deploy` ships them like the rest.
 #
 # Development only: `start` hands the terminal and input devices to the user directly, where
 # the greeter does it for a real sign-in.

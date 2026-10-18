@@ -77,6 +77,9 @@ environment, `setlogin`, PAM session modules, lastlog.
   `ttyv0` off at start (`/etc/ttys`, then `init` rereads it). It turns it
   back on only when the service is disabled: a getty started during a
   restart drew its login prompt over the new sign-in screen.
+- Images ship both binaries (`dist.manifest`; their crates and fonts are in
+  the notices) and `post-install.sh` turns the service on, so every deploy
+  and image boots into the sign-in screen.
 - Checked on the dev VM: it boots into the sign-in screen; a wrong password
   is refused after two seconds; `demo` signs in to their desktop with live
   tiles; signing out returns to the sign-in screen with the devices back

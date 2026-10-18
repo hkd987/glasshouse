@@ -56,5 +56,9 @@ if [ -f /usr/local/etc/rc.d/glassd ]; then
 		echo "deploy: glassd_enable is not YES; not restarting glassd"
 	fi
 fi
+# The sign-in screen, on its new binaries (signing out anyone signed in).
+if [ -f /usr/local/etc/rc.d/glasshouse_greeter ] && service glasshouse_greeter enabled; then
+	hook service glasshouse_greeter restart
+fi
 EOF
 log "ok"

@@ -13,6 +13,8 @@ REPO_ROOT := $(CURDIR)
 FREEBSD_TARGET := x86_64-unknown-freebsd
 # Binaries shipped in the OS image (see os/freebsd/dist.manifest).
 SHIPPED := glassd glassctl glass-mcp glass-demo-agent glass-it-agent glass-probe
+# The sign-in screen and the desktop, from the shell workspace (shell/).
+SHIPPED_SHELL := glass-greeter glass-shell-fb
 # Cargo profile for FreeBSD builds. `vm` rebuilds in seconds for the VM loop;
 # shippable images use `release` (make image-release). See
 # docs/dev/build-performance.md.
@@ -56,13 +58,15 @@ legal-base: ## Regenerate the base system's notices and source offer from its sr
 	tools/legal/base_notices.py
 
 sbom: ## Software bill of materials, admins and security reviews only (BR-4); never ship it
-	tools/legal/notices.py $(addprefix --package ,$(SHIPPED)) --sbom build/sbom/glasshouse.cdx.json
+	tools/legal/notices.py $(addprefix --package ,$(SHIPPED)) $(addprefix --shell-package ,$(SHIPPED_SHELL)) \
+		--sbom build/sbom/glasshouse.cdx.json
 
 timings: ## Profile a clean build; opens target/cargo-timings/cargo-timing.html
 	cargo build --workspace --timings
 
 freebsd: ## Cross-compile the shipped binaries for FreeBSD (FREEBSD_PROFILE, default vm)
 	cargo build --profile $(FREEBSD_PROFILE) --target $(FREEBSD_TARGET) $(addprefix -p ,$(SHIPPED))
+	cargo build $(SHELL_MANIFEST) --profile $(FREEBSD_PROFILE) --target $(FREEBSD_TARGET) $(addprefix -p ,$(SHIPPED_SHELL))
 
 dev-host: ## Run glassd here with the insecure host sandbox (development only)
 	tools/dev/host-run.sh

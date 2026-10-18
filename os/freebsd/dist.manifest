@@ -1,6 +1,7 @@
 # Binaries staged into build/dist/freebsd/ by os/freebsd/scripts/stage-dist.sh.
 # Format: <binary-name> <install-path-relative-to-/> <octal-mode>
-# Binaries come from target/x86_64-unknown-freebsd/<profile>/ (profile: release, or $DIST_PROFILE).
+# Binaries come from target/x86_64-unknown-freebsd/<profile>/ (profile: release, or $DIST_PROFILE);
+# shell/<binary> from the desktop shell's workspace, shell/target/x86_64-unknown-freebsd/<profile>/.
 # Non-binary files (rc.d scripts, configs, post-install.sh) live in os/freebsd/overlay/.
 glassd            usr/local/sbin/glassd                              0755
 glassctl          usr/local/bin/glassctl                             0755
@@ -8,3 +9,5 @@ glass-mcp         usr/local/bin/glass-mcp                            0755
 glass-demo-agent  usr/local/libexec/glasshouse/glass-demo-agent      0755
 glass-it-agent    usr/local/libexec/glasshouse/glass-it-agent        0755
 glass-probe       usr/local/libexec/glasshouse/glass-probe           0755
+shell/glass-greeter   usr/local/bin/glass-greeter                        0755
+shell/glass-shell-fb  usr/local/bin/glass-shell-fb                       0755

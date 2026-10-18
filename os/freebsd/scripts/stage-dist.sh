@@ -2,38 +2,45 @@
 # Usage: stage-dist.sh
 # Recreates the staging root build/dist/freebsd/ (mirrors the guest's /): copies the overlay
 # tree os/freebsd/overlay/, then the cross-compiled binaries listed in os/freebsd/dist.manifest.
-# Binaries come from ${CARGO_TARGET_DIR:-target}/x86_64-unknown-freebsd/${DIST_PROFILE:-release}/.
+# Binaries come from ${CARGO_TARGET_DIR:-target}/x86_64-unknown-freebsd/${DIST_PROFILE:-release}/,
+# and shell/<binary> from the shell workspace's shell/target/x86_64-unknown-freebsd/<same>/.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
 manifest=$FREEBSD_OS_DIR/dist.manifest
 bindir=${CARGO_TARGET_DIR:-$REPO_ROOT/target}/x86_64-unknown-freebsd/${DIST_PROFILE:-release}
+shell_bindir=$REPO_ROOT/shell/target/x86_64-unknown-freebsd/${DIST_PROFILE:-release}
 
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 cp -a "$FREEBSD_OS_DIR/overlay/." "$DIST_DIR/"
 find "$DIST_DIR" -name .gitkeep -delete
 
-missing=() shipped=() n=0 lineno=0
+missing=() shipped=() shell_shipped=() n=0 lineno=0
 while read -r name path mode extra; do
 	lineno=$((lineno + 1))
 	[[ -z $name || $name == \#* ]] && continue
 	[[ -n $mode && -z $extra && $mode =~ ^[0-7]{3,4}$ ]] ||
 		die "dist.manifest:$lineno: expected '<binary> <relative-path> <octal-mode>'"
 	[[ $path != /* && $path != *..* ]] || die "dist.manifest:$lineno: path must be relative: $path"
-	if [[ ! -f $bindir/$name ]]; then
+	from=$bindir/$name
+	[[ $name == shell/* ]] && from=$shell_bindir/${name#shell/}
+	if [[ ! -f $from ]]; then
 		missing+=("$name")
 		continue
 	fi
-	shipped+=("$name")
-	install -D -m "$mode" "$bindir/$name" "$DIST_DIR/$path"
+	if [[ $name == shell/* ]]; then shell_shipped+=("${name#shell/}"); else shipped+=("$name"); fi
+	install -D -m "$mode" "$from" "$DIST_DIR/$path"
 	n=$((n + 1))
 done <"$manifest"
 
 # Open-source notices for the shipped binaries and the base system (BR-2).
 notice_args=()
 for name in "${shipped[@]}"; do notice_args+=(--package "$name"); done
+# The shell's crates, and the fonts it embeds.
+for name in "${shell_shipped[@]}"; do notice_args+=(--shell-package "$name"); done
+if ((${#shell_shipped[@]})); then notice_args+=(--assets "$REPO_ROOT/shell/assets/fonts"); fi
 python3 "$REPO_ROOT/tools/legal/notices.py" "${notice_args[@]}" \
 	--base-txz "$CACHE_DIR/$FREEBSD_BASE_TXZ" \
 	--notices "$DIST_DIR/usr/local/share/glasshouse/legal/NOTICES.txt" 2>/dev/null ||
@@ -48,7 +55,6 @@ printf 'version=%s\nbuild=%s\nprofile=%s\n' "$version" "$build" "${DIST_PROFILE:
 	>"$DIST_DIR/usr/local/share/glasshouse/branding/build-info"
 
 if ((${#missing[@]})); then
-	die "missing binaries in ${bindir#"$REPO_ROOT"/}: ${missing[*]}" \
-		"(build them: cargo build --release --target x86_64-unknown-freebsd)"
+	die "missing binaries: ${missing[*]} (build them: make freebsd FREEBSD_PROFILE=${DIST_PROFILE:-release})"
 fi
 log "staged $n binaries + overlay into ${DIST_DIR#"$REPO_ROOT"/} ($(find "$DIST_DIR" ! -type d | wc -l) files)"
