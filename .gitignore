@@ -13,3 +13,6 @@
 
 # Python bytecode from the tools/ scripts.
 __pycache__/
+
+# The desktop shell workspace (shell/README.md).
+/shell/target/

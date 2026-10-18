@@ -1,0 +1,24 @@
+[package]
+name = "glass-shell"
+description = "The Glasshouse desktop shell's UI: theme, boot, sign-in and desktop screens."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-api.workspace = true
+glass-types.workspace = true
+iced_core.workspace = true
+iced_widget = { workspace = true, features = ["image"] }
+iced_runtime.workspace = true
+iced_renderer.workspace = true
+iced_tiny_skia.workspace = true
+tiny-skia.workspace = true
+kurbo.workspace = true
+png.workspace = true
+softbuffer.workspace = true
+
+[lints]
+workspace = true
