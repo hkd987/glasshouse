@@ -5,7 +5,7 @@ Three levels, each proving something the one below can't.
 | Level | Where | Runs on | Proves |
 |---|---|---|---|
 | Unit | `#[cfg(test)]` in each crate | any host, `make test` | Policy math, hash chains, framing, path confinement, label rules |
-| Pipeline integration | `crates/svc/runtime/tests/pipeline.rs` | any host, `make test` | The whole action pipeline (tiers, asks, labels, snapshots, undo, pause, sleep, take over, isolation) on development backends, with the test playing the agent over the real MCP socket |
+| Pipeline integration | `crates/svc/runtime/tests/` (`pipeline.rs`, `models.rs`, …) | any host, `make test` | The whole action pipeline (tiers, asks, labels, snapshots, undo, pause, sleep, take over, isolation, model calls through the gateway with a scripted provider) on development backends, with the test playing the agent over the real MCP socket |
 | End to end | `tests/e2e` + `tests/e2e/run-vm.sh` | the FreeBSD VM, `make e2e-vm` | Real jails, real ZFS, real users: containment (PA-1), teardown (PA-2), xattr labels, cross-user isolation, sleep through the rc.d hooks (PM-5), crash recovery |
 
 ## The FreeBSD VM
@@ -27,6 +27,11 @@ minute in a 4-CPU VM on an idle host (it was 2.5 min). What keeps it short:
   multi-threaded TCG gives each its own host thread.
 - Every step and scenario prints how long it took; look there first when the
   suite slows down.
+
+`models` (the model gateway, ADR 0018) runs in a step of its own: it needs
+a model in policy, so `run-vm.sh` installs the test policy
+`glass-e2e models-policy` prints (a scripted model; nothing leaves the VM),
+restarts glassd, runs it, and puts the old policy back.
 
 Run one scenario while working on it: `make freebsd vm-deploy`, then
 `tests/e2e/run-vm.sh` is the whole suite, or in the VM

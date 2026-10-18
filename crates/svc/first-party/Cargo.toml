@@ -13,6 +13,7 @@ glass-app-files.workspace = true
 glass-app-helpdesk.workspace = true
 glass-app-mail.workspace = true
 glass-app-system.workspace = true
+glass-gateway.workspace = true
 
 [lints]
 workspace = true

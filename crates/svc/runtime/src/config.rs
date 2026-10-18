@@ -14,8 +14,11 @@ pub struct CatalogEntry {
     /// Published version, shown on handoff cards and in the catalog.
     #[serde(default)]
     pub version: String,
-    /// The model the agent works with, shown under "Data and model" on the
-    /// handoff card. Empty for agents that use none.
+    /// The policy model id this agent prefers (ADR 0018). The handoff card
+    /// shows where policy routes the task's data, preferring this one when
+    /// allowed. For an agent that can't call the gateway, such as a harness
+    /// with its own provider (HX-7), the text is shown as is. Empty for
+    /// agents that use none.
     #[serde(default)]
     pub model: String,
     #[serde(default)]

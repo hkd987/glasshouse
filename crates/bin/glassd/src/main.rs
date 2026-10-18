@@ -12,6 +12,7 @@ use anyhow::{Context, bail};
 use clap::Parser;
 use glass_actions::Registry;
 use glass_audit::{AuditEvent, AuditLog, Durability, EventKind};
+use glass_gateway::{Gateway, Secrets};
 use glass_platform::sandbox::{HostSandbox, JailConfig, JailSandbox, Sandbox};
 use glass_platform::snapshot::{CopySnapshotter, Snapshotter, ZfsSnapshotter};
 use glass_policy::Policy;
@@ -52,11 +53,46 @@ async fn main() -> anyhow::Result<()> {
     for warning in policy.lint(&registry.lint_info()) {
         tracing::warn!("policy: {warning}");
     }
+    let models = gateway(&config, &policy);
     if args.check {
         tracing::info!(policy = %policy_source, agents = config.agents.len(), "configuration is valid");
         return Ok(());
     }
-    run(config, policy, policy_source, registry).await
+    run(config, policy, policy_source, registry, models).await
+}
+
+/// The model gateway for this machine (ADR 0018): a provider for each one
+/// policy names that has what it needs. A secrets file that isn't private
+/// is refused, and calls then go only to providers that need no secret.
+/// Nothing here logs a credential.
+fn gateway(config: &Config, policy: &Policy) -> Models {
+    let mut notes = Vec::new();
+    let secrets = match Secrets::load(
+        &config.model_secrets,
+        glass_platform::users::effective_uid(),
+    ) {
+        Ok(secrets) => secrets,
+        Err(e) => {
+            notes.push(e.to_string());
+            Secrets::default()
+        }
+    };
+    let (gateway, more) =
+        glass_gateway_providers::connect(&policy.document().models.providers, &secrets);
+    notes.extend(more);
+    for note in &notes {
+        tracing::warn!("models: {note}");
+    }
+    Models {
+        gateway: Arc::new(gateway),
+        notes,
+    }
+}
+
+struct Models {
+    gateway: Arc<Gateway>,
+    /// Why a provider policy names can't be used here, for the start record.
+    notes: Vec<String>,
 }
 
 fn load_policy(path: &Path) -> anyhow::Result<(Policy, String)> {
@@ -87,6 +123,7 @@ async fn run(
     policy: Policy,
     policy_source: String,
     registry: Registry,
+    models: Models,
 ) -> anyhow::Result<()> {
     let run_dir = config
         .control_socket
@@ -147,6 +184,8 @@ async fn run(
         "sandbox": sandbox.kind(),
         "snapshots": snapshots.kind(),
         "stale_sandboxes_removed": cleaned,
+        "model_providers": models.gateway.providers().collect::<Vec<_>>(),
+        "model_notes": models.notes,
     });
     audit.append(started)?;
     let mut loaded = AuditEvent::new(
@@ -171,6 +210,7 @@ async fn run(
         sandbox: Arc::clone(&sandbox),
         snapshots,
         audit,
+        gateway: models.gateway,
     });
 
     // A new agent version re-checks every layer on it (TL-13).

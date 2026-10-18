@@ -11,7 +11,7 @@ declare -A pkg=(
 	[qemu-system-x86_64]=qemu-system-x86 [qemu-img]=qemu-utils
 	[ssh]=openssh-client [scp]=openssh-client [ssh-keygen]=openssh-client
 	[xorriso]=xorriso [xz]=xz-utils [curl]=curl [tar]=tar
-	[clang]=clang [ld.lld]=lld [shellcheck]=shellcheck
+	[clang]=clang [ld.lld]=lld [shellcheck]=shellcheck [pkg-config]=pkg-config
 )
 missing=()
 for cmd in $(printf '%s\n' "${!pkg[@]}" | sort); do
@@ -22,6 +22,14 @@ for cmd in $(printf '%s\n' "${!pkg[@]}" | sort); do
 		missing+=("${pkg[$cmd]}")
 	fi
 done
+
+# The model gateway links OpenSSL; host builds find it with pkg-config (ADR 0018).
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists openssl; then
+	echo "  ok       OpenSSL headers"
+else
+	echo "  MISSING  OpenSSL headers (apt package libssl-dev)"
+	missing+=(libssl-dev)
+fi
 
 if command -v rustup >/dev/null 2>&1; then
 	if (cd "$REPO_ROOT" && rustup target list --installed) | grep -qx x86_64-unknown-freebsd; then

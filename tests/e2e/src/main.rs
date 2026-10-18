@@ -8,6 +8,8 @@
 //! glass-e2e isolation <id>      (as another user) that task is invisible
 //! glass-e2e release <id>        stop it
 //! glass-e2e sleeping|awake <id> its state after a system suspend / resume
+//! glass-e2e models-policy       print the policy the `models` scenario needs
+//! glass-e2e models              the model gateway (run-vm.sh installs that policy first)
 //! ```
 //!
 //! `all` runs the scenarios that share nothing side by side, then the rest one
@@ -17,6 +19,7 @@
 #![allow(clippy::print_stdout)]
 
 mod harness;
+mod models;
 mod perf;
 mod scenarios;
 
@@ -52,6 +55,18 @@ const AT_ONCE: usize = 6;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("models-policy") {
+        return match models::policy() {
+            Ok(text) => {
+                print!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("glass-e2e: {e:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let harness = match Harness::connect().await {
         Ok(h) => Arc::new(h),
         Err(e) => {
@@ -169,6 +184,7 @@ async fn scenario(name: &str, h: &Harness) -> anyhow::Result<()> {
         "tailor" => scenarios::tailor(h).await,
         "harness" => scenarios::harness(h).await,
         "perf" => perf::perf(h).await,
+        "models" => models::models(h).await,
         other => Err(anyhow::anyhow!("unknown scenario {other}")),
     }
 }

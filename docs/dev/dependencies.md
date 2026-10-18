@@ -25,5 +25,11 @@ staging and fails on a license outside the allow list; `make sbom` writes the
 SBOM security teams get under NDA (BR-4). Neither is ever edited by hand.
 
 Crates that compile C need the FreeBSD cross compiler; see
-`os/freebsd/README.md`. We currently have none, and should keep it that way
-where we can: pure-Rust dependencies cross-compile and audit more easily.
+`os/freebsd/README.md`. We have none, and should keep it that way where we
+can: pure-Rust dependencies cross-compile and audit more easily. The one C
+library we link is the base system's OpenSSL, for the model gateway's TLS
+(ADR 0018): `openssl-sys`'s build script only reads the version from the
+sysroot's headers, so FreeBSD builds and the FreeBSD clippy need
+`make freebsd-sysroot`, and host builds need `libssl-dev` and `pkg-config`.
+Only `glass-gateway-providers` may depend on `native-tls`, `openssl` or
+`httparse`; nothing else gets an HTTP or TLS stack.

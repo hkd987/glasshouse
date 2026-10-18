@@ -87,11 +87,18 @@ pub enum SideEffect {
     /// Leaves the machine or can't be undone: sent mail, posted records,
     /// payments, deletes outside snapshotted data.
     Irreversible,
+    /// Sends data off the machine to a service policy approved, and changes
+    /// nothing anywhere: a model call through the gateway (DP-1). Data
+    /// labels, routing and redaction govern it rather than an ask; there is
+    /// nothing to undo, and what was sent can't be recalled.
+    Disclose,
 }
 
 impl SideEffect {
+    /// Whether undo can take it back. A disclosure changed nothing, but what
+    /// left the machine can't be recalled.
     pub fn is_reversible(self) -> bool {
-        !matches!(self, SideEffect::Irreversible)
+        matches!(self, SideEffect::None | SideEffect::LocalReversible)
     }
 }
 

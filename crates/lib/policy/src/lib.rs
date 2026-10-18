@@ -5,15 +5,19 @@
 //!   one agent acting for one user.
 //! - [`EffectivePolicy`] answers the questions the broker asks on every
 //!   action: which tier, why, which labels, and what the agent can't touch.
+//! - [`ModelRules`] say which approved model a model call may go to, given
+//!   the label of the data it carries (DP-2, ADR 0018).
 
 pub mod document;
 mod engine;
 mod labels;
+mod models;
 mod pattern;
 
 pub use engine::{
     EVERYONE, EffectivePolicy, LoosenRefused, Policy, PolicyError, RuleSource, TierDecision,
 };
+pub use models::{ModelRefusal, ModelRules, Route, RouteStep};
 pub use pattern::{ActionPattern, InvalidPattern, Specificity};
 
 /// The policy a new org ships with. Also what `glassd` enforces when no

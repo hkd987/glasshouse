@@ -12,6 +12,7 @@ glass-actions.workspace = true
 glass-api.workspace = true
 glass-audit.workspace = true
 glass-broker.workspace = true
+glass-gateway.workspace = true
 glass-platform.workspace = true
 glass-policy.workspace = true
 glass-rpc.workspace = true

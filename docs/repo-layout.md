@@ -24,7 +24,8 @@ Future top-level areas, when they start: the compositor (M2, next to the
 shell in `shell/`), `apps/` (first-party TypeScript web apps; their OS actions stay
 in `crates/apps`), `agents/` (agent
 harness bundles, ADR 0010), `console/` (admin console), `gateway/` if the
-model gateway outgrows a crate.
+model gateway outgrows its crates (`crates/svc/gateway`,
+`crates/svc/gateway-providers`, ADR 0018).
 
 ## Layering
 

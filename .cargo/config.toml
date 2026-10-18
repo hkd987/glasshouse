@@ -3,3 +3,14 @@
 # the directory containing .cargo/, i.e. the repo root.
 [target.x86_64-unknown-freebsd]
 linker = "os/freebsd/toolchain/x86_64-unknown-freebsd-cc"
+
+# The model gateway links the base system's OpenSSL (ADR 0018). openssl-sys's build script
+# reads the version from the headers with the target's C compiler and links libssl and
+# libcrypto: the same clang wrapper finds both in the sysroot through --sysroot, so the
+# directories named here only have to exist. No C is compiled into any binary. These apply to
+# FreeBSD builds and checks only; host builds find OpenSSL with pkg-config (libssl-dev).
+[env]
+CC_x86_64_unknown_freebsd = { value = "os/freebsd/toolchain/x86_64-unknown-freebsd-cc", relative = true }
+X86_64_UNKNOWN_FREEBSD_OPENSSL_INCLUDE_DIR = { value = "os/freebsd/toolchain", relative = true }
+X86_64_UNKNOWN_FREEBSD_OPENSSL_LIB_DIR = { value = "os/freebsd/toolchain", relative = true }
+X86_64_UNKNOWN_FREEBSD_OPENSSL_STATIC = "0"

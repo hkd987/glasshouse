@@ -11,7 +11,7 @@ Measured on a 4-core cloud container (no KVM), 22 crates, 143 build units.
 
 | Build | Time |
 |---|---|
-| Clean debug build, whole workspace (`make build`) | 27 s |
+| Clean debug build, whole workspace (`make build`) | 27 s; about 31 s with the model gateway's TLS stack (+15%, see Known costs) |
 | Rebuild after editing an app crate (`glass-app-files`) | 1.5 s |
 | Rebuild after editing `glass-runtime` | 1.6 s |
 | Rebuild after editing `glass-types`, the bottom crate | 2.4 s |
@@ -39,8 +39,10 @@ Measured on a 4-core cloud container (no KVM), 22 crates, 143 build units.
   the libraries below it, and each app's actions are their own crate
   (`crates/apps`, ADR 0013), so editing one app rebuilds that app and the
   binaries, not the other apps or the runtime.
-- **Lean dependencies.** Pure-Rust only, no C build scripts, tokio with only
-  the features we use, no `regex` (`make timings` shows the full chart).
+- **Lean dependencies.** Pure Rust and no C build scripts, tokio with only
+  the features we use, no `regex` (`make timings` shows the full chart). The
+  one C library is the base system's OpenSSL, which the model gateway links
+  for TLS; `openssl-sys` only reads its headers (ADR 0018).
 
 ## Linting
 
@@ -52,7 +54,7 @@ inputs didn't change (`tools/lint.py`):
 | Check | Runs when |
 |---|---|
 | rustfmt | on the changed `.rs` files (all, if `rustfmt.toml` or the toolchain changed) |
-| clippy, host and FreeBSD at once | anything under `crates/` or `tests/`, or a root Cargo, clippy or toolchain file |
+| clippy, host and FreeBSD at once | anything under `crates/` or `tests/`, or a root Cargo, clippy or toolchain file. The FreeBSD run needs the sysroot (`make freebsd-sysroot`), because openssl-sys reads its OpenSSL headers; worktrees use the main checkout's |
 | layering | any `Cargo.toml` |
 | generated art | `tools/branding/` or the overlay's branding outputs |
 | shellcheck | the changed shell scripts |
@@ -106,6 +108,9 @@ pays about 25 s once to check the dependencies.
 5. **No build scripts that compile C.** They serialize builds and complicate
    cross-compiling.
 6. **Don't turn on LTO or `codegen-units = 1`** outside `release`.
+7. **HTTP and TLS live in `glass-gateway-providers` only**, which only
+   `glassd` links (ADR 0018). Another crate that needs the network asks the
+   gateway, or makes the case for moving code there.
 
 ## Known costs and options
 
@@ -117,6 +122,18 @@ pays about 25 s once to check the dependencies.
   (12–13 s each); `glass-runtime` sits on the critical path to `glassd`.
   `tracing-subscriber`'s `env-filter` used to add `regex` (19 s of CPU);
   `glassd` now filters logs with `filter::Targets`, same `GLASS_LOG` syntax.
+- **The model gateway's TLS stack** (ADR 0018), measured by building the
+  commit before it and the change alternately under the same load (another
+  VM was running on the 4-core container): a clean debug build of the
+  workspace went from 34.9 s to 40.2 s, +5.3 s (+15%). The new units are
+  `openssl` (4.9 s), `glass-gateway-providers` (5.0 s), `glass-gateway`
+  (2.6 s), `cc` (1.9 s, for openssl-sys's build script) and nine more under
+  1 s each; they're off the critical path (`glass-runtime`, then `glassd`)
+  but compete for cores. A clean FreeBSD `vm` build of `glassd` went from a
+  median 61 s to 75 s under the same noisy load (40 s before on an idle
+  machine), and `glassd` from 6.7 to 7.7 MB. The rustls and ring
+  alternative cost more: alone, its stack built in 21 s for FreeBSD against
+  14 s for OpenSSL's, and compiles C.
 - **CI**: cache `~/.cargo` and `target/` keyed on `Cargo.lock` (for example
   `Swatinem/rust-cache`), and consider `sccache` for a shared cache once
   several machines build the same commits.

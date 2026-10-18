@@ -33,6 +33,150 @@ pub struct PolicyDocument {
     /// What the IT self-service agent may fix (AE-4).
     #[serde(default)]
     pub fixes: Fixes,
+    /// The approved models and where each label's data may go (DP-2,
+    /// ADR 0018).
+    #[serde(default)]
+    pub models: Models,
+}
+
+/// IT's model allowlist and routing (DP-2, DP-3, DP-5, MP-8). Empty means no
+/// agent can call a model, which is what a new org ships with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Models {
+    /// The model calls go to when a label has no route of its own. Public and
+    /// internal data only: confidential data needs an explicit route.
+    #[serde(default)]
+    pub default: Option<String>,
+    /// The label of content no rule labels, for routing.
+    #[serde(default = "default_unlabeled")]
+    pub unlabeled: Label,
+    /// The most a call may ask the model to write.
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: u32,
+    /// Keep the (redacted) prompt and reply text in the audit log. Off by
+    /// default: records carry sizes and SHA-256 hashes only (DP-5).
+    #[serde(default)]
+    pub log_prompts: bool,
+    /// Where each label's data may go: model ids in order. The first is
+    /// used; the rest take over on an outage or rate limit (MP-8).
+    /// Restricted data never goes to a model.
+    #[serde(default)]
+    pub routes: BTreeMap<Label, Vec<String>>,
+    #[serde(default, rename = "provider")]
+    pub providers: Vec<ProviderEntry>,
+    /// The allowlist: every model an agent may be routed to.
+    #[serde(default, rename = "model")]
+    pub models: Vec<ModelEntry>,
+    /// What is replaced before anything leaves (DP-3). Secrets are always
+    /// redacted; these add PII.
+    #[serde(default)]
+    pub redact: Redaction,
+}
+
+impl Default for Models {
+    fn default() -> Self {
+        Self {
+            default: None,
+            unlabeled: default_unlabeled(),
+            max_output_tokens: default_max_output_tokens(),
+            log_prompts: false,
+            routes: BTreeMap::new(),
+            providers: Vec::new(),
+            models: Vec::new(),
+            redact: Redaction::default(),
+        }
+    }
+}
+
+fn default_unlabeled() -> Label {
+    Label::Internal
+}
+
+fn default_max_output_tokens() -> u32 {
+    4096
+}
+
+/// A model service glassd may call (MP-1 … MP-4). Its credentials live in
+/// the secrets file under the same id, never here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderEntry {
+    pub id: String,
+    pub kind: ProviderKind,
+    /// As users see it: "Amazon Bedrock".
+    pub name: String,
+    /// The AWS region Bedrock calls are pinned to (MP-2).
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Another endpoint than the provider's public one, such as a PrivateLink
+    /// endpoint (MP-2). HTTPS only.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    /// Amazon Bedrock in the org's AWS account (MP-1, the PRD's default).
+    Bedrock,
+    /// The Anthropic API with an org or team key (MP-4).
+    Anthropic,
+    /// Canned, deterministic replies made on this machine; nothing leaves.
+    /// For development and tests.
+    Scripted,
+}
+
+/// One approved model (DP-2, MP-9).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelEntry {
+    /// The name routes, agents and group lists use.
+    pub id: String,
+    /// The [`ProviderEntry`] it runs on.
+    pub provider: String,
+    /// The provider's own model id.
+    pub model: String,
+    /// As users see it on the handoff card: "Claude Sonnet".
+    pub name: String,
+    /// Price per million input tokens, for the cost in each audit record.
+    #[serde(default)]
+    pub usd_per_mtok_in: Option<f64>,
+    #[serde(default)]
+    pub usd_per_mtok_out: Option<f64>,
+}
+
+/// PII redaction on top of the built-in secret detectors (DP-3).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Redaction {
+    /// Built-in PII detectors to turn on.
+    #[serde(default)]
+    pub pii: Vec<PiiKind>,
+    /// IT's own patterns, such as employee ids.
+    #[serde(default, rename = "pattern")]
+    pub patterns: Vec<RedactPattern>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PiiKind {
+    Email,
+    /// US Social Security numbers written `123-45-6789`.
+    UsSsn,
+    /// Payment card numbers that pass the Luhn check.
+    CardNumber,
+}
+
+/// A configured PII shape. In `pattern`, `#` is a digit, `@` a letter, `?` a
+/// letter or digit, and `\` makes the next character literal; everything else
+/// matches itself. A match must not run on into more letters or digits.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedactPattern {
+    /// Names the placeholder: `employee-id` gives `[redacted:employee-id#1]`.
+    pub name: String,
+    pub pattern: String,
 }
 
 /// IT's approved fix list (AE-4). Checks and cache cleanup need no list;
@@ -97,6 +241,10 @@ pub struct GroupPolicy {
     pub max_label: Option<Label>,
     #[serde(default)]
     pub tiers: BTreeMap<ActionPattern, Tier>,
+    /// Models members' agents may use, such as Bedrock only for a group that
+    /// handles confidential data (MP-6). Unset means the org's list.
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
 }
 
 /// Rules for one catalog agent (AD-2).
@@ -115,6 +263,10 @@ pub struct AgentPolicy {
     /// Empty means no network at all.
     #[serde(default)]
     pub egress: Vec<String>,
+    /// Models this agent may use (AD-2). Unset means the org's list; groups
+    /// and this list only ever narrow it.
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
 }
 
 /// Labels everything under a path (DP-10). `*` matches exactly one path

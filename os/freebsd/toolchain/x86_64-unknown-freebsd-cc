@@ -1,13 +1,21 @@
 #!/bin/sh
 # x86_64-unknown-freebsd-cc: clang wrapper that compiles and links for FreeBSD using
-# build/freebsd/sysroot (run `make freebsd-sysroot` first). Cargo uses it as the linker;
-# invoked as x86_64-unknown-freebsd-c++ (symlink) it runs clang++ instead.
+# build/freebsd/sysroot (run `make freebsd-sysroot` first). Cargo uses it as the linker,
+# and openssl-sys's build script uses it to read the base system's OpenSSL headers
+# (.cargo/config.toml); invoked as x86_64-unknown-freebsd-c++ (symlink) it runs clang++.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 sysroot=$(cd "$here/../../.." && pwd)/build/freebsd/sysroot
 # shellcheck source=../release.env
 . "$here/../release.env"
 
+# A git worktree (parallel agents work in them) shares the main checkout's sysroot.
+if [ ! -f "$sysroot/.base-sha256" ]; then
+	common=$(git -C "$here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+	if [ -n "$common" ] && [ -f "${common%/.git}/build/freebsd/sysroot/.base-sha256" ]; then
+		sysroot=${common%/.git}/build/freebsd/sysroot
+	fi
+fi
 if [ ! -f "$sysroot/.base-sha256" ]; then
 	echo "x86_64-unknown-freebsd-cc: no sysroot at $sysroot; run 'make freebsd-sysroot'" >&2
 	exit 1

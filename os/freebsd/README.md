@@ -17,7 +17,7 @@ Cross-compile glasshouse for FreeBSD on a Linux host and run it in a local FreeB
 | `scripts/deploy.sh` | Installs the staging root into the running VM, then runs the post-install hook and restarts glassd. |
 | `scripts/bake-image.sh` | Bakes a fresh VM with the payload deployed into a flat qcow2 in `build/images/`. |
 | `scripts/check-host-deps.sh` | Checks host tools (`--install` runs apt-get). |
-| `toolchain/x86_64-unknown-freebsd-cc` | clang wrapper (`--target`, `--sysroot`, lld). `-c++` is a symlink to it. |
+| `toolchain/x86_64-unknown-freebsd-cc` | clang wrapper (`--target`, `--sysroot`, lld). `-c++` is a symlink to it. Cargo links with it, and openssl-sys's build script reads the base system's OpenSSL headers through it (`.cargo/config.toml`, ADR 0018), so FreeBSD checks need the sysroot too. A git worktree without its own sysroot uses the main checkout's. |
 | `vm/user-data.in` | cloud-config template for first boot. |
 | `dist.manifest` | `<binary> <install-path> <mode>`: which cargo binaries go where. |
 | `overlay/` | Non-binary payload (rc.d scripts, configs, `post-install.sh`), laid out like the guest's `/`. |

@@ -16,10 +16,11 @@ undo. Safety comes from the OS, not from the model behaving well.
  glassctl / desktop shell ──control socket (JSON-RPC, authorized by uid)──┐
                                                                            │
                                                    ┌───────────────────────▼──────┐
-                                                   │ glassd (root)                 │
-                                                   │  runtime: tasks, tiles, undo  │
-                                                   │  broker: decide + approvals   │
-                                                   │  actions: files, mail, ...    │
+                                                   │ glassd (root)                 │  HTTPS (base OpenSSL)
+                                                   │  runtime: tasks, tiles, undo  │──────────────────────►
+                                                   │  broker: decide + approvals   │  model providers policy
+                                                   │  actions: files, mail, ...    │  names: Amazon Bedrock,
+                                                   │  model gateway: route, redact │  Anthropic API
                                                    │  audit log writer             │
                                                    └──┬──────────────┬─────────────┘
                          task socket (MCP), one per task │              │ zfs(8), jail(8)
@@ -29,8 +30,11 @@ undo. Safety comes from the OS, not from the model behaving well.
  └────────────────────────────────────────────────────────────┘
 ```
 
-- **glassd** is the only privileged process. It hosts the runtime, broker and
-  action providers as libraries (ADR 0003) and serves two kinds of socket.
+- **glassd** is the only privileged process. It hosts the runtime, broker,
+  action providers and the model gateway as libraries (ADR 0003) and serves
+  two kinds of socket. It is also the only process that reaches a model:
+  agents have no network, and ask through the `model_complete` action
+  (ADR 0018).
 - **The control socket** (`/var/run/glasshouse/control.sock`, mode 0666)
   carries the `glass-api` methods. Every call is authorized by the caller's
   kernel-reported uid: users see and act on their own tasks; root sees all.
@@ -62,7 +66,8 @@ undo. Safety comes from the OS, not from the model behaving well.
 
    Providers compute a side-effect-free *preview* first (what will this read
    and write?), so the broker can decide, check labels, snapshot and log
-   before anything happens.
+   before anything happens. A model call takes the same path, with one more
+   step after the tier: routing by the labels the task has read (below).
 4. **End**: on exit, stop or failure the supervisor always tears down: closes
    the socket, withdraws open asks and task grants, destroys the jail (PA-2).
    The record, snapshots and audit trail stay for review and undo.
@@ -75,7 +80,7 @@ Each task gets a jail from a generated `jail.conf` + `fstab`
 | Surface | Control |
 |---|---|
 | Files | Root is an empty directory. Base system (`/bin /lib /libexec /usr/*`) and agent programs are nullfs read-only. Private `/work` and `/tmp`. No user data mounted (ADR 0005). |
-| Network | `ip4 = disable`, `ip6 = disable`. Egress allowlists (pf per vnet jail) come with the model gateway. |
+| Network | `ip4 = disable`, `ip6 = disable`. Models are reached through glassd's gateway (`model_complete`), never from the jail. Per-jail egress (pf per vnet jail) comes with harnesses in jails (HX-7) and the local model endpoints (MP-7). |
 | Processes | Jailed processes see and signal only their own jail. |
 | Privilege | `securelevel = 3`, no mounts, no raw sockets, no child jails, devfs ruleset 4. |
 | Identity | Runs as the user's uid, so files it causes to be written are the user's; the jail confines what that uid can reach. |
@@ -99,6 +104,43 @@ absolute paths and symlinks that leave the grant.
 - Asks live in the approval desk (`glass-broker`): one approval per call
   (batches carry a review list), answerable once or for the rest of the task,
   timing out into a paused task, withdrawn when the task ends.
+
+## Model gateway (ADR 0018)
+
+Every model call goes through glassd, so policy, redaction, attribution and
+logging happen in one place (DP-1).
+
+```text
+agent ── model_complete ──► pipeline: tier → route by label → ask? → send → record
+                                              │                      │
+                         policy [models] ◄────┘    glass-gateway: redact, try the
+                         (allowlist, routes,       route in order, restore PII,
+                          groups/agents narrow)    describe the call ──► providers
+```
+
+- **The label is what the task has read.** Each completed action raises the
+  task's label to the most sensitive label of the paths it read (DP-11). A
+  call carries it, floored at policy's label for unlabeled content.
+- **Policy routes it** (`glass_policy::ModelRules`): `[models]` lists
+  providers and models (the allowlist, DP-2), the default, and per-label
+  routes in order, the rest taking over on an outage (MP-8). Group and
+  agent `models` lists intersect; restricted data never routes, and
+  confidential data only where a route says. No route is a tool result the
+  agent can read, audited as Blocked. The handoff card's model line is the
+  route for the labels of the task's folders.
+- **The gateway sends it** (`glass-gateway`): secrets and configured PII
+  become placeholders before anything leaves (DP-3), and PII comes back in
+  the reply. Providers implement `ModelProvider`: scripted (on the machine,
+  for tests and development), Anthropic Messages (MP-4) and Bedrock
+  Converse with SigV4 and temporary credentials only (MP-1, MP-2), in
+  `glass-gateway-providers`, the one crate with HTTP and TLS (native-tls on
+  the base system's OpenSSL).
+- **The record** is the action's audit entry with `detail.model`: model,
+  provider, tokens, cost, label, redactions, and the sizes and SHA-256 of
+  what crossed, but no prompt text unless policy sets `log_prompts` (DP-5).
+- **Credentials** come from a root-only file, `model-secrets.toml`, the
+  stand-in for the secrets broker (MP-4), refused unless it is private to
+  glassd's user and outside everything mounted into a jail.
 
 ## Agent text on screen
 
@@ -206,7 +248,7 @@ pipeline refuses further side effects (fail closed).
 | Crate | Layer | What it owns |
 |---|---|---|
 | `glass-types` | lib | Ids, tiers, labels, action names, principals |
-| `glass-policy` | lib | Policy schema, evaluation, default policy |
+| `glass-policy` | lib | Policy schema, evaluation, default policy, model routing |
 | `glass-audit` | lib | Hash-chained log, verification |
 | `glass-rpc` | lib | JSON-RPC over Unix sockets, MCP types |
 | `glass-api` | lib | Control API contract (shell, CLI), display text |
@@ -216,6 +258,8 @@ pipeline refuses further side effects (fail closed).
 | `glass-app-files`, `-mail`, `-system`, `-helpdesk` | apps | Each app's actions (ADR 0013) |
 | `glass-first-party` | svc | The apps the OS ships, as one registry |
 | `glass-broker` | svc | Decisions and the approval desk |
+| `glass-gateway` | svc | The model gateway: the `model.complete` action, redaction, routing over providers with failover, the call record, the secrets stand-in (ADR 0018) |
+| `glass-gateway-providers` | svc | Providers that leave the machine: Anthropic Messages and Amazon Bedrock over HTTPS; the only crate with an HTTP and TLS stack |
 | `glass-tailoring` | svc | Personal layers on agents: customization points, versions, re-checks (ADR 0014) |
 | `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
 | `glassd`, `glassctl`, `glass-mcp`, `glass-demo-agent`, `glass-it-agent`, `glass-probe` | bin | Executables |

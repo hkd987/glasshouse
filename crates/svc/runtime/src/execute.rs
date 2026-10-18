@@ -4,6 +4,10 @@
 //! snapshot if reversible → refuse side effects if the audit log is down →
 //! invoke → record (audit, feed, changes).
 //!
+//! A model call (`model.complete`) takes the same path. After the tier
+//! check, the most sensitive label of what the task has read decides where
+//! it may go, and "invoke" sends it through the model gateway (ADR 0018).
+//!
 //! Policy refusals come back to the agent as tool errors it can read and
 //! react to; only malformed calls are protocol errors.
 
@@ -16,6 +20,7 @@ use glass_actions::{ActionDef, ActionError, ActionProvider, Preview};
 use glass_api::{ActivityKind, ApprovalScope, ChangeEntry, Progress, TileState};
 use glass_audit::{ApprovalRef, AuditEvent, EventKind, Outcome as AuditOutcome, PolicyDecision};
 use glass_broker::{Outcome, Verdict, decide, new_view};
+use glass_gateway::MODEL_COMPLETE;
 use glass_rpc::RpcError;
 use glass_rpc::mcp::CallToolResult;
 use glass_types::{SideEffect, Tier, Timestamp};
@@ -25,7 +30,7 @@ use serde_json::Value;
 use crate::runtime::display_path;
 use crate::task::{Gate, Task};
 use crate::written::{self, Seen, Touched};
-use crate::{REPORT_PROGRESS_TOOL, Runtime, labels, title};
+use crate::{REPORT_PROGRESS_TOOL, Runtime, labels, model, title};
 
 impl Runtime {
     pub(crate) async fn call_tool(
@@ -59,7 +64,7 @@ impl Runtime {
                 Err(e) => Err(ActionError::Failed(e.to_string())),
             }
         };
-        let preview = match preview {
+        let mut preview = match preview {
             Ok(preview) => preview,
             Err(e) => return Ok(self.refuse_invalid(task, &def, e)),
         };
@@ -72,10 +77,48 @@ impl Runtime {
             .chain(&preview.writes)
             .map(PathBuf::as_path);
         let verdict = decide(&task.policy, &def.name, def.default_tier, paths, &label_of);
+        // What the call reads, so a successful one raises the task's label
+        // (DP-11).
+        let read_label = preview
+            .reads
+            .iter()
+            .filter_map(|path| label_of(path).ok().flatten())
+            .max();
+
+        // A model call carries the task's data off the machine: the most
+        // sensitive label it has read decides where it may go (DP-2).
+        let mut routed = None;
+        let mut refused_model = None;
+        let verdict = match verdict {
+            Verdict::Block { .. } => verdict,
+            _ if def.name.as_str() == MODEL_COMPLETE => match self.route_model(task, &args) {
+                Ok(call) => {
+                    (preview.summary, preview.targets) = model::summary(&call);
+                    routed = Some(call);
+                    verdict
+                }
+                Err(refusal) => {
+                    // Refused for the data it carries, not for its input.
+                    let hint = if refusal.rule.starts_with("models.") {
+                        ""
+                    } else {
+                        " Policy decides which models may see the data this task has read; \
+                         continue without a model for this step."
+                    };
+                    refused_model = Some((model::refusal_detail(task, &args), hint));
+                    Verdict::Block {
+                        reason: refusal.reason,
+                        rule: refusal.rule,
+                    }
+                }
+            },
+            _ => verdict,
+        };
 
         let mut approval = None;
         match &verdict {
             Verdict::Block { reason, .. } => {
+                let hint = refused_model.as_ref().map(|(_, hint)| *hint);
                 self.record(
                     task,
                     &def,
@@ -85,6 +128,7 @@ impl Runtime {
                     None,
                     AuditOutcome::Blocked,
                     started,
+                    refused_model.map(|(detail, _)| detail),
                 );
                 {
                     let mut state = task.lock();
@@ -94,9 +138,13 @@ impl Runtime {
                     );
                 }
                 self.publish(task);
-                return Ok(CallToolResult::error(format!(
-                    "Blocked by policy: {reason}. This is listed under \"Can't touch\" for this task; continue without it."
-                )));
+                return Ok(CallToolResult::error(if let Some(hint) = hint {
+                    format!("Not sent: {reason}.{hint}")
+                } else {
+                    format!(
+                        "Blocked by policy: {reason}. This is listed under \"Can't touch\" for this task; continue without it."
+                    )
+                }));
             }
             Verdict::Ask { rule } if !self.desk.has_task_grant(task.id, &def.name) => {
                 match self
@@ -153,6 +201,7 @@ impl Runtime {
                             None,
                             failure,
                             started,
+                            None,
                         );
                         return Ok(CallToolResult::error(format!(
                             "Not done: couldn't take the snapshot that makes this undoable ({e})."
@@ -174,7 +223,26 @@ impl Runtime {
             let state = task.lock();
             (state.snapshots.len(), state.snapshot_roots())
         };
-        let (result, seen) = {
+        let (result, seen, sent) = if let Some(call) = routed {
+            let (rt, task) = (Arc::clone(self), Arc::clone(task));
+            let sent = tokio::task::spawn_blocking(move || {
+                Runtime::send_model(&rt.gateway, &task.policy, &call)
+            })
+            .await;
+            match sent {
+                Ok(sent) => {
+                    if let Some((summary, targets)) = sent.answered {
+                        (preview.summary, preview.targets) = (summary, targets);
+                    }
+                    (sent.result, Seen::default(), Some(sent.record))
+                }
+                Err(e) => (
+                    Err(ActionError::Failed(e.to_string())),
+                    Seen::default(),
+                    None,
+                ),
+            }
+        } else {
             let (ctx, name, input) = (task.ctx.clone(), def.name.clone(), args);
             let provider: Arc<dyn ActionProvider> = provider;
             let invoked = tokio::task::spawn_blocking(move || {
@@ -194,11 +262,13 @@ impl Runtime {
                 (result, seen)
             })
             .await;
-            match invoked {
+            let (result, seen) = match invoked {
                 Ok(invoked) => invoked,
                 Err(e) => (Err(ActionError::Failed(e.to_string())), Seen::default()),
-            }
+            };
+            (result, seen, None)
         };
+        let sent = sent.as_ref().map(model::audit_detail);
         match result {
             Ok(output) => {
                 self.record(
@@ -210,16 +280,21 @@ impl Runtime {
                     snapshot,
                     AuditOutcome::Completed,
                     started,
+                    sent,
                 );
                 {
                     let mut state = task.lock();
-                    let verb = def
-                        .name
-                        .as_str()
-                        .rsplit('.')
-                        .next()
-                        .unwrap_or_default()
-                        .replace('_', " ");
+                    state.data_label = state.data_label.max(read_label);
+                    let verb = if def.name.as_str() == MODEL_COMPLETE {
+                        "ask".to_owned()
+                    } else {
+                        def.name
+                            .as_str()
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or_default()
+                            .replace('_', " ")
+                    };
                     let target = match preview.targets.as_slice() {
                         // "List granted folders" → "granted folders"
                         [] => preview
@@ -261,7 +336,7 @@ impl Runtime {
                     error: e.to_string(),
                 };
                 self.record(
-                    task, &def, &preview, &verdict, approval, snapshot, failure, started,
+                    task, &def, &preview, &verdict, approval, snapshot, failure, started, sent,
                 );
                 task.lock().note(
                     ActivityKind::Notice,
@@ -372,6 +447,7 @@ impl Runtime {
                     None,
                     AuditOutcome::Denied,
                     started,
+                    None,
                 );
                 self.publish(task);
                 Err(CallToolResult::error(format!(
@@ -394,6 +470,7 @@ impl Runtime {
                     None,
                     AuditOutcome::TimedOut,
                     started,
+                    None,
                 );
                 self.publish(task);
                 Err(CallToolResult::error(
@@ -450,6 +527,7 @@ impl Runtime {
         snapshot: Option<glass_types::SnapshotId>,
         outcome: AuditOutcome,
         started: Instant,
+        model: Option<Value>,
     ) {
         let mut event: AuditEvent =
             self.task_event(task, EventKind::Action, preview.summary.clone());
@@ -458,6 +536,11 @@ impl Runtime {
         // the wait for the person.
         event.detail =
             serde_json::json!({ "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0 });
+        // A model call's model, provider, tokens, cost, label, redactions,
+        // and the sizes and hashes of what crossed (DP-5).
+        if let Some(model) = model {
+            event.detail["model"] = model;
+        }
         event.action = Some(def.name.clone());
         event.targets = preview.targets.clone();
         event.decision = Some(PolicyDecision {

@@ -55,6 +55,35 @@ approval_timeout_secs = 900
 [fixes]
 services = ["cron", "ntpd", "openvpn", "cupsd"]
 
+# Models (DP-2, ADR 0018). A new org approves none, so no agent can call a
+# model until IT lists one here and allows `model.complete` to an agent.
+# Amazon Bedrock in the org's own AWS account is the default provider. Its
+# temporary credentials, and any API keys, go in model-secrets.toml (see
+# glassd.toml), never here. For example:
+#
+# [models]
+# default = "claude-bedrock"         # for public and internal data
+# [models.routes]                    # in order; the rest take over on an outage
+# confidential = ["claude-bedrock"]  # confidential data goes only where a route says
+# [models.redact]                    # secrets are always redacted; this adds PII
+# pii = ["email", "us-ssn", "card-number"]
+#
+# [[models.provider]]
+# id = "bedrock"
+# kind = "bedrock"
+# name = "Amazon Bedrock"
+# region = "us-east-1"
+#
+# [[models.model]]
+# id = "claude-bedrock"
+# provider = "bedrock"
+# model = "<Bedrock model or inference profile id>"
+# name = "Claude"
+# usd_per_mtok_in = 3.0
+# usd_per_mtok_out = 15.0
+#
+# Groups and agents can narrow the list: `models = ["claude-bedrock"]`.
+
 [[group]]
 name = "everyone"
 agents = ["it-agent", "invoice-demo", "containment-probe", "claude-code"]

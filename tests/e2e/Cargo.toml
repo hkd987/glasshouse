@@ -12,11 +12,13 @@ anyhow.workspace = true
 glass-api.workspace = true
 glass-audit.workspace = true
 glass-platform.workspace = true
+glass-policy.workspace = true
 glass-rpc.workspace = true
 glass-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true
