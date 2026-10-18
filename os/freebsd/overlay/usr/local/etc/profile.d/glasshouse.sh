@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # At login, one line on your agents: "◉ 1 needs you   ● 2 working".
 # /etc/profile sources this for sh login shells; quiet for scripts and when
 # glassd isn't running.

@@ -21,8 +21,9 @@ details this file leaves out.
 
 ## Commands
 
-- `make test lint` before every commit (lint = fmt check, clippy `-D warnings`
-  for host and FreeBSD, `tools/check-layers.py`).
+- `make test lint` before every commit. `make lint` checks what changed since
+  main (rustfmt, clippy `-D warnings` for host and FreeBSD, layering, art,
+  shellcheck); `make lint-all` checks everything, as CI does.
 - `make freebsd vm-deploy` (~12 s) to try a change in the VM;
   `make e2e-vm` (~2 min) after any change to agent-facing behavior.
 - `make dev-host` runs glassd locally with the insecure host sandbox.

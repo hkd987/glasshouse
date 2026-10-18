@@ -1,7 +1,7 @@
 # Glasshouse build entry points. `make help` lists every target.
 #
 # Day to day:
-#   make test lint            host unit + integration tests, formatting, clippy, layering
+#   make test lint            host unit + integration tests; lint what changed since main
 #   make dev-host             run glassd on this machine (insecure dev backend)
 #   make vm-up vm-wait        boot the FreeBSD dev VM (first time: freebsd-fetch freebsd-sysroot)
 #   make e2e-vm               cross-compile, deploy to the VM, run the end-to-end suite
@@ -20,7 +20,7 @@ FREEBSD_PROFILE ?= vm
 export FREEBSD_PROFILE
 export DIST_PROFILE := $(FREEBSD_PROFILE)
 
-.PHONY: help build check test lint fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
+.PHONY: help build check test lint lint-all fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
 	test-env image-release legal-base ci clean
 
 help: ## List targets
@@ -36,11 +36,11 @@ check: ## Type-check everything, fastest feedback (no codegen)
 test: ## Unit and integration tests on this host
 	cargo test --workspace
 
-lint: check-layers ## Formatting, clippy (warnings are errors), layering rules, generated art
-	cargo fmt --all --check
-	tools/branding/art.py --check
-	cargo clippy --workspace --all-targets -- -D warnings
-	cargo clippy --workspace --target $(FREEBSD_TARGET) -- -D warnings
+lint: ## Lint what changed since main: rustfmt, clippy (warnings are errors), layering, art, shellcheck
+	tools/lint.py
+
+lint-all: ## Lint everything (CI): the same checks over the whole tree
+	tools/lint.py --all
 
 fmt: ## Format all Rust code
 	cargo fmt --all
@@ -80,7 +80,7 @@ image-release: ## Build a shippable image: release profile (thin LTO), baked qco
 		{ echo "image-release: set the legal contact first, or ALLOW_DRAFT_LEGAL=1 for a test image"; exit 1; }
 	$(MAKE) freebsd image FREEBSD_PROFILE=release
 
-ci: lint test ## What CI runs on every change
+ci: lint-all test ## What CI runs on every change
 
 clean: ## Remove build outputs (keeps downloaded FreeBSD images in build/cache)
 	cargo clean

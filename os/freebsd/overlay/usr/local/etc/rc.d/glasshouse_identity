@@ -11,6 +11,8 @@
 # menu's console right for this machine's firmware. post-install.sh turns
 # the base writers (osrelease_enable, update_motd) off.
 
+# rc.subr reads the rc variables below, and FreeBSD's sh has `local`.
+# shellcheck disable=SC1091,SC2034,SC3043
 . /etc/rc.subr
 
 name="glasshouse_identity"

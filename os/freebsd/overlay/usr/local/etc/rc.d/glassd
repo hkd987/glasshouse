@@ -13,6 +13,8 @@
 # glassd_config  (path)  Config file. Default /usr/local/etc/glasshouse/glassd.toml
 # glassd_log     (path)  Daemon log. Default /var/log/glassd.log
 
+# rc.subr reads the rc variables below, and FreeBSD's sh has `local`.
+# shellcheck disable=SC1091,SC2034,SC3043
 . /etc/rc.subr
 
 name="glassd"

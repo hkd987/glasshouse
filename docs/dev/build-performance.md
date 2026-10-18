@@ -42,6 +42,46 @@ Measured on a 4-core cloud container (no KVM), 22 crates, 143 build units.
 - **Lean dependencies.** Pure-Rust only, no C build scripts, tokio with only
   the features we use, no `regex` (`make timings` shows the full chart).
 
+## Linting
+
+`make lint` checks only what changed since the merge base with
+`origin/main` (committed, staged, unstaged and untracked; `LINT_BASE=<rev>`
+moves the base), runs its checks in parallel and skips the ones whose
+inputs didn't change (`tools/lint.py`):
+
+| Check | Runs when |
+|---|---|
+| rustfmt | on the changed `.rs` files (all, if `rustfmt.toml` or the toolchain changed) |
+| clippy, host and FreeBSD at once | anything under `crates/` or `tests/`, or a root Cargo, clippy or toolchain file |
+| layering | any `Cargo.toml` |
+| generated art | `tools/branding/` or the overlay's branding outputs |
+| shellcheck | the changed shell scripts |
+| Python | the changed `.py` files compile |
+
+`make lint-all` runs every check on the whole tree; CI (`make ci`) uses it.
+
+Clippy always covers the whole workspace. Cargo already re-lints only the
+changed crates and the crates that depend on them; a `-p` subset changes
+feature unification (`-Z feature-unification` is still unstable), which
+rechecks dependencies such as `serde`, `syn` and `libc` with other features
+and made scoped runs slower, not faster.
+
+Measured on the same 4-core container under the same load, old lint vs
+`make lint`:
+
+| Situation | Before | After |
+|---|---|---|
+| Nothing new to lint (docs, scripts, or already linted) | 1.1 s | 0.1 s |
+| One-line edit in `glassctl` | 1.7 s | 1.1–1.6 s |
+| One-line edit in an app crate (`glass-app-files`) | 3.0–3.4 s | 2.7 s |
+| One-line edit in `glass-runtime` | 2.9–3.7 s | 2.1 s |
+| One-line edit in `glass-types` (everything above re-lints) | 6.7–8.1 s | 6.1–6.9 s |
+| `make lint-all`, warm | — | 1.3 s |
+
+The remaining time after an edit is clippy re-checking the edited crate and
+its dependents, which no lint scope can skip. A fresh checkout or worktree
+pays about 25 s once to check the dependencies.
+
 ## Habits
 
 - Use `make check` (no codegen) while editing; rust-analyzer does the same.
