@@ -17,8 +17,8 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use glass_api::{
     AgentSummary, AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalView, AuditVerifyResult,
-    Event, HandoffCard, PowerResult, ScopeRequest, SystemStatus, TaskDetail, TaskRef, TaskRequest,
-    TaskView, TileState, UndoReport, UndoRequest, methods,
+    DisplaySafe, Event, HandoffCard, PowerResult, ScopeRequest, SystemStatus, TaskDetail, TaskRef,
+    TaskRequest, TaskView, TileState, UndoReport, UndoRequest, methods,
 };
 use glass_audit::AuditRecord;
 use glass_rpc::Client;
@@ -234,7 +234,8 @@ async fn main() -> std::process::ExitCode {
     match run(cli).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("glassctl: {e:#}");
+            // An error can carry the server's words.
+            eprintln!("glassctl: {}", glass_api::display_line(&format!("{e:#}")));
             std::process::ExitCode::FAILURE
         }
     }
@@ -257,12 +258,17 @@ impl Ctl {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    /// Prints `value` as JSON, or as `text` otherwise.
-    fn show<T: Serialize>(&self, value: &T, text: impl FnOnce(&T) -> String) -> anyhow::Result<()> {
+    /// Prints `value` as JSON, or as `text` otherwise. Either way nothing
+    /// in it reaches the terminal as a control or direction character.
+    fn show<T: Serialize + DeserializeOwned>(
+        &self,
+        value: &T,
+        text: impl FnOnce(&T) -> String,
+    ) -> anyhow::Result<()> {
         if self.json {
-            println!("{}", serde_json::to_string_pretty(value)?);
+            println!("{}", render::json(value, true)?);
         } else {
-            print!("{}", text(value));
+            print!("{}", text(&render::display_safe(value)?));
         }
         Ok(())
     }
@@ -363,7 +369,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let request = task.request()?;
             let card: HandoffCard = ctl.call(methods::TASK_PLAN, &request).await?;
             if !ctl.json {
-                print!("{}", render::card(&card));
+                print!("{}", render::card(&render::display_safe(&card)?));
             }
             if !yes && !confirm("\nStart this task?")? {
                 bail!("not started");
@@ -555,8 +561,11 @@ async fn answer(ctl: &Ctl, reference: &str, answer: ApprovalAnswer) -> anyhow::R
     })
 }
 
+/// Live tiles. Everything here is only shown, so text is made display text
+/// as it arrives.
 async fn watch(ctl: &Ctl) -> anyhow::Result<()> {
     let tasks: Vec<TaskView> = ctl.call(methods::TASK_LIST, Value::Null).await?;
+    let tasks = render::display_safe(&tasks)?;
     let mut tiles: BTreeMap<TaskId, TaskView> = tasks.into_iter().map(|t| (t.id, t)).collect();
     let _: Value = ctl.call(methods::EVENTS_SUBSCRIBE, Value::Null).await?;
     let redraw = |tiles: &BTreeMap<TaskId, TaskView>| {
@@ -574,12 +583,17 @@ async fn watch(ctl: &Ctl) -> anyhow::Result<()> {
         redraw(&tiles);
     }
     while let Some(note) = ctl.client.next_notification().await {
-        let Some(params) = note.params else { continue };
+        let Some(mut params) = note.params else {
+            continue;
+        };
+        if !ctl.json {
+            params.make_display_safe();
+        }
         let Ok(event) = serde_json::from_value::<Event>(params.clone()) else {
             continue;
         };
         if ctl.json {
-            println!("{params}");
+            println!("{}", render::json(&params, false)?);
             continue;
         }
         match event {

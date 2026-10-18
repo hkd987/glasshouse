@@ -90,7 +90,7 @@ impl AskLabels {
         [&self.review, &self.approve].iter().all(|label| {
             (1..=Self::MAX_CHARS).contains(&label.chars().count())
                 && label.trim() == label.as_str()
-                && !label.chars().any(char::is_control)
+                && label.chars().all(|c| crate::display_char(c) == c)
         })
     }
 }
@@ -113,6 +113,7 @@ mod tests {
         assert!(!AskLabels::new("", "Approve").fit());
         assert!(!AskLabels::new("Review", "Approve and send them all").fit());
         assert!(!AskLabels::new("Review\nall", "Approve").fit());
+        assert!(!AskLabels::new("Review", "Approve\u{202E}").fit());
         assert!(!AskLabels::new("Review ", "Approve").fit());
     }
 }

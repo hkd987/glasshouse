@@ -100,6 +100,23 @@ absolute paths and symlinks that leave the grant.
   (batches carry a review list), answerable once or for the rest of the task,
   timing out into a paused task, withdrawn when the task ends.
 
+## Agent text on screen
+
+Agents write much of what people read: captions, the files and recipients
+in feed lines, changes and asks, the line they log before failing. That
+text is shown, never obeyed: a control character or direction override in
+it could clear a terminal, hide a line or forge an approval (PA-3). It is
+display-sanitized at the API boundary and again in clients, with one
+function, `glass_api::display_line`: line breaks and tabs become a space,
+other controls and invisible characters become U+FFFD, so tampering shows.
+glassd applies it where views are built (`Task::view` and `Task::detail`,
+`TaskState::note`, the approval desk's `open`, the undo report), through each
+view type's `DisplaySafe` impl, which names every field so a new one doesn't
+compile until someone decides. `glassctl` passes everything it prints
+through it again (`--json` escapes instead, losslessly), and the shell's
+tiles too. The audit log keeps what the agent sent; `glassctl audit` shows
+it sanitized.
+
 ## Undo
 
 File-level restore from snapshots (ADR 0006), of only the files the task
@@ -188,7 +205,7 @@ pipeline refuses further side effects (fail closed).
 | `glass-policy` | lib | Policy schema, evaluation, default policy |
 | `glass-audit` | lib | Hash-chained log, verification |
 | `glass-rpc` | lib | JSON-RPC over Unix sockets, MCP types |
-| `glass-api` | lib | Control API contract (shell, CLI) |
+| `glass-api` | lib | Control API contract (shell, CLI), display text |
 | `glass-platform` | lib | Jails, ZFS, confined file access, users, xattrs, system facts |
 | `glass-agent-sdk` | lib | Convenience MCP client for Rust agents |
 | `glass-actions` | lib | The action contract: providers, previews, task context, registry |

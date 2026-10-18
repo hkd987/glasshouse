@@ -4,7 +4,7 @@
 //! Recent tasks are real `task.list` data; the answer comes from the
 //! desktop agent, which isn't built yet, so callers pass it in.
 
-use glass_api::{TaskView, TileState};
+use glass_api::{TaskView, TileState, display_line};
 use iced_core::alignment::Vertical;
 use iced_core::{Color, Length, Padding};
 use iced_widget::text::Span;
@@ -227,7 +227,7 @@ fn recent_row(task: &TaskView) -> Element<'_, Message> {
         &task.title
     };
     row![
-        text(name.as_str()).size(13).color(INK),
+        text(display_line(name)).size(13).color(INK),
         iced_widget::space().width(Length::Fill),
         text(status).size(13).color(color),
     ]

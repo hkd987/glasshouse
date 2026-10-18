@@ -883,6 +883,112 @@ async fn da12_asks_carry_the_actions_answer_labels() {
     }
 }
 
+/// What an agent writes reaches tiles, the expanded view, asks and undo
+/// reports as one line of plain text (AW-3, AW-4, AW-13, DA-12): its
+/// caption, its file names and its mail can't clear the user's terminal,
+/// hide a line or reorder what they read (PA-3). The audit log keeps what
+/// the agent sent as it was.
+#[tokio::test]
+async fn aw4_agent_text_reaches_every_view_as_plain_lines() {
+    const CLEAR: &str = "\x1b[2J";
+    const OVERRIDE: char = '\u{202E}';
+    // Serialized, ESC is "\u001b" and CR is "\r"; the override stays raw.
+    let assert_plain = |what: &str, json: String| {
+        assert!(
+            !json.contains("\\u001b") && !json.contains("\\r") && !json.contains(OVERRIDE),
+            "{what}: {json}"
+        );
+    };
+    let h = harness();
+    let task = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let agent = Arc::new(h.agent(task).await);
+
+    let name = format!("Reports/report{CLEAR}{OVERRIDE}vsc.txt");
+    let written = tool(&agent, "files_write", json!({"path": name, "content": "x"})).await;
+    assert!(!written.is_error, "{}", written.text());
+    let caption = format!("Summarizing{CLEAR}\rAll approved{OVERRIDE}");
+    let progress = tool(&agent, "report_progress", json!({ "caption": caption })).await;
+    assert!(!progress.is_error);
+
+    let send = {
+        let agent = Arc::clone(&agent);
+        let mail = json!({ "messages": [{
+            "to": [format!("ap{CLEAR}@example.com")],
+            "subject": format!("Paid\x1b]8;;https://evil.example\x1b\\{OVERRIDE}"),
+            "body": "Done."
+        }]});
+        tokio::spawn(async move { tool(&agent, "mail_send", mail).await })
+    };
+    eventually(|| !h.rt.approvals(&h.me).is_empty()).await;
+    let ask = h.rt.approvals(&h.me).remove(0);
+    assert_eq!(
+        ask.summary,
+        "Send email: Paid\u{FFFD}]8;;https://evil.example\u{FFFD}\\\u{FFFD}"
+    );
+    assert_plain("ask", serde_json::to_string(&ask).unwrap());
+    let tile = h.rt.list(&h.me).remove(0);
+    assert_eq!(tile.caption, "Summarizing\u{FFFD}[2J All approved\u{FFFD}");
+    assert_eq!(
+        tile.feed[0].target,
+        "Reports/report\u{FFFD}[2J\u{FFFD}vsc.txt"
+    );
+    assert!(tile.needs.is_some());
+    assert_plain("tile", serde_json::to_string(&tile).unwrap());
+    h.rt.answer(
+        &h.me,
+        AnswerApproval {
+            approval: ask.id,
+            answer: ApprovalAnswer::Deny,
+        },
+    )
+    .unwrap();
+    assert!(send.await.unwrap().is_error);
+
+    let detail = h.rt.get(&h.me, task).unwrap();
+    assert_eq!(
+        detail.changes[0].target,
+        "Reports/report\u{FFFD}[2J\u{FFFD}vsc.txt"
+    );
+    assert!(
+        detail
+            .activity
+            .iter()
+            .any(|a| a.text.starts_with("Declined: Send email: Paid"))
+    );
+    assert_plain("detail", serde_json::to_string(&detail).unwrap());
+    let report =
+        h.rt.undo(
+            &h.me,
+            UndoRequest {
+                task,
+                to: None,
+                changes: Vec::new(),
+                dry_run: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        report.removed,
+        ["~/Reports/report\u{FFFD}[2J\u{FFFD}vsc.txt"]
+    );
+    assert_plain("undo", serde_json::to_string(&report).unwrap());
+
+    // The record is history: it keeps exactly what the agent sent.
+    let wrote = glass_audit::read(&h.audit_path(), |r| {
+        r.event.task == Some(task)
+            && r.event
+                .action
+                .as_ref()
+                .is_some_and(|a| a.as_str() == "files.write")
+    })
+    .unwrap();
+    assert_eq!(
+        wrote[0].event.targets,
+        [format!("Reports/report{CLEAR}{OVERRIDE}vsc.txt")]
+    );
+}
+
 #[tokio::test]
 async fn undoing_single_changes_leaves_the_rest() {
     let h = harness();

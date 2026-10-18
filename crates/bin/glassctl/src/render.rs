@@ -1,16 +1,59 @@
 //! Plain-text renderings of what the desktop shell draws: the handoff card,
 //! tiles, the expanded view, approvals and undo reports.
+//!
+//! Everything glassd sends is made display text again before it is
+//! rendered ([`display_safe`]) or printed as JSON ([`json`]), so a server
+//! can't drive the terminal whatever it sends: glassd does this too, but
+//! an older or compromised one might not, and audit records come back as
+//! they were recorded.
 
 use std::fmt::Write;
 
 use glass_api::{
-    ActivityKind, ApprovalView, ChangeKind, HandoffCard, TaskDetail, TaskView, TileState,
-    UndoReport,
+    ActivityKind, ApprovalView, ChangeKind, DisplaySafe, HandoffCard, TaskDetail, TaskView,
+    TileState, UndoReport,
 };
 use glass_audit::AuditRecord;
 use glass_types::TaskId;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::style::{bold, dim, orange, red, state_label, state_marker};
+
+/// A copy of `value` with every string in it passed through
+/// `glass_api::display_line`, for rendering as text.
+pub fn display_safe<T: Serialize + DeserializeOwned>(value: &T) -> anyhow::Result<T> {
+    let mut json = serde_json::to_value(value)?;
+    json.make_display_safe();
+    Ok(serde_json::from_value(json)?)
+}
+
+/// `value` as JSON that is safe to print. serde_json escapes C0 controls;
+/// this also writes DEL, C1 controls and invisible characters (direction
+/// overrides and the like) as `\u` escapes, which JSON readers decode back,
+/// so `--json` stays exact.
+pub fn json(value: &impl Serialize, pretty: bool) -> serde_json::Result<String> {
+    let text = if pretty {
+        serde_json::to_string_pretty(value)?
+    } else {
+        serde_json::to_string(value)?
+    };
+    // Outside strings, serde_json writes only ASCII, so anything matched
+    // here is inside a string, where an escape means the same character.
+    let escaped = |c: char| c == '\x7f' || (!c.is_ascii() && glass_api::display_char(c) != c);
+    if !text.chars().any(escaped) {
+        return Ok(text);
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    for c in text.chars() {
+        if escaped(c) {
+            let _ = write!(out, "\\u{:04x}", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
 
 pub fn card(card: &HandoffCard) -> String {
     let mut out = String::new();
@@ -502,8 +545,8 @@ mod tests {
         out
     }
 
-    #[test]
-    fn tiles_name_the_task_and_asks_answer_in_the_actions_words() {
+    /// A tile waiting on an ask to send mail.
+    fn sample() -> (ApprovalView, TaskView) {
         let id = TaskId::new();
         let ask = ApprovalView {
             id: ApprovalId::new(),
@@ -537,12 +580,18 @@ mod tests {
             driver_socket: None,
             continues: None,
         };
+        (ask, view)
+    }
+
+    #[test]
+    fn tiles_name_the_task_and_asks_answer_in_the_actions_words() {
+        let (ask, view) = sample();
         let shown = plain(&tile(&view));
         assert!(
             shown.starts_with("◉ Invoice demo · Reconcile the October invoices  actions"),
             "{shown}"
         );
-        let (task, approval) = (id.short(), ask.id.short());
+        let (task, approval) = (view.id.short(), ask.id.short());
         assert!(shown.contains(&format!(
             "Review drafts: glassctl show {task}  ·  Approve and send: glassctl approve {approval}"
         )));
@@ -554,5 +603,89 @@ mod tests {
             ..view
         };
         assert!(plain(&tile(&untitled)).starts_with("◉ Invoice demo  actions"));
+    }
+
+    /// Whether every escape sequence in `text` is one of glassctl's own
+    /// colors (`ESC [ digits m`).
+    fn only_colors(text: &str) -> bool {
+        text.split('\x1b').skip(1).all(|after| {
+            after.strip_prefix('[').is_some_and(|body| {
+                let end = body.find(|c: char| !c.is_ascii_digit() && c != ';');
+                end.is_some_and(|end| body[end..].starts_with('m'))
+            })
+        })
+    }
+
+    /// Text from a hostile or older server prints as text: it can't clear
+    /// the screen, make a link, hide part of a line or reorder it (AW-4,
+    /// AW-3). `--json` keeps it exact, escaped.
+    #[test]
+    fn aw4_server_text_is_printed_without_escapes() {
+        let (mut ask, view) = sample();
+        ask.summary = "Send 1 email\x1b[2J\x1b[H".into();
+        ask.labels = AskLabels::new("Review", "Approve\u{202E}");
+        let hostile = TaskView {
+            caption:
+                "Working\x1b[2J\x1b]8;;https://evil.example\x07here\x1b]8;;\x07\rAll done\u{202E}"
+                    .into(),
+            feed: vec![glass_api::FeedLine {
+                at: Timestamp::now(),
+                text: "Write a".into(),
+                verb: "write".into(),
+                target: "Reports/a\x1b[1A\u{9b}2Kb.csv".into(),
+            }],
+            needs: Some(ask),
+            ..view
+        };
+        let shown = tile(&display_safe(&hostile).unwrap());
+        assert!(only_colors(&shown), "{shown:?}");
+        assert!(!shown.contains(['\r', '\u{202E}', '\u{9b}']), "{shown:?}");
+        let shown = plain(&shown);
+        assert!(
+            shown.contains(
+                "Working\u{FFFD}[2J\u{FFFD}]8;;https://evil.example\u{FFFD}here\u{FFFD}]8;;\u{FFFD} All done\u{FFFD}"
+            ),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("write  Reports/a\u{FFFD}[1A\u{FFFD}2Kb.csv"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("Needs you: Send 1 email\u{FFFD}[2J\u{FFFD}[H"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("Approve\u{FFFD}: glassctl approve"),
+            "{shown}"
+        );
+
+        let printed = json(&hostile, true).unwrap();
+        assert!(
+            !printed.contains(['\x1b', '\u{202E}', '\u{9b}']),
+            "{printed}"
+        );
+        assert!(printed.contains("All done\\u202e"));
+        assert_eq!(serde_json::from_str::<TaskView>(&printed).unwrap(), hostile);
+    }
+
+    /// Audit records come back as they were recorded (they are history);
+    /// `glassctl audit` shows them as text (AU-3).
+    #[test]
+    fn au3_audit_records_print_as_text() {
+        let mut event = glass_audit::AuditEvent::new(
+            glass_audit::EventKind::Action,
+            "Write Reports/x\x1b[2J\u{202E}.csv",
+        );
+        event.detail = serde_json::json!({ "reason\x1b": "a\rb" });
+        let record = AuditRecord {
+            seq: 7,
+            ts: Timestamp::now(),
+            prev: "0".repeat(64),
+            event,
+        };
+        let shown = audit(&display_safe(&vec![record]).unwrap());
+        assert!(only_colors(&shown), "{shown:?}");
+        assert!(plain(&shown).contains("Write Reports/x\u{FFFD}[2J\u{FFFD}.csv"));
     }
 }
