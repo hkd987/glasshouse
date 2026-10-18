@@ -1,0 +1,18 @@
+[package]
+name = "glass-first-party"
+description = "The first-party app set: every app glassd ships, registered in one place."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-actions.workspace = true
+glass-app-files.workspace = true
+glass-app-helpdesk.workspace = true
+glass-app-mail.workspace = true
+glass-app-system.workspace = true
+
+[lints]
+workspace = true

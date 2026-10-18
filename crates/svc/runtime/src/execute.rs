@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use glass_actions::{ActionDef, ActionError, ActionProvider, Preview};
 use glass_api::{ActivityKind, ApprovalScope, ChangeEntry, Progress, TileState};
@@ -40,6 +40,7 @@ impl Runtime {
             return Err(RpcError::invalid_params(format!("unknown tool {tool:?}")));
         };
         let (def, provider) = (def.clone(), Arc::clone(provider));
+        let started = Instant::now();
 
         if task.wait_runnable().await.is_err() {
             return Ok(CallToolResult::error("This task has ended."));
@@ -82,6 +83,7 @@ impl Runtime {
                     None,
                     None,
                     AuditOutcome::Blocked,
+                    started,
                 );
                 {
                     let mut state = task.lock();
@@ -96,7 +98,10 @@ impl Runtime {
                 )));
             }
             Verdict::Ask { rule } if !self.desk.has_task_grant(task.id, &def.name) => {
-                match self.ask(task, &def, &preview, rule, &verdict).await {
+                match self
+                    .ask(task, &def, &preview, rule, &verdict, started)
+                    .await
+                {
                     Ok(answer) => approval = Some(answer),
                     Err(refusal) => return Ok(refusal),
                 }
@@ -146,6 +151,7 @@ impl Runtime {
                             approval.clone(),
                             None,
                             failure,
+                            started,
                         );
                         return Ok(CallToolResult::error(format!(
                             "Not done: couldn't take the snapshot that makes this undoable ({e})."
@@ -179,6 +185,7 @@ impl Runtime {
                     approval,
                     snapshot,
                     AuditOutcome::Completed,
+                    started,
                 );
                 {
                     let mut state = task.lock();
@@ -226,7 +233,9 @@ impl Runtime {
                 let failure = AuditOutcome::Failed {
                     error: e.to_string(),
                 };
-                self.record(task, &def, &preview, &verdict, approval, snapshot, failure);
+                self.record(
+                    task, &def, &preview, &verdict, approval, snapshot, failure, started,
+                );
                 task.lock().note(
                     ActivityKind::Notice,
                     format!("Failed: {} — {e}", preview.summary),
@@ -246,6 +255,7 @@ impl Runtime {
         preview: &Preview,
         rule: &str,
         verdict: &Verdict,
+        started: Instant,
     ) -> Result<ApprovalRef, CallToolResult> {
         let timeout = task.policy.approval_timeout_secs();
         let items = if preview.items.is_empty() {
@@ -333,6 +343,7 @@ impl Runtime {
                     Some(approval("denied")),
                     None,
                     AuditOutcome::Denied,
+                    started,
                 );
                 self.publish(task);
                 Err(CallToolResult::error(format!(
@@ -354,6 +365,7 @@ impl Runtime {
                     None,
                     None,
                     AuditOutcome::TimedOut,
+                    started,
                 );
                 self.publish(task);
                 Err(CallToolResult::error(
@@ -409,9 +421,15 @@ impl Runtime {
         approval: Option<ApprovalRef>,
         snapshot: Option<glass_types::SnapshotId>,
         outcome: AuditOutcome,
+        started: Instant,
     ) {
         let mut event: AuditEvent =
             self.task_event(task, EventKind::Action, preview.summary.clone());
+        // How long the OS took, from the call to its outcome, for the
+        // latency budgets (docs/dev/performance.md). For an Ask it includes
+        // the wait for the person.
+        event.detail =
+            serde_json::json!({ "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0 });
         event.action = Some(def.name.clone());
         event.targets = preview.targets.clone();
         event.decision = Some(PolicyDecision {

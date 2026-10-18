@@ -3,6 +3,7 @@
 //! ```text
 //! glass-e2e all                 every single-user scenario
 //! glass-e2e invoices labels     just these
+//! glass-e2e perf                end-user latency budgets
 //! glass-e2e hold                start a waiting task, print its id
 //! glass-e2e isolation <id>      (as another user) that task is invisible
 //! glass-e2e release <id>        stop it
@@ -15,6 +16,7 @@
 #![allow(clippy::print_stdout)]
 
 mod harness;
+mod perf;
 mod scenarios;
 
 use std::process::ExitCode;
@@ -33,6 +35,7 @@ const ALL: &[&str] = &[
     "takeover",
     "changes",
     "it",
+    "perf",
 ];
 
 #[tokio::main(flavor = "current_thread")]
@@ -80,6 +83,7 @@ async fn main() -> ExitCode {
                     "takeover" => scenarios::takeover(&harness).await,
                     "changes" => scenarios::changes(&harness).await,
                     "it" => scenarios::it(&harness).await,
+                    "perf" => perf::perf(&harness).await,
                     other => Err(anyhow::anyhow!("unknown scenario {other}")),
                 };
                 if report(name, outcome).is_err() {

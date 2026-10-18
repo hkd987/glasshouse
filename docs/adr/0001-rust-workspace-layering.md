@@ -1,5 +1,8 @@
 # 0001. One Rust workspace, layered lib → svc → bin
 
+Status: Accepted; [0013](0013-one-crate-per-app.md) adds the apps layer
+(lib → apps → svc → bin).
+
 ## Context
 The PRD expects a founding team of about 15 engineers and memory-safe
 languages for new daemons ("Rust for brokers and the gateway is the

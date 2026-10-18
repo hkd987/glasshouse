@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs the end-to-end suite in the dev VM. Deploy first (`make vm-deploy`).
 #
-#   1. single-user scenarios as `demo` (containment, delegation, labels, ...)
+#   1. single-user scenarios as `demo` (containment, delegation, labels, ...,
+#      and `perf`, the latency budgets in docs/dev/performance.md)
 #   2. isolation: a second user can't see, stop or answer demo's task
 #   3. sleep: running agents pause before the machine sleeps and resume after
 #   4. crash recovery: kill -9 glassd mid-task; on restart it removes the

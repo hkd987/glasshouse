@@ -12,13 +12,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use glass_actions::Registry;
-use glass_actions::providers::{
-    FilesProvider, HelpdeskProvider, MailProvider, SystemOps, SystemProvider,
-};
 use glass_api::{
     AnswerApproval, ApprovalAnswer, ApprovalScope, ScopeRequest, TaskRequest, TileState,
     UndoRequest,
 };
+use glass_app_files::FilesProvider;
+use glass_app_helpdesk::HelpdeskProvider;
+use glass_app_mail::MailProvider;
+use glass_app_system::{SystemOps, SystemProvider};
 use glass_audit::{AuditLog, Durability, EventKind, Outcome};
 use glass_platform::sandbox::HostSandbox;
 use glass_platform::snapshot::CopySnapshotter;
@@ -343,6 +344,10 @@ async fn reads_and_writes_flow_through_tiers_snapshots_and_audit() {
     assert_eq!(write.event.outcome, Some(Outcome::Completed));
     assert!(write.event.snapshot.is_some());
     assert_eq!(write.event.user.as_deref(), Some(h.me.name.as_str()));
+    // Every action says how long the OS took, for the latency budgets.
+    for action in &actions {
+        assert!(action.event.detail["elapsed_ms"].as_f64().unwrap() >= 0.0);
+    }
     assert!(glass_audit::verify(&h.audit_path()).is_ok());
 }
 

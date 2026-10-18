@@ -5,7 +5,13 @@ resolver = "3"
 #   crates/svc  service implementations hosted by daemons; lib + svc
 #   crates/bin  executables; anything
 #   tests/*     end-to-end suites; anything
-members = ["crates/lib/*", "crates/svc/*", "crates/bin/*", "tests/e2e"]
+members = [
+    "crates/lib/*",
+    "crates/svc/*",
+    "crates/apps/*",
+    "crates/bin/*",
+    "tests/e2e",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -24,7 +30,12 @@ glass-rpc = { path = "crates/lib/rpc" }
 glass-platform = { path = "crates/lib/platform" }
 glass-agent-sdk = { path = "crates/lib/agent-sdk" }
 glass-broker = { path = "crates/svc/broker" }
-glass-actions = { path = "crates/svc/actions" }
+glass-actions = { path = "crates/lib/actions" }
+glass-first-party = { path = "crates/svc/first-party" }
+glass-app-files = { path = "crates/apps/files" }
+glass-app-helpdesk = { path = "crates/apps/helpdesk" }
+glass-app-mail = { path = "crates/apps/mail" }
+glass-app-system = { path = "crates/apps/system" }
 glass-runtime = { path = "crates/svc/runtime" }
 
 # Third-party crates. Licenses must pass `deny.toml` (no copyleft).
@@ -42,7 +53,9 @@ time = { version = "0.3.55", features = ["serde", "formatting", "parsing", "macr
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "process", "signal", "fs"] }
 toml = "1.1.8"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# No `env-filter`: it pulls in `regex`; `filter::Targets` reads the same
+# `target=level` syntax (docs/dev/build-performance.md).
+tracing-subscriber = "0.3.23"
 uuid = { version = "1.28.0", features = ["v7", "serde"] }
 
 [workspace.lints.rust]

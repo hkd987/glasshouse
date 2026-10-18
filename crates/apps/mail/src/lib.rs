@@ -14,9 +14,10 @@ use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::attribute;
-use crate::def::parse_input;
-use crate::{ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, TaskContext};
+use glass_actions::{
+    ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, TaskContext, attribute,
+    parse_input,
+};
 
 const MAIL_DIR: &str = "Mail";
 const DRAFTS: &str = "Drafts";
@@ -315,7 +316,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::context::tests::context;
+    use glass_actions::testing::context;
 
     fn setup() -> (tempfile::TempDir, TaskContext) {
         use std::os::unix::fs::MetadataExt;

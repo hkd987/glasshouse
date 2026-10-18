@@ -5,8 +5,10 @@
 //! through the hidden `.zfs/snapshot/<name>` directory and changes come from
 //! `zfs diff`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use glass_types::SnapshotId;
 
@@ -17,11 +19,49 @@ use crate::{PlatformError, Result, cmd};
 pub const SNAPSHOT_PREFIX: &str = "glass-";
 
 #[derive(Debug, Default)]
-pub struct ZfsSnapshotter;
+pub struct ZfsSnapshotter {
+    /// Which dataset holds each root, so taking a snapshot is one `zfs` call
+    /// rather than one per root (every write snapshots first). An entry is
+    /// used only while the root is on the same filesystem it was found on.
+    datasets: Mutex<HashMap<PathBuf, Dataset>>,
+}
+
+#[derive(Debug, Clone)]
+struct Dataset {
+    name: String,
+    mountpoint: PathBuf,
+    device: u64,
+}
 
 impl ZfsSnapshotter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// The dataset holding `path` and that dataset's mountpoint.
-    fn dataset_of(path: &Path) -> Result<(String, PathBuf)> {
+    fn dataset_of(&self, path: &Path) -> Result<(String, PathBuf)> {
+        let device = std::fs::metadata(path).map(|m| m.dev()).ok();
+        let mut known = self.datasets.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(found) = known.get(path)
+            && Some(found.device) == device
+        {
+            return Ok((found.name.clone(), found.mountpoint.clone()));
+        }
+        let (name, mountpoint) = Self::look_up(path)?;
+        if let Some(device) = device {
+            known.insert(
+                path.to_path_buf(),
+                Dataset {
+                    name: name.clone(),
+                    mountpoint: mountpoint.clone(),
+                    device,
+                },
+            );
+        }
+        Ok((name, mountpoint))
+    }
+
+    fn look_up(path: &Path) -> Result<(String, PathBuf)> {
         let out = cmd::run(
             "zfs",
             &[
@@ -46,18 +86,11 @@ impl ZfsSnapshotter {
             }),
         }
     }
-}
 
-impl Snapshotter for ZfsSnapshotter {
-    fn kind(&self) -> &'static str {
-        "zfs"
-    }
-
-    fn snapshot(&self, id: SnapshotId, roots: &[PathBuf]) -> Result<SnapshotHandle> {
-        let snap_name = format!("{SNAPSHOT_PREFIX}{}", id.short());
+    fn take(&self, snap_name: &str, roots: &[PathBuf]) -> Result<Vec<SnapshotPart>> {
         let mut by_dataset: BTreeMap<String, (PathBuf, Vec<PathBuf>)> = BTreeMap::new();
         for root in roots {
-            let (dataset, mountpoint) = Self::dataset_of(root)?;
+            let (dataset, mountpoint) = self.dataset_of(root)?;
             by_dataset
                 .entry(dataset)
                 .or_insert_with(|| (mountpoint, Vec::new()))
@@ -67,7 +100,7 @@ impl Snapshotter for ZfsSnapshotter {
         let parts: Vec<SnapshotPart> = by_dataset
             .into_iter()
             .map(|(dataset, (mountpoint, roots))| SnapshotPart {
-                base: mountpoint.join(".zfs/snapshot").join(&snap_name),
+                base: mountpoint.join(".zfs/snapshot").join(snap_name),
                 name: format!("{dataset}@{snap_name}"),
                 mountpoint,
                 roots,
@@ -78,6 +111,30 @@ impl Snapshotter for ZfsSnapshotter {
             args.extend(parts.iter().map(|p| p.name.as_str()));
             cmd::run("zfs", &args)?;
         }
+        Ok(parts)
+    }
+}
+
+impl Snapshotter for ZfsSnapshotter {
+    fn kind(&self) -> &'static str {
+        "zfs"
+    }
+
+    fn snapshot(&self, id: SnapshotId, roots: &[PathBuf]) -> Result<SnapshotHandle> {
+        let snap_name = format!("{SNAPSHOT_PREFIX}{}", id.short());
+        let parts = match self.take(&snap_name, roots) {
+            Ok(parts) => parts,
+            // A dataset renamed under a mounted root keeps its device; look
+            // the roots up again once.
+            Err(_) => {
+                let mut known = self.datasets.lock().unwrap_or_else(|e| e.into_inner());
+                for root in roots {
+                    known.remove(root);
+                }
+                drop(known);
+                self.take(&snap_name, roots)?
+            }
+        };
         Ok(SnapshotHandle { id, parts })
     }
 

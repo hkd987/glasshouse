@@ -175,7 +175,9 @@ pipeline refuses further side effects (fail closed).
 | `glass-api` | lib | Control API contract (shell, CLI) |
 | `glass-platform` | lib | Jails, ZFS, confined file access, users, xattrs, system facts |
 | `glass-agent-sdk` | lib | Convenience MCP client for Rust agents |
-| `glass-actions` | svc | Action registry and first-party providers |
+| `glass-actions` | lib | The action contract: providers, previews, task context, registry |
+| `glass-app-files`, `-mail`, `-system`, `-helpdesk` | apps | Each app's actions (ADR 0013) |
+| `glass-first-party` | svc | The apps the OS ships, as one registry |
 | `glass-broker` | svc | Decisions and the approval desk |
 | `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
 | `glassd`, `glassctl`, `glass-mcp`, `glass-demo-agent`, `glass-it-agent`, `glass-probe` | bin | Executables |

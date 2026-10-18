@@ -6,7 +6,7 @@ ADR and mark the old one superseded.
 
 | # | Decision |
 |---|---|
-| [0001](0001-rust-workspace-layering.md) | One Rust workspace, layered lib → svc → bin |
+| [0001](0001-rust-workspace-layering.md) | One Rust workspace, layered lib → svc → bin (apps layer added by 0013) |
 | [0002](0002-freebsd-release-overlay.md) | Build on unmodified FreeBSD 15.1 releases plus our overlay; develop in a QEMU VM |
 | [0003](0003-single-daemon-for-prototype.md) | One privileged daemon hosting services as libraries, for now |
 | [0004](0004-mcp-over-task-sockets.md) | Agents speak MCP over a per-task Unix socket; JSON-RPC everywhere |
@@ -18,3 +18,4 @@ ADR and mark the old one superseded.
 | [0010](0010-agents-are-harness-bundles.md) | Proposed: agents are versioned harness bundles run by one runner; hard limits stay in the OS |
 | [0011](0011-branding-on-a-freebsd-base.md) | Branding: overlay now (tested), our own base build next; notices and SBOM generated from the build |
 | [0012](0012-system-actions-broker-role.md) | IT self-service runs as fixed-function system actions in glassd; policy is the broker role |
+| [0013](0013-one-crate-per-app.md) | One crate per app's actions, built against a lib-layer contract; layers lib → apps → svc → bin |

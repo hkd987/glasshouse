@@ -82,7 +82,8 @@ pub enum ActionError {
 }
 
 impl ActionError {
-    pub(crate) fn io(context: impl fmt::Display, e: std::io::Error) -> Self {
+    /// An I/O error, named after what was being done.
+    pub fn io(context: impl fmt::Display, e: std::io::Error) -> Self {
         match e.kind() {
             std::io::ErrorKind::NotFound => Self::NotFound(context.to_string()),
             // cap-std reports escapes as permission errors.
@@ -120,7 +121,7 @@ pub trait ActionProvider: Send + Sync + fmt::Debug {
 }
 
 /// Deserializes an action's input, mapping errors to `InvalidInput`.
-pub(crate) fn parse_input<T: serde::de::DeserializeOwned>(input: &Value) -> Result<T, ActionError> {
+pub fn parse_input<T: serde::de::DeserializeOwned>(input: &Value) -> Result<T, ActionError> {
     let input = if input.is_null() {
         Value::Object(Default::default())
     } else {

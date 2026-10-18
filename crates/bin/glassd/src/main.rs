@@ -11,9 +11,6 @@ use std::sync::Arc;
 use anyhow::{Context, bail};
 use clap::Parser;
 use glass_actions::Registry;
-use glass_actions::providers::{
-    FilesProvider, HelpdeskProvider, HostSystem, MailProvider, SystemProvider,
-};
 use glass_audit::{AuditEvent, AuditLog, Durability, EventKind};
 use glass_platform::sandbox::{HostSandbox, JailConfig, JailSandbox, Sandbox};
 use glass_platform::snapshot::{CopySnapshotter, Snapshotter, ZfsSnapshotter};
@@ -21,6 +18,8 @@ use glass_policy::Policy;
 use glass_runtime::{ControlApi, Runtime, RuntimeConfig, RuntimeParts};
 use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
+use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::prelude::*;
 
 use crate::config::{Config, SandboxBackend, SnapshotBackend};
 
@@ -37,12 +36,14 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("GLASS_LOG")
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .with_target(false)
+    // GLASS_LOG is `level` or `target=level,...`, e.g. `glass_runtime=debug,info`.
+    let filter = std::env::var("GLASS_LOG")
+        .ok()
+        .and_then(|spec| spec.parse::<Targets>().ok())
+        .unwrap_or_else(|| Targets::new().with_default(LevelFilter::INFO));
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(filter)
         .init();
     let args = Args::parse();
     let config = Config::load(&args.config)?;
@@ -73,19 +74,12 @@ fn load_policy(path: &Path) -> anyhow::Result<(Policy, String)> {
 }
 
 fn registry(config: &Config, policy: &Policy) -> anyhow::Result<Registry> {
-    let mut registry = Registry::new();
-    registry.register(Arc::new(FilesProvider))?;
-    registry.register(Arc::new(MailProvider))?;
-    // The IT self-service agent's actions (AE-4). Policy decides who may use
-    // them; IT's fix list decides what they may restart.
-    registry.register(Arc::new(SystemProvider::new(
-        Arc::new(HostSystem),
-        policy.fixes().services.clone(),
-    )))?;
-    registry.register(Arc::new(HelpdeskProvider::new(
-        config.state_dir.join("helpdesk/outbox"),
-    )))?;
-    Ok(registry)
+    Ok(glass_first_party::registry(glass_first_party::Setup {
+        // IT's fix list decides what the IT agent may restart (AE-4).
+        restartable_services: policy.fixes().services.clone(),
+        helpdesk_outbox: config.state_dir.join("helpdesk/outbox"),
+        system: Arc::new(glass_app_system::HostSystem),
+    })?)
 }
 
 async fn run(
@@ -122,7 +116,7 @@ async fn run(
         }
     };
     let snapshots: Arc<dyn Snapshotter> = match config.snapshots.backend {
-        SnapshotBackend::Zfs => Arc::new(ZfsSnapshotter),
+        SnapshotBackend::Zfs => Arc::new(ZfsSnapshotter::new()),
         SnapshotBackend::Copy => Arc::new(CopySnapshotter::new(config.state_dir.join("snapshots"))),
     };
 

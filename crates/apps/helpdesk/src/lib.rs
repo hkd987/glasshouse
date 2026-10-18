@@ -15,8 +15,9 @@ use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::def::parse_input;
-use crate::{ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, TaskContext};
+use glass_actions::{
+    ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, TaskContext, parse_input,
+};
 
 #[derive(Debug)]
 pub struct HelpdeskProvider {

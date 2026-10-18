@@ -22,8 +22,9 @@ use glass_types::{ActionName, SideEffect, Tier};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::def::parse_input;
-use crate::{ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, TaskContext};
+use glass_actions::{
+    ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, TaskContext, parse_input,
+};
 
 /// The user's cache folder: safe to empty, and it grows quietly.
 const CACHE: &str = ".cache";

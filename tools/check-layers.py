@@ -3,10 +3,11 @@
 
 Layers (by directory), and what each may depend on inside the workspace:
 
-    crates/lib   lib
-    crates/svc   lib, svc
-    crates/bin   lib, svc         (binaries never depend on each other)
-    tests/*      lib, svc
+    crates/lib    lib
+    crates/apps   lib             (apps never depend on each other)
+    crates/svc    lib, apps, svc
+    crates/bin    lib, apps, svc  (binaries never depend on each other)
+    tests/*       lib, apps, svc
 
 Every workspace crate must also inherit the workspace lints, license and
 `publish = false`, so no crate quietly opts out of the shared rules.
@@ -22,9 +23,10 @@ from pathlib import Path
 
 ALLOWED = {
     "lib": {"lib"},
-    "svc": {"lib", "svc"},
-    "bin": {"lib", "svc"},
-    "tests": {"lib", "svc"},
+    "apps": {"lib"},
+    "svc": {"lib", "apps", "svc"},
+    "bin": {"lib", "apps", "svc"},
+    "tests": {"lib", "apps", "svc"},
 }
 
 
@@ -49,7 +51,7 @@ def main() -> int:
     for name, package in sorted(packages.items()):
         layer = layers[name]
         if layer not in ALLOWED:
-            problems.append(f"{name}: lives outside crates/{{lib,svc,bin}} and tests/")
+            problems.append(f"{name}: lives outside crates/{{lib,apps,svc,bin}} and tests/")
             continue
         for dep in package["dependencies"]:
             target = dep["name"]

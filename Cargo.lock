@@ -3,15 +3,6 @@
 version = 4
 
 [[package]]
-name = "aho-corasick"
-version = "1.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "ambient-authority"
 version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -327,6 +318,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-app-files"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-platform",
+ "glass-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "glass-app-helpdesk"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-platform",
+ "glass-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "glass-app-mail"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-platform",
+ "glass-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "glass-app-system"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-platform",
+ "glass-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "glass-audit"
 version = "0.1.0"
 dependencies = [
@@ -373,6 +416,17 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "glass-first-party"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-app-files",
+ "glass-app-helpdesk",
+ "glass-app-mail",
+ "glass-app-system",
 ]
 
 [[package]]
@@ -444,6 +498,10 @@ version = "0.1.0"
 dependencies = [
  "glass-actions",
  "glass-api",
+ "glass-app-files",
+ "glass-app-helpdesk",
+ "glass-app-mail",
+ "glass-app-system",
  "glass-audit",
  "glass-broker",
  "glass-platform",
@@ -475,9 +533,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "glass-actions",
  "glass-api",
  "glass-audit",
+ "glass-first-party",
  "glass-policy",
  "glass-rpc",
  "glass-types",
@@ -494,7 +552,9 @@ dependencies = [
  "clap",
  "glass-actions",
  "glass-api",
+ "glass-app-system",
  "glass-audit",
+ "glass-first-party",
  "glass-platform",
  "glass-policy",
  "glass-rpc",
@@ -621,15 +681,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "matchers"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
-dependencies = [
- "regex-automata",
-]
-
-[[package]]
 name = "maybe-owned"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -714,23 +765,6 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
-
-[[package]]
-name = "regex-automata"
-version = "0.4.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
-dependencies = [
- "aho-corasick",
- "memchr",
- "regex-syntax",
-]
-
-[[package]]
-name = "regex-syntax"
-version = "0.8.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rustix"
@@ -1080,14 +1114,10 @@ version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
- "matchers",
  "nu-ansi-term",
- "once_cell",
- "regex-automata",
  "sharded-slab",
  "smallvec",
  "thread_local",
- "tracing",
  "tracing-core",
  "tracing-log",
 ]

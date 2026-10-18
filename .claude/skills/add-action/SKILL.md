@@ -15,8 +15,12 @@ decides permissions.
    `calendar.hold`). Side effect: `None` (read only), `LocalReversible`
    (snapshots can undo it), `Irreversible` (leaves the machine: send, post,
    pay). Irreversible actions default to `Tier::Ask`.
-2. **Provider.** In `crates/svc/actions/src/providers/` (or a new svc crate
-   for a big app), implement `ActionProvider`:
+2. **Provider.** In the app's crate, `crates/apps/<app>/` (`glass-app-<app>`),
+   implement `ActionProvider`. A new app gets a new crate: copy
+   `crates/apps/helpdesk` (the smallest), add it to
+   `[workspace.dependencies]`, and depend only on lib crates
+   (`glass-actions`, `glass-api`, `glass-platform`, `glass-types`); apps
+   never depend on each other or on the runtime (`tools/check-layers.py`).
    - `actions()`: `ActionDef` with a JSON Schema (`additionalProperties:
      false`) and a plain-language title ("Send emails"; it appears on
      handoff cards).
@@ -28,16 +32,19 @@ decides permissions.
      touch files only through `ConfinedDir`. Hand ownership to `ctx.owner`,
      call `attribute()` on changed files (AU-10), return `Change`s with
      `reversible` set honestly.
-   - Parse input with `parse_input` into `#[serde(deny_unknown_fields)]`
-     structs.
-3. **Register** the provider in `crates/bin/glassd/src/main.rs::registry()`
-   (and `glassctl policy check`'s registry).
+   - Parse input with `glass_actions::parse_input` into
+     `#[serde(deny_unknown_fields)]` structs.
+3. **Register** a new provider in `crates/svc/first-party/src/lib.rs`
+   (`registry()`), the one list `glassd` and `glassctl policy check` share.
+   Anything it needs from the daemon (paths, policy lists, a system
+   interface to fake in tests) goes on `Setup`.
 4. **Policy.** Add a tier to `crates/lib/policy/default-policy.toml` if the
    app default isn't right for a new org, and a `[names]` entry for any
    pattern users will see.
 5. **Tests.**
-   - Provider unit tests: preview matches invoke; read-only grants refuse;
-     bad input rejected.
+   - Provider unit tests in the app crate, built on
+     `glass_actions::testing::context`: preview matches invoke; read-only
+     grants refuse; bad input rejected.
    - A pipeline test (`crates/svc/runtime/tests/pipeline.rs`) for its tier
      behavior, especially Ask and undo.
    - If it's reversible, prove `glassctl undo` restores it.
@@ -46,5 +53,6 @@ decides permissions.
 
 ## Checks before you're done
 
-`make test lint`, then `make e2e-vm`; use the `manual-test` skill to show
-the action in a tile and in `glassctl audit`.
+`make test lint`, then `make e2e-vm` (its `perf` scenario holds actions to
+their latency budgets, `docs/dev/performance.md`); use the `manual-test`
+skill to show the action in a tile and in `glassctl audit`.

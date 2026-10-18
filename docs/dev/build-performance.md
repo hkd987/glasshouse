@@ -6,16 +6,18 @@ way as the codebase grows.
 
 ## Where we are
 
-Measured on a 4-core cloud container (no KVM), 16 crates, 137 build units:
+Measured on a 4-core cloud container (no KVM), 22 crates, 143 build units.
+"After an edit" means a real code change, not a `touch`:
 
 | Build | Time |
 |---|---|
-| Clean debug build, whole workspace (`make build`) | 26 s |
-| Rebuild after editing `glass-runtime` (debug) | 2.7 s |
-| Rebuild after editing `glass-types`, the bottom crate (debug) | 1.8 s |
+| Clean debug build, whole workspace (`make build`) | 27 s |
+| Rebuild after editing an app crate (`glass-app-files`) | 1.5 s |
+| Rebuild after editing `glass-runtime` | 1.6 s |
+| Rebuild after editing `glass-types`, the bottom crate | 2.4 s |
 | All tests (`make test`) | 4–9 s |
-| FreeBSD binaries, clean, `vm` profile | 47 s |
-| **FreeBSD rebuild after an edit, `vm` profile** (the VM loop) | **3 s** |
+| FreeBSD binaries, clean, `vm` profile | 57 s |
+| **FreeBSD rebuild after an edit, `vm` profile** (the VM loop) | **1.3–1.8 s** |
 | FreeBSD rebuild after an edit, `release` profile (thin LTO) | 25 s |
 | Rebuild + deploy into the running VM (`make freebsd vm-deploy`) | ~12 s |
 
@@ -34,11 +36,11 @@ Measured on a 4-core cloud container (no KVM), 16 crates, 137 build units:
   default; the FreeBSD wrapper passes `-fuse-ld=lld`.
 - **Many small crates.** Cargo builds independent crates in parallel and
   rebuilds only what an edit touches. Editing a service crate never rebuilds
-  the libraries below it.
+  the libraries below it, and each app's actions are their own crate
+  (`crates/apps`, ADR 0013), so editing one app rebuilds that app and the
+  binaries, not the other apps or the runtime.
 - **Lean dependencies.** Pure-Rust only, no C build scripts, tokio with only
-  the features we use. The slowest units in a clean build are `tokio`, our
-  own `glass-runtime` and the `syn` proc-macro parser (`make timings` shows
-  the full chart).
+  the features we use, no `regex` (`make timings` shows the full chart).
 
 ## Habits
 
@@ -56,19 +58,25 @@ Measured on a 4-core cloud container (no KVM), 16 crates, 137 build units:
    `glass-api` use only `serde` derives; avoid adding derive-heavy crates
    there, because everything above waits for them.
 3. **Split crates that grow past ~5k lines** or that mix concerns, so edits
-   stay local. `glass-runtime` is the first candidate (the action pipeline
-   and the APIs could become their own crates).
-4. **No build scripts that compile C.** They serialize builds and complicate
+   stay local. New features with their own state (tailoring layers, the
+   gateway) start as their own crate rather than another module in
+   `glass-runtime`.
+4. **A new app is a new crate** in `crates/apps`, depending on lib crates
+   only (`add-action` skill).
+5. **No build scripts that compile C.** They serialize builds and complicate
    cross-compiling.
-5. **Don't turn on LTO or `codegen-units = 1`** outside `release`.
+6. **Don't turn on LTO or `codegen-units = 1`** outside `release`.
 
 ## Known costs and options
 
 - Two `syn` majors (2 and 3) are compiled because the newest `serde` and
   `clap` derive macros moved to `syn` 3 while other macro crates haven't yet.
   This resolves itself as crates update; `cargo deny` reports duplicates.
-- `tracing-subscriber`'s `env-filter` pulls in `regex` (only for `glassd`).
-  Replace it with a plain level filter if it ever matters.
+- The slowest units in a clean FreeBSD build are `tokio` (19 s),
+  `glass-runtime` (14 s), and the `glassctl` and `glass-e2e` binaries
+  (12–13 s each); `glass-runtime` sits on the critical path to `glassd`.
+  `tracing-subscriber`'s `env-filter` used to add `regex` (19 s of CPU);
+  `glassd` now filters logs with `filter::Targets`, same `GLASS_LOG` syntax.
 - **CI**: cache `~/.cargo` and `target/` keyed on `Cargo.lock` (for example
   `Swatinem/rust-cache`), and consider `sccache` for a shared cache once
   several machines build the same commits.

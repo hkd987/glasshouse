@@ -1,0 +1,23 @@
+[package]
+name = "glass-actions"
+description = "The app action contract (NV-1): definitions, previews, the registry. Apps live in crates/apps."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-api.workspace = true
+glass-platform.workspace = true
+glass-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -28,6 +28,8 @@ details this file leaves out.
 - `make dev-host` runs glassd locally with the insecure host sandbox.
 - `make check` while editing; never `--release` in the loop
   (`docs/dev/build-performance.md`).
+- Anything a person waits on has a latency budget in `glass-e2e perf`
+  (`docs/dev/performance.md`).
 
 ## Sources of truth
 
@@ -38,8 +40,8 @@ details this file leaves out.
 
 ## Rules
 
-- Layering: `crates/lib` → `crates/svc` → `crates/bin`; binaries never
-  depend on each other. Every dependency goes through
+- Layering: `crates/lib` → `crates/apps` → `crates/svc` → `crates/bin`
+  (ADR 0013); apps never depend on each other, nor binaries on each other. Every dependency goes through
   `[workspace.dependencies]`, permissively licensed (`deny.toml`).
 - No new `unsafe` outside `glass-platform`'s FFI modules; prefer base-system
   commands (ADR 0007).

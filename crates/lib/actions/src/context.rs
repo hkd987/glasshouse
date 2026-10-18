@@ -117,40 +117,9 @@ impl TaskContext {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use glass_types::{TaskId, UserRef};
-
+mod tests {
     use super::*;
-
-    pub fn context(root: &Path) -> TaskContext {
-        TaskContext {
-            principal: AgentPrincipal {
-                agent: "invoice-demo".parse().unwrap(),
-                on_behalf_of: UserRef {
-                    name: "demo".into(),
-                    uid: 1001,
-                },
-                task: TaskId::new(),
-            },
-            owner: Owner {
-                uid: 1001,
-                gid: 1001,
-            },
-            home: root.to_path_buf(),
-            grants: vec![
-                Grant {
-                    name: "Invoices".into(),
-                    root: root.join("Invoices"),
-                    writable: false,
-                },
-                Grant {
-                    name: "Reports".into(),
-                    root: root.join("Reports"),
-                    writable: true,
-                },
-            ],
-        }
-    }
+    use crate::testing::context;
 
     #[test]
     fn resolves_grant_relative_paths() {

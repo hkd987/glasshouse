@@ -600,9 +600,7 @@ fn policy(cmd: &PolicyCommand) -> anyhow::Result<()> {
             let text = std::fs::read_to_string(file)
                 .with_context(|| format!("reading {}", file.display()))?;
             let policy = glass_policy::Policy::from_toml(&text)?;
-            let mut registry = glass_actions::Registry::new();
-            registry.register(std::sync::Arc::new(glass_actions::providers::FilesProvider))?;
-            registry.register(std::sync::Arc::new(glass_actions::providers::MailProvider))?;
+            let registry = glass_first_party::registry(glass_first_party::Setup::offline())?;
             let warnings = policy.lint(&registry.lint_info());
             println!(
                 "{} is valid: {} groups, {} agents.",

@@ -8,10 +8,9 @@ use glass_types::{ActionName, SideEffect, Tier};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::attribute;
-use crate::def::parse_input;
-use crate::{
+use glass_actions::{
     ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, Resolved, TaskContext,
+    attribute, parse_input,
 };
 
 /// Largest file `files.read` returns.
@@ -383,7 +382,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::context::tests::context;
+    use glass_actions::testing::context;
 
     fn name(s: &str) -> ActionName {
         s.parse().unwrap()
