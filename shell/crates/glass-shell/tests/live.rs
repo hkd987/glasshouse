@@ -392,7 +392,16 @@ fn the_mark_opens_the_system_menu_and_sign_out_signs_out() {
         [Message::ToggleSystemMenu]
     );
     live.update(Message::ToggleSystemMenu);
-    let found = (40..80)
+    let task = (40..120)
+        .step_by(6)
+        .flat_map(|y| (20..300).step_by(40).map(move |x| (x, y)))
+        .find_map(|(x, y)| {
+            click(&mut screen, &live, Point::new(x as f32, y as f32))
+                .into_iter()
+                .find(|m| *m == Message::OpenCommandBar)
+        });
+    assert!(task.is_some(), "Hand an agent a task, in the system menu");
+    let found = (40..120)
         .step_by(6)
         .flat_map(|y| (20..300).step_by(40).map(move |x| (x, y)))
         .find_map(|(x, y)| {

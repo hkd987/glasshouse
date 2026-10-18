@@ -32,7 +32,9 @@ rows that changed. Keyboard and pointer come from evdev
 (`glass_platform::input`). Agent tiles show as banners for a few seconds
 when something happens (a new agent, an ask, an ending) and then go, unless the pointer is on
 them; the menu bar's agents pill opens the agents menu with every agent,
-and the mark at its left the system menu (Sign out). Buttons and menu
+and the mark at its left the system menu (Hand an agent a task, Sign
+out). With no app in front, the mark is all the menu bar shows on the
+left. Buttons and menu
 items answer the pointer as it moves, redrawing only when one changes. Approve on a
 needs-you banner or menu tile answers the ask;
 clicking a tile, or its Review, opens the expanded view (`task.get`, fetched

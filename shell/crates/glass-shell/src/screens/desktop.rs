@@ -55,16 +55,16 @@ pub enum Tiles<'a> {
 
 impl<'a> Desktop<'a> {
     /// The desktop at `now`, in the user's local time: the menu bar clock
-    /// and the calendar's dock icon follow it. With no app open, the menu
-    /// bar names the desktop.
+    /// and the calendar's dock icon follow it. With no app open the menu
+    /// bar's left side is just the mark: the desktop isn't an app, and the
+    /// mark's menu is where things start.
     pub fn live(tasks: &'a [TaskView], now: OffsetDateTime) -> Self {
-        let menus = ["File", "Edit", "View", "Window", "Help"];
         Desktop {
             tasks,
             now: Timestamp::from_unix_seconds(now.unix_timestamp()).unwrap_or_else(Timestamp::now),
             clock: clock(now),
-            app: "Desktop".into(),
-            menus: menus.map(String::from).to_vec(),
+            app: String::new(),
+            menus: Vec::new(),
             date: (
                 clock_part(now, format_description!("[month repr:short]")).to_uppercase(),
                 now.day(),
@@ -285,10 +285,10 @@ fn agents_menu<'a>(
 fn menu_bar<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
     let bar = theme.menu_bar;
     let label = |s: String, font| text(s).size(13).font(font).color(bar.text);
-    let mut menus = Row::new()
-        .spacing(20)
-        .align_y(Vertical::Center)
-        .push(label(desktop.app.clone(), fonts::SEMIBOLD));
+    let mut menus = Row::new().spacing(20).align_y(Vertical::Center);
+    if !desktop.app.is_empty() {
+        menus = menus.push(label(desktop.app.clone(), fonts::SEMIBOLD));
+    }
     for menu in &desktop.menus {
         menus = menus.push(label(menu.clone(), fonts::SANS));
     }
@@ -337,22 +337,64 @@ const MARK_REACH: f32 = 6.0;
 const MARK_WIDTH: f32 = 16.0 + MARK_REACH * 2.0;
 const SYSTEM_MENU_LEFT: f32 = 6.0;
 
-/// The system menu: signing out (Shift Super Q, as Shift Command Q on a
-/// Mac). Locking the screen and switching users wait for the compositor
-/// (ADR 0019).
+/// The system menu, under the mark: what can be started from anywhere (an
+/// agent's task, for now; apps join it when they have windows), and
+/// signing out (Shift Super Q, as Shift Command Q on a Mac). Locking the
+/// screen and switching users wait for the compositor (ADR 0019).
 fn system_menu<'a>(theme: &Theme, person: &str) -> Element<'a, Message> {
-    let ink = hex(0xF3F5F7);
-    let item = button(
+    let sign_out = if person.is_empty() {
+        "Sign out…".to_owned()
+    } else {
+        format!("Sign out {person}…")
+    };
+    let lines = [
+        ("Hand an agent a task…".to_owned(), "Ctrl Space"),
+        (sign_out, "Shift Super Q"),
+    ];
+    // As wide as its longest line, as a menu is. Every line fills that
+    // width so the highlight does; the width itself is reckoned from the
+    // text, since a filling line would otherwise take the whole screen.
+    let width = lines
+        .iter()
+        .map(|(label, shortcut)| {
+            label.chars().count() as f32 * 7.2 + shortcut.chars().count() as f32 * 6.6
+        })
+        .fold(0.0, f32::max)
+        + 32.0
+        + 20.0;
+    let [(task, task_keys), (out, out_keys)] = lines;
+    let items = column![
+        menu_item(theme, task, task_keys, Message::OpenCommandBar),
+        container("")
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(|_| style::panel(hexa(0xFFFFFF, 0.1), 0.0)),
+        menu_item(theme, out, out_keys, Message::SignOut),
+    ]
+    .spacing(4)
+    .width(Length::Fixed(width.max(240.0)));
+    container(items)
+        .padding(5)
+        .style(|_| container::Style {
+            shadow: style::shadow(0.35, 12.0, 30.0),
+            ..style::outlined(hexa(0x15181D, 0.94), 10.0, 1.0, hex(0x262B32))
+        })
+        .into()
+}
+
+/// One line of a menu: what it does, its shortcut at the right.
+fn menu_item<'a>(
+    theme: &Theme,
+    label: String,
+    shortcut: &'static str,
+    message: Message,
+) -> Element<'a, Message> {
+    button(
         row![
-            text(if person.is_empty() {
-                "Sign out…".to_owned()
-            } else {
-                format!("Sign out {person}…")
-            })
-            .size(13)
-            .wrapping(Wrapping::None),
+            text(label).size(13).wrapping(Wrapping::None),
+            iced_widget::space().width(Length::Fill),
             // Translucent, so it reads on the menu and on the highlight.
-            text("Shift Super Q")
+            text(shortcut)
                 .size(12)
                 .color(hexa(0xFFFFFF, 0.6))
                 .wrapping(Wrapping::None),
@@ -360,17 +402,11 @@ fn system_menu<'a>(theme: &Theme, person: &str) -> Element<'a, Message> {
         .spacing(32)
         .align_y(Vertical::Center),
     )
-    .on_press(Message::SignOut)
+    .on_press(message)
+    .width(Length::Fill)
     .padding(Padding::from([5.0, 10.0]))
-    .style(style::menu_item(ink, theme.accent));
-    // As wide as the longest item, as a menu is.
-    container(item)
-        .padding(5)
-        .style(|_| container::Style {
-            shadow: style::shadow(0.35, 12.0, 30.0),
-            ..style::outlined(hexa(0x15181D, 0.94), 10.0, 1.0, hex(0x262B32))
-        })
-        .into()
+    .style(style::menu_item(hex(0xF3F5F7), theme.accent))
+    .into()
 }
 
 /// "● ● ● 3 agents": one dot per agent, orange for any that need you. A
@@ -608,6 +644,13 @@ fn dock<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
 mod tests {
     use super::*;
     use crate::fixtures;
+
+    #[test]
+    fn dk1_the_bare_desktop_names_no_app_in_the_menu_bar() {
+        let desktop = Desktop::live(&[], OffsetDateTime::UNIX_EPOCH);
+        assert!(desktop.app.is_empty());
+        assert!(desktop.menus.is_empty());
+    }
 
     #[test]
     fn aw1_needs_you_tiles_come_first_then_oldest_to_newest() {
