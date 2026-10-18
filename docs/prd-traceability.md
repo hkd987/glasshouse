@@ -94,10 +94,22 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
-| DP-1 Gateway is the only model path | Partial | jails have no network at all, so no direct model access; gateway not started |
-| DP-2 … DP-5 Allowlist, redaction, injection screening, call logging | Not started | model gateway |
+| DP-1 Gateway is the only model path | **Done** | native agents have no network (stricter than pf); they call `model_complete`, which glassd routes, redacts, sends and audits (ADR 0018; pipeline `models.rs` `dp1_model_calls_are_an_action_on_the_task_socket`, e2e `models`). Harnesses follow HX-7 |
+| DP-2 Model allowlist, Bedrock default, routing by label and task type | Partial | `[models]` allowlist, default and per-label routes; group and agent lists only narrow; the card's model line is the route for the task's folders (unit `dp2_*` in glass-policy, pipeline `dp2_*`). The shipped policy approves no model until IT adds one (Bedrock first in its example). Routing by task type not started |
+| DP-3 Redact secrets and PII, restore where safe | **Done** | secrets always (keys, tokens, private keys, credential assignments), PII per policy (email, SSN, card numbers, IT's patterns); PII restored in replies, secrets never (unit `dp3_*` in glass-gateway, pipeline `dp3_secrets_and_pii_are_redacted_before_leaving_and_pii_comes_back`) |
+| DP-4 Injection screening of retrieved content | Not started | |
+| DP-5 Every call logged: model, tokens, cost, labels, task | **Done** | the action's audit record with `detail.model`: model, provider, tokens, cost from policy prices, label, redactions, request/reply sizes and SHA-256, failovers; refusals too; no prompt text unless `log_prompts` (pipeline `dp5_every_call_is_audited_with_sizes_and_hashes_not_text`, unit `dp5_policy_can_keep_the_redacted_prompt`) |
+| DP-6 Token budgets per user and team | Not started | |
 | DP-10 Labels from sources, stored with files | Partial | folder rules + `glasshouse.label` xattrs enforced (e2e `labels`); Purview/Drive import not started |
-| MP-1 … MP-9 Model providers (Bedrock default) | Not started | gateway; handoff card already carries a `model` line |
+| MP-1 Bedrock first, no long-lived AWS keys on devices | Partial | Bedrock provider (Converse, SigV4) takes temporary credentials only: `AKIA` keys refused, session token required, expiry honored (unit `mp1_only_temporary_credentials_are_used`). Not run against a real account; first-run setup and IAM Identity Center or role sign-in not started |
+| MP-2 Bedrock region pinning, PrivateLink | Partial | policy pins each Bedrock provider to a region and can name a PrivateLink endpoint (unit `mp2_sends_a_signed_converse_request_and_reads_the_reply`); untested against AWS |
+| MP-3 Bedrock Guardrails | Not started | |
+| MP-4 API keys only in the secrets broker | Partial | Anthropic API keys come from a root-only `model-secrets.toml` glassd refuses unless private, outside every jail (unit `mp4_*`); the secrets broker, per-team keys, spend per key and rotation not started |
+| MP-5 Bring your own subscription | Not started | Claude plans work through attended Claude Code (ADR 0015) |
+| MP-6 Access modes per group | Partial | group `models` lists, such as Bedrock only for a confidential group (unit `dp2_groups_and_agents_only_narrow_the_allowlist`); subscription toggles not started |
+| MP-7 Provider-neutral agents, local Anthropic and OpenAI endpoints | Partial | native agents call one provider-neutral tool, `model_complete`; the local HTTP endpoints in the jail are designed in ADR 0018, not built |
+| MP-8 Routing and failover by label, task and cost | Partial | routes by label, failing over on an outage, rate limit or missing credentials, logged in `failed_over` (pipeline `mp8_an_outage_fails_over_to_the_next_model_and_is_logged`); by task and cost not started |
+| MP-9 Model catalog in the admin console | Not started | policy already carries each model's provider, region, display name and prices |
 | HX-1 Claude Code plugin: skills + MCP server | Partial | MCP server and `glass-mcp` bridge done; Claude Code is an attended catalog agent the user connects with `glassctl take-over` / `glassctl run claude-code` (ADR 0015); plugin package (skills, hooks) not started |
 | HX-2 … HX-7 | Not started | needs a Node runtime in the jail and per-harness egress |
 
@@ -105,7 +117,7 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
-| AU-1 Each action logged with user, agent, task, action, target, decision, approval, snapshot | **Done** | model calls field waits for the gateway |
+| AU-1 Each action logged with user, agent, task, action, target, decision, approval, snapshot | **Done** | model calls carry their call record (DP-5) |
 | AU-2 Append-only, hash-chained, streamed in OCSF/CEF to the SIEM | Partial | chain + verify done (unit tamper tests); OCSF/CEF export, streaming and OpenBSM not started |
 | AU-3 Rebuild any task end to end | **Done** | `audit.task`, `glassctl audit` |
 | AU-10 "by [agent] for [user]" metadata | **Done** | xattr on files, header on mail (verified in the VM) |

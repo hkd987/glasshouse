@@ -15,6 +15,12 @@ small it looks.
   network destination it couldn't before? Jail params live in
   `crates/lib/platform/src/sandbox/jail.rs`; mounts come from
   `RuntimeConfig::agent_dirs` and `JailConfig::base_mounts`.
+- **Data leaving the machine.** Does anything an agent produced or read
+  leave except through the model gateway's routing and redaction (labels
+  decide where, ADR 0018)? Does glassd reach a new network destination?
+  Outbound connections belong in `glass-gateway-providers`, to endpoints
+  policy names. Do credentials stay out of logs, audit records and tool
+  results?
 - **Root acting for an agent.** Does broker-side code touch paths an agent
   influences? It must go through `TaskContext::resolve*` and `ConfinedDir`,
   never `std::fs` on a joined path.
