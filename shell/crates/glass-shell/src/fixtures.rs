@@ -16,7 +16,7 @@ use crate::screens::login::SignIn;
 use crate::theme::hex;
 use crate::{Element, Message, Theme, fonts, icons, style};
 
-/// 2:14 PM on the artboard's Monday.
+/// The artboard's Monday afternoon, 1:54 PM UTC.
 pub fn now() -> Timestamp {
     Timestamp::from_unix_seconds(1_792_418_040).unwrap_or_else(Timestamp::now)
 }

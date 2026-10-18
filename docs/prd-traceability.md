@@ -166,8 +166,8 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
-| UI-4 Shell in Rust with iced and AccessKit | Partial | `shell/` (its own workspace): boot, sign-in, desktop and command-bar screens match the mockups, from `glass_api` data, live from glassd with `--socket`; rendered headlessly (M1). Missing: running in the compositor (M2, ADR 0016), input, AccessKit |
-| UI-1 … UI-3 Wayland compositor on Smithay, isolation, agent displays | Not started | ADR 0016 (proposed): framebuffer output in the VM, DRM on hardware |
+| UI-4 Shell in Rust with iced and AccessKit | Partial | `shell/` (its own workspace): boot, sign-in, desktop and command-bar screens match the mockups, from `glass_api` data. `glass-shell-fb` draws the desktop on the VM's screen (console framebuffer) with live tiles from `events.subscribe` (`make shell-vm`). Missing: the compositor (ADR 0016), input, AccessKit |
+| UI-1 … UI-3 Wayland compositor on Smithay, isolation, agent displays | Not started | ADR 0016 (accepted): framebuffer output in the VM, verified with `glass-shell-fb`; DRM on hardware |
 | UI-5, UI-6 Web apps and native apps with manifests | Not started | ADR 0009 |
 
 ## Desktop experience
@@ -178,7 +178,7 @@ element-by-element map is in [docs/design](design/README.md).
 
 | Id | Status | Notes |
 |---|---|---|
-| DK-1 Mac-like desktop | Partial | the shell renders it headlessly (menu bar, dock, tiles, command bar); not yet on a screen |
+| DK-1 Mac-like desktop | Partial | menu bar, dock, tiles and command bar; the desktop shows on the VM's screen with live tiles and clock. No windows or input yet |
 | UX-1 Chef's-choice defaults | Not started | |
 | UX-2 Setup asks ≤ 5 questions (none when enrolled), desktop in < 5 min | Not started | first-run setup (Setup mockup) |
 | UX-10 One theme restyles the whole system | Partial | the shell keeps every color and the wallpaper in one `Theme`; only Glass exists, no picker |

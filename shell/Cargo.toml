@@ -1,7 +1,7 @@
 # The desktop shell (PRD UI-4, ADR 0009): its own workspace, so the core
 # (`make build`, `make test`) never compiles the UI toolkit. It reaches the
 # rest of Glasshouse only through the control API crates (glass-api,
-# glass-rpc), like any other client.
+# glass-rpc), like any other client, and the screen through glass-platform.
 [workspace]
 resolver = "3"
 members = ["crates/*"]
@@ -19,6 +19,8 @@ glass-shell = { path = "crates/glass-shell" }
 glass-api = { path = "../crates/lib/api" }
 glass-rpc = { path = "../crates/lib/rpc" }
 glass-types = { path = "../crates/lib/types" }
+# The screen: the console framebuffer (ADR 0016).
+glass-platform = { path = "../crates/lib/platform" }
 
 # iced with only the tiny-skia software renderer: no wgpu, no winit. The
 # compositor (M2) drives the UI itself, so a windowing layer isn't needed.
@@ -37,7 +39,10 @@ kurbo = "0.10.4"
 softbuffer = { version = "0.4.8", default-features = false, features = ["kms"] }
 png = "0.18"
 anyhow = "1.0.100"
-tokio = { version = "1.48", features = ["rt", "macros"] }
+serde_json = "1.0"
+tokio = { version = "1.48", features = ["rt", "macros", "time", "signal"] }
+# The menu bar clock, in local time. Already built for glass-types.
+time = { version = "0.3.55", features = ["formatting", "macros", "local-offset"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

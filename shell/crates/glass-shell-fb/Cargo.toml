@@ -1,0 +1,22 @@
+[package]
+name = "glass-shell-fb"
+description = "Shows the desktop on the console framebuffer, without a compositor: live tiles from glassd."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-shell.workspace = true
+glass-api.workspace = true
+glass-platform.workspace = true
+glass-rpc.workspace = true
+glass-types.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

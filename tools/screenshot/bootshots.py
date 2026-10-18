@@ -6,8 +6,8 @@ the splash, the login screen) the way a user sees them.
     tools/screenshot/bootshots.py --out <dir> [--interval 0.5] [--no-reboot]
 
 Writes each distinct frame as <dir>/NNN-<seconds>s.png and a contact sheet,
-<dir>/sheet.png. Uses `vm.sh screendump` (the VM's QEMU monitor); boot the VM
-with VM_FIRMWARE=uefi to see what UEFI machines show. Needs Pillow.
+<dir>/sheet.png. Uses `vm.sh screendump` (the VM's QEMU monitor); the VM boots
+UEFI like laptops (VM_FIRMWARE=bios for the text console). Needs Pillow.
 """
 
 import argparse

@@ -11,7 +11,7 @@ publish.workspace = true
 glass-shell.workspace = true
 glass-api.workspace = true
 glass-rpc.workspace = true
-glass-types.workspace = true
+time.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 

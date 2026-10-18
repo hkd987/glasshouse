@@ -189,7 +189,7 @@ pipeline refuses further side effects (fail closed).
 | `glass-audit` | lib | Hash-chained log, verification |
 | `glass-rpc` | lib | JSON-RPC over Unix sockets, MCP types |
 | `glass-api` | lib | Control API contract (shell, CLI) |
-| `glass-platform` | lib | Jails, ZFS, confined file access, users, xattrs, system facts |
+| `glass-platform` | lib | Jails, ZFS, confined file access, users, xattrs, system facts, the console framebuffer |
 | `glass-agent-sdk` | lib | Convenience MCP client for Rust agents |
 | `glass-actions` | lib | The action contract: providers, previews, task context, registry |
 | `glass-app-files`, `-mail`, `-system`, `-helpdesk` | apps | Each app's actions (ADR 0013) |
@@ -199,4 +199,4 @@ pipeline refuses further side effects (fail closed).
 | `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
 | `glassd`, `glassctl`, `glass-mcp`, `glass-demo-agent`, `glass-it-agent`, `glass-probe` | bin | Executables |
 | `glass-e2e` | tests | End-to-end scenarios |
-| `glass-shell`, `glass-shell-preview` | shell/ (own workspace) | The desktop shell's screens (iced, software rendering) and their headless renderer; a control-API client (ADR 0009, 0016) |
+| `glass-shell`, `glass-shell-preview`, `glass-shell-fb` | shell/ (own workspace) | The desktop shell's screens (iced, software rendering), their headless renderer, and the desktop on the console framebuffer with live tiles; a control-API client (ADR 0009, 0016) |

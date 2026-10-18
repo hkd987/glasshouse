@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 glass-api.workspace = true
 glass-types.workspace = true
+time.workspace = true
 iced_core.workspace = true
 iced_widget = { workspace = true, features = ["image"] }
 iced_runtime.workspace = true

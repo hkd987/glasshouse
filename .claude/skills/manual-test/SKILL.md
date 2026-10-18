@@ -39,8 +39,14 @@ tools/screenshot/termshot.py --out <scratchpad>/shots/03-needs-you.png \
 Boot screens (the boot menu, splash and login screen) aren't terminal
 output: record them from the VM's display with
 `tools/screenshot/bootshots.py --out <scratchpad>/boot`, which reboots the VM
-and saves each distinct screen plus a contact sheet. Boot the VM with
-`VM_FIRMWARE=uefi` to see what UEFI laptops show.
+and saves each distinct screen plus a contact sheet. The VM boots UEFI like
+a laptop; `VM_FIRMWARE=bios` shows the text-console path.
+
+The desktop shell: `make shell-vm` puts it on the VM's screen with the demo
+user's live tiles, then `os/freebsd/scripts/vm.sh screendump <png>` captures
+what the screen shows. Drive the tiles with `glassctl` as demo and capture
+again; `os/freebsd/scripts/shell-vm.sh stop` when done. For screens without
+a live glassd, `make shell-preview` renders them to PNG.
 
 ## 3. Look before sending
 

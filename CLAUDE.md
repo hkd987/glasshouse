@@ -30,8 +30,9 @@ details this file leaves out.
 - `make check` while editing; never `--release` in the loop
   (`docs/dev/build-performance.md`).
 - The desktop shell is its own workspace (`shell/README.md`): `make shell-test
-  shell-lint`, and `make shell-preview` renders its screens to PNG (the user
-  likes seeing them).
+  shell-lint`; `make shell-preview` renders its screens to PNG and
+  `make shell-vm` puts the desktop on the VM's screen (the user likes seeing
+  them).
 - Anything a person waits on has a latency budget in `glass-e2e perf`
   (`docs/dev/performance.md`).
 

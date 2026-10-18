@@ -12,11 +12,15 @@
 //! - [`users`] and [`xattr`]: account lookup and data labels stored with files.
 //! - [`system`]: network, storage, load and services, for the IT self-service
 //!   agent (AE-4).
+//! - [`framebuffer`]: the console framebuffer, where the shell draws when
+//!   there is no GPU driver (ADR 0016).
 //!
-//! All `unsafe` code in the workspace is confined to the FFI in `users` and
-//! `xattr`, each block with a SAFETY note.
+//! All `unsafe` code in the workspace is confined to the FFI in `users`,
+//! `xattr` and `framebuffer`, each block with a SAFETY note.
 
 mod cmd;
+#[allow(unsafe_code)]
+pub mod framebuffer;
 pub mod fs;
 pub mod sandbox;
 pub mod snapshot;

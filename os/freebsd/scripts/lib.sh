@@ -30,9 +30,10 @@ VM_ACCEL=${VM_ACCEL:-tcg,thread=multi}
 VM_CPU_MODEL=${VM_CPU_MODEL:-max,la57=off,avx=off,avx2=off}
 VM_MEM=${VM_MEM:-4096}
 VM_DISK_SIZE=${VM_DISK_SIZE:-20G}
-VM_FIRMWARE=${VM_FIRMWARE:-bios}                          # bios, or uefi (needs OVMF; like real hardware)
+VM_FIRMWARE=${VM_FIRMWARE:-uefi}                          # uefi (OVMF; a framebuffer, like laptops), or bios (text console)
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
+VM_SCREEN=${VM_SCREEN:-1280x800}                        # the display's size (ADR 0016); match loader.conf
 VM_BOOT_TIMEOUT=${VM_BOOT_TIMEOUT:-900}                 # seconds; TCG first boot is slow
 BASE_IMAGE=${VM_BASE_IMAGE:-$PRISTINE_IMAGE}            # backing disk for new overlays
 VM_SSH_KEY=${VM_SSH_KEY:-$BUILD_DIR/vm/ssh/id_ed25519}  # dev-only key, shared by all VM_DIRs

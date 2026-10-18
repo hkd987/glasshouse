@@ -6,8 +6,9 @@ to match the mockups (`docs/design/`). It is a control-API client like
 glassctl: everything it shows comes from `glass_api` types (`TaskView`,
 `ApprovalView`), and `--socket` renders a running glassd's real tiles.
 
-M1 renders headlessly to PNG. There is no window yet; M2 runs the same
-views inside the compositor (below).
+M1 renders headlessly to PNG. M2 puts the same views on a screen: first
+straight onto the console framebuffer (`glass-shell-fb`, ADR 0016), then
+inside the compositor (below).
 
 ## Run it
 
@@ -16,7 +17,17 @@ make shell-preview                 # build/shell-preview/{boot,login,desktop,com
 make shell-preview SOCKET=/var/run/glasshouse/control.sock   # live tiles from glassd (task.list)
 make shell-test                    # unit tests, landmarks, snapshot digests
 make shell-lint                    # fmt check and clippy -D warnings
+make shell-vm                      # the desktop on the dev VM's screen, live tiles
+os/freebsd/scripts/vm.sh screendump desktop.png   # see it
 ```
+
+`make shell-vm` cross-builds `glass-shell-fb`, copies it into the running
+VM and starts it on the first virtual terminal as `demo`
+(`os/freebsd/scripts/shell-vm.sh start|stop|once [user]`). It maps the
+console framebuffer (`glass_platform::framebuffer`), draws the user's
+tiles, and redraws when glassd reports a change (`events.subscribe`) or
+the menu bar clock turns over, copying only the rows that changed. Its log
+is `/var/log/glass-shell-fb.log` in the VM.
 
 `glass-shell-preview --scale 2` renders at 2x. The snapshot test keeps an
 FNV digest per screen in `crates/glass-shell/tests/snapshots/`; after an
@@ -35,6 +46,7 @@ under `shell/target/tmp/` so you can compare it.
 | `crates/glass-shell/src/icons.rs`, `wallpaper.rs` | Icons from the mockups' SVG paths and the blurred wallpaper, rasterized with tiny-skia |
 | `crates/glass-shell/src/fixtures.rs` | The mockups' content, for previews and tests |
 | `crates/glass-shell-preview` | The PNG renderer binary |
+| `crates/glass-shell-fb` | The desktop on the console framebuffer, with live tiles (M2 step 1) |
 | `assets/fonts/` | Geist and Geist Mono, with their licenses |
 
 ## Why a separate workspace
@@ -42,7 +54,8 @@ under `shell/target/tmp/` so you can compare it.
 The UI toolkit is about 120 crates. Keeping it out of the root workspace
 means `make build`, `make test`, `make lint` and the FreeBSD cross-builds of
 glassd and friends never compile or wait on it. The shell depends on the
-core's `glass-api`, `glass-types` and `glass-rpc` by path, so an API change
+core's `glass-api`, `glass-types`, `glass-rpc` and (for the screen)
+`glass-platform` by path, so an API change
 that breaks it shows up in `make shell-test`. Its build output goes to
 `shell/target/`.
 
@@ -74,9 +87,9 @@ font licenses land in the image's notices next to the crates'.
    (DRM/KMS, libinput) and draws the shell as its desktop layer: the same
    `tiny-skia` frames, presented through dumb buffers (or a pixman
    renderer), so no GPU driver is required.
-2. **Live state.** Subscribe to `events.subscribe` and redraw tiles,
-   the agents pill and the dock badge as tasks change, instead of one
-   `task.list`.
+2. **Live state.** Done in `glass-shell-fb`: it subscribes to
+   `events.subscribe` and redraws tiles, the agents pill and the clock as
+   they change.
 3. **Input.** Keyboard and pointer from the compositor into iced events:
    Ctrl Space opens the command bar, Approve sends `approval.answer`,
    opening a tile goes to `task.get` and its activity, sign in talks to the

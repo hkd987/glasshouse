@@ -1,6 +1,7 @@
 # 0016. Showing the shell: framebuffer in the VM, DRM on hardware
 
-Status: **Proposed**. PRD UI-1, UI-3, UI-4, DK-1. Builds on ADR 0009.
+Status: **Accepted** (the framebuffer output is verified in the VM; the
+compositor is next). PRD UI-1, UI-3, UI-4, DK-1. Builds on ADR 0009.
 
 ## Context
 The shell (`shell/`, iced on the tiny-skia software renderer) renders the
@@ -59,6 +60,26 @@ niri port and the 15.1 package catalog:
   FreeBSD minor release, and has broken on -STABLE before.
 - seatd doesn't hand out the framebuffer, so the compositor owns the VT
   (it runs as a session started by the greeter).
-- Not yet verified at run time: devmatch loading hms(4) by itself, and
-  SeaBIOS VBE modes with each VGA variant. The first M2 step checks these
-  in the VM.
+- The VM boots UEFI by default: under BIOS (SeaBIOS) the console stays in
+  VGA text mode even with `vbe_max_resolution`, so there is nothing to map.
+  OVMF's stored boot entries name PCI slots, so the VM starts from fresh
+  UEFI variables each time rather than keep entries for a device layout
+  that changed.
+
+## What the first step showed (M2a, `glass-shell-fb`)
+Run in the VM under UEFI with `-device VGA,xres=1280,yres=800`:
+
+- The console comes up as `VT(efifb): resolution 1280x800`, and
+  `FBIOGTYPE`, `FBIO_GETLINEWIDTH` (5120-byte rows) and mmap work on
+  `/dev/ttyv0` for the user who owns the terminal; the pixel layout is
+  blue lowest (B, G, R, X).
+- `KDSETMODE KD_GRAPHICS` stops the console drawing over the shell. Back
+  in `KD_TEXT` the console doesn't redraw by itself, and `CONS_CLRHIST`
+  would redraw it but erases the visible text, so on exit the shell
+  switches to another terminal and back, which redraws it intact.
+- devmatch loads hms(4) for `usb-tablet` by itself.
+- Drawing the full desktop takes 1.6 to 2 s in the emulated VM (debug
+  build); copying the changed rows to the screen takes 10 to 40 ms. A
+  clock tick changes 22 rows. Real hardware with an optimized build is
+  orders of magnitude faster; the compositor will draw only damaged
+  regions.

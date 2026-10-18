@@ -82,7 +82,8 @@ the containment probe is expected to fail there.
 | Start the VM from a clean first boot | `make vm-reset vm-up vm-wait vm-deploy` |
 | Rebuild everything from scratch | `make clean` (keeps the FreeBSD downloads) |
 | Bake a bootable image of the current build | `make image` (`make image-release` for a shippable one) |
-| Boot the way laptops do (UEFI) | `make vm-down`, then `VM_FIRMWARE=uefi make vm-up vm-wait` (needs `ovmf`) |
+| Boot with a BIOS text console instead of UEFI | `make vm-down`, then `VM_FIRMWARE=bios make vm-up vm-wait`. UEFI (the default, `ovmf`) gives the 1280x800 framebuffer the shell draws on (`VM_SCREEN`, ADR 0016) |
+| Put the desktop shell on the VM's screen | `make shell-vm`, then `os/freebsd/scripts/vm.sh screendump shot.png`; `os/freebsd/scripts/shell-vm.sh stop` gives the console back |
 | See what the VM's screen shows | `os/freebsd/scripts/vm.sh screendump shot.png`; `tools/screenshot/bootshots.py --out <dir>` reboots and records every boot screen |
 
 ## Troubleshooting

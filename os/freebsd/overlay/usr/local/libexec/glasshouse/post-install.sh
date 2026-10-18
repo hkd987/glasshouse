@@ -29,9 +29,10 @@ install -C -o root -g wheel -m 0444 "$branding/gfx-glasshouse.lua" /boot/lua/gfx
 install -C -o root -g wheel -m 0444 "$branding/splash.png" /boot/images/glasshouse-splash.png
 install -C -o root -g wheel -m 0444 "$branding/logo.png" /boot/images/glasshouse-logo.png
 # (rc.d/glasshouse_identity sets the console for this machine's firmware.)
+# The framebuffer console runs at the screen size the shell draws for (ADR 0016).
 sysrc -q -f /boot/loader.conf loader_brand=glasshouse loader_logo=glasshouse \
 	loader_menu_title="Welcome to Glasshouse" autoboot_delay=2 beastie_disable=NO \
-	boot_mute=YES \
+	boot_mute=YES efi_max_resolution=1280x800 vbe_max_resolution=1280x800 \
 	splash=/boot/images/glasshouse-splash.png \
 	shutdown_splash=/boot/images/glasshouse-splash.png >/dev/null
 sysrc -q rc_startmsgs=NO >/dev/null

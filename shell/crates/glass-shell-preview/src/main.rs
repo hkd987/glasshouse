@@ -48,6 +48,9 @@ fn args() -> anyhow::Result<Args> {
 
 fn main() -> anyhow::Result<()> {
     let args = args()?;
+    // Only readable while the process has one thread.
+    let local_now =
+        time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
     let theme = Theme::glass();
     let size = Size::new(1440.0, 900.0);
     let (w, h) = (size.width, size.height);
@@ -80,11 +83,11 @@ fn main() -> anyhow::Result<()> {
     write("boot.png", boot::view(&theme, 0.42))?;
     write("login.png", login::view(&theme, &sign_in, (w, h)))?;
 
-    let mut state = fixtures::desktop(&tasks);
-    if live.is_some() {
-        // Live tiles count their time from now, not the artboard's 2:14 PM.
-        state.now = glass_types::Timestamp::now();
-    }
+    // Live tiles count their time from now, not the artboard's afternoon.
+    let state = match live {
+        Some(_) => desktop::Desktop::live(&tasks, local_now),
+        None => fixtures::desktop(&tasks),
+    };
     let windows = vec![desktop::Window {
         title: "Q3 Forecast — Finance".into(),
         x: 48.0,

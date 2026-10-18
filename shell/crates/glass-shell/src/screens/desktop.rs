@@ -7,6 +7,8 @@ use glass_types::Timestamp;
 use iced_core::alignment::{Horizontal, Vertical};
 use iced_core::{Color, Length, Padding};
 use iced_widget::{Column, Row, column, container, image, pin, row, stack, text};
+use time::OffsetDateTime;
+use time::macros::format_description;
 
 use crate::theme::{Surface, hex};
 use crate::{Element, Message, Theme, fonts, icons, style, tiles, wallpaper};
@@ -26,6 +28,44 @@ pub struct Desktop<'a> {
     pub date: (String, u8),
     /// False collapses the tile stack, as while the command bar is open.
     pub tiles_visible: bool,
+}
+
+impl<'a> Desktop<'a> {
+    /// The desktop at `now`, in the user's local time: the menu bar clock
+    /// and the calendar's dock icon follow it. With no app open, the menu
+    /// bar names the desktop.
+    pub fn live(tasks: &'a [TaskView], now: OffsetDateTime) -> Self {
+        let menus = ["File", "Edit", "View", "Window", "Help"];
+        Desktop {
+            tasks,
+            now: Timestamp::from_unix_seconds(now.unix_timestamp()).unwrap_or_else(Timestamp::now),
+            clock: clock(now),
+            app: "Desktop".into(),
+            menus: menus.map(String::from).to_vec(),
+            date: (
+                clock_part(now, format_description!("[month repr:short]")).to_uppercase(),
+                now.day(),
+            ),
+            tiles_visible: true,
+        }
+    }
+}
+
+/// The menu bar clock: "Mon Oct 19  2:14 PM".
+pub fn clock(at: OffsetDateTime) -> String {
+    clock_part(
+        at,
+        format_description!(
+            "[weekday repr:short] [month repr:short] [day padding:none]  [hour repr:12 padding:none]:[minute] [period]"
+        ),
+    )
+}
+
+fn clock_part(
+    at: OffsetDateTime,
+    format: &[time::format_description::BorrowedFormatItem<'_>],
+) -> String {
+    at.format(format).unwrap_or_default()
 }
 
 /// An app window: the shell draws its frame (controls on the left, the
@@ -157,13 +197,9 @@ fn agents_pill<'a>(theme: &Theme, tasks: &[TaskView]) -> Element<'a, Message> {
     for color in status_dots(theme, tasks) {
         dots = dots.push(dot(color, 7.0));
     }
-    let label = match count {
-        1 => "1 agent".to_owned(),
-        n => format!("{n} agents"),
-    };
     let bar = theme.menu_bar;
     container(
-        row![dots, text(label).size(13).color(bar.text)]
+        row![dots, text(pill_label(count)).size(13).color(bar.text)]
             .spacing(6)
             .align_y(Vertical::Center),
     )
@@ -171,6 +207,16 @@ fn agents_pill<'a>(theme: &Theme, tasks: &[TaskView]) -> Element<'a, Message> {
     .center_y(Length::Fixed(22.0))
     .style(move |_| style::panel(bar.fill, 11.0))
     .into()
+}
+
+/// The pill counts the agents still at work; ended tiles stay on screen
+/// until dismissed, so none running isn't "0 agents".
+fn pill_label(running: usize) -> String {
+    match running {
+        0 => "No agents running".to_owned(),
+        1 => "1 agent".to_owned(),
+        n => format!("{n} agents"),
+    }
 }
 
 /// Up to three dots for the live agents, the ones that need you last so
@@ -368,6 +414,25 @@ mod tests {
             .map(|t| t.agent_name.as_str())
             .collect();
         assert_eq!(names, ["Expense agent", "Meeting prep", "Invoice agent"]);
+    }
+
+    #[test]
+    fn a_live_desktop_shows_the_local_time_and_date() {
+        let tasks = fixtures::tasks();
+        let afternoon = time::macros::datetime!(2026-10-19 14:14 UTC);
+        let live = Desktop::live(&tasks, afternoon);
+        assert_eq!(live.clock, "Mon Oct 19  2:14 PM");
+        assert_eq!(live.date, ("OCT".into(), 19));
+        assert_eq!(live.now.unix_seconds(), afternoon.unix_timestamp());
+        let morning = afternoon.replace_hour(9).expect("valid");
+        assert_eq!(clock(morning), "Mon Oct 19  9:14 AM");
+    }
+
+    #[test]
+    fn the_pill_counts_running_agents_in_words() {
+        assert_eq!(pill_label(0), "No agents running");
+        assert_eq!(pill_label(1), "1 agent");
+        assert_eq!(pill_label(3), "3 agents");
     }
 
     #[test]

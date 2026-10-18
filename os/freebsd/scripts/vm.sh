@@ -13,7 +13,7 @@
 #   console-log [-f]   print (or follow) the serial console log
 #   screendump <out.png>     save what the VM's display shows right now (boot screens, splash)
 # Env knobs: VM_DIR VM_SSH_PORT VM_CPUS VM_CPU_MODEL VM_ACCEL VM_MEM VM_DISK_SIZE VM_BOOT_TIMEOUT VM_BASE_IMAGE
-#   VM_FIRMWARE=bios|uefi (see lib.sh).
+#   VM_FIRMWARE=uefi|bios VM_SCREEN (see lib.sh).
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -51,7 +51,9 @@ cmd_up() {
 	local firmware=()
 	if [[ $VM_FIRMWARE == uefi ]]; then
 		[[ -f $OVMF_CODE ]] || die "VM_FIRMWARE=uefi needs OVMF ($OVMF_CODE): apt-get install ovmf"
-		[[ -f $VM_EFIVARS ]] || cp "$OVMF_VARS" "$VM_EFIVARS"
+		# Fresh each start: stored boot entries name PCI slots, and go stale
+		# when the device list changes.
+		cp "$OVMF_VARS" "$VM_EFIVARS"
 		firmware=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE"
 			-drive "if=pflash,format=raw,unit=1,file=$VM_EFIVARS")
 	fi
@@ -63,6 +65,8 @@ cmd_up() {
 		-drive "if=virtio,file=$VM_SEED,format=raw,readonly=on" \
 		-netdev "user,id=net0,hostname=glasshouse-dev,hostfwd=tcp:127.0.0.1:$VM_SSH_PORT-:22" \
 		-device virtio-net-pci,netdev=net0 -device virtio-rng-pci \
+		-vga none -device "VGA,xres=${VM_SCREEN%x*},yres=${VM_SCREEN#*x}" \
+		-device qemu-xhci -device usb-kbd -device usb-tablet \
 		"${firmware[@]}" \
 		-display none -monitor "unix:$VM_MONITOR,server,nowait" -serial "file:$VM_CONSOLE" \
 		-daemonize -pidfile "$VM_PIDFILE"
