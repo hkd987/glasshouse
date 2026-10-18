@@ -23,8 +23,8 @@ Tests: *unit* = crate unit tests, *pipeline* =
 
 | Id | Status | Where | Verified by |
 |---|---|---|---|
-| PA-1 No grants → no files, network, processes | **Done** | `platform/sandbox/jail.rs` | e2e `containment` (19/19 probe checks in a real jail) |
-| PA-2 Grants per task, expire at end | **Done** | `runtime/supervise.rs`, `broker/desk.rs` | e2e `stop`, crash recovery; pipeline `stopping_tears_down…` |
+| PA-1 No grants → no files, network, processes | **Done** | `platform/sandbox/jail.rs` | e2e `containment` (20/20 probe checks in a real jail, including the resource limits) |
+| PA-2 Grants per task, expire at end | **Done** | `runtime/supervise.rs`, `broker/desk.rs`; the jail's resource limits go with it (`exec.poststop`, `platform/sandbox/jail.rs`) | e2e `stop`, crash recovery (orphaned jail and its limits removed); pipeline `stopping_tears_down…`; e2e root checks: no jails, mounts or limits left behind |
 | PA-3 Escapes are P0 bugs, bounty | Process | — | — |
 | PA-4 On-behalf-of tokens downstream | Not started | — | needs identity federation |
 | PA-5 Upstream FreeBSD + our layers | **Done** | `os/freebsd`, ADR 0002 | VM boots pinned 15.1-RELEASE |
@@ -201,7 +201,7 @@ element-by-element map is in [docs/design](design/README.md).
 | UX-10 One theme restyles the whole system | Partial | the shell keeps every color and the wallpaper in one `Theme`; only Glass exists, no picker |
 | UX-20 Everything by keyboard, cheat sheet, Windows shortcuts too | Not started | shell |
 | UX-21 Snapping, saved layouts, optional tiling | Not started | compositor |
-| UX-22 Performance budgets on every build; papercut program | Partial | OS-side budgets in `glass-e2e perf` (docs/dev/performance.md); input lag, app launch, window open and wake need the shell |
+| UX-22 Performance budgets on every build; papercut program | Partial | OS-side budgets in `glass-e2e perf` (docs/dev/performance.md), and the same reads with two busy agents running (`glass-e2e load`; agents run below the person's priority with resource limits); a boot budget, measured with `tools/boot/timeline.py` and guarded on every build by `check-boot.sh`; input lag, app launch, window open and wake need the shell |
 | UX-30 "Ask the agent" on every error, crash and failed update | Partial | the IT agent diagnoses, fixes from IT's list and files tickets (AE-4); the notification and its button need the shell |
 | UX-3, UX-11, UX-31, UX-40 Try-it VM, org themes, explain any setting, tailorable desktop | P1 | UX-40 reuses tailoring layers (ADR 0014) |
 

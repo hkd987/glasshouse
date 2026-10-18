@@ -212,8 +212,22 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
 
     let sandbox: Arc<dyn Sandbox> = match config.sandbox.backend {
         SandboxBackend::Jail => {
+            let machine = glass_platform::system::resources();
+            let mut limits = config
+                .sandbox
+                .limits
+                .resolve(machine.cpus, machine.physical_memory);
+            if !machine.accounting {
+                tracing::warn!(
+                    "resource accounting is off (kern.racct.enable), so agents run without \
+                     CPU, memory and disk limits until the machine restarts with it on"
+                );
+                limits = limits.priority_only();
+            }
+            tracing::info!(?limits, "agent resource limits");
             let mut jail = JailConfig {
                 state_dir: run_dir.join("jails"),
+                limits,
                 ..JailConfig::default()
             };
             if let Some(mounts) = &config.sandbox.base_mounts {

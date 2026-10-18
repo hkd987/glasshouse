@@ -39,6 +39,12 @@ if grep -q 'rc_fast.*return 0' /usr/local/etc/rc.d/glassd; then
 else
 	flunk "rc.d/glassd runs glassd --check at boot, a second glassd on the way to login"
 fi
+if loader 'kern.racct.enable="1"' && [ "$(sysctl -n kern.racct.enable)" = 1 ]; then
+	pass "resource accounting on, for agents' limits"
+else
+	flunk "resource accounting is off: restart the VM once after deploying (kern.racct.enable)"
+fi
+
 # Our identity script runs on every boot. Report what it takes; fail only on
 # a large regression (about 0.7 s a run in the emulated VM, most of it
 # rc.subr reading the rc configuration; 1.9 s before it used builtins).

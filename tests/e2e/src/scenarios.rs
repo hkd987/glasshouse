@@ -34,7 +34,7 @@ pub async fn containment(h: &Harness) -> anyhow::Result<()> {
         .wait_for(task, TileState::Done, LONG)
         .await
         .context("the probe found a leak")?;
-    // "Containment: 19/19 checks passed"
+    // "Containment: 20/20 checks passed"
     let counts = detail
         .view
         .caption

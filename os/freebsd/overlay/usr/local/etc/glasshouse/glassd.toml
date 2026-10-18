@@ -19,6 +19,18 @@ model_secrets = "/usr/local/etc/glasshouse/model-secrets.toml"
 backend = "jail"
 agent_dirs = ["/usr/local/libexec/glasshouse"]
 
+# The person comes first: agents start below their CPU priority, and each
+# task's jail gets these limits for as long as it exists. Shares are of this
+# machine; 0 turns a limit off. Resource limits need the machine booted with
+# kern.racct.enable=1 (post-install.sh sets it). docs/dev/performance.md,
+# "Under load", has the measurements behind these.
+[sandbox.limits]
+nice = 10
+cpu_percent = 50
+memory_percent = 25
+read_mb_per_sec = 64
+write_mb_per_sec = 32
+max_processes = 256
 
 [snapshots]
 backend = "zfs"

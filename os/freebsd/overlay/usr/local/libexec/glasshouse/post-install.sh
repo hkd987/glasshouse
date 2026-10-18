@@ -72,6 +72,12 @@ service glasshouse_identity start >/dev/null
 if zpool list zroot >/dev/null 2>&1; then
 	zpool set autotrim=on zroot
 fi
+# Agents run with resource limits (rctl) so the person's own work stays
+# responsive; the kernel accounts for resources only when booted with this.
+loader_tunable kern.racct.enable 1
+if [ "$(sysctl -n kern.racct.enable)" != 1 ]; then
+	echo "post-install: restart once to turn on agents' resource limits (kern.racct.enable)"
+fi
 # Console login: the full mark before the prompt, and a banner that names the
 # product, not the base system (%s).
 install -C -o root -g wheel -m 0644 "$branding/issue" /etc/issue
