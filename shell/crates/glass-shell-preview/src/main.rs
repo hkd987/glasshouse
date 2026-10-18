@@ -80,7 +80,11 @@ fn main() -> anyhow::Result<()> {
     write("boot.png", boot::view(&theme, 0.42))?;
     write("login.png", login::view(&theme, &sign_in, (w, h)))?;
 
-    let state = fixtures::desktop(&tasks);
+    let mut state = fixtures::desktop(&tasks);
+    if live.is_some() {
+        // Live tiles count their time from now, not the artboard's 2:14 PM.
+        state.now = glass_types::Timestamp::now();
+    }
     let windows = vec![desktop::Window {
         title: "Q3 Forecast — Finance".into(),
         x: 48.0,

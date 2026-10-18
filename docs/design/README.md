@@ -9,7 +9,10 @@ stale when the canvas changes; re-render them with the `prd-sync` skill
 The desktop is **Mac-like** (DK-1, revised): a translucent menu bar across
 the top, a dock at the bottom, window controls on the left, agent tiles at
 the top right, and the command bar opening over everything with Ctrl Space.
-The shell (compositor and GUI) is not built yet. Everything a tile, the
+The shell's first screens exist: `shell/` renders the Desktop, Sign in,
+Boot and Command bar boards from `glass-api` data (`make shell-preview`;
+`SOCKET=` for a live glassd's tiles). It doesn't run on a screen yet (M2,
+ADR 0016), and the compositor is not built. Everything a tile, the
 expanded view and the handoff card show already comes from the control API
 (`glass-api`), so the shell can be built directly against it. The tables
 below say which field drives each element, and what's still missing.

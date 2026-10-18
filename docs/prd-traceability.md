@@ -166,7 +166,9 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
-| UI-1 … UI-6 Wayland compositor on Smithay, iced + AccessKit shell, web apps with manifests | Not started | ADR 0009. The control API already carries everything tiles, the expanded view, handoff and Changes show (docs/design) |
+| UI-4 Shell in Rust with iced and AccessKit | Partial | `shell/` (its own workspace): boot, sign-in, desktop and command-bar screens match the mockups, from `glass_api` data, live from glassd with `--socket`; rendered headlessly (M1). Missing: running in the compositor (M2, ADR 0016), input, AccessKit |
+| UI-1 … UI-3 Wayland compositor on Smithay, isolation, agent displays | Not started | ADR 0016 (proposed): framebuffer output in the VM, DRM on hardware |
+| UI-5, UI-6 Web apps and native apps with manifests | Not started | ADR 0009 |
 
 ## Desktop experience
 
@@ -176,10 +178,10 @@ element-by-element map is in [docs/design](design/README.md).
 
 | Id | Status | Notes |
 |---|---|---|
-| DK-1 Mac-like desktop | Not started | shell; the first shell crate renders the desktop, sign-in and boot screens headlessly (M1) |
+| DK-1 Mac-like desktop | Partial | the shell renders it headlessly (menu bar, dock, tiles, command bar); not yet on a screen |
 | UX-1 Chef's-choice defaults | Not started | |
 | UX-2 Setup asks ≤ 5 questions (none when enrolled), desktop in < 5 min | Not started | first-run setup (Setup mockup) |
-| UX-10 One theme restyles the whole system | Not started | the shell keeps every color, radius and wallpaper in one theme |
+| UX-10 One theme restyles the whole system | Partial | the shell keeps every color and the wallpaper in one `Theme`; only Glass exists, no picker |
 | UX-20 Everything by keyboard, cheat sheet, Windows shortcuts too | Not started | shell |
 | UX-21 Snapping, saved layouts, optional tiling | Not started | compositor |
 | UX-22 Performance budgets on every build; papercut program | Partial | OS-side budgets in `glass-e2e perf` (docs/dev/performance.md); input lag, app launch, window open and wake need the shell |

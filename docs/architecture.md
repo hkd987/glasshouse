@@ -195,3 +195,4 @@ pipeline refuses further side effects (fail closed).
 | `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
 | `glassd`, `glassctl`, `glass-mcp`, `glass-demo-agent`, `glass-it-agent`, `glass-probe` | bin | Executables |
 | `glass-e2e` | tests | End-to-end scenarios |
+| `glass-shell`, `glass-shell-preview` | shell/ (own workspace) | The desktop shell's screens (iced, software rendering) and their headless renderer; a control-API client (ADR 0009, 0016) |

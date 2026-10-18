@@ -25,10 +25,13 @@ details this file leaves out.
   main (rustfmt, clippy `-D warnings` for host and FreeBSD, layering, art,
   shellcheck); `make lint-all` checks everything, as CI does.
 - `make freebsd vm-deploy` (~12 s) to try a change in the VM;
-  `make e2e-vm` (~2 min) after any change to agent-facing behavior.
+  `make e2e-vm` (~1 min) after any change to agent-facing behavior.
 - `make dev-host` runs glassd locally with the insecure host sandbox.
 - `make check` while editing; never `--release` in the loop
   (`docs/dev/build-performance.md`).
+- The desktop shell is its own workspace (`shell/README.md`): `make shell-test
+  shell-lint`, and `make shell-preview` renders its screens to PNG (the user
+  likes seeing them).
 - Anything a person waits on has a latency budget in `glass-e2e perf`
   (`docs/dev/performance.md`).
 
