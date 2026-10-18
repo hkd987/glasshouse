@@ -1,7 +1,8 @@
 # Repository layout and conventions
 
 This codebase will grow to hundreds of crates and several languages. These
-rules keep it navigable. `make lint` enforces the mechanical ones.
+rules keep it navigable. `make lint` (what changed) and `make lint-all`
+(everything) enforce the mechanical ones.
 
 ## Where things go
 
