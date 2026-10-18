@@ -7,12 +7,15 @@
 //!   action: which tier, why, which labels, and what the agent can't touch.
 //! - [`ModelRules`] say which approved model a model call may go to, given
 //!   the label of the data it carries (DP-2, ADR 0018).
+//! - [`store`] decides which policy is in force at start, from local disk,
+//!   and keeps the last good one to fall back on (ADR 0021).
 
 pub mod document;
 mod engine;
 mod labels;
 mod models;
 mod pattern;
+pub mod store;
 
 pub use engine::{
     EVERYONE, EffectivePolicy, LoosenRefused, Policy, PolicyError, RuleSource, TierDecision,

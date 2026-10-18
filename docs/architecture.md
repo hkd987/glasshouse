@@ -94,6 +94,13 @@ absolute paths and symlinks that leave the grant.
 
 ## Decisions, approvals, labels
 
+- Policy at start comes from local disk only, checked once by glassd as it
+  starts: `policy.toml`, or the built-in default without one. If the file
+  doesn't validate, glassd enforces the last policy that did
+  (`<state_dir>/policy/last-good.toml`) and says why; with no good copy it
+  refuses to start. Managed settings will be fetched in the background
+  after the desktop is up and applied whole, never on the boot path
+  (ADR 0021).
 - Tiers come from policy (`glass-policy`): org baseline, then group and agent
   rules (stricter wins between them), then task restrictions (stricter only).
   Actions outside an agent's allow-list are Never. Each decision records the

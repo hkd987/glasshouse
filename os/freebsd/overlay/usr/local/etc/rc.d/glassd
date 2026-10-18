@@ -29,7 +29,10 @@ pidfile="/var/run/${name}.pid"
 procname="/usr/local/sbin/glassd"
 command="/usr/sbin/daemon"
 # -p records glassd's own pid (not the supervisor's) so rc.subr can track it.
-command_args="-f -p ${pidfile} -o ${glassd_log} ${procname} --config ${glassd_config}"
+# glassd checks its config and policy as it starts and, with
+# --console-errors, says on the console why if it won't run (BR-1: the
+# message names Glasshouse only).
+command_args="-f -p ${pidfile} -o ${glassd_log} ${procname} --config ${glassd_config} --console-errors"
 start_precmd="glassd_precmd"
 extra_commands="suspend resume"
 suspend_cmd="glassd_suspend"
@@ -37,8 +40,10 @@ resume_cmd="glassd_resume"
 
 glassd_precmd()
 {
-	# Refuse to start on a config or policy that doesn't validate, and say
-	# why only then: at boot this prints on the user's console (BR-1).
+	# At boot glassd's own checks are enough: running them here too would
+	# start glassd twice on the way to the login screen (ADR 0021). Started
+	# by hand, check first, so a refusal shows on the terminal that asked.
+	[ -n "${rc_fast}" ] && return 0
 	local out
 	if ! out=$("${procname}" --config "${glassd_config}" --check 2>&1); then
 		echo "${out}" >&2

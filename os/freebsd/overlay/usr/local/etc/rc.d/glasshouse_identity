@@ -6,17 +6,22 @@
 # KEYWORD: nojail
 #
 # BR-1: the system says Glasshouse wherever users look. Writes the OS
-# identity (/etc/os-release) and the login message (/etc/motd), which the
-# base system would otherwise fill in with its own name, and keeps the boot
-# menu's console right for this machine's firmware. post-install.sh turns
-# the base writers (osrelease_enable, update_motd) off.
+# identity (/etc/os-release), which the base system would otherwise fill in
+# with its own name, and keeps the boot menu's console right for this
+# machine's firmware. post-install.sh turns the base writers
+# (osrelease_enable, update_motd) off and points /etc/motd at our login
+# message.
+#
+# It runs on every boot, on the way to the login screen, so it uses shell
+# builtins wherever it can: each program it started cost a fifth of a
+# second in the emulated VM (docs/dev/performance.md, "Boot").
 
 # rc.subr reads the rc variables below, and FreeBSD's sh has `local`.
 # shellcheck disable=SC1091,SC2034,SC3043
 . /etc/rc.subr
 
 name="glasshouse_identity"
-desc="Write the Glasshouse OS identity and login message"
+desc="Write the Glasshouse OS identity"
 rcvar="glasshouse_identity_enable"
 start_cmd="glasshouse_identity_start"
 stop_cmd=":"
@@ -25,25 +30,22 @@ branding=/usr/local/share/glasshouse/branding
 
 glasshouse_identity_start()
 {
-	local version build t console
+	local key value version build console current
 
-	version=$(sed -n 's/^version=//p' "$branding/build-info" 2>/dev/null)
-	build=$(sed -n 's/^build=//p' "$branding/build-info" 2>/dev/null)
-	t=$(mktemp -t os-release)
-	cat > "$t" <<-__EOF__
-		NAME=Glasshouse
-		VERSION="${version:-dev}"
-		VERSION_ID="${version:-0}"
-		BUILD_ID="${build:-unknown}"
-		ID=glasshouse
-		PRETTY_NAME="Glasshouse ${version:-dev}"
-	__EOF__
-	install -C -o root -g wheel -m 444 "$t" /var/run/os-release
-	rm -f "$t"
+	if [ -r "$branding/build-info" ]; then
+		while IFS='=' read -r key value; do
+			case $key in
+			version) version=$value ;;
+			build) build=$value ;;
+			esac
+		done <"$branding/build-info"
+	fi
+	# /var/run is emptied at every boot (cleanvar), so this is written
+	# each time.
+	printf '%s\n' NAME=Glasshouse "VERSION=\"${version:-dev}\"" \
+		"VERSION_ID=\"${version:-0}\"" "BUILD_ID=\"${build:-unknown}\"" \
+		ID=glasshouse "PRETTY_NAME=\"Glasshouse ${version:-dev}\"" >/var/run/os-release
 	[ -h /etc/os-release ] || ln -sf ../var/run/os-release /etc/os-release
-
-	install -C -o root -g wheel -m 644 "$branding/motd" /var/run/motd
-	[ -h /etc/motd ] || ln -sf ../var/run/motd /etc/motd
 
 	# The boot menu (our brand and logo) draws on the firmware's screen
 	# console and the serial one. The loader rejects the whole list if one
@@ -52,7 +54,16 @@ glasshouse_identity_start()
 	UEFI) console="efi" ;;
 	*) console="comconsole,vidconsole" ;;
 	esac
-	if [ "$(sysrc -f /boot/loader.conf -n console 2>/dev/null)" != "$console" ]; then
+	while IFS= read -r key; do
+		case $key in
+		console=*)
+			current=${key#console=}
+			current=${current#\"}
+			current=${current%\"}
+			;;
+		esac
+	done </boot/loader.conf
+	if [ "$current" != "$console" ]; then
 		sysrc -q -f /boot/loader.conf console="$console" >/dev/null
 	fi
 }

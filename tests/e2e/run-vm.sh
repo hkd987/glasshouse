@@ -9,7 +9,9 @@
 #      orphaned jail and the audit log is intact
 #   5. the model gateway with the scripted provider, under a test policy
 #   6. branding: no base-system name where a user looks (BR-1, BR-2)
-#   7. root checks: audit chain verifies, no jails or mounts left behind
+#   7. boot: the settings a fast boot depends on (no reboot; see
+#      tools/boot/timeline.py for a whole boot)
+#   8. root checks: audit chain verifies, no jails or mounts left behind
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -81,6 +83,10 @@ exit \$status"
 step "branding (BR-1, BR-2)"
 "$vm" scp-in "$repo/tests/e2e/check-branding.sh" /tmp/check-branding.sh
 "$vm" run "sh /tmp/check-branding.sh"
+
+step "boot (docs/dev/performance.md)"
+"$vm" scp-in "$repo/tests/e2e/check-boot.sh" /tmp/check-boot.sh
+"$vm" run "sh /tmp/check-boot.sh"
 
 step "root checks"
 # `hold` leaves its workspace for the task it starts; the tasks are gone now.
