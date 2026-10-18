@@ -218,7 +218,8 @@ fn describe(state: &ApprovalState) -> String {
     }
 }
 
-/// A fresh pending view, for callers building asks.
+/// A fresh pending view with the default answer labels, for callers
+/// building asks.
 pub fn new_view(
     task: TaskId,
     agent: glass_types::AgentId,
@@ -241,6 +242,7 @@ pub fn new_view(
         expires_at: Timestamp::from_unix_seconds(now.unix_seconds() + timeout_secs as i64)
             .unwrap_or(now),
         state: ApprovalState::Pending,
+        labels: Default::default(),
     }
 }
 

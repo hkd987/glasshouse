@@ -32,7 +32,7 @@ light desktop; accent `#3D6BFF` for working and you're-driving; attention
 | Elapsed ("4 min") | now − `started_at` |
 | Feed: verb column + target (AW-3) | `feed[].verb`, `feed[].target` (`text` is the whole line) |
 | Caption and "12 / 40" (AW-4) | `caption`, `progress` (agents call `report_progress`) |
-| Needs-you question, Review drafts / Approve and send | `needs: ApprovalView` (`summary`, `items`) → `approval.answer` |
+| Needs-you question, Review drafts / Approve and send | `needs: ApprovalView` (`summary`, `items`; `labels` are the action's own answer words, `ActionDef.ask`, "Review" and "Approve" by default) → `approval.answer` |
 | "Allow sends for the rest of this task" | `ApprovalAnswer::Approve { scope: Task }` |
 | Screen thumbnail with labeled agent cursor (AW-2) | **Not built**: needs screen-control agents |
 | Menu bar: app menus, "3 agents" pill with one dot per tile, Wi-Fi, battery, clock | `task.list` counts and states; app menus come from the focused app (shell); Wi-Fi and battery from the system (PM, CF) |
@@ -116,7 +116,7 @@ e2e `changes` scenario.
 | "Changes by Invoice agent", "finished 2:41 PM · on behalf of you" | `TaskDetail.view` (`agent_name`, `updated_at`, `user`) |
 | Counts: Reconciled 40, Flagged for you 2 | `progress`, `receipt.flagged` |
 | Left the machine: 1 email | `receipt.left_machine` |
-| Saved as drafts: 38 | **Not built**: counts in the agent's own terms need an agent-reported outcome (`report_progress` carries only a caption and numbers today) |
+| Saved as drafts: 38 | **Not built**: counts in the agent's own terms need an agent-reported outcome (`report_progress` carries only a caption, numbers and a title today) |
 | Can be undone · 3 / Can't be undone · 1 | `changes[]` split on `reversible` (and `undone`) |
 | One row for "38 draft invoices saved" | The shell groups `changes[]` by `action`; Undo on the row sends all their ids |
 | Per-row Undo | `task.undo { changes: [id, …] }`; `dry_run` first. Puts back just the files those changes wrote (`ChangeEntry.paths`) |
@@ -238,7 +238,7 @@ opens over everything with Ctrl Space, like Spotlight (DK-1).
 | "prep me for my 2:00" and the answer | **Not built**: AE-3 needs the model gateway and harness bundles (ADR 0010). Today `glassctl run <agent>` names the agent |
 | "Hands off to a specialist agent when one fits" | **Gap**: routing a request to an agent. `agents.list` has what the router needs (ids, descriptions) |
 | Suggestions for what's on screen | **Not built**: needs the shell and the accessibility tree (NV-11) |
-| Recent: Needs you, Fixed 9:12 AM, 3 of 6 | `task.list`: `state`, `caption`, `progress` |
+| Recent: Expense report, Needs you, Fixed 9:12 AM, 3 of 6 | `task.list`: `title` (given with the request, or made from the prompt; the agent may rename it once), `state`, `progress`. A done verb in the agent's terms ("Fixed") is a **gap**: Recent says "Done" |
 | "Claude via Amazon Bedrock · Internal data" | `HandoffCard.model` and `max_label` |
 
 ## Developer workspace

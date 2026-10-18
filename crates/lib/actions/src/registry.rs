@@ -11,6 +11,8 @@ pub enum RegistryError {
     Duplicate(ActionName),
     #[error("actions {0} and {1} map to the same MCP tool name")]
     McpCollision(ActionName, ActionName),
+    #[error("action {0}'s answer labels must each be one line of 1 to {max} characters", max = glass_api::AskLabels::MAX_CHARS)]
+    AskLabels(ActionName),
 }
 
 /// Every action the OS knows, and which provider runs it.
@@ -29,6 +31,9 @@ impl Registry {
         for def in provider.actions() {
             if self.actions.contains_key(&def.name) {
                 return Err(RegistryError::Duplicate(def.name));
+            }
+            if !def.ask.fit() {
+                return Err(RegistryError::AskLabels(def.name));
             }
             let mcp = def.mcp_name();
             if let Some(existing) = self.by_mcp.get(&mcp) {
@@ -75,5 +80,67 @@ impl Registry {
         self.defs()
             .map(|d| (d.name.clone(), d.side_effect, d.default_tier))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::{ActionError, ActionOutput, Preview, TaskContext};
+
+    #[derive(Debug)]
+    struct Labeled(&'static str);
+
+    impl ActionProvider for Labeled {
+        fn actions(&self) -> Vec<ActionDef> {
+            vec![
+                ActionDef {
+                    name: "notes.publish".parse().unwrap(),
+                    title: "Publish a note".into(),
+                    description: String::new(),
+                    input_schema: json!({ "type": "object" }),
+                    side_effect: SideEffect::Irreversible,
+                    default_tier: Tier::Ask,
+                    ask: Default::default(),
+                }
+                .asking("Review note", self.0),
+            ]
+        }
+
+        fn preview(
+            &self,
+            _: &TaskContext,
+            _: &ActionName,
+            _: &Value,
+        ) -> Result<Preview, ActionError> {
+            Ok(Preview::default())
+        }
+
+        fn invoke(
+            &self,
+            _: &TaskContext,
+            _: &ActionName,
+            _: &Value,
+        ) -> Result<ActionOutput, ActionError> {
+            Err(ActionError::Failed("not in tests".into()))
+        }
+    }
+
+    #[test]
+    fn answer_labels_must_fit_a_tile_button() {
+        let mut registry = Registry::new();
+        registry
+            .register(Arc::new(Labeled("Approve and publish")))
+            .unwrap();
+        let (def, _) = registry.get(&"notes.publish".parse().unwrap()).unwrap();
+        assert_eq!(def.ask.approve, "Approve and publish");
+
+        let mut registry = Registry::new();
+        assert!(matches!(
+            registry.register(Arc::new(Labeled("Approve and publish to everyone"))),
+            Err(RegistryError::AskLabels(_))
+        ));
     }
 }

@@ -25,6 +25,7 @@ mod runtime;
 mod supervise;
 mod tailor;
 mod task;
+mod title;
 mod undo;
 
 pub use caller::Caller;

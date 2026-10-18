@@ -25,7 +25,7 @@ use crate::error::Result;
 /// How long sleep waits for actions already under way.
 const SLEEP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 use crate::task::{Continued, Gate, NewTask, TakenSnapshot, Task};
-use crate::{Caller, CatalogEntry, RuntimeConfig, RuntimeError, supervise};
+use crate::{Caller, CatalogEntry, RuntimeConfig, RuntimeError, supervise, title};
 
 /// Everything the runtime is built from. `glassd` assembles these from its
 /// config; tests assemble development backends.
@@ -76,6 +76,8 @@ struct Prepared {
     card: HandoffCard,
     settings: BTreeMap<String, Value>,
     layer: Option<u32>,
+    /// The request's title, or one made from the prompt.
+    title: String,
 }
 
 /// Why a task is starting.
@@ -241,6 +243,10 @@ impl Runtime {
                 "describe the task in a sentence or two".into(),
             ));
         }
+        let title = match &request.title {
+            Some(given) => title::check(given).map_err(RuntimeError::Invalid)?,
+            None => title::from_prompt(&request.prompt),
+        };
         let entry = self
             .config
             .catalog
@@ -340,6 +346,7 @@ impl Runtime {
             card,
             settings,
             layer: layer_version,
+            title,
         })
     }
 
@@ -368,6 +375,7 @@ impl Runtime {
             agent: task.entry.id.clone(),
             prompt: task.prompt.clone(),
             scope: task.scope.clone(),
+            title: Some(task.lock().title.clone()),
         };
         self.start_task(caller, request, Origin::RetryOf(id))
     }
@@ -451,6 +459,8 @@ impl Runtime {
             layer: prepared.layer,
             driver_socket,
             continues,
+            title: prepared.title.clone(),
+            title_fixed: request.title.is_some(),
             stop: stop_tx,
         }));
         self.tasks().insert(id, Arc::clone(&task));
@@ -462,6 +472,7 @@ impl Runtime {
         );
         event.detail = serde_json::json!({
             "prompt": task.prompt,
+            "title": prepared.title,
             "plan": task.plan,
             "grants": task.ctx.grants.iter().map(|g| serde_json::json!({
                 "name": g.name, "path": g.root, "writable": g.writable

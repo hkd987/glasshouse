@@ -277,6 +277,7 @@ impl ActionProvider for SystemProvider {
                     input_schema: schema.clone(),
                     side_effect,
                     default_tier: tier,
+                    ask: Default::default(),
                 }
             };
         vec![
@@ -312,7 +313,8 @@ impl ActionProvider for SystemProvider {
                 SideEffect::LocalReversible,
                 Tier::Notify,
                 &none,
-            ),
+            )
+            .asking("Review cleanup", "Approve and clean up"),
             def(
                 "system.service.restart",
                 "Restart a service from IT's list",
@@ -326,7 +328,8 @@ impl ActionProvider for SystemProvider {
                     "required": ["service"],
                     "additionalProperties": false
                 }),
-            ),
+            )
+            .asking("Review details", "Approve and restart"),
         ]
     }
 

@@ -41,6 +41,7 @@ impl Runtime {
             agent: harness,
             prompt: task.prompt.clone(),
             scope: task.scope.clone(),
+            title: Some(task.lock().title.clone()),
         };
         self.start_task(caller, request, Origin::Continues(continued(&task)))
     }

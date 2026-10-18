@@ -15,7 +15,8 @@ this is going (signed manifests), ADR 0008.
 1. **Program.** For a Rust agent, a crate in `crates/bin/` using
    `glass-agent-sdk` (`Agent::from_env()`, `call`, `progress`). Call
    `report_progress` at each step with a plain caption and `done/total` when
-   countable (AW-4). Treat `is_error` tool results as information: a declined
+   countable (AW-4). Its optional `title` renames the task once, if the name
+   made from the prompt doesn't fit ("Reconcile October invoices"). Treat `is_error` tool results as information: a declined
    or blocked step is skipped, never retried in a loop. Exit 0 when done,
    non-zero with a one-line reason on stderr when it can't continue (that
    line becomes the Failed tile's reason).

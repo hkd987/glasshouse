@@ -2,7 +2,9 @@
 //! sign-in user and a sample app window. Previews and snapshot tests draw
 //! these; a live shell gets the same types from `task.list`.
 
-use glass_api::{AgentMode, ApprovalState, ApprovalView, FeedLine, Progress, TaskView, TileState};
+use glass_api::{
+    AgentMode, ApprovalState, ApprovalView, AskLabels, FeedLine, Progress, TaskView, TileState,
+};
 use glass_types::{ApprovalId, TaskId, Timestamp};
 use iced_core::alignment::{Horizontal, Vertical};
 use iced_core::{Color, Length, Padding};
@@ -36,31 +38,34 @@ fn line(verb: &str, target: &str) -> FeedLine {
 /// meeting-prep actions agent and an invoice screen agent.
 pub fn tasks() -> Vec<TaskView> {
     let expense = TaskId::new();
-    let base = |agent: &str, name: &str, mode, state, caption: &str, started| TaskView {
-        id: TaskId::new(),
-        agent: agent
-            .parse()
-            .unwrap_or_else(|_| "agent".parse().expect("valid id")),
-        agent_name: name.into(),
-        user: "dana".into(),
-        mode,
-        state,
-        caption: caption.into(),
-        progress: None,
-        feed: Vec::new(),
-        needs: None,
-        receipt: None,
-        failure: None,
-        started_at: started,
-        updated_at: now(),
-        driver_socket: None,
-        continues: None,
-    };
+    let base =
+        |agent: &str, name: &str, mode, state, title: &str, caption: &str, started| TaskView {
+            id: TaskId::new(),
+            agent: agent
+                .parse()
+                .unwrap_or_else(|_| "agent".parse().expect("valid id")),
+            agent_name: name.into(),
+            user: "dana".into(),
+            mode,
+            state,
+            title: title.into(),
+            caption: caption.into(),
+            progress: None,
+            feed: Vec::new(),
+            needs: None,
+            receipt: None,
+            failure: None,
+            started_at: started,
+            updated_at: now(),
+            driver_socket: None,
+            continues: None,
+        };
     let mut needs = base(
         "expense-agent",
         "Expense agent",
         AgentMode::Actions,
         TileState::NeedsYou,
+        "Expense report",
         "6 receipts matched in the expense portal. Nothing has been submitted.",
         minutes_ago(9),
     );
@@ -76,12 +81,14 @@ pub fn tasks() -> Vec<TaskView> {
         requested_at: minutes_ago(1),
         expires_at: now(),
         state: ApprovalState::Pending,
+        labels: AskLabels::new("Review report", "Approve and submit"),
     });
     let mut prep = base(
         "meeting-prep",
         "Meeting prep",
         AgentMode::Actions,
         TileState::Working,
+        "Northwind 2:00 PM brief",
         "Prepping your 2:00 PM with Northwind",
         minutes_ago(4),
     );
@@ -95,6 +102,7 @@ pub fn tasks() -> Vec<TaskView> {
         "Invoice agent",
         AgentMode::Screen,
         TileState::Working,
+        "March invoices",
         "Reconciling March invoices",
         minutes_ago(2),
     );
@@ -129,6 +137,7 @@ pub fn recent_tasks() -> Vec<TaskView> {
     let mut it = tasks[0].clone();
     it.id = TaskId::new();
     it.agent_name = "IT agent".into();
+    it.title = "VPN connection".into();
     it.state = TileState::Done;
     it.needs = None;
     it.updated_at = Timestamp::from_unix_seconds(now().unix_seconds() - 5 * 3600 + 120)
@@ -136,6 +145,7 @@ pub fn recent_tasks() -> Vec<TaskView> {
     let mut onboarding = tasks[1].clone();
     onboarding.id = TaskId::new();
     onboarding.agent_name = "Onboarding agent".into();
+    onboarding.title = "Onboarding Alex Kim".into();
     onboarding.progress = Some(Progress { done: 3, total: 6 });
     tasks.truncate(1);
     tasks.extend([it, onboarding]);

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use glass_api::PointKind;
+use glass_api::{PointKind, TITLE_MAX_CHARS};
 use glass_rpc::mcp::{
     self, CallToolParams, Implementation, InitializeResult, ListToolsResult, ServerCapabilities,
     Tool, ToolAnnotations, ToolsCapability,
@@ -93,7 +93,12 @@ impl AgentApi {
                 "properties": {
                     "caption": { "type": "string", "description": "Plain-language current step, under 80 characters" },
                     "done": { "type": "integer", "minimum": 0 },
-                    "total": { "type": "integer", "minimum": 1 }
+                    "total": { "type": "integer", "minimum": 1 },
+                    "title": {
+                        "type": "string",
+                        "maxLength": TITLE_MAX_CHARS,
+                        "description": "A better short name for the whole task, one line, such as \"Reconcile October invoices\". It can be set once."
+                    }
                 },
                 "required": ["caption"],
                 "additionalProperties": false
@@ -164,6 +169,16 @@ fn instructions(task: &Task) -> String {
             .map_or("Folder", |g| g.name.as_str()),
         progress = REPORT_PROGRESS_TOOL,
     );
+    {
+        let state = task.lock();
+        if !state.title_fixed {
+            text.push_str(&format!(
+                "\nThe user sees this task as \"{}\". If a better short name fits, pass it as title to \
+                 {REPORT_PROGRESS_TOOL} once.",
+                state.title
+            ));
+        }
+    }
     // The user's layer (TL-2): settings by name, and their own words.
     let (asked, settings): (Vec<_>, Vec<_>) = task
         .entry

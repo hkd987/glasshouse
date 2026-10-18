@@ -83,6 +83,7 @@ pub async fn perf(h: &Harness) -> anyhow::Result<()> {
             write: vec![ws.reports.clone()],
             restrict: Vec::new(),
         },
+        title: None,
     };
     let mut results = Vec::new();
 

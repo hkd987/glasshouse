@@ -193,6 +193,9 @@ struct TaskArgs {
     /// Make an action ask first for this task.
     #[arg(long, value_name = "ACTION")]
     ask: Vec<String>,
+    /// A short name for the task. Without one, it's named from the prompt.
+    #[arg(long)]
+    title: Option<String>,
 }
 
 impl TaskArgs {
@@ -220,6 +223,7 @@ impl TaskArgs {
                 write: absolute(&self.write)?,
                 restrict,
             },
+            title: self.title.clone(),
         })
     }
 }

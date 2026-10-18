@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use glass_api::{
-    AnswerApproval, ApprovalAnswer, ApprovalScope, ScopeRequest, TaskRequest, TileState,
-    UndoRequest,
+    AnswerApproval, ApprovalAnswer, ApprovalScope, AskLabels, ScopeRequest, TITLE_MAX_CHARS,
+    TaskRequest, TileState, UndoRequest,
 };
 use glass_audit::{EventKind, Outcome};
 use glass_rpc::mcp::ListToolsResult;
@@ -737,6 +737,152 @@ async fn feed_lines_carry_verb_and_target() {
     assert_eq!(card.model, "No model (scripted agent)");
 }
 
+/// A task's title names it in lists like the command bar's Recent (DA-1):
+/// given with the request, or made from the prompt. Retry keeps it.
+#[tokio::test]
+async fn da1_tasks_are_titled_from_the_request_or_the_prompt() {
+    let h = harness();
+    let made = h.rt.start(&h.me, h.request(&["Invoices"], &[])).unwrap();
+    assert_eq!(made.title, "Reconcile this month's invoices");
+
+    let mut request = h.request(&["Invoices"], &[]);
+    request.title = Some("  October close ".into());
+    let given = h.rt.start(&h.me, request.clone()).unwrap();
+    assert_eq!(given.title, "October close");
+    assert_eq!(
+        h.rt.get(&h.me, given.id).unwrap().view.title,
+        "October close"
+    );
+    let started = glass_audit::read(&h.audit_path(), |r| {
+        r.event.kind == EventKind::TaskStarted && r.event.task == Some(given.id)
+    })
+    .unwrap();
+    assert_eq!(started[0].event.detail["title"], "October close");
+
+    for bad in ["October\nclose", "", &"x".repeat(TITLE_MAX_CHARS + 1)] {
+        request.title = Some(bad.into());
+        assert!(
+            matches!(h.rt.plan(&h.me, &request), Err(RuntimeError::Invalid(_))),
+            "{bad:?}"
+        );
+    }
+
+    h.rt.stop(&h.me, made.id).unwrap();
+    eventually(|| !h.rt.get(&h.me, made.id).unwrap().view.state.is_live()).await;
+    assert_eq!(h.rt.retry(&h.me, made.id).unwrap().title, made.title);
+}
+
+/// The agent may rename its task once, with `report_progress`, unless the
+/// user named it; a refused rename changes nothing, and a rename is logged
+/// (DA-1).
+#[tokio::test]
+async fn da1_agents_may_rename_their_task_once() {
+    let h = harness();
+    let task = h.rt.start(&h.me, h.request(&["Invoices"], &[])).unwrap().id;
+    let agent = h.agent(task).await;
+    let progress = |caption: &str, title: &str| json!({ "caption": caption, "title": title });
+
+    let bad = tool(&agent, "report_progress", progress("Reading", "Two\nlines")).await;
+    assert!(
+        bad.is_error && bad.text().contains("Nothing changed"),
+        "{}",
+        bad.text()
+    );
+    assert_ne!(h.rt.get(&h.me, task).unwrap().view.caption, "Reading");
+
+    let renamed = tool(
+        &agent,
+        "report_progress",
+        progress("Reading invoices", "October invoices"),
+    )
+    .await;
+    assert!(!renamed.is_error, "{}", renamed.text());
+    let detail = h.rt.get(&h.me, task).unwrap();
+    assert_eq!(detail.view.title, "October invoices");
+    assert_eq!(detail.view.caption, "Reading invoices");
+    assert!(
+        detail
+            .activity
+            .iter()
+            .any(|a| a.text == "Renamed \"October invoices\"")
+    );
+    let logged = glass_audit::read(&h.audit_path(), |r| {
+        r.event.kind == EventKind::TaskStateChanged && r.event.task == Some(task)
+    })
+    .unwrap();
+    let rename = &logged.last().unwrap().event.detail;
+    assert_eq!(rename["title"], "October invoices");
+    assert_eq!(rename["was"], "Reconcile this month's invoices");
+
+    let again = tool(&agent, "report_progress", progress("Matching", "Mine now")).await;
+    assert!(
+        again.is_error && again.text().contains("can't change again"),
+        "{}",
+        again.text()
+    );
+    let view = h.rt.get(&h.me, task).unwrap().view;
+    assert_eq!(
+        (view.title.as_str(), view.caption.as_str()),
+        ("October invoices", "Reading invoices")
+    );
+    let plain = tool(&agent, "report_progress", json!({"caption": "Matching"})).await;
+    assert!(!plain.is_error);
+
+    let mut request = h.request(&["Invoices"], &[]);
+    request.title = Some("October close".into());
+    let named = h.rt.start(&h.me, request).unwrap().id;
+    let agent = h.agent(named).await;
+    let refused = tool(&agent, "report_progress", progress("Reading", "Mine now")).await;
+    assert!(refused.is_error);
+    assert_eq!(h.rt.get(&h.me, named).unwrap().view.title, "October close");
+}
+
+/// An ask reads as what the action does: its own answer labels, or Review
+/// and Approve when it declares none (DA-12).
+#[tokio::test]
+async fn da12_asks_carry_the_actions_answer_labels() {
+    let h = harness();
+    let mut request = h.request(&["Invoices"], &["Reports"]);
+    request
+        .scope
+        .restrict
+        .push(("files.read".into(), Tier::Ask));
+    let task = h.rt.start(&h.me, request).unwrap().id;
+    let agent = Arc::new(h.agent(task).await);
+
+    for (tool_name, args, labels) in [
+        (
+            "mail_send",
+            send_args(2),
+            AskLabels::new("Review drafts", "Approve and send"),
+        ),
+        (
+            "files_read",
+            json!({"path": "Invoices/inv-003.txt"}),
+            AskLabels::default(),
+        ),
+    ] {
+        let call = {
+            let agent = Arc::clone(&agent);
+            tokio::spawn(async move { tool(&agent, tool_name, args).await })
+        };
+        eventually(|| !h.rt.approvals(&h.me).is_empty()).await;
+        let ask = h.rt.approvals(&h.me).remove(0);
+        assert_eq!(ask.labels, labels, "{tool_name}");
+        let tile = h.rt.list(&h.me).remove(0);
+        assert_eq!(tile.needs.unwrap().labels, labels);
+        h.rt.answer(
+            &h.me,
+            AnswerApproval {
+                approval: ask.id,
+                answer: ApprovalAnswer::Deny,
+            },
+        )
+        .unwrap();
+        assert!(call.await.unwrap().is_error);
+    }
+}
+
 #[tokio::test]
 async fn undoing_single_changes_leaves_the_rest() {
     let h = harness();
@@ -856,6 +1002,7 @@ async fn only_the_it_agent_reaches_the_system_and_its_fixes_stay_undoable() {
         agent: "it-agent".parse().unwrap(),
         prompt: "My disk is full".into(),
         scope: ScopeRequest::default(),
+        title: None,
     };
     let task = h.rt.start(&h.me, request).unwrap().id;
     let agent = Arc::new(h.agent(task).await);

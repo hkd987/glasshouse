@@ -85,6 +85,11 @@ pub(crate) struct TaskState {
     pub sleeping: Option<String>,
     /// For an attended task: the user's harness has connected.
     pub connected: bool,
+    /// The task's short name (`TaskView::title`).
+    pub title: String,
+    /// The title stays as it is: the request gave it, or the agent already
+    /// renamed the task.
+    pub title_fixed: bool,
 }
 
 /// Everything fixed when a task starts.
@@ -104,6 +109,9 @@ pub(crate) struct NewTask {
     pub layer: Option<u32>,
     pub driver_socket: Option<PathBuf>,
     pub continues: Option<Continued>,
+    pub title: String,
+    /// The request gave the title, so the agent can't rename the task.
+    pub title_fixed: bool,
     pub stop: oneshot::Sender<()>,
 }
 
@@ -157,6 +165,8 @@ impl Task {
                 takeover: None,
                 sleeping: None,
                 connected: false,
+                title: new.title,
+                title_fixed: new.title_fixed,
             }),
         }
     }
@@ -201,6 +211,7 @@ impl Task {
             user: self.user.name.clone(),
             mode: self.entry.mode,
             state: state.tile,
+            title: state.title.clone(),
             caption: state.caption.clone(),
             progress: state.progress,
             feed: state.feed.iter().cloned().collect(),

@@ -3,7 +3,7 @@
 //! and its two answers; working tiles show the three-line feed (actions
 //! agents) or the screen (screen agents), the caption and progress.
 
-use glass_api::{AgentMode, TaskView, TileState};
+use glass_api::{AgentMode, ApprovalView, TaskView, TileState};
 use glass_types::Timestamp;
 use iced_core::alignment::Vertical;
 use iced_core::{Color, Length, Padding};
@@ -42,7 +42,7 @@ pub fn view<'a>(
                     .line_height(1.4),
             )
             .push(text(&task.caption).size(12).color(t.muted))
-            .push(answers(t, ask.id));
+            .push(answers(t, ask));
     } else if screen {
         let display = thumbnail.unwrap_or_else(placeholder_thumbnail);
         body = body.push(display).push(caption_row(theme, task));
@@ -143,13 +143,20 @@ fn header<'a>(theme: &Theme, task: &'a TaskView, now: Timestamp) -> Element<'a, 
     }
 }
 
-fn answers<'a>(t: TileColors, approval: glass_types::ApprovalId) -> Element<'a, Message> {
+/// The ask's two answers, in the action's own words ("Review drafts",
+/// "Approve and send").
+fn answers<'a>(t: TileColors, ask: &'a ApprovalView) -> Element<'a, Message> {
     let review = button(
-        container(text("Review").size(13).font(fonts::MEDIUM).color(t.text))
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
+        container(
+            text(&ask.labels.review)
+                .size(13)
+                .font(fonts::MEDIUM)
+                .color(t.text),
+        )
+        .center_x(Length::Fill)
+        .center_y(Length::Fill),
     )
-    .on_press(Message::Review(approval))
+    .on_press(Message::Review(ask.id))
     .width(Length::Fill)
     .height(Length::Fixed(44.0))
     .style(style::button_like(style::outlined(
@@ -160,7 +167,7 @@ fn answers<'a>(t: TileColors, approval: glass_types::ApprovalId) -> Element<'a, 
     )));
     let approve = button(
         container(
-            text("Approve")
+            text(&ask.labels.approve)
                 .size(13)
                 .font(fonts::SEMIBOLD)
                 .color(t.background),
@@ -168,7 +175,7 @@ fn answers<'a>(t: TileColors, approval: glass_types::ApprovalId) -> Element<'a, 
         .center_x(Length::Fill)
         .center_y(Length::Fill),
     )
-    .on_press(Message::Approve(approval))
+    .on_press(Message::Approve(ask.id))
     .width(Length::Fill)
     .height(Length::Fixed(44.0))
     .style(style::button_like(style::panel(t.text, 10.0)));
