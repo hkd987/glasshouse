@@ -20,7 +20,8 @@ set -euo pipefail
 
 cmd=${1:-start}
 user=${2:-demo}
-bins=$REPO_ROOT/shell/target/x86_64-unknown-freebsd/debug
+# SHELL_PROFILE=vm for the optimized build images ship (debug by default).
+bins=$REPO_ROOT/shell/target/x86_64-unknown-freebsd/${SHELL_PROFILE:-debug}
 vm_running || die "VM is not running (vm.sh up && vm.sh wait)"
 
 need_bin() {

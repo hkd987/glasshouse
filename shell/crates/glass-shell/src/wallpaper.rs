@@ -46,30 +46,51 @@ pub fn backdrop(wallpaper: &Wallpaper, width: u32, height: u32) -> Vec<u8> {
         (width as f32 / DOWNSCALE).ceil().max(1.0) as u32,
         (height as f32 / DOWNSCALE).ceil().max(1.0) as u32,
     );
-    let (Some(source), Some(mut full)) = (
-        Pixmap::from_vec(
-            paint(wallpaper, small.0, small.1, true),
-            tiny_skia::IntSize::from_wh(small.0, small.1).expect("not empty"),
-        ),
-        Pixmap::new(width.max(1), height.max(1)),
-    ) else {
-        return vec![0; width as usize * height as usize * 4];
+    let source = paint(wallpaper, small.0, small.1, true);
+    scale_up(&source, small, (width.max(1), height.max(1)))
+}
+
+/// Bilinear scaling of 4-byte pixels from `from` to `to` (width, height),
+/// sampling at pixel centers, in integer arithmetic: tiny-skia's float
+/// pipeline took 2 s for a full screen in the emulated VM; this takes a
+/// small fraction of that, and the wallpaper is too blurred to tell them
+/// apart.
+fn scale_up(src: &[u8], from: (u32, u32), to: (u32, u32)) -> Vec<u8> {
+    // For each output column (or row): the two source ones either side of
+    // its center, and the second's weight out of 256.
+    let taps = |from: u32, to: u32| -> Vec<(usize, usize, u32)> {
+        (0..to)
+            .map(|i| {
+                let at = ((i as f32 + 0.5) * from as f32 / to as f32 - 0.5).max(0.0);
+                let first = (at.floor() as u32).min(from - 1);
+                let second = (first + 1).min(from - 1);
+                let weight = ((at - first as f32) * 256.0).round().clamp(0.0, 256.0) as u32;
+                (first as usize, second as usize, weight)
+            })
+            .collect()
     };
-    full.draw_pixmap(
-        0,
-        0,
-        source.as_ref(),
-        &tiny_skia::PixmapPaint {
-            quality: tiny_skia::FilterQuality::Bilinear,
-            ..tiny_skia::PixmapPaint::default()
-        },
-        Transform::from_scale(
-            width as f32 / small.0 as f32,
-            height as f32 / small.1 as f32,
-        ),
-        None,
-    );
-    full.take()
+    let (columns, rows) = (taps(from.0, to.0), taps(from.1, to.1));
+    let src_stride = from.0 as usize * 4;
+    let mut out = Vec::with_capacity(to.0 as usize * to.1 as usize * 4);
+    // One source row blended between its two neighbours, per output row.
+    let mut blended = vec![0u32; src_stride];
+    let mix = |a: u32, b: u32, w: u32| (a * (256 - w) + b * w + 128) >> 8;
+    for &(top, bottom, w) in &rows {
+        let (top, bottom) = (
+            &src[top * src_stride..][..src_stride],
+            &src[bottom * src_stride..][..src_stride],
+        );
+        for ((value, &a), &b) in blended.iter_mut().zip(top).zip(bottom) {
+            *value = mix(u32::from(a), u32::from(b), w);
+        }
+        for &(left, right, w) in &columns {
+            for channel in 0..4 {
+                let (a, b) = (blended[left * 4 + channel], blended[right * 4 + channel]);
+                out.push(mix(a, b, w) as u8);
+            }
+        }
+    }
+    out
 }
 
 /// Straight RGBA pixels, opaque.
@@ -283,6 +304,34 @@ mod tests {
             );
             assert_eq!(big[3], 255);
         }
+    }
+
+    #[test]
+    fn scaling_up_matches_tiny_skias_bilinear() {
+        let (small, big) = ((80, 50), (320, 200));
+        let src = render(&Theme::glass().wallpaper, small.0, small.1);
+        let ours = scale_up(&src, small, big);
+        let source =
+            Pixmap::from_vec(src, tiny_skia::IntSize::from_wh(small.0, small.1).unwrap()).unwrap();
+        let mut theirs = Pixmap::new(big.0, big.1).unwrap();
+        theirs.draw_pixmap(
+            0,
+            0,
+            source.as_ref(),
+            &tiny_skia::PixmapPaint {
+                quality: tiny_skia::FilterQuality::Bilinear,
+                ..tiny_skia::PixmapPaint::default()
+            },
+            Transform::from_scale(4.0, 4.0),
+            None,
+        );
+        let worst = ours
+            .iter()
+            .zip(theirs.data())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        assert!(worst <= 3, "differs by up to {worst} levels");
     }
 
     #[test]
