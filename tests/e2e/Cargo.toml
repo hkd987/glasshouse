@@ -1,0 +1,22 @@
+[package]
+name = "glass-e2e"
+description = "End-to-end scenarios against a live glassd: run inside the FreeBSD VM (or against a dev host daemon)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glass-api.workspace = true
+glass-audit.workspace = true
+glass-platform.workspace = true
+glass-rpc.workspace = true
+glass-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

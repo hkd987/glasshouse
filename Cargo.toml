@@ -5,7 +5,7 @@ resolver = "3"
 #   crates/svc  service implementations hosted by daemons; lib + svc
 #   crates/bin  executables; anything
 #   tests/*     end-to-end suites; anything
-members = ["crates/lib/*", "crates/svc/*", "crates/bin/*"]
+members = ["crates/lib/*", "crates/svc/*", "crates/bin/*", "tests/e2e"]
 
 [workspace.package]
 version = "0.1.0"
