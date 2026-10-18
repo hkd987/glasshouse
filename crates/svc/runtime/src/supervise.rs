@@ -220,6 +220,11 @@ fn agent_env(rt: &Runtime, task: &Task) -> Vec<(String, String)> {
         ("GLASS_AGENT_SOCKET".into(), inside(AGENT_SOCKET_PATH)),
         ("GLASS_TASK_ID".into(), task.id.to_string()),
         ("GLASS_TASK_PROMPT".into(), task.prompt.clone()),
+        // The agent's customization points: defaults and the user's layer.
+        (
+            "GLASS_AGENT_SETTINGS".into(),
+            serde_json::to_string(&task.settings).unwrap_or_else(|_| "{}".into()),
+        ),
         ("GLASS_WORK".into(), inside(WORK_DIR)),
         ("HOME".into(), inside(WORK_DIR)),
         ("TMPDIR".into(), inside("/tmp")),

@@ -45,6 +45,24 @@ plan = [
   "Ask you before emailing reminders to vendors with unpaid invoices",
 ]
 
+# What users may change with a personal layer (TL-1); everything else is
+# locked. `glassctl tailor invoice-demo` shows and changes them.
+[[agent.customize]]
+key = "flag_over"
+title = "Flag invoices over (dollars)"
+kind = "number"
+
+[[agent.customize]]
+key = "remind_vendors"
+title = "Ask to remind vendors"
+kind = "flag"
+default = true
+
+[[agent.customize]]
+key = "instructions"
+title = "Also do this"
+kind = "instructions"
+
 [[agent]]
 id = "containment-probe"
 name = "Containment probe"

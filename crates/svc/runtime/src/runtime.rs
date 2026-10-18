@@ -15,14 +15,16 @@ use glass_platform::fs::Owner;
 use glass_platform::sandbox::{Mount, Sandbox, SandboxSpec};
 use glass_platform::snapshot::{SnapshotHandle, Snapshotter};
 use glass_policy::{ActionPattern, EffectivePolicy, Policy};
+use glass_tailoring::LayerStore;
 use glass_types::{AgentPrincipal, SnapshotId, TaskId, Tier, Timestamp, UserRef};
+use serde_json::Value;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::error::Result;
 
 /// How long sleep waits for actions already under way.
 const SLEEP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-use crate::task::{Gate, TakenSnapshot, Task};
+use crate::task::{Gate, NewTask, TakenSnapshot, Task};
 use crate::{Caller, CatalogEntry, RuntimeConfig, RuntimeError, supervise};
 
 /// Everything the runtime is built from. `glassd` assembles these from its
@@ -49,6 +51,8 @@ pub struct Runtime {
     pub(crate) desk: ApprovalDesk,
     pub(crate) sandbox: Arc<dyn Sandbox>,
     pub(crate) snapshots: Arc<dyn Snapshotter>,
+    /// Users' layers on catalog agents (TL-2).
+    pub(crate) layers: LayerStore,
     audit: Arc<AuditLog>,
     audit_ok: AtomicBool,
     events: broadcast::Sender<OwnedEvent>,
@@ -70,12 +74,15 @@ struct Prepared {
     policy: EffectivePolicy,
     grants: Vec<Grant>,
     card: HandoffCard,
+    settings: BTreeMap<String, Value>,
+    layer: Option<u32>,
 }
 
 impl Runtime {
     pub fn new(parts: RuntimeParts) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
+            layers: LayerStore::new(parts.config.state_dir.join("layers")),
             config: parts.config,
             policy: parts.policy,
             policy_source: parts.policy_source,
@@ -245,6 +252,19 @@ impl Runtime {
             })?;
 
         let known = self.registry.known_tiers();
+        // The user's layer narrows before the card's own limits (TL-10).
+        let layer = self.layer_for_task(caller, &entry)?;
+        let in_use = layer.as_ref().and_then(|l| l.version.as_ref());
+        for (pattern, tier) in in_use.map(|v| v.restrict.as_slice()).unwrap_or_default() {
+            if let Ok(pattern) = pattern.parse::<ActionPattern>() {
+                policy.narrow(pattern, *tier);
+            }
+        }
+        let settings = glass_tailoring::resolve(
+            &entry.customize,
+            &in_use.map(|v| v.settings.clone()).unwrap_or_default(),
+        );
+        let layer_version = in_use.map(|v| v.version);
         for (pattern, tier) in &request.scope.restrict {
             let pattern: ActionPattern = pattern
                 .parse()
@@ -302,12 +322,15 @@ impl Runtime {
             } else {
                 entry.model.clone()
             },
+            layer: layer.map(|l| l.line),
         };
         Ok(Prepared {
             entry,
             policy,
             grants,
             card,
+            settings,
+            layer: layer_version,
         })
     }
 
@@ -393,20 +416,23 @@ impl Runtime {
             home: caller.home.clone(),
             grants: prepared.grants,
         };
+        let layer_note = prepared.card.layer.as_ref().map(crate::tailor::note);
         let (stop_tx, stop_rx) = oneshot::channel();
-        let task = Arc::new(Task::new(
+        let task = Arc::new(Task::new(NewTask {
             id,
-            caller.clone(),
-            prepared.entry,
-            request.prompt,
-            request.scope,
-            prepared.card.plan,
-            prepared.policy,
+            user: caller.clone(),
+            entry: prepared.entry,
+            prompt: request.prompt,
+            scope: request.scope,
+            plan: prepared.card.plan,
+            policy: prepared.policy,
             ctx,
             sandbox,
-            prepared.card.cant_touch,
-            stop_tx,
-        ));
+            cant_touch: prepared.card.cant_touch,
+            settings: prepared.settings,
+            layer: prepared.layer,
+            stop: stop_tx,
+        }));
         self.tasks().insert(id, Arc::clone(&task));
 
         let mut event = self.task_event(
@@ -422,15 +448,25 @@ impl Runtime {
             })).collect::<Vec<_>>(),
             "sandbox": self.sandbox.kind(),
             "retry_of": retry_of,
+            "layer": task.layer,
+            "settings": task.settings,
         });
         self.audit(event);
-        task.lock().note(
-            ActivityKind::State,
-            match retry_of {
-                Some(first) => format!("Started by {} (retry of {})", caller.name, first.short()),
-                None => format!("Started by {}", caller.name),
-            },
-        );
+        {
+            let mut state = task.lock();
+            state.note(
+                ActivityKind::State,
+                match retry_of {
+                    Some(first) => {
+                        format!("Started by {} (retry of {})", caller.name, first.short())
+                    }
+                    None => format!("Started by {}", caller.name),
+                },
+            );
+            if let Some(note) = layer_note {
+                state.note(ActivityKind::Notice, note);
+            }
+        }
         self.publish(&task);
 
         let handle = tokio::spawn(supervise::run(Arc::clone(self), Arc::clone(&task), stop_rx));

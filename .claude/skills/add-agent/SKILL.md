@@ -26,6 +26,12 @@ this is going (signed manifests), ADR 0008.
    `os/freebsd/overlay/usr/local/etc/glasshouse/glassd.toml`: `id`, `name`,
    `version`, `description`, `mode`, `program`, `plan` (3–7 plain steps for
    the handoff card), `model` if it uses one.
+   **What users may tailor** (TL-1, ADR 0014): `[[agent.customize]]` blocks
+   (`key`, `title`, `kind` = text | number | flag | choice | instructions,
+   `default`). The agent reads them with `Agent::setting(key)` (or the
+   `GLASS_AGENT_SETTINGS` JSON); model-backed agents also get them in their
+   instructions. Keep keys stable across versions: renaming one pauses
+   every layer that set it (TL-13). Bump `version` when behavior changes.
 4. **Policy.** An `[[agent]]` block with `allowed_actions` (as narrow as the
    job allows) in `crates/lib/policy/default-policy.toml` (only if every new
    org should have it), and add it to a group's `agents`.

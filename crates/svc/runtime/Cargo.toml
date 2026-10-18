@@ -15,6 +15,7 @@ glass-broker.workspace = true
 glass-platform.workspace = true
 glass-policy.workspace = true
 glass-rpc.workspace = true
+glass-tailoring.workspace = true
 glass-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true

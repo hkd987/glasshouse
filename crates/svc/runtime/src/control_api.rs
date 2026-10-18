@@ -3,7 +3,10 @@
 
 use std::sync::Arc;
 
-use glass_api::{AnswerApproval, Event, TaskRef, TaskRequest, UndoRequest, methods};
+use glass_api::{
+    AnswerApproval, Event, LayerChange, LayerRef, LayerRevert, TaskRef, TaskRequest, UndoRequest,
+    methods,
+};
 use glass_rpc::{Connection, Handler, RpcError, parse_params, to_result};
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
@@ -53,6 +56,18 @@ impl Handler for ControlApi {
             methods::TASK_UNDO => {
                 let request: UndoRequest = parse_params(params)?;
                 to_result(&rt.undo(&caller, request).await?)
+            }
+            methods::LAYER_GET => {
+                let request: LayerRef = parse_params(params)?;
+                to_result(&rt.layer_get(&caller, &request.agent)?)
+            }
+            methods::LAYER_SET => {
+                let change: LayerChange = parse_params(params)?;
+                to_result(&rt.layer_set(&caller, change)?)
+            }
+            methods::LAYER_REVERT => {
+                let revert: LayerRevert = parse_params(params)?;
+                to_result(&rt.layer_revert(&caller, revert)?)
             }
             methods::APPROVAL_LIST => to_result(&rt.approvals(&caller)),
             methods::APPROVAL_ANSWER => {

@@ -10,11 +10,16 @@
 //! every client, so add fields with `#[serde(default)]` and never repurpose one.
 
 mod approval;
+mod tailoring;
 mod task;
 
 use serde::{Deserialize, Serialize};
 
 pub use approval::{AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalState, ApprovalView};
+pub use tailoring::{
+    CheckResult, CustomizationPoint, LayerChange, LayerCheck, LayerLine, LayerRef, LayerRevert,
+    LayerStatus, LayerVersion, LayerView, PointKind,
+};
 pub use task::{
     ActivityEntry, ActivityKind, AgentMode, AgentSummary, ChangeEntry, ChangeKind, FeedLine,
     HandoffCard, Progress, Receipt, ScopeLine, ScopeRequest, SnapshotMarker, TaskDetail, TaskRef,
@@ -58,6 +63,15 @@ pub mod methods {
     /// Starts the ended task's request again as a new task, under today's
     /// policy. What the first run saved stays (and stays undoable there).
     pub const TASK_RETRY: &str = "task.retry";
+    /// [`crate::LayerRef`] → [`crate::LayerView`]: the caller's layer on an
+    /// agent and what can be changed (TL-1, TL-2).
+    pub const LAYER_GET: &str = "layer.get";
+    /// [`crate::LayerChange`] → [`crate::LayerView`]: saves and turns on a
+    /// new version, after its checks pass (TL-2, TL-10).
+    pub const LAYER_SET: &str = "layer.set";
+    /// [`crate::LayerRevert`] → [`crate::LayerView`]: switches to an earlier
+    /// version, or turns the layer off.
+    pub const LAYER_REVERT: &str = "layer.revert";
     /// `()` → `Vec<`[`crate::ApprovalView`]`>`: pending approvals.
     pub const APPROVAL_LIST: &str = "approval.list";
     /// [`crate::AnswerApproval`] → [`crate::ApprovalView`] (DA-11)

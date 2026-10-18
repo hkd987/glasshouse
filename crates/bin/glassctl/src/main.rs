@@ -6,6 +6,7 @@
 
 mod render;
 mod style;
+mod tailor;
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, IsTerminal, Write};
@@ -125,6 +126,9 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Show or change your layer on an agent: your settings and limits,
+    /// saved as versions on top of the published agent.
+    Tailor(tailor::TailorArgs),
     /// Rebuild a task end to end from the audit log.
     Audit {
         task: String,
@@ -445,6 +449,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .await?;
             ctl.show(&report, render::undo)
         }
+        Command::Tailor(args) => tailor::run(&ctl, args).await,
         Command::Audit { task } => {
             let records: Vec<AuditRecord> = ctl.task_call(methods::AUDIT_TASK, &task).await?;
             ctl.show(&records, |r| render::audit(r))

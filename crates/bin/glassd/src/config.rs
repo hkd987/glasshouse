@@ -130,6 +130,9 @@ impl Config {
             );
         }
         for agent in &self.agents {
+            agent
+                .check()
+                .map_err(|e| anyhow::anyhow!("agent {}: {e}", agent.id))?;
             if !agent.program.is_absolute() {
                 bail!("agent {}: program must be an absolute path", agent.id);
             }

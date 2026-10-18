@@ -7,6 +7,10 @@
 //!
 //! Invoice files are `Key: Value` lines (Invoice, Vendor, Email, Amount, Due,
 //! Status).
+//!
+//! Users tailor it with a layer (TL-2) through the settings its catalog entry
+//! declares: `flag_over` (flag invoices over an amount, in dollars),
+//! `remind_vendors` (whether to ask to email vendors) and `instructions`.
 
 use std::process::ExitCode;
 
@@ -15,6 +19,41 @@ use glass_agent_sdk::{Agent, CallToolResult};
 use serde_json::{Value, json};
 
 const AP_TEAM: &str = "ap-team@example.com";
+
+/// What the user's layer changed, from the agent's settings.
+#[derive(Debug)]
+struct Settings {
+    flag_over_cents: Option<u64>,
+    remind_vendors: bool,
+    instructions: Option<String>,
+}
+
+impl Settings {
+    fn of(agent: &Agent) -> Self {
+        Self {
+            flag_over_cents: agent
+                .setting("flag_over")
+                .and_then(Value::as_f64)
+                .filter(|d| *d >= 0.0)
+                .map(|d| (d * 100.0).round() as u64),
+            remind_vendors: agent
+                .setting("remind_vendors")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            instructions: agent
+                .setting("instructions")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+        }
+    }
+
+    fn flagged(&self, invoice: &Invoice) -> bool {
+        self.flag_over_cents
+            .is_some_and(|limit| invoice.amount_cents > limit)
+    }
+}
 
 #[derive(Debug, Default)]
 struct Invoice {
@@ -43,9 +82,15 @@ async fn run() -> anyhow::Result<()> {
         .await
         .context("connecting to the task socket")?;
     eprintln!("task {}: {}", agent.task_id, agent.prompt);
-    agent
-        .progress("Looking at what I was given", None, None)
-        .await?;
+    let settings = Settings::of(&agent);
+    eprintln!("settings: {settings:?}");
+    // A scripted agent can't follow free-form instructions; it shows it
+    // got them. Model-backed agents read them from their instructions.
+    let opening = match &settings.instructions {
+        Some(words) => format!("Looking at what I was given (noted: {words})"),
+        None => "Looking at what I was given".to_owned(),
+    };
+    agent.progress(&opening, None, None).await?;
 
     let folders = agent.call("files_list", json!({})).await?;
     let folders = folders.structured_content.unwrap_or(Value::Null);
@@ -78,7 +123,7 @@ async fn run() -> anyhow::Result<()> {
             let written = agent
                 .call(
                     "files_write",
-                    json!({ "path": path, "content": summary_csv(&invoices) }),
+                    json!({ "path": path, "content": summary_csv(&invoices, &settings) }),
                 )
                 .await?;
             report_step(&written, "summary");
@@ -90,8 +135,19 @@ async fn run() -> anyhow::Result<()> {
         agent
             .progress("Drafting a note to the AP team", None, None)
             .await?;
+        let flagged: Vec<String> = invoices
+            .iter()
+            .filter(|i| settings.flagged(i))
+            .map(|i| format!("{} {} {}", i.number, i.vendor, money(i.amount_cents)))
+            .collect();
+        let flagged = match settings.flag_over_cents {
+            Some(limit) if !flagged.is_empty() => {
+                format!("\nOver {}: {}\n", money(limit), flagged.join(", "))
+            }
+            _ => String::new(),
+        };
         let body = format!(
-            "Reconciled {} invoices. {} unpaid, totaling {}.\n\n{}\n",
+            "Reconciled {} invoices. {} unpaid, totaling {}.\n{flagged}\n{}\n",
             invoices.len(),
             unpaid.len(),
             money(unpaid_total),
@@ -116,7 +172,9 @@ async fn run() -> anyhow::Result<()> {
         report_step(&draft, "draft");
     }
 
-    if !unpaid.is_empty() && agent.has_tool("mail_send") {
+    if !settings.remind_vendors {
+        eprintln!("reminders: off in the user's layer");
+    } else if !unpaid.is_empty() && agent.has_tool("mail_send") {
         agent
             .progress(
                 &format!("Asking to email {} vendors", unpaid.len()),
@@ -231,11 +289,15 @@ fn money(cents: u64) -> String {
     format!("${}.{:02}", cents / 100, cents % 100)
 }
 
-fn summary_csv(invoices: &[Invoice]) -> String {
-    let mut out = String::from("invoice,vendor,amount,due,status,file\n");
+/// One line per invoice and a total. A `flagged` column is added when the
+/// user's layer sets `flag_over`.
+fn summary_csv(invoices: &[Invoice], settings: &Settings) -> String {
+    let flagging = settings.flag_over_cents.is_some();
+    let mut out = String::from("invoice,vendor,amount,due,status,file");
+    out.push_str(if flagging { ",flagged\n" } else { "\n" });
     for i in invoices {
         out.push_str(&format!(
-            "{},{},{}.{:02},{},{},{}\n",
+            "{},{},{}.{:02},{},{},{}",
             i.number,
             i.vendor.replace(',', " "),
             i.amount_cents / 100,
@@ -244,9 +306,14 @@ fn summary_csv(invoices: &[Invoice]) -> String {
             if i.unpaid { "unpaid" } else { "paid" },
             i.file
         ));
+        if flagging {
+            out.push_str(if settings.flagged(i) { ",yes" } else { "," });
+        }
+        out.push('\n');
     }
     let total: u64 = invoices.iter().map(|i| i.amount_cents).sum();
-    out.push_str(&format!("TOTAL,,{}.{:02},,,\n", total / 100, total % 100));
+    out.push_str(&format!("TOTAL,,{}.{:02},,,", total / 100, total % 100));
+    out.push_str(if flagging { ",\n" } else { "\n" });
     out
 }
 
@@ -273,5 +340,31 @@ mod tests {
         assert!(inv.unpaid);
         assert_eq!(money(184_050), "$1840.50");
         assert_eq!(cents("75"), 7_500);
+    }
+
+    #[test]
+    fn a_layer_adds_a_flagged_column() {
+        let invoices = [
+            parse("a.txt", "Invoice: A\nAmount: 1500\n"),
+            parse("b.txt", "Invoice: B\nAmount: 20\n"),
+        ];
+        let plain = Settings {
+            flag_over_cents: None,
+            remind_vendors: true,
+            instructions: None,
+        };
+        assert!(
+            summary_csv(&invoices, &plain).starts_with("invoice,vendor,amount,due,status,file\n")
+        );
+        let flagging = Settings {
+            flag_over_cents: Some(100_000),
+            ..plain
+        };
+        let csv = summary_csv(&invoices, &flagging);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert!(lines[0].ends_with(",flagged"));
+        assert!(lines[1].starts_with("A,") && lines[1].ends_with(",yes"));
+        assert!(lines[2].starts_with("B,") && lines[2].ends_with(','));
+        assert!(lines[3].starts_with("TOTAL,"));
     }
 }

@@ -69,6 +69,9 @@ pub enum EventKind {
     ApprovalAnswered,
     SnapshotTaken,
     Rollback,
+    /// A user saved, switched or turned off a layer on an agent, or a new
+    /// agent version re-checked it (TL-2, TL-13).
+    LayerChanged,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

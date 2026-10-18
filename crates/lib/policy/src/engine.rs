@@ -381,8 +381,17 @@ impl EffectivePolicy {
                 });
             }
         }
-        self.restrictions.push((pattern, tier));
+        self.narrow(pattern, tier);
         Ok(())
+    }
+
+    /// Makes every action matching `pattern` at least `tier`, without
+    /// [`Self::restrict`]'s check. Restrictions only ever raise a tier, so
+    /// where policy is already stricter this does nothing. For limits saved
+    /// earlier, such as a tailoring layer's (TL-10), whose policy may since
+    /// have tightened.
+    pub fn narrow(&mut self, pattern: ActionPattern, tier: Tier) {
+        self.restrictions.push((pattern, tier));
     }
 
     /// The label folder rules give `path`, if any.

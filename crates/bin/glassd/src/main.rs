@@ -168,6 +168,9 @@ async fn run(
         audit,
     });
 
+    // A new agent version re-checks every layer on it (TL-13).
+    runtime.recheck_layers();
+
     let listener = bind_control_socket(&config.control_socket)?;
     tracing::info!(
         socket = %config.control_socket.display(),

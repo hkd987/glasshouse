@@ -507,6 +507,7 @@ dependencies = [
  "glass-platform",
  "glass-policy",
  "glass-rpc",
+ "glass-tailoring",
  "glass-types",
  "serde",
  "serde_json",
@@ -514,6 +515,18 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "glass-tailoring"
+version = "0.1.0"
+dependencies = [
+ "glass-api",
+ "glass-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

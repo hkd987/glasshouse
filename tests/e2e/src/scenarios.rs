@@ -5,9 +5,12 @@
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
-use glass_api::{ActivityKind, ApprovalAnswer, SystemStatus, TaskView, TileState, methods};
+use glass_api::{
+    ActivityKind, ApprovalAnswer, HandoffCard, LayerChange, LayerRevert, LayerStatus, LayerView,
+    ScopeRequest, SystemStatus, TaskRequest, TaskView, TileState, methods,
+};
 use glass_audit::{EventKind, Outcome};
-use glass_types::{Label, TaskId, Tier};
+use glass_types::{AgentId, Label, TaskId, Tier};
 use serde_json::Value;
 
 use crate::harness::{Harness, mail_count};
@@ -302,6 +305,87 @@ pub async fn it(h: &Harness) -> anyhow::Result<()> {
             .any(|f| f.starts_with("Help desk ticket HD-")),
         "{receipt:?}"
     );
+    Ok(())
+}
+
+/// Tailoring (TL-1, TL-2, TL-10): a personal layer on the invoice agent
+/// flags big invoices, turns reminders off and blocks sends; a layer that
+/// would loosen sends is refused; turning it off puts the published agent
+/// back.
+pub async fn tailor(h: &Harness) -> anyhow::Result<()> {
+    let agent: AgentId = "invoice-demo".parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let off = LayerRevert {
+        agent: agent.clone(),
+        to: None,
+    };
+    let _: LayerView = h.call(methods::LAYER_REVERT, &off).await?;
+
+    let loosen = LayerChange {
+        agent: agent.clone(),
+        settings: Default::default(),
+        restrict: vec![("mail.send".into(), Tier::Auto)],
+        note: "send without asking".into(),
+    };
+    let err = h.call_err(methods::LAYER_SET, &loosen).await?;
+    ensure!(err.contains("Permissions only narrow"), "{err}");
+
+    let layer = LayerChange {
+        agent: agent.clone(),
+        settings: [
+            ("flag_over".to_owned(), serde_json::json!(1000)),
+            ("remind_vendors".to_owned(), serde_json::json!(false)),
+        ]
+        .into(),
+        restrict: vec![("mail.send".into(), Tier::Never)],
+        note: "flag big invoices, no reminders".into(),
+    };
+    let view: LayerView = h.call(methods::LAYER_SET, &layer).await?;
+    ensure!(view.status == LayerStatus::On, "{:?}", view.status);
+    let version = view.active.context("a version is in use")?;
+
+    let ws = h.workspace("tailor")?;
+    let task = h
+        .start(
+            "invoice-demo",
+            "Reconcile invoices",
+            &[&ws.invoices],
+            &[&ws.reports],
+        )
+        .await?;
+    // Sends are blocked and reminders off, so nothing asks.
+    let done = h.wait_for(task, TileState::Done, LONG).await?;
+    ensure!(
+        done.activity
+            .iter()
+            .any(|a| a.text.starts_with(&format!("Using your layer v{version}"))),
+        "the task says which layer it runs with"
+    );
+    let csv = std::fs::read_to_string(ws.reports.join("reconciliation.csv"))?;
+    ensure!(
+        csv.lines().next().is_some_and(|l| l.ends_with(",flagged")),
+        "{csv}"
+    );
+    ensure!(
+        csv.lines().any(|l| l.ends_with(",yes")),
+        "the invoice over $1000 is flagged: {csv}"
+    );
+    ensure!(h.pending().await?.iter().all(|a| a.task != task));
+    h.undo(task, false).await?;
+
+    let view: LayerView = h.call(methods::LAYER_REVERT, &off).await?;
+    ensure!(view.status == LayerStatus::Off);
+    ensure!(
+        view.history.iter().any(|v| v.version == version),
+        "history stays"
+    );
+    let request = TaskRequest {
+        agent,
+        prompt: "Reconcile invoices".into(),
+        scope: ScopeRequest::default(),
+    };
+    let card: HandoffCard = h.call(methods::TASK_PLAN, &request).await?;
+    ensure!(card.layer.is_none(), "the published agent again");
+    ensure!(card.asks_before.iter().any(|a| a == "Send emails"));
     Ok(())
 }
 

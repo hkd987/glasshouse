@@ -2,7 +2,7 @@
 
 The PRD's mockups live in a Claude Design canvas, **"Agent Window — OS
 Mockups"**: <https://claude.ai/artifact/Y5fH2vFk3fWUvWumZTRATC>. The PNGs here
-are renders of its sixteen artboards, for reading without the canvas. They go
+are renders of its eighteen artboards, for reading without the canvas. They go
 stale when the canvas changes; re-render them with the `prd-sync` skill
 (`.claude/skills/prd-sync`), which uses `tools/design/render-dc.py`.
 
@@ -250,3 +250,41 @@ Claude Code in the workspace is HX-1.
 | What it can do: declared by the publisher, enforced by the OS | The signed manifest (ADR 0008); today the closest thing is `[[agent]] allowed_actions` in policy |
 | Release bar: accuracy, policy violations, change from the last version | Eval suites and the release bar (AE-10, AE-11, ADR 0010): **not built** |
 | Approve for group, install mode, rollout ring, pin version | Today: `[[group]] agents` in policy. Rings and pinning are the console's (AD-3, DV-12) |
+
+## Tailoring a catalog agent
+
+![Tailor Contract Review agent](mockups/tailor.png)
+
+Personal layers are built (ADR 0014); try them with `glassctl tailor
+invoice-demo`. The Contract Review agent itself doesn't exist; the invoice
+demo agent declares the customization points.
+
+| Element | Source |
+|---|---|
+| "You asked: Also flag auto-renewal clauses…" | `LayerChange.note`, kept per version (`LayerVersion.note`). Turning a sentence into settings needs the desktop agent (AE-3); today the user sets them (`settings`, `restrict`) |
+| How the agent is built for you: your layer, team layer, base version | `LayerView.active`, `history[].summary`; the base is `LayerView.agent` (name, version). Team layers (TL-3): **not built** |
+| "Personal" chip | Every layer is personal today |
+| Base · updates automatically | The layer sits on whatever version the catalog has; a new version re-checks it (TL-13) |
+| Checks before it turns on | `LayerView.checks[]` (`name`, `result`, `detail`): "Only what the publisher lets you change" (TL-1), "Permissions only narrow" (TL-10), "Release bar" (TL-11, reports `not_available` until eval suites exist) |
+| "Behavior change allowed. IT permits behavior layers on this agent" | TL-12: **not built** |
+| Turn on for me | `layer.set` (saves a version and turns it on after the checks pass) |
+| Undo / earlier versions | `layer.revert { to }`; `to: null` turns the layer off |
+| "17 people made a similar change", Suggest to the publisher, Propose for Legal Operations | TL-20 … TL-22, TL-3: **not built** |
+| Make my own version instead | TL-4: **not built** (a copy becomes a generated app, GA) |
+| A paused layer | `LayerStatus::Paused { reason }`; the handoff card's `layer.paused` |
+
+## Apps built on request · vendor disputes
+
+![Vendor Disputes built for you](mockups/build-app.png)
+
+Not built (GA-1 … GA-11, P1). What it builds on:
+
+| Element | Source |
+|---|---|
+| "I checked the catalog and no approved app does this" | Catalog first (GA-2): needs the catalog service; `agents.list` is the local stand-in for agents |
+| Data, reads, sends, shared with | Would be the generated app's manifest, enforced like any app's: declared actions join the registry (ADR 0013), tiers and labels from policy |
+| "Built for you · v3 · personal", v1 / v2 / v3 chips | Versioned like layers (ADR 0014), each version undoable (GA-3) |
+| Overdue reminders to you only | An action at Auto for the owner and Ask for anyone else; sends outside follow the tiers (GA-7) |
+| Owner: Dana Ruiz | GA-9 ownership; the audit log already attributes every change to a user |
+| Share with the AP team: security checks and IT approval | GA-8 sharing steps, reusing the catalog checks (DV-2, DV-3) |
+

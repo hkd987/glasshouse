@@ -30,6 +30,7 @@ glass-rpc = { path = "crates/lib/rpc" }
 glass-platform = { path = "crates/lib/platform" }
 glass-agent-sdk = { path = "crates/lib/agent-sdk" }
 glass-broker = { path = "crates/svc/broker" }
+glass-tailoring = { path = "crates/svc/tailoring" }
 glass-actions = { path = "crates/lib/actions" }
 glass-first-party = { path = "crates/svc/first-party" }
 glass-app-files = { path = "crates/apps/files" }

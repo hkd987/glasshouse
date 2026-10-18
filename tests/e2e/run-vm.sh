@@ -59,6 +59,8 @@ step "branding (BR-1, BR-2)"
 "$vm" run "sh /tmp/check-branding.sh"
 
 step "root checks"
+# `hold` leaves its workspace for the task it starts; the tasks are gone now.
+"$vm" run "rm -rf /home/demo/e2e-hold-*"
 "$vm" run "glassctl verify
 test \$($glass_jails) -eq 0 || { echo 'FAIL jails left behind'; exit 1; }
 if mount -p | grep -q /var/db/glasshouse/sandboxes; then echo 'FAIL mounts left behind'; exit 1; fi

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use glass_api::{AgentMode, AgentSummary};
+use glass_api::{AgentMode, AgentSummary, CustomizationPoint};
 use glass_types::AgentId;
 use serde::Deserialize;
 
@@ -31,6 +31,9 @@ pub struct CatalogEntry {
     /// produces one per task.
     #[serde(default)]
     pub plan: Vec<String>,
+    /// What users may change with a layer (TL-1); everything else is locked.
+    #[serde(default, rename = "customize")]
+    pub customize: Vec<CustomizationPoint>,
 }
 
 fn default_mode() -> AgentMode {
@@ -38,6 +41,11 @@ fn default_mode() -> AgentMode {
 }
 
 impl CatalogEntry {
+    /// Checks what the entry declares, for config validation.
+    pub fn check(&self) -> Result<(), String> {
+        glass_tailoring::check_declared(&self.customize)
+    }
+
     pub fn summary(&self) -> AgentSummary {
         AgentSummary {
             id: self.id.clone(),

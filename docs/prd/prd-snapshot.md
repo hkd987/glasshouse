@@ -10,6 +10,8 @@ We are building a FreeBSD-based enterprise desktop where employees can safely ha
 - **No data control.** Sensitive content flows to external models with no OS-level checkpoint.
 So most enterprise AI programs stall at chat assistants and tightly scoped copilots. Security blocks broader autonomy because the platform can't enforce limits.
 **The thesis.** Make the agent a first-class principal in the OS, with its own identity, sandbox, permissions, audit trail and undo. Then make it visible: every agent gets a live tile the user can watch, take over or rewind ([mockups](https://claude.ai/artifact/Y5fH2vFk3fWUvWumZTRATC)). Windows and macOS are adding these protections after the fact. We design them in from day one.
+**The edge: everyone can shape their own tools, and the OS guarantees it stays safe.** Users tailor catalog apps and agents with layers (TL-1 to TL-22) and have the OS build new apps on request (GA-1 to GA-11). Every change is tested against the agent's release bar before it runs, can only narrow permissions, and can be undone across the whole machine.
+Microsoft already offers user-built apps and agents through Power Apps and Copilot Studio, so customization alone isn't the differentiator. The difference is that Glasshouse enforces safety in the OS itself: test gates, permissions that can't widen, and machine-wide undo, across every app including legacy ones. Matching that would require rebuilding the Windows security model. Over time, each org's layers, suggestions and agent improvements accumulate, and Glasshouse becomes shaped to how they work. That is the switching cost we're building.
 **Working name:** to be decided. This doc says "the OS" throughout.
 
 ## Goals, non-goals and success metrics
@@ -37,6 +39,7 @@ V1 succeeds when a security team approves agents with real write access for a fl
 | Agent changes rolled back | Undo works and is trusted, but agents aren't sloppy | 1–5% of tasks |
 | Policy violations reaching an external model | Data protection holds | Zero |
 | Time to first productive hour for a new user | Familiarity | Under 1 hour, no training |
+| Users who tailor or build at least one tool | Proves the edge is used, not just demoed | 25% of seats |
 
 Targets are starting points for discussion with design partners, not commitments.
 
@@ -158,6 +161,41 @@ Glasshouse is for all the work people do on a computer, not just back-office wor
 | Multi-system workflows | "Start onboarding for our new analyst" | Adapters and screen control across HR and IT systems | Ask at each submit |
 
 IT self-service is a headline feature because only an OS can safely inspect and fix the machine it runs on, and every ticket it resolves is a help desk ticket avoided.
+
+## Apps built on request
+When no app exists for what someone needs, Glasshouse builds one for them in minutes. A generated app is an ordinary Glasshouse app (UI-5), so it runs under the same sandbox, permissions, approval tiers and audit as everything else. Most of what business users ask IT for is a small tool that would otherwise become a fragile spreadsheet or a months-long request. See the Apps built on request artboard on the [mockups canvas](https://claude.ai/artifact/Y5fH2vFk3fWUvWumZTRATC).
+**Building**
+- GA-1. When a need is repeatable, shared or needs its own screen, the desktop agent builds an app instead of just doing the task once. Examples: a vendor-dispute tracker, a month-end close checklist, an intake form, a dashboard combining several systems.
+- GA-2. Catalog first: if an approved app or agent already does the job, the agent suggests it instead of building a duplicate.
+- GA-3. Users change an app by asking ("add a due-date column", "remind me when something's overdue"). Every change is a new version that can be undone.
+- GA-4. Generated code is checked before it first runs: static analysis, only pre-approved libraries, and a test that its behavior matches its manifest.
+**Guardrails**
+- GA-5. Personal by default. An app can only use data and actions its creator already has, and it runs in its own sandbox.
+- GA-6. App data lives in org storage with data labels, retention and legal hold, never in hidden local files.
+- GA-7. Actions inside an app follow the approval tiers, so a generated app can't send, post or move money without the usual approvals.
+- GA-8. Sharing moves in steps: personal, then team, then catalog. Sharing with a team runs the automated catalog checks (DV-2 and DV-3) and needs approval from IT or a delegated team owner. A catalog listing gets the full review.
+- GA-9. Every app shows its owner and version. Apps unused for 90 days are retired after the owner is notified, and ownership transfers when the owner leaves.
+**IT control**
+- GA-10. Admins set who can build apps, which data labels generated apps may use, how far they can be shared, and see an inventory of every generated app.
+- GA-11. IT or developers can take an app's TypeScript source and turn a popular app into a supported one.
+
+## Tailoring catalog items
+Users adapt catalog apps and agents with layers, not copies. A small change is saved as a thin layer on top of the published version, so the original keeps getting updates and the change rides along. A full copy is only for changes too big for a layer. See the Tailoring a catalog agent artboard on the [mockups canvas](https://claude.ai/artifact/Y5fH2vFk3fWUvWumZTRATC).
+**From lightest to heaviest**
+- TL-1. Publishers declare customization points in the manifest, such as fields, views, notification rules, prompt additions and extra skills. Everything else is locked.
+- TL-2. Personal layers: a user asks for a change ("also flag auto-renewal clauses") and it's saved as a versioned, undoable layer on the published item.
+- TL-3. Team layers: a team owner can share a layer with their team, reviewed the same way as sharing a generated app (GA-8).
+- TL-4. Make my own version: when a change is too big for a layer, the user copies the item into a generated app they own. It stops receiving the publisher's updates and is clearly marked as a copy.
+**Keeping it safe**
+- TL-10. Layers can only narrow permissions, never widen them. A change that needs new data or actions goes back through catalog review as a new version or a copy.
+- TL-11. Before an agent layer turns on, the agent is re-run against its evaluation suite with the layer applied and must still clear its release bar (AE-11).
+- TL-12. For agents validated under model-risk governance, IT can limit layers to display-only changes, or require re-validation for anything that changes behavior.
+- TL-13. When the publisher ships a new version, every layer is re-applied and re-tested. A layer that fails is paused and its owner notified, while the base version keeps working.
+- TL-14. An inventory of every layer, with controls to disable layers per item or per group.
+**Feeding good changes back**
+- TL-20. "Suggest this change" sends a layer to the item's owner, whether an internal team or an outside vendor.
+- TL-21. Owners see which changes people keep making, such as "38 people added a region column", without seeing anyone's private data.
+- TL-22. Internal owners can accept a suggested change directly into the next version, like approving a pull request.
 
 ## Agent engine and continuous improvement
 Glasshouse owns its first-party agents end to end: what they're made of, how we prove they work, and how they get better over time without retraining models. Improvements come from the harness around the model, so they carry across Bedrock, Anthropic and OpenAI alike.
@@ -533,6 +571,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Branding and notices: BR-1 to BR-4
 - UI stack: UI-1 to UI-6
 - Agent engine: AE-1, AE-2 (invoice reconciliation), AE-3, AE-4, AE-10 to AE-12, AE-30
+- Tailoring, minimal for Pilot 1: TL-1, TL-2, TL-10, TL-11 and TL-13 on our first-party agents, with undo
 **P1 · V1 GA**
 - AW-6, DA-4, DA-14, NV-4, NV-21, NV-22, NV-30 to NV-32
 - DP-6, DP-11, DP-20, DP-30, AU-4, AU-11, AU-22
@@ -546,6 +585,8 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Compliance and commercial: AD-17, AU-30, CF-65, GT-20, GT-21, GT-40
 - Developer workspace, full: DW-2, DW-4 to DW-6, DW-12, DW-14 to DW-16, DW-22, DW-24 to DW-26
 - Agent engine: AE-2 (remaining agents), AE-20 to AE-25
+- Apps built on request: GA-1 to GA-11
+- Tailoring catalog items: TL-3, TL-4, TL-12, TL-14, TL-20 to TL-22
 **P2 · Later**
 - Undo into third-party SaaS through compensating actions at scale
 - A public agent and adapter marketplace

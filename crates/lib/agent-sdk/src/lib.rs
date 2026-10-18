@@ -19,6 +19,8 @@ pub mod env {
     pub const TASK_ID: &str = "GLASS_TASK_ID";
     pub const PROMPT: &str = "GLASS_TASK_PROMPT";
     pub const WORK: &str = "GLASS_WORK";
+    /// JSON object: the agent's customization points, with the user's layer.
+    pub const SETTINGS: &str = "GLASS_AGENT_SETTINGS";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -39,6 +41,9 @@ pub struct Agent {
     pub work_dir: PathBuf,
     /// The server's instructions for this task.
     pub instructions: String,
+    /// The settings the catalog entry declares, with the user's layer
+    /// applied (TL-2). Read them with [`Agent::setting`].
+    pub settings: serde_json::Map<String, Value>,
 }
 
 impl Agent {
@@ -72,7 +77,16 @@ impl Agent {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| "/work".into()),
             instructions: init["instructions"].as_str().unwrap_or_default().to_owned(),
+            settings: std::env::var(env::SETTINGS)
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default(),
         })
+    }
+
+    /// One setting, if the catalog declares it and it has a value.
+    pub fn setting(&self, key: &str) -> Option<&Value> {
+        self.settings.get(key).filter(|v| !v.is_null())
     }
 
     /// Whether policy gave this task the tool. Tools at tier Never are not

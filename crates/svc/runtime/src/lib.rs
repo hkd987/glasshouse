@@ -22,6 +22,7 @@ mod execute;
 mod labels;
 mod runtime;
 mod supervise;
+mod tailor;
 mod task;
 mod undo;
 

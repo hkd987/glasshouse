@@ -5,210 +5,25 @@
 
 #![allow(clippy::unwrap_used)]
 
+mod common;
+
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use glass_actions::Registry;
 use glass_api::{
     AnswerApproval, ApprovalAnswer, ApprovalScope, ScopeRequest, TaskRequest, TileState,
     UndoRequest,
 };
-use glass_app_files::FilesProvider;
-use glass_app_helpdesk::HelpdeskProvider;
-use glass_app_mail::MailProvider;
-use glass_app_system::{SystemOps, SystemProvider};
-use glass_audit::{AuditLog, Durability, EventKind, Outcome};
-use glass_platform::sandbox::HostSandbox;
-use glass_platform::snapshot::CopySnapshotter;
-use glass_platform::system;
-use glass_policy::Policy;
-use glass_rpc::Client;
-use glass_rpc::mcp::{CallToolResult, ListToolsResult};
-use glass_runtime::{Caller, CatalogEntry, Runtime, RuntimeConfig, RuntimeError, RuntimeParts};
-use glass_types::{TaskId, Tier};
+use glass_audit::{EventKind, Outcome};
+use glass_rpc::mcp::ListToolsResult;
+use glass_runtime::{Caller, RuntimeError};
+use glass_types::Tier;
 use serde_json::{Value, json};
 
-struct Harness {
-    dir: tempfile::TempDir,
-    rt: Arc<Runtime>,
-    me: Caller,
-    machine: Arc<FakeMachine>,
-}
-
-impl Harness {
-    fn home(&self) -> PathBuf {
-        self.me.home.clone()
-    }
-
-    fn audit_path(&self) -> PathBuf {
-        self.dir.path().join("audit.log")
-    }
-
-    fn socket(&self, task: TaskId) -> PathBuf {
-        self.dir
-            .path()
-            .join("state/sandboxes")
-            .join(format!("glass-{}", task.short()))
-            .join("run/glasshouse/agent.sock")
-    }
-
-    fn request(&self, read: &[&str], write: &[&str]) -> TaskRequest {
-        TaskRequest {
-            agent: "invoice-demo".parse().unwrap(),
-            prompt: "Reconcile this month's invoices and remind vendors".into(),
-            scope: ScopeRequest {
-                read: read.iter().map(|p| self.home().join(p)).collect(),
-                write: write.iter().map(|p| self.home().join(p)).collect(),
-                restrict: Vec::new(),
-            },
-        }
-    }
-
-    /// Connects as the agent and completes the MCP handshake.
-    async fn agent(&self, task: TaskId) -> Client {
-        let socket = self.socket(task);
-        eventually(|| socket.exists()).await;
-        let client = Client::connect(&socket).await.unwrap();
-        let init: Value = client
-            .call("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}))
-            .await
-            .unwrap();
-        let prompt = self.rt.get(&self.me, task).unwrap().prompt;
-        assert!(init["instructions"].as_str().unwrap().contains(&prompt));
-        client
-    }
-
-    fn tile(&self, task: TaskId) -> TileState {
-        self.rt.get(&self.me, task).unwrap().view.state
-    }
-}
-
-async fn tool(client: &Client, name: &str, arguments: Value) -> CallToolResult {
-    client
-        .call(
-            "tools/call",
-            json!({ "name": name, "arguments": arguments }),
-        )
-        .await
-        .unwrap()
-}
-
-/// Polls until `check` holds, failing after five seconds.
-async fn eventually(mut check: impl FnMut() -> bool) {
-    for _ in 0..500 {
-        if check() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("condition never became true");
-}
-
-fn harness_with(policy_extra: &str) -> Harness {
-    let dir = tempfile::tempdir().unwrap();
-    let meta = fs::metadata(dir.path()).unwrap();
-    let account = glass_platform::users::by_uid(meta.uid()).expect("test user resolves");
-    let home = dir.path().join("home");
-    for folder in ["Invoices", "Reports", "Finance", "Private"] {
-        fs::create_dir_all(home.join(folder)).unwrap();
-    }
-    for (i, amount) in ["120.00", "75.50", "310.25"].iter().enumerate() {
-        fs::write(
-            home.join(format!("Invoices/inv-00{}.txt", i + 1)),
-            format!("Vendor {i}\nAmount: {amount}\n"),
-        )
-        .unwrap();
-    }
-    fs::write(home.join("Reports/existing.txt"), "original report\n").unwrap();
-    fs::write(home.join("Finance/q3.csv"), "secret numbers\n").unwrap();
-
-    let policy_text = format!(
-        "{}\n[[label]]\npath = \"{}/Finance\"\nlabel = \"confidential\"\n{policy_extra}",
-        glass_policy::DEFAULT_POLICY,
-        home.display()
-    );
-    let policy = Policy::from_toml(&policy_text).unwrap();
-    let mut registry = Registry::new();
-    registry.register(Arc::new(FilesProvider)).unwrap();
-    registry.register(Arc::new(MailProvider)).unwrap();
-    let machine = Arc::new(FakeMachine::default());
-    let ops: Arc<dyn SystemOps> = machine.clone();
-    registry
-        .register(Arc::new(SystemProvider::new(ops, vec!["ntpd".into()])))
-        .unwrap();
-    registry
-        .register(Arc::new(HelpdeskProvider::new(dir.path().join("outbox"))))
-        .unwrap();
-
-    let rt = Runtime::new(RuntimeParts {
-        config: RuntimeConfig {
-            state_dir: dir.path().join("state"),
-            catalog: vec![
-                CatalogEntry {
-                    id: "it-agent".parse().unwrap(),
-                    name: "IT agent".into(),
-                    version: "0.1".into(),
-                    model: String::new(),
-                    description: String::new(),
-                    mode: glass_api::AgentMode::Actions,
-                    program: "/bin/sleep".into(),
-                    args: vec!["30".into()],
-                    plan: vec!["Check".into(), "Fix".into()],
-                },
-                CatalogEntry {
-                    id: "invoice-demo".parse().unwrap(),
-                    name: "Invoice demo".into(),
-                    version: "0.1".into(),
-                    model: String::new(),
-                    description: String::new(),
-                    mode: glass_api::AgentMode::Actions,
-                    program: "/bin/sleep".into(),
-                    args: vec!["30".into()],
-                    plan: vec![
-                        "Read invoices".into(),
-                        "Write the summary".into(),
-                        "Remind vendors".into(),
-                    ],
-                },
-            ],
-            agent_dirs: Vec::new(),
-            max_live_tasks_per_user: 4,
-        },
-        policy,
-        policy_source: "test".into(),
-        registry,
-        sandbox: Arc::new(HostSandbox),
-        snapshots: Arc::new(CopySnapshotter::new(dir.path().join("snapshots"))),
-        audit: Arc::new(
-            AuditLog::open(dir.path().join("audit.log"), Durability::Buffered).unwrap(),
-        ),
-    });
-    let me = Caller {
-        name: account.name,
-        uid: account.uid,
-        gid: account.gid,
-        home,
-    };
-    Harness {
-        dir,
-        rt,
-        me,
-        machine,
-    }
-}
-
-fn harness() -> Harness {
-    harness_with("")
-}
-
-fn send_args(n: usize) -> Value {
-    json!({ "messages": (0..n).map(|i| json!({
-        "to": [format!("vendor{i}@example.com")], "subject": format!("Invoice {i} reminder"), "body": "Please pay."
-    })).collect::<Vec<_>>() })
-}
+use crate::common::{Harness, eventually, harness, harness_with, rebuild, send_args, tool};
 
 #[tokio::test]
 async fn plan_shows_the_handoff_card_without_side_effects() {
@@ -722,36 +537,6 @@ async fn approvals_time_out_into_a_paused_task() {
     assert_eq!(timed_out.len(), 1);
 }
 
-fn rebuild(h: &Harness, policy: &str) -> Arc<Runtime> {
-    let mut registry = Registry::new();
-    registry.register(Arc::new(FilesProvider)).unwrap();
-    registry.register(Arc::new(MailProvider)).unwrap();
-    Runtime::new(RuntimeParts {
-        config: RuntimeConfig {
-            state_dir: h.dir.path().join("state"),
-            catalog: vec![CatalogEntry {
-                id: "invoice-demo".parse().unwrap(),
-                name: "Invoice demo".into(),
-                version: "0.1".into(),
-                model: String::new(),
-                description: String::new(),
-                mode: glass_api::AgentMode::Actions,
-                program: "/bin/sleep".into(),
-                args: vec!["30".into()],
-                plan: Vec::new(),
-            }],
-            agent_dirs: Vec::new(),
-            max_live_tasks_per_user: 4,
-        },
-        policy: Policy::from_toml(policy).unwrap(),
-        policy_source: "test".into(),
-        registry,
-        sandbox: Arc::new(HostSandbox),
-        snapshots: Arc::new(CopySnapshotter::new(h.dir.path().join("snapshots"))),
-        audit: Arc::new(AuditLog::open(h.audit_path(), Durability::Buffered).unwrap()),
-    })
-}
-
 #[tokio::test]
 async fn stopping_tears_down_the_sandbox_and_withdraws_asks() {
     let h = harness();
@@ -1049,42 +834,6 @@ async fn an_ended_task_says_what_is_safe_and_can_be_retried() {
     })
     .unwrap();
     assert_eq!(started[0].event.detail["retry_of"], json!(first));
-}
-
-/// The machine as the IT agent's actions see it (AE-4), without touching
-/// the real one.
-#[derive(Debug, Default)]
-struct FakeMachine {
-    restarted: std::sync::Mutex<Vec<String>>,
-}
-
-impl SystemOps for FakeMachine {
-    fn network(&self) -> Result<system::NetworkStatus, String> {
-        Err("not in tests".into())
-    }
-    fn resolve(&self, _host: &str) -> Result<Vec<std::net::IpAddr>, String> {
-        Err("not in tests".into())
-    }
-    fn filesystem_usage(&self, _path: &std::path::Path) -> Result<system::FsUsage, String> {
-        Ok(system::FsUsage {
-            total_kb: 100,
-            used_kb: 95,
-            available_kb: 5,
-        })
-    }
-    fn load(&self) -> Result<system::Load, String> {
-        Err("not in tests".into())
-    }
-    fn top_processes(&self, _uid: u32) -> Result<Vec<system::Process>, String> {
-        Ok(Vec::new())
-    }
-    fn service_enabled(&self, name: &str) -> bool {
-        name == "ntpd"
-    }
-    fn restart_service(&self, name: &str) -> Result<(), String> {
-        self.restarted.lock().unwrap().push(name.into());
-        Ok(())
-    }
 }
 
 #[tokio::test]

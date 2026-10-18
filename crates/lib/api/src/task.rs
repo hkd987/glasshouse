@@ -74,6 +74,9 @@ pub struct HandoffCard {
     /// Which model does the work, such as "Claude via Amazon Bedrock".
     #[serde(default)]
     pub model: String,
+    /// The user's layer on this agent, if they tailored it (TL-2).
+    #[serde(default)]
+    pub layer: Option<crate::LayerLine>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 //! One task's identity (fixed at start) and its mutable record.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Mutex, MutexGuard};
@@ -14,6 +14,7 @@ use glass_platform::sandbox::SandboxSpec;
 use glass_platform::snapshot::SnapshotHandle;
 use glass_policy::EffectivePolicy;
 use glass_types::{TaskId, Timestamp};
+use serde_json::Value;
 use tokio::sync::{oneshot, watch};
 
 use crate::{Caller, CatalogEntry};
@@ -43,6 +44,10 @@ pub(crate) struct Task {
     pub ctx: TaskContext,
     pub sandbox: SandboxSpec,
     pub cant_touch: Vec<String>,
+    /// The agent's settings: published defaults, with the user's layer.
+    pub settings: BTreeMap<String, Value>,
+    /// The layer version this task runs with (TL-2).
+    pub layer: Option<u32>,
     pub started_at: Timestamp,
     pub gate: watch::Sender<Gate>,
     /// Fires once to make the supervisor kill the agent.
@@ -76,36 +81,43 @@ pub(crate) struct TaskState {
     pub sleeping: Option<String>,
 }
 
+/// Everything fixed when a task starts.
+#[derive(Debug)]
+pub(crate) struct NewTask {
+    pub id: TaskId,
+    pub user: Caller,
+    pub entry: CatalogEntry,
+    pub prompt: String,
+    pub scope: ScopeRequest,
+    pub plan: Vec<String>,
+    pub policy: EffectivePolicy,
+    pub ctx: TaskContext,
+    pub sandbox: SandboxSpec,
+    pub cant_touch: Vec<String>,
+    pub settings: BTreeMap<String, Value>,
+    pub layer: Option<u32>,
+    pub stop: oneshot::Sender<()>,
+}
+
 impl Task {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        id: TaskId,
-        user: Caller,
-        entry: CatalogEntry,
-        prompt: String,
-        scope: ScopeRequest,
-        plan: Vec<String>,
-        policy: EffectivePolicy,
-        ctx: TaskContext,
-        sandbox: SandboxSpec,
-        cant_touch: Vec<String>,
-        stop: oneshot::Sender<()>,
-    ) -> Self {
+    pub fn new(new: NewTask) -> Self {
         let now = Timestamp::now();
         Self {
-            id,
-            user,
-            entry,
-            prompt,
-            scope,
-            plan,
-            policy,
-            ctx,
-            sandbox,
-            cant_touch,
+            id: new.id,
+            user: new.user,
+            entry: new.entry,
+            prompt: new.prompt,
+            scope: new.scope,
+            plan: new.plan,
+            policy: new.policy,
+            ctx: new.ctx,
+            sandbox: new.sandbox,
+            cant_touch: new.cant_touch,
+            settings: new.settings,
+            layer: new.layer,
             started_at: now,
             gate: watch::Sender::new(Gate::Run),
-            stop: Mutex::new(Some(stop)),
+            stop: Mutex::new(Some(new.stop)),
             in_flight: AtomicUsize::new(0),
             state: Mutex::new(TaskState {
                 tile: TileState::Starting,

@@ -30,6 +30,27 @@ pub fn card(card: &HandoffCard) -> String {
     for (i, step) in card.plan.iter().enumerate() {
         let _ = writeln!(out, "    {}. {step}", i + 1);
     }
+    if let Some(layer) = &card.layer {
+        let heading = format!("Your layer v{}", layer.version);
+        match &layer.paused {
+            Some(reason) => {
+                let _ = writeln!(
+                    out,
+                    "\n  {} {}",
+                    bold(&heading),
+                    orange(&format!(
+                        "· paused, running the published version: {reason}"
+                    ))
+                );
+            }
+            None => {
+                let _ = writeln!(out, "\n  {}", bold(&heading));
+                for line in &layer.summary {
+                    let _ = writeln!(out, "    • {line}");
+                }
+            }
+        }
+    }
     let _ = writeln!(out, "\n  {}", bold("Touches"));
     if card.touches.is_empty() {
         let _ = writeln!(

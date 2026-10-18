@@ -160,6 +160,11 @@ pipeline refuses further side effects (fail closed).
   ADR 0010).** Nothing an agent ships or an improvement loop edits can
   change tiers, Never rules, labels or scope, so keep every limit enforced
   in `glassd`, never delegated to the agent.
+- **Users shape their tools; the OS keeps it safe (TL, GA, ADR 0014).**
+  Tailoring is data the OS checks (settings for declared points, limits
+  that only narrow), never code an agent ships. Apps built on request are
+  ordinary apps under the same sandbox, tiers and audit; there is no
+  separate path for generated code.
 - **Our cloud services run on AWS (GT-21)** and hold only licensing, policy
   and telemetry metadata; customer data stays on devices and in the
   customer's own Bedrock account (GT-3).
@@ -179,6 +184,7 @@ pipeline refuses further side effects (fail closed).
 | `glass-app-files`, `-mail`, `-system`, `-helpdesk` | apps | Each app's actions (ADR 0013) |
 | `glass-first-party` | svc | The apps the OS ships, as one registry |
 | `glass-broker` | svc | Decisions and the approval desk |
+| `glass-tailoring` | svc | Personal layers on agents: customization points, versions, re-checks (ADR 0014) |
 | `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
 | `glassd`, `glassctl`, `glass-mcp`, `glass-demo-agent`, `glass-it-agent`, `glass-probe` | bin | Executables |
 | `glass-e2e` | tests | End-to-end scenarios |

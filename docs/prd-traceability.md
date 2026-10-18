@@ -6,10 +6,10 @@ OS — PRD"), plus engineering notes on P1 work that shapes today's design.
 what's missing. Update this file in the same change that moves a
 requirement; the `prd-sync` skill re-reads the PRD and diffs it.
 
-PRD revision last synced: 2026-10-18, third sync (Glasshouse is for all the
-work people do on a computer: "Everyday work" categories, a general desktop
-agent (AE-3) and an IT self-service agent (AE-4), both P0; Pilot 1 ships
-invoice reconciliation, with vendor email covered by AE-3; six new mockups). V1 is **US-only** and **x86 (Intel/AMD)
+PRD revision last synced: 2026-10-18, fourth sync (users shape their own
+tools: tailoring catalog items with layers, TL-1, TL-2, TL-10, TL-11 and
+TL-13 in Pilot 1; apps built on request, GA-1 … GA-11, P1; a success
+metric for it; two new mockups). V1 is **US-only** and **x86 (Intel/AMD)
 only**: we build and test `x86_64-unknown-freebsd` and nothing else.
 
 Tests: *unit* = crate unit tests, *pipeline* =
@@ -66,14 +66,14 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 | AW-3 Three-line feed, verb + target | **Done** (data) | `FeedLine { verb, target, text }` |
 | AW-4 Name, mode, caption, progress | **Done** (data) | `report_progress` tool |
 | AW-5 No focus stealing, draggable | Not started | shell |
-| AW-10 Expanded view < 200 ms | Partial | `task.get` returns it; GUI not started |
+| AW-10 Expanded view < 200 ms | Partial | `task.get` answers in ~4 ms in the VM (e2e `perf`, docs/dev/performance.md); GUI not started |
 | AW-11 Pause, Stop, Take over | Partial | all three work; "Stop asks once if unsaved" not done |
 | AW-12 Now bar | **Done** (data) | `TaskDetail::now` |
 | AW-13 Activity and Changes tabs | **Done** (data) | `TaskDetail::{activity, changes}` |
 | AW-14 Can't touch panel | **Done** (data) | IT's Never rules by name, plus limits |
 | AW-15 Timeline, roll back to a marker | **Done** | pipeline `rolling_back_to_a_marker…` |
 | AW-16 Shrink back to tile | Not started | shell |
-| AW-20 Take over pauses at a safe point within 1 s | Partial | actions agents pause at the next action boundary; display/input hand-off needs screen agents |
+| AW-20 Take over pauses at a safe point within 1 s | Partial | actions agents pause at the next action boundary, ~0.2 s in the VM (e2e `perf`); display/input hand-off needs screen agents |
 | AW-21 Hand back says what changed | **Done** | pipeline + e2e `takeover` |
 | AW-22 Take over always available, even during an ask | **Done** | e2e `takeover` |
 | Tile states: Failed with Retry, take over, undo all | **Done** (data + CLI) | `receipt.outcome()` on Failed and Stopped tiles; `task.retry`. Pipeline `an_ended_task_says_what_is_safe…`, e2e `changes`. Take over of a failed actions agent needs a design call (docs/design) |
@@ -108,7 +108,7 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 | AU-2 Append-only, hash-chained, streamed in OCSF/CEF to the SIEM | Partial | chain + verify done (unit tamper tests); OCSF/CEF export, streaming and OpenBSM not started |
 | AU-3 Rebuild any task end to end | **Done** | `audit.task`, `glassctl audit` |
 | AU-10 "by [agent] for [user]" metadata | **Done** | xattr on files, header on mail (verified in the VM) |
-| AU-20 Snapshots before Notify steps, every 5 min, kept 30 days | Partial | before Notify and first change done; cadence and retention not started |
+| AU-20 Snapshots before Notify steps, every 5 min, kept 30 days | Partial | before Notify and first change done; cadence and retention not started (snapshots are never destroyed yet) |
 | AU-21 Undo all, lists what it couldn't undo | **Done** | pipeline + e2e `invoices`; single changes too (Changes mockup): pipeline `undoing_single_changes…`, e2e `changes` |
 
 ## Admin, licensing, catalog
@@ -177,6 +177,22 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 | AE-4 IT self-service agent: approved fixes through a dedicated broker role, logged and undoable, never security settings; ticket when it can't fix | Partial | `system.*` actions (network, storage, performance checks; cache cleanup, undoable; service restart from IT's `[fixes]` list) and `helpdesk.ticket.create`, run by glassd (ADR 0012); policy allows them to `it-agent` only. Scripted `glass-it-agent`. Unit tests, pipeline `only_the_it_agent_reaches_the_system…`, e2e `it`. Missing: certificates, printers, app installs, a real help desk adapter, the model-backed agent |
 | AE-10 … AE-12 Eval suites, release bar, live quality metrics | Not started | The e2e harness on ZFS snapshots is the base of the eval runner; take-overs, undos and declined approvals are already audit events per agent |
 | AE-30 Re-run evals before a model switch | Not started | Needs the gateway and bundles |
+
+## Tailoring and apps built on request
+
+Users shape their own tools (PRD "The edge", ADR 0014). Success metric:
+25% of seats tailor or build at least one tool; every layer save is a
+`LayerChanged` audit event per user, which is what the metric will count.
+
+| Id | Status | Notes |
+|---|---|---|
+| TL-1 Publishers declare customization points; the rest is locked | **Done** | `[[agent.customize]]` in the catalog (text, number, flag, choice, instructions), checked at startup; values checked on save. Unit tests in `glass-tailoring`, `tailoring::tl1_…`, e2e `tailor` |
+| TL-2 Personal layers, versioned and undoable | **Done** | `layer.get/set/revert`, `glassctl tailor` (`--undo`, `--revert`, `--off`); the agent gets `GLASS_AGENT_SETTINGS` and its instructions; the card and the task's activity name the version. `tailoring::tl2_…`, e2e `tailor` |
+| TL-10 Layers only narrow permissions | **Done** | a layer holds settings and limits only; limits must tighten the user's policy on save and apply as a maximum. `tailoring::tl10_…`, e2e `tailor` |
+| TL-11 Re-run the evaluation suite before a layer turns on | Not started | needs eval suites (AE-10); the "Release bar" check reports "not available" rather than passing |
+| TL-13 New agent version: re-apply and re-test every layer; pause failures, notify the owner | Partial | re-checked against the new version's points at startup and before use, paused with the reason, published agent runs; owner sees it on the card and in `glassctl tailor`. Missing: re-test with evals, a pushed notification. `tailoring::tl13_…` |
+| TL-3, TL-4, TL-12, TL-14, TL-20 … TL-22 Team layers, copies, IT controls, inventory, suggestions | P1 | ADR 0014 "Proposed next" |
+| GA-1 … GA-11 Apps built on request | P1 | A generated app is an ordinary app (UI-5): its actions join the registry like any `crates/apps` provider (ADR 0013) and get tiers, audit and undo for free. Catalog-first (GA-2) needs the catalog service; sharing steps (GA-8) reuse the DV-2/DV-3 checks |
 
 ## Pilot readiness
 

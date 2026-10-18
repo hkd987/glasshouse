@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use glass_api::PointKind;
 use glass_rpc::mcp::{
     self, CallToolParams, Implementation, InitializeResult, ListToolsResult, ServerCapabilities,
     Tool, ToolAnnotations, ToolsCapability,
@@ -145,7 +146,7 @@ fn instructions(task: &Task) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    format!(
+    let mut text = format!(
         "You are the {agent} agent working for {user} on this task:\n{prompt}\n\n\
          Folders you were given: {folders}. File paths start with a folder name, such as \"{example}/notes.txt\".\n\
          Everything you do is shown to the user live, logged, and undoable where possible. Some actions ask the \
@@ -159,5 +160,28 @@ fn instructions(task: &Task) -> String {
             .first()
             .map_or("Folder", |g| g.name.as_str()),
         progress = REPORT_PROGRESS_TOOL,
-    )
+    );
+    // The user's layer (TL-2): settings by name, and their own words.
+    let (asked, settings): (Vec<_>, Vec<_>) = task
+        .entry
+        .customize
+        .iter()
+        .filter_map(|point| task.settings.get(&point.key).map(|value| (point, value)))
+        .partition(|(point, _)| point.kind == PointKind::Instructions);
+    if !settings.is_empty() {
+        let lines: Vec<String> = settings
+            .iter()
+            .map(|(point, value)| format!("{} ({}): {value}", point.title, point.key))
+            .collect();
+        text.push_str(&format!(
+            "\n\nSettings for this agent: {}.",
+            lines.join("; ")
+        ));
+    }
+    for (_, value) in asked {
+        if let Some(words) = value.as_str().filter(|w| !w.trim().is_empty()) {
+            text.push_str(&format!("\n\nThe user also asked: {words}"));
+        }
+    }
+    text
 }
