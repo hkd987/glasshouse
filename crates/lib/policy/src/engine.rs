@@ -9,6 +9,7 @@ use glass_types::{ActionName, AgentId, Label, SideEffect, Tier};
 use serde::{Deserialize, Serialize};
 
 use crate::document::{AgentPolicy, Fixes, GroupPolicy, PolicyDocument, SCHEMA_VERSION};
+use crate::models::{self, ModelRules};
 use crate::{ActionPattern, labels, pattern};
 
 /// The group name that implicitly contains every user.
@@ -77,6 +78,7 @@ impl Policy {
                 errors.push(format!("label rule path {:?} must be absolute", rule.path));
             }
         }
+        models::validate(&doc, &mut errors);
         for service in &doc.fixes.services {
             let plain = !service.is_empty()
                 && service
@@ -154,6 +156,7 @@ impl Policy {
             agent_rules: agent.clone(),
             restrictions: Vec::new(),
             names: self.doc.names.clone(),
+            models: ModelRules::new(&self.doc.models, groups, agent.models.as_deref()),
         }
     }
 
@@ -180,7 +183,9 @@ impl Policy {
                 let eff = self.build("", &groups, agent);
                 for (name, effect, default) in actions {
                     let decision = eff.tier_for(name, *default);
-                    if !effect.is_reversible() && decision.tier < Tier::Ask {
+                    // Disclosures (model calls) are governed by labels and
+                    // routing, not by asking each time (ADR 0018).
+                    if *effect == SideEffect::Irreversible && decision.tier < Tier::Ask {
                         warnings.push(format!(
                             "agent {} in group {} runs irreversible action {name} at tier {} \
                              ({}); irreversible actions normally sit at ask",
@@ -265,6 +270,7 @@ pub struct EffectivePolicy {
     agent_rules: AgentPolicy,
     restrictions: Vec<(ActionPattern, Tier)>,
     names: BTreeMap<ActionPattern, String>,
+    models: ModelRules,
 }
 
 impl EffectivePolicy {
@@ -286,6 +292,17 @@ impl EffectivePolicy {
 
     pub fn egress(&self) -> &[String] {
         &self.egress
+    }
+
+    /// The approved models and where this task's data may go (DP-2).
+    pub fn models(&self) -> &ModelRules {
+        &self.models
+    }
+
+    /// Keeps only the models in `keep` for this task; never adds one
+    /// (ADR 0014).
+    pub fn narrow_models(&mut self, keep: &[String]) {
+        self.models.narrow(keep);
     }
 
     /// The tier `action` runs at, and which rule decided it.
