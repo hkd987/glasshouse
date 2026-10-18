@@ -6,6 +6,7 @@
 //!   agent tiles.
 //! - [`tiles`]: an agent tile drawn from a `glass_api::TaskView`, the same
 //!   data `glassctl` shows.
+//! - [`greeter`]: the sign-in screen's state, for the greeter (ADR 0019).
 //! - [`live`]: the live desktop's state, kept current from glassd's events,
 //!   and what the person's clicks and keys ask of glassd.
 //! - [`render`]: draws any screen, once for previews and snapshot tests, or
@@ -16,6 +17,7 @@
 
 pub mod fixtures;
 pub mod fonts;
+pub mod greeter;
 pub mod icons;
 pub mod live;
 pub mod render;
@@ -70,4 +72,6 @@ pub enum Message {
     CloseCommandBar,
     PasswordChanged(String),
     SignIn,
+    /// The sign-in screen's "Switch user": the next person who can sign in.
+    SwitchUser,
 }

@@ -84,3 +84,73 @@ mod tests {
         assert!(by_name("bad\0name").is_none());
     }
 }
+
+/// Someone who can sign in on this computer: a local account in the
+/// people's uid range with a login shell, for the sign-in screen
+/// (ADR 0019). Directory accounts come with directory sign-in (CF-1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Person {
+    pub name: String,
+    /// The full name from the account's comment field, if any.
+    pub full_name: String,
+    pub uid: u32,
+}
+
+/// The people in `/etc/passwd`, in uid order.
+pub fn people() -> std::io::Result<Vec<Person>> {
+    Ok(people_in(&std::fs::read_to_string("/etc/passwd")?))
+}
+
+/// The people in a `passwd(5)` file's text: uids from 1000 up (not
+/// `nobody`), with a shell that lets them in.
+pub fn people_in(passwd: &str) -> Vec<Person> {
+    const NO_LOGIN: [&str; 3] = ["/usr/sbin/nologin", "/sbin/nologin", "/usr/bin/false"];
+    let mut found: Vec<Person> = passwd
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            let [name, _, uid, _, gecos, _, shell] = fields[..] else {
+                return None;
+            };
+            let uid: u32 = uid.parse().ok()?;
+            let can_sign_in =
+                (1000..65534).contains(&uid) && !shell.is_empty() && !NO_LOGIN.contains(&shell);
+            can_sign_in.then(|| Person {
+                name: name.to_owned(),
+                // The first comma-separated part is the full name.
+                full_name: gecos.split(',').next().unwrap_or_default().to_owned(),
+                uid,
+            })
+        })
+        .collect();
+    found.sort_by_key(|p| p.uid);
+    found
+}
+
+#[cfg(test)]
+mod people_tests {
+    use super::*;
+
+    #[test]
+    fn people_are_local_accounts_with_a_login_shell() {
+        let passwd = "\
+# comment
+root:*:0:0:Charlie &:/root:/bin/sh
+nobody:*:65534:65534:Unprivileged user:/nonexistent:/usr/sbin/nologin
+glassd:*:900:900:Glasshouse daemon:/var/db/glasshouse:/usr/sbin/nologin
+dana:*:1002:1002:Dana Ruiz,Room 4,,:/home/dana:/bin/sh
+demo:*:1001:1001:Glasshouse demo user:/home/demo:/bin/sh
+svc:*:1003:1003::/home/svc:/usr/sbin/nologin
+";
+        let people = people_in(passwd);
+        let names: Vec<(&str, &str)> = people
+            .iter()
+            .map(|p| (p.name.as_str(), p.full_name.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [("demo", "Glasshouse demo user"), ("dana", "Dana Ruiz")]
+        );
+    }
+}

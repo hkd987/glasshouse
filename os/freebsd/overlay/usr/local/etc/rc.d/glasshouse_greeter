@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# PROVIDE: glasshouse_greeter
+# REQUIRE: LOGIN glassd
+# KEYWORD: nojail shutdown
+#
+# The sign-in screen on the first virtual terminal (ADR 0019): glass-greeter
+# checks passwords with PAM, starts the person's desktop, and shows the
+# sign-in screen again when they sign out. getty must not run on ttyv0 at
+# the same time; post-install.sh turns it off there when this is enabled.
+
+# rc.subr reads the rc variables below.
+# shellcheck disable=SC1091,SC2034
+. /etc/rc.subr
+
+name="glasshouse_greeter"
+desc="The Glasshouse sign-in screen"
+rcvar="glasshouse_greeter_enable"
+pidfile="/var/run/${name}.pid"
+procname="/usr/local/bin/glass-greeter"
+command="/usr/sbin/daemon"
+# -p records glass-greeter's own pid (not the supervisor's) so rc.subr can
+# track it.
+command_args="-f -p ${pidfile} -o /var/log/glass-greeter.log ${procname}"
+
+load_rc_config "$name"
+: "${glasshouse_greeter_enable:=NO}"
+
+run_rc_command "$1"

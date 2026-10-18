@@ -192,8 +192,10 @@ pub fn sign_in() -> SignIn {
         user: "Dana Ruiz".into(),
         initials: "DR".into(),
         managed_by: "[Org name] managed device · signs in with Entra ID".into(),
-        battery_percent: 82,
+        battery_percent: Some(82),
         password: String::new(),
+        message: None,
+        wallpaper: true,
     }
 }
 

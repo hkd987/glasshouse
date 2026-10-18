@@ -16,6 +16,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[features]
+# Password checks through PAM (`auth`), for the sign-in screen only: the
+# rest of the system doesn't link libpam.
+pam = []
+
 [dev-dependencies]
 tempfile.workspace = true
 

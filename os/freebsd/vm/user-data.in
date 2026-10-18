@@ -22,4 +22,6 @@ runcmd:
   # demo: unprivileged user whose home is its own dataset (agent undo restores from ZFS snapshots).
   - zfs create zroot/home/demo
   - pw useradd -n demo -u 1001 -c "Glasshouse demo user" -d /home/demo -s /bin/sh -m -M 0755 -w no
+  # Development VMs only: a known password for the sign-in screen (ADR 0019). Images never set one.
+  - echo demo | pw usermod demo -h 0
   - chown demo:demo /home/demo

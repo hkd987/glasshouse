@@ -1,0 +1,10 @@
+#
+# The Glasshouse sign-in screen (glass-greeter, ADR 0019): the same
+# account checks as a console login, without the root-only terminal rule
+# (the screen is not a terminal session).
+#
+auth		include		system
+account		required	pam_nologin.so
+account		include		system
+session		include		system
+password	include		system
