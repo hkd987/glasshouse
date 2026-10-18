@@ -10,11 +10,13 @@
 //! screen, and moving the pointer repaints only the rows it crosses.
 //!
 //! ```text
-//! glass-shell-fb [--tty /dev/ttyv0] [--socket /var/run/glasshouse/control.sock] [--once] [--no-input]
+//! glass-shell-fb [--tty /dev/ttyv0] [--socket /var/run/glasshouse/control.sock] [--once] [--no-input] [--from-sign-in]
 //! ```
 //!
 //! The terminal shows the desktop until the program ends (Ctrl-C or
-//! SIGTERM), then goes back to text. `--once` draws one frame and exits; it
+//! SIGTERM), then goes back to text. With `--from-sign-in` (the sign-in
+//! screen starts it so) signing out leaves the last frame up for the
+//! sign-in screen to draw over, rather than flashing the text console. `--once` draws one frame and exits; it
 //! stays on screen until the console next draws. The tiles are the caller's,
 //! as `glassctl tasks` shows them, and the caller needs read and write
 //! access to the terminal and read access to `/dev/input/event*`.
@@ -42,6 +44,7 @@ struct Args {
     socket: PathBuf,
     once: bool,
     input: bool,
+    from_sign_in: bool,
 }
 
 fn args() -> anyhow::Result<Args> {
@@ -50,6 +53,7 @@ fn args() -> anyhow::Result<Args> {
         socket: PathBuf::from("/var/run/glasshouse/control.sock"),
         once: false,
         input: true,
+        from_sign_in: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -59,9 +63,10 @@ fn args() -> anyhow::Result<Args> {
             "--socket" => parsed.socket = value()?.into(),
             "--once" => parsed.once = true,
             "--no-input" => parsed.input = false,
+            "--from-sign-in" => parsed.from_sign_in = true,
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: glass-shell-fb [--tty PATH] [--socket PATH] [--once] [--no-input]"
+                    "usage: glass-shell-fb [--tty PATH] [--socket PATH] [--once] [--no-input] [--from-sign-in]"
                 );
                 std::process::exit(0);
             }
@@ -142,7 +147,10 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
                 let effects = shell.input(&batch);
                 if effects.contains(&Effect::SignOut) {
                     eprintln!("signing out");
-                    break;
+                    if args.from_sign_in {
+                        shell.display.hand_over();
+                    }
+                    return Ok(());
                 }
                 shell.carry_out_all(&client, effects).await;
                 redraw = shell.changed();

@@ -2,7 +2,7 @@
 //! virtual terminal, started by `rc.d/glasshouse_greeter`.
 //!
 //! ```text
-//! glass-greeter [--tty /dev/ttyv0] [--session /usr/local/bin/glass-shell-fb]
+//! glass-greeter [--tty /dev/ttyv0] [--session "/usr/local/bin/glass-shell-fb --from-sign-in"]
 //! glass-greeter --screen [--tty /dev/ttyv0]
 //! ```
 //!
@@ -41,14 +41,15 @@ const AFTER_REFUSAL: Duration = Duration::from_secs(2);
 
 struct Args {
     tty: PathBuf,
-    session: PathBuf,
+    /// The desktop: a command for the person's login shell.
+    session: String,
     screen: bool,
 }
 
 fn args() -> anyhow::Result<Args> {
     let mut parsed = Args {
         tty: PathBuf::from("/dev/ttyv0"),
-        session: PathBuf::from("/usr/local/bin/glass-shell-fb"),
+        session: "/usr/local/bin/glass-shell-fb --from-sign-in".into(),
         screen: false,
     };
     let mut it = std::env::args().skip(1);
@@ -56,10 +57,10 @@ fn args() -> anyhow::Result<Args> {
         let mut value = || it.next().with_context(|| format!("{arg} needs a value"));
         match arg.as_str() {
             "--tty" => parsed.tty = value()?.into(),
-            "--session" => parsed.session = value()?.into(),
+            "--session" => parsed.session = value()?,
             "--screen" => parsed.screen = true,
             "-h" | "--help" => {
-                eprintln!("usage: glass-greeter [--tty PATH] [--session PATH] [--screen]");
+                eprintln!("usage: glass-greeter [--tty PATH] [--session COMMAND] [--screen]");
                 std::process::exit(0);
             }
             other => bail!("unknown argument {other}"),
@@ -282,7 +283,11 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
                             auth::wipe(&mut password);
                             auth::wipe(greeter.password_mut());
                             match checked {
-                                Ok(()) => return Ok(user),
+                                Ok(()) => {
+                                    // Up until the desktop draws over it.
+                                    display.hand_over();
+                                    return Ok(user);
+                                }
                                 Err(AuthError::Refused) => {
                                     tokio::time::sleep(AFTER_REFUSAL).await;
                                     greeter.refused("That password didn't work. Try again.");

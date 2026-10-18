@@ -62,7 +62,11 @@ environment, `setlogin`, PAM session modules, lastlog.
   had open before the person's desktop opens the same devices.
 - `glass-shell-fb` became a library (`display`: framebuffer, damage-tracked
   drawing, pointer, input) and the desktop binary; the greeter uses the
-  library. Shift Super Q signs out of the desktop, which ends the session.
+  library. Shift Super Q, or Sign out in the system menu, ends the session.
+- Handing over, the screen that ends leaves its last frame up and the
+  terminal in graphics mode (`Framebuffer::hand_over`) for the next to draw
+  over, so the text console never shows between the sign-in screen and the
+  desktop, either way. Any other ending puts the console back.
 - Stopping the service (`service glasshouse_greeter stop`, or a shutdown)
   sends SIGTERM to the supervisor, which ends whatever is showing (SIGTERM
   to the screen; to the desktop's process group, never to `su`, so `su`

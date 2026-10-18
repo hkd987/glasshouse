@@ -58,6 +58,12 @@ impl Display {
         })
     }
 
+    /// Closes the screen, leaving its last frame up for the next program to
+    /// draw over, so the text console doesn't flash in between.
+    pub fn hand_over(self) {
+        self.fb.hand_over();
+    }
+
     /// The screen's size in pixels.
     pub fn pixels(&self) -> (u32, u32) {
         let g = self.fb.geometry();

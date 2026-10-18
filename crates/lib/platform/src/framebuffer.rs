@@ -100,6 +100,19 @@ impl Framebuffer {
         self.geometry
     }
 
+    /// Closes the framebuffer but leaves the last frame up and the terminal
+    /// in graphics mode, for the next program to draw over (the sign-in
+    /// screen handing over to the desktop and back) without the text
+    /// console showing in between. Dropping it instead puts the console
+    /// back.
+    pub fn hand_over(self) {
+        #[cfg(target_os = "freebsd")]
+        {
+            let mut inner = self.inner;
+            inner.restore = false;
+        }
+    }
+
     /// Copies rows `rows` of a straight RGBA frame `width` pixels wide onto
     /// the screen, from its top left corner. Rows and columns past the
     /// screen's edge are left out.
@@ -197,6 +210,8 @@ mod sys {
         base: NonNull<u8>,
         len: usize,
         pub(super) geometry: Geometry,
+        /// Put the terminal back to text when closing.
+        pub(super) restore: bool,
     }
 
     impl Mapping {
@@ -284,6 +299,7 @@ mod sys {
                 base,
                 len,
                 geometry,
+                restore: true,
             };
             // SAFETY: KDSETMODE takes the mode by value.
             check(unsafe { libc::ioctl(fd, KDSETMODE, KD_GRAPHICS) }).map_err(named)?;
@@ -300,13 +316,17 @@ mod sys {
     impl Drop for Mapping {
         fn drop(&mut self) {
             let fd = self.tty.as_raw_fd();
-            // SAFETY: KDSETMODE takes the mode by value; `base` and `len`
-            // are the mapping made in `open`, unmapped once, here.
+            // SAFETY: `base` and `len` are the mapping made in `open`,
+            // unmapped once, here; KDSETMODE takes the mode by value.
             unsafe {
-                libc::ioctl(fd, KDSETMODE, KD_TEXT);
                 libc::munmap(self.base.as_ptr().cast(), self.len);
+                if self.restore {
+                    libc::ioctl(fd, KDSETMODE, KD_TEXT);
+                }
             }
-            redraw(fd);
+            if self.restore {
+                redraw(fd);
+            }
         }
     }
 
