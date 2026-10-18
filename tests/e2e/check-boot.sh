@@ -19,7 +19,9 @@ if loader 'hw.usb.no_boot_wait="1"'; then
 else
 	flunk "root file system waits for USB: hw.usb.no_boot_wait isn't 1"
 fi
-if [ "$(sysrc -n devd_flags)" = "-n" ]; then
+# (sysrc -n prints a value of -n with echo, which prints nothing: compare
+# the assignment instead.)
+if [ "$(sysrc -e devd_flags)" = 'devd_flags="-n"' ]; then
 	pass "devices found at boot are handled in the background"
 else
 	flunk "startup waits for devd to handle every device found at boot (devd_flags)"

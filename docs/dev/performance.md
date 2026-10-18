@@ -121,6 +121,12 @@ boottrace(4) run each:
 | Traced: devd / netif / defaultroute | 19.5 / 10.0 / 0.6 s | 0.7 / 7.4 / 0.7 s |
 | Traced: our scripts (identity / glassd) | 2.5 / 0.9 s | 0.5 / 0.6 s |
 
+The image now boots into the sign-in screen (ADR 0019): `glasshouse_greeter`
+starts right after glassd, so the screen is up with the last few startup
+scripts, a little before the serial console's login prompt the tool times.
+One cold boot with it on came out at 57.6 s to the login prompt (glassd
+ready at 56.3 s), no slower than the runs above.
+
 ### Where the time goes, and what we changed
 
 - **The boot menu waited two seconds on every boot** (1.6 s measured).

@@ -84,7 +84,7 @@ Each task gets a jail from a generated `jail.conf` + `fstab`
 | Processes | Jailed processes see and signal only their own jail. |
 | Privilege | `securelevel = 3`, no mounts, no raw sockets, no child jails, devfs ruleset 4. |
 | Identity | Runs as the user's uid, so files it causes to be written are the user's; the jail confines what that uid can reach. |
-| Resources | The person comes first: the agent starts at `nice` 10 (`nice -n 10 jexec …`), and the jail's `exec.prestart` adds rctl(8) limits on CPU (half the machine), memory (a quarter of it, committed and resident), disk throughput and processes, which its `exec.poststop` removes with the jail (PA-2). `[sandbox.limits]` in `glassd.toml`; needs `kern.racct.enable=1` at boot. |
+| Resources | The person comes first: the agent starts at `nice` 10 (`nice -n 10 jexec …`), and the jail's `exec.prestart` adds rctl(8) limits on CPU (half the machine), memory (a quarter of it, committed and resident), disk throughput and processes, which its `exec.poststop` removes with the jail (PA-2). `[sandbox.limits]` in `glassd.toml`; needs `kern.racct.enable=1` at boot. The rctl rules, `nice` and the sysctls it reads live in `glass-platform` (PL-1); on Linux the same limits are cgroup v2's `cpu.max`, `memory.max`, `io.max` and `pids.max`. |
 
 `glass-probe` attacks all of this from inside and must come back 20/20; the
 e2e suite runs it on every change to the VM.
