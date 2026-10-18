@@ -72,6 +72,50 @@ fn render_system_menu() -> Frame {
     )
 }
 
+/// About Glasshouse, from the mark's menu.
+fn render_about() -> Frame {
+    let theme = Theme::glass();
+    let tasks = fixtures::tasks();
+    let about = glass_shell::screens::system::About {
+        version: "0.1.0".into(),
+        build: "9cf8edb".into(),
+        processor: "Intel(R) Core(TM) Ultra 7 155H".into(),
+        memory_gb: 32,
+        computer: "dana-laptop".into(),
+    };
+    let state = desktop::Desktop {
+        tiles: desktop::Tiles::Hidden,
+        ..fixtures::desktop(&tasks)
+    };
+    let overlay = glass_shell::screens::system::about_overlay(&theme, &about);
+    frame(
+        desktop::view(&theme, &state, Vec::new(), |_| None, Some(overlay), SCREEN),
+        size(),
+        1.0,
+    )
+}
+
+/// Force Quit with the first running agent chosen.
+fn render_force_quit() -> Frame {
+    let theme = Theme::glass();
+    let tasks = fixtures::tasks();
+    let running: Vec<_> = tasks.iter().filter(|t| t.state.is_live()).collect();
+    let quit = glass_shell::screens::system::ForceQuit {
+        chosen: running.first().map(|t| t.id),
+        running,
+    };
+    let state = desktop::Desktop {
+        tiles: desktop::Tiles::Hidden,
+        ..fixtures::desktop(&tasks)
+    };
+    let overlay = glass_shell::screens::system::force_quit_overlay(&theme, &quit);
+    frame(
+        desktop::view(&theme, &state, Vec::new(), |_| None, Some(overlay), SCREEN),
+        size(),
+        1.0,
+    )
+}
+
 fn render_desktop() -> Frame {
     let theme = Theme::glass();
     let tasks = fixtures::tasks();
@@ -322,6 +366,8 @@ fn screens_match_their_snapshots() {
     snapshot("desktop", &render_desktop());
     snapshot("agents-menu", &render_agents_menu());
     snapshot("system-menu", &render_system_menu());
+    snapshot("about", &render_about());
+    snapshot("force-quit", &render_force_quit());
     snapshot("command-bar", &render_command_bar());
     snapshot("expanded", &render_expanded());
     snapshot("expanded-review", &render_expanded_review());

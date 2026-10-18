@@ -124,6 +124,40 @@ pub fn filesystem_usage(path: &Path) -> Result<FsUsage> {
     }
 }
 
+/// This computer, as About Glasshouse describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Computer {
+    /// The host name.
+    pub name: String,
+    /// The processor's model name.
+    pub processor: String,
+    pub memory_mb: u64,
+}
+
+/// The host name, processor model and memory.
+pub fn computer() -> Result<Computer> {
+    let name = cmd::run("hostname", &[])?.trim().to_owned();
+    let memory_mb = load()?.memory_total_mb;
+    let processor = if cfg!(target_os = "freebsd") {
+        cmd::run("sysctl", &["-n", "hw.model"])?.trim().to_owned()
+    } else {
+        std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|info| {
+                info.lines()
+                    .find_map(|l| l.strip_prefix("model name"))
+                    .and_then(|v| v.split_once(':'))
+                    .map(|(_, model)| model.trim().to_owned())
+            })
+            .unwrap_or_default()
+    };
+    Ok(Computer {
+        name,
+        processor,
+        memory_mb,
+    })
+}
+
 /// Load averages, CPUs and memory.
 pub fn load() -> Result<Load> {
     let cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
@@ -307,6 +341,8 @@ wlan0: flags=8802<BROADCAST,SIMPLEX,MULTICAST> metric 0 mtu 1500
         let mine = top_processes(users_uid(), 5).unwrap();
         assert!(mine.len() <= 5);
         assert!(load().unwrap().cpus >= 1);
+        let computer = computer().unwrap();
+        assert!(!computer.name.is_empty() && computer.memory_mb > 0);
     }
 
     fn users_uid() -> u32 {

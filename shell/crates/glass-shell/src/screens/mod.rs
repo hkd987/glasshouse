@@ -5,3 +5,4 @@ pub mod command_bar;
 pub mod desktop;
 pub mod expanded;
 pub mod login;
+pub mod system;

@@ -337,42 +337,59 @@ const MARK_REACH: f32 = 6.0;
 const MARK_WIDTH: f32 = 16.0 + MARK_REACH * 2.0;
 const SYSTEM_MENU_LEFT: f32 = 6.0;
 
-/// The system menu, under the mark: what can be started from anywhere (an
-/// agent's task, for now; apps join it when they have windows), and
-/// signing out (Shift Super Q, as Shift Command Q on a Mac). Locking the
-/// screen and switching users wait for the compositor (ADR 0019).
+/// The system menu, under the mark, as a Mac's Apple menu: About
+/// Glasshouse; what can be started from anywhere (an agent's task, for now;
+/// apps join it when they have windows); Force Quit; signing out (Shift
+/// Super Q, as Shift Command Q on a Mac). Sleep, restart, locking the screen
+/// and switching users wait for the compositor (ADR 0019).
 fn system_menu<'a>(theme: &Theme, person: &str) -> Element<'a, Message> {
     let sign_out = if person.is_empty() {
         "Sign out…".to_owned()
     } else {
         format!("Sign out {person}…")
     };
-    let lines = [
-        ("Hand an agent a task…".to_owned(), "Ctrl Space"),
-        (sign_out, "Shift Super Q"),
+    let sections: [&[(String, &'static str, Message)]; 4] = [
+        &[("About Glasshouse".to_owned(), "", Message::OpenAbout)],
+        &[(
+            "Hand an agent a task…".to_owned(),
+            "Ctrl Space",
+            Message::OpenCommandBar,
+        )],
+        &[(
+            "Force Quit…".to_owned(),
+            "Alt Super Esc",
+            Message::OpenForceQuit,
+        )],
+        &[(sign_out, "Shift Super Q", Message::SignOut)],
     ];
     // As wide as its longest line, as a menu is. Every line fills that
     // width so the highlight does; the width itself is reckoned from the
     // text, since a filling line would otherwise take the whole screen.
-    let width = lines
+    let width = sections
         .iter()
-        .map(|(label, shortcut)| {
+        .flat_map(|section| section.iter())
+        .map(|(label, shortcut, _)| {
             label.chars().count() as f32 * 7.2 + shortcut.chars().count() as f32 * 6.6
         })
         .fold(0.0, f32::max)
         + 32.0
         + 20.0;
-    let [(task, task_keys), (out, out_keys)] = lines;
-    let items = column![
-        menu_item(theme, task, task_keys, Message::OpenCommandBar),
-        container("")
-            .width(Length::Fill)
-            .height(Length::Fixed(1.0))
-            .style(|_| style::panel(hexa(0xFFFFFF, 0.1), 0.0)),
-        menu_item(theme, out, out_keys, Message::SignOut),
-    ]
-    .spacing(4)
-    .width(Length::Fixed(width.max(240.0)));
+    let mut items = Column::new()
+        .spacing(4)
+        .width(Length::Fixed(width.max(240.0)));
+    for (n, section) in sections.iter().enumerate() {
+        if n > 0 {
+            items = items.push(
+                container("")
+                    .width(Length::Fill)
+                    .height(Length::Fixed(1.0))
+                    .style(|_| style::panel(hexa(0xFFFFFF, 0.1), 0.0)),
+            );
+        }
+        for (label, shortcut, message) in section.iter() {
+            items = items.push(menu_item(theme, label.clone(), shortcut, message.clone()));
+        }
+    }
     container(items)
         .padding(5)
         .style(|_| container::Style {

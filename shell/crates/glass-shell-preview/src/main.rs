@@ -6,7 +6,8 @@
 //! ```
 //!
 //! Writes `boot.png`, `login.png`, `desktop.png`, `desktop-banner.png`,
-//! `agents-menu.png`, `system-menu.png`, `command-bar.png` and the
+//! `agents-menu.png`, `system-menu.png`, `about.png`, `force-quit.png`,
+//! `command-bar.png` and the
 //! expanded view: `expanded.png` (the Expanded artboard), with its Changes
 //! tab, a roll back about to happen, a needs-you task's review and a
 //! finished task's receipt. The desktop shows the Desktop artboard's
@@ -20,7 +21,7 @@ use std::time::Instant;
 use anyhow::{Context, bail};
 use glass_api::{Receipt, TaskDetail, TaskRef, TaskView, TileState, UndoReport, methods};
 use glass_shell::screens::expanded::{self, Expanded, Rollback, Tab};
-use glass_shell::screens::{boot, command_bar, desktop, login};
+use glass_shell::screens::{boot, command_bar, desktop, login, system};
 use glass_shell::{Element, Message, Size, Theme, fixtures, render};
 use glass_types::Timestamp;
 use time::OffsetDateTime;
@@ -158,6 +159,45 @@ fn main() -> anyhow::Result<()> {
     write(
         "system-menu.png",
         desktop::view(&theme, &system, vec![window()], thumbnail, None, (w, h)),
+    )?;
+    // Its windows: About Glasshouse, and Force Quit with an agent chosen.
+    let bare = desktop::Desktop {
+        tiles: desktop::Tiles::Hidden,
+        ..state.clone()
+    };
+    let about = system::About {
+        version: env!("CARGO_PKG_VERSION").into(),
+        build: "9cf8edb".into(),
+        processor: "Intel(R) Core(TM) Ultra 7 155H".into(),
+        memory_gb: 32,
+        computer: "dana-laptop".into(),
+    };
+    write(
+        "about.png",
+        desktop::view(
+            &theme,
+            &bare,
+            vec![window()],
+            thumbnail,
+            Some(system::about_overlay(&theme, &about)),
+            (w, h),
+        ),
+    )?;
+    let running: Vec<&TaskView> = tasks.iter().filter(|t| t.state.is_live()).collect();
+    let quit = system::ForceQuit {
+        chosen: running.first().map(|t| t.id),
+        running,
+    };
+    write(
+        "force-quit.png",
+        desktop::view(
+            &theme,
+            &bare,
+            vec![window()],
+            thumbnail,
+            Some(system::force_quit_overlay(&theme, &quit)),
+            (w, h),
+        ),
     )?;
 
     // The command bar over the desktop (Ctrl Space).

@@ -29,6 +29,7 @@ use anyhow::{Context, anyhow, bail};
 use glass_api::{Event, TaskDetail, TaskRef, TaskView, UndoReport, methods};
 use glass_rpc::{Client, ClientError};
 use glass_shell::live::{Effect, Live};
+use glass_shell::screens::system;
 use glass_shell::{Message, Theme, wallpaper};
 use glass_shell_fb::display::Display;
 use glass_shell_fb::input::{self, Input};
@@ -103,7 +104,8 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
     let asked = started.elapsed();
     let live = Live::new(tasks)
         .without_wallpaper()
-        .signed_in_as(signed_in_as());
+        .signed_in_as(signed_in_as())
+        .about(about());
     let mut shell = Shell::open(args.tty, offset, live)?;
     let opened = started.elapsed();
     shell.draw(true);
@@ -228,6 +230,33 @@ async fn until(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at.into()).await,
         None => std::future::pending().await,
+    }
+}
+
+/// This build and this computer, for About Glasshouse: the image's
+/// build-info (written by `stage-dist.sh`) and the machine's facts.
+fn about() -> system::About {
+    let info = std::fs::read_to_string("/usr/local/share/glasshouse/branding/build-info")
+        .unwrap_or_default();
+    let field = |key: &str| {
+        info.lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let computer = glass_platform::system::computer().ok();
+    system::About {
+        version: Some(field("version"))
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned()),
+        build: field("build"),
+        processor: computer
+            .as_ref()
+            .map(|c| c.processor.clone())
+            .unwrap_or_default(),
+        // Rounded up: the kernel holds some back, so 16 GB reads 15.8.
+        memory_gb: computer.as_ref().map_or(0, |c| c.memory_mb.div_ceil(1024)),
+        computer: computer.map(|c| c.name).unwrap_or_default(),
     }
 }
 

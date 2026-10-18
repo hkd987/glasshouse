@@ -401,7 +401,7 @@ fn the_mark_opens_the_system_menu_and_sign_out_signs_out() {
                 .find(|m| *m == Message::OpenCommandBar)
         });
     assert!(task.is_some(), "Hand an agent a task, in the system menu");
-    let found = (40..120)
+    let found = (40..220)
         .step_by(6)
         .flat_map(|y| (20..300).step_by(40).map(move |x| (x, y)))
         .find_map(|(x, y)| {
@@ -464,4 +464,53 @@ fn aw10_the_agents_icon_in_the_dock_opens_the_agents_menu() {
         .map(|x| Point::new(x as f32, SIZE.1 - 40.0))
         .any(|at| click(&mut screen, &live, at) == [Message::ToggleAgents]);
     assert!(found, "the dock's agents icon opens the menu");
+}
+
+#[test]
+fn the_system_menu_has_about_and_force_quit() {
+    let mut live = Live::new(fixtures::tasks());
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    live.update(Message::ToggleSystemMenu);
+    let mut seen = Vec::new();
+    for y in (40..200).step_by(6) {
+        for message in click(&mut screen, &live, Point::new(80.0, y as f32)) {
+            if !seen.contains(&message) {
+                seen.push(message);
+            }
+        }
+    }
+    for want in [
+        Message::OpenAbout,
+        Message::OpenCommandBar,
+        Message::OpenForceQuit,
+        Message::SignOut,
+    ] {
+        assert!(seen.contains(&want), "{want:?} in {seen:?}");
+    }
+}
+
+#[test]
+fn force_quit_lists_the_running_agents_to_choose_from() {
+    let tasks = fixtures::tasks();
+    let mut live = Live::new(tasks.clone());
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    live.update(Message::OpenForceQuit);
+    let chosen = (300..700).step_by(8).find_map(|y| {
+        click(&mut screen, &live, Point::new(720.0, y as f32))
+            .into_iter()
+            .find_map(|m| match m {
+                Message::ChooseToQuit(task) => Some(task),
+                _ => None,
+            })
+    });
+    let chosen = chosen.expect("a running agent in the list");
+    assert!(tasks.iter().any(|t| t.id == chosen && t.state.is_live()));
+    // A click on the window itself, away from its buttons, keeps it open.
+    let window = click(&mut screen, &live, Point::new(720.0, 330.0));
+    assert!(!window.contains(&Message::CloseSystemWindow), "{window:?}");
+    assert_eq!(
+        click(&mut screen, &live, Point::new(40.0, 600.0)),
+        [Message::CloseSystemWindow],
+        "a click outside closes it"
+    );
 }

@@ -109,4 +109,14 @@ pub enum Message {
     SignOut,
     /// The mark at the left of the menu bar: open or close the system menu.
     ToggleSystemMenu,
+    /// The system menu's About Glasshouse.
+    OpenAbout,
+    /// The system menu's Force Quit… (Alt Super Esc, or Ctrl Shift Esc).
+    OpenForceQuit,
+    /// Choose the agent Force Quit would stop.
+    ChooseToQuit(TaskId),
+    /// Stop the chosen agent at once.
+    ForceQuit,
+    /// Close About or Force Quit.
+    CloseSystemWindow,
 }

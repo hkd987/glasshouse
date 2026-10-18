@@ -18,6 +18,7 @@ use time::OffsetDateTime;
 use crate::screens::command_bar::{self, CommandBar};
 use crate::screens::desktop::{self, Desktop, Tiles};
 use crate::screens::expanded::{self, Expanded, Rollback, Tab};
+use crate::screens::system;
 use crate::{Element, Message, Theme};
 
 #[derive(Debug)]
@@ -41,6 +42,18 @@ pub struct Live {
     system_menu: bool,
     /// Who is signed in, as the system menu names them.
     person: String,
+    /// This build and computer, for About Glasshouse.
+    about: system::About,
+    /// About or Force Quit, when one is open.
+    window: Option<SystemWindow>,
+}
+
+/// A window the system menu opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemWindow {
+    About,
+    /// The agent chosen to stop, if one is.
+    ForceQuit(Option<TaskId>),
 }
 
 /// How long a notification stays on screen, as a macOS banner does. One
@@ -132,6 +145,8 @@ impl Live {
             menu: false,
             system_menu: false,
             person: String::new(),
+            about: system::About::default(),
+            window: None,
         };
         let waiting: Vec<TaskId> = live
             .tasks
@@ -150,6 +165,12 @@ impl Live {
     /// its backdrop (`render::Screen::set_backdrop`).
     pub fn without_wallpaper(mut self) -> Self {
         self.wallpaper = false;
+        self
+    }
+
+    /// This build and computer, for About Glasshouse.
+    pub fn about(mut self, about: system::About) -> Self {
+        self.about = about;
         self
     }
 
@@ -346,6 +367,7 @@ impl Live {
         !self.banners.is_empty()
             && !self.menu
             && !self.system_menu
+            && self.window.is_none()
             && self.open.is_none()
             && self.command.is_none()
     }
@@ -367,6 +389,35 @@ impl Live {
             // AW-10: open the tile; its activity and changes come from
             // `task.get`.
             Message::OpenTask(task) => self.open(task),
+            Message::OpenAbout => {
+                self.system_menu = false;
+                self.window = Some(SystemWindow::About);
+                None
+            }
+            Message::OpenForceQuit => {
+                self.system_menu = false;
+                self.menu = false;
+                self.command = None;
+                self.window = Some(SystemWindow::ForceQuit(None));
+                None
+            }
+            Message::ChooseToQuit(task) => {
+                if let Some(SystemWindow::ForceQuit(chosen)) = &mut self.window {
+                    *chosen = Some(task);
+                }
+                None
+            }
+            Message::ForceQuit => {
+                let Some(SystemWindow::ForceQuit(Some(task))) = self.window else {
+                    return None;
+                };
+                self.window = None;
+                Some(Effect::Stop(task))
+            }
+            Message::CloseSystemWindow => {
+                self.window = None;
+                None
+            }
             Message::ToggleSystemMenu => {
                 self.system_menu = !self.system_menu;
                 if self.system_menu {
@@ -524,11 +575,20 @@ impl Live {
     }
 
     /// The desktop's own keys: Ctrl Space opens and closes the command bar
-    /// (DA-1); Esc closes the command bar, then the agents menu, then a roll
-    /// back card, then the expanded view (AW-16); Shift Super Q signs out.
+    /// (DA-1); Esc closes About or Force Quit, the command bar, the agents
+    /// menu, then a roll back card, then the expanded view (AW-16); Shift
+    /// Super Q signs out; Alt Super Esc (a Mac's Option Command Esc) or Ctrl
+    /// Shift Esc (Windows' task manager, DK-2) opens Force Quit.
     pub fn shortcut(&self, key: &Key, modifiers: Modifiers) -> Option<Message> {
         let bar = self.command.is_some();
         match key {
+            Key::Named(Named::Escape)
+                if (modifiers.alt() && modifiers.logo())
+                    || (modifiers.control() && modifiers.shift()) =>
+            {
+                Some(Message::OpenForceQuit)
+            }
+            Key::Named(Named::Escape) if self.window.is_some() => Some(Message::CloseSystemWindow),
             Key::Named(Named::Space) if modifiers.control() => Some(if bar {
                 Message::CloseCommandBar
             } else {
@@ -598,22 +658,23 @@ impl Live {
         let expanded = self.expanded(now);
         // Nothing sits over the command bar or the expanded view; otherwise
         // the menu if it's open, else whatever is a banner right now.
-        let tiles = if bar.is_some() || expanded.is_some() || self.system_menu {
-            Tiles::Hidden
-        } else if self.menu {
-            Tiles::Menu
-        } else {
-            let shown: Vec<&TaskView> = self
-                .banners
-                .iter()
-                .filter_map(|b| self.tasks.iter().find(|t| t.id == b.task))
-                .collect();
-            if shown.is_empty() {
+        let tiles =
+            if bar.is_some() || expanded.is_some() || self.system_menu || self.window.is_some() {
                 Tiles::Hidden
+            } else if self.menu {
+                Tiles::Menu
             } else {
-                Tiles::Banners(shown)
-            }
-        };
+                let shown: Vec<&TaskView> = self
+                    .banners
+                    .iter()
+                    .filter_map(|b| self.tasks.iter().find(|t| t.id == b.task))
+                    .collect();
+                if shown.is_empty() {
+                    Tiles::Hidden
+                } else {
+                    Tiles::Banners(shown)
+                }
+            };
         let mut state = Desktop {
             tiles,
             wallpaper: self.wallpaper,
@@ -628,6 +689,17 @@ impl Live {
             overlays.push(expanded::overlay(theme, expanded));
         }
         overlays.extend(bar.map(|bar| command_bar::overlay(theme, bar)));
+        match self.window {
+            Some(SystemWindow::About) => overlays.push(system::about_overlay(theme, &self.about)),
+            Some(SystemWindow::ForceQuit(chosen)) => {
+                let running = self.tasks.iter().filter(|t| t.state.is_live()).collect();
+                overlays.push(system::force_quit_overlay(
+                    theme,
+                    &system::ForceQuit { running, chosen },
+                ));
+            }
+            None => {}
+        }
         let overlay = match overlays.len() {
             0 | 1 => overlays.pop(),
             _ => Some(crate::layered(overlays)),
@@ -1086,6 +1158,46 @@ mod tests {
             later,
         );
         assert_eq!(live.next_change(), Some(later + BANNER));
+    }
+
+    #[test]
+    fn force_quit_stops_the_chosen_agent_at_once() {
+        let tasks = fixtures::tasks();
+        let running = tasks
+            .iter()
+            .find(|t| t.state.is_live())
+            .expect("a running agent");
+        let mut live = Live::new(tasks.clone());
+        let esc = Key::Named(Named::Escape);
+        for keys in [
+            Modifiers::ALT | Modifiers::LOGO,
+            Modifiers::CTRL | Modifiers::SHIFT,
+        ] {
+            assert_eq!(live.shortcut(&esc, keys), Some(Message::OpenForceQuit));
+        }
+        live.update(Message::OpenForceQuit);
+        assert_eq!(live.update(Message::ForceQuit), None, "nothing chosen yet");
+        live.update(Message::ChooseToQuit(running.id));
+        assert_eq!(
+            live.update(Message::ForceQuit),
+            Some(Effect::Stop(running.id))
+        );
+        assert_eq!(live.shortcut(&esc, Modifiers::empty()), None, "it closed");
+    }
+
+    #[test]
+    fn about_and_force_quit_close_with_esc_and_hide_the_banners() {
+        let mut live = Live::new(fixtures::tasks());
+        assert!(!live.banners().is_empty());
+        live.update(Message::OpenAbout);
+        let esc = Key::Named(Named::Escape);
+        assert_eq!(
+            live.shortcut(&esc, Modifiers::empty()),
+            Some(Message::CloseSystemWindow)
+        );
+        assert_eq!(live.next_change(), live.next_change());
+        live.update(Message::CloseSystemWindow);
+        assert_eq!(live.shortcut(&esc, Modifiers::empty()), None);
     }
 
     #[test]
