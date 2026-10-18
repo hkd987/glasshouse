@@ -105,12 +105,39 @@ snapshots app data (such as mail drafts) before its first change. "Undo all"
 restores each root from the earliest snapshot covering it; "Roll back to"
 uses a later marker. Irreversible changes are listed, never silently ignored.
 
+## Sleep (PM-5)
+
+When the machine is about to sleep, FreeBSD's `/etc/rc.suspend` runs every
+rc.d script with the `suspend` keyword and waits for it before telling the
+kernel to continue. `rc.d/glassd` has that keyword: `glassd suspend` calls
+`system.suspend`, which holds every running agent at its next safe point
+(tile: "Paused for sleep"), waits up to 2 s for actions already under way,
+and returns. `rc.resume` runs `glassd resume` on wake, and those agents carry
+on; anything the user had paused stays paused. Approval asks stay open across
+sleep.
+
 ## Audit
 
 `glass-audit` writes one JSON record per line, each carrying the SHA-256 of
 its body, each body carrying the previous record's hash. `glassctl verify`
 proves nothing was edited, dropped or reordered. If an append fails, the
 pipeline refuses further side effects (fail closed).
+
+## Constraints from the PRD that shape new code
+
+- **US-only, x86-only for V1.** One target: `x86_64-unknown-freebsd`.
+- **Signed software only (EP-2) and a read-only signed base (EP-1).** Agent
+  programs already come only from read-only directories; new components
+  must not assume they can write to the base system at runtime.
+- **Agents are directory identities (PA-7) with declared privileges (DV-3).**
+  See ADR 0008 for how that layers onto today's policy.
+- **Telemetry in OCSF (EP-7, AU-2).** Audit events will need an OCSF
+  mapping; keep event fields typed and stable.
+- **A lapsed license pauses agents only (LA-3).** Licensing gates the
+  runtime, never the desktop, data or security updates.
+- **Our cloud services run on AWS (GT-21)** and hold only licensing, policy
+  and telemetry metadata; customer data stays on devices and in the
+  customer's own Bedrock account (GT-3).
 
 ## Code map
 

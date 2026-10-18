@@ -13,3 +13,4 @@ ADR and mark the old one superseded.
 | [0005](0005-brokered-file-access.md) | Agents get no user data mounted; file access is brokered |
 | [0006](0006-file-level-undo.md) | Undo restores files from snapshots, never rolls back datasets |
 | [0007](0007-drive-freebsd-through-admin-commands.md) | Drive jails and ZFS through their admin commands |
+| [0008](0008-agent-manifests-declare-privileges.md) | Proposed: agents ship signed manifests; effective rights = declaration ∩ policy ∩ scope |

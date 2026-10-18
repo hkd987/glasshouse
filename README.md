@@ -22,7 +22,10 @@ Working today, verified on FreeBSD 15.1 in a VM:
   restore files and say what can't be undone.
 - **Audit**: hash-chained, tamper-evident log; rebuild any task end to end.
 - **Tiles as data**: the tile, expanded view, Now bar, Activity, Changes,
-  Can't touch and Timeline are in the control API, and in `glassctl`.
+  Can't touch and Timeline are in the control API, and in `glassctl`,
+  mapped field by field to the mockups in `docs/design/`.
+- **Sleep** (PM-5): agents pause before the machine sleeps and carry on
+  after it wakes, through FreeBSD's own `rc.suspend`/`rc.resume`.
 
 Not started yet: the desktop shell and GUI tiles, the model gateway and real
 model-backed agents, the admin console and fleet management, screen-control
@@ -34,15 +37,17 @@ agents. See [docs/prd-traceability.md](docs/prd-traceability.md).
 make help                    # every target
 make test lint               # unit + pipeline tests, fmt, clippy, layering
 
-# Run it on this machine (no containment; development only):
-make dev-host
+# A full test environment, from a fresh checkout (Linux x86_64):
+make test-env                # tools, FreeBSD 15.1 image, VM, build, deploy
+make e2e-vm                  # the end-to-end suite in the VM (~2 min)
+make vm-ssh                  # then: su demo; glassctl agents
 
-# Run it for real in a FreeBSD VM:
-make freebsd-host-deps freebsd-fetch freebsd-sysroot   # once
-make vm-up vm-wait                                      # ~100 s
-make e2e-vm                                             # build, deploy, test
-make vm-ssh                                             # then: su demo; glassctl ...
+# Or run it on this machine with no containment (development only):
+make dev-host
 ```
+
+Setting up, the daily loop and troubleshooting:
+[docs/dev/test-environment.md](docs/dev/test-environment.md).
 
 A first session in the VM, as the `demo` user:
 
@@ -62,6 +67,9 @@ glassctl run containment-probe "Try to escape"
 | [docs/architecture.md](docs/architecture.md) | How it fits together |
 | [docs/repo-layout.md](docs/repo-layout.md) | Where code goes, layering rules, conventions |
 | [docs/adr/](docs/adr/) | Decisions and why |
+| [docs/dev/test-environment.md](docs/dev/test-environment.md) | Set up a test environment |
 | [docs/dev/testing.md](docs/dev/testing.md) | Test levels, the VM, manual testing |
+| [docs/design/](docs/design/README.md) | The mockups and the API behind each element |
+| [CLAUDE.md](CLAUDE.md) and [.claude/skills/](.claude/skills/) | How Claude works on this repo |
 | [docs/prd-traceability.md](docs/prd-traceability.md) | PRD requirement → status → test |
 | [os/freebsd/README.md](os/freebsd/README.md) | Image, VM and cross-compile tooling |

@@ -5,18 +5,13 @@ Three levels, each proving something the one below can't.
 | Level | Where | Runs on | Proves |
 |---|---|---|---|
 | Unit | `#[cfg(test)]` in each crate | any host, `make test` | Policy math, hash chains, framing, path confinement, label rules |
-| Pipeline integration | `crates/svc/runtime/tests/pipeline.rs` | any host, `make test` | The whole action pipeline (tiers, asks, labels, snapshots, undo, pause, take over, isolation) on development backends, with the test playing the agent over the real MCP socket |
-| End to end | `tests/e2e` + `tests/e2e/run-vm.sh` | the FreeBSD VM, `make e2e-vm` | Real jails, real ZFS, real users: containment (PA-1), teardown (PA-2), xattr labels, cross-user isolation, crash recovery |
+| Pipeline integration | `crates/svc/runtime/tests/pipeline.rs` | any host, `make test` | The whole action pipeline (tiers, asks, labels, snapshots, undo, pause, sleep, take over, isolation) on development backends, with the test playing the agent over the real MCP socket |
+| End to end | `tests/e2e` + `tests/e2e/run-vm.sh` | the FreeBSD VM, `make e2e-vm` | Real jails, real ZFS, real users: containment (PA-1), teardown (PA-2), xattr labels, cross-user isolation, sleep through the rc.d hooks (PM-5), crash recovery |
 
 ## The FreeBSD VM
 
-See [os/freebsd/README.md](../../os/freebsd/README.md). First time:
-
-```sh
-make freebsd-host-deps freebsd-fetch freebsd-sysroot
-make vm-up vm-wait          # ~100 s under software emulation
-make e2e-vm                 # cross-compile, deploy, run the suite (~1 min)
-```
+Set it up with `make test-env`; see [test-environment.md](test-environment.md).
+Then `make e2e-vm` cross-compiles, deploys and runs the suite (~2 min).
 
 The VM has a `demo` user (uid 1001) whose home is its own ZFS dataset, seeded
 with sample invoices by `post-install.sh`.
@@ -40,6 +35,10 @@ As root: `glassctl verify`, `jls`, `zfs list -t snapshot`, `tail /var/log/glassd
 
 On a Linux or macOS laptop, `make dev-host` runs glassd with the insecure host
 sandbox for fast iteration on everything but containment.
+
+Share what you tested: `tools/screenshot/termshot.py` saves the real output
+of a sequence of commands (host or VM, as any user) as a PNG. The
+`manual-test` skill describes the flow.
 
 ## Rules
 

@@ -1,30 +1,51 @@
 # PRD traceability
 
 Status of every **P0** requirement in the PRD ("Agent-Safe Enterprise Desktop
-OS — PRD"), as of milestone M0. **Done** means implemented and covered by a
-test named here. **Partial** says what's missing. Update this file in the same
-change that moves a requirement.
+OS — PRD"), plus engineering notes on P1 work that shapes today's design.
+**Done** means implemented and covered by a test named here. **Partial** says
+what's missing. Update this file in the same change that moves a
+requirement; the `prd-sync` skill re-reads the PRD and diffs it.
+
+PRD revision last synced: 2026-10-18 (adds endpoint protection, licensing,
+developer program and catalog, core OS and power management, developer
+workspace, commercial readiness). V1 is **US-only** and **x86 (Intel/AMD)
+only**: we build and test `x86_64-unknown-freebsd` and nothing else.
 
 Tests: *unit* = crate unit tests, *pipeline* =
 `crates/svc/runtime/tests/pipeline.rs`, *e2e* = `tests/e2e` in the FreeBSD VM.
 
-## Platform and containment
+## Platform, containment and identity
 
 | Id | Status | Where | Verified by |
 |---|---|---|---|
 | PA-1 No grants → no files, network, processes | **Done** | `platform/sandbox/jail.rs` | e2e `containment` (19/19 probe checks in a real jail) |
-| PA-2 Grants per task, expire at end | **Done** | `runtime/supervise.rs`, `broker/desk.rs` | e2e `stop`, `crash recovery`; pipeline `stopping_tears_down…` |
+| PA-2 Grants per task, expire at end | **Done** | `runtime/supervise.rs`, `broker/desk.rs` | e2e `stop`, crash recovery; pipeline `stopping_tears_down…` |
 | PA-3 Escapes are P0 bugs, bounty | Process | — | — |
 | PA-4 On-behalf-of tokens downstream | Not started | — | needs identity federation |
 | PA-5 Upstream FreeBSD + our layers | **Done** | `os/freebsd`, ADR 0002 | VM boots pinned 15.1-RELEASE |
 | PA-6 FDE, secure boot, TPM keys by default | Not started | — | image build work |
+| PA-7 Each agent its own directory identity with a human owner | Not started | catalog has id + version only | ADR 0008 (proposed) |
+| AD-14 Agents in Microsoft Agent 365 registry | Not started | | |
+| AD-15 Policy from Intune and Entra too | Not started | `policy.toml` is the local stand-in | |
+
+## Endpoint protection
+
+| Id | Status | Notes |
+|---|---|---|
+| EP-1 Read-only, signed, verified base; image updates via boot environments | Not started | Today the image is stock 15.1 plus our overlay (ADR 0002 notes the change) |
+| EP-2 Only signed software, veriexec in user and agent jails | Not started | Agents already run only programs from read-only `agent_dirs`; veriexec manifests are the next step |
+| EP-3 Scan incoming files | Not started | |
+| EP-6 Ransomware recovery from clean snapshots, snapshots tamper-proof | Partial | Task snapshots live on datasets agents can't reach and users can't destroy without `zfs allow`; remote rollback from the console not built |
+| EP-7 Alerts and telemetry in OCSF to the customer's XDR | Not started | The audit record needs an OCSF mapping (also AU-2) |
+| EP-9 Removable-device control | Not started | Agent jails see no devices beyond the devfs jail ruleset |
+| EP-11 … EP-13 Signing keys, reproducible builds, isolated update infra | Not started | Pinned toolchain and `Cargo.lock` are the start of reproducible builds |
 
 ## Delegation and approvals
 
 | Id | Status | Where | Verified by |
 |---|---|---|---|
-| DA-1 Command bar with context | Partial | `glassctl run` (CLI stand-in) | — shell not started |
-| DA-2 Handoff card | **Done** (data + CLI) | `runtime.rs::prepare`, `glass-api::HandoffCard` | pipeline `plan_shows_the_handoff_card…` |
+| DA-1 Command bar with context | Partial | `glassctl run` (CLI stand-in) | shell not started |
+| DA-2 Handoff card | **Done** (data + CLI) | `runtime.rs::prepare`, `HandoffCard` (plan, version, touches, asks, can't do, data and model) | pipeline `plan_shows_the_handoff_card…`, `feed_lines_carry_verb_and_target` |
 | DA-3 Edit scope; policy limits locked | Partial | folders + `--block/--ask` restrictions | pipeline `restrictions_tighten…`; inline UI not started |
 | DA-10 IT tiers per agent/group; users stricter only | **Done** | `glass-policy` | unit `engine::*`, pipeline, e2e `scope` |
 | DA-11 Approve once or for the task, never forever | **Done** | `broker/desk.rs` | unit `desk::*`, pipeline `sends_wait_for…` |
@@ -34,21 +55,21 @@ Tests: *unit* = crate unit tests, *pipeline* =
 ## Agent window
 
 The tile, expanded view and their states exist as data (`glass-api`) and in
-`glassctl` (`tasks`, `watch`, `show`). The compositor, GUI tiles and screen
-thumbnails are not started.
+`glassctl`. [docs/design](design/README.md) maps every mockup element to its
+field. The compositor, GUI tiles and screen thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
 | AW-1 Stack, newest at bottom, needs-you on top | Partial | ordering in `glassctl`; GUI not started |
 | AW-2 Live thumbnail ≤ 5 fps | Not started | needs screen agents |
-| AW-3 Three-line feed | **Done** (data) | `TaskView::feed` |
+| AW-3 Three-line feed, verb + target | **Done** (data) | `FeedLine { verb, target, text }` |
 | AW-4 Name, mode, caption, progress | **Done** (data) | `report_progress` tool |
 | AW-5 No focus stealing, draggable | Not started | shell |
 | AW-10 Expanded view < 200 ms | Partial | `task.get` returns it; GUI not started |
 | AW-11 Pause, Stop, Take over | Partial | all three work; "Stop asks once if unsaved" not done |
 | AW-12 Now bar | **Done** (data) | `TaskDetail::now` |
 | AW-13 Activity and Changes tabs | **Done** (data) | `TaskDetail::{activity, changes}` |
-| AW-14 Can't touch panel | **Done** (data) | `EffectivePolicy::cant_touch` |
+| AW-14 Can't touch panel | **Done** (data) | IT's Never rules by name, plus limits |
 | AW-15 Timeline, roll back to a marker | **Done** | pipeline `rolling_back_to_a_marker…` |
 | AW-16 Shrink back to tile | Not started | shell |
 | AW-20 Take over pauses at a safe point within 1 s | Partial | actions agents pause at the next action boundary; display/input hand-off needs screen agents |
@@ -66,31 +87,71 @@ thumbnails are not started.
 | NV-11 A11y tree through the broker | Not started | |
 | NV-20 Screen agents on their own display | Not started | |
 
-## Data protection
+## Data protection and models
 
 | Id | Status | Notes |
 |---|---|---|
 | DP-1 Gateway is the only model path | Partial | jails have no network at all, so no direct model access; gateway not started |
 | DP-2 … DP-5 Allowlist, redaction, injection screening, call logging | Not started | model gateway |
 | DP-10 Labels from sources, stored with files | Partial | folder rules + `glasshouse.label` xattrs enforced (e2e `labels`); Purview/Drive import not started |
+| MP-1 … MP-9 Model providers (Bedrock default) | Not started | gateway; handoff card already carries a `model` line |
+| HX-1 Claude Code plugin: skills + MCP server | Partial | MCP server and `glass-mcp` bridge done; plugin package not started |
+| HX-2 … HX-7 | Not started | needs a Node runtime in the jail and per-harness egress |
 
 ## Audit, attribution, undo
 
 | Id | Status | Notes |
 |---|---|---|
 | AU-1 Each action logged with user, agent, task, action, target, decision, approval, snapshot | **Done** | model calls field waits for the gateway |
-| AU-2 Append-only, hash-chained, streamed to SIEM | Partial | chain + verify done (unit tamper tests); SIEM streaming and OpenBSM not started |
+| AU-2 Append-only, hash-chained, streamed in OCSF/CEF to the SIEM | Partial | chain + verify done (unit tamper tests); OCSF/CEF export, streaming and OpenBSM not started |
 | AU-3 Rebuild any task end to end | **Done** | `audit.task`, `glassctl audit` |
-| AU-10 "by [agent] for [user]" metadata | **Done** | xattr on files, header on mail (verified in VM) |
-| AU-20 Snapshots before Notify steps, every 5 min, kept 30 days | Partial | before Notify and first change done; 5-minute cadence and retention not started |
+| AU-10 "by [agent] for [user]" metadata | **Done** | xattr on files, header on mail (verified in the VM) |
+| AU-20 Snapshots before Notify steps, every 5 min, kept 30 days | Partial | before Notify and first change done; cadence and retention not started |
 | AU-21 Undo all, lists what it couldn't undo | **Done** | pipeline + e2e `invoices` |
 
-## Admin, desktop, providers
+## Admin, licensing, catalog
 
-| Area | Status | Notes |
+| Id | Status | Notes |
 |---|---|---|
-| AD-1 … AD-5, AD-10 … AD-12 (console, SCIM, fleet) | Not started | `policy.toml` + `glassd.toml` are the local stand-ins |
-| DK-1 … DK-3 (familiar desktop) | Not started | shell |
-| MP-1 … MP-9 (model providers) | Not started | gateway |
-| HX-1 Claude Code plugin: skills + MCP server | Partial | MCP server and `glass-mcp` bridge done; skills/plugin package not started |
-| HX-2 … HX-7 | Not started | needs a Node runtime in the jail and per-harness egress |
+| AD-1 … AD-5, AD-10 … AD-12 Console, SCIM, fleet | Not started | `policy.toml` + `glassd.toml` are the local stand-ins |
+| AD-16 Communications archiving and supervision | Not started | agent-sent mail is already attributed and audited, which this builds on |
+| LA-1 … LA-3, LA-10 … LA-12, LA-20 Licensing and activation | Not started | Design constraint: a lapsed license pauses agents only; desktop, data and security updates keep working (LA-3) |
+| DV-1 … DV-3, DV-5, DV-10, DV-11 Developer program, private catalog | Not started | DV-3 (declared privileges the OS enforces) shapes the agent manifest: ADR 0008 (proposed) |
+
+## Core OS and workplace
+
+| Id | Status | Notes |
+|---|---|---|
+| CF-1 … CF-3 Sign-in with Entra/Okta, passwordless, desktop SSO | Not started | |
+| CF-10 802.1X, SCEP, PAC | Not started | |
+| CF-15 … CF-17 Our Chromium build, patch SLAs, compatibility suite | Not started | |
+| CF-20 Teams, Zoom, Meet in the browser | Not started | |
+| CF-30 Sleep, wake, battery meet PM-1 … PM-10 | See below | |
+| CF-32 Multiple monitors, docks, scaling | Not started | |
+| CF-40 OneDrive, SharePoint, Drive sync | Not started | |
+| CF-50 Published support policy, 48 h critical fixes | Process | |
+| CF-60 Users can always see their own agents' logs | Partial | `audit.task` is open to the task's user; recordings don't exist yet |
+| CF-61, CF-62 Retention set by IT; no individual-level reporting | Not started | |
+| CF-63, CF-64 Recordings encrypted and labeled; legal hold | Not started | |
+| CF-80 … CF-82 Built-in remote help desk | Not started | |
+
+## Power management
+
+| Id | Status | Notes |
+|---|---|---|
+| PM-1 Modern standby, < 2 s resume | Not started | hardware certification; FreeBSD 15.1 modern standby |
+| PM-4 1,000 sleep/wake cycles per certified device | Not started | release gate on real hardware |
+| PM-5 Agents checkpoint and pause before sleep, resume on wake | **Done** (local agents) | `Runtime::suspend/wake` via `rc.d/glassd` `suspend`/`resume` keywords, which `/etc/rc.suspend` and `/etc/rc.resume` run. Pipeline `agents_pause_for_sleep…`, e2e sleep step. Remote runtimes (PA-9) are P1; tested through the rc.d path, not a real ACPI suspend |
+| PM-10 Certify only after PM-1 … PM-6 | Process | |
+
+## Developer workspace
+
+| Id | Status | Notes |
+|---|---|---|
+| DW-1, DW-3, DW-10, DW-11, DW-13, DW-20, DW-21, DW-23 | Not started | A bhyve Linux VM plus developer jails, audited from the host. Reuses the jail, broker and audit pieces; the runtime's sandbox interface was built for a second backend |
+
+## Pilot readiness
+
+| Id | Status | Notes |
+|---|---|---|
+| GT-1 … GT-4, GT-10, GT-30 | Process | GT-3 (customer data stays in their boundary) and GT-21 (control plane on AWS) are architecture constraints for the console and activation services |

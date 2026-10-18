@@ -22,3 +22,8 @@ ordinary Linux CI and laptops, without KVM.
   mis-emulates AVX, so the VM runs with AVX off.
 - Certified hardware images (DK-12) will need a different image build
   (likely `poudriere-image` or `makefs`), reusing the same overlay.
+- EP-1 (October PRD) requires a read-only, signed base verified at boot,
+  updated by swapping whole signed images through ZFS boot environments.
+  The development VM's writable, stock image is fine for the loop; shipped
+  images must move to that model, with the overlay installed at build time
+  rather than by `post-install.sh` on a running system.
