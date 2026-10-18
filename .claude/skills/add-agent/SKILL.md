@@ -41,7 +41,11 @@ this is going (signed manifests), ADR 0008.
 
 ## External harnesses (Claude Code, Codex)
 
-They connect through `glass-mcp` (stdio ↔ task socket):
-`claude mcp add glasshouse -- glass-mcp`. They need their runtime (Node) in
-the jail and egress to their provider only (HX-2, HX-7), which isn't built
-yet; don't widen the jail's network to get there.
+They connect through `glass-mcp` (stdio ↔ task socket). Today they run as
+**attended** agents (ADR 0015): a catalog entry with `attended = true` and no
+program; glassd only binds the task socket in `/var/run/glasshouse/attended/`
+and the user connects their own session (`glassctl take-over` on an ended
+task, or `glassctl run claude-code …`, prints the command). Running them
+inside a jail needs their runtime (Node) there and egress to their provider
+only (HX-2, HX-7), which isn't built yet; don't widen the jail's network to
+get there.

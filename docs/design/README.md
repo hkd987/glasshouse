@@ -126,7 +126,7 @@ e2e `changes` scenario.
 | Failed tile: "stopped responding at invoice 27 of 40" | `state == Failed`, `failure`, `progress` |
 | "Nothing was posted. 26 drafts are saved and can be undone." | `receipt.outcome()`: "Nothing left the machine. 26 changes can be undone." (`left_machine`, `undoable`) |
 | Retry | `task.retry` → a new task with the same request and scope, checked against today's policy. Only the task's own user can retry it. |
-| Take over | For screen agents, the agent's display (not built). An actions agent that failed has no display to hand over; **proposed**: the shell opens the expanded view at the step that failed. Needs a design call. |
+| Take over | For screen agents, the agent's display (not built). For an actions agent that ended: `task.continue` starts the task again in the user's own Claude Code, which is told what the agent did and why it stopped; `TaskView.driver_socket` is what to connect (`glass-mcp <socket>`), and hand back closes it (ADR 0015) |
 | Undo all | `task.undo {}` |
 | Catch-up panel, batched and summarized notifications, Focus until 4:00 PM (CF-71, P1) | **Not built**: a notification service in the shell; agents' tile events are one of its sources |
 | Taskbar "2 agents" with one red dot | `task.list` states |

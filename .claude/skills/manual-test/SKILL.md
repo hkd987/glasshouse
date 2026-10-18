@@ -65,6 +65,12 @@ Send as you go, not all at the end.
 - Containment: `run containment-probe`, then `grep -E '^(PASS|FAIL)'` in the
   task's `agent.log`, then `jls` (nothing left behind)
 - Audit: `glassctl audit <task>`, `glassctl verify`
+- Tailoring (TL): `glassctl tailor invoice-demo --set flag_over=1000
+  --block mail.send`, then `plan`/`run` to show the layer applied, `--undo`
+- Take over an ended task in the harness: `glassctl take-over <failed>`;
+  Claude Code isn't in the VM, so drive the socket through `glass-mcp` with
+  a scripted MCP exchange; `glassctl hand-back`
+- Latency budgets: `/usr/local/libexec/glasshouse-tests/glass-e2e perf`
 - IT agent (AE-4): `glassctl run it-agent "My disk is filling up" --yes`
   (with a few MB in `~/.cache`), `"restart cron"` (asks), `"the printer
   won't print"` (asks to open a ticket); `glassctl show`, `undo --change`

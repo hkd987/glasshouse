@@ -24,7 +24,7 @@ use crate::error::Result;
 
 /// How long sleep waits for actions already under way.
 const SLEEP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-use crate::task::{Gate, NewTask, TakenSnapshot, Task};
+use crate::task::{Continued, Gate, NewTask, TakenSnapshot, Task};
 use crate::{Caller, CatalogEntry, RuntimeConfig, RuntimeError, supervise};
 
 /// Everything the runtime is built from. `glassd` assembles these from its
@@ -76,6 +76,15 @@ struct Prepared {
     card: HandoffCard,
     settings: BTreeMap<String, Value>,
     layer: Option<u32>,
+}
+
+/// Why a task is starting.
+pub(crate) enum Origin {
+    New,
+    /// The Failed tile's Retry.
+    RetryOf(TaskId),
+    /// Take over on an ended task, in the user's harness.
+    Continues(Continued),
 }
 
 impl Runtime {
@@ -131,7 +140,7 @@ impl Runtime {
     }
 
     /// The task, if `caller` may see it. Others' tasks read as not found.
-    fn authorized(&self, caller: &Caller, id: TaskId) -> Result<Arc<Task>> {
+    pub(crate) fn authorized(&self, caller: &Caller, id: TaskId) -> Result<Arc<Task>> {
         self.task(id)
             .filter(|t| caller.is_admin() || t.user.uid == caller.uid)
             .ok_or_else(|| RuntimeError::NotFound(format!("no task {}", id.short())))
@@ -336,7 +345,7 @@ impl Runtime {
 
     /// Starts a task (DA-3): the scope on the card becomes the task's grants.
     pub fn start(self: &Arc<Self>, caller: &Caller, request: TaskRequest) -> Result<TaskView> {
-        self.start_task(caller, request, None)
+        self.start_task(caller, request, Origin::New)
     }
 
     /// The Failed tile's Retry: the same request as a new task. Policy and
@@ -360,14 +369,14 @@ impl Runtime {
             prompt: task.prompt.clone(),
             scope: task.scope.clone(),
         };
-        self.start_task(caller, request, Some(id))
+        self.start_task(caller, request, Origin::RetryOf(id))
     }
 
-    fn start_task(
+    pub(crate) fn start_task(
         self: &Arc<Self>,
         caller: &Caller,
         request: TaskRequest,
-        retry_of: Option<TaskId>,
+        origin: Origin,
     ) -> Result<TaskView> {
         let prepared = self.prepare(caller, &request)?;
         let live = self
@@ -417,6 +426,15 @@ impl Runtime {
             grants: prepared.grants,
         };
         let layer_note = prepared.card.layer.as_ref().map(crate::tailor::note);
+        let driver_socket = prepared
+            .entry
+            .attended
+            .then(|| self.config.attended_dir.join(format!("{id}.sock")));
+        let (retry_of, continues) = match origin {
+            Origin::New => (None, None),
+            Origin::RetryOf(first) => (Some(first), None),
+            Origin::Continues(from) => (None, Some(from)),
+        };
         let (stop_tx, stop_rx) = oneshot::channel();
         let task = Arc::new(Task::new(NewTask {
             id,
@@ -431,6 +449,8 @@ impl Runtime {
             cant_touch: prepared.card.cant_touch,
             settings: prepared.settings,
             layer: prepared.layer,
+            driver_socket,
+            continues,
             stop: stop_tx,
         }));
         self.tasks().insert(id, Arc::clone(&task));
@@ -448,6 +468,8 @@ impl Runtime {
             })).collect::<Vec<_>>(),
             "sandbox": self.sandbox.kind(),
             "retry_of": retry_of,
+            "continues": task.continues.as_ref().map(|c| c.id),
+            "attended": task.entry.attended,
             "layer": task.layer,
             "settings": task.settings,
         });
@@ -456,11 +478,18 @@ impl Runtime {
             let mut state = task.lock();
             state.note(
                 ActivityKind::State,
-                match retry_of {
-                    Some(first) => {
+                match (retry_of, &task.continues) {
+                    (Some(first), _) => {
                         format!("Started by {} (retry of {})", caller.name, first.short())
                     }
-                    None => format!("Started by {}", caller.name),
+                    (None, Some(from)) => format!(
+                        "Started by {}, continuing {} ({} {})",
+                        caller.name,
+                        from.id.short(),
+                        from.agent,
+                        from.ended
+                    ),
+                    (None, None) => format!("Started by {}", caller.name),
                 },
             );
             if let Some(note) = layer_note {
@@ -494,7 +523,7 @@ impl Runtime {
         Ok(task)
     }
 
-    fn state_change(&self, task: &Task, summary: &str) {
+    pub(crate) fn state_change(&self, task: &Task, summary: &str) {
         self.audit(self.task_event(task, EventKind::TaskStateChanged, summary));
         self.publish(task);
     }
@@ -541,6 +570,11 @@ impl Runtime {
     /// has control. Available at any time, including during an ask (AW-22).
     pub async fn take_over(&self, caller: &Caller, id: TaskId) -> Result<TaskView> {
         let task = self.live(caller, id)?;
+        if task.entry.attended {
+            return Err(RuntimeError::Conflict(
+                "you're already driving this task in your harness".into(),
+            ));
+        }
         self.hold(&task, TileState::YouAreDriving, "You took over");
         let roots: Vec<PathBuf> = task
             .ctx
@@ -565,6 +599,9 @@ impl Runtime {
     /// lets the agent resume from there.
     pub async fn hand_back(&self, caller: &Caller, id: TaskId) -> Result<TaskView> {
         let task = self.live(caller, id)?;
+        if task.entry.attended {
+            return Ok(self.finish_attended(&task));
+        }
         if task.lock().tile != TileState::YouAreDriving {
             return Err(RuntimeError::Conflict(
                 "you don't have control of that task".into(),

@@ -16,6 +16,7 @@
 mod agent_api;
 mod caller;
 mod config;
+mod continuation;
 mod control_api;
 mod error;
 mod execute;

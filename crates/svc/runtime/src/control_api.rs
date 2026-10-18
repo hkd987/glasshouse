@@ -53,6 +53,7 @@ impl Handler for ControlApi {
             methods::TASK_HAND_BACK => to_result(&rt.hand_back(&caller, task_ref(params)?).await?),
             methods::TASK_DISMISS => to_result(&rt.dismiss(&caller, task_ref(params)?)?),
             methods::TASK_RETRY => to_result(&rt.retry(&caller, task_ref(params)?)?),
+            methods::TASK_CONTINUE => to_result(&rt.continue_task(&caller, task_ref(params)?)?),
             methods::TASK_UNDO => {
                 let request: UndoRequest = parse_params(params)?;
                 to_result(&rt.undo(&caller, request).await?)

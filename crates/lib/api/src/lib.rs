@@ -59,6 +59,12 @@ pub mod methods {
     pub const TASK_DISMISS: &str = "task.dismiss";
     /// [`crate::UndoRequest`] → [`crate::UndoReport`] (AW-15, AU-21)
     pub const TASK_UNDO: &str = "task.undo";
+    /// [`crate::TaskRef`] → [`crate::TaskView`]: Take over on an ended task
+    /// (AW-22 for actions agents, which have no screen to hand over).
+    /// Starts a new task with the same request and scope, driven by the
+    /// user's own harness through `glass-mcp <driver_socket>`, with what the
+    /// first task did and why it stopped in the harness's instructions.
+    pub const TASK_CONTINUE: &str = "task.continue";
     /// [`crate::TaskRef`] → [`crate::TaskView`]: the Failed tile's Retry.
     /// Starts the ended task's request again as a new task, under today's
     /// policy. What the first run saved stays (and stays undoable there).

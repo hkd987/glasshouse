@@ -48,6 +48,10 @@ pub(crate) struct Task {
     pub settings: BTreeMap<String, Value>,
     /// The layer version this task runs with (TL-2).
     pub layer: Option<u32>,
+    /// Where the user's own harness connects, for an attended task.
+    pub driver_socket: Option<PathBuf>,
+    /// The ended task this one carries on from (`task.continue`).
+    pub continues: Option<Continued>,
     pub started_at: Timestamp,
     pub gate: watch::Sender<Gate>,
     /// Fires once to make the supervisor kill the agent.
@@ -79,6 +83,8 @@ pub(crate) struct TaskState {
     pub takeover: Option<SnapshotHandle>,
     /// Set while paused for sleep (PM-5): the caption to restore on wake.
     pub sleeping: Option<String>,
+    /// For an attended task: the user's harness has connected.
+    pub connected: bool,
 }
 
 /// Everything fixed when a task starts.
@@ -96,7 +102,23 @@ pub(crate) struct NewTask {
     pub cant_touch: Vec<String>,
     pub settings: BTreeMap<String, Value>,
     pub layer: Option<u32>,
+    pub driver_socket: Option<PathBuf>,
+    pub continues: Option<Continued>,
     pub stop: oneshot::Sender<()>,
+}
+
+/// What a continued task tells the harness about the task it carries on
+/// from.
+#[derive(Debug, Clone)]
+pub(crate) struct Continued {
+    pub id: TaskId,
+    pub agent: String,
+    /// How it ended, as a clause: "failed: …", "was stopped".
+    pub ended: String,
+    /// The steps it completed, from its activity log.
+    pub done: Vec<String>,
+    /// What it changed, with whether each can be undone.
+    pub changes: Vec<String>,
 }
 
 impl Task {
@@ -115,6 +137,8 @@ impl Task {
             cant_touch: new.cant_touch,
             settings: new.settings,
             layer: new.layer,
+            driver_socket: new.driver_socket,
+            continues: new.continues,
             started_at: now,
             gate: watch::Sender::new(Gate::Run),
             stop: Mutex::new(Some(new.stop)),
@@ -132,6 +156,7 @@ impl Task {
                 updated_at: now,
                 takeover: None,
                 sleeping: None,
+                connected: false,
             }),
         }
     }
@@ -184,6 +209,8 @@ impl Task {
             failure: state.failure.clone(),
             started_at: self.started_at,
             updated_at: state.updated_at,
+            driver_socket: self.driver_socket.clone(),
+            continues: self.continues.as_ref().map(|c| c.id),
         }
     }
 

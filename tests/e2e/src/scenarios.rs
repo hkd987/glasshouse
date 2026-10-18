@@ -308,6 +308,68 @@ pub async fn it(h: &Harness) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Take over on an ended task (AW-22 for actions agents, HX-1): the task
+/// carries on in the user's own harness, here played by this test through
+/// the task's socket, with what the first agent did in its instructions.
+pub async fn harness(h: &Harness) -> anyhow::Result<()> {
+    let ws = h.workspace("harness")?;
+    let first = h
+        .start(
+            "invoice-demo",
+            "Reconcile invoices",
+            &[&ws.invoices],
+            &[&ws.reports],
+        )
+        .await?;
+    h.wait_for(first, TileState::NeedsYou, LONG).await?;
+    h.act(methods::TASK_STOP, first).await?;
+    wait_until_finished(h, first).await?;
+
+    let view = h.act(methods::TASK_CONTINUE, first).await?;
+    ensure!(view.continues == Some(first), "{view:?}");
+    let socket = view
+        .driver_socket
+        .clone()
+        .context("a socket to connect to")?;
+    // The socket is up once the task leaves Starting.
+    h.wait_for(view.id, TileState::Working, SHORT).await?;
+    ensure!(
+        socket.starts_with("/var/run/glasshouse/attended"),
+        "{}",
+        socket.display()
+    );
+    let client = glass_rpc::Client::connect(&socket)
+        .await
+        .with_context(|| format!("connecting to {}", socket.display()))?;
+    let init: Value = client
+        .call(
+            "initialize",
+            serde_json::json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "glass-e2e", "version": "0"}}),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let instructions = init["instructions"].as_str().unwrap_or_default();
+    ensure!(
+        instructions.contains("which was stopped") && instructions.contains("reconciliation.csv"),
+        "{instructions}"
+    );
+    let listed: glass_rpc::mcp::CallToolResult = client
+        .call(
+            "tools/call",
+            serde_json::json!({"name": "files_list", "arguments": {"path": "Invoices"}}),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    ensure!(!listed.is_error, "{}", listed.text());
+
+    let done = h.act(methods::TASK_HAND_BACK, view.id).await?;
+    ensure!(done.state == TileState::Done, "{:?}", done.state);
+    wait_until_finished(h, view.id).await?;
+    ensure!(!socket.exists(), "the socket goes with the task");
+    h.undo(first, false).await?;
+    Ok(())
+}
+
 /// Tailoring (TL-1, TL-2, TL-10): a personal layer on the invoice agent
 /// flags big invoices, turns reminders off and blocks sends; a layer that
 /// would loosen sends is refused; turning it off puts the published agent

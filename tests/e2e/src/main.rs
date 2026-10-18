@@ -36,6 +36,7 @@ const ALL: &[&str] = &[
     "changes",
     "it",
     "tailor",
+    "harness",
     "perf",
 ];
 
@@ -85,6 +86,7 @@ async fn main() -> ExitCode {
                     "changes" => scenarios::changes(&harness).await,
                     "it" => scenarios::it(&harness).await,
                     "tailor" => scenarios::tailor(&harness).await,
+                    "harness" => scenarios::harness(&harness).await,
                     "perf" => perf::perf(&harness).await,
                     other => Err(anyhow::anyhow!("unknown scenario {other}")),
                 };

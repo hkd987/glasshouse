@@ -43,13 +43,21 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
     }
     task.gate.send_replace(Gate::Ended);
     rt.desk.end_task(task.id);
-    let sandbox = Arc::clone(&rt.sandbox);
-    let spec = task.sandbox.clone();
-    let destroyed = tokio::task::spawn_blocking(move || sandbox.destroy(&spec)).await;
-    let teardown_error = match destroyed {
-        Ok(Ok(())) => None,
-        Ok(Err(e)) => Some(e.to_string()),
-        Err(e) => Some(e.to_string()),
+    let teardown_error = match &task.driver_socket {
+        // An attended task has no sandbox, only its socket.
+        Some(socket) => match fs::remove_file(socket) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Some(e.to_string()),
+            _ => None,
+        },
+        None => {
+            let sandbox = Arc::clone(&rt.sandbox);
+            let spec = task.sandbox.clone();
+            match tokio::task::spawn_blocking(move || sandbox.destroy(&spec)).await {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e.to_string()),
+                Err(e) => Some(e.to_string()),
+            }
+        }
     };
     if let Some(e) = &teardown_error {
         tracing::error!(task = %task.id, error = %e, "sandbox teardown failed");
@@ -58,7 +66,8 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
     let summary = {
         let mut state = task.lock();
         match (&result, state.tile) {
-            (_, TileState::Stopped) => {}
+            // Set by Stop, or by hand back on an attended task.
+            (_, TileState::Stopped | TileState::Done) => {}
             (Ok(Exit::Finished(status)), _) if status.success() => {
                 // Keep the agent's last caption: it is usually its summary.
                 state.tile = TileState::Done;
@@ -125,6 +134,10 @@ async fn setup_and_wait(
         rt.take_snapshot(task, &writable, "Task started")
             .await
             .map_err(|e| format!("snapshot failed: {e}"))?;
+    }
+
+    if let Some(socket) = &task.driver_socket {
+        return drive_attended(rt, task, socket, server, stop).await;
     }
 
     let sandbox = Arc::clone(&rt.sandbox);
@@ -195,6 +208,50 @@ async fn setup_and_wait(
             Ok(Exit::Stopped)
         }
     }
+}
+
+/// An attended task: the user's own harness connects to its socket through
+/// `glass-mcp`, so there is no sandbox or program, and the task lasts until
+/// the user hands back or stops it.
+async fn drive_attended(
+    rt: &Arc<Runtime>,
+    task: &Arc<Task>,
+    socket: &Path,
+    server: &mut Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    stop: oneshot::Receiver<()>,
+) -> Result<Exit, String> {
+    if let Some(dir) = socket.parent() {
+        // Root's, and traversable so each user reaches their own socket.
+        fs::create_dir_all(dir).map_err(|e| format!("task socket: {e}"))?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("task socket: {e}"))?;
+    }
+    let listener = bind_task_socket(socket, task).map_err(|e| format!("task socket: {e}"))?;
+    *server = Some(tokio::spawn(glass_rpc::serve(
+        listener,
+        Arc::new(AgentApi {
+            rt: Arc::clone(rt),
+            task: task.id,
+        }),
+    )));
+    {
+        let mut state = task.lock();
+        if state.tile == TileState::Starting {
+            state.tile = TileState::Working;
+            state.caption = format!("Waiting for {} to connect", task.entry.name);
+        }
+        state.note(
+            ActivityKind::State,
+            format!(
+                "You're driving in {}: connect it with glass-mcp {}",
+                task.entry.name,
+                socket.display()
+            ),
+        );
+    }
+    rt.publish(task);
+    let _ = stop.await;
+    Ok(Exit::Stopped)
 }
 
 /// Binds the task socket so only the task's user (and root) can connect.

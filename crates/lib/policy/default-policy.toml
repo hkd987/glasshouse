@@ -57,7 +57,7 @@ services = ["cron", "ntpd", "openvpn", "cupsd"]
 
 [[group]]
 name = "everyone"
-agents = ["it-agent", "invoice-demo", "containment-probe"]
+agents = ["it-agent", "invoice-demo", "containment-probe", "claude-code"]
 
 # IT self-service (AE-4): diagnoses this computer and fixes what's on IT's
 # list. The only agent allowed the system actions, which glassd runs with its
@@ -71,6 +71,15 @@ allowed_actions = ["system.*", "helpdesk.ticket.create"]
 [[agent]]
 id = "invoice-demo"
 allowed_actions = ["files.*", "mail.*"]
+
+# The user's own Claude Code, connected through glass-mcp (HX-1): Take over on
+# an ended task carries on there. Its calls go through the same tiers, audit
+# and undo as any agent's. Confidential data stays out of harnesses that send
+# model traffic to their own provider (HX-7).
+[[agent]]
+id = "claude-code"
+allowed_actions = ["files.*", "mail.*"]
+max_label = "internal"
 
 # Diagnostics agent that tries to break out of its sandbox and reports what it
 # could reach. Grants it nothing beyond reading its task scope.

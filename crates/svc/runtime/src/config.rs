@@ -24,7 +24,14 @@ pub struct CatalogEntry {
     pub mode: AgentMode,
     /// The agent program, as a host path that is also visible inside the
     /// sandbox (its directory must be in [`RuntimeConfig::agent_dirs`]).
+    /// Unused for attended agents.
+    #[serde(default)]
     pub program: PathBuf,
+    /// The user's own harness drives this agent through `glass-mcp`;
+    /// glassd starts no program and no sandbox, only the task socket
+    /// (HX-1). Every call still goes through the action pipeline.
+    #[serde(default)]
+    pub attended: bool,
     #[serde(default)]
     pub args: Vec<String>,
     /// The plan shown on the handoff card, until model-backed planning
@@ -53,6 +60,7 @@ impl CatalogEntry {
             version: self.version.clone(),
             description: self.description.clone(),
             mode: self.mode,
+            attended: self.attended,
         }
     }
 }
@@ -67,4 +75,10 @@ pub struct RuntimeConfig {
     pub agent_dirs: Vec<PathBuf>,
     /// Live tasks one user may have at once.
     pub max_live_tasks_per_user: usize,
+    /// The attended catalog agent that Take over on an ended task continues
+    /// in (`task.continue`), such as Claude Code. `None` turns it off.
+    pub harness: Option<AgentId>,
+    /// Where attended tasks' sockets live: a root-owned directory users can
+    /// traverse; each socket is its user's alone.
+    pub attended_dir: PathBuf,
 }

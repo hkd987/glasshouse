@@ -142,9 +142,11 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     let rt = Runtime::new(RuntimeParts {
         config: RuntimeConfig {
             state_dir: dir.path().join("state"),
-            catalog: vec![it_agent(), invoice_demo()],
+            catalog: vec![it_agent(), invoice_demo(), claude_code()],
             agent_dirs: Vec::new(),
             max_live_tasks_per_user: 4,
+            harness: Some("claude-code".parse().unwrap()),
+            attended_dir: dir.path().join("run/attended"),
         },
         policy,
         policy_source: "test".into(),
@@ -197,6 +199,8 @@ pub fn rebuild_with(h: &Harness, policy: &str, catalog: Vec<CatalogEntry>) -> Ar
             catalog,
             agent_dirs: Vec::new(),
             max_live_tasks_per_user: 4,
+            harness: Some("claude-code".parse().unwrap()),
+            attended_dir: h.dir.path().join("run/attended"),
         },
         policy: Policy::from_toml(policy).unwrap(),
         policy_source: "test".into(),
@@ -205,6 +209,23 @@ pub fn rebuild_with(h: &Harness, policy: &str, catalog: Vec<CatalogEntry>) -> Ar
         snapshots: Arc::new(CopySnapshotter::new(h.dir.path().join("snapshots"))),
         audit: Arc::new(AuditLog::open(h.audit_path(), Durability::Buffered).unwrap()),
     })
+}
+
+/// The user's own Claude Code, driving through `glass-mcp` (attended).
+pub fn claude_code() -> CatalogEntry {
+    CatalogEntry {
+        id: "claude-code".parse().unwrap(),
+        name: "Claude Code".into(),
+        version: "1".into(),
+        model: String::new(),
+        description: String::new(),
+        mode: glass_api::AgentMode::Actions,
+        program: PathBuf::new(),
+        attended: true,
+        args: Vec::new(),
+        plan: Vec::new(),
+        customize: Vec::new(),
+    }
 }
 
 pub fn it_agent() -> CatalogEntry {
@@ -216,6 +237,7 @@ pub fn it_agent() -> CatalogEntry {
         description: String::new(),
         mode: glass_api::AgentMode::Actions,
         program: "/bin/sleep".into(),
+        attended: false,
         args: vec!["30".into()],
         plan: vec!["Check".into(), "Fix".into()],
         customize: Vec::new(),
@@ -232,6 +254,7 @@ pub fn invoice_demo() -> CatalogEntry {
         description: String::new(),
         mode: glass_api::AgentMode::Actions,
         program: "/bin/sleep".into(),
+        attended: false,
         args: vec!["30".into()],
         plan: vec![
             "Read invoices".into(),

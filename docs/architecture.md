@@ -37,7 +37,10 @@ undo. Safety comes from the OS, not from the model behaving well.
   Answering an approval is always the task owner's call.
 - **A task socket** is created per task *inside* that task's jail, owned by
   the task's user, mode 0600. It speaks MCP (ADR 0004). It is the agent's only
-  way to affect anything outside the jail.
+  way to affect anything outside the jail. An *attended* agent (the user's
+  own Claude Code) has no jail: its socket is in
+  `/var/run/glasshouse/attended/`, the user's alone, and the user connects
+  it with `glass-mcp` (ADR 0015).
 
 ## A task's life
 

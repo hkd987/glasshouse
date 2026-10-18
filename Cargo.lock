@@ -572,6 +572,7 @@ dependencies = [
  "glass-policy",
  "glass-rpc",
  "glass-runtime",
+ "glass-types",
  "serde",
  "serde_json",
  "tempfile",

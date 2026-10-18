@@ -43,6 +43,9 @@ impl Handler for AgentApi {
         }
         match method.as_str() {
             mcp::methods::INITIALIZE => {
+                if task.entry.attended {
+                    self.rt.harness_connected(&task);
+                }
                 let requested = params
                     .get("protocolVersion")
                     .and_then(Value::as_str)
@@ -182,6 +185,25 @@ fn instructions(task: &Task) -> String {
         if let Some(words) = value.as_str().filter(|w| !w.trim().is_empty()) {
             text.push_str(&format!("\n\nThe user also asked: {words}"));
         }
+    }
+    if let Some(from) = &task.continues {
+        let list = |lines: &[String]| {
+            if lines.is_empty() {
+                " none".to_owned()
+            } else {
+                lines.iter().map(|l| format!("\n- {l}")).collect()
+            }
+        };
+        text.push_str(&format!(
+            "\n\nYou are taking over this task from the {agent} agent, which {ended}. \
+             Carry on from where it stopped; don't redo what it finished.\n\
+             Steps it completed:{done}\nChanges it made:{changes}\n\
+             When the work is done, tell the user to hand back so the task closes.",
+            agent = from.agent,
+            ended = from.ended,
+            done = list(&from.done),
+            changes = list(&from.changes),
+        ));
     }
     text
 }

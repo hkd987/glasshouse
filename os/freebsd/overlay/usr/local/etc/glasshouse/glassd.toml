@@ -7,6 +7,9 @@ state_dir = "/var/db/glasshouse"
 # with `glassctl policy default`.
 policy = "/usr/local/etc/glasshouse/policy.toml"
 max_live_tasks_per_user = 8
+# Take over on an ended task carries on in this attended agent: the user's
+# own Claude Code, connected through glass-mcp.
+harness = "claude-code"
 
 [sandbox]
 backend = "jail"
@@ -62,6 +65,22 @@ default = true
 key = "instructions"
 title = "Also do this"
 kind = "instructions"
+
+# The user's own Claude Code (HX-1). glassd starts nothing for it: the user
+# connects Claude Code to the task's socket with glass-mcp, and every call
+# goes through the same approvals, audit and undo as any agent's.
+[[agent]]
+id = "claude-code"
+name = "Claude Code"
+version = "1"
+description = "Your own Claude Code session, connected to Glasshouse: it works through the same approvals, audit and undo as any agent."
+mode = "actions"
+attended = true
+plan = [
+  "Connect your Claude Code with the command shown",
+  "Work through Glasshouse's actions, with the usual approvals",
+  "Hand back when you're done",
+]
 
 [[agent]]
 id = "containment-probe"

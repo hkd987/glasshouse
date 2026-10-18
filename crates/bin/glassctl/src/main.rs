@@ -93,7 +93,8 @@ enum Command {
     Resume {
         task: String,
     },
-    /// Take control from the agent (it pauses).
+    /// Take control from the agent (it pauses). On an ended task, carry on
+    /// in your own harness, such as Claude Code, with what the agent did.
     TakeOver {
         task: String,
     },
@@ -364,12 +365,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 bail!("not started");
             }
             let view: TaskView = ctl.call(methods::TASK_START, &request).await?;
+            let view = until_started(&ctl, view).await?;
             ctl.show(&view, |v| {
-                format!(
-                    "\nStarted {} ({}). Watch it with `glassctl watch`.\n",
-                    v.agent_name,
-                    v.id.short()
-                )
+                if v.driver_socket.is_some() {
+                    format!("\n{}", render::connect(v))
+                } else {
+                    format!(
+                        "\nStarted {} ({}). Watch it with `glassctl watch`.\n",
+                        v.agent_name,
+                        v.id.short()
+                    )
+                }
             })
         }
         Command::Tasks { summary } => {
@@ -400,7 +406,23 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Deny { approval } => answer(&ctl, &approval, ApprovalAnswer::Deny).await,
         Command::Pause { task } => lifecycle(&ctl, methods::TASK_PAUSE, &task).await,
         Command::Resume { task } => lifecycle(&ctl, methods::TASK_RESUME, &task).await,
-        Command::TakeOver { task } => lifecycle(&ctl, methods::TASK_TAKE_OVER, &task).await,
+        Command::TakeOver { task } => {
+            let detail: TaskDetail = ctl.task_call(methods::TASK_GET, &task).await?;
+            if detail.view.state.is_live() {
+                lifecycle(&ctl, methods::TASK_TAKE_OVER, &task).await
+            } else {
+                let view: TaskView = ctl
+                    .call(
+                        methods::TASK_CONTINUE,
+                        TaskRef {
+                            task: detail.view.id,
+                        },
+                    )
+                    .await?;
+                let view = until_started(&ctl, view).await?;
+                ctl.show(&view, render::connect)
+            }
+        }
         Command::HandBack { task } => lifecycle(&ctl, methods::TASK_HAND_BACK, &task).await,
         Command::Stop { task } => lifecycle(&ctl, methods::TASK_STOP, &task).await,
         Command::Dismiss { task } => ctl.task_call(methods::TASK_DISMISS, &task).await,
@@ -482,6 +504,24 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Policy(_) => unreachable!("handled before connecting"),
     }
+}
+
+/// For a task the user's harness drives, waits until its socket is up
+/// (the task has left Starting), so the connect command works at once.
+async fn until_started(ctl: &Ctl, view: TaskView) -> anyhow::Result<TaskView> {
+    if view.driver_socket.is_none() {
+        return Ok(view);
+    }
+    for _ in 0..100 {
+        let detail: TaskDetail = ctl
+            .call(methods::TASK_GET, TaskRef { task: view.id })
+            .await?;
+        if detail.view.state != TileState::Starting {
+            return Ok(detail.view);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ok(view)
 }
 
 async fn lifecycle(ctl: &Ctl, method: &str, task: &str) -> anyhow::Result<()> {

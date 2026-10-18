@@ -92,6 +92,53 @@ fn section(out: &mut String, title: &str, lines: &[String]) {
     }
 }
 
+/// How to connect the user's harness to a task it drives (HX-1, HX-6).
+pub fn connect(view: &TaskView) -> String {
+    let Some(socket) = &view.driver_socket else {
+        return tile(view);
+    };
+    let mut out = String::new();
+    let heading = match view.continues {
+        Some(first) => format!(
+            "Carrying on from {} in {} (task {}).",
+            first.short(),
+            view.agent_name,
+            view.id.short()
+        ),
+        None => format!("Started {} (task {}).", view.agent_name, view.id.short()),
+    };
+    let _ = writeln!(out, "{}", bold(&heading));
+    let config = serde_json::json!({
+        "mcpServers": { "glasshouse": {
+            "type": "stdio", "command": "glass-mcp", "args": [socket]
+        }}
+    });
+    let _ = writeln!(
+        out,
+        "\nStart Claude Code connected to it (this session only):\n\n  claude --mcp-config '{config}'"
+    );
+    let _ = writeln!(
+        out,
+        "\nOther MCP clients: run {} as a stdio server.",
+        bold(&format!("glass-mcp {}", socket.display()))
+    );
+    if view.continues.is_some() {
+        let _ = writeln!(
+            out,
+            "It knows what the agent did and why it stopped; ask it to carry on."
+        );
+    }
+    let _ = writeln!(
+        out,
+        "{}",
+        dim(&format!(
+            "Every action goes through your approvals and undo. Done? glassctl hand-back {}",
+            view.id.short()
+        ))
+    );
+    out
+}
+
 /// One tile (AW-2 to AW-4).
 pub fn tile(view: &TaskView) -> String {
     let mut out = String::new();
@@ -167,7 +214,9 @@ pub fn tile(view: &TaskView) -> String {
         let _ = writeln!(
             out,
             "    {}",
-            dim(&format!("glassctl retry {id}  ·  {undo}glassctl show {id}"))
+            dim(&format!(
+                "glassctl retry {id}  ·  glassctl take-over {id}  ·  {undo}glassctl show {id}"
+            ))
         );
     }
     out

@@ -20,3 +20,4 @@ ADR and mark the old one superseded.
 | [0012](0012-system-actions-broker-role.md) | IT self-service runs as fixed-function system actions in glassd; policy is the broker role |
 | [0013](0013-one-crate-per-app.md) | One crate per app's actions, built against a lib-layer contract; layers lib → apps → svc → bin |
 | [0014](0014-tailoring-layers.md) | Tailoring is a stack of personal layers glassd checks and applies; layers only narrow, every change is a version |
+| [0015](0015-take-over-in-your-harness.md) | Take over on an ended actions agent continues the task in the user's harness (Claude Code through `glass-mcp`); attended agents |

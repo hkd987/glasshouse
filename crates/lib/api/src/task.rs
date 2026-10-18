@@ -24,6 +24,10 @@ pub struct AgentSummary {
     pub version: String,
     pub description: String,
     pub mode: AgentMode,
+    /// Driven by the user's own harness, such as Claude Code, through
+    /// `glass-mcp`; glassd starts no program for it (HX-1).
+    #[serde(default)]
+    pub attended: bool,
 }
 
 /// A task handed off in plain language (DA-1), with the scope the user set
@@ -181,6 +185,14 @@ pub struct TaskView {
     pub failure: Option<String>,
     pub started_at: Timestamp,
     pub updated_at: Timestamp,
+    /// For a task the user's own harness drives: the socket to connect it
+    /// to, as `glass-mcp <socket>`. Only the task's user can connect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_socket: Option<PathBuf>,
+    /// The ended task this one continues, when it was taken over in the
+    /// user's harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues: Option<TaskId>,
 }
 
 /// What an ended task did: the Done tile's receipt, and the line under a

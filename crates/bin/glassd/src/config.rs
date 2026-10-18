@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 use glass_runtime::CatalogEntry;
+use glass_types::AgentId;
 use serde::Deserialize;
 
 pub const DEFAULT_CONFIG: &str = "/usr/local/etc/glasshouse/glassd.toml";
@@ -25,6 +26,10 @@ pub struct Config {
     pub policy: PathBuf,
     #[serde(default = "default_max_live")]
     pub max_live_tasks_per_user: usize,
+    /// The attended agent that Take over on an ended task continues in,
+    /// such as `claude-code` (HX-1). Unset turns that off.
+    #[serde(default)]
+    pub harness: Option<AgentId>,
     #[serde(default)]
     pub sandbox: SandboxConfig,
     #[serde(default)]
@@ -133,6 +138,10 @@ impl Config {
             agent
                 .check()
                 .map_err(|e| anyhow::anyhow!("agent {}: {e}", agent.id))?;
+            if agent.attended {
+                // The user's own harness drives it; there's no program.
+                continue;
+            }
             if !agent.program.is_absolute() {
                 bail!("agent {}: program must be an absolute path", agent.id);
             }
@@ -149,6 +158,11 @@ impl Config {
                     agent.program.display()
                 );
             }
+        }
+        if let Some(harness) = &self.harness
+            && !self.agents.iter().any(|a| &a.id == harness && a.attended)
+        {
+            bail!("harness {harness} must be an attended agent in the catalog");
         }
         let mut ids: Vec<_> = self.agents.iter().map(|a| &a.id).collect();
         ids.sort();
@@ -201,6 +215,24 @@ mod tests {
         "#;
         let config: Config = toml::from_str(text).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn the_harness_must_be_an_attended_catalog_agent() {
+        let text = r#"
+            harness = "claude-code"
+            [[agent]]
+            id = "claude-code"
+            name = "Claude Code"
+        "#;
+        let config: Config = toml::from_str(text).unwrap();
+        assert!(config.validate().is_err(), "not attended");
+        let config: Config = toml::from_str(&text.replace(
+            "name = \"Claude Code\"",
+            "name = \"Claude Code\"\nattended = true",
+        ))
+        .unwrap();
+        config.validate().unwrap();
     }
 
     #[test]

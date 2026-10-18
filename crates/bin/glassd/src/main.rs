@@ -128,6 +128,9 @@ async fn run(
     let audit = Arc::new(AuditLog::open(&audit_path, Durability::Sync)?);
     std::fs::set_permissions(&audit_path, std::fs::Permissions::from_mode(0o600))?;
 
+    // Attended tasks' sockets from an earlier run have no tasks behind them.
+    let _ = std::fs::remove_dir_all(run_dir.join("attended"));
+
     let cleaned = {
         let sandbox = Arc::clone(&sandbox);
         tokio::task::spawn_blocking(move || sandbox.cleanup_stale()).await??
@@ -159,6 +162,8 @@ async fn run(
             catalog: config.agents.clone(),
             agent_dirs: config.sandbox.agent_dirs.clone(),
             max_live_tasks_per_user: config.max_live_tasks_per_user,
+            harness: config.harness.clone(),
+            attended_dir: run_dir.join("attended"),
         },
         policy,
         policy_source: policy_source.clone(),
