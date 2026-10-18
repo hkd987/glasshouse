@@ -505,6 +505,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-greeter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glass-platform",
+ "glass-shell",
+ "glass-shell-fb",
+ "time",
+ "tokio",
+]
+
+[[package]]
 name = "glass-platform"
 version = "0.1.0"
 dependencies = [

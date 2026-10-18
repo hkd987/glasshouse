@@ -141,6 +141,8 @@ impl Greeter {
             battery_percent: None,
             password: self.password.clone(),
             message: self.message.clone(),
+            // No fingerprint sign-in yet.
+            fingerprint: false,
             wallpaper: false,
         }
     }

@@ -1,0 +1,19 @@
+[package]
+name = "glass-greeter"
+description = "The sign-in screen: checks the password with PAM and starts the person's desktop (ADR 0019)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-shell.workspace = true
+glass-shell-fb.workspace = true
+glass-platform = { workspace = true, features = ["pam"] }
+anyhow.workspace = true
+time.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

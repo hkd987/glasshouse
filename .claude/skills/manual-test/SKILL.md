@@ -51,6 +51,10 @@ stop` when done. A redraw takes about 2 s in the VM, so wait for the
 `drawn in` line in `/var/log/glass-shell-fb.log` before capturing. For screens without
 a live glassd, `make shell-preview` renders them to PNG.
 
+Signing in: `make greeter-vm` shows the sign-in screen; `vm.sh type demo`
+then `vm.sh key ret` signs in, `vm.sh key shift-meta_l-q` signs out. Its
+log is `/var/log/glass-greeter.log`.
+
 ## 3. Look before sending
 
 Read each PNG. Check it shows what the title claims (right task, colors,

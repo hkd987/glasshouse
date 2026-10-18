@@ -80,6 +80,9 @@ pub enum Effect {
     Stop(TaskId),
     TakeOver(TaskId),
     HandBack(TaskId),
+    /// End the session: the desktop program exits and the sign-in screen
+    /// comes back (ADR 0019).
+    SignOut,
     /// Roll back (`task.undo`, AW-15) and hand the report to
     /// [`Live::undo_report`], or the refusal to [`Live::undo_failed`].
     Undo(UndoRequest),
@@ -406,6 +409,7 @@ impl Live {
             | Message::PasswordChanged(_)
             | Message::SignIn
             | Message::SwitchUser => None,
+            Message::SignOut => Some(Effect::SignOut),
         }
     }
 
@@ -428,7 +432,7 @@ impl Live {
 
     /// The desktop's own keys: Ctrl Space opens and closes the command bar
     /// (DA-1); Esc closes the command bar, then the agents menu, then a roll
-    /// back card, then the expanded view (AW-16).
+    /// back card, then the expanded view (AW-16); Shift Super Q signs out.
     pub fn shortcut(&self, key: &Key, modifiers: Modifiers) -> Option<Message> {
         let bar = self.command.is_some();
         match key {
@@ -437,6 +441,12 @@ impl Live {
             } else {
                 Message::OpenCommandBar
             }),
+            // Sign out, as on a Mac (Shift Command Q).
+            Key::Character(c)
+                if c.eq_ignore_ascii_case("q") && modifiers.shift() && modifiers.logo() =>
+            {
+                Some(Message::SignOut)
+            }
             Key::Named(Named::Escape) if bar => Some(Message::CloseCommandBar),
             Key::Named(Named::Escape) if self.menu => Some(Message::CloseAgents),
             Key::Named(Named::Escape) => {
@@ -968,6 +978,20 @@ mod tests {
             live.shortcut(&Key::Named(Named::Escape), Modifiers::empty()),
             Some(Message::CloseTask),
             "Esc now closes the expanded view, the menu is gone"
+        );
+    }
+
+    #[test]
+    fn shift_super_q_signs_out() {
+        let mut live = Live::default();
+        let q = Key::Character("Q".into());
+        let message = live.shortcut(&q, Modifiers::SHIFT | Modifiers::LOGO);
+        assert_eq!(message, Some(Message::SignOut));
+        assert_eq!(live.update(Message::SignOut), Some(Effect::SignOut));
+        assert_eq!(
+            live.shortcut(&q, Modifiers::SHIFT),
+            None,
+            "Shift Q is typing"
         );
     }
 }

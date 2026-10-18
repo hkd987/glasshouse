@@ -25,6 +25,8 @@ pub struct SignIn {
     pub password: String,
     /// Why the last try didn't sign in, shown in place of the hint.
     pub message: Option<String>,
+    /// Whether the hint offers the fingerprint sensor.
+    pub fingerprint: bool,
     /// False leaves the wallpaper out, for a screen that keeps it as its
     /// backdrop (`render::Screen::set_backdrop`).
     pub wallpaper: bool,
@@ -112,9 +114,13 @@ pub fn view<'a>(theme: &Theme, screen: &'a SignIn, size: (f32, f32)) -> Element<
         password,
         match &screen.message {
             Some(message) => text(message.as_str()).size(13).color(hex(0xFFD7A8)),
-            None => text("Touch the fingerprint sensor or enter your password")
-                .size(13)
-                .color(Color { a: 0.8, ..INK }),
+            None => text(if screen.fingerprint {
+                "Touch the fingerprint sensor or enter your password"
+            } else {
+                "Enter your password"
+            })
+            .size(13)
+            .color(Color { a: 0.8, ..INK }),
         },
     ]
     .spacing(14)

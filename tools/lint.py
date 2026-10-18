@@ -106,6 +106,9 @@ def plan(files: set[str], everything: bool) -> list[tuple[str, list[str]]]:
         steps.append(("clippy (shell)",
                       ["cargo", "clippy", "--manifest-path", "shell/Cargo.toml", "--workspace",
                        "--all-targets", "--", "-D", "warnings"]))
+        steps.append(("clippy (shell, FreeBSD)",
+                      ["cargo", "clippy", "--manifest-path", "shell/Cargo.toml", "--workspace",
+                       "--all-targets", "--target", FREEBSD, "--", "-D", "warnings"]))
 
     if everything or any(f.endswith("Cargo.toml") or f == "tools/check-layers.py" for f in files):
         steps.append(("layering", ["tools/check-layers.py"]))
@@ -140,10 +143,10 @@ def run(steps: list[tuple[str, list[str]]]) -> int:
     failed = 0
     for label, took, done in results:
         if done.returncode == 0:
-            print(f"  ok    {label:<17} {took:5.1f}s")
+            print(f"  ok    {label:<23} {took:5.1f}s")
         else:
             failed += 1
-            print(f"  FAIL  {label:<17} {took:5.1f}s\n{done.stdout.rstrip()}\n")
+            print(f"  FAIL  {label:<23} {took:5.1f}s\n{done.stdout.rstrip()}\n")
     print(f"lint: {len(steps) - failed} of {len(steps)} checks passed "
           f"in {time.monotonic() - started:.1f}s")
     return 1 if failed else 0

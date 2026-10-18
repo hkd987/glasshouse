@@ -417,6 +417,7 @@ pub fn sign_in() -> SignIn {
         battery_percent: Some(82),
         password: String::new(),
         message: None,
+        fingerprint: true,
         wallpaper: true,
     }
 }

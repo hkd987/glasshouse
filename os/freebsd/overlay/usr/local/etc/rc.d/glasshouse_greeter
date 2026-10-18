@@ -6,11 +6,11 @@
 #
 # The sign-in screen on the first virtual terminal (ADR 0019): glass-greeter
 # checks passwords with PAM, starts the person's desktop, and shows the
-# sign-in screen again when they sign out. getty must not run on ttyv0 at
-# the same time; post-install.sh turns it off there when this is enabled.
+# sign-in screen again when they sign out. getty can't share ttyv0 with it:
+# starting turns getty off there in /etc/ttys, stopping turns it back on.
 
-# rc.subr reads the rc variables below.
-# shellcheck disable=SC1091,SC2034
+# rc.subr reads the rc variables below, and FreeBSD's sh has `local`.
+# shellcheck disable=SC1091,SC2034,SC3043
 . /etc/rc.subr
 
 name="glasshouse_greeter"
@@ -19,9 +19,24 @@ rcvar="glasshouse_greeter_enable"
 pidfile="/var/run/${name}.pid"
 procname="/usr/local/bin/glass-greeter"
 command="/usr/sbin/daemon"
-# -p records glass-greeter's own pid (not the supervisor's) so rc.subr can
-# track it.
+# -p records glass-greeter's pid, not daemon's: rc.subr stops it with
+# SIGTERM, and it ends the sign-in screen or desktop showing before it exits.
 command_args="-f -p ${pidfile} -o /var/log/glass-greeter.log ${procname}"
+
+start_precmd="glasshouse_greeter_getty off"
+stop_postcmd="glasshouse_greeter_getty onifexists"
+
+# glasshouse_greeter_getty off|onifexists: whether getty runs on ttyv0.
+glasshouse_greeter_getty()
+{
+	local want="$1"
+	if grep -Eq "^ttyv0[[:space:]].*[[:space:]]${want}([[:space:]]|\$)" /etc/ttys; then
+		return 0
+	fi
+	sed -i '' -E "/^ttyv0[[:space:]]/s/[[:space:]](on|off|onifexists|onifconsole)([[:space:]]|\$)/ ${want}\2/" /etc/ttys
+	# init(8) rereads /etc/ttys, ending or starting getty there.
+	kill -HUP 1
+}
 
 load_rc_config "$name"
 : "${glasshouse_greeter_enable:=NO}"

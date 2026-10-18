@@ -21,7 +21,7 @@ export FREEBSD_PROFILE
 export DIST_PROFILE := $(FREEBSD_PROFILE)
 
 .PHONY: help build check test lint lint-all fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
-	test-env image-release legal-base ci clean shell shell-test shell-lint shell-preview shell-vm
+	test-env image-release legal-base ci clean shell shell-test shell-lint shell-preview shell-vm greeter-vm
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -93,6 +93,7 @@ shell-test: ## Desktop shell tests, including the screen snapshots
 shell-lint: ## Desktop shell formatting and clippy (warnings are errors)
 	cargo fmt $(SHELL_MANIFEST) --all --check
 	cargo clippy $(SHELL_MANIFEST) --workspace --all-targets -- -D warnings
+	cargo clippy $(SHELL_MANIFEST) --workspace --all-targets --target $(FREEBSD_TARGET) -- -D warnings
 
 shell-preview: ## Render the shell's screens to PNG in build/shell-preview (SOCKET=... for live tiles)
 	cargo run $(SHELL_MANIFEST) -p glass-shell-preview -- --out build/shell-preview $(if $(SOCKET),--socket $(SOCKET))
@@ -100,6 +101,10 @@ shell-preview: ## Render the shell's screens to PNG in build/shell-preview (SOCK
 shell-vm: ## Show the shell on the dev VM's screen with live tiles (see it with vm.sh screendump)
 	cargo build $(SHELL_MANIFEST) --target $(FREEBSD_TARGET) -p glass-shell-fb
 	os/freebsd/scripts/shell-vm.sh start
+
+greeter-vm: ## Boot-like sign-in on the dev VM: the sign-in screen, then the desktop (password demo)
+	cargo build $(SHELL_MANIFEST) --target $(FREEBSD_TARGET) -p glass-shell-fb -p glass-greeter
+	os/freebsd/scripts/shell-vm.sh greeter
 
 ci: lint-all test shell-lint shell-test ## What CI runs on every change
 

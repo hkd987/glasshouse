@@ -15,14 +15,14 @@
 //! - [`framebuffer`] and [`input`]: the console framebuffer and the evdev
 //!   keyboard and pointer, for the shell where there is no compositor or GPU
 //!   driver (ADR 0016).
-//! - `auth` (feature `pam`, FreeBSD): checking a password with PAM, for the
-//!   sign-in screen (ADR 0019).
+//! - `auth` (feature `pam`): checking a password with PAM, for the sign-in
+//!   screen (ADR 0019).
 //!
 //! All `unsafe` code in the workspace is confined to the FFI in `users`,
 //! `xattr`, `framebuffer`, `input` and `auth`, each block with a SAFETY
 //! note.
 
-#[cfg(all(feature = "pam", target_os = "freebsd"))]
+#[cfg(feature = "pam")]
 #[allow(unsafe_code)]
 pub mod auth;
 mod cmd;

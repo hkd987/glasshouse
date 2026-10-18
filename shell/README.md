@@ -18,6 +18,7 @@ make shell-preview SOCKET=/var/run/glasshouse/control.sock   # live tiles from g
 make shell-test                    # unit tests, landmarks, snapshot digests
 make shell-lint                    # fmt check and clippy -D warnings
 make shell-vm                      # the desktop on the dev VM's screen, live tiles
+make greeter-vm                    # sign in on the dev VM's screen (demo / demo), then the desktop
 os/freebsd/scripts/vm.sh screendump desktop.png   # see it
 ```
 
@@ -38,6 +39,15 @@ answers and Roll back (`task.undo`, a dry run first); Ctrl Space opens the
 command bar; Esc closes the command bar, then the agents menu, then the
 expanded view. Its log is
 `/var/log/glass-shell-fb.log` in the VM.
+
+`make greeter-vm` installs `glass-greeter` (ADR 0019) as well and turns on
+`rc.d/glasshouse_greeter`, as a machine boots: the sign-in screen on the
+first virtual terminal, PAM checks the password (`demo` on development
+VMs), and the desktop starts as that person through `su -l`. Shift Super Q
+signs out back to the sign-in screen. The greeter stays on across reboots
+until `os/freebsd/scripts/shell-vm.sh greeter-off`; `make shell-vm` stops
+it while the desktop runs directly. Its log, the desktop's included, is
+`/var/log/glass-greeter.log`.
 
 Drive it from the host through QEMU's USB tablet and keyboard:
 

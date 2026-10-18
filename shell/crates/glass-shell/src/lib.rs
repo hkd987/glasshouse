@@ -100,4 +100,6 @@ pub enum Message {
     SignIn,
     /// The sign-in screen's "Switch user": the next person who can sign in.
     SwitchUser,
+    /// End the session and go back to the sign-in screen (Shift Super Q).
+    SignOut,
 }

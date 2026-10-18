@@ -23,5 +23,5 @@ ADR and mark the old one superseded.
 | [0015](0015-take-over-in-your-harness.md) | Take over on an ended actions agent continues the task in the user's harness (Claude Code through `glass-mcp`); attended agents |
 | [0016](0016-showing-the-shell.md) | The shell shows on the console framebuffer in the VM (verified, with evdev input) and through DRM on hardware; one compositor, two outputs |
 | [0017](0017-undo-from-change-records.md) | Undo restores only the files the task changed, from its change records; a file changed since is left and reported; take-over edits are changes |
-| [0019](0019-signing-in.md) | Proposed: a greeter on the screen signs people in through PAM and starts their desktop with `su -l` |
+| [0019](0019-signing-in.md) | Accepted: a greeter on the screen signs people in through PAM and starts their desktop with `su -l` |
 | [0020](0020-agents-that-may-run-elsewhere.md) | Proposed: agents may later run in the cloud with local hands; the task socket stays the only interface and task state stays data (FD-1 to FD-4) |

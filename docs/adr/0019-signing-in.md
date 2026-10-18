@@ -1,6 +1,7 @@
 # 0019. Signing in: a greeter on the screen, PAM, and `su` for the session
 
-Status: **Proposed**. PRD UI-4, DK-1, CF-1 (later). Builds on ADR 0016.
+Status: **Accepted** (built on the dev VM; see "What we built"). PRD
+UI-4, DK-1, CF-1 (later). Builds on ADR 0016.
 
 ## Context
 The VM now shows the desktop on its own screen with live tiles, keyboard
@@ -52,4 +53,26 @@ environment, `setlogin`, PAM session modules, lastlog.
   compositor (ADR 0016's next step), which will own the devices for every
   session; until then one person is signed in at a time.
 - Passkeys and fingerprints (CF-2) are PAM modules too, so they fit here
-  later.
+  later. Until then the screen's hint asks only for the password.
+
+## What we built
+- `glass-greeter` is a supervisor loop plus the screen as a child process
+  of itself (`--screen`): the child shows the sign-in screen, checks the
+  password and prints `signed-in <user>`, and exiting closes everything it
+  had open before the person's desktop opens the same devices.
+- `glass-shell-fb` became a library (`display`: framebuffer, damage-tracked
+  drawing, pointer, input) and the desktop binary; the greeter uses the
+  library. Shift Super Q signs out of the desktop, which ends the session.
+- Stopping the service (`service glasshouse_greeter stop`, or a shutdown)
+  sends SIGTERM to the supervisor, which ends whatever is showing (SIGTERM
+  to the screen; to the desktop's process group, never to `su`, so `su`
+  still closes the PAM session), waits for it, takes the devices back and
+  exits. The screen and the desktop each put the terminal back to text on
+  SIGTERM, so the console login reappears.
+- `rc.d/glasshouse_greeter` runs it under `daemon(8)` and turns `getty` on
+  `ttyv0` off at start and back on at stop (`/etc/ttys`, then `init`
+  rereads it).
+- Checked on the dev VM: it boots into the sign-in screen; a wrong password
+  is refused after two seconds; `demo` signs in to their desktop with live
+  tiles; signing out returns to the sign-in screen with the devices back
+  with root; restarting or stopping the service leaves nothing behind.

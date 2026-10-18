@@ -3,7 +3,8 @@
 //! tiles from glassd and takes the keyboard and pointer from the kernel's
 //! evdev devices: Approve on a tile answers its ask, clicking a tile opens
 //! its expanded view (`task.get`) with Pause, Stop, Take over and Roll back,
-//! Esc closes it, Ctrl Space opens the command bar. It redraws when a task
+//! Esc closes it, Ctrl Space opens the command bar, Shift Super Q signs out
+//! (the program ends, and the sign-in screen comes back). It redraws when a task
 //! changes, the person does something, or the menu bar clock turns over:
 //! only the areas whose content changed are drawn again and copied to the
 //! screen, and moving the pointer repaints only the rows it crosses.
@@ -18,27 +19,20 @@
 //! as `glassctl tasks` shows them, and the caller needs read and write
 //! access to the terminal and read access to `/dev/input/event*`.
 
-mod input;
-mod keys;
-mod pointer;
-
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
 use glass_api::{Event, TaskDetail, TaskRef, TaskView, UndoReport, methods};
-use glass_platform::framebuffer::{Framebuffer, Order};
 use glass_rpc::{Client, ClientError};
 use glass_shell::live::{Effect, Live};
-use glass_shell::render::Screen;
-use glass_shell::{Size, Theme, wallpaper};
-use iced_core::{Point, mouse};
+use glass_shell::{Theme, wallpaper};
+use glass_shell_fb::display::Display;
+use glass_shell_fb::input::{self, Input};
 use time::{OffsetDateTime, UtcOffset};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
-
-use crate::input::Input;
 
 /// Changes that arrive this close together make one redraw.
 const SETTLE: Duration = Duration::from_millis(50);
@@ -107,7 +101,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
         return Ok(());
     }
     let (mut inputs, devices) = if args.input {
-        input::start(shell.screen_size())
+        input::start(shell.display.pixels())
     } else {
         (mpsc::unbounded_channel().1, 0)
     };
@@ -147,6 +141,10 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
                     batch.push(more);
                 }
                 let effects = shell.input(&batch);
+                if effects.contains(&Effect::SignOut) {
+                    eprintln!("signing out");
+                    break;
+                }
                 shell.carry_out_all(&client, effects).await;
                 redraw = shell.changed();
             }
@@ -162,60 +160,29 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The desktop on the framebuffer: its state, its UI (which keeps the
-/// pixels drawn) and where the pointer is.
+/// The desktop on the framebuffer: its state and the screen it draws on.
 struct Shell {
-    fb: Framebuffer,
+    display: Display,
     theme: Theme,
     offset: UtcOffset,
     live: Live,
-    screen: Screen,
-    keyboard: keys::Keyboard,
-    pointer: Point,
-    /// Where the pointer was painted, if it was.
-    painted: Option<Point>,
     /// Something changed that the next frame should show.
     dirty: bool,
 }
 
 impl Shell {
     fn open(tty: PathBuf, offset: UtcOffset, live: Live) -> anyhow::Result<Self> {
-        let fb = Framebuffer::open(&tty)?;
-        let g = fb.geometry();
-        eprintln!(
-            "{}: {}x{}, {}-byte rows",
-            tty.display(),
-            g.width,
-            g.height,
-            g.stride
-        );
-        let size = Size::new(g.width as f32, g.height as f32);
         let theme = Theme::glass();
         // The wallpaper stays drawn behind the UI, so a change redraws only
         // what's over it.
-        let mut screen = Screen::new(size, 1.0);
-        screen.set_backdrop(wallpaper::backdrop(&theme.wallpaper, g.width, g.height));
+        let display = Display::open(&tty, |w, h| wallpaper::backdrop(&theme.wallpaper, w, h))?;
         Ok(Self {
-            fb,
+            display,
             theme,
             offset,
             live,
-            screen,
-            keyboard: keys::Keyboard::default(),
-            pointer: Point::new(size.width / 2.0, size.height / 2.0),
-            painted: None,
             dirty: false,
         })
-    }
-
-    fn screen_size(&self) -> (u32, u32) {
-        let g = self.fb.geometry();
-        (g.width, g.height)
-    }
-
-    fn size(&self) -> (f32, f32) {
-        let (w, h) = self.screen_size();
-        (w as f32, h as f32)
     }
 
     fn now(&self) -> OffsetDateTime {
@@ -236,56 +203,17 @@ impl Shell {
     /// Handles a batch of input: the pointer moves at once; clicks and keys
     /// go through the UI. Returns what they ask for.
     fn input(&mut self, batch: &[Input]) -> Vec<Effect> {
-        let (w, h) = self.size();
-        let mut events = Vec::new();
-        let mut shortcuts = Vec::new();
-        for input in batch {
-            match *input {
-                Input::MovedTo(x, y) => self.pointer = Point::new(x, y),
-                Input::MovedBy(dx, dy) => {
-                    self.pointer = Point::new(
-                        (self.pointer.x + dx).clamp(0.0, w - 1.0),
-                        (self.pointer.y + dy).clamp(0.0, h - 1.0),
-                    );
-                }
-                Input::Button(button, down) => {
-                    events.push(iced_core::Event::Mouse(mouse::Event::CursorMoved {
-                        position: self.pointer,
-                    }));
-                    events.push(iced_core::Event::Mouse(if down {
-                        mouse::Event::ButtonPressed(button)
-                    } else {
-                        mouse::Event::ButtonReleased(button)
-                    }));
-                }
-                Input::Wheel(lines) => {
-                    events.push(iced_core::Event::Mouse(mouse::Event::WheelScrolled {
-                        delta: mouse::ScrollDelta::Lines { x: 0.0, y: lines },
-                    }));
-                }
-                Input::Key(code, value) => {
-                    for press in self.keyboard.key(code, value) {
-                        let shortcut =
-                            matches!(press.event, iced_core::keyboard::Event::KeyPressed { .. })
-                                .then(|| self.live.shortcut(&press.key, press.modifiers))
-                                .flatten();
-                        match shortcut {
-                            Some(message) => shortcuts.push(message),
-                            None => events.push(iced_core::Event::Keyboard(press.event)),
-                        }
-                    }
-                }
-            }
-        }
-        self.paint_pointer();
-
-        let mut messages = shortcuts;
-        if !events.is_empty() {
+        let live = &self.live;
+        let typed = self
+            .display
+            .input(batch, |key, modifiers| live.shortcut(key, modifiers));
+        let mut messages = typed.shortcuts;
+        if !typed.events.is_empty() {
             let bar = self.live.command_bar();
             let view = self
                 .live
-                .view(&self.theme, bar.as_ref(), self.now(), self.size());
-            messages.extend(self.screen.update(view, &events, Some(self.pointer)));
+                .view(&self.theme, bar.as_ref(), self.now(), self.display.size());
+            messages.extend(self.display.update(view, &typed.events));
             // A press or a key can change how the UI looks without a message
             // (a focused input, a held button).
             self.dirty = true;
@@ -296,10 +224,10 @@ impl Shell {
             match self.live.update(message) {
                 Some(Effect::Focus(id)) => {
                     let bar = self.live.command_bar();
-                    let view = self
-                        .live
-                        .view(&self.theme, bar.as_ref(), self.now(), self.size());
-                    self.screen.focus(view, id);
+                    let view =
+                        self.live
+                            .view(&self.theme, bar.as_ref(), self.now(), self.display.size());
+                    self.display.focus(view, id);
                 }
                 Some(effect) => effects.push(effect),
                 None => {}
@@ -346,8 +274,8 @@ impl Shell {
                 }
                 Vec::new()
             }
-            // Done in `input`, which has the view.
-            Effect::Focus(_) => Vec::new(),
+            // Done in `input`, which has the view; signing out ends the loop.
+            Effect::Focus(_) | Effect::SignOut => Vec::new(),
             Effect::Get(task) => {
                 let started = Instant::now();
                 let result: Result<TaskDetail, _> =
@@ -407,58 +335,12 @@ impl Shell {
     fn draw(&mut self) {
         // This frame shows whatever was waiting to be shown.
         self.dirty = false;
-        let started = Instant::now();
-        let (w, h) = self.size();
         let bar = self.live.command_bar();
         let view = self
             .live
-            .view(&self.theme, bar.as_ref(), self.now(), (w, h));
-        let damage = self.screen.render(view, Some(self.pointer));
-        drop(bar);
-        let rendered = started.elapsed();
-        let (width, _) = self.screen_size();
-        let stride = width as usize * 4;
-        let mut rows = 0;
-        for area in &damage {
-            let band = area.y as usize * stride..(area.y + area.height) as usize * stride;
-            self.fb
-                .write_rows(&self.screen.bgra()[band], Order::Bgra, width, area.y);
-            rows += area.height;
-        }
-        if !damage.is_empty() {
-            // A redrawn area may have covered the pointer; paint it afresh.
-            self.painted = None;
-            self.paint_pointer();
-        }
-        eprintln!(
-            "{} tiles: drawn in {} ms, {} areas ({rows} rows) copied in {} ms",
-            self.live.tasks().len(),
-            rendered.as_millis(),
-            damage.len(),
-            (started.elapsed() - rendered).as_millis()
-        );
-    }
-
-    /// Restores the rows under the pointer's old place from the screen's
-    /// pixels and paints it at its new one.
-    fn paint_pointer(&mut self) {
-        let (width, height) = self.screen_size();
-        let stride = width as usize * 4;
-        if self.painted == Some(self.pointer) {
-            return;
-        }
-        let at = (self.pointer.x as u32, self.pointer.y as u32);
-        let pixels = self.screen.bgra();
-        if let Some(old) = self.painted {
-            let rows = pointer::rows(old.y as u32, height);
-            let band = &pixels[rows.start as usize * stride..rows.end as usize * stride];
-            self.fb.write_rows(band, Order::Bgra, width, rows.start);
-        }
-        let rows = pointer::rows(at.1, height);
-        let mut band = pixels[rows.start as usize * stride..rows.end as usize * stride].to_vec();
-        pointer::paint(&mut band, width, rows.start, at.0, at.1);
-        self.fb.write_rows(&band, Order::Bgra, width, rows.start);
-        self.painted = Some(self.pointer);
+            .view(&self.theme, bar.as_ref(), self.now(), self.display.size());
+        let drawn = self.display.draw(view);
+        eprintln!("{} tiles: {drawn}", self.live.tasks().len());
     }
 }
 
