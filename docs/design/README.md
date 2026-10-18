@@ -2,7 +2,7 @@
 
 The PRD's mockups live in a Claude Design canvas, **"Agent Window — OS
 Mockups"**: <https://claude.ai/artifact/Y5fH2vFk3fWUvWumZTRATC>. The PNGs here
-are renders of its ten artboards, for reading without the canvas. They go
+are renders of its sixteen artboards, for reading without the canvas. They go
 stale when the canvas changes; re-render them with the `prd-sync` skill
 (`.claude/skills/prd-sync`), which uses `tools/design/render-dc.py`.
 
@@ -173,3 +173,80 @@ What exists that it builds on:
 | Network cut, host-side egress policy | Agent jails have no network at all today; per-destination egress (pf) comes with the model gateway |
 | Freeze workspace, legal hold | **Not built** (DW-*, CF-64) |
 | Alert to Sentinel and CrowdStrike | **Not built** (EP-7) |
+
+## IT agent · fixing a VPN
+
+![IT agent fixing a VPN](mockups/it-agent.png)
+
+The IT self-service agent (AE-4). Its first slice is built: `glass-it-agent`
+(scripted until model-backed agents land) using the `system.*` and
+`helpdesk.*` actions (ADR 0012). Verified in the VM by the e2e `it` scenario.
+
+| Element | Source |
+|---|---|
+| "My VPN won't connect" | `TaskRequest.prompt` to `it-agent` (the command bar will route there, AE-3) |
+| Diagnosis lines, ✓ and ✗ | `system.network.check`, `system.storage.check`, `system.performance.check`: each returns `findings[]` and `healthy` in its structured result; the agent narrates them as captions |
+| Restarted the VPN | `system.service.restart` (Ask), only for services on IT's list (policy `[fixes] services`, e.g. `openvpn`) and set up on this machine |
+| "Found it: certificate expired", "Renewed the certificate" | **Not built**: certificate actions need the company certificate service (SCEP, CF-10) |
+| Fixed, 48 seconds | Done tile, `receipt`; elapsed from `started_at` and `updated_at` |
+| Undo this fix | `task.undo { changes: [id] }`. A cache cleanup comes back from its snapshot; a restart leaves nothing to undo |
+| What changed | `changes[]` (cleanups); restarts are in `activity[]` and the audit log |
+| When I can't fix it: HD-48231 with diagnostics | `helpdesk.ticket.create` (Ask) with the checks' results attached. Tickets go to a root-only outbox until the ServiceNow adapter lands |
+| What I'm allowed to fix | The agent's `allowed_actions` (`system.*`, `helpdesk.ticket.create`) and IT's `[fixes]` list; the handoff card shows them. Certificates, printers and approved app installs: **not built** |
+| Security settings: never | `security.*` is Never in org policy, and no system action touches them |
+
+## Expense agent · portal and policy check
+
+![Expense agent](mockups/expense.png)
+
+| Element | Source |
+|---|---|
+| "Submit your expense report for $412.60?" with the receipt list | A batched Ask: `ApprovalView.summary` and `items` (DA-12) |
+| Policy column, "Needs receipt" | The agent's own findings, shown in the review list. Company travel policy as a checkable source: **not built** |
+| Filled in "using a recorded flow", portal thumbnail | **Not built**: screen control and recorded flows (NV-20, NV-21) |
+| Take over, Save for later | `task.take_over`; Save for later is `task.pause` |
+
+## Onboarding agent · across systems
+
+![Onboarding agent](mockups/onboarding.png)
+
+| Element | Source |
+|---|---|
+| "3 of 6 systems done" | `progress` |
+| Per-system cards: Done, Waiting, Needs you, Queued | **Gap**: the plan is a list of strings (`TaskDetail.plan`). Steps with their own state, owner and how they ran (app action, screen control) need a typed plan |
+| Draft post to #ap-team, Edit, Approve and post | An Ask with the draft as its item; editing a draft before approving is **not built** |
+| "Every step is undoable until Alex's first sign-in" | Compensating actions in other systems (P2); local undo works today |
+| Workday, Entra ID, ServiceNow, Teams | Adapters (DV catalog, HX): **not built** |
+
+## Command bar · general desktop agent
+
+![Command bar with the general agent](mockups/command-bar.png)
+
+The general desktop agent (AE-3) is the default for anything typed here.
+
+| Element | Source |
+|---|---|
+| "prep me for my 2:00" and the answer | **Not built**: AE-3 needs the model gateway and harness bundles (ADR 0010). Today `glassctl run <agent>` names the agent |
+| "Hands off to a specialist agent when one fits" | **Gap**: routing a request to an agent. `agents.list` has what the router needs (ids, descriptions) |
+| Suggestions for what's on screen | **Not built**: needs the shell and the accessibility tree (NV-11) |
+| Recent: Needs you, Fixed 9:12 AM, 3 of 6 | `task.list`: `state`, `caption`, `progress` |
+| "Claude via Amazon Bedrock · Internal data" | `HandoffCard.model` and `max_label` |
+
+## Developer workspace
+
+![Developer workspace](mockups/dev-workspace.png)
+
+Not built (DW-1 … DW-26). What it builds on: data labels already block
+Confidential reads for agents (the "can't copy customer_export.csv" banner is
+the same rule, DP-10); package-mirror enforcement is egress policy (EP-2).
+Claude Code in the workspace is HX-1.
+
+## Catalog · approving an agent
+
+![Catalog review](mockups/catalog.png)
+
+| Element | Source |
+|---|---|
+| What it can do: declared by the publisher, enforced by the OS | The signed manifest (ADR 0008); today the closest thing is `[[agent]] allowed_actions` in policy |
+| Release bar: accuracy, policy violations, change from the last version | Eval suites and the release bar (AE-10, AE-11, ADR 0010): **not built** |
+| Approve for group, install mode, rollout ring, pin version | Today: `[[group]] agents` in policy. Rings and pinning are the console's (AD-3, DV-12) |

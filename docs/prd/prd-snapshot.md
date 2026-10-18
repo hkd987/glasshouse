@@ -144,11 +144,28 @@ Agents use the most structured interface available, in a fixed order: app action
 - NV-31. The index enforces the source's access controls at query time, not index time. An agent never sees content the user couldn't open, and labeled content follows its label rules.
 - NV-32. Agents can't read other agents' working state unless the task explicitly chains them.
 
+## Everyday work Glasshouse handles
+Glasshouse is for all the work people do on a computer, not just back-office workflows. A general desktop agent (AE-3) takes anything typed in the command bar, an IT self-service agent (AE-4) fixes the machine itself, and specialist agents handle high-volume regulated workflows like invoice reconciliation.
+| Category | Example task | How the agent does it | Typical approval moment |
+| Email and scheduling | "Triage my inbox and draft replies to anything from clients" | App actions in mail and calendar | Ask before sending outside the team |
+| Meetings | "Prep me for my 2:00 PM with Northwind" | App actions plus the shared context index | None, read-only |
+| Documents and decks | "Turn the Q3 forecast into a six-slide deck" | Microsoft 365 or Google Workspace through adapters | Notify when files are created |
+| Spreadsheets and data | "Combine these three exports and flag duplicates" | App actions, with scripts in a sandbox | Notify |
+| Forms and portals | "File my expense report from these receipts" | Screen control and recorded flows | Ask before submitting |
+| Research and monitoring | "Watch the vendor's status page and tell me if it changes" | Browser, on the remote runtime (PA-9) | None |
+| Files | "Find the signed MSA and share it with Legal" | File actions, respecting data labels | Ask before sharing outside the org |
+| IT self-service | "My VPN won't connect" | System actions through the IT agent | Ask before restarting |
+| Multi-system workflows | "Start onboarding for our new analyst" | Adapters and screen control across HR and IT systems | Ask at each submit |
+
+IT self-service is a headline feature because only an OS can safely inspect and fix the machine it runs on, and every ticket it resolves is a help desk ticket avoided.
+
 ## Agent engine and continuous improvement
 Glasshouse owns its first-party agents end to end: what they're made of, how we prove they work, and how they get better over time without retraining models. Improvements come from the harness around the model, so they carry across Bedrock, Anthropic and OpenAI alike.
 **What an agent is**
 - AE-1. Every agent is a versioned harness bundle with eight parts: system prompt, soft guardrails, memory, tool guidance, subagents, skills, scripts and plugins, plus its manifest of declared actions and permissions. Hard limits (approval tiers, the Never list, data labels and egress rules) live in the OS brokers, outside the bundle, where no agent or improvement loop can change them.
-- AE-2. First-party agents for the beachhead workflows: invoice reconciliation, vendor email, claims intake, KYC document review and research summaries. Pilot 1 ships the first two.
+- AE-2. First-party agents for the beachhead workflows: invoice reconciliation, vendor email, claims intake, KYC document review and research summaries. Pilot 1 ships invoice reconciliation, with vendor email covered by the general desktop agent (AE-3).
+- AE-3. A general desktop agent is the default for anything typed in the command bar. It plans the task, picks the right navigation layer for each step, and hands off to a specialist agent when one matches, all under the same policy and approval tiers.
+- AE-4. An IT self-service agent diagnoses and fixes common problems from an IT-approved fix list: network and VPN, device certificates, printers, catalog app installs, storage cleanup and slowdowns. When it can't fix something, it opens a help desk ticket with diagnostics attached. Its system-level actions go through a dedicated broker role, every fix is logged and undoable, and it can never change security settings.
 **Proving agents work**
 - AE-10. Each workflow has an evaluation suite of realistic tasks with graded outcomes, built with design partners from anonymized examples. Public benchmarks such as JobBench and WorkBuddy-Bench's office subset add broader coverage.
 - AE-11. Release bar: an agent version ships only if it meets its workflow's accuracy target, has zero policy violations on the suite, and doesn't regress any tracked metric beyond a set tolerance. Proposed starting target: 95% correct on its suite.
@@ -515,7 +532,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Developer workspace for automation teams: DW-1, DW-3, DW-10, DW-11, DW-13, DW-20, DW-21, DW-23
 - Branding and notices: BR-1 to BR-4
 - UI stack: UI-1 to UI-6
-- Agent engine: AE-1, AE-2 (invoice reconciliation and vendor email), AE-10 to AE-12, AE-30
+- Agent engine: AE-1, AE-2 (invoice reconciliation), AE-3, AE-4, AE-10 to AE-12, AE-30
 **P1 · V1 GA**
 - AW-6, DA-4, DA-14, NV-4, NV-21, NV-22, NV-30 to NV-32
 - DP-6, DP-11, DP-20, DP-30, AU-4, AU-11, AU-22

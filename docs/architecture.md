@@ -148,6 +148,14 @@ pipeline refuses further side effects (fail closed).
 - **The shell is a control-API client (UI-1 … UI-6, ADR 0009).** Rust on
   Smithay and iced; apps are TypeScript web apps whose manifest actions
   join the action registry. Keep everything the shell shows in `glass-api`.
+- **A general OS, not one workflow ("Everyday work").** Mail, calendar,
+  files, documents through adapters, forms, research, IT self-service and
+  multi-system workflows all go through the same action registry and
+  pipeline. New capability is a new action provider with a default tier,
+  never a special path.
+- **Privileged fixes are fixed-function actions (AE-4, ADR 0012).** The
+  IT agent's `system.*` actions run in glassd; policy allows them to that
+  agent only, and IT's `[fixes]` list bounds what they may change.
 - **Agents are harness bundles; hard limits stay in the OS (AE-1,
   ADR 0010).** Nothing an agent ships or an improvement loop edits can
   change tiers, Never rules, labels or scope, so keep every limit enforced
@@ -165,10 +173,10 @@ pipeline refuses further side effects (fail closed).
 | `glass-audit` | lib | Hash-chained log, verification |
 | `glass-rpc` | lib | JSON-RPC over Unix sockets, MCP types |
 | `glass-api` | lib | Control API contract (shell, CLI) |
-| `glass-platform` | lib | Jails, ZFS, confined file access, users, xattrs |
+| `glass-platform` | lib | Jails, ZFS, confined file access, users, xattrs, system facts |
 | `glass-agent-sdk` | lib | Convenience MCP client for Rust agents |
 | `glass-actions` | svc | Action registry and first-party providers |
 | `glass-broker` | svc | Decisions and the approval desk |
 | `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
-| `glassd`, `glassctl`, `glass-mcp`, `glass-demo-agent`, `glass-probe` | bin | Executables |
+| `glassd`, `glassctl`, `glass-mcp`, `glass-demo-agent`, `glass-it-agent`, `glass-probe` | bin | Executables |
 | `glass-e2e` | tests | End-to-end scenarios |

@@ -6,9 +6,10 @@ OS — PRD"), plus engineering notes on P1 work that shapes today's design.
 what's missing. Update this file in the same change that moves a
 requirement; the `prd-sync` skill re-reads the PRD and diffs it.
 
-PRD revision last synced: 2026-10-18, second sync (adds branding and notices,
-the UI stack, the agent engine, five new mockups; NV-3 drops our own
-document and spreadsheet editors; first-party apps are web apps). V1 is **US-only** and **x86 (Intel/AMD)
+PRD revision last synced: 2026-10-18, third sync (Glasshouse is for all the
+work people do on a computer: "Everyday work" categories, a general desktop
+agent (AE-3) and an IT self-service agent (AE-4), both P0; Pilot 1 ships
+invoice reconciliation, with vendor email covered by AE-3; six new mockups). V1 is **US-only** and **x86 (Intel/AMD)
 only**: we build and test `x86_64-unknown-freebsd` and nothing else.
 
 Tests: *unit* = crate unit tests, *pipeline* =
@@ -155,7 +156,7 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
-| BR-1 No FreeBSD where users look; system identity says Glasshouse | Partial | Overlay layer done: os-release, motd, loader brand, muted boot, login banner, SSH version, login tips, our own strings. e2e branding check. Kernel identity, base tools and man pages need our own base build, and the kernel's reported name needs a decision (ADR 0011) |
+| BR-1 No FreeBSD where users look; system identity says Glasshouse | Partial | Overlay layer done: os-release, motd, boot menu brand, logo and title, our splash, muted boot, login screen art and banner, SSH version, login tips, our own strings (`tools/branding/art.py`). e2e branding check; boot screens recorded with `bootshots.py`. The UEFI loader's banner, kernel identity, base tools and man pages need our own base build, and the kernel's reported name needs a decision (ADR 0011) |
 | BR-2 License notices in Settings → Legal notices and docs | Partial | `tools/legal/notices.py` generates `NOTICES.txt` for every shipped crate plus the base `COPYRIGHT`, staged into the image (e2e checks it). The Settings page waits for the shell; per-component base notices wait for the base build |
 | BR-3 Source offer for GPL components | Not started | No GPL code ships today. The base system's CDDL code (OpenZFS, DTrace) carries a similar source obligation: legal review needed (ADR 0011) |
 | BR-4 Full base details and SBOM to security teams under NDA, admins only | Partial | `make sbom` writes a CycloneDX SBOM to `build/`, never staged into the image. Admin export comes with the console (EP-10) |
@@ -171,7 +172,9 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 | Id | Status | Notes |
 |---|---|---|
 | AE-1 Agents are versioned harness bundles; hard limits in the OS | Partial | The hard limits are enforced in `glassd` today, outside any agent. The bundle format and runner are proposed (ADR 0010) |
-| AE-2 Invoice reconciliation and vendor email agents | Not started | `glass-demo-agent` is a scripted stand-in with no model. Pilot 1 workflows are an open question in the PRD |
+| AE-2 First-party workflow agents; Pilot 1 ships invoice reconciliation | Not started | `glass-demo-agent` is a scripted stand-in with no model. Vendor email moved to AE-3 |
+| AE-3 General desktop agent, the command bar's default; hands off to specialists | Not started | Needs the gateway and bundles (ADR 0010). `glassctl run <agent>` names the agent today; routing by `agents.list` descriptions is the gap (docs/design, Command bar) |
+| AE-4 IT self-service agent: approved fixes through a dedicated broker role, logged and undoable, never security settings; ticket when it can't fix | Partial | `system.*` actions (network, storage, performance checks; cache cleanup, undoable; service restart from IT's `[fixes]` list) and `helpdesk.ticket.create`, run by glassd (ADR 0012); policy allows them to `it-agent` only. Scripted `glass-it-agent`. Unit tests, pipeline `only_the_it_agent_reaches_the_system…`, e2e `it`. Missing: certificates, printers, app installs, a real help desk adapter, the model-backed agent |
 | AE-10 … AE-12 Eval suites, release bar, live quality metrics | Not started | The e2e harness on ZFS snapshots is the base of the eval runner; take-overs, undos and declined approvals are already audit events per agent |
 | AE-30 Re-run evals before a model switch | Not started | Needs the gateway and bundles |
 

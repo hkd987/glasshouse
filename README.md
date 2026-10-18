@@ -26,6 +26,12 @@ Working today, verified on FreeBSD 15.1 in a VM:
   mapped field by field to the mockups in `docs/design/`.
 - **Sleep** (PM-5): agents pause before the machine sleeps and carry on
   after it wakes, through FreeBSD's own `rc.suspend`/`rc.resume`.
+- **IT self-service** (AE-4, first slice): an IT agent checks the network,
+  storage and performance, cleans up caches (undoable), restarts services
+  from IT's approved list after asking, and opens a help desk ticket with
+  diagnostics when it can't fix something.
+- **Branding** (BR-1, BR-2): the image says Glasshouse from the boot menu to
+  the login screen, and ships the open-source notices it owes.
 
 Not started yet: the desktop shell and GUI tiles, the model gateway and real
 model-backed agents, the admin console and fleet management, screen-control
@@ -57,6 +63,7 @@ glassctl watch                 # live tiles
 glassctl approve <id>          # the vendor reminders wait for you
 glassctl show <task>           # activity, changes, can't touch, timeline
 glassctl undo <task>           # put it all back (sent mail stays sent)
+glassctl run it-agent "My disk is filling up" --yes
 glassctl run containment-probe "Try to escape"
 ```
 
