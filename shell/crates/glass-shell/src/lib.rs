@@ -84,6 +84,10 @@ pub enum Message {
     ConfirmRollBack,
     /// Close the roll back card.
     CancelRollBack,
+    /// The menu bar's agents pill: open or close the agents menu.
+    ToggleAgents,
+    /// A click outside the agents menu, or Esc: close it.
+    CloseAgents,
     /// Open the command bar (Ctrl Space).
     OpenCommandBar,
     CommandChanged(String),

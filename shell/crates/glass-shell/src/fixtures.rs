@@ -12,7 +12,7 @@ use iced_core::{Color, Length, Padding};
 use iced_widget::{Column, column, container, row, stack, text};
 
 use crate::screens::command_bar::{Answer, CommandBar};
-use crate::screens::desktop::Desktop;
+use crate::screens::desktop::{Desktop, Tiles};
 use crate::screens::expanded;
 use crate::screens::login::SignIn;
 use crate::theme::hex;
@@ -329,7 +329,7 @@ pub fn expanded_desktop<'a>(tasks: &'a [TaskView], agent: &str) -> Desktop<'a> {
     Desktop {
         app: agent.into(),
         menus: expanded::MENUS.map(String::from).to_vec(),
-        tiles_visible: false,
+        tiles: Tiles::Hidden,
         ..desktop(tasks)
     }
 }
@@ -348,7 +348,8 @@ pub fn desktop(tasks: &[TaskView]) -> Desktop<'_> {
             "Help".into(),
         ],
         date: (String::from("OCT"), 19),
-        tiles_visible: true,
+        // The artboard's three tiles, as banners.
+        tiles: Tiles::Banners(tasks.iter().collect()),
         wallpaper: true,
     }
 }

@@ -71,7 +71,7 @@ fn click_for(
 }
 
 #[test]
-fn aw10_clicking_a_tile_opens_it_and_its_header_stops_the_task() {
+fn aw10_from_the_agents_menu_a_tile_opens_and_its_header_stops_the_task() {
     let tasks = fixtures::tasks();
     let invoices = tasks
         .iter()
@@ -82,7 +82,19 @@ fn aw10_clicking_a_tile_opens_it_and_its_header_stops_the_task() {
     let mut live = Live::new(tasks);
     let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
 
-    // Its tile is the last in the stack at the top right.
+    // It isn't a banner (it doesn't need the person), so open the agents
+    // menu from the menu bar's pill first.
+    let toggle = click_for(
+        &mut screen,
+        &live,
+        (900..1440).step_by(20),
+        [14].into_iter(),
+        |m| *m == Message::ToggleAgents,
+    )
+    .expect("the agents pill opens the menu");
+    assert_eq!(live.update(toggle), None);
+
+    // Its tile is the last in the menu at the top right.
     let open = click_for(
         &mut screen,
         &live,

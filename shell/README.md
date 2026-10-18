@@ -28,11 +28,15 @@ console framebuffer (`glass_platform::framebuffer`), draws the user's
 tiles, and redraws when glassd reports a change (`events.subscribe`), the
 person clicks or types, or the menu bar clock turns over, copying only the
 rows that changed. Keyboard and pointer come from evdev
-(`glass_platform::input`): Approve on a needs-you tile answers the ask;
+(`glass_platform::input`). Agent tiles show as banners for a few seconds
+when something happens (a new agent, an ask, an ending) and then go; the
+menu bar's agents pill opens the agents menu with every agent. Approve on a
+needs-you banner or menu tile answers the ask;
 clicking a tile, or its Review, opens the expanded view (`task.get`, fetched
 again whenever that task changes) with Pause, Stop, Take over, the ask's
 answers and Roll back (`task.undo`, a dry run first); Ctrl Space opens the
-command bar; Esc closes the command bar, then the expanded view. Its log is
+command bar; Esc closes the command bar, then the agents menu, then the
+expanded view. Its log is
 `/var/log/glass-shell-fb.log` in the VM.
 
 Drive it from the host through QEMU's USB tablet and keyboard:
@@ -62,7 +66,7 @@ under `shell/target/tmp/` so you can compare it.
 | Path | What |
 |---|---|
 | `crates/glass-shell/src/theme.rs` | `Theme` (UX-10): every color, the wallpaper recipe. Screens take colors from it, never literals for themeable parts |
-| `crates/glass-shell/src/screens/` | `boot`, `login`, `desktop` (menu bar, dock, windows, tile stack), `command_bar`, `expanded` (a tile opened: header controls, activity, changes, timeline and roll back, AW-10 to AW-16) |
+| `crates/glass-shell/src/screens/` | `boot`, `login`, `desktop` (menu bar, dock, windows, banners and the agents menu), `command_bar`, `expanded` (a tile opened: header controls, activity, changes, timeline and roll back, AW-10 to AW-16) |
 | `crates/glass-shell/src/tiles.rs` | An agent tile from a `TaskView` (AW-1 to AW-4) |
 | `crates/glass-shell/src/render.rs` | Rendering: a view to an RGBA frame or PNG, once, or frame after frame redrawing only what changed (`Screen`) |
 | `vendor/` | Crates built from a patched copy (`vendor/README.md`) |

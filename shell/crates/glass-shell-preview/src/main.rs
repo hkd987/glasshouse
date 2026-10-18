@@ -5,7 +5,8 @@
 //! glass-shell-preview [--out DIR] [--scale 2] [--socket /var/run/glasshouse/control.sock]
 //! ```
 //!
-//! Writes `boot.png`, `login.png`, `desktop.png`, `command-bar.png` and the
+//! Writes `boot.png`, `login.png`, `desktop.png`, `desktop-banner.png`,
+//! `agents-menu.png`, `command-bar.png` and the
 //! expanded view: `expanded.png` (the Expanded artboard), with its Changes
 //! tab, a roll back about to happen, a needs-you task's review and a
 //! finished task's receipt. The desktop shows the Desktop artboard's
@@ -116,6 +117,39 @@ fn main() -> anyhow::Result<()> {
         desktop::view(&theme, &state, windows, thumbnail, None, (w, h)),
     )?;
 
+    // Agent tiles don't stay on screen: one that needs you shows as a
+    // banner for a few seconds, and the menu bar's agents pill opens the
+    // agents menu with all of them.
+    let window = || desktop::Window {
+        title: "Q3 Forecast — Finance".into(),
+        x: 48.0,
+        y: 52.0,
+        width: 968.0,
+        height: 744.0,
+        content: fixtures::forecast_sheet(),
+    };
+    let banner = desktop::Desktop {
+        tiles: desktop::Tiles::Banners(
+            tasks
+                .iter()
+                .filter(|t| t.state == glass_api::TileState::NeedsYou)
+                .collect(),
+        ),
+        ..state.clone()
+    };
+    write(
+        "desktop-banner.png",
+        desktop::view(&theme, &banner, vec![window()], thumbnail, None, (w, h)),
+    )?;
+    let menu = desktop::Desktop {
+        tiles: desktop::Tiles::Menu,
+        ..state.clone()
+    };
+    write(
+        "agents-menu.png",
+        desktop::view(&theme, &menu, vec![window()], thumbnail, None, (w, h)),
+    )?;
+
     // The command bar over the desktop (Ctrl Space).
     let recent = live.clone().unwrap_or_else(fixtures::recent_tasks);
     let bar = fixtures::command_bar(&recent);
@@ -129,7 +163,7 @@ fn main() -> anyhow::Result<()> {
     }];
     // Tiles collapse while the command bar is open.
     let calm = desktop::Desktop {
-        tiles_visible: false,
+        tiles: desktop::Tiles::Hidden,
         ..fixtures::desktop(&tasks)
     };
     let view = desktop::view(
@@ -248,7 +282,7 @@ fn expanded_screen<'a>(
         desktop::Desktop {
             app: under.app,
             menus: under.menus,
-            tiles_visible: false,
+            tiles: desktop::Tiles::Hidden,
             ..desktop::Desktop::live(tasks, now)
         }
     };

@@ -6,11 +6,13 @@ use glass_api::{TaskView, TileState};
 use glass_types::Timestamp;
 use iced_core::alignment::{Horizontal, Vertical};
 use iced_core::{Color, Length, Padding};
-use iced_widget::{Column, Row, column, container, image, pin, row, stack, text};
+use iced_widget::{
+    Column, Row, button, column, container, image, mouse_area, pin, row, scrollable, stack, text,
+};
 use time::OffsetDateTime;
 use time::macros::format_description;
 
-use crate::theme::{Surface, hex};
+use crate::theme::{Surface, hex, hexa};
 use crate::{Element, Message, Theme, fonts, icons, style, tiles, wallpaper};
 
 /// What the desktop shows, besides windows.
@@ -26,11 +28,25 @@ pub struct Desktop<'a> {
     pub menus: Vec<String>,
     /// The calendar's dock icon: month and day.
     pub date: (String, u8),
-    /// False collapses the tile stack, as while the command bar is open.
-    pub tiles_visible: bool,
+    /// Which agent tiles show over the desktop.
+    pub tiles: Tiles<'a>,
     /// False leaves the wallpaper out, for a screen that keeps it as its
     /// backdrop (`render::Screen::set_backdrop`).
     pub wallpaper: bool,
+}
+
+/// Which agent tiles the desktop shows. They don't stay on screen: a change
+/// worth knowing about shows as a banner for a few seconds, like a macOS
+/// notification, and every agent is a click away in the agents menu.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Tiles<'a> {
+    /// None: the screen is the person's.
+    Hidden,
+    /// Notifications: these tiles at the top right, needs-you first (AW-1).
+    Banners(Vec<&'a TaskView>),
+    /// The agents menu, opened from the menu bar's agents pill: every agent,
+    /// needs-you first, each opening its expanded view.
+    Menu,
 }
 
 impl<'a> Desktop<'a> {
@@ -49,7 +65,7 @@ impl<'a> Desktop<'a> {
                 clock_part(now, format_description!("[month repr:short]")).to_uppercase(),
                 now.day(),
             ),
-            tiles_visible: true,
+            tiles: Tiles::Hidden,
             wallpaper: true,
         }
     }
@@ -121,13 +137,39 @@ pub fn view<'a>(
             .into(),
         );
     }
-    if desktop.tiles_visible {
-        layers.push(
-            pin(tile_stack(theme, desktop, &thumbnail))
-                .x(size.0 - TILES_RIGHT - tiles::WIDTH)
-                .y(TILES_TOP)
+    match &desktop.tiles {
+        Tiles::Hidden => {}
+        Tiles::Banners(shown) => {
+            let mut shown = shown.clone();
+            shown.sort_by_key(|t| (t.state != TileState::NeedsYou, t.started_at.unix_seconds()));
+            let banners = shown
+                .into_iter()
+                .map(|task| tiles::view(theme, task, desktop.now, thumbnail(task)));
+            layers.push(
+                pin(Column::with_children(banners).spacing(12))
+                    .x(size.0 - TILES_RIGHT - tiles::WIDTH)
+                    .y(TILES_TOP)
+                    .into(),
+            );
+        }
+        Tiles::Menu => {
+            // A click anywhere else closes the menu, as a menu does.
+            layers.push(
+                mouse_area(
+                    iced_widget::space()
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .on_press(Message::CloseAgents)
                 .into(),
-        );
+            );
+            layers.push(
+                pin(agents_menu(theme, desktop, &thumbnail, size.1))
+                    .x(size.0 - TILES_RIGHT - tiles::WIDTH - MENU_PADDING)
+                    .y(TILES_TOP - MENU_PADDING)
+                    .into(),
+            );
+        }
     }
     layers.extend(overlay);
     layers.push(menu_bar(theme, desktop));
@@ -157,15 +199,64 @@ pub fn ordered(tasks: &[TaskView]) -> Vec<&TaskView> {
     ordered
 }
 
-fn tile_stack<'a>(
+/// Room around the tiles inside the agents menu.
+const MENU_PADDING: f32 = 12.0;
+/// Room the menu leaves for the dock.
+const DOCK_ROOM: f32 = 96.0;
+
+/// The agents menu: every agent's tile, needs-you first, in a panel that
+/// scrolls when they don't fit.
+fn agents_menu<'a>(
     theme: &Theme,
     desktop: &Desktop<'a>,
     thumbnail: &impl Fn(&'a TaskView) -> Option<Element<'a, Message>>,
+    height: f32,
 ) -> Element<'a, Message> {
-    let tiles = ordered(desktop.tasks)
-        .into_iter()
-        .map(|task| tiles::view(theme, task, desktop.now, thumbnail(task)));
-    Column::with_children(tiles).spacing(12).into()
+    let live = desktop.tasks.iter().filter(|t| t.state.is_live()).count();
+    let waiting = desktop
+        .tasks
+        .iter()
+        .filter(|t| t.state == TileState::NeedsYou)
+        .count();
+    let summary = match (live, waiting) {
+        (0, _) => "None running".to_owned(),
+        (n, 0) => format!("{n} running"),
+        (n, w) => format!(
+            "{n} running · {w} need{} you",
+            if w == 1 { "s" } else { "" }
+        ),
+    };
+    let header = row![
+        text("Agents")
+            .size(13)
+            .font(fonts::SEMIBOLD)
+            .color(hex(0xF3F5F7)),
+        iced_widget::space().width(Length::Fill),
+        text(summary).size(12).color(hex(0xA9B1BC)),
+    ]
+    .align_y(Vertical::Center);
+    let body: Element<'a, Message> = if desktop.tasks.is_empty() {
+        text("No agents yet. Press Ctrl Space to hand one a task.")
+            .size(13)
+            .color(hex(0xC9D1DA))
+            .into()
+    } else {
+        let tiles = ordered(desktop.tasks)
+            .into_iter()
+            .map(|task| tiles::view(theme, task, desktop.now, thumbnail(task)));
+        scrollable(Column::with_children(tiles).spacing(10))
+            .height(Length::Shrink)
+            .into()
+    };
+    container(column![header, body].spacing(10))
+        .padding(MENU_PADDING)
+        .width(Length::Fixed(tiles::WIDTH + MENU_PADDING * 2.0))
+        .max_height(height - TILES_TOP - DOCK_ROOM)
+        .style(|_| container::Style {
+            shadow: style::shadow(0.35, 18.0, 40.0),
+            ..style::outlined(hexa(0x15181D, 0.94), 18.0, 1.0, hex(0x262B32))
+        })
+        .into()
 }
 
 fn menu_bar<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
@@ -180,7 +271,7 @@ fn menu_bar<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
         left = left.push(label(menu.clone(), fonts::SANS));
     }
     let right = row![
-        agents_pill(theme, desktop.tasks),
+        agents_pill(theme, desktop.tasks, desktop.tiles == Tiles::Menu),
         icons::view(&icons::SPARK, bar.text, 16.0, 16.0),
         icons::view(&icons::WIFI, bar.text, 17.0, 17.0),
         icons::view(&icons::BATTERY, bar.text, 24.0, 13.0),
@@ -197,27 +288,41 @@ fn menu_bar<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
         .into()
 }
 
-/// "● ● ● 3 agents": one dot per agent, orange for any that need you.
-fn agents_pill<'a>(theme: &Theme, tasks: &[TaskView]) -> Element<'a, Message> {
+/// "● ● ● 3 agents": one dot per agent, orange for any that need you. A
+/// click opens the agents menu.
+fn agents_pill<'a>(theme: &Theme, tasks: &[TaskView], open: bool) -> Element<'a, Message> {
     let count = tasks.iter().filter(|t| t.state.is_live()).count();
     let mut dots = Row::new().spacing(6).align_y(Vertical::Center);
     for color in status_dots(theme, tasks) {
         dots = dots.push(dot(color, 7.0));
     }
     let bar = theme.menu_bar;
-    container(
-        row![dots, text(pill_label(count)).size(13).color(bar.text)]
-            .spacing(6)
-            .align_y(Vertical::Center),
+    // Highlighted while its menu is open, as a menu bar item is.
+    let fill = if open {
+        Color {
+            a: (bar.fill.a + 0.25).min(1.0),
+            ..bar.fill
+        }
+    } else {
+        bar.fill
+    };
+    button(
+        container(
+            row![dots, text(pill_label(count)).size(13).color(bar.text)]
+                .spacing(6)
+                .align_y(Vertical::Center),
+        )
+        .padding(Padding::from([0.0, 9.0]))
+        .center_y(Length::Fixed(22.0)),
     )
-    .padding(Padding::from([0.0, 9.0]))
-    .center_y(Length::Fixed(22.0))
-    .style(move |_| style::panel(bar.fill, 11.0))
+    .on_press(Message::ToggleAgents)
+    .padding(0)
+    .style(style::button_like(style::panel(fill, 11.0)))
     .into()
 }
 
-/// The pill counts the agents still at work; ended tiles stay on screen
-/// until dismissed, so none running isn't "0 agents".
+/// The pill counts the agents still at work; ended ones stay in the agents
+/// menu until dismissed, so none running isn't "0 agents".
 fn pill_label(running: usize) -> String {
     match running {
         0 => "No agents running".to_owned(),

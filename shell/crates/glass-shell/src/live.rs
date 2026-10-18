@@ -8,12 +8,15 @@ use glass_api::{
     AnswerApproval, ApprovalAnswer, ApprovalScope, Event, TaskDetail, TaskRef, TaskView,
     UndoReport, UndoRequest, methods,
 };
-use glass_types::{SnapshotId, TaskId};
+use std::time::{Duration, Instant};
+
+use glass_api::TileState;
+use glass_types::{ApprovalId, SnapshotId, TaskId};
 use iced_core::keyboard::{Key, Modifiers, key::Named};
 use time::OffsetDateTime;
 
 use crate::screens::command_bar::{self, CommandBar};
-use crate::screens::desktop::{self, Desktop};
+use crate::screens::desktop::{self, Desktop, Tiles};
 use crate::screens::expanded::{self, Expanded, Rollback, Tab};
 use crate::{Element, Message, Theme};
 
@@ -28,6 +31,24 @@ pub struct Live {
     wallpaper: bool,
     /// The tile opened into the expanded view.
     open: Option<Open>,
+    /// Tiles showing as notifications, newest last.
+    banners: Vec<Banner>,
+    /// The agents menu is open.
+    menu: bool,
+}
+
+/// How long a notification stays on screen, as a macOS banner does. One
+/// that needs the person stays a little longer; either way the agents menu
+/// keeps every agent a click away, and the pill shows the orange dot.
+pub const BANNER: Duration = Duration::from_secs(4);
+pub const NEEDS_YOU_BANNER: Duration = Duration::from_secs(7);
+/// Banners at once; an older one makes room for a newer one.
+const MOST_BANNERS: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Banner {
+    task: TaskId,
+    until: Instant,
 }
 
 /// An expanded tile and the view's own state.
@@ -87,13 +108,28 @@ impl Default for Live {
 }
 
 impl Live {
+    /// The desktop with the agents `task.list` gave. Any that need the
+    /// person show as banners at first, so what's waiting is seen.
     pub fn new(tasks: Vec<TaskView>) -> Self {
-        Self {
+        let mut live = Self {
             tasks,
             command: None,
             wallpaper: true,
             open: None,
+            banners: Vec::new(),
+            menu: false,
+        };
+        let waiting: Vec<TaskId> = live
+            .tasks
+            .iter()
+            .filter(|t| t.state == TileState::NeedsYou)
+            .map(|t| t.id)
+            .collect();
+        let at = Instant::now();
+        for task in waiting {
+            live.notify(task, TileState::NeedsYou, at);
         }
+        live
     }
 
     /// Leaves the wallpaper out of the view, for a screen that keeps it as
@@ -116,9 +152,23 @@ impl Live {
     /// the expanded view changed: the tile's own fields are current at
     /// once, its activity and changes after `task.get`.
     pub fn apply(&mut self, event: Event) -> Option<Effect> {
+        self.apply_at(event, Instant::now())
+    }
+
+    /// [`Live::apply`] at a given moment: a change worth knowing about
+    /// shows as a banner from `at`.
+    pub fn apply_at(&mut self, event: Event, at: Instant) -> Option<Effect> {
         match event {
             Event::TaskUpdated { task } => {
                 let id = task.id;
+                let before = self
+                    .tasks
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map(|t| (t.state, t.needs.as_ref().map(|a| a.id)));
+                if worth_a_banner(before, &task) {
+                    self.notify(id, task.state, at);
+                }
                 match self.tasks.iter_mut().find(|t| t.id == id) {
                     Some(tile) => *tile = *task,
                     None => self.tasks.push(*task),
@@ -127,6 +177,7 @@ impl Live {
             }
             Event::TaskRemoved { task } => {
                 self.tasks.retain(|t| t.id != task);
+                self.banners.retain(|b| b.task != task);
                 // The tile was dismissed: nothing to go back to.
                 if self.open_task() == Some(task) {
                     self.open = None;
@@ -134,6 +185,49 @@ impl Live {
                 None
             }
         }
+    }
+
+    /// Shows `task` as a banner from `at`.
+    fn notify(&mut self, task: TaskId, state: TileState, at: Instant) {
+        let lasts = if state == TileState::NeedsYou {
+            NEEDS_YOU_BANNER
+        } else {
+            BANNER
+        };
+        self.banners.retain(|b| b.task != task);
+        self.banners.push(Banner {
+            task,
+            until: at + lasts,
+        });
+        if self.banners.len() > MOST_BANNERS {
+            self.banners.remove(0);
+        }
+    }
+
+    /// Takes away the banners whose time is up at `at`. True when any went,
+    /// so the screen needs drawing.
+    pub fn tick(&mut self, at: Instant) -> bool {
+        let before = self.banners.len();
+        self.banners.retain(|b| b.until > at);
+        self.banners.len() != before
+    }
+
+    /// When the next banner goes, for the shell to wake then.
+    pub fn next_change(&self) -> Option<Instant> {
+        self.banners.iter().map(|b| b.until).min()
+    }
+
+    /// The tasks showing as banners.
+    pub fn banners(&self) -> Vec<TaskId> {
+        self.banners.iter().map(|b| b.task).collect()
+    }
+
+    /// The task an ask belongs to.
+    fn asking(&self, approval: ApprovalId) -> Option<TaskId> {
+        self.tasks
+            .iter()
+            .find(|t| t.needs.as_ref().is_some_and(|a| a.id == approval))
+            .map(|t| t.id)
     }
 
     /// `task.get`'s answer for the expanded view.
@@ -190,6 +284,19 @@ impl Live {
             // AW-10: open the tile; its activity and changes come from
             // `task.get`.
             Message::OpenTask(task) => self.open(task),
+            Message::ToggleAgents => {
+                self.menu = !self.menu;
+                if self.menu {
+                    // Everything is in the menu; nothing else on top.
+                    self.command = None;
+                    self.banners.clear();
+                }
+                None
+            }
+            Message::CloseAgents => {
+                self.menu = false;
+                None
+            }
             // DA-12: Review opens the expanded view on the ask's items.
             Message::Review(approval) => {
                 let task = self
@@ -211,12 +318,18 @@ impl Live {
                 None
             }
             // DA-12: the needs-you tile's primary button approves once.
-            Message::Approve(approval) => Some(Effect::Answer(AnswerApproval {
-                approval,
-                answer: ApprovalAnswer::Approve {
-                    scope: ApprovalScope::Once,
-                },
-            })),
+            Message::Approve(approval) => {
+                // Answered: its banner has done its job.
+                if let Some(task) = self.asking(approval) {
+                    self.banners.retain(|b| b.task != task);
+                }
+                Some(Effect::Answer(AnswerApproval {
+                    approval,
+                    answer: ApprovalAnswer::Approve {
+                        scope: ApprovalScope::Once,
+                    },
+                }))
+            }
             Message::Decline(approval) => Some(Effect::Answer(AnswerApproval {
                 approval,
                 answer: ApprovalAnswer::Deny,
@@ -297,6 +410,9 @@ impl Live {
     }
 
     fn open(&mut self, task: TaskId) -> Option<Effect> {
+        // Opened from its banner or the menu: those step aside.
+        self.menu = false;
+        self.banners.retain(|b| b.task != task);
         // Opening the tile that's already open keeps its tab and detail.
         if self.open_task() != Some(task) {
             self.open = Some(Open {
@@ -311,8 +427,8 @@ impl Live {
     }
 
     /// The desktop's own keys: Ctrl Space opens and closes the command bar
-    /// (DA-1); Esc closes the command bar, then a roll back card, then the
-    /// expanded view (AW-16).
+    /// (DA-1); Esc closes the command bar, then the agents menu, then a roll
+    /// back card, then the expanded view (AW-16).
     pub fn shortcut(&self, key: &Key, modifiers: Modifiers) -> Option<Message> {
         let bar = self.command.is_some();
         match key {
@@ -322,6 +438,7 @@ impl Live {
                 Message::OpenCommandBar
             }),
             Key::Named(Named::Escape) if bar => Some(Message::CloseCommandBar),
+            Key::Named(Named::Escape) if self.menu => Some(Message::CloseAgents),
             Key::Named(Named::Escape) => {
                 let open = self.open.as_ref()?;
                 Some(match &open.rollback {
@@ -375,10 +492,26 @@ impl Live {
         size: (f32, f32),
     ) -> Element<'a, Message> {
         let expanded = self.expanded(now);
+        // Nothing sits over the command bar or the expanded view; otherwise
+        // the menu if it's open, else whatever is a banner right now.
+        let tiles = if bar.is_some() || expanded.is_some() {
+            Tiles::Hidden
+        } else if self.menu {
+            Tiles::Menu
+        } else {
+            let shown: Vec<&TaskView> = self
+                .banners
+                .iter()
+                .filter_map(|b| self.tasks.iter().find(|t| t.id == b.task))
+                .collect();
+            if shown.is_empty() {
+                Tiles::Hidden
+            } else {
+                Tiles::Banners(shown)
+            }
+        };
         let mut state = Desktop {
-            // Tiles collapse under the command bar and the expanded view;
-            // they keep updating, and show again when those close.
-            tiles_visible: bar.is_none() && expanded.is_none(),
+            tiles,
             wallpaper: self.wallpaper,
             ..Desktop::live(&self.tasks, now)
         };
@@ -396,6 +529,20 @@ impl Live {
         };
         desktop::view(theme, &state, Vec::new(), |_| None, overlay, size)
     }
+}
+
+/// Whether a task's update is worth a notification: a new agent, an ask
+/// (a new one, too), or the end of its work. Progress and captions aren't.
+fn worth_a_banner(before: Option<(TileState, Option<ApprovalId>)>, now: &TaskView) -> bool {
+    let Some((state, ask)) = before else {
+        return true;
+    };
+    let ended = matches!(
+        now.state,
+        TileState::Done | TileState::Failed | TileState::Stopped
+    );
+    let asks = now.state == TileState::NeedsYou && ask != now.needs.as_ref().map(|a| a.id);
+    (state != now.state && (ended || now.state == TileState::NeedsYou)) || asks
 }
 
 #[cfg(test)]
@@ -723,5 +870,104 @@ mod tests {
         live.update(Message::OpenTask(detail.view.id));
         live.detail(detail);
         assert_eq!(live.update(Message::RollBack), None);
+    }
+
+    fn working(tasks: &[TaskView]) -> TaskView {
+        tasks
+            .iter()
+            .find(|t| t.state == TileState::Working)
+            .cloned()
+            .expect("a working tile")
+    }
+
+    #[test]
+    fn ux_a_new_agent_shows_as_a_banner_that_goes_after_a_few_seconds() {
+        let tasks = fixtures::tasks();
+        let mut live = Live::new(Vec::new());
+        let at = Instant::now();
+        let mut task = working(&tasks);
+        live.apply_at(
+            Event::TaskUpdated {
+                task: Box::new(task.clone()),
+            },
+            at,
+        );
+        assert_eq!(live.banners(), [task.id]);
+        assert_eq!(live.next_change(), Some(at + BANNER));
+        // Progress isn't news: no new banner, no longer stay.
+        task.caption = "Matched 12 of 40".into();
+        live.apply_at(
+            Event::TaskUpdated {
+                task: Box::new(task.clone()),
+            },
+            at + Duration::from_secs(2),
+        );
+        assert_eq!(live.next_change(), Some(at + BANNER));
+        assert!(!live.tick(at + BANNER - Duration::from_millis(1)));
+        assert!(live.tick(at + BANNER), "time's up");
+        assert!(live.banners().is_empty());
+        assert_eq!(live.next_change(), None);
+        // Its end is news again.
+        task.state = TileState::Done;
+        live.apply_at(
+            Event::TaskUpdated {
+                task: Box::new(task.clone()),
+            },
+            at + Duration::from_secs(9),
+        );
+        assert_eq!(live.banners(), [task.id]);
+    }
+
+    #[test]
+    fn ux_an_ask_stays_a_little_longer_and_approving_it_takes_it_away() {
+        let tasks = fixtures::tasks();
+        let asking = tasks
+            .iter()
+            .find(|t| t.state == TileState::NeedsYou)
+            .cloned()
+            .expect("a needs-you tile");
+        let at = Instant::now();
+        let mut live = Live::new(Vec::new());
+        live.apply_at(
+            Event::TaskUpdated {
+                task: Box::new(asking.clone()),
+            },
+            at,
+        );
+        assert_eq!(live.next_change(), Some(at + NEEDS_YOU_BANNER));
+        let ask = asking.needs.as_ref().expect("an ask").id;
+        live.update(Message::Approve(ask));
+        assert!(live.banners().is_empty());
+    }
+
+    #[test]
+    fn ux_whats_waiting_at_sign_in_shows_and_the_rest_waits_in_the_menu() {
+        let tasks = fixtures::tasks();
+        let live = Live::new(tasks.clone());
+        let waiting: Vec<TaskId> = tasks
+            .iter()
+            .filter(|t| t.state == TileState::NeedsYou)
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(live.banners(), waiting);
+    }
+
+    #[test]
+    fn ux_the_agents_pill_opens_a_menu_of_every_agent_and_esc_closes_it() {
+        let tasks = fixtures::tasks();
+        let mut live = Live::new(tasks.clone());
+        live.update(Message::ToggleAgents);
+        assert!(live.banners().is_empty(), "the menu has them all");
+        let esc = live.shortcut(&Key::Named(Named::Escape), Modifiers::empty());
+        assert_eq!(esc, Some(Message::CloseAgents));
+        live.update(Message::ToggleAgents);
+        // A tile in the menu opens its expanded view and closes the menu.
+        let id = working(&tasks).id;
+        assert_eq!(live.update(Message::OpenTask(id)), Some(Effect::Get(id)));
+        assert_eq!(
+            live.shortcut(&Key::Named(Named::Escape), Modifiers::empty()),
+            Some(Message::CloseTask),
+            "Esc now closes the expanded view, the menu is gone"
+        );
     }
 }

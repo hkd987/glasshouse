@@ -64,7 +64,7 @@ thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
-| AW-1 Stack, newest at bottom, needs-you on top | Partial | ordering in `glassctl` and the shell's tile stack, live on the VM's screen; Approve on a needs-you tile answers its ask. Missing: the compositor, dismissing tiles |
+| AW-1 Stack, newest at bottom, needs-you on top | Partial | ordering in `glassctl` and in the shell's agents menu (opened from the menu bar's pill). On the desktop, tiles show only as banners for a few seconds when something happens (a new agent, an ask, an ending), so they never take the screen; Approve on a banner answers the ask. Missing: the compositor, dismissing ended tiles | `glass-shell` `live::tests::ux_*`, `tests/live.rs` |
 | AW-2 Live thumbnail ≤ 5 fps | Not started | needs screen agents |
 | AW-3 Three-line feed, verb + target | **Done** (data) | `FeedLine { verb, target, text }` |
 | AW-4 Name, mode, caption, progress | **Done** (data) | `report_progress` tool |

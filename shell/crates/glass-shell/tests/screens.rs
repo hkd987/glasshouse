@@ -30,6 +30,32 @@ fn render_login() -> Frame {
     frame(login::view(&Theme::glass(), &screen, SCREEN), size(), 1.0)
 }
 
+/// The agents menu, opened from the menu bar's pill, over a window.
+fn render_agents_menu() -> Frame {
+    let theme = Theme::glass();
+    let tasks = fixtures::tasks();
+    let state = desktop::Desktop {
+        tiles: desktop::Tiles::Menu,
+        ..fixtures::desktop(&tasks)
+    };
+    let windows = vec![desktop::Window {
+        title: "Q3 Forecast — Finance".into(),
+        x: 48.0,
+        y: 52.0,
+        width: 968.0,
+        height: 744.0,
+        content: fixtures::forecast_sheet(),
+    }];
+    let thumbnail = |task: &glass_api::TaskView| {
+        (task.agent.as_str() == "invoice-agent").then(|| fixtures::invoice_entry_thumbnail(&theme))
+    };
+    frame(
+        desktop::view(&theme, &state, windows, thumbnail, None, SCREEN),
+        size(),
+        1.0,
+    )
+}
+
 fn render_desktop() -> Frame {
     let theme = Theme::glass();
     let tasks = fixtures::tasks();
@@ -58,7 +84,7 @@ fn render_command_bar() -> Frame {
     let recent = fixtures::recent_tasks();
     let bar = fixtures::command_bar(&recent);
     let state = desktop::Desktop {
-        tiles_visible: false,
+        tiles: desktop::Tiles::Hidden,
         ..fixtures::desktop(&tasks)
     };
     let overlay: glass_shell::Element<'_, Message> = command_bar::overlay(&theme, &bar);
@@ -278,6 +304,7 @@ fn screens_match_their_snapshots() {
     snapshot("boot", &render_boot());
     snapshot("login", &render_login());
     snapshot("desktop", &render_desktop());
+    snapshot("agents-menu", &render_agents_menu());
     snapshot("command-bar", &render_command_bar());
     snapshot("expanded", &render_expanded());
     snapshot("expanded-review", &render_expanded_review());

@@ -168,11 +168,15 @@ cmd_point() {
 
 cmd_click() {
 	(($# == 2)) || die "usage: vm.sh click <x> <y>"
-	qmp_input "[$(abs_events "$1" "$2")]"
+	local at
+	at=$(abs_events "$1" "$2")
+	# The position goes with each button event: a move sent on its own can
+	# be lost when the tablet reports nothing else.
+	qmp_input "[$at]"
 	sleep 0.1
-	qmp_input '[{"type":"btn","data":{"down":true,"button":"left"}}]'
+	qmp_input "[$at,{\"type\":\"btn\",\"data\":{\"down\":true,\"button\":\"left\"}}]"
 	sleep 0.1
-	qmp_input '[{"type":"btn","data":{"down":false,"button":"left"}}]'
+	qmp_input "[$at,{\"type\":\"btn\",\"data\":{\"down\":false,\"button\":\"left\"}}]"
 }
 
 # monitor <command>: one human-monitor command.

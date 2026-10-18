@@ -116,6 +116,14 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
     let mut interrupt = signal(SignalKind::interrupt())?;
     loop {
         let redraw;
+        // When the next notification banner's time is up.
+        let banner_due = shell.live.next_change();
+        let banner_gone = async move {
+            match banner_due {
+                Some(due) => tokio::time::sleep_until(due.into()).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             note = client.next_notification() => {
                 // The open task changing asks for its detail again, once
@@ -142,6 +150,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
                 shell.carry_out_all(&client, effects).await;
                 redraw = shell.changed();
             }
+            () = banner_gone => redraw = shell.live.tick(Instant::now()),
             () = tokio::time::sleep(until_next_minute(OffsetDateTime::now_utc())) => redraw = true,
             _ = terminate.recv() => break,
             _ = interrupt.recv() => break,

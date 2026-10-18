@@ -28,7 +28,8 @@ light desktop; accent `#3D6BFF` for working and you're-driving; attention
 
 | Element | Source |
 |---|---|
-| One tile per running agent, needs-you on top (AW-1) | `task.list` → `TaskView`; sort by `state == NeedsYou` |
+| One tile per running agent, needs-you on top (AW-1) | `task.list` → `TaskView`; sort by `state == NeedsYou`. **Tiles don't stay on screen** (product decision, 2026-10-19): a new agent, an ask or an ending shows as a banner at the top right for 4 s (an ask 7 s), like a macOS notification, then goes; approving or opening it takes it away at once. The stack the artboard shows lives in the **agents menu** (below) |
+| Agents menu: every agent, needs-you first, "3 running · 1 needs you" | The menu bar's agents pill opens it (`Message::ToggleAgents`); a tile opens its expanded view; a click outside or Esc closes it. `screens::desktop::Tiles::Menu`, `live::Live` |
 | Name and mode chip ("Actions", "Screen") | `agent_name`, `mode` |
 | Elapsed ("4 min") | now − `started_at` |
 | Feed: verb column + target (AW-3) | `feed[].verb`, `feed[].target` (`text` is the whole line) |
@@ -36,7 +37,7 @@ light desktop; accent `#3D6BFF` for working and you're-driving; attention
 | Needs-you question, Review drafts / Approve and send | `needs: ApprovalView` (`summary`, `items`; `labels` are the action's own answer words, `ActionDef.ask`, "Review" and "Approve" by default) → `approval.answer` |
 | "Allow sends for the rest of this task" | `ApprovalAnswer::Approve { scope: Task }` |
 | Screen thumbnail with labeled agent cursor (AW-2) | **Not built**: needs screen-control agents |
-| Menu bar: app menus, "3 agents" pill with one dot per tile, Wi-Fi, battery, clock | `task.list` counts and states; app menus come from the focused app (shell); Wi-Fi and battery from the system (PM, CF) |
+| Menu bar: app menus, "3 agents" pill with one dot per tile (a button: it opens the agents menu), Wi-Fi, battery, clock | `task.list` counts and states; app menus come from the focused app (shell); Wi-Fi and battery from the system (PM, CF) |
 | Dock: launcher, apps with open dots, calendar date, Agents with a needs-you badge | Apps from the catalog (shell); the badge is the count of `NeedsYou` tiles |
 | Command bar over everything, Ctrl Space (DA-1) | `task.plan` on enter; see Command bar below |
 | Live updates | `events.subscribe` → `event` notifications (`TaskUpdated`, `TaskRemoved`) |
