@@ -207,6 +207,23 @@ impl Live {
         }
     }
 
+    /// The task list afresh, from `task.list` after glassd came back: tiles
+    /// that are gone leave the banners and the expanded view; the open one,
+    /// if still there, has its detail fetched again. Nothing shows as news.
+    pub fn reload(&mut self, tasks: Vec<TaskView>) -> Option<Effect> {
+        self.tasks = tasks;
+        let present = |id: TaskId| self.tasks.iter().any(|t| t.id == id);
+        self.banners.retain(|b| present(b.task));
+        match self.open_task() {
+            Some(open) if present(open) => Some(Effect::Get(open)),
+            Some(_) => {
+                self.open = None;
+                None
+            }
+            None => None,
+        }
+    }
+
     /// Shows `task` as a banner from `at`.
     fn notify(&mut self, task: TaskId, state: TileState, at: Instant) {
         let lasts = if state == TileState::NeedsYou {
@@ -1004,6 +1021,20 @@ mod tests {
             at + Duration::from_secs(9),
         );
         assert_eq!(live.banners(), [task.id]);
+    }
+
+    #[test]
+    fn reloading_after_glassd_comes_back_keeps_what_is_still_there() {
+        let tasks = fixtures::tasks();
+        let (kept, gone) = (tasks[0].clone(), tasks[1].clone());
+        let mut live = Live::new(tasks);
+        live.update(Message::OpenTask(gone.id));
+        assert_eq!(live.reload(vec![kept.clone()]), None);
+        assert_eq!(live.open_task(), None, "its tile is gone");
+        assert!(live.banners().iter().all(|&b| b == kept.id));
+        live.update(Message::OpenTask(kept.id));
+        assert_eq!(live.reload(vec![kept.clone()]), Some(Effect::Get(kept.id)));
+        assert_eq!(live.tasks().len(), 1);
     }
 
     #[test]

@@ -38,6 +38,8 @@ use tokio::sync::mpsc;
 
 /// Changes that arrive this close together make one redraw.
 const SETTLE: Duration = Duration::from_millis(50);
+/// While glassd isn't answering, how often to try it again.
+const RECONNECT: Duration = Duration::from_millis(500);
 
 struct Args {
     tty: PathBuf,
@@ -88,18 +90,15 @@ fn main() -> anyhow::Result<()> {
 
 async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
     let started = Instant::now();
-    let client = Client::connect(&args.socket)
-        .await
-        .with_context(|| format!("connecting to {}", args.socket.display()))?;
-    // Subscribe first, so no change falls between the list and the events.
-    let _: serde_json::Value = client
-        .call(methods::EVENTS_SUBSCRIBE, ())
-        .await
-        .map_err(|e| anyhow!("events.subscribe: {e}"))?;
-    let tasks: Vec<TaskView> = client
-        .call(methods::TASK_LIST, ())
-        .await
-        .map_err(|e| anyhow!("task.list: {e}"))?;
+    // The desktop comes up whether or not glassd answers yet (it may still
+    // be starting, or restarting); its tiles arrive when it does.
+    let (mut client, tasks) = match attach(&args.socket).await {
+        Ok((client, tasks)) => (Some(client), tasks),
+        Err(e) => {
+            eprintln!("glassd: {e:#}; trying again");
+            (None, Vec::new())
+        }
+    };
 
     let asked = started.elapsed();
     let live = Live::new(tasks)
@@ -132,20 +131,36 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
         // command bar's caret blinks.
         let banner_gone = until(shell.live.next_change());
         let blink = until(shell.display.next_redraw());
+        let reconnect = until(client.is_none().then(|| Instant::now() + RECONNECT));
         tokio::select! {
-            note = client.next_notification() => {
+            note = next_note(client.as_ref()) => {
+                let Some(note) = note else {
+                    eprintln!("glassd closed the connection; trying again");
+                    client = None;
+                    continue;
+                };
                 // The open task changing asks for its detail again, once
                 // for everything that arrived together.
-                let mut effects = Vec::from_iter(shell.apply(note)?);
+                let mut effects = Vec::from_iter(shell.apply(note));
                 let settled = tokio::time::sleep(SETTLE);
                 tokio::pin!(settled);
                 loop {
                     tokio::select! {
                         () = &mut settled => break,
-                        note = client.next_notification() => effects.extend(shell.apply(note)?),
+                        Some(note) = next_note(client.as_ref()) => effects.extend(shell.apply(note)),
                     }
                 }
-                shell.carry_out_all(&client, effects).await;
+                shell.carry_out_all(client.as_ref(), effects).await;
+                redraw = true;
+            }
+            () = reconnect => {
+                let Ok((back, tasks)) = attach(&args.socket).await else {
+                    continue;
+                };
+                eprintln!("glassd: connected again, {} tiles", tasks.len());
+                client = Some(back);
+                let effects = Vec::from_iter(shell.live.reload(tasks));
+                shell.carry_out_all(client.as_ref(), effects).await;
                 redraw = true;
             }
             Some(first) = inputs.recv() => {
@@ -162,7 +177,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
                     }
                     return Ok(());
                 }
-                shell.carry_out_all(&client, effects).await;
+                shell.carry_out_all(client.as_ref(), effects).await;
                 redraw = shell.changed();
             }
             () = banner_gone => redraw = shell.live.tick(Instant::now()),
@@ -180,6 +195,32 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Connects to glassd, subscribes to its events and lists the caller's
+/// tasks: subscribing first, so no change falls between the two.
+async fn attach(socket: &std::path::Path) -> anyhow::Result<(Client, Vec<TaskView>)> {
+    let client = Client::connect(socket)
+        .await
+        .with_context(|| format!("connecting to {}", socket.display()))?;
+    let _: serde_json::Value = client
+        .call(methods::EVENTS_SUBSCRIBE, ())
+        .await
+        .map_err(|e| anyhow!("events.subscribe: {e}"))?;
+    let tasks: Vec<TaskView> = client
+        .call(methods::TASK_LIST, ())
+        .await
+        .map_err(|e| anyhow!("task.list: {e}"))?;
+    Ok((client, tasks))
+}
+
+/// glassd's next notification; `None` when the connection closed, and
+/// never while there's no connection.
+async fn next_note(client: Option<&Client>) -> Option<glass_rpc::Request> {
+    match client {
+        Some(client) => client.next_notification().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Waits until `at`, or forever without one.
@@ -234,13 +275,12 @@ impl Shell {
 
     /// Folds in one notification from glassd, and returns what it asks for
     /// (the open task's detail again, when that task changed).
-    fn apply(&mut self, note: Option<glass_rpc::Request>) -> anyhow::Result<Option<Effect>> {
-        let note = note.context("glassd closed the connection")?;
+    fn apply(&mut self, note: glass_rpc::Request) -> Option<Effect> {
         let event = note
             .params
             .filter(|_| note.method == methods::EVENT)
             .and_then(|params| serde_json::from_value::<Event>(params).ok());
-        Ok(event.and_then(|event| self.live.apply(event)))
+        event.and_then(|event| self.live.apply(event))
     }
 
     /// Handles a batch of input: the pointer moves at once; where it went,
@@ -289,7 +329,13 @@ impl Shell {
 
     /// Makes the calls effects ask for, then the ones their answers ask
     /// for, each once.
-    async fn carry_out_all(&mut self, client: &Client, effects: Vec<Effect>) {
+    async fn carry_out_all(&mut self, client: Option<&Client>, effects: Vec<Effect>) {
+        let Some(client) = client else {
+            if !effects.is_empty() {
+                eprintln!("glassd isn't answering; not done: {effects:?}");
+            }
+            return;
+        };
         let mut queue = VecDeque::new();
         for effect in effects {
             if !queue.contains(&effect) {

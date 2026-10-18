@@ -39,7 +39,9 @@ clicking a tile, or its Review, opens the expanded view (`task.get`, fetched
 again whenever that task changes) with Pause, Stop, Take over, the ask's
 answers and Roll back (`task.undo`, a dry run first); Ctrl Space opens the
 command bar; Esc closes the command bar, then the agents menu, then the
-expanded view. Its log is
+expanded view. If glassd isn't answering (still starting, or restarting
+after an update or a crash) the desktop stays up and tries it again every
+half second, then reloads the tiles. Its log is
 `/var/log/glass-shell-fb.log` in the VM.
 
 Images ship `glass-greeter` (ADR 0019) and `glass-shell-fb` with the rest
