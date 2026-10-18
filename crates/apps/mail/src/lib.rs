@@ -407,7 +407,9 @@ mod tests {
         let first = MailProvider.invoke(&ctx, &draft, &input).unwrap();
         let second = MailProvider.invoke(&ctx, &draft, &input).unwrap();
         assert_ne!(first.changes[0].paths, second.changes[0].paths);
-        let count = fs::read_dir(dir.path().join("Mail/Drafts")).unwrap().count();
+        let count = fs::read_dir(dir.path().join("Mail/Drafts"))
+            .unwrap()
+            .count();
         assert_eq!(count, 2);
     }
 
