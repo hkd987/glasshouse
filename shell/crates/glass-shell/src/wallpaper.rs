@@ -38,8 +38,9 @@ pub fn handle(wallpaper: &Wallpaper, width: f32, height: f32) -> Handle {
 
 /// The wallpaper at full size for a screen of `width` x `height` physical
 /// pixels, as B, G, R, A bytes: the backdrop a live screen keeps and draws
-/// the UI over ([`crate::render::Screen::set_backdrop`]). It's drawn small
-/// and scaled up once, as the renderer would on every frame.
+/// the UI over ([`crate::render::Screen::set_backdrop`]). It's drawn small,
+/// with red and blue swapped so no pass over every pixel is needed, and
+/// scaled up once, as the renderer would on every frame.
 pub fn backdrop(wallpaper: &Wallpaper, width: u32, height: u32) -> Vec<u8> {
     let small = (
         (width as f32 / DOWNSCALE).ceil().max(1.0) as u32,
@@ -47,7 +48,7 @@ pub fn backdrop(wallpaper: &Wallpaper, width: u32, height: u32) -> Vec<u8> {
     );
     let (Some(source), Some(mut full)) = (
         Pixmap::from_vec(
-            render(wallpaper, small.0, small.1),
+            paint(wallpaper, small.0, small.1, true),
             tiny_skia::IntSize::from_wh(small.0, small.1).expect("not empty"),
         ),
         Pixmap::new(width.max(1), height.max(1)),
@@ -68,15 +69,17 @@ pub fn backdrop(wallpaper: &Wallpaper, width: u32, height: u32) -> Vec<u8> {
         ),
         None,
     );
-    let mut bgra = full.take();
-    for pixel in bgra.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-    }
-    bgra
+    full.take()
 }
 
 /// Straight RGBA pixels, opaque.
 pub fn render(wallpaper: &Wallpaper, width: u32, height: u32) -> Vec<u8> {
+    paint(wallpaper, width, height, false)
+}
+
+/// [`render`], or with red and blue swapped throughout (`bgr`): B, G, R, A.
+fn paint(wallpaper: &Wallpaper, width: u32, height: u32, bgr: bool) -> Vec<u8> {
+    let order = |c: iced_core::Color| if bgr { [c.b, c.g, c.r] } else { [c.r, c.g, c.b] };
     let Some(mut shapes) = Pixmap::new(width.max(1), height.max(1)) else {
         return vec![0; (width * height * 4) as usize];
     };
@@ -96,16 +99,16 @@ pub fn render(wallpaper: &Wallpaper, width: u32, height: u32) -> Vec<u8> {
             cx,
             cy,
         ));
-        let mut paint = Paint::default();
-        let c = blob.color;
-        paint.set_color_rgba8(
-            (c.r * 255.0) as u8,
-            (c.g * 255.0) as u8,
-            (c.b * 255.0) as u8,
-            (c.a * 255.0) as u8,
+        let mut fill = Paint::default();
+        let [r, g, b] = order(blob.color);
+        fill.set_color_rgba8(
+            (r * 255.0) as u8,
+            (g * 255.0) as u8,
+            (b * 255.0) as u8,
+            (blob.color.a * 255.0) as u8,
         );
-        paint.anti_alias = true;
-        shapes.fill_path(&path, &paint, FillRule::Winding, transform, None);
+        fill.anti_alias = true;
+        shapes.fill_path(&path, &fill, FillRule::Winding, transform, None);
     }
 
     // Blur the shapes layer on its own (beyond the edges is transparent, as
@@ -128,8 +131,7 @@ pub fn render(wallpaper: &Wallpaper, width: u32, height: u32) -> Vec<u8> {
         height as usize,
         wallpaper.blur * scale,
     );
-    let base = wallpaper.base;
-    let base = [base.r * 255.0, base.g * 255.0, base.b * 255.0];
+    let base = order(wallpaper.base).map(|c| c * 255.0);
     layer
         .iter()
         .flat_map(|[r, g, b, a]| {
@@ -256,6 +258,25 @@ mod tests {
         assert!(pixels.chunks(4).all(|p| p[3] == 255));
         let first = &pixels[..4];
         assert!(pixels.chunks(4).any(|p| p != first), "the shapes show");
+    }
+
+    #[test]
+    fn the_backdrop_is_the_wallpaper_in_blue_green_red_order() {
+        let wallpaper = &Theme::glass().wallpaper;
+        let (w, h) = (320, 200);
+        let rgba = render(wallpaper, w / 4, h / 4);
+        let bgra = backdrop(wallpaper, w, h);
+        // The middle of a small pixel, scaled up, is that pixel's color.
+        for (x, y) in [(10, 10), (40, 25), (70, 40)] {
+            let small = &rgba[(y * (w / 4) + x) as usize * 4..][..4];
+            let big = &bgra[((y * 4 + 2) * w + x * 4 + 2) as usize * 4..][..4];
+            let close = |a: u8, b: u8| a.abs_diff(b) <= 3;
+            assert!(
+                close(big[0], small[2]) && close(big[1], small[1]) && close(big[2], small[0]),
+                "at {x},{y}: {big:?} vs {small:?}"
+            );
+            assert_eq!(big[3], 255);
+        }
     }
 
     #[test]
