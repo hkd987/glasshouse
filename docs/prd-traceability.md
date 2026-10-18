@@ -6,11 +6,11 @@ OS — PRD"), plus engineering notes on P1 work that shapes today's design.
 what's missing. Update this file in the same change that moves a
 requirement; the `prd-sync` skill re-reads the PRD and diffs it.
 
-PRD revision last synced: 2026-10-19, fifth sync (a Mac-like desktop:
-menu bar, dock, window controls on the left, Ctrl Space command bar; the
-"Desktop experience and design" section, UX-1 … UX-40, with UX-1, UX-2,
-UX-10, UX-20 … UX-22 and UX-30 in P0; four new mockups: boot, sign in,
-snapping and ask the agent, themes). V1 is **US-only** and **x86 (Intel/AMD)
+PRD revision last synced: 2026-10-19, sixth sync ("Future direction:
+always-on agents with local hands", with architecture commitments FD-1 …
+FD-4 in P0 and always-on cloud agents a non-goal for Pilot 1). The fifth
+brought the Mac-like desktop (UX-1 … UX-40) and the boot, sign-in,
+snapping and themes mockups. V1 is **US-only** and **x86 (Intel/AMD)
 only**: we build and test `x86_64-unknown-freebsd` and nothing else.
 
 Tests: *unit* = crate unit tests, *pipeline* =
@@ -214,6 +214,19 @@ Users shape their own tools (PRD "The edge", ADR 0014). Success metric:
 | TL-13 New agent version: re-apply and re-test every layer; pause failures, notify the owner | Partial | re-checked against the new version's points at startup and before use, paused with the reason, published agent runs; owner sees it on the card and in `glassctl tailor`. Missing: re-test with evals, a pushed notification. `tailoring::tl13_…` |
 | TL-3, TL-4, TL-12, TL-14, TL-20 … TL-22 Team layers, copies, IT controls, inventory, suggestions | P1 | ADR 0014 "Proposed next" |
 | GA-1 … GA-11 Apps built on request | P1 | A generated app is an ordinary app (UI-5): its actions join the registry like any `crates/apps` provider (ADR 0013) and get tiers, audit and undo for free. Catalog-first (GA-2) needs the catalog service; sharing steps (GA-8) reuse the DV-2/DV-3 checks |
+
+## Architecture commitments (future direction: always-on agents)
+
+The PRD's future direction runs an agent's reasoning in the cloud with its
+actions still on the laptop (not in Pilot 1). These P0 commitments keep the
+architecture from blocking it; ADR 0020 has the rules for new code.
+
+| Requirement | Status | Where | Notes |
+|---|---|---|---|
+| FD-1 Brokers are location-independent | Partial | Agents reach glassd only through the task's MCP socket; the pipeline decides on the task, not the transport; paths are relative to grants | A remote transport bound to device keys is future work |
+| FD-2 Work checkpoints and moves mid-task; the same mechanism handles sleep | Not started | Sleep (PM-5) holds agents at their next call in memory | Checkpoint call in the task API (ADR 0020) |
+| FD-3 Agent identity not tied to one machine | Not started | Catalog id + version | Directory identities (PA-7, ADR 0008) |
+| FD-4 Snapshots and undo history follow a task across machines | Not started | Change records (ADR 0017) are in memory; snapshots are local ZFS | Persist change records with the task; per-task snapshots can be sent |
 
 ## Pilot readiness
 

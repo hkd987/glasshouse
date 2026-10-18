@@ -193,6 +193,10 @@ pipeline refuses further side effects (fail closed).
   that only narrow), never code an agent ships. Apps built on request are
   ordinary apps under the same sandbox, tiers and audit; there is no
   separate path for generated code.
+- **Agents may one day run elsewhere (FD-1 to FD-4, ADR 0020).** The task
+  socket is the only agent interface and no decision depends on where a
+  call comes from; task state, change records included, stays serializable
+  data; identity is never a host name, a per-machine uid or a path.
 - **Our cloud services run on AWS (GT-21)** and hold only licensing, policy
   and telemetry metadata; customer data stays on devices and in the
   customer's own Bedrock account (GT-3).

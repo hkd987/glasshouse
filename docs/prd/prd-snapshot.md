@@ -592,6 +592,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Agent engine: AE-1, AE-2 (invoice reconciliation), AE-3, AE-4, AE-10 to AE-12, AE-30
 - Tailoring, minimal for Pilot 1: TL-1, TL-2, TL-10, TL-11 and TL-13 on our first-party agents, with undo
 - Desktop experience: UX-1, UX-2, UX-10, UX-20 to UX-22, UX-30
+- Architecture commitments: FD-1 to FD-4
 **P1 · V1 GA**
 - AW-6, DA-4, DA-14, NV-4, NV-21, NV-22, NV-30 to NV-32
 - DP-6, DP-11, DP-20, DP-30, AU-4, AU-11, AU-22
@@ -613,7 +614,23 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - A public agent and adapter marketplace
 - Broad hardware support beyond the certified list
 - Segment packs for call centers, healthcare revenue cycle and government case work
+- Always-on cloud agents that work on the user's machine, in a managed Glasshouse cloud or the customer's AWS
 - Paid listings through enterprise procurement (DV-30)
+
+## Future direction: always-on agents with local hands
+Once the OS is proven, agents move to the cloud so they're always on, while still working on the user's machine as if they were local. The agent's reasoning runs in the cloud. Its actions run on the laptop through the same brokers, approvals and audit as a local agent. When the laptop is asleep or offline, work continues on a cloud copy of the workspace and syncs back. This is not part of Pilot 1, but the architecture must not block it.
+**Where it runs**
+- A managed Glasshouse cloud for small teams and individuals.
+- The same service inside the customer's own AWS for enterprises, since banks and insurers will expect always-on agents to stay within their boundary.
+**Security rules for remote agents**
+- A remote agent reaches the laptop only through the brokers, under exactly the same policy, approval tiers and audit as a local one.
+- Its connection is bound to that specific device's hardware keys and the user's identity.
+- It always appears as a tile on the user's desktop, and the kill switch stops it instantly.
+**Design commitments now (P0, no user-facing feature)**
+- FD-1. Brokers are location-independent: a call follows the same policy whether it comes from a local agent or a remote one.
+- FD-2. An agent's work can be checkpointed and moved mid-task between laptop and cloud. The same mechanism handles sleep (PM-5).
+- FD-3. Agent identity is never tied to one machine, building on directory-registered agent identities (PA-7).
+- FD-4. Snapshots and undo history can follow a task across machines, so changes stay reversible wherever they were made.
 
 ## Risks, open questions and decisions needed
 The biggest risks are distribution and hardware, not the agent technology. Microsoft already ships agent controls in Windows, so we win on depth and on fitting the Microsoft stack, not on being first.
