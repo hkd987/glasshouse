@@ -45,6 +45,9 @@ details this file leaves out.
   commands (ADR 0007).
 - One target: `x86_64-unknown-freebsd` (V1 is x86-only).
 - Policy refusals are tool results agents can read, not protocol errors.
+- Users never see "FreeBSD" (BR-1): not in tiles, activity lines, errors,
+  CLI output or anything the image shows. Admin logs and audit records may
+  name the base system. `tests/e2e/check-branding.sh` checks the image.
 - Every change to what an agent can do needs a test at the right level, and
   a probe check if it adds a sandbox surface.
 - Reference PRD ids (`AU-21`) in code comments and test names, and update

@@ -103,7 +103,14 @@ File-level restore from snapshots (ADR 0006). The runtime snapshots each
 writable root when the task starts and before every Notify-tier change, and
 snapshots app data (such as mail drafts) before its first change. "Undo all"
 restores each root from the earliest snapshot covering it; "Roll back to"
-uses a later marker. Irreversible changes are listed, never silently ignored.
+uses a later marker. Undoing single changes (the Changes view's per-row
+Undo) does the same for just the files those changes wrote: every change
+records its files (`ChangeEntry.paths`). Irreversible changes are listed,
+never silently ignored, and every rollback is audited.
+
+An ended task can be retried (`task.retry`): the same request and scope as
+a new task, checked against today's policy. The first run's changes stay
+undoable on the first task.
 
 ## Sleep (PM-5)
 
@@ -135,6 +142,16 @@ pipeline refuses further side effects (fail closed).
   mapping; keep event fields typed and stable.
 - **A lapsed license pauses agents only (LA-3).** Licensing gates the
   runtime, never the desktop, data or security updates.
+- **Users never see FreeBSD (BR-1).** User-facing text names no base-system
+  component; the image is branded by the overlay and checked in the e2e
+  suite (ADR 0011). Notices and the SBOM are generated from the build.
+- **The shell is a control-API client (UI-1 … UI-6, ADR 0009).** Rust on
+  Smithay and iced; apps are TypeScript web apps whose manifest actions
+  join the action registry. Keep everything the shell shows in `glass-api`.
+- **Agents are harness bundles; hard limits stay in the OS (AE-1,
+  ADR 0010).** Nothing an agent ships or an improvement loop edits can
+  change tiers, Never rules, labels or scope, so keep every limit enforced
+  in `glassd`, never delegated to the agent.
 - **Our cloud services run on AWS (GT-21)** and hold only licensing, policy
   and telemetry metadata; customer data stays on devices and in the
   customer's own Bedrock account (GT-3).

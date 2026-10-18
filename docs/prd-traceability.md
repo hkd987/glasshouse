@@ -6,9 +6,9 @@ OS — PRD"), plus engineering notes on P1 work that shapes today's design.
 what's missing. Update this file in the same change that moves a
 requirement; the `prd-sync` skill re-reads the PRD and diffs it.
 
-PRD revision last synced: 2026-10-18 (adds endpoint protection, licensing,
-developer program and catalog, core OS and power management, developer
-workspace, commercial readiness). V1 is **US-only** and **x86 (Intel/AMD)
+PRD revision last synced: 2026-10-18, second sync (adds branding and notices,
+the UI stack, the agent engine, five new mockups; NV-3 drops our own
+document and spreadsheet editors; first-party apps are web apps). V1 is **US-only** and **x86 (Intel/AMD)
 only**: we build and test `x86_64-unknown-freebsd` and nothing else.
 
 Tests: *unit* = crate unit tests, *pipeline* =
@@ -75,6 +75,7 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 | AW-20 Take over pauses at a safe point within 1 s | Partial | actions agents pause at the next action boundary; display/input hand-off needs screen agents |
 | AW-21 Hand back says what changed | **Done** | pipeline + e2e `takeover` |
 | AW-22 Take over always available, even during an ask | **Done** | e2e `takeover` |
+| Tile states: Failed with Retry, take over, undo all | **Done** (data + CLI) | `receipt.outcome()` on Failed and Stopped tiles; `task.retry`. Pipeline `an_ended_task_says_what_is_safe…`, e2e `changes`. Take over of a failed actions agent needs a design call (docs/design) |
 
 ## Navigation
 
@@ -82,7 +83,7 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 |---|---|---|
 | NV-1 Action registry (name, inputs, side effects, default tier) | **Done** | `glass-actions`; typed *outputs* not yet declared |
 | NV-2 Registry speaks MCP | **Done** | ADR 0004 |
-| NV-3 Full first-party coverage | Partial | files, mail (mock store); calendar, browser, settings, docs, sheets not started |
+| NV-3 Full first-party coverage: files, mail, calendar, browser, settings | Partial | files, mail (mock store); calendar, browser, settings not started. No document or spreadsheet editors of our own: agents use Microsoft 365 and Google Workspace through their APIs |
 | NV-10 Toolkit requires role + label | Not started | shell |
 | NV-11 A11y tree through the broker | Not started | |
 | NV-20 Screen agents on their own display | Not started | |
@@ -107,7 +108,7 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 | AU-3 Rebuild any task end to end | **Done** | `audit.task`, `glassctl audit` |
 | AU-10 "by [agent] for [user]" metadata | **Done** | xattr on files, header on mail (verified in the VM) |
 | AU-20 Snapshots before Notify steps, every 5 min, kept 30 days | Partial | before Notify and first change done; cadence and retention not started |
-| AU-21 Undo all, lists what it couldn't undo | **Done** | pipeline + e2e `invoices` |
+| AU-21 Undo all, lists what it couldn't undo | **Done** | pipeline + e2e `invoices`; single changes too (Changes mockup): pipeline `undoing_single_changes…`, e2e `changes` |
 
 ## Admin, licensing, catalog
 
@@ -149,6 +150,30 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 | Id | Status | Notes |
 |---|---|---|
 | DW-1, DW-3, DW-10, DW-11, DW-13, DW-20, DW-21, DW-23 | Not started | A bhyve Linux VM plus developer jails, audited from the host. Reuses the jail, broker and audit pieces; the runtime's sandbox interface was built for a second backend |
+
+## Branding and notices
+
+| Id | Status | Notes |
+|---|---|---|
+| BR-1 No FreeBSD where users look; system identity says Glasshouse | Partial | Overlay layer done: os-release, motd, loader brand, muted boot, login banner, SSH version, login tips, our own strings. e2e branding check. Kernel identity, base tools and man pages need our own base build, and the kernel's reported name needs a decision (ADR 0011) |
+| BR-2 License notices in Settings → Legal notices and docs | Partial | `tools/legal/notices.py` generates `NOTICES.txt` for every shipped crate plus the base `COPYRIGHT`, staged into the image (e2e checks it). The Settings page waits for the shell; per-component base notices wait for the base build |
+| BR-3 Source offer for GPL components | Not started | No GPL code ships today. The base system's CDDL code (OpenZFS, DTrace) carries a similar source obligation: legal review needed (ADR 0011) |
+| BR-4 Full base details and SBOM to security teams under NDA, admins only | Partial | `make sbom` writes a CycloneDX SBOM to `build/`, never staged into the image. Admin export comes with the console (EP-10) |
+
+## UI stack
+
+| Id | Status | Notes |
+|---|---|---|
+| UI-1 … UI-6 Wayland compositor on Smithay, iced + AccessKit shell, web apps with manifests | Not started | ADR 0009. The control API already carries everything tiles, the expanded view, handoff and Changes show (docs/design) |
+
+## Agent engine
+
+| Id | Status | Notes |
+|---|---|---|
+| AE-1 Agents are versioned harness bundles; hard limits in the OS | Partial | The hard limits are enforced in `glassd` today, outside any agent. The bundle format and runner are proposed (ADR 0010) |
+| AE-2 Invoice reconciliation and vendor email agents | Not started | `glass-demo-agent` is a scripted stand-in with no model. Pilot 1 workflows are an open question in the PRD |
+| AE-10 … AE-12 Eval suites, release bar, live quality metrics | Not started | The e2e harness on ZFS snapshots is the base of the eval runner; take-overs, undos and declined approvals are already audit events per agent |
+| AE-30 Re-run evals before a model switch | Not started | Needs the gateway and bundles |
 
 ## Pilot readiness
 

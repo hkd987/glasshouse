@@ -19,6 +19,11 @@ Before adding a crate:
    wildcard, and depend on it with `.workspace = true`.
 4. Run `make deny`.
 
+What ships is listed for users and reviewers from the build itself:
+`tools/legal/notices.py` writes the image's `NOTICES.txt` (BR-2) during
+staging and fails on a license outside the allow list; `make sbom` writes the
+SBOM security teams get under NDA (BR-4). Neither is ever edited by hand.
+
 Crates that compile C need the FreeBSD cross compiler; see
 `os/freebsd/README.md`. We currently have none, and should keep it that way
 where we can: pure-Rust dependencies cross-compile and audit more easily.

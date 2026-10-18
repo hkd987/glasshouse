@@ -14,3 +14,6 @@ ADR and mark the old one superseded.
 | [0006](0006-file-level-undo.md) | Undo restores files from snapshots, never rolls back datasets |
 | [0007](0007-drive-freebsd-through-admin-commands.md) | Drive jails and ZFS through their admin commands |
 | [0008](0008-agent-manifests-declare-privileges.md) | Proposed: agents ship signed manifests; effective rights = declaration ∩ policy ∩ scope |
+| [0009](0009-native-shell-web-apps.md) | A native Rust shell on Smithay and iced; apps are TypeScript web apps |
+| [0010](0010-agents-are-harness-bundles.md) | Proposed: agents are versioned harness bundles run by one runner; hard limits stay in the OS |
+| [0011](0011-branding-on-a-freebsd-base.md) | Branding: overlay now (tested), our own base build next; notices and SBOM generated from the build |

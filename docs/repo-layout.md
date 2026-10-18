@@ -11,12 +11,14 @@ crates/svc/<name>    service implementations hosted by daemons
 crates/bin/<name>    executables: daemons, CLIs, agents, tools
 tests/<suite>        end-to-end suites that drive a running system
 os/freebsd/          everything that becomes the OS image: overlay, image and VM tooling
-tools/               developer tooling (checks, dev runners)
+tools/               developer tooling (checks, dev runners, screenshots, legal notices)
 docs/                architecture, decisions (adr/), developer guides (dev/)
 ```
 
-Future top-level areas, when they start: `shell/` (compositor and UI toolkit),
-`console/` (admin console), `gateway/` if the model gateway outgrows a crate.
+Future top-level areas, when they start: `shell/` (compositor and shell UI,
+ADR 0009), `apps/` (first-party TypeScript web apps), `agents/` (agent
+harness bundles, ADR 0010), `console/` (admin console), `gateway/` if the
+model gateway outgrows a crate.
 
 ## Layering
 

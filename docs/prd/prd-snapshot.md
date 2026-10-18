@@ -97,7 +97,7 @@ Every running agent gets a live tile in the corner of the desktop that the user 
 | You're driving | User took over | Blue ring, "paused · you have control" | Hand back, stop |
 | Done | Task finished | Receipt: counts, items flagged | Review changes, undo all, dismiss |
 | Collapsed | User folds tiles away or more than 3 agents | Progress rings in the taskbar pill, orange dot for needs-you | Expand |
-| Failed (not yet mocked) | Agent can't continue | Red ring, reason in one line | Retry, take over, undo all |
+| Failed | Agent can't continue | Red ring, reason in one line | Retry, take over, undo all |
 
 
 ## Delegation and approvals
@@ -130,7 +130,7 @@ Agents use the most structured interface available, in a fixed order: app action
 **App actions**
 - NV-1. The OS ships an action registry. Apps declare actions with a name, typed inputs, outputs, side effects and default approval tier.
 - NV-2. The registry speaks MCP, so existing MCP servers and tools work without rewriting.
-- NV-3. Every first-party app ships with full action coverage at launch: files, mail, calendar, browser, settings and the spreadsheet and document editors.
+- NV-3. Every first-party app ships with full action coverage at launch: files, mail, calendar, browser and settings. Glasshouse doesn't build its own document or spreadsheet editors; agents work in Microsoft 365 and Google Workspace through their APIs.
 - NV-4. An adapter SDK lets IT or vendors wrap a web or SaaS app's API as actions.
 **Accessibility tree**
 - NV-10. The UI toolkit refuses to build a control without a role and label. That serves agents and Section 508 compliance at once.
@@ -143,6 +143,26 @@ Agents use the most structured interface available, in a fixed order: app action
 - NV-30. An on-device index of the user's files, mail, calendar and recent activity, available to agents through retrieval.
 - NV-31. The index enforces the source's access controls at query time, not index time. An agent never sees content the user couldn't open, and labeled content follows its label rules.
 - NV-32. Agents can't read other agents' working state unless the task explicitly chains them.
+
+## Agent engine and continuous improvement
+Glasshouse owns its first-party agents end to end: what they're made of, how we prove they work, and how they get better over time without retraining models. Improvements come from the harness around the model, so they carry across Bedrock, Anthropic and OpenAI alike.
+**What an agent is**
+- AE-1. Every agent is a versioned harness bundle with eight parts: system prompt, soft guardrails, memory, tool guidance, subagents, skills, scripts and plugins, plus its manifest of declared actions and permissions. Hard limits (approval tiers, the Never list, data labels and egress rules) live in the OS brokers, outside the bundle, where no agent or improvement loop can change them.
+- AE-2. First-party agents for the beachhead workflows: invoice reconciliation, vendor email, claims intake, KYC document review and research summaries. Pilot 1 ships the first two.
+**Proving agents work**
+- AE-10. Each workflow has an evaluation suite of realistic tasks with graded outcomes, built with design partners from anonymized examples. Public benchmarks such as JobBench and WorkBuddy-Bench's office subset add broader coverage.
+- AE-11. Release bar: an agent version ships only if it meets its workflow's accuracy target, has zero policy violations on the suite, and doesn't regress any tracked metric beyond a set tolerance. Proposed starting target: 95% correct on its suite.
+- AE-12. Live quality metrics for every agent: tasks finished without take-over, undo rate, rejected approvals, user edits to its output, and time saved. These feed the admin console and the model-risk evidence pack (AU-30).
+**Getting better over time**
+- AE-20. An improvement loop based on recursive agent harnessing: propose edits to the harness, test them, combine the best into a new version, and carry evidence-backed lessons forward to future tasks. The approach follows Google Research's Harness², which improved two different models on professional-work benchmarks with model weights unchanged ([Harness² on GitHub](https://github.com/google-research/harness2), [paper](https://arxiv.org/abs/2610.14224)).
+- AE-21. Test runs happen only on disposable snapshot copies of the machine or workspace. Anything that would leave the machine, such as sends, posts or payments, is stubbed out, and the copy is thrown away afterward.
+- AE-22. Learning signals come from real use: take-overs, undos, rejected approvals, user edits to agent output, and evaluation results.
+- AE-23. Change control for every new harness version: it's diffed against the last version, run against the full evaluation suite, approved by the org's chosen reviewers, rolled out in stages through the catalog (DV-12) and recorded in the model-risk evidence pack. Any version can be rolled back instantly.
+- AE-24. Lessons are stored per org, carry data labels and stay inside the customer's boundary. They're shared across customers only if the customer opts in and the lesson contains no customer data.
+- AE-25. Two scopes of improvement: we improve first-party agents centrally from our evaluations and opted-in signals, and each customer can tune its deployed agents on its own workflows under its own change control.
+**Model changes**
+- AE-30. When a provider releases a new model, every agent is re-run against its evaluation suite before an org can switch, and the switch goes through the same change control as a harness update.
+We adopt the Harness² method, not its code. Its README notes that executor network access is unrestricted and Codex runs with its sandbox disabled, so the loop is rebuilt inside Glasshouse containment.
 
 ## Containment and platform architecture
 The OS is built on FreeBSD. Every agent runs in its own jail, limited by Capsicum capabilities. Every privileged action goes through a broker that checks policy, injects credentials and writes the audit log.
@@ -160,7 +180,7 @@ Agents sit in jails with no standing access. Anything that touches data, credent
 | Snapshot service | ZFS | Snapshots before risky steps and on a cadence. Drives rollback. |
 | Audit service | OpenBSM + agent action log | Tamper-evident, structured log of every agent and broker decision |
 | Agent identity | Entra ID / Okta federation | Each agent is its own directory identity (Entra Agent ID or Okta) with a human owner, acting on behalf of its user |
-| Desktop shell | New compositor and UI toolkit | Taskbar, windows, tiles, command bar. Enforces accessibility metadata. |
+| Desktop shell | Wayland compositor on Smithay (Rust), iced + AccessKit | Taskbar, windows, tiles, command bar. Enforces accessibility metadata. |
 
 **Requirements**
 - PA-1. An agent with no grants can't read user files, open network connections or see other processes.
@@ -169,6 +189,15 @@ Agents sit in jails with no standing access. Anything that touches data, credent
 - PA-4. Agent identities are sent downstream via OAuth on-behalf-of tokens, so SaaS audit logs show "agent for user".
 - PA-5. The base system is upstream FreeBSD plus our layers. We contribute fixes upstream and track releases within one quarter.
 - PA-6. Full-disk encryption, secure boot and TPM-backed keys are on by default.
+**UI stack and app platform**
+The desktop itself is native Rust for speed and battery life. Apps, ours and third-party, are web apps with system powers, the split ChromeOS uses.
+- UI-1. Wayland only. The compositor is built in Rust on Smithay, the library System76's COSMIC desktop uses. Legacy X11 apps run through Xwayland inside a jail when needed.
+- UI-2. Apps can't read other apps' windows, keystrokes or clipboard. Screen capture and remote viewing only happen through a consent-gated, logged system prompt (ties to CF-72 and CF-80).
+- UI-3. Each agent's virtual display is its own isolated compositor output, which drives the tiles, take over and screen recording.
+- UI-4. The desktop shell (taskbar, tiles, notifications, lock screen and settings frame) is built in Rust with the iced toolkit and AccessKit for screen readers. Slint is the fallback, pending a license review.
+- UI-5. Glasshouse apps are web apps written in TypeScript, running on our Chromium engine. A manifest declares each app's actions, permissions and data labels. System APIs are reached only through the brokers, apps install through the catalog, and they work offline.
+- UI-6. Native apps built with GTK, Qt or Rust are allowed if they run on Wayland, expose a full accessibility tree and declare their actions in a manifest.
+- UI-7. Performance budgets for web apps, checked every release: cold launch under 1 second and typical memory under 150 MB per app (proposed targets).
 **Identity lifecycle, risk and always-on agents**
 - PA-7. Every agent is registered as its own directory identity: an Entra Agent ID, or the Okta equivalent. Each has a named human owner, an access review every quarter, and is retired automatically after 90 days unused or when its owner leaves.
 - PA-8. Agent permissions follow live risk signals. If a device falls out of compliance or the user is flagged as risky in Entra or Okta, that user's agents drop to read-only and pending tasks pause, until the signal clears.
@@ -186,8 +215,15 @@ Every regulated buyer requires malware protection and EDR coverage on endpoints.
 - EP-9. Removable-device control: IT can allow, block or make read-only USB storage and other devices by policy.
 - EP-10. Vulnerability tracking: every machine reports its installed packages and matching CVEs to the admin console, with an exportable software bill of materials.
 - EP-11. Signing keys live in hardware security modules. Using them requires multiple people in a recorded key ceremony, with separate keys for the OS, packages and each release channel.
-- EP-12. Builds are reproducible, so anyone can verify a release matches its source. Update metadata is signed and supports key rotation and recovery from a compromised key without re-imaging the fleet.
+- EP-12. Builds are reproducible, so customer security teams can verify under NDA that a release matches its source. Update metadata is signed and supports key rotation and recovery from a compromised key without re-imaging the fleet.
 - EP-13. The update and signing infrastructure is isolated from the rest of our systems and gets its own penetration test before every major release.
+**Branding and open-source notices**
+End users never see that Glasshouse is built on FreeBSD. The only exceptions are the legal notices open-source licenses require, and disclosure to customer security teams during due diligence.
+- BR-1. No FreeBSD names, logos, mascot, boot messages or strings appear anywhere a user looks: installer, boot, login, settings, system information, error messages, default shell prompts and help. Every system-identity value, from the reported OS name and version to the kernel identity and package tools, says Glasshouse.
+- BR-2. Open-source license notices (BSD, MIT, Apache, GPL and others) are reproduced as each license requires, in a Legal notices page under Settings and in product documentation. The BSD license requires its copyright notice to ship with binary distributions, which is why it can't be removed entirely. This is the same approach Apple and Sony take.
+- BR-3. Components under the GPL, including the Linux kernel inside the developer workspace, come with the source-code offer the GPL requires.
+- BR-4. Customer security teams get full base-system details and the complete software bill of materials under NDA during due diligence. The SBOM export (EP-10) is available to admins only, never published publicly.
+- BR-5. Upstream contributions to FreeBSD can go through contractors or Foundation sponsorship, if keeping a low public profile matters.
 
 ## Data protection and model gateway
 All model traffic leaves the machine through one gateway, which enforces data labels, redaction and the approved-model list before anything is sent.
@@ -326,7 +362,7 @@ Glasshouse needs a developer program and an IT-controlled catalog, not a consume
 **Public exchange**
 - DV-20. A public exchange lists apps, agents, adapters, skills and recorded flows. Each listing shows the verified publisher, declared privileges, ratings and how many regulated orgs have approved it.
 - DV-21. Existing MCP servers and Claude Code plugins can be listed by adding a manifest, with no rewrite.
-- DV-22. A curated, signed mirror of FreeBSD's package repository. Apps running through Linux compatibility are marked best effort.
+- DV-22. A curated, signed collection of open-source packages, branded as Glasshouse packages. Apps running through Linux compatibility are marked best effort.
 **Business model**
 - DV-30. Listing is free with no revenue share at launch. Paid listings come later, billed through enterprise procurement the way AWS Marketplace works, with a low fee.
 
@@ -340,7 +376,7 @@ A Windows user should feel at home in minutes, and every app the beachhead uses 
 **App strategy**
 | App type | How it runs | Agent access |
 | Microsoft 365, Google Workspace, SaaS | Built-in Chromium-based browser with enterprise policy | Actions via adapters, else accessibility tree |
-| First-party apps (files, mail, calendar, docs, sheets, PDF) | Native | Full actions coverage |
+| First-party apps (files, mail, calendar, PDF) | Web apps on our engine (UI-5) | Full actions coverage |
 | Teams, Zoom, Slack | Web versions, with native wrappers where needed | Actions via APIs |
 | Legacy and Windows-only apps | Managed Windows VM, app streaming (Azure Virtual Desktop, Citrix) or Windows 365 for Agents | Screen control + recorded flows |
 | Line-of-business web apps | Browser | Adapter SDK or screen control |
@@ -477,6 +513,9 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Signing infrastructure: EP-11 to EP-13
 - Pilot readiness: GT-1 to GT-4, GT-10, GT-30
 - Developer workspace for automation teams: DW-1, DW-3, DW-10, DW-11, DW-13, DW-20, DW-21, DW-23
+- Branding and notices: BR-1 to BR-4
+- UI stack: UI-1 to UI-6
+- Agent engine: AE-1, AE-2 (invoice reconciliation and vendor email), AE-10 to AE-12, AE-30
 **P1 · V1 GA**
 - AW-6, DA-4, DA-14, NV-4, NV-21, NV-22, NV-30 to NV-32
 - DP-6, DP-11, DP-20, DP-30, AU-4, AU-11, AU-22
@@ -489,6 +528,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Power management: PM-2, PM-3, PM-6 to PM-9
 - Compliance and commercial: AD-17, AU-30, CF-65, GT-20, GT-21, GT-40
 - Developer workspace, full: DW-2, DW-4 to DW-6, DW-12, DW-14 to DW-16, DW-22, DW-24 to DW-26
+- Agent engine: AE-2 (remaining agents), AE-20 to AE-25
 **P2 · Later**
 - Undo into third-party SaaS through compensating actions at scale
 - A public agent and adapter marketplace
@@ -524,6 +564,7 @@ The biggest risks are distribution and hardware, not the agent technology. Micro
 - License model: confirm per-user (up to 3 devices) plus per-device for shared machines, and which OEMs to certify first.
 - Fee for paid listings once DV-30 launches, and whether internal-only items ever carry a fee.
 - Support lifecycle: how many years each release is supported, and the battery-life target versus Windows.
+- Confirm the first two Pilot 1 workflows with design partners, and the accuracy bar each agent must clear.
 **Decisions already made**
 - Build on FreeBSD rather than writing a kernel.
 - The agent is a first-class principal with its own identity, sandbox and audit.

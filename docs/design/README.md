@@ -2,7 +2,7 @@
 
 The PRD's mockups live in a Claude Design canvas, **"Agent Window — OS
 Mockups"**: <https://claude.ai/artifact/Y5fH2vFk3fWUvWumZTRATC>. The PNGs here
-are renders of its five artboards, for reading without the canvas. They go
+are renders of its ten artboards, for reading without the canvas. They go
 stale when the canvas changes; re-render them with the `prd-sync` skill
 (`.claude/skills/prd-sync`), which uses `tools/design/render-dc.py`.
 
@@ -59,7 +59,7 @@ light desktop; accent `#3D6BFF` for working and you're-driving; attention
 | You're driving · "You have control" · Hand back | `YouAreDriving` → `task.hand_back` |
 | Done: receipt, Review changes, Undo all | `Done` with `receipt`; Undo all → `task.undo` |
 | Collapsed | A shell display mode, not a task state |
-| Failed (not yet mocked) | `Failed` with `failure` |
+| Failed (mocked in [Calm notifications](#calm-notifications--failed-agent)) | `Failed` with `failure` and `receipt` |
 | Paused, Paused for sleep (PM-5) | `Paused`; caption "Paused for sleep" while the machine sleeps. **Needs a mock.** |
 
 ## Handoff · plan and scope
@@ -95,3 +95,81 @@ The admin console is not started. Today its content lives in `policy.toml`
 | Preview impact, publish to pilot ring (AD-3) | **Not built** |
 | Live stats: running, waiting, blocked 24h, rollbacks 7d (AD-4) | **Not built**; the audit log has the data |
 | Prompt fatigue nudge (DA-14, P1) | **Not built** |
+
+## Changes and undo
+
+![Changes and undo](mockups/changes.png)
+
+Built on `task.get` and `task.undo`. Verified on real ZFS snapshots by the
+e2e `changes` scenario.
+
+| Element | Source |
+|---|---|
+| "Changes by Invoice agent", "finished 2:41 PM · on behalf of you" | `TaskDetail.view` (`agent_name`, `updated_at`, `user`) |
+| Counts: Reconciled 40, Flagged for you 2 | `progress`, `receipt.flagged` |
+| Left the machine: 1 email | `receipt.left_machine` |
+| Saved as drafts: 38 | **Not built**: counts in the agent's own terms need an agent-reported outcome (`report_progress` carries only a caption and numbers today) |
+| Can be undone · 3 / Can't be undone · 1 | `changes[]` split on `reversible` (and `undone`) |
+| One row for "38 draft invoices saved" | The shell groups `changes[]` by `action`; Undo on the row sends all their ids |
+| Per-row Undo | `task.undo { changes: [id, …] }`; `dry_run` first. Puts back just the files those changes wrote (`ChangeEntry.paths`) |
+| Draft a follow-up (on a change that can't be undone) | **Not built**: a new task with the sent message as context (compensating actions are P2) |
+| Roll back to a snapshot, with "undoes 30 drafts and both annotations. The email stays sent." | `snapshots[]` → `task.undo { to, dry_run: true }` gives `removed`, `restored`, `not_undone` |
+| Undo all reversible changes | `task.undo {}` |
+| "Undo is logged too" | Every rollback is a `Rollback` audit event with the change ids and files |
+
+## Calm notifications · failed agent
+
+![Catch-up panel and a failed agent](mockups/calm.png)
+
+| Element | Source |
+|---|---|
+| Failed tile: "stopped responding at invoice 27 of 40" | `state == Failed`, `failure`, `progress` |
+| "Nothing was posted. 26 drafts are saved and can be undone." | `receipt.outcome()`: "Nothing left the machine. 26 changes can be undone." (`left_machine`, `undoable`) |
+| Retry | `task.retry` → a new task with the same request and scope, checked against today's policy. Only the task's own user can retry it. |
+| Take over | For screen agents, the agent's display (not built). An actions agent that failed has no display to hand over; **proposed**: the shell opens the expanded view at the step that failed. Needs a design call. |
+| Undo all | `task.undo {}` |
+| Catch-up panel, batched and summarized notifications, Focus until 4:00 PM (CF-71, P1) | **Not built**: a notification service in the shell; agents' tile events are one of its sources |
+| Taskbar "2 agents" with one red dot | `task.list` states |
+
+## First-run setup · AI models
+
+![First-run setup, AI models step](mockups/setup.png)
+
+Not built. Each step maps to a P0 area:
+
+| Element | Requirement |
+|---|---|
+| Sign in with Microsoft Entra ID, fingerprint | CF-1 … CF-3 |
+| License activated automatically, "device 1 of 3", personal trial | LA-1 … LA-3, LA-10 … LA-12 |
+| Amazon Bedrock (recommended by IT, already connected); Claude Code with your Claude plan; ChatGPT; API keys blocked by policy | MP-1 … MP-9, HX-1 (Claude Code plugin) |
+| "Confidential files always go to Bedrock or a local model" | DP-1, DP-10: the gateway routes by label. The handoff card's `model` line is where a user sees the result per task |
+| Ready: files sync, apps install | CF-40, DV-10 |
+
+## Remote help desk session
+
+![Help desk session, user and support views](mockups/helpdesk.png)
+
+Not built (CF-80 … CF-82 are P0; CF-83 is P1). What exists that it builds on:
+
+| Element | Today |
+|---|---|
+| Banner "can see your screen", Allow control / Keep view only, End session | Needs the compositor's consent-gated capture (UI-2) |
+| Tools by directory role (Help Desk, Desktop Support, Security) | Roles from Entra/Okta groups (AD-1); not modeled yet |
+| "Pause or undo Dana's agents" (CF-83) | `task.pause`, `task.undo` already work for root. A support role needs its own authorization, under the user's consent, instead of root |
+| "Recorded to audit" | The audit log; sessions would be new event kinds |
+
+## Security investigation
+
+![Admin console security investigation](mockups/investigate.png)
+
+Not built: the admin console (AD-1) and the developer workspace (DW-*).
+What exists that it builds on:
+
+| Element | Today |
+|---|---|
+| Timeline from all sources | The hash-chained audit log; `audit.task` rebuilds one task |
+| Export evidence (OCSF) | **Not built** (EP-7, AU-2) |
+| Take forensic snapshot, Restore to 10:00 AM snapshot | ZFS snapshots (`glass-platform::snapshot`); remote rollback is EP-6 |
+| Network cut, host-side egress policy | Agent jails have no network at all today; per-destination egress (pf) comes with the model gateway |
+| Freeze workspace, legal hold | **Not built** (DW-*, CF-64) |
+| Alert to Sentinel and CrowdStrike | **Not built** (EP-7) |

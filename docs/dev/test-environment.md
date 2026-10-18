@@ -89,6 +89,7 @@ the containment probe is expected to fail there.
 |---|---|
 | VM panics during boot, mentions ZFS or SIMD | QEMU 8.2's emulator mis-handles AVX. The scripts already default to `-cpu max,avx=off,...` under TCG; if you set `VM_CPU_MODEL`, keep AVX off. |
 | `vm-wait` times out | First boot without KVM takes up to ~2 min. `make vm-console` shows the serial console. |
+| The console shows nothing while the VM boots | Kernel output is muted for branding (BR-1). To debug boot: `make vm-run CMD="sysrc -f /boot/loader.conf boot_mute=NO"`, then reboot the VM. |
 | `vm.sh run 'service x start'` never returns | A daemon inherited the SSH session's output. Redirect it: `service x start >/dev/null 2>&1`. (`vm-deploy` already does this.) |
 | `linker x86_64-unknown-freebsd-cc not found` / no sysroot | Run `make freebsd-sysroot`. |
 | `glassctl: is glassd running?` | `make vm-run CMD="service glassd status; tail /var/log/glassd.log"` |
