@@ -1,10 +1,12 @@
 //! `glass-shell-fb`: the desktop on the console framebuffer, without a
 //! compositor (ADR 0016, the first step of M2). It draws the caller's live
 //! tiles from glassd and takes the keyboard and pointer from the kernel's
-//! evdev devices: Approve on a tile answers its ask, Ctrl Space opens the
-//! command bar. It redraws when a task changes, the person does something,
-//! or the menu bar clock turns over, and copies only the rows that changed;
-//! moving the pointer repaints only the rows it crosses.
+//! evdev devices: Approve on a tile answers its ask, clicking a tile opens
+//! its expanded view (`task.get`) with Pause, Stop, Take over and Roll back,
+//! Esc closes it, Ctrl Space opens the command bar. It redraws when a task
+//! changes, the person does something, or the menu bar clock turns over,
+//! and copies only the rows that changed; moving the pointer repaints only
+//! the rows it crosses.
 //!
 //! ```text
 //! glass-shell-fb [--tty /dev/ttyv0] [--socket /var/run/glasshouse/control.sock] [--once] [--no-input]
@@ -20,14 +22,15 @@ mod input;
 mod keys;
 mod pointer;
 
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
-use glass_api::{Event, TaskView, methods};
+use glass_api::{Event, TaskDetail, TaskRef, TaskView, UndoReport, methods};
 use glass_platform::framebuffer::Framebuffer;
-use glass_rpc::Client;
+use glass_rpc::{Client, ClientError};
 use glass_shell::live::{Effect, Live};
 use glass_shell::render::Screen;
 use glass_shell::{Size, Theme};
@@ -116,15 +119,18 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
         let redraw;
         tokio::select! {
             note = client.next_notification() => {
-                shell.apply(note)?;
+                // The open task changing asks for its detail again, once
+                // for everything that arrived together.
+                let mut effects = Vec::from_iter(shell.apply(note)?);
                 let settled = tokio::time::sleep(SETTLE);
                 tokio::pin!(settled);
                 loop {
                     tokio::select! {
                         () = &mut settled => break,
-                        note = client.next_notification() => shell.apply(note)?,
+                        note = client.next_notification() => effects.extend(shell.apply(note)?),
                     }
                 }
+                shell.carry_out_all(&client, effects).await;
                 redraw = true;
             }
             Some(first) = inputs.recv() => {
@@ -133,9 +139,8 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
                 while let Ok(more) = inputs.try_recv() {
                     batch.push(more);
                 }
-                for effect in shell.input(&batch) {
-                    shell.carry_out(&client, effect).await;
-                }
+                let effects = shell.input(&batch);
+                shell.carry_out_all(&client, effects).await;
                 redraw = shell.changed();
             }
             () = tokio::time::sleep(until_next_minute(OffsetDateTime::now_utc())) => redraw = true,
@@ -207,17 +212,15 @@ impl Shell {
         OffsetDateTime::now_utc().to_offset(self.offset)
     }
 
-    /// Folds in one notification from glassd.
-    fn apply(&mut self, note: Option<glass_rpc::Request>) -> anyhow::Result<()> {
+    /// Folds in one notification from glassd, and returns what it asks for
+    /// (the open task's detail again, when that task changed).
+    fn apply(&mut self, note: Option<glass_rpc::Request>) -> anyhow::Result<Option<Effect>> {
         let note = note.context("glassd closed the connection")?;
         let event = note
             .params
             .filter(|_| note.method == methods::EVENT)
             .and_then(|params| serde_json::from_value::<Event>(params).ok());
-        if let Some(event) = event {
-            self.live.apply(event);
-        }
-        Ok(())
+        Ok(event.and_then(|event| self.live.apply(event)))
     }
 
     /// Handles a batch of input: the pointer moves at once; clicks and keys
@@ -300,20 +303,100 @@ impl Shell {
         std::mem::take(&mut self.dirty)
     }
 
-    /// Makes the call an effect asks for. A refusal shows up in the tiles,
-    /// so it's only logged here.
-    async fn carry_out(&mut self, client: &Client, effect: Effect) {
-        if let Effect::Answer(answer) = effect {
-            let result: Result<serde_json::Value, _> =
-                client.call(methods::APPROVAL_ANSWER, &answer).await;
-            match result {
-                Ok(_) => eprintln!("answered {}", answer.approval),
-                Err(e) => eprintln!("approval.answer: {e}"),
+    /// Makes the calls effects ask for, then the ones their answers ask
+    /// for, each once.
+    async fn carry_out_all(&mut self, client: &Client, effects: Vec<Effect>) {
+        let mut queue = VecDeque::new();
+        for effect in effects {
+            if !queue.contains(&effect) {
+                queue.push_back(effect);
+            }
+        }
+        while let Some(effect) = queue.pop_front() {
+            for next in self.carry_out(client, effect).await {
+                if !queue.contains(&next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+
+    /// Makes the call an effect asks for and hands its answer to the
+    /// desktop; returns what that asks for next. A refused control shows
+    /// up in the tile's state, so it's only logged here; a refused roll
+    /// back is told on its card.
+    async fn carry_out(&mut self, client: &Client, effect: Effect) -> Vec<Effect> {
+        match effect {
+            Effect::Answer(answer) => {
+                let result: Result<serde_json::Value, _> =
+                    client.call(methods::APPROVAL_ANSWER, &answer).await;
+                match result {
+                    Ok(_) => eprintln!("answered {}", answer.approval),
+                    Err(e) => eprintln!("approval.answer: {e}"),
+                }
+                Vec::new()
+            }
+            // Done in `input`, which has the view.
+            Effect::Focus(_) => Vec::new(),
+            Effect::Get(task) => {
+                let started = Instant::now();
+                let result: Result<TaskDetail, _> =
+                    client.call(methods::TASK_GET, TaskRef { task }).await;
+                match result {
+                    Ok(detail) => {
+                        eprintln!(
+                            "task.get {}: {} ms",
+                            task.short(),
+                            started.elapsed().as_millis()
+                        );
+                        self.live.detail(detail);
+                        self.dirty = true;
+                    }
+                    Err(e) => eprintln!("task.get: {e}"),
+                }
+                Vec::new()
+            }
+            Effect::Undo(request) => {
+                let result: Result<UndoReport, _> = client.call(methods::TASK_UNDO, &request).await;
+                self.dirty = true;
+                match result {
+                    Ok(report) => self.live.undo_report(report).into_iter().collect(),
+                    Err(e) => {
+                        eprintln!("task.undo: {e}");
+                        self.live.undo_failed(plain(&e));
+                        Vec::new()
+                    }
+                }
+            }
+            other => {
+                let Some((method, task)) = other.task_call() else {
+                    return Vec::new();
+                };
+                let result: Result<TaskView, _> = client.call(method, &task).await;
+                match result {
+                    // The new state shows at once; the event that follows
+                    // changes nothing more.
+                    Ok(view) => {
+                        self.dirty = true;
+                        self.live
+                            .apply(Event::TaskUpdated {
+                                task: Box::new(view),
+                            })
+                            .into_iter()
+                            .collect()
+                    }
+                    Err(e) => {
+                        eprintln!("{method}: {e}");
+                        Vec::new()
+                    }
+                }
             }
         }
     }
 
     fn draw(&mut self) {
+        // This frame shows whatever was waiting to be shown.
+        self.dirty = false;
         let started = Instant::now();
         let (w, h) = self.size();
         let bar = self.live.command_bar();
@@ -381,6 +464,18 @@ fn changed_rows(before: &[u8], after: &[u8], width: u32) -> Option<Range<u32>> {
     let first = rows.clone().position(differs)?;
     let last = rows.rposition(differs)?;
     Some(first as u32..last as u32 + 1)
+}
+
+/// A refusal in the person's words: glassd's own message, without the
+/// protocol's error code.
+fn plain(error: &ClientError) -> String {
+    match error {
+        ClientError::Rpc(e) => e.message.clone(),
+        ClientError::Closed | ClientError::Connect { .. } => {
+            "Lost touch with the system. Try again in a moment.".to_owned()
+        }
+        ClientError::Decode(_) => "Got an answer this desktop doesn't understand.".to_owned(),
+    }
 }
 
 /// How long until the clock next shows a new minute.

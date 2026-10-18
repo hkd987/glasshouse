@@ -3,15 +3,17 @@
 //! these; a live shell gets the same types from `task.list`.
 
 use glass_api::{
-    AgentMode, ApprovalState, ApprovalView, AskLabels, FeedLine, Progress, TaskView, TileState,
+    ActivityEntry, ActivityKind, AgentMode, ApprovalState, ApprovalView, AskLabels, ChangeEntry,
+    ChangeKind, FeedLine, Progress, SnapshotMarker, TaskDetail, TaskView, TileState,
 };
-use glass_types::{ApprovalId, TaskId, Timestamp};
+use glass_types::{ApprovalId, SnapshotId, TaskId, Timestamp};
 use iced_core::alignment::{Horizontal, Vertical};
 use iced_core::{Color, Length, Padding};
 use iced_widget::{Column, column, container, row, stack, text};
 
 use crate::screens::command_bar::{Answer, CommandBar};
 use crate::screens::desktop::Desktop;
+use crate::screens::expanded;
 use crate::screens::login::SignIn;
 use crate::theme::hex;
 use crate::{Element, Message, Theme, fonts, icons, style};
@@ -76,7 +78,16 @@ pub fn tasks() -> Vec<TaskView> {
         agent: "expense-agent".parse().expect("valid id"),
         action: "expenses.submit".parse().expect("valid action"),
         summary: "Submit your expense report for $412.60?".into(),
-        items: (1..=6).map(|i| format!("Receipt {i}")).collect(),
+        items: [
+            "Rideshare, airport to hotel · $38.40",
+            "Hotel, 1 night · $214.00",
+            "Client lunch, 3 people · $86.20",
+            "Airport parking · $24.00",
+            "Coffee before meeting · $12.40",
+            "Train, hotel to client office · $37.60",
+        ]
+        .map(String::from)
+        .to_vec(),
         rule: "org rule expenses.submit".into(),
         requested_at: minutes_ago(1),
         expires_at: now(),
@@ -111,6 +122,216 @@ pub fn tasks() -> Vec<TaskView> {
         total: 40,
     });
     vec![needs, prep, invoices]
+}
+
+/// Monday, October 19, `hour:minute` UTC.
+fn at(hour: i64, minute: i64) -> Timestamp {
+    const MIDNIGHT: i64 = 1_792_368_000;
+    Timestamp::from_unix_seconds(MIDNIGHT + hour * 3600 + minute * 60)
+        .unwrap_or_else(Timestamp::now)
+}
+
+/// The Expanded artboard's moment: 2:14 PM UTC, twelve minutes into the
+/// invoice run.
+pub fn expanded_now() -> Timestamp {
+    at(14, 14)
+}
+
+/// The Expanded artboard: the invoice agent 12 invoices into 40, with its
+/// activity, three snapshots, eleven changes (one email that can't be
+/// undone) and what it can't touch. The artboard's agent drives the AP
+/// app's screen; screen agents can't stream one yet, so this one works
+/// through the app's actions and the view shows its feed.
+pub fn invoice_detail() -> TaskDetail {
+    let feed = |minute, verb: &str, target: &str| FeedLine {
+        at: at(14, minute),
+        text: format!("{verb} {target}"),
+        verb: verb.into(),
+        target: target.into(),
+    };
+    let view = TaskView {
+        id: TaskId::new(),
+        agent: "invoice-agent".parse().expect("valid id"),
+        agent_name: "Invoice agent".into(),
+        user: "dana".into(),
+        mode: AgentMode::Actions,
+        state: TileState::Working,
+        title: "March invoices".into(),
+        caption: "Reconciling March invoices in AP Invoice Entry".into(),
+        progress: Some(Progress {
+            done: 12,
+            total: 40,
+        }),
+        feed: vec![
+            feed(12, "match", "INV-0411 → PO 7779"),
+            feed(14, "open", "INV-0412 · AP Invoice Entry"),
+            feed(14, "open", "PO 7781 · Purchase orders"),
+        ],
+        needs: None,
+        receipt: None,
+        failure: None,
+        started_at: at(14, 2),
+        updated_at: expanded_now(),
+        driver_socket: None,
+        continues: None,
+    };
+    let entry = |minute, kind, text: &str| ActivityEntry {
+        at: at(14, minute),
+        kind,
+        text: text.into(),
+    };
+    use ActivityKind::{Action, Approval, Notice, Snapshot};
+    let activity = vec![
+        entry(2, Action, "Opened AP Invoice Entry, batch MAR-26"),
+        entry(4, Action, "Matched INV-0401 → INV-0405 to POs"),
+        entry(5, Snapshot, "Snapshot saved"),
+        entry(8, Notice, "Flagged INV-0407 — total is $212.40 over PO"),
+        entry(8, Snapshot, "Snapshot saved"),
+        entry(9, Approval, "Emailed Northwind AP about INV-0407"),
+        entry(10, Action, "Matched INV-0406, INV-0408 → INV-0410"),
+        entry(11, Snapshot, "Snapshot saved"),
+        entry(12, Action, "Matched INV-0411 → PO 7779"),
+        entry(14, Action, "Opened INV-0412 and PO 7781"),
+    ];
+    let matched = [
+        (3, "0401", "7740"),
+        (3, "0402", "7741"),
+        (4, "0403", "7744"),
+        (4, "0404", "7745"),
+        (4, "0405", "7750"),
+        (10, "0406", "7752"),
+        (10, "0408", "7760"),
+        (10, "0409", "7763"),
+        (10, "0410", "7766"),
+        (12, "0411", "7779"),
+    ];
+    let mut changes: Vec<ChangeEntry> = matched
+        .into_iter()
+        .map(|(minute, invoice, po)| ChangeEntry {
+            id: 0,
+            at: at(14, minute),
+            kind: ChangeKind::Modified,
+            target: format!("INV-{invoice} matched to PO {po}"),
+            action: "ap.invoice.match".parse().expect("valid action"),
+            reversible: true,
+            paths: vec![format!("~/Invoices/MAR-26/INV-{invoice}.json")],
+            undone: false,
+        })
+        .collect();
+    changes.insert(
+        5,
+        ChangeEntry {
+            id: 0,
+            at: at(14, 9),
+            kind: ChangeKind::Sent,
+            target: "Email to Northwind AP about INV-0407".into(),
+            action: "mail.send".parse().expect("valid action"),
+            reversible: false,
+            paths: Vec::new(),
+            undone: false,
+        },
+    );
+    for (id, change) in (1..).zip(changes.iter_mut()) {
+        change.id = id;
+    }
+    let marker = |minute, reason: &str| SnapshotMarker {
+        id: SnapshotId::new(),
+        at: at(14, minute),
+        reason: reason.into(),
+    };
+    TaskDetail {
+        view,
+        prompt: "Reconcile the March invoices in AP Invoice Entry against their purchase \
+                 orders. Flag anything more than $50 off and let the vendor know."
+            .into(),
+        plan: [
+            "Open batch MAR-26 in AP Invoice Entry",
+            "Match each invoice to its purchase order",
+            "Flag invoices whose totals are more than $50 off",
+            "Email the vendor about flagged invoices, after you approve",
+            "Save the matches as drafts for you to post",
+        ]
+        .map(String::from)
+        .to_vec(),
+        now: "Matching INV-0412 to PO 7781 — vendor, quantities and total agree".into(),
+        activity,
+        changes,
+        cant_touch: ["Posting invoices", "Payments", "Vendor bank details"]
+            .map(String::from)
+            .to_vec(),
+        snapshots: vec![
+            marker(5, "After invoice 5"),
+            marker(8, "Before emailing Northwind AP"),
+            marker(11, "After invoice 10"),
+        ],
+    }
+}
+
+/// The expense agent's tile from [`tasks`] opened on its ask: the review
+/// list and the ask's own answers.
+pub fn expense_detail(task: &TaskView) -> TaskDetail {
+    let minutes_before = |m: i64| {
+        Timestamp::from_unix_seconds(task.updated_at.unix_seconds() - m * 60)
+            .unwrap_or_else(Timestamp::now)
+    };
+    let entry = |m, kind, text: &str| ActivityEntry {
+        at: minutes_before(m),
+        kind,
+        text: text.into(),
+    };
+    TaskDetail {
+        view: task.clone(),
+        prompt: "File my expenses for the Chicago client visit, Oct 13 to 14.".into(),
+        plan: [
+            "Find the trip's receipts in mail and photos",
+            "Fill in a draft report in the expense portal",
+            "Ask you before submitting it",
+        ]
+        .map(String::from)
+        .to_vec(),
+        now: task.needs.as_ref().map_or_else(String::new, |ask| {
+            format!("Waiting for you to approve: {}", ask.summary)
+        }),
+        activity: vec![
+            entry(
+                9,
+                ActivityKind::Action,
+                "Found 6 receipts in mail and photos",
+            ),
+            entry(6, ActivityKind::Snapshot, "Snapshot saved"),
+            entry(4, ActivityKind::Action, "Filled in draft report ER-2291"),
+            entry(1, ActivityKind::Approval, "Asked you to submit $412.60"),
+        ],
+        changes: vec![ChangeEntry {
+            id: 1,
+            at: minutes_before(4),
+            kind: ChangeKind::Created,
+            target: "Draft report ER-2291".into(),
+            action: "expenses.draft".parse().expect("valid action"),
+            reversible: true,
+            paths: Vec::new(),
+            undone: false,
+        }],
+        cant_touch: ["Corporate card settings", "Other people's reports"]
+            .map(String::from)
+            .to_vec(),
+        snapshots: vec![SnapshotMarker {
+            id: SnapshotId::new(),
+            at: minutes_before(6),
+            reason: "Before the draft report".into(),
+        }],
+    }
+}
+
+/// The desktop under the expanded view: the tiles tucked away and the
+/// agent as the focused app.
+pub fn expanded_desktop<'a>(tasks: &'a [TaskView], agent: &str) -> Desktop<'a> {
+    Desktop {
+        app: agent.into(),
+        menus: expanded::MENUS.map(String::from).to_vec(),
+        tiles_visible: false,
+        ..desktop(tasks)
+    }
 }
 
 pub fn desktop(tasks: &[TaskView]) -> Desktop<'_> {

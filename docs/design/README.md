@@ -10,9 +10,10 @@ The desktop is **Mac-like** (DK-1, revised): a translucent menu bar across
 the top, a dock at the bottom, window controls on the left, agent tiles at
 the top right, and the command bar opening over everything with Ctrl Space.
 The shell's first screens exist: `shell/` renders the Desktop, Sign in,
-Boot and Command bar boards from `glass-api` data (`make shell-preview`;
-`SOCKET=` for a live glassd's tiles). It doesn't run on a screen yet (M2,
-ADR 0016), and the compositor is not built. Everything a tile, the
+Boot, Command bar and Expanded boards from `glass-api` data (`make
+shell-preview`; `SOCKET=` for a live glassd's tiles), and `glass-shell-fb`
+shows them on the VM's console framebuffer with live tiles and input (ADR
+0016). The compositor is not built. Everything a tile, the
 expanded view and the handoff card show already comes from the control API
 (`glass-api`), so the shell can be built directly against it. The tables
 below say which field drives each element, and what's still missing.
@@ -44,17 +45,25 @@ light desktop; accent `#3D6BFF` for working and you're-driving; attention
 
 ![Expanded view](mockups/expanded.png)
 
+The shell draws this board (`shell/crates/glass-shell/src/screens/expanded.rs`;
+`make shell-preview` writes `expanded.png` and its Changes, roll back,
+review and receipt variants). Clicking a tile, or a needs-you tile's Review,
+opens it over the desktop with one `task.get`; the tiles tuck away and keep
+updating, and the agent becomes the menu bar's app.
+
 | Element | Source |
 |---|---|
-| Header: name, "Working · 12 of 40", "on behalf of you · started 2:02 PM" | `TaskDetail.view` |
-| Pause / Stop / Take over (AW-11, AW-20) | `task.pause`, `task.stop`, `task.take_over` (`task.hand_back` returns) |
+| Collapse button, Esc (AW-16) | Shell: back to the tiles; the agent carries on. Esc first closes the command bar or a roll back card |
+| Header: name, "Working · 12 of 40", "on behalf of you · started 2:02 PM" | The tile's `TaskView`, current to the last event (`agent_name`, `state`, `progress`, `caption`, `started_at`; "finished 2:41 PM" from `updated_at` once ended) |
+| Pause / Stop / Take over (AW-11, AW-20) | `task.pause`, `task.stop`, `task.take_over`. Only what applies to the `TileState`: Resume (`task.resume`) while paused, Hand back (`task.hand_back`) while you drive, none once the task ended; Take over is off for a task the person's own harness drives (`driver_socket`) |
+| Left pane: live screen with agent cursor, LIVE badge (AW-12) | **Not built**: screen-control agents. Until then the left pane shows what the person needs from the data: the ask's items with its own answer and Decline while `NeedsYou` (`needs.items`, `labels`, `rule`; `approval.answer`), the receipt once ended (`receipt`, `failure`), otherwise the feed (`feed[]`), the request (`prompt`) and the `plan` |
 | Now bar (AW-12) | `TaskDetail.now` |
-| Activity tab with snapshot rows (AW-13) | `activity[]`, `kind == Snapshot` for the ◇ rows |
-| Changes · 11 | `changes[]` (`reversible: false` flags sent mail and the like) |
+| Activity tab with snapshot rows (AW-13) | `activity[]`, newest at the bottom; `kind == Snapshot` rows are ◇, the one Roll back returns to ◆; clicking one picks it. The latest 200 lines are drawn |
+| Changes · 11 | `changes[]`: "Can't be undone" for `reversible: false`, "Undone" for `undone` |
 | Can't touch (AW-14) | `cant_touch[]` |
-| Timeline markers, "Roll back to 2:11 PM" (AW-15) | `snapshots[]` → `task.undo { to }` (`dry_run` first to show what changes) |
-| Live screen with agent cursor, LIVE badge | **Not built**: screen-control agents |
-| "Stop asks once if unsaved work" (AW-11) | **Not built** |
+| Timeline markers, "Roll back to 2:11 PM" (AW-15) | `snapshots[]`, placed by time from `started_at` to now; the latest is picked unless the person picks another. Roll back asks `task.undo { to, dry_run: true }` and shows `restored`, `removed` and `not_undone`; confirming sends `task.undo { to }` and shows what it did |
+| Kept current | A `TaskUpdated` event for the open task updates the header at once and fetches `task.get` again for the rest |
+| "Stop asks once if unsaved work" (AW-11) | **Not built**: needs the agent to report unsaved, un-snapshotted work |
 
 ## Tile states
 

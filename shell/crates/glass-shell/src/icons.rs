@@ -2,6 +2,9 @@
 //! shown as images. tiny-skia and kurbo (which parses SVG path data) are
 //! already in the renderer, so this costs no SVG library.
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
 use iced_core::image::Handle;
 use iced_core::{Color, Length};
 use iced_widget::image;
@@ -65,8 +68,35 @@ pub fn view<'a, Message: 'a>(
         .into()
 }
 
-/// Rasterizes an icon.
+/// An icon rasterized once per color and size: every frame rebuilds the
+/// view, and the same image handle lets the renderer reuse its pixels too.
 pub fn handle(icon: &Icon, color: Color, width: f32, height: f32) -> Handle {
+    /// Enough for every icon on screen in a few colors; past it, start over.
+    const MOST: usize = 256;
+    type Key = (usize, usize, [u32; 2], [u32; 4], [u32; 2]);
+    static CACHE: LazyLock<Mutex<HashMap<Key, Handle>>> = LazyLock::new(Mutex::default);
+    // Icons are constants whose shapes live in static memory for good, so
+    // where the shapes are tells icons apart.
+    let key = (
+        icon.shapes.as_ptr() as usize,
+        icon.shapes.len(),
+        [icon.view_box.0, icon.view_box.1].map(f32::to_bits),
+        [color.r, color.g, color.b, color.a].map(f32::to_bits),
+        [width, height].map(f32::to_bits),
+    );
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(handle) = cache.get(&key) {
+        return handle.clone();
+    }
+    if cache.len() >= MOST {
+        cache.clear();
+    }
+    let handle = rasterize(icon, color, width, height);
+    cache.insert(key, handle.clone());
+    handle
+}
+
+fn rasterize(icon: &Icon, color: Color, width: f32, height: f32) -> Handle {
     let w = (width * OVERSAMPLE).ceil().max(1.0) as u32;
     let h = (height * OVERSAMPLE).ceil().max(1.0) as u32;
     let Some(mut pixmap) = Pixmap::new(w, h) else {
@@ -306,6 +336,73 @@ pub const EXPAND: Icon = Icon {
         "M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5L9 7M2.5 13.5L7 9",
         Line(1.5),
     )],
+};
+
+/// Shrink the expanded view back to its tile (AW-16).
+pub const COLLAPSE: Icon = Icon {
+    view_box: (16.0, 16.0),
+    shapes: &[Shape::Path(
+        "M9.5 2.5v4h4M6.5 13.5v-4h-4M9.5 6.5L14 2M6.5 9.5L2 14",
+        Line(1.5),
+    )],
+};
+
+pub const PAUSE: Icon = Icon {
+    view_box: (16.0, 16.0),
+    shapes: &[Shape::Path("M5.5 3.5v9M10.5 3.5v9", StrokeRound(1.8))],
+};
+
+pub const RESUME: Icon = Icon {
+    view_box: (16.0, 16.0),
+    shapes: &[Shape::Path("M5 3.2l8 4.8-8 4.8z", Fill)],
+};
+
+pub const STOP: Icon = Icon {
+    view_box: (16.0, 16.0),
+    shapes: &[Shape::Rect {
+        x: 3.5,
+        y: 3.5,
+        w: 9.0,
+        h: 9.0,
+        r: 2.0,
+        ink: Line(1.6),
+    }],
+};
+
+/// Take over: the person's own pointer.
+pub const POINTER: Icon = Icon {
+    view_box: (16.0, 16.0),
+    shapes: &[Shape::Path("M3 2.5l10 4.3-4.3 1.4-1.6 4.3z", Line(1.6))],
+};
+
+/// Hand back to the agent.
+pub const HAND_BACK: Icon = Icon {
+    view_box: (16.0, 16.0),
+    shapes: &[Shape::Path(
+        "M6 3.5L2.5 7 6 10.5M3 7h6.5a3.5 3.5 0 010 7H8",
+        Line(1.6),
+    )],
+};
+
+/// Roll back to a snapshot (AW-15).
+pub const ROLL_BACK: Icon = Icon {
+    view_box: (16.0, 16.0),
+    shapes: &[
+        Shape::Path("M3.4 6A5 5 0 113 8.5", Line(1.6)),
+        Shape::Path("M2.8 2.8v3.4h3.4", Line(1.6)),
+    ],
+};
+
+/// A snapshot, on the timeline and in the activity log (◇).
+pub const SNAPSHOT: Icon = Icon {
+    view_box: (16.0, 16.0),
+    shapes: &[Shape::Path("M8 2l6 6-6 6-6-6z", Line(1.6))],
+};
+
+/// The snapshot a roll back would return to (◆).
+pub const SNAPSHOT_SELECTED: Icon = Icon {
+    view_box: (16.0, 16.0),
+    shapes: &[Shape::Path("M8 1.5l6.5 6.5-6.5 6.5L1.5 8z", Fill)],
 };
 
 /// The agent's cursor on a screen agent's thumbnail.
