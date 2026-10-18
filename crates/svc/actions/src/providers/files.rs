@@ -290,6 +290,7 @@ impl ActionProvider for FilesProvider {
                         kind,
                         target: r.display,
                         reversible: true,
+                        paths: vec![r.host],
                     }],
                 })
             }
@@ -306,6 +307,7 @@ impl ActionProvider for FilesProvider {
                         kind: ChangeKind::Deleted,
                         target: r.display,
                         reversible: true,
+                        paths: vec![r.host],
                     }],
                 })
             }
@@ -332,6 +334,7 @@ impl ActionProvider for FilesProvider {
                         kind: ChangeKind::Moved,
                         target: format!("{} → {}", src.display, dst.display),
                         reversible: true,
+                        paths: vec![src.host, dst.host],
                     }],
                 })
             }

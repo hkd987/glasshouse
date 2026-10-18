@@ -181,6 +181,7 @@ impl Runtime {
         SystemStatus {
             version: env!("CARGO_PKG_VERSION").into(),
             sandbox: self.sandbox.kind().into(),
+            contained: self.sandbox.is_security_boundary(),
             policy: self.policy_source.clone(),
             tasks_running: tasks.values().filter(|t| t.lock().tile.is_live()).count(),
             approvals_pending: self.desk.pending(None).len(),
@@ -312,6 +313,39 @@ impl Runtime {
 
     /// Starts a task (DA-3): the scope on the card becomes the task's grants.
     pub fn start(self: &Arc<Self>, caller: &Caller, request: TaskRequest) -> Result<TaskView> {
+        self.start_task(caller, request, None)
+    }
+
+    /// The Failed tile's Retry: the same request as a new task. Policy and
+    /// scope are checked again, as for any start. Only the task's own user
+    /// may retry it, since the new task acts on their behalf.
+    pub fn retry(self: &Arc<Self>, caller: &Caller, id: TaskId) -> Result<TaskView> {
+        let task = self.authorized(caller, id)?;
+        if task.user.uid != caller.uid {
+            return Err(RuntimeError::PermissionDenied(format!(
+                "only {} can retry their own task",
+                task.user.name
+            )));
+        }
+        if task.lock().tile.is_live() {
+            return Err(RuntimeError::Conflict(
+                "that task is still running; stop it first".into(),
+            ));
+        }
+        let request = TaskRequest {
+            agent: task.entry.id.clone(),
+            prompt: task.prompt.clone(),
+            scope: task.scope.clone(),
+        };
+        self.start_task(caller, request, Some(id))
+    }
+
+    fn start_task(
+        self: &Arc<Self>,
+        caller: &Caller,
+        request: TaskRequest,
+        retry_of: Option<TaskId>,
+    ) -> Result<TaskView> {
         let prepared = self.prepare(caller, &request)?;
         let live = self
             .tasks()
@@ -365,6 +399,7 @@ impl Runtime {
             caller.clone(),
             prepared.entry,
             request.prompt,
+            request.scope,
             prepared.card.plan,
             prepared.policy,
             ctx,
@@ -386,10 +421,16 @@ impl Runtime {
                 "name": g.name, "path": g.root, "writable": g.writable
             })).collect::<Vec<_>>(),
             "sandbox": self.sandbox.kind(),
+            "retry_of": retry_of,
         });
         self.audit(event);
-        task.lock()
-            .note(ActivityKind::State, format!("Started by {}", caller.name));
+        task.lock().note(
+            ActivityKind::State,
+            match retry_of {
+                Some(first) => format!("Started by {} (retry of {})", caller.name, first.short()),
+                None => format!("Started by {}", caller.name),
+            },
+        );
         self.publish(&task);
 
         let handle = tokio::spawn(supervise::run(Arc::clone(self), Arc::clone(&task), stop_rx));

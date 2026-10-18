@@ -8,7 +8,7 @@ use std::sync::{Mutex, MutexGuard};
 use glass_actions::TaskContext;
 use glass_api::{
     ActivityEntry, ActivityKind, ApprovalView, ChangeEntry, FeedLine, Progress, Receipt,
-    SnapshotMarker, TaskDetail, TaskView, TileState,
+    ScopeRequest, SnapshotMarker, TaskDetail, TaskView, TileState,
 };
 use glass_platform::sandbox::SandboxSpec;
 use glass_platform::snapshot::SnapshotHandle;
@@ -36,6 +36,8 @@ pub(crate) struct Task {
     pub user: Caller,
     pub entry: CatalogEntry,
     pub prompt: String,
+    /// The scope the user set on the handoff card, kept for Retry.
+    pub scope: ScopeRequest,
     pub plan: Vec<String>,
     pub policy: EffectivePolicy,
     pub ctx: TaskContext,
@@ -81,6 +83,7 @@ impl Task {
         user: Caller,
         entry: CatalogEntry,
         prompt: String,
+        scope: ScopeRequest,
         plan: Vec<String>,
         policy: EffectivePolicy,
         ctx: TaskContext,
@@ -94,6 +97,7 @@ impl Task {
             user,
             entry,
             prompt,
+            scope,
             plan,
             policy,
             ctx,
@@ -164,7 +168,7 @@ impl Task {
             progress: state.progress,
             feed: state.feed.iter().cloned().collect(),
             needs,
-            receipt: (state.tile == TileState::Done).then(|| state.receipt()),
+            receipt: (!state.tile.is_live()).then(|| state.receipt()),
             failure: state.failure.clone(),
             started_at: self.started_at,
             updated_at: state.updated_at,
@@ -216,9 +220,13 @@ impl TaskState {
     }
 
     pub fn receipt(&self) -> Receipt {
+        let count =
+            |keep: fn(&ChangeEntry) -> bool| self.changes.iter().filter(|c| keep(c)).count();
         Receipt {
             actions: self.actions,
             changes: self.changes.len() as u32,
+            undoable: count(|c| c.reversible && !c.undone) as u32,
+            left_machine: count(|c| !c.reversible) as u32,
             flagged: self
                 .changes
                 .iter()

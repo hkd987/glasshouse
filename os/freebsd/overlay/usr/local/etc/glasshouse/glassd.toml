@@ -9,7 +9,7 @@ policy = "/usr/local/etc/glasshouse/policy.toml"
 max_live_tasks_per_user = 8
 
 [sandbox]
-backend = "freebsd-jail"
+backend = "jail"
 agent_dirs = ["/usr/local/libexec/glasshouse"]
 
 [snapshots]

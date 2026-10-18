@@ -20,7 +20,7 @@ FREEBSD_PROFILE ?= vm
 export FREEBSD_PROFILE
 export DIST_PROFILE := $(FREEBSD_PROFILE)
 
-.PHONY: help build check test lint fmt check-layers deny timings freebsd dev-host e2e-vm \
+.PHONY: help build check test lint fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
 	test-env image-release ci clean
 
 help: ## List targets
@@ -49,6 +49,9 @@ check-layers: ## Enforce crate layering and manifest conventions
 
 deny: ## Check dependency licenses and advisories (needs cargo-deny)
 	cargo deny check licenses bans sources
+
+sbom: ## Software bill of materials, admins and security reviews only (BR-4); never ship it
+	tools/legal/notices.py $(addprefix --package ,$(SHIPPED)) --sbom build/sbom/glasshouse.cdx.json
 
 timings: ## Profile a clean build; opens target/cargo-timings/cargo-timing.html
 	cargo build --workspace --timings

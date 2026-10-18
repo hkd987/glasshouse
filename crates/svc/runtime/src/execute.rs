@@ -22,6 +22,7 @@ use glass_types::{SideEffect, Tier, Timestamp};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::runtime::display_path;
 use crate::task::{Gate, Task};
 use crate::{REPORT_PROGRESS_TOOL, Runtime, labels};
 
@@ -189,19 +190,32 @@ impl Runtime {
                         .unwrap_or_default()
                         .replace('_', " ");
                     let target = match preview.targets.as_slice() {
-                        [] => String::new(),
+                        // "List granted folders" → "granted folders"
+                        [] => preview
+                            .summary
+                            .split_once(' ')
+                            .map(|(_, rest)| rest.to_owned())
+                            .unwrap_or_default(),
                         [one] => one.clone(),
                         [first, rest @ ..] => format!("{first} · {} more", rest.len()),
                     };
                     state.record_action(&verb, &target, &preview.summary);
                     let at = Timestamp::now();
                     for change in output.changes {
+                        let id = state.changes.len() as u32;
                         state.changes.push(ChangeEntry {
+                            id,
                             at,
                             kind: change.kind,
                             target: change.target,
                             action: def.name.clone(),
                             reversible: change.reversible,
+                            paths: change
+                                .paths
+                                .iter()
+                                .map(|p| display_path(&task.user.home, p))
+                                .collect(),
+                            undone: false,
                         });
                     }
                 }

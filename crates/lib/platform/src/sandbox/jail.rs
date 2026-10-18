@@ -184,7 +184,7 @@ impl JailSandbox {
 
 impl Sandbox for JailSandbox {
     fn kind(&self) -> &'static str {
-        "freebsd-jail"
+        "jail"
     }
 
     fn is_security_boundary(&self) -> bool {

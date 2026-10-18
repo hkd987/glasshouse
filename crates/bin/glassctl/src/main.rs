@@ -104,12 +104,19 @@ enum Command {
     Dismiss {
         task: String,
     },
-    /// Roll a task back: everything, or to a timeline marker.
+    /// Start an ended task's request again as a new task.
+    Retry {
+        task: String,
+    },
+    /// Roll a task back: everything, to a timeline marker, or single changes.
     Undo {
         task: String,
         /// Timeline marker to roll back to (see `glassctl show`).
         #[arg(long)]
         to: Option<String>,
+        /// Undo only this change, by its number in `glassctl show`. Repeatable.
+        #[arg(long = "change", value_name = "N")]
+        changes: Vec<u32>,
         /// Show what would change without changing anything.
         #[arg(long)]
         dry_run: bool,
@@ -313,7 +320,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     "glassd {}\n  sandbox   {}{}\n  policy    {}\n  running   {} agents\n  waiting   {} approvals\n",
                     s.version,
                     s.sandbox,
-                    if s.sandbox == "freebsd-jail" { String::new() } else { style::red("  (NOT A SECURITY BOUNDARY)") },
+                    if s.contained { String::new() } else { style::red("  (NOT A SECURITY BOUNDARY)") },
                     s.policy,
                     s.tasks_running,
                     s.approvals_pending
@@ -385,7 +392,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::HandBack { task } => lifecycle(&ctl, methods::TASK_HAND_BACK, &task).await,
         Command::Stop { task } => lifecycle(&ctl, methods::TASK_STOP, &task).await,
         Command::Dismiss { task } => ctl.task_call(methods::TASK_DISMISS, &task).await,
-        Command::Undo { task, to, dry_run } => {
+        Command::Retry { task } => {
+            let view: TaskView = ctl.task_call(methods::TASK_RETRY, &task).await?;
+            ctl.show(&view, |v| {
+                format!(
+                    "Started again as {}. Watch it with `glassctl watch`.\n",
+                    v.id.short()
+                )
+            })
+        }
+        Command::Undo {
+            task,
+            to,
+            changes,
+            dry_run,
+        } => {
             let id = ctl.task(&task).await?;
             let to = match to {
                 Some(marker) => {
@@ -409,6 +430,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     UndoRequest {
                         task: id,
                         to,
+                        changes,
                         dry_run,
                     },
                 )

@@ -93,7 +93,7 @@ async fn run(
     }
 
     let sandbox: Arc<dyn Sandbox> = match config.sandbox.backend {
-        SandboxBackend::FreebsdJail => {
+        SandboxBackend::Jail => {
             let mut jail = JailConfig {
                 state_dir: run_dir.join("jails"),
                 ..JailConfig::default()

@@ -20,7 +20,7 @@ const LONG: Duration = Duration::from_secs(180);
 pub async fn containment(h: &Harness) -> anyhow::Result<()> {
     let status: SystemStatus = h.call(methods::SYSTEM_STATUS, Value::Null).await?;
     ensure!(
-        status.sandbox == "freebsd-jail",
+        status.contained && status.sandbox == "jail",
         "containment needs the jail backend, not {}",
         status.sandbox
     );
@@ -175,6 +175,62 @@ pub async fn decline(h: &Harness) -> anyhow::Result<()> {
         .into_iter()
         .any(|r| r.event.outcome == Some(Outcome::Denied));
     ensure!(denied, "the denied action is on the record");
+    Ok(())
+}
+
+/// The Changes view's per-change Undo, and Retry on an ended task, on real
+/// ZFS snapshots (Changes and Calm mockups).
+pub async fn changes(h: &Harness) -> anyhow::Result<()> {
+    let ws = h.workspace("changes")?;
+    let prompt = "Reconcile invoices";
+    let first = h
+        .start("invoice-demo", prompt, &[&ws.invoices], &[&ws.reports])
+        .await?;
+    h.wait_for(first, TileState::NeedsYou, LONG).await?;
+    h.answer(&h.the_ask(first).await?, ApprovalAnswer::Deny)
+        .await?;
+    let done = h.wait_for(first, TileState::Done, SHORT).await?;
+    let summary = ws.reports.join("reconciliation.csv");
+    let draft = done
+        .changes
+        .iter()
+        .find(|c| c.action.as_str() == "mail.draft")
+        .context("the agent saved a draft")?;
+    let draft_path = draft.paths.first().context("the draft names its file")?;
+    ensure!(draft_path.starts_with("~/Mail/Drafts/"), "{draft_path}");
+    let draft_file = h.home.join(draft_path.trim_start_matches("~/"));
+    ensure!(draft_file.exists(), "{} exists", draft_file.display());
+
+    let preview = h.undo_changes(first, vec![draft.id], true).await?;
+    ensure!(preview.removed == [draft_path.clone()], "{preview:?}");
+    ensure!(preview.restored.is_empty(), "{preview:?}");
+    h.undo_changes(first, vec![draft.id], false).await?;
+    ensure!(!draft_file.exists(), "undo removed just the draft");
+    ensure!(summary.exists(), "the other change stays");
+    let after = h.detail(first).await?;
+    let receipt = after.view.receipt.context("an ended task has a receipt")?;
+    ensure!(
+        receipt.undoable == receipt.changes - 1,
+        "the undone change no longer counts as undoable: {receipt:?}"
+    );
+
+    let second = h.act(methods::TASK_RETRY, first).await?.id;
+    ensure!(second != first, "retry starts a new task");
+    h.wait_for(second, TileState::NeedsYou, LONG).await?;
+    h.answer(&h.the_ask(second).await?, ApprovalAnswer::Deny)
+        .await?;
+    let retried = h.wait_for(second, TileState::Done, SHORT).await?;
+    ensure!(retried.prompt == prompt, "same request");
+    ensure!(
+        retried
+            .activity
+            .iter()
+            .any(|a| a.text.contains(&format!("retry of {}", first.short()))),
+        "the retry names the task it repeats"
+    );
+    h.undo(second, false).await?;
+    h.undo(first, false).await?;
+    ensure!(!summary.exists(), "undo all cleaned up");
     Ok(())
 }
 

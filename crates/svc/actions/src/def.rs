@@ -52,8 +52,12 @@ pub struct Preview {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Change {
     pub kind: ChangeKind,
+    /// What changed, as the user would name it.
     pub target: String,
     pub reversible: bool,
+    /// Host files the call wrote, so this one change can be undone on its
+    /// own.
+    pub paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

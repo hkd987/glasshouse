@@ -1,0 +1,49 @@
+#!/bin/sh
+#
+# PROVIDE: glasshouse_identity
+# REQUIRE: mountcritremote FILESYSTEMS os-release motd
+# BEFORE:  LOGIN
+# KEYWORD: nojail
+#
+# BR-1: the system says Glasshouse wherever users look. Writes the OS
+# identity (/etc/os-release) and the login message (/etc/motd), which the
+# base system would otherwise fill in with its own name. post-install.sh
+# turns the base writers (osrelease_enable, update_motd) off.
+
+. /etc/rc.subr
+
+name="glasshouse_identity"
+desc="Write the Glasshouse OS identity and login message"
+rcvar="glasshouse_identity_enable"
+start_cmd="glasshouse_identity_start"
+stop_cmd=":"
+
+branding=/usr/local/share/glasshouse/branding
+
+glasshouse_identity_start()
+{
+	local version build t
+
+	version=$(sed -n 's/^version=//p' "$branding/build-info" 2>/dev/null)
+	build=$(sed -n 's/^build=//p' "$branding/build-info" 2>/dev/null)
+	t=$(mktemp -t os-release)
+	cat > "$t" <<-__EOF__
+		NAME=Glasshouse
+		VERSION="${version:-dev}"
+		VERSION_ID="${version:-0}"
+		BUILD_ID="${build:-unknown}"
+		ID=glasshouse
+		PRETTY_NAME="Glasshouse ${version:-dev}"
+	__EOF__
+	install -C -o root -g wheel -m 444 "$t" /var/run/os-release
+	rm -f "$t"
+	[ -h /etc/os-release ] || ln -sf ../var/run/os-release /etc/os-release
+
+	install -C -o root -g wheel -m 644 "$branding/motd" /var/run/motd
+	[ -h /etc/motd ] || ln -sf ../var/run/motd /etc/motd
+}
+
+load_rc_config "$name"
+: "${glasshouse_identity_enable:=NO}"
+
+run_rc_command "$1"

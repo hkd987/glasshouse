@@ -35,8 +35,13 @@ resume_cmd="glassd_resume"
 
 glassd_precmd()
 {
-	# Refuse to start on a config or policy that doesn't validate.
-	"${procname}" --config "${glassd_config}" --check
+	# Refuse to start on a config or policy that doesn't validate, and say
+	# why only then: at boot this prints on the user's console (BR-1).
+	local out
+	if ! out=$("${procname}" --config "${glassd_config}" --check 2>&1); then
+		echo "${out}" >&2
+		return 1
+	fi
 }
 
 glassd_suspend()

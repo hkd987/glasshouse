@@ -171,6 +171,7 @@ pub struct TaskView {
     /// The pending approval while the state is `NeedsYou`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs: Option<ApprovalView>,
+    /// What the task did, once it has ended (Done, Failed or Stopped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<Receipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -179,13 +180,43 @@ pub struct TaskView {
     pub updated_at: Timestamp,
 }
 
-/// What a finished task did (the Done tile).
+/// What an ended task did: the Done tile's receipt, and the line under a
+/// Failed or Stopped tile's reason ("Nothing left the machine…").
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Receipt {
     pub actions: u32,
     pub changes: u32,
+    /// Changes that can still be undone.
+    #[serde(default)]
+    pub undoable: u32,
+    /// Changes that left the machine, such as sent mail. Can't be undone.
+    #[serde(default)]
+    pub left_machine: u32,
     /// Things the user should look at, such as irreversible actions taken.
     pub flagged: Vec<String>,
+}
+
+impl Receipt {
+    /// One plain sentence on what's safe and what isn't, for a tile that
+    /// stopped early: "Nothing left the machine. 26 changes can be undone."
+    pub fn outcome(&self) -> String {
+        let left = match self.left_machine {
+            0 => "Nothing left the machine.".to_owned(),
+            1 => "1 change left the machine and can't be undone.".to_owned(),
+            n => format!("{n} changes left the machine and can't be undone."),
+        };
+        let undoable = match self.undoable {
+            0 if self.changes == 0 => "Nothing was changed.".to_owned(),
+            0 => String::new(),
+            1 => "1 change can be undone.".to_owned(),
+            n => format!("{n} changes can be undone."),
+        };
+        [left, undoable]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 /// The expanded view (AW-10 to AW-16).
@@ -237,11 +268,22 @@ pub enum ChangeKind {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChangeEntry {
+    /// Stable within the task; undo one change with `UndoRequest::changes`.
+    #[serde(default)]
+    pub id: u32,
     pub at: Timestamp,
     pub kind: ChangeKind,
+    /// What changed, as the user would name it ("Drafts: Invoice 0407").
     pub target: String,
     pub action: ActionName,
     pub reversible: bool,
+    /// The files it wrote, as `~/…` paths. Undoing the change puts these
+    /// back.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// Rolled back since (by Undo all, a roll back, or its own Undo).
+    #[serde(default)]
+    pub undone: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -258,6 +300,11 @@ pub struct UndoRequest {
     /// Roll back to this marker. `None` undoes everything (AU-21).
     #[serde(default)]
     pub to: Option<SnapshotId>,
+    /// Undo only these changes (`ChangeEntry::id`), the per-row Undo in the
+    /// Changes view. Empty means every change since `to`. Undoing a change
+    /// puts its files back as they were before the task touched them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<u32>,
     /// Report what would change without changing anything.
     #[serde(default)]
     pub dry_run: bool,
@@ -273,4 +320,36 @@ pub struct UndoReport {
     pub removed: Vec<String>,
     /// Changes that can't be undone, with the reason.
     pub not_undone: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outcome_says_what_is_safe() {
+        let receipt = |changes, undoable, left_machine| Receipt {
+            actions: 30,
+            changes,
+            undoable,
+            left_machine,
+            flagged: Vec::new(),
+        };
+        assert_eq!(
+            receipt(26, 26, 0).outcome(),
+            "Nothing left the machine. 26 changes can be undone."
+        );
+        assert_eq!(
+            receipt(3, 2, 1).outcome(),
+            "1 change left the machine and can't be undone. 2 changes can be undone."
+        );
+        assert_eq!(
+            receipt(0, 0, 0).outcome(),
+            "Nothing left the machine. Nothing was changed."
+        );
+        assert_eq!(
+            receipt(2, 0, 2).outcome(),
+            "2 changes left the machine and can't be undone."
+        );
+    }
 }

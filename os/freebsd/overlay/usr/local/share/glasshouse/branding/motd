@@ -1,0 +1,7 @@
+
+Welcome to Glasshouse.
+
+  Your agents      glassctl tasks
+  Hand off a task  glassctl run <agent> "<what to do>"
+  Legal notices    /usr/local/share/glasshouse/legal/NOTICES.txt
+

@@ -162,11 +162,22 @@ impl Harness {
     }
 
     pub async fn undo(&self, task: TaskId, dry_run: bool) -> anyhow::Result<UndoReport> {
+        self.undo_changes(task, Vec::new(), dry_run).await
+    }
+
+    /// Undoes only these changes (`ChangeEntry::id`); empty undoes all.
+    pub async fn undo_changes(
+        &self,
+        task: TaskId,
+        changes: Vec<u32>,
+        dry_run: bool,
+    ) -> anyhow::Result<UndoReport> {
         self.call(
             methods::TASK_UNDO,
             UndoRequest {
                 task,
                 to: None,
+                changes,
                 dry_run,
             },
         )

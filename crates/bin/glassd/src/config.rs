@@ -64,8 +64,10 @@ impl Default for SandboxConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxBackend {
+    /// One jail per task: the only real boundary.
     #[default]
-    FreebsdJail,
+    #[serde(alias = "freebsd-jail")]
+    Jail,
     HostInsecure,
 }
 
@@ -131,7 +133,7 @@ impl Config {
             if !agent.program.is_absolute() {
                 bail!("agent {}: program must be an absolute path", agent.id);
             }
-            if self.sandbox.backend == SandboxBackend::FreebsdJail
+            if self.sandbox.backend == SandboxBackend::Jail
                 && !self
                     .sandbox
                     .agent_dirs
@@ -162,12 +164,18 @@ mod tests {
     fn defaults_are_the_production_layout() {
         let config: Config = toml::from_str("").unwrap();
         config.validate().unwrap();
-        assert_eq!(config.sandbox.backend, SandboxBackend::FreebsdJail);
+        assert_eq!(config.sandbox.backend, SandboxBackend::Jail);
         assert_eq!(config.snapshots.backend, SnapshotBackend::Zfs);
         assert_eq!(
             config.audit_log(),
             PathBuf::from("/var/db/glasshouse/audit/audit.log")
         );
+    }
+
+    #[test]
+    fn the_old_backend_name_still_parses() {
+        let config: Config = toml::from_str("[sandbox]\nbackend = \"freebsd-jail\"\n").unwrap();
+        assert_eq!(config.sandbox.backend, SandboxBackend::Jail);
     }
 
     #[test]

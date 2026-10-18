@@ -6,7 +6,8 @@
 #   3. sleep: running agents pause before the machine sleeps and resume after
 #   4. crash recovery: kill -9 glassd mid-task; on restart it removes the
 #      orphaned jail and the audit log is intact
-#   5. root checks: audit chain verifies, no jails or mounts left behind
+#   5. branding: no base-system name where a user looks (BR-1, BR-2)
+#   6. root checks: audit chain verifies, no jails or mounts left behind
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -51,6 +52,10 @@ after=$("$vm" run "$glass_jails")
 [[ $after -eq 0 ]] || { echo "FAIL $after orphaned jails survived the restart"; exit 1; }
 "$vm" run "grep -q 'removed a sandbox left behind' /var/log/glassd.log"
 echo "PASS crash recovery (orphaned jail removed on restart)"
+
+step "branding (BR-1, BR-2)"
+"$vm" scp-in "$repo/tests/e2e/check-branding.sh" /tmp/check-branding.sh
+"$vm" run "sh /tmp/check-branding.sh"
 
 step "root checks"
 "$vm" run "glassctl verify

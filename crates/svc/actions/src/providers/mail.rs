@@ -269,6 +269,7 @@ impl ActionProvider for MailProvider {
                         kind: ChangeKind::Created,
                         target,
                         reversible: true,
+                        paths: vec![Self::mail_dir(ctx).join(&rel)],
                     }],
                 })
             }
@@ -289,6 +290,7 @@ impl ActionProvider for MailProvider {
                         kind: ChangeKind::Sent,
                         target: Self::describe(message),
                         reversible: false,
+                        paths: vec![Self::mail_dir(ctx).join(&rel)],
                     });
                 }
                 Ok(ActionOutput {

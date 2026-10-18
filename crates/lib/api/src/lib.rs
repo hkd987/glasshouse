@@ -54,6 +54,10 @@ pub mod methods {
     pub const TASK_DISMISS: &str = "task.dismiss";
     /// [`crate::UndoRequest`] → [`crate::UndoReport`] (AW-15, AU-21)
     pub const TASK_UNDO: &str = "task.undo";
+    /// [`crate::TaskRef`] → [`crate::TaskView`]: the Failed tile's Retry.
+    /// Starts the ended task's request again as a new task, under today's
+    /// policy. What the first run saved stays (and stays undoable there).
+    pub const TASK_RETRY: &str = "task.retry";
     /// `()` → `Vec<`[`crate::ApprovalView`]`>`: pending approvals.
     pub const APPROVAL_LIST: &str = "approval.list";
     /// [`crate::AnswerApproval`] → [`crate::ApprovalView`] (DA-11)
@@ -77,9 +81,12 @@ pub mod methods {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemStatus {
     pub version: String,
-    /// The sandbox backend in use. Anything but `freebsd-jail` is not a
-    /// security boundary.
+    /// The sandbox backend in use, for support and audit.
     pub sandbox: String,
+    /// Whether that backend contains agents. Only development builds run
+    /// without containment.
+    #[serde(default)]
+    pub contained: bool,
     /// Where the enforced policy came from.
     pub policy: String,
     pub tasks_running: usize,

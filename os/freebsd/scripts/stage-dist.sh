@@ -15,7 +15,7 @@ mkdir -p "$DIST_DIR"
 cp -a "$FREEBSD_OS_DIR/overlay/." "$DIST_DIR/"
 find "$DIST_DIR" -name .gitkeep -delete
 
-missing=() n=0 lineno=0
+missing=() shipped=() n=0 lineno=0
 while read -r name path mode extra; do
 	lineno=$((lineno + 1))
 	[[ -z $name || $name == \#* ]] && continue
@@ -26,9 +26,26 @@ while read -r name path mode extra; do
 		missing+=("$name")
 		continue
 	fi
+	shipped+=("$name")
 	install -D -m "$mode" "$bindir/$name" "$DIST_DIR/$path"
 	n=$((n + 1))
 done <"$manifest"
+
+# Open-source notices for the shipped binaries and the base system (BR-2).
+notice_args=()
+for name in "${shipped[@]}"; do notice_args+=(--package "$name"); done
+python3 "$REPO_ROOT/tools/legal/notices.py" "${notice_args[@]}" \
+	--base-txz "$CACHE_DIR/$FREEBSD_BASE_TXZ" \
+	--notices "$DIST_DIR/usr/local/share/glasshouse/legal/NOTICES.txt" 2>/dev/null ||
+	die "open-source notices failed: run tools/legal/notices.py for details"
+
+# The OS identity the image reports (BR-1; read by rc.d/glasshouse_identity).
+version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' "$REPO_ROOT/Cargo.toml")
+build=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
+git -C "$REPO_ROOT" diff --quiet HEAD 2>/dev/null || build="$build-dirty"
+install -d "$DIST_DIR/usr/local/share/glasshouse/branding"
+printf 'version=%s\nbuild=%s\nprofile=%s\n' "$version" "$build" "${DIST_PROFILE:-release}" \
+	>"$DIST_DIR/usr/local/share/glasshouse/branding/build-info"
 
 if ((${#missing[@]})); then
 	die "missing binaries in ${bindir#"$REPO_ROOT"/}: ${missing[*]}" \

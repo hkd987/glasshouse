@@ -90,6 +90,8 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
     event.detail = serde_json::json!({
         "actions": receipt.actions,
         "changes": receipt.changes,
+        "undoable": receipt.undoable,
+        "left_machine": receipt.left_machine,
         "flagged": receipt.flagged,
         "sandbox_teardown_error": teardown_error,
     });
@@ -173,9 +175,15 @@ async fn setup_and_wait(
             state.tile = TileState::Working;
             state.caption = "Getting started".into();
         }
+        // Users read this line, so it names no backend (BR-1); the audit
+        // record carries the backend for security teams.
         state.note(
             ActivityKind::State,
-            format!("Agent running in {} sandbox", rt.sandbox.kind()),
+            if rt.sandbox.is_security_boundary() {
+                "Agent running in its own sealed sandbox"
+            } else {
+                "Agent running WITHOUT containment (development mode)"
+            },
         );
     }
     rt.publish(task);

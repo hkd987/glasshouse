@@ -527,6 +527,7 @@ async fn undo_all_restores_removes_and_lists_what_left_the_machine() {
             UndoRequest {
                 task,
                 to: None,
+                changes: vec![],
                 dry_run: true,
             },
         )
@@ -548,6 +549,7 @@ async fn undo_all_restores_removes_and_lists_what_left_the_machine() {
             UndoRequest {
                 task,
                 to: None,
+                changes: vec![],
                 dry_run: false,
             },
         )
@@ -607,6 +609,7 @@ async fn rolling_back_to_a_marker_keeps_earlier_work() {
             UndoRequest {
                 task,
                 to: Some(markers[2].id),
+                changes: vec![],
                 dry_run: false,
             },
         )
@@ -911,4 +914,103 @@ async fn feed_lines_carry_verb_and_target() {
     assert_eq!(card.agent.version, "0.1");
     assert_eq!(card.max_label, Some(glass_types::Label::Internal));
     assert_eq!(card.model, "No model (scripted agent)");
+}
+
+#[tokio::test]
+async fn undoing_single_changes_leaves_the_rest() {
+    let h = harness();
+    let task = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let agent = h.agent(task).await;
+    for (path, content) in [
+        ("Reports/one.txt", "1"),
+        ("Reports/two.txt", "2"),
+        ("Reports/existing.txt", "clobbered"),
+    ] {
+        let args = json!({"path": path, "content": content});
+        assert!(!tool(&agent, "files_write", args).await.is_error);
+    }
+    let changes = h.rt.get(&h.me, task).unwrap().changes;
+    assert_eq!(changes.iter().map(|c| c.id).collect::<Vec<_>>(), [0, 1, 2]);
+    assert_eq!(changes[2].paths, ["~/Reports/existing.txt"]);
+
+    let undo = |changes: Vec<u32>, dry_run| UndoRequest {
+        task,
+        to: None,
+        changes,
+        dry_run,
+    };
+    let preview = h.rt.undo(&h.me, undo(vec![1, 2], true)).await.unwrap();
+    assert_eq!(preview.removed, ["~/Reports/two.txt"]);
+    assert_eq!(preview.restored, ["~/Reports/existing.txt"]);
+    let report = h.rt.undo(&h.me, undo(vec![1, 2], false)).await.unwrap();
+    assert_eq!(report.removed, preview.removed);
+    assert!(h.home().join("Reports/one.txt").exists(), "the rest stays");
+    assert!(!h.home().join("Reports/two.txt").exists());
+    assert_eq!(
+        fs::read_to_string(h.home().join("Reports/existing.txt")).unwrap(),
+        "original report\n"
+    );
+    let undone: Vec<bool> =
+        h.rt.get(&h.me, task)
+            .unwrap()
+            .changes
+            .iter()
+            .map(|c| c.undone)
+            .collect();
+    assert_eq!(undone, [false, true, true]);
+    assert!(matches!(
+        h.rt.undo(&h.me, undo(vec![9], true)).await,
+        Err(RuntimeError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn an_ended_task_says_what_is_safe_and_can_be_retried() {
+    let h = harness();
+    let request = h.request(&["Invoices"], &["Reports"]);
+    let first = h.rt.start(&h.me, request.clone()).unwrap().id;
+    assert!(
+        matches!(h.rt.retry(&h.me, first), Err(RuntimeError::Conflict(_))),
+        "a running task can't be retried"
+    );
+    let agent = h.agent(first).await;
+    let args = json!({"path": "Reports/one.txt", "content": "1"});
+    assert!(!tool(&agent, "files_write", args).await.is_error);
+    h.rt.stop(&h.me, first).unwrap();
+    eventually(|| h.rt.get(&h.me, first).unwrap().view.receipt.is_some()).await;
+
+    // The Failed and Stopped tiles say what's safe (Calm mockup).
+    let receipt = h.rt.get(&h.me, first).unwrap().view.receipt.unwrap();
+    assert_eq!((receipt.undoable, receipt.left_machine), (1, 0));
+    assert_eq!(
+        receipt.outcome(),
+        "Nothing left the machine. 1 change can be undone."
+    );
+
+    let stranger = Caller {
+        name: "mallory".into(),
+        uid: 4242,
+        gid: 4242,
+        home: PathBuf::from("/home/mallory"),
+    };
+    assert!(matches!(
+        h.rt.retry(&stranger, first),
+        Err(RuntimeError::NotFound(_))
+    ));
+
+    let second = h.rt.retry(&h.me, first).unwrap().id;
+    assert_ne!(second, first);
+    let detail = h.rt.get(&h.me, second).unwrap();
+    assert_eq!(detail.prompt, request.prompt);
+    let note = format!("retry of {}", first.short());
+    assert!(detail.activity.iter().any(|a| a.text.contains(&note)));
+    // Same scope as the first run: Reports is writable again.
+    let agent = h.agent(second).await;
+    let args = json!({"path": "Reports/two.txt", "content": "2"});
+    assert!(!tool(&agent, "files_write", args).await.is_error);
+    let started = glass_audit::read(&h.audit_path(), |r| {
+        r.event.kind == EventKind::TaskStarted && r.event.task == Some(second)
+    })
+    .unwrap();
+    assert_eq!(started[0].event.detail["retry_of"], json!(first));
 }

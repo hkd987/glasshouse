@@ -1,18 +1,20 @@
-//! Rollback: "Undo all" (AU-21) and "Roll back to [time]" (AW-15).
+//! Rollback: "Undo all" (AU-21), "Roll back to [time]" (AW-15) and the
+//! Changes view's per-change Undo.
 //!
 //! For every root the task's snapshots cover, take the earliest snapshot at
 //! or after the target point; it predates any change the agent made to that
 //! root, because a root is always snapshotted before the first change to it.
 //! Files that differ from it are put back (or removed, if they were created
-//! since). Changes that left the machine are listed, not undone.
+//! since). Changes that left the machine are listed, not undone. Undoing
+//! single changes does the same for just the files those changes wrote.
 //!
 //! Limits, stated plainly in every report: rollback covers the task's
 //! snapshotted roots, and restores them as they were at the snapshot, so a
 //! change the user made in the same folders during the task is rolled back
 //! too. `dry_run` shows exactly what would change first.
 
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -39,6 +41,7 @@ impl Runtime {
             .ok_or_else(|| RuntimeError::NotFound(format!("no task {}", request.task.short())))?;
 
         let (since, plan) = rollback_plan(&task, request.to)?;
+        let selection = select(&task, &request.changes, since)?;
         if !request.dry_run && matches!(task.lock().tile, TileState::Working | TileState::NeedsYou)
         {
             // Nothing may change underneath a rollback. The task stays held
@@ -51,8 +54,16 @@ impl Runtime {
         let owner = task.ctx.owner;
         let home = task.user.home.clone();
         let dry_run = request.dry_run;
+        let only = selection.paths.clone();
         let mut report = tokio::task::spawn_blocking(move || {
-            apply(snapshots.as_ref(), &plan, owner, &home, dry_run)
+            apply(
+                snapshots.as_ref(),
+                &plan,
+                only.as_ref(),
+                owner,
+                &home,
+                dry_run,
+            )
         })
         .await
         .map_err(|e| RuntimeError::Internal(e.to_string()))??;
@@ -61,14 +72,27 @@ impl Runtime {
             .lock()
             .changes
             .iter()
-            .filter(|c| !c.reversible && c.at >= since)
+            .filter(|c| !c.reversible && selection.ids.contains(&c.id))
             .map(|c| format!("{} — this left the machine and can't be recalled", c.target))
             .collect();
 
         if !dry_run {
+            {
+                let mut state = task.lock();
+                for change in state.changes.iter_mut() {
+                    if change.reversible && selection.ids.contains(&change.id) {
+                        change.undone = true;
+                    }
+                }
+            }
+            let what = if request.changes.is_empty() {
+                format!("Rolled back to {}", since.clock())
+            } else {
+                let n = request.changes.len();
+                format!("Undid {n} change{}", if n == 1 { "" } else { "s" })
+            };
             let summary = format!(
-                "Rolled back to {}: restored {}, removed {}, {} not undoable",
-                since.clock(),
+                "{what}: restored {}, removed {}, {} not undoable",
                 report.restored.len(),
                 report.removed.len(),
                 report.not_undone.len()
@@ -82,6 +106,7 @@ impl Runtime {
                 .collect();
             event.snapshot = request.to;
             event.detail = serde_json::json!({
+                "changes": request.changes,
                 "restored": report.restored,
                 "removed": report.removed,
                 "not_undone": report.not_undone,
@@ -96,6 +121,47 @@ impl Runtime {
         }
         Ok(report)
     }
+}
+
+/// The changes a rollback covers, and the files to limit it to.
+struct Selection {
+    ids: BTreeSet<u32>,
+    /// `~/…` paths to restore; `None` restores everything since the point.
+    paths: Option<BTreeSet<String>>,
+}
+
+fn select(task: &Task, wanted: &[u32], since: Timestamp) -> Result<Selection> {
+    let state = task.lock();
+    if wanted.is_empty() {
+        return Ok(Selection {
+            ids: state
+                .changes
+                .iter()
+                .filter(|c| c.at >= since)
+                .map(|c| c.id)
+                .collect(),
+            paths: None,
+        });
+    }
+    let mut selection = Selection {
+        ids: BTreeSet::new(),
+        paths: Some(BTreeSet::new()),
+    };
+    for id in wanted {
+        let change = state
+            .changes
+            .iter()
+            .find(|c| c.id == *id)
+            .ok_or_else(|| RuntimeError::NotFound(format!("this task has no change {id}")))?;
+        selection.ids.insert(change.id);
+        if change.reversible {
+            selection
+                .paths
+                .get_or_insert_default()
+                .extend(change.paths.iter().cloned());
+        }
+    }
+    Ok(selection)
 }
 
 /// Which snapshot restores each root, and the point in time rolled back to.
@@ -134,6 +200,7 @@ fn rollback_plan(
 fn apply(
     snapshots: &dyn Snapshotter,
     plan: &[(PathBuf, SnapshotHandle)],
+    only: Option<&BTreeSet<String>>,
     owner: Owner,
     home: &Path,
     dry_run: bool,
@@ -160,6 +227,9 @@ fn apply(
                 continue;
             };
             let shown = display_path(home, &change.path);
+            if only.is_some_and(|paths| !paths.contains(&shown)) {
+                continue;
+            }
             match change.kind {
                 ChangeKind::Created => {
                     if !dry_run {

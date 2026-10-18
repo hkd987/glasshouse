@@ -4,6 +4,7 @@
 #
 # - creates the daemon's state and run directories with the right modes;
 # - enables glassd at boot;
+# - brands the system: no base-system name where users look (BR-1);
 # - seeds demo data for the `demo` user, if that user exists and has none.
 
 set -eu
@@ -12,6 +13,41 @@ install -d -o root -g wheel -m 0700 /var/db/glasshouse
 install -d -o root -g wheel -m 0755 /var/run/glasshouse
 
 sysrc -q glassd_enable=YES >/dev/null
+
+# BR-1. Identity and login message come from rc.d/glasshouse_identity; the
+# base writers it replaces are turned off.
+branding=/usr/local/share/glasshouse/branding
+sysrc -q osrelease_enable=NO update_motd=NO glasshouse_identity_enable=YES >/dev/null
+if [ "$(sysrc -n hostname 2>/dev/null)" = freebsd ]; then
+	sysrc -q hostname=glasshouse >/dev/null
+fi
+service glasshouse_identity start >/dev/null
+# Boot: our brand on the loader menu, no logo, and a quiet kernel and rc.
+# To debug boot, set boot_mute=NO in /boot/loader.conf and reboot.
+install -C -o root -g wheel -m 0444 "$branding/gfx-glasshouse.lua" /boot/lua/gfx-glasshouse.lua
+sysrc -q -f /boot/loader.conf loader_brand=glasshouse loader_logo=none \
+	beastie_disable=YES boot_mute=YES >/dev/null
+sysrc -q rc_startmsgs=NO >/dev/null
+# Console login banner: the product, not the base system's name (%s).
+sed -i '' -e 's|:im=\\r\\n%s/%m (%h) (%t)|:im=\\r\\nGlasshouse (%h) (%t)|' /etc/gettytab
+# No base-system tips at login, for new accounts and existing ones.
+for f in /usr/share/skel/dot.profile /usr/share/skel/dot.login /home/*/.profile /home/*/.login; do
+	[ -f "$f" ] && sed -i '' -e '/^[^#].*fortune freebsd-tips/s/^/# /' "$f"
+done
+# SSH doesn't announce the base system in its version string. The config
+# is only replaced once sshd accepts it, so a bad edit can't lock us out.
+if ! grep -q '^VersionAddendum' /etc/ssh/sshd_config; then
+	conf=$(mktemp /etc/ssh/sshd_config.XXXXXX)
+	cat /etc/ssh/sshd_config >"$conf"
+	echo 'VersionAddendum none' >>"$conf"
+	if sshd -t -f "$conf"; then
+		chmod 0644 "$conf"
+		mv "$conf" /etc/ssh/sshd_config
+		service sshd reload >/dev/null
+	else
+		rm -f "$conf"
+	fi
+fi
 
 seed=/usr/local/share/glasshouse/demo
 if pw usershow demo >/dev/null 2>&1; then

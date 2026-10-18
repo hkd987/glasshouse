@@ -116,18 +116,37 @@ pub fn tile(view: &TaskView) -> String {
             ))
         );
     }
-    if let Some(receipt) = &view.receipt {
-        let _ = writeln!(
-            out,
-            "  Receipt: {} actions, {} changes",
-            receipt.actions, receipt.changes
-        );
-        for flag in &receipt.flagged {
-            let _ = writeln!(out, "    {} {flag}", orange("⚑"));
-        }
-    }
     if let Some(failure) = &view.failure {
         let _ = writeln!(out, "  {}", red(failure));
+    }
+    match (&view.receipt, view.state) {
+        (Some(receipt), TileState::Done) => {
+            let _ = writeln!(
+                out,
+                "  Receipt: {} actions, {} changes",
+                receipt.actions, receipt.changes
+            );
+            for flag in &receipt.flagged {
+                let _ = writeln!(out, "    {} {flag}", orange("⚑"));
+            }
+        }
+        // A tile that stopped early says what's safe (the Failed mockup).
+        (Some(receipt), _) => {
+            let _ = writeln!(out, "  {}", receipt.outcome());
+        }
+        (None, _) => {}
+    }
+    if view.state == TileState::Failed {
+        let id = view.id.short();
+        let undo = match &view.receipt {
+            Some(r) if r.undoable > 0 => format!("glassctl undo {id}  ·  "),
+            _ => String::new(),
+        };
+        let _ = writeln!(
+            out,
+            "    {}",
+            dim(&format!("glassctl retry {id}  ·  {undo}glassctl show {id}"))
+        );
     }
     out
 }
@@ -181,17 +200,30 @@ pub fn detail(d: &TaskDetail) -> String {
             ChangeKind::Moved => "moved",
             ChangeKind::Sent => "sent",
         };
-        let note = if change.reversible {
-            String::new()
-        } else {
+        let note = if !change.reversible {
             format!("  {}", orange("can't be undone"))
+        } else if change.undone {
+            format!("  {}", dim("undone"))
+        } else {
+            String::new()
         };
         let _ = writeln!(
             out,
-            "  {} {:<9} {}{note}",
+            "  {:>3} {} {:<9} {}{note}",
+            dim(&format!("#{}", change.id)),
             dim(&change.at.clock()),
             kind,
             change.target
+        );
+    }
+    if d.changes.iter().any(|c| c.reversible && !c.undone) {
+        let _ = writeln!(
+            out,
+            "      {}",
+            dim(&format!(
+                "glassctl undo {} --change <#> [--dry-run]",
+                d.view.id.short()
+            ))
         );
     }
     let _ = writeln!(out, "\n{}", bold("Can't touch"));
