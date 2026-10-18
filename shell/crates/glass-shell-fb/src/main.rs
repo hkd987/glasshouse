@@ -87,6 +87,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
+    let started = Instant::now();
     let client = Client::connect(&args.socket)
         .await
         .with_context(|| format!("connecting to {}", args.socket.display()))?;
@@ -100,11 +101,20 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow!("task.list: {e}"))?;
 
+    let asked = started.elapsed();
     let live = Live::new(tasks)
         .without_wallpaper()
         .signed_in_as(signed_in_as());
     let mut shell = Shell::open(args.tty, offset, live)?;
+    let opened = started.elapsed();
     shell.draw(true);
+    eprintln!(
+        "desktop up in {} ms: glassd {} ms, screen {} ms, first frame {} ms",
+        started.elapsed().as_millis(),
+        asked.as_millis(),
+        (opened - asked).as_millis(),
+        (started.elapsed() - opened).as_millis()
+    );
     if args.once {
         return Ok(());
     }
