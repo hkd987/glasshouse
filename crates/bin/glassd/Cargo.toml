@@ -1,0 +1,31 @@
+[package]
+name = "glassd"
+description = "The Glasshouse system daemon: hosts the runtime, brokers and the control socket."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+glass-actions.workspace = true
+glass-api.workspace = true
+glass-audit.workspace = true
+glass-platform.workspace = true
+glass-policy.workspace = true
+glass-rpc.workspace = true
+glass-runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
