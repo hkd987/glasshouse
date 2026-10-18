@@ -89,3 +89,77 @@ fn da1_typing_into_the_command_bar_after_ctrl_space() {
     }
     assert_eq!(live.command_bar().map(|b| b.query), Some("hi".into()));
 }
+
+#[test]
+fn redrawing_only_what_changed_matches_drawing_everything() {
+    redraws_match(false);
+}
+
+#[test]
+fn redrawing_over_a_backdrop_matches_drawing_everything() {
+    redraws_match(true);
+}
+
+/// A tile changes: the screen redraws a small part, and the result is what
+/// drawing everything again gives. With `backdrop`, the screen keeps the
+/// wallpaper and the view leaves it out.
+fn redraws_match(backdrop: bool) {
+    use glass_api::{Event as TaskEvent, TileState};
+
+    let theme = Theme::glass();
+    let tasks = fixtures::tasks();
+    let mut live = Live::new(tasks.clone());
+    if backdrop {
+        live = live.without_wallpaper();
+    }
+    let screen = || {
+        let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+        if backdrop {
+            screen.set_backdrop(glass_shell::wallpaper::backdrop(
+                &theme.wallpaper,
+                SIZE.0 as u32,
+                SIZE.1 as u32,
+            ));
+        }
+        screen
+    };
+    let render = |screen: &mut Screen, live: &Live| {
+        screen.render(live.view(&theme, None, artboard_time(), SIZE), None)
+    };
+    let mut kept = screen();
+    let first = render(&mut kept, &live);
+    assert_eq!(first.len(), 1, "the first frame draws everything");
+
+    // One tile finishes.
+    let mut done = tasks[1].clone();
+    done.state = TileState::Done;
+    done.needs = None;
+    live.apply(TaskEvent::TaskUpdated {
+        task: Box::new(done),
+    });
+    let changed = render(&mut kept, &live);
+    let area: u32 = changed.iter().map(|d| d.width * d.height).sum();
+    assert!(!changed.is_empty());
+    assert!(
+        area < (SIZE.0 * SIZE.1 / 3.0) as u32,
+        "a tile change redraws a small part: {changed:?}"
+    );
+
+    let mut fresh = screen();
+    render(&mut fresh, &live);
+    // Shadows blurred under a smaller clip can round a step differently;
+    // nothing a person could see.
+    let worst = kept
+        .frame()
+        .rgba
+        .iter()
+        .zip(&fresh.frame().rgba)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max();
+    assert!(
+        worst.is_some_and(|d| d <= 2),
+        "redrawing the damage gives the pixels drawing it all does (off by {worst:?})"
+    );
+    let again = render(&mut kept, &live);
+    assert!(again.is_empty(), "nothing changed: {again:?}");
+}

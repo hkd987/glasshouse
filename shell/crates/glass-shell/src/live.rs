@@ -11,12 +11,15 @@ use crate::screens::command_bar::{self, CommandBar};
 use crate::screens::desktop::{self, Desktop};
 use crate::{Element, Message, Theme};
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Live {
     /// From `task.list`, then kept current from `events.subscribe`.
     tasks: Vec<TaskView>,
     /// The command bar's text while it's open.
     command: Option<String>,
+    /// Whether the view draws the wallpaper, or the screen keeps it as its
+    /// backdrop.
+    wallpaper: bool,
 }
 
 /// What a message asks the shell to do.
@@ -28,12 +31,26 @@ pub enum Effect {
     Focus(&'static str),
 }
 
+impl Default for Live {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
 impl Live {
     pub fn new(tasks: Vec<TaskView>) -> Self {
         Self {
             tasks,
             command: None,
+            wallpaper: true,
         }
+    }
+
+    /// Leaves the wallpaper out of the view, for a screen that keeps it as
+    /// its backdrop (`render::Screen::set_backdrop`).
+    pub fn without_wallpaper(mut self) -> Self {
+        self.wallpaper = false;
+        self
     }
 
     pub fn tasks(&self) -> &[TaskView] {
@@ -118,6 +135,7 @@ impl Live {
         let state = Desktop {
             // Tiles collapse while the command bar is open.
             tiles_visible: bar.is_none(),
+            wallpaper: self.wallpaper,
             ..Desktop::live(&self.tasks, now)
         };
         let overlay = bar.map(|bar| command_bar::overlay(theme, bar));

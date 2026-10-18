@@ -47,8 +47,7 @@ decision, so the perf scenario leaves Asks out.
   calls per file, and a read of the file and its snapshot copy when their
   metadata differs. It used to ask `zfs diff`, which walks every change in
   the whole home dataset since the snapshot and took 0.8 to 1.3 s per
-  preview in the VM; the 1 s ceiling is a placeholder until the VM measures
-  the new code.
+  preview in the VM; now 6 to 9 ms at the median.
 - **`zfs diff`** is left in hand back only, which asks what the user changed
   while driving (the broker doesn't see those edits). It costs what the
   home changed during the take over, so it grows with long take overs on a
@@ -57,6 +56,21 @@ decision, so the perf scenario leaves Asks out.
   the first snapshot make up most of "start to first step".
 - **Audit.** Records are written with `fsync` (`Durability::Sync`), a few
   milliseconds each in the VM.
+- **The desktop shell's redraws.** A frame redraws only the areas whose
+  content changed (`render::Screen`: iced's layer diff, extended to drop
+  shadows), and the wallpaper stays drawn as the screen's backdrop rather
+  than being scaled again for every area. A vendored patch to
+  `iced_tiny_skia` (`shell/vendor/README.md`) computes a drop shadow only
+  inside the area being redrawn. Measured with `cargo test -p glass-shell
+  --test redraw_cost -- --ignored --nocapture` (laptop) and the
+  `drawn in` lines of `/var/log/glass-shell-fb.log` (VM):
+
+  | Redraw | Laptop before | Laptop now | VM before | VM now |
+  |---|---|---|---|---|
+  | Menu bar clock turns over | 122 ms | 1.8 ms | 1.1 s | 47 ms |
+  | A key typed in the command bar | 42 ms | 5 ms | 1.7 s | 28 to 60 ms |
+  | Nothing changed | 190 ms | 0.4 ms | 2 s | 3 to 7 ms |
+  | Whole screen (first frame, opening the command bar) | 191 ms | 60 ms | 3 s | 1.5 to 1.9 s |
 
 ## Rules for new code
 

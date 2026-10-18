@@ -2,6 +2,9 @@
 //! shown as images. tiny-skia and kurbo (which parses SVG path data) are
 //! already in the renderer, so this costs no SVG library.
 
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
 use iced_core::image::Handle;
 use iced_core::{Color, Length};
 use iced_widget::image;
@@ -65,8 +68,26 @@ pub fn view<'a, Message: 'a>(
         .into()
 }
 
-/// Rasterizes an icon.
+/// An icon rasterized in `color` at `width` x `height`. Each one is drawn
+/// once and kept: views are rebuilt every frame, and an image with a new
+/// handle counts as changed, so redrawing would never skip it.
 pub fn handle(icon: &Icon, color: Color, width: f32, height: f32) -> Handle {
+    type Key = (usize, [u32; 4], u32, u32);
+    static DRAWN: Mutex<BTreeMap<Key, Handle>> = Mutex::new(BTreeMap::new());
+    let key = (
+        icon.shapes.as_ptr() as usize,
+        color.into_rgba8().map(u32::from),
+        width.to_bits(),
+        height.to_bits(),
+    );
+    let mut drawn = DRAWN.lock().unwrap_or_else(|e| e.into_inner());
+    drawn
+        .entry(key)
+        .or_insert_with(|| rasterize(icon, color, width, height))
+        .clone()
+}
+
+fn rasterize(icon: &Icon, color: Color, width: f32, height: f32) -> Handle {
     let w = (width * OVERSAMPLE).ceil().max(1.0) as u32;
     let h = (height * OVERSAMPLE).ceil().max(1.0) as u32;
     let Some(mut pixmap) = Pixmap::new(w, h) else {

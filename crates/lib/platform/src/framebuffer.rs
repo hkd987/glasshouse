@@ -30,17 +30,39 @@ pub struct Geometry {
 /// and QEMU's VGA give.
 const BYTES_PER_PIXEL: usize = 4;
 
+/// The byte order of the pixels handed to the framebuffer: straight RGBA,
+/// or B, G, R, A as software renderers commonly draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Order {
+    Rgba,
+    Bgra,
+}
+
 impl Geometry {
-    /// Packs one row of straight RGBA pixels into this screen's layout. A
-    /// row longer than the screen is cut; alpha is dropped.
-    pub fn pack_row(&self, rgba: &[u8], out: &mut [u8]) {
-        let pixels = rgba
+    /// Packs one row of 4-byte pixels in `order` into this screen's layout.
+    /// A row longer than the screen is cut; alpha is dropped. B, G, R, A on
+    /// a screen laid out that way (blue lowest, as UEFI's usually is) is
+    /// copied as it is.
+    pub fn pack_row(&self, pixels: &[u8], order: Order, out: &mut [u8]) {
+        let n = (self.width as usize * BYTES_PER_PIXEL)
+            .min(pixels.len() - pixels.len() % 4)
+            .min(out.len());
+        if order == Order::Bgra && (self.red_shift, self.green_shift, self.blue_shift) == (16, 8, 0)
+        {
+            out[..n].copy_from_slice(&pixels[..n]);
+            return;
+        }
+        let (r, b) = match order {
+            Order::Rgba => (0, 2),
+            Order::Bgra => (2, 0),
+        };
+        for (src, dst) in pixels[..n]
             .chunks_exact(4)
-            .zip(out.chunks_exact_mut(BYTES_PER_PIXEL));
-        for (src, dst) in pixels.take(self.width as usize) {
-            let value = (u32::from(src[0]) << self.red_shift)
+            .zip(out[..n].chunks_exact_mut(BYTES_PER_PIXEL))
+        {
+            let value = (u32::from(src[r]) << self.red_shift)
                 | (u32::from(src[1]) << self.green_shift)
-                | (u32::from(src[2]) << self.blue_shift);
+                | (u32::from(src[b]) << self.blue_shift);
             dst.copy_from_slice(&value.to_le_bytes());
         }
     }
@@ -84,25 +106,31 @@ impl Framebuffer {
     pub fn write_rgba(&mut self, rgba: &[u8], width: u32, rows: Range<u32>) {
         let stride = width as usize * 4;
         let band = rows.start as usize * stride..(rows.end as usize * stride).min(rgba.len());
-        self.write_rows(rgba.get(band).unwrap_or_default(), width, rows.start);
+        self.write_rows(
+            rgba.get(band).unwrap_or_default(),
+            Order::Rgba,
+            width,
+            rows.start,
+        );
     }
 
-    /// Copies whole rows of straight RGBA pixels, `width` wide, onto the
-    /// screen from row `top` down, such as the band a moving pointer
-    /// crosses. Rows and columns past the screen's edge are left out.
-    pub fn write_rows(&mut self, rgba: &[u8], width: u32, top: u32) {
+    /// Copies whole rows of 4-byte pixels in `order`, `width` wide, onto the
+    /// screen from row `top` down, such as a redrawn area or the band a
+    /// moving pointer crosses. Rows and columns past the screen's edge are
+    /// left out.
+    pub fn write_rows(&mut self, pixels: &[u8], order: Order, width: u32, top: u32) {
         let g = self.geometry;
         let src_stride = width as usize * 4;
         if src_stride == 0 {
             return;
         }
-        let pixels = self.pixels_mut();
-        for (y, src) in (top as usize..g.height as usize).zip(rgba.chunks_exact(src_stride)) {
+        let screen = self.pixels_mut();
+        for (y, src) in (top as usize..g.height as usize).zip(pixels.chunks_exact(src_stride)) {
             let dst = y * g.stride as usize;
-            let Some(dst) = pixels.get_mut(dst..dst + g.stride as usize) else {
+            let Some(dst) = screen.get_mut(dst..dst + g.stride as usize) else {
                 break;
             };
-            g.pack_row(src, dst);
+            g.pack_row(src, order, dst);
         }
     }
 
@@ -323,10 +351,18 @@ mod tests {
     fn packs_rgba_into_the_screens_channel_order() {
         let rgba = [0x11, 0x22, 0x33, 0xff, 0xaa, 0xbb, 0xcc, 0x00];
         let mut bgrx = [0u8; 8];
-        geometry(16, 0).pack_row(&rgba, &mut bgrx);
+        geometry(16, 0).pack_row(&rgba, Order::Rgba, &mut bgrx);
         assert_eq!(bgrx, [0x33, 0x22, 0x11, 0, 0xcc, 0xbb, 0xaa, 0]);
         let mut rgbx = [0u8; 8];
-        geometry(0, 16).pack_row(&rgba, &mut rgbx);
+        geometry(0, 16).pack_row(&rgba, Order::Rgba, &mut rgbx);
+        assert_eq!(rgbx, [0x11, 0x22, 0x33, 0, 0xaa, 0xbb, 0xcc, 0]);
+        // B, G, R, A onto blue-lowest is the same bytes; onto red-lowest it
+        // swaps.
+        let bgra = [0x33, 0x22, 0x11, 0xff, 0xcc, 0xbb, 0xaa, 0x00];
+        let mut same = [0u8; 8];
+        geometry(16, 0).pack_row(&bgra, Order::Bgra, &mut same);
+        assert_eq!(&same[..3], &[0x33, 0x22, 0x11]);
+        geometry(0, 16).pack_row(&bgra, Order::Bgra, &mut rgbx);
         assert_eq!(rgbx, [0x11, 0x22, 0x33, 0, 0xaa, 0xbb, 0xcc, 0]);
     }
 
@@ -334,7 +370,7 @@ mod tests {
     fn a_row_wider_than_the_screen_is_cut() {
         let rgba = [0xff; 12];
         let mut out = [0u8; 12];
-        geometry(16, 0).pack_row(&rgba, &mut out);
+        geometry(16, 0).pack_row(&rgba, Order::Rgba, &mut out);
         assert_eq!(&out[8..], &[0, 0, 0, 0]);
     }
 

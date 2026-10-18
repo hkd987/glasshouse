@@ -28,6 +28,9 @@ pub struct Desktop<'a> {
     pub date: (String, u8),
     /// False collapses the tile stack, as while the command bar is open.
     pub tiles_visible: bool,
+    /// False leaves the wallpaper out, for a screen that keeps it as its
+    /// backdrop (`render::Screen::set_backdrop`).
+    pub wallpaper: bool,
 }
 
 impl<'a> Desktop<'a> {
@@ -47,6 +50,7 @@ impl<'a> Desktop<'a> {
                 now.day(),
             ),
             tiles_visible: true,
+            wallpaper: true,
         }
     }
 }
@@ -93,13 +97,16 @@ pub fn view<'a>(
     overlay: Option<Element<'a, Message>>,
     size: (f32, f32),
 ) -> Element<'a, Message> {
-    let mut layers: Vec<Element<'a, Message>> = vec![
-        image(wallpaper::handle(&theme.wallpaper, size.0, size.1))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .content_fit(iced_core::ContentFit::Fill)
-            .into(),
-    ];
+    let mut layers: Vec<Element<'a, Message>> = Vec::new();
+    if desktop.wallpaper {
+        layers.push(
+            image(wallpaper::handle(&theme.wallpaper, size.0, size.1))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .content_fit(iced_core::ContentFit::Fill)
+                .into(),
+        );
+    }
     for window in windows {
         layers.push(
             pin(frame(

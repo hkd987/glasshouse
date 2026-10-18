@@ -36,6 +36,45 @@ pub fn handle(wallpaper: &Wallpaper, width: f32, height: f32) -> Handle {
     handle
 }
 
+/// The wallpaper at full size for a screen of `width` x `height` physical
+/// pixels, as B, G, R, A bytes: the backdrop a live screen keeps and draws
+/// the UI over ([`crate::render::Screen::set_backdrop`]). It's drawn small
+/// and scaled up once, as the renderer would on every frame.
+pub fn backdrop(wallpaper: &Wallpaper, width: u32, height: u32) -> Vec<u8> {
+    let small = (
+        (width as f32 / DOWNSCALE).ceil().max(1.0) as u32,
+        (height as f32 / DOWNSCALE).ceil().max(1.0) as u32,
+    );
+    let (Some(source), Some(mut full)) = (
+        Pixmap::from_vec(
+            render(wallpaper, small.0, small.1),
+            tiny_skia::IntSize::from_wh(small.0, small.1).expect("not empty"),
+        ),
+        Pixmap::new(width.max(1), height.max(1)),
+    ) else {
+        return vec![0; width as usize * height as usize * 4];
+    };
+    full.draw_pixmap(
+        0,
+        0,
+        source.as_ref(),
+        &tiny_skia::PixmapPaint {
+            quality: tiny_skia::FilterQuality::Bilinear,
+            ..tiny_skia::PixmapPaint::default()
+        },
+        Transform::from_scale(
+            width as f32 / small.0 as f32,
+            height as f32 / small.1 as f32,
+        ),
+        None,
+    );
+    let mut bgra = full.take();
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    bgra
+}
+
 /// Straight RGBA pixels, opaque.
 pub fn render(wallpaper: &Wallpaper, width: u32, height: u32) -> Vec<u8> {
     let Some(mut shapes) = Pixmap::new(width.max(1), height.max(1)) else {

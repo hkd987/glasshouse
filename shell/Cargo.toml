@@ -44,6 +44,10 @@ tokio = { version = "1.48", features = ["rt", "macros", "time", "signal"] }
 # The menu bar clock, in local time. Already built for glass-types.
 time = { version = "0.3.55", features = ["formatting", "macros", "local-offset"] }
 
+# A patched copy: see vendor/README.md.
+[patch.crates-io]
+iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 unused_must_use = "deny"

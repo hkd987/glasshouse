@@ -3,8 +3,9 @@
 //! tiles from glassd and takes the keyboard and pointer from the kernel's
 //! evdev devices: Approve on a tile answers its ask, Ctrl Space opens the
 //! command bar. It redraws when a task changes, the person does something,
-//! or the menu bar clock turns over, and copies only the rows that changed;
-//! moving the pointer repaints only the rows it crosses.
+//! or the menu bar clock turns over: only the areas whose content changed
+//! are drawn again and copied to the screen, and moving the pointer
+//! repaints only the rows it crosses.
 //!
 //! ```text
 //! glass-shell-fb [--tty /dev/ttyv0] [--socket /var/run/glasshouse/control.sock] [--once] [--no-input]
@@ -20,17 +21,16 @@ mod input;
 mod keys;
 mod pointer;
 
-use std::ops::Range;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
 use glass_api::{Event, TaskView, methods};
-use glass_platform::framebuffer::Framebuffer;
+use glass_platform::framebuffer::{Framebuffer, Order};
 use glass_rpc::Client;
 use glass_shell::live::{Effect, Live};
 use glass_shell::render::Screen;
-use glass_shell::{Size, Theme};
+use glass_shell::{Size, Theme, wallpaper};
 use iced_core::{Point, mouse};
 use time::{OffsetDateTime, UtcOffset};
 use tokio::signal::unix::{SignalKind, signal};
@@ -99,7 +99,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow!("task.list: {e}"))?;
 
-    let mut shell = Shell::open(args.tty, offset, Live::new(tasks))?;
+    let mut shell = Shell::open(args.tty, offset, Live::new(tasks).without_wallpaper())?;
     shell.draw();
     if args.once {
         return Ok(());
@@ -149,8 +149,8 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The desktop on the framebuffer: its state, its UI, the last frame drawn
-/// and where the pointer is.
+/// The desktop on the framebuffer: its state, its UI (which keeps the
+/// pixels drawn) and where the pointer is.
 struct Shell {
     fb: Framebuffer,
     theme: Theme,
@@ -158,8 +158,6 @@ struct Shell {
     live: Live,
     screen: Screen,
     keyboard: keys::Keyboard,
-    /// The last frame, without the pointer.
-    last: Vec<u8>,
     pointer: Point,
     /// Where the pointer was painted, if it was.
     painted: Option<Point>,
@@ -179,14 +177,18 @@ impl Shell {
             g.stride
         );
         let size = Size::new(g.width as f32, g.height as f32);
+        let theme = Theme::glass();
+        // The wallpaper stays drawn behind the UI, so a change redraws only
+        // what's over it.
+        let mut screen = Screen::new(size, 1.0);
+        screen.set_backdrop(wallpaper::backdrop(&theme.wallpaper, g.width, g.height));
         Ok(Self {
             fb,
-            theme: Theme::glass(),
+            theme,
             offset,
             live,
-            screen: Screen::new(size, 1.0),
+            screen,
             keyboard: keys::Keyboard::default(),
-            last: Vec::new(),
             pointer: Point::new(size.width / 2.0, size.height / 2.0),
             painted: None,
             dirty: false,
@@ -320,67 +322,53 @@ impl Shell {
         let view = self
             .live
             .view(&self.theme, bar.as_ref(), self.now(), (w, h));
-        let frame = self.screen.draw(view, Some(self.pointer));
+        let damage = self.screen.render(view, Some(self.pointer));
         drop(bar);
         let rendered = started.elapsed();
-        let rows = changed_rows(&self.last, &frame.rgba, frame.width);
-        if let Some(rows) = rows.clone() {
-            self.fb.write_rgba(&frame.rgba, frame.width, rows);
+        let (width, _) = self.screen_size();
+        let stride = width as usize * 4;
+        let mut rows = 0;
+        for area in &damage {
+            let band = area.y as usize * stride..(area.y + area.height) as usize * stride;
+            self.fb
+                .write_rows(&self.screen.bgra()[band], Order::Bgra, width, area.y);
+            rows += area.height;
         }
-        self.last = frame.rgba;
-        // The new frame covered the old pointer; paint it afresh.
-        self.painted = None;
-        self.paint_pointer();
+        if !damage.is_empty() {
+            // A redrawn area may have covered the pointer; paint it afresh.
+            self.painted = None;
+            self.paint_pointer();
+        }
         eprintln!(
-            "{} tiles: drawn in {} ms, {} rows copied in {} ms",
+            "{} tiles: drawn in {} ms, {} areas ({rows} rows) copied in {} ms",
             self.live.tasks().len(),
             rendered.as_millis(),
-            rows.map_or(0, |r| r.len()),
+            damage.len(),
             (started.elapsed() - rendered).as_millis()
         );
     }
 
-    /// Restores the rows under the pointer's old place from the last frame
-    /// and paints it at its new one.
+    /// Restores the rows under the pointer's old place from the screen's
+    /// pixels and paints it at its new one.
     fn paint_pointer(&mut self) {
         let (width, height) = self.screen_size();
         let stride = width as usize * 4;
-        if self.last.len() < stride * height as usize {
-            return;
-        }
         if self.painted == Some(self.pointer) {
             return;
         }
         let at = (self.pointer.x as u32, self.pointer.y as u32);
+        let pixels = self.screen.bgra();
         if let Some(old) = self.painted {
             let rows = pointer::rows(old.y as u32, height);
-            let band = &self.last[rows.start as usize * stride..rows.end as usize * stride];
-            self.fb.write_rows(band, width, rows.start);
+            let band = &pixels[rows.start as usize * stride..rows.end as usize * stride];
+            self.fb.write_rows(band, Order::Bgra, width, rows.start);
         }
         let rows = pointer::rows(at.1, height);
-        let mut band = self.last[rows.start as usize * stride..rows.end as usize * stride].to_vec();
+        let mut band = pixels[rows.start as usize * stride..rows.end as usize * stride].to_vec();
         pointer::paint(&mut band, width, rows.start, at.0, at.1);
-        self.fb.write_rows(&band, width, rows.start);
+        self.fb.write_rows(&band, Order::Bgra, width, rows.start);
         self.painted = Some(self.pointer);
     }
-}
-
-/// The rows that differ between two frames `width` pixels wide, as one
-/// range: all of them when the frames' sizes differ, `None` when they're
-/// the same.
-fn changed_rows(before: &[u8], after: &[u8], width: u32) -> Option<Range<u32>> {
-    let stride = width as usize * 4;
-    if stride == 0 {
-        return None;
-    }
-    if before.len() != after.len() {
-        return Some(0..(after.len() / stride) as u32);
-    }
-    let differs = |(a, b): (&[u8], &[u8])| a != b;
-    let mut rows = before.chunks(stride).zip(after.chunks(stride));
-    let first = rows.clone().position(differs)?;
-    let last = rows.rposition(differs)?;
-    Some(first as u32..last as u32 + 1)
 }
 
 /// How long until the clock next shows a new minute.
@@ -392,17 +380,6 @@ fn until_next_minute(now: OffsetDateTime) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_the_rows_that_changed_are_copied() {
-        let before = vec![0u8; 2 * 4 * 5];
-        let mut after = before.clone();
-        assert_eq!(changed_rows(&before, &after, 2), None);
-        after[8] = 1; // row 1
-        after[3 * 8 + 4] = 1; // row 3
-        assert_eq!(changed_rows(&before, &after, 2), Some(1..4));
-        assert_eq!(changed_rows(&[], &after, 2), Some(0..5));
-    }
 
     #[test]
     fn the_clock_redraws_on_the_minute() {

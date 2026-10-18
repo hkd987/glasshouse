@@ -59,7 +59,8 @@ under `shell/target/tmp/` so you can compare it.
 | `crates/glass-shell/src/theme.rs` | `Theme` (UX-10): every color, the wallpaper recipe. Screens take colors from it, never literals for themeable parts |
 | `crates/glass-shell/src/screens/` | `boot`, `login`, `desktop` (menu bar, dock, windows, tile stack), `command_bar` |
 | `crates/glass-shell/src/tiles.rs` | An agent tile from a `TaskView` (AW-1 to AW-4) |
-| `crates/glass-shell/src/render.rs` | Rendering: a view to an RGBA frame or PNG, once or frame after frame (`Screen`) |
+| `crates/glass-shell/src/render.rs` | Rendering: a view to an RGBA frame or PNG, once, or frame after frame redrawing only what changed (`Screen`) |
+| `vendor/` | Crates built from a patched copy (`vendor/README.md`) |
 | `crates/glass-shell/src/live.rs` | The live desktop's state and what clicks and keys ask of glassd |
 | `crates/glass-shell/src/icons.rs`, `wallpaper.rs` | Icons from the mockups' SVG paths and the blurred wallpaper, rasterized with tiny-skia |
 | `crates/glass-shell/src/fixtures.rs` | The mockups' content, for previews and tests |
@@ -78,8 +79,23 @@ that breaks it shows up in `make shell-test`. Its build output goes to
 `shell/target/`.
 
 Build times (4 cores, debug): clean about 2 min 50 s, mostly dependencies,
-which build once at `opt-level = 2` so a 1440x900 frame renders in
-40–330 ms even in debug; an edit to `glass-shell` rebuilds in about 1 s.
+which build once at `opt-level = 2` so a whole 1280x800 frame renders in
+about 60 ms even in debug; an edit to `glass-shell` rebuilds in about 1 s.
+
+## Redrawing fast
+
+A live screen (`render::Screen`) keeps its pixels and redraws only what
+changed: it diffs the frame's layers against the last one (iced's damage
+diff, extended to cover drop shadows), redraws each changed area on its
+own, and keeps only that area. The wallpaper is the screen's backdrop
+(`Screen::set_backdrop`, `wallpaper::backdrop`), drawn once, so a small
+change doesn't scale a full-screen image again. Icons are rasterized once
+per color and size. `shell/vendor/iced_tiny_skia` carries one patch: a
+drop shadow is computed only inside the area being redrawn. A clock tick
+costs 1.8 ms on a laptop and a keystroke 5 ms; numbers and the VM's are in
+`docs/dev/performance.md`. `tests/live.rs` checks that redrawing only the
+changed areas gives the pixels a full redraw gives, and `tests/redraw_cost.rs`
+measures it (`-- --ignored --nocapture`).
 
 ## Dependencies and licenses
 

@@ -32,8 +32,9 @@ pub fn rows(y: u32, height: u32) -> Range<u32> {
     y.min(height)..(y + ARROW.len() as u32).min(height)
 }
 
-/// Paints the arrow with its tip at (`x`, `y`) into `band`: whole RGBA rows
-/// of a frame `width` pixels wide, starting at frame row `top`.
+/// Paints the arrow with its tip at (`x`, `y`) into `band`: whole rows of
+/// 4-byte pixels of a frame `width` pixels wide, starting at frame row
+/// `top`. The arrow is gray and white, the same in RGBA or BGRA order.
 pub fn paint(band: &mut [u8], width: u32, top: u32, x: u32, y: u32) {
     let stride = width as usize * 4;
     for (dy, line) in ARROW.iter().enumerate() {

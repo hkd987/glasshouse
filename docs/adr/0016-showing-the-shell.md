@@ -88,8 +88,8 @@ Run in the VM under UEFI with `-device VGA,xres=1280,yres=800`:
   a built-in US layout until xkbcommon arrives with the compositor.
 - Moving the pointer repaints only the rows it crosses over the last
   frame; the UI is re-rendered only for clicks, keys and changes.
-- Drawing the full desktop takes 1.6 to 2 s in the emulated VM (debug
-  build); copying the changed rows to the screen takes 10 to 40 ms. A
-  clock tick changes 22 rows. Real hardware with an optimized build is
-  orders of magnitude faster; the compositor will draw only damaged
-  regions.
+- Drawing the whole desktop takes about 1.5 s in the emulated VM (debug
+  build; 60 ms on a laptop), so the shell draws only damaged areas: a
+  clock tick costs 47 ms in the VM and a keystroke 28 to 60 ms
+  (`docs/dev/performance.md`). The renderer's B, G, R, A pixels match the
+  efifb layout, so changed rows are copied to the screen as they are.

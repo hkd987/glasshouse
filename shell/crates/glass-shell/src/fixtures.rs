@@ -128,6 +128,7 @@ pub fn desktop(tasks: &[TaskView]) -> Desktop<'_> {
         ],
         date: (String::from("OCT"), 19),
         tiles_visible: true,
+        wallpaper: true,
     }
 }
 

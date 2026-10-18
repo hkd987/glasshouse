@@ -42,6 +42,8 @@ RUST_GLOBAL = {
 }
 FMT_GLOBAL = {"rustfmt.toml", "rust-toolchain.toml"}
 ART_INPUTS = ("tools/branding/", "os/freebsd/overlay/usr/local/share/glasshouse/branding/")
+# Third-party code kept as upstream wrote it, apart from marked patches.
+VENDORED = ("shell/vendor/",)
 
 
 def git(*args: str) -> str:
@@ -83,7 +85,7 @@ def is_shell(path: str) -> bool:
 
 def plan(files: set[str], everything: bool) -> list[tuple[str, list[str]]]:
     """The commands to run, as (label, argv)."""
-    existing = {f for f in files if (REPO / f).is_file()}
+    existing = {f for f in files if (REPO / f).is_file() and not f.startswith(VENDORED)}
     steps: list[tuple[str, list[str]]] = []
 
     rust = sorted(f for f in existing if f.endswith(".rs"))
