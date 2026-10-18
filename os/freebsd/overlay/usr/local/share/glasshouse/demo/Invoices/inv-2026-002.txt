@@ -1,0 +1,6 @@
+Invoice: INV-2026-002
+Vendor: Northwind Logistics
+Email: ar@northwind.example
+Amount: 1840.50
+Due: 2026-10-05
+Status: paid

@@ -1,0 +1,35 @@
+#!/bin/sh
+#
+# PROVIDE: glassd
+# REQUIRE: LOGIN FILESYSTEMS
+# KEYWORD: shutdown
+#
+# Glasshouse system daemon. Enable with:  sysrc glassd_enable=YES
+#
+# glassd_config  (path)  Config file. Default /usr/local/etc/glasshouse/glassd.toml
+# glassd_log     (path)  Daemon log. Default /var/log/glassd.log
+
+. /etc/rc.subr
+
+name="glassd"
+rcvar="glassd_enable"
+load_rc_config "$name"
+
+: "${glassd_enable:=NO}"
+: "${glassd_config:=/usr/local/etc/glasshouse/glassd.toml}"
+: "${glassd_log:=/var/log/glassd.log}"
+
+pidfile="/var/run/${name}.pid"
+procname="/usr/local/sbin/glassd"
+command="/usr/sbin/daemon"
+# -p records glassd's own pid (not the supervisor's) so rc.subr can track it.
+command_args="-f -p ${pidfile} -o ${glassd_log} ${procname} --config ${glassd_config}"
+start_precmd="glassd_precmd"
+
+glassd_precmd()
+{
+	# Refuse to start on a config or policy that doesn't validate.
+	"${procname}" --config "${glassd_config}" --check
+}
+
+run_rc_command "$1"

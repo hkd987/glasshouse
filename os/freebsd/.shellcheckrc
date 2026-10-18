@@ -1,0 +1,3 @@
+# shellcheck config for os/freebsd (scripts and toolchain wrappers)
+source-path=SCRIPTDIR
+external-sources=true

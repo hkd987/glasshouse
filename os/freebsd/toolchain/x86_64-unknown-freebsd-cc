@@ -1,0 +1,19 @@
+#!/bin/sh
+# x86_64-unknown-freebsd-cc: clang wrapper that compiles and links for FreeBSD using
+# build/freebsd/sysroot (run `make freebsd-sysroot` first). Cargo uses it as the linker;
+# invoked as x86_64-unknown-freebsd-c++ (symlink) it runs clang++ instead.
+set -eu
+here=$(cd "$(dirname "$0")" && pwd)
+sysroot=$(cd "$here/../../.." && pwd)/build/freebsd/sysroot
+# shellcheck source=../release.env
+. "$here/../release.env"
+
+if [ ! -f "$sysroot/.base-sha256" ]; then
+	echo "x86_64-unknown-freebsd-cc: no sysroot at $sysroot; run 'make freebsd-sysroot'" >&2
+	exit 1
+fi
+case $0 in
+*++) cc=clang++ ;;
+*) cc=clang ;;
+esac
+exec "$cc" --target="$FREEBSD_TRIPLE" --sysroot="$sysroot" -fuse-ld=lld "$@"

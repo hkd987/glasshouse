@@ -1,0 +1,6 @@
+Invoice: INV-2026-003
+Vendor: Globex Facilities
+Email: accounts@globex.example
+Amount: 310.25
+Due: 2026-09-28
+Status: unpaid

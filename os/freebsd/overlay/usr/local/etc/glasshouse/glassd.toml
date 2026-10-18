@@ -1,0 +1,45 @@
+# Glasshouse daemon configuration. See crates/bin/glassd/src/config.rs for
+# every setting and its default.
+
+control_socket = "/var/run/glasshouse/control.sock"
+state_dir = "/var/db/glasshouse"
+# When this file is absent the built-in default policy is enforced. Print it
+# with `glassctl policy default`.
+policy = "/usr/local/etc/glasshouse/policy.toml"
+max_live_tasks_per_user = 8
+
+[sandbox]
+backend = "freebsd-jail"
+agent_dirs = ["/usr/local/libexec/glasshouse"]
+
+[snapshots]
+backend = "zfs"
+
+# The agent catalog (AD-5): what IT has published to this machine. What each
+# agent may do is set by policy, not here.
+
+[[agent]]
+id = "invoice-demo"
+name = "Invoice demo"
+description = "Scripted demo agent: reconciles invoices, writes a summary, drafts a note to AP and asks before reminding vendors."
+mode = "actions"
+program = "/usr/local/libexec/glasshouse/glass-demo-agent"
+plan = [
+  "Read every invoice in the folder you give it",
+  "Write a reconciliation summary to the reports folder",
+  "Draft a note to the AP team",
+  "Ask you before emailing reminders to vendors with unpaid invoices",
+]
+
+[[agent]]
+id = "containment-probe"
+name = "Containment probe"
+description = "Diagnostics: tries to read files, reach the network and see processes it shouldn't, then reports what it could reach."
+mode = "actions"
+program = "/usr/local/libexec/glasshouse/glass-probe"
+plan = [
+  "Try to read files outside the task",
+  "Try to reach the network",
+  "Try to see other processes",
+  "Report the results",
+]

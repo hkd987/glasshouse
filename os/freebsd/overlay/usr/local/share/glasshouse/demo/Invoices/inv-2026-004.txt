@@ -1,0 +1,6 @@
+Invoice: INV-2026-004
+Vendor: Initech Software
+Email: invoices@initech.example
+Amount: 75.00
+Due: 2026-10-12
+Status: paid

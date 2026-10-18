@@ -1,0 +1,6 @@
+Invoice: INV-2026-001
+Vendor: Acme Office Supplies
+Email: billing@acme-supplies.example
+Amount: 120.00
+Due: 2026-10-01
+Status: unpaid

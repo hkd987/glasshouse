@@ -1,0 +1,25 @@
+#cloud-config
+# First-boot provisioning for the glasshouse dev VM, run by FreeBSD's nuageinit(7).
+# vm.sh substitutes @SSH_PUBKEY@ and writes this into the NoCloud "cidata" seed ISO.
+# nuageinit order: write_files (pre-net) -> users (post-net) -> runcmd (late, after sshd).
+users:
+  - name: root
+    ssh_authorized_keys:
+      - @SSH_PUBKEY@
+ssh_pwauth: false
+write_files:
+  - path: /etc/ssh/sshd_config
+    append: true
+    content: |
+      # glasshouse dev VM
+      PermitRootLogin prohibit-password
+      UseDNS no
+  # Keep the VM on the pinned release: the image would otherwise pkg-upgrade its base at first boot.
+  - path: /etc/rc.conf.d/firstboot_pkg_upgrade
+    content: |
+      firstboot_pkg_upgrade_enable="NO"
+runcmd:
+  # demo: unprivileged user whose home is its own dataset (agent undo restores from ZFS snapshots).
+  - zfs create zroot/home/demo
+  - pw useradd -n demo -u 1001 -c "Glasshouse demo user" -d /home/demo -s /bin/sh -m -M 0755 -w no
+  - chown demo:demo /home/demo

@@ -1,0 +1,6 @@
+Invoice: INV-2026-005
+Vendor: Umbrella Catering
+Email: billing@umbrella-catering.example
+Amount: 462.80
+Due: 2026-09-30
+Status: unpaid
