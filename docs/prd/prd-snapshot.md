@@ -279,6 +279,20 @@ End users never see that Glasshouse is built on FreeBSD. The only exceptions are
 - BR-3. Components under the GPL, including the Linux kernel inside the developer workspace, come with the source-code offer the GPL requires.
 - BR-4. Customer security teams get full base-system details and the complete software bill of materials under NDA during due diligence. The SBOM export (EP-10) is available to admins only, never published publicly.
 - BR-5. Upstream contributions to FreeBSD can go through contractors or Foundation sponsorship, if keeping a low public profile matters.
+**Building the base system**
+Glasshouse builds on pkgbase, FreeBSD's packaged base system. It ships as a technology preview in FreeBSD 15 and is planned to replace the old freebsd-update method entirely in FreeBSD 16 ([OSnews](https://www.osnews.com/story/143942/freebsd-15-0-released-with-pkgbase/)). Building on it keeps our fork small and our security fixes fast.
+- BS-1. A thin fork: our changes to FreeBSD's source are a small, documented patch set on top of FreeBSD's stable branch, rebased each release. Generic fixes go back upstream.
+- BS-2. We rebuild only the base packages we change (kernel, branding, security configuration) and take FreeBSD's packages for the rest, re-signed into our own repository.
+- BS-3. Each product image is a list of packages from that one repository: the desktop, the developer-workspace host, and later the cloud agent computer. Images include only what they need, with no compilers, test suites, debug tools or 32-bit libraries.
+- BS-4. Devices receive whole signed images through ZFS boot environments (EP-1). Nothing is compiled on a user's machine.
+- BS-5. Security pipeline: a FreeBSD advisory triggers an updated package, a rebuilt and tested image, and a release within the critical-fix commitment (CF-50).
+- BS-6. Every component is a versioned package, which feeds the software inventory and advisory matching (EP-10).
+**A thin platform layer**
+Glasshouse's value lives above the kernel. We don't plan to replace FreeBSD, but we design so we're never trapped by it.
+- PL-1. All FreeBSD-specific features (jails, Capsicum, ZFS, bhyve, pf and veriexec) are reached only through a thin platform adapter. Each has a documented Linux equivalent, such as namespaces with seccomp or Landlock, Btrfs or ZFS on Linux, KVM, nftables and dm-verity.
+- PL-2. The brokers, model gateway, policy engine, desktop shell, agents, apps and admin console contain no FreeBSD-specific code outside the adapter. Our build pipeline also builds and tests these components on Linux.
+- PL-3. We revisit the base only if FreeBSD laptop support stalls on hardware we need, EDR vendors refuse to support it and customers insist on their own agent, or a major laptop maker or buyer requires Linux.
+- PL-4. We aim to become a significant FreeBSD contributor, which gives us influence over the platform instead of an exit from it (through contractors or sponsorship if a low profile matters, per BR-5).
 
 ## Data protection and model gateway
 All model traffic leaves the machine through one gateway, which enforces data labels, redaction and the approved-model list before anything is sent.
@@ -593,6 +607,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Tailoring, minimal for Pilot 1: TL-1, TL-2, TL-10, TL-11 and TL-13 on our first-party agents, with undo
 - Desktop experience: UX-1, UX-2, UX-10, UX-20 to UX-22, UX-30
 - Architecture commitments: FD-1 to FD-4
+- Base system and portability: BS-1 to BS-6, PL-1, PL-2
 **P1 · V1 GA**
 - AW-6, DA-4, DA-14, NV-4, NV-21, NV-22, NV-30 to NV-32
 - DP-6, DP-11, DP-20, DP-30, AU-4, AU-11, AU-22
@@ -666,4 +681,5 @@ The biggest risks are distribution and hardware, not the agent technology. Micro
 - The agent is a first-class principal with its own identity, sandbox and audit.
 - Visible tiles for every running agent, with take over and rewind.
 - Structured actions first, screen control as fallback.
+- Build on pkgbase with a thin fork. Never replace the kernel; keep Glasshouse portable above it through a thin platform layer.
 - Amazon Bedrock is the default model provider at launch. Claude subscribers drive the OS through Claude Code plus our plugin, and ChatGPT subscribers through Sign in with ChatGPT.

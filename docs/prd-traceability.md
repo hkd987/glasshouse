@@ -6,9 +6,12 @@ OS — PRD"), plus engineering notes on P1 work that shapes today's design.
 what's missing. Update this file in the same change that moves a
 requirement; the `prd-sync` skill re-reads the PRD and diffs it.
 
-PRD revision last synced: 2026-10-19, sixth sync ("Future direction:
-always-on agents with local hands", with architecture commitments FD-1 …
-FD-4 in P0 and always-on cloud agents a non-goal for Pilot 1). The fifth
+PRD revision last synced: 2026-10-19, seventh sync ("Building the base
+system": pkgbase with a thin fork, BS-1 … BS-6, and "A thin platform
+layer", PL-1 … PL-4; BS-1 … BS-6, PL-1 and PL-2 are P0; ADR 0022). The
+sixth brought "Future direction: always-on agents with local hands", with
+architecture commitments FD-1 … FD-4 in P0 and always-on cloud agents a
+non-goal for Pilot 1. The fifth
 brought the Mac-like desktop (UX-1 … UX-40) and the boot, sign-in,
 snapping and themes mockups. V1 is **US-only** and **x86 (Intel/AMD)
 only**: we build and test `x86_64-unknown-freebsd` and nothing else.
@@ -228,6 +231,22 @@ Users shape their own tools (PRD "The edge", ADR 0014). Success metric:
 | TL-13 New agent version: re-apply and re-test every layer; pause failures, notify the owner | Partial | re-checked against the new version's points at startup and before use, paused with the reason, published agent runs; owner sees it on the card and in `glassctl tailor`. Missing: re-test with evals, a pushed notification. `tailoring::tl13_…` |
 | TL-3, TL-4, TL-12, TL-14, TL-20 … TL-22 Team layers, copies, IT controls, inventory, suggestions | P1 | ADR 0014 "Proposed next" |
 | GA-1 … GA-11 Apps built on request | P1 | A generated app is an ordinary app (UI-5): its actions join the registry like any `crates/apps` provider (ADR 0013) and get tiers, audit and undo for free. Catalog-first (GA-2) needs the catalog service; sharing steps (GA-8) reuse the DV-2/DV-3 checks |
+
+## Base system and portability
+
+Glasshouse builds on pkgbase with a thin fork, and stays portable above
+the kernel through one platform crate (ADR 0022).
+
+| Requirement | Status | Where | Notes |
+|---|---|---|---|
+| BS-1 A thin fork: a small documented patch set on FreeBSD's stable branch | Not started | We ship FreeBSD 15.1's binaries unmodified; branding is an overlay (BR-1) | The patch set starts with the first base change (kernel identity, ADR 0011) |
+| BS-2 Rebuild only changed base packages; FreeBSD's re-signed into our repository | Not started | | A pinned mirror of `base_release_N` first, then our repository and key |
+| BS-3 Each image a package list from that repository, without compilers, tests, debug files or 32-bit libraries | Not started | Images start from the official VM image, whose base is already 499 pkgbase packages, `-dbg` included | Package-list image build (`pkg --rootdir`), ADR 0022 item 1 |
+| BS-4 Whole signed images through ZFS boot environments | Not started | | With EP-1 |
+| BS-5 Advisory → package → tested image → release within CF-50 | Not started | | Needs the release pipeline |
+| BS-6 Every component a versioned package, for inventory and advisory matching | Partial | The base is packages (`pkg query`); `make sbom` covers our crates | Our binaries and overlay as `glasshouse-*` packages |
+| PL-1 FreeBSD features only through a thin platform adapter, each with a Linux equivalent | Partial | `glass-platform`: jails, ZFS, framebuffer, evdev, PAM, accounts | Document each facility's Linux equivalent in the crate |
+| PL-2 Brokers, gateway, policy, shell, agents and apps free of FreeBSD code; built and tested on Linux | Partial | `make test` and the shell tests run on the Linux host (host sandbox, copy snapshots); `make lint` refuses `target_os = "freebsd"` outside `glass-platform` | CI runs the same on Linux |
 
 ## Architecture commitments (future direction: always-on agents)
 

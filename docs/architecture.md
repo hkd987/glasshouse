@@ -239,6 +239,11 @@ pipeline refuses further side effects (fail closed).
   socket is the only agent interface and no decision depends on where a
   call comes from; task state, change records included, stays serializable
   data; identity is never a host name, a per-machine uid or a path.
+- **Build on pkgbase, stay portable above it (BS-1 to BS-6, PL-1, PL-2,
+  ADR 0022).** An image is a list of packages from one repository; our
+  code and changes ship as packages too; devices take whole images, never
+  `pkg` runs. FreeBSD facilities are reached only through `glass-platform`,
+  and everything above it builds and tests on Linux.
 - **Our cloud services run on AWS (GT-21)** and hold only licensing, policy
   and telemetry metadata; customer data stays on devices and in the
   customer's own Bedrock account (GT-3).

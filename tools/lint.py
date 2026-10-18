@@ -110,7 +110,7 @@ def plan(files: set[str], everything: bool) -> list[tuple[str, list[str]]]:
                       ["cargo", "clippy", "--manifest-path", "shell/Cargo.toml", "--workspace",
                        "--all-targets", "--target", FREEBSD, "--", "-D", "warnings"]))
 
-    if everything or any(f.endswith("Cargo.toml") or f == "tools/check-layers.py" for f in files):
+    if everything or any(f.endswith(("Cargo.toml", ".rs")) or f == "tools/check-layers.py" for f in files):
         steps.append(("layering", ["tools/check-layers.py"]))
 
     if everything or any(f.startswith(ART_INPUTS) for f in files):

@@ -12,6 +12,9 @@ Layers (by directory), and what each may depend on inside the workspace:
 Every workspace crate must also inherit the workspace lints, license and
 `publish = false`, so no crate quietly opts out of the shared rules.
 
+FreeBSD-specific code lives only in glass-platform (PL-1, PL-2, ADR 0022):
+no `target_os = "freebsd"` anywhere else, in this workspace or the shell's.
+
 See docs/repo-layout.md. Run via `make check-layers` (part of `make lint`).
 """
 
@@ -71,6 +74,16 @@ def main() -> int:
         for dep_name, spec in manifest.get("dependencies", {}).items():
             if not (isinstance(spec, dict) and spec.get("workspace") is True):
                 problems.append(f"{name}: depend on {dep_name} through the workspace (`{dep_name}.workspace = true`)")
+
+    for path in sorted(root.glob("crates/**/*.rs")) + sorted(root.glob("tests/**/*.rs")) + sorted(
+        root.glob("shell/crates/**/*.rs")
+    ):
+        if "crates/lib/platform/" in path.as_posix() or "/target/" in path.as_posix():
+            continue
+        if 'target_os = "freebsd"' in path.read_text(errors="replace"):
+            problems.append(
+                f"{path.relative_to(root)}: FreeBSD-specific code belongs in glass-platform (PL-2)"
+            )
 
     if problems:
         print("layering check failed:", file=sys.stderr)
