@@ -6,6 +6,7 @@ use glass_api::{TaskView, TileState};
 use glass_types::Timestamp;
 use iced_core::alignment::{Horizontal, Vertical};
 use iced_core::{Color, Length, Padding};
+use iced_widget::text::Wrapping;
 use iced_widget::{
     Column, Row, button, column, container, image, mouse_area, pin, row, scrollable, stack, text,
 };
@@ -33,6 +34,9 @@ pub struct Desktop<'a> {
     /// False leaves the wallpaper out, for a screen that keeps it as its
     /// backdrop (`render::Screen::set_backdrop`).
     pub wallpaper: bool,
+    /// The menu under the mark at the left of the menu bar, when it's open:
+    /// the name of the person signed in, for "Sign out <name>".
+    pub system_menu: Option<String>,
 }
 
 /// Which agent tiles the desktop shows. They don't stay on screen: a change
@@ -67,6 +71,7 @@ impl<'a> Desktop<'a> {
             ),
             tiles: Tiles::Hidden,
             wallpaper: true,
+            system_menu: None,
         }
     }
 }
@@ -137,41 +142,59 @@ pub fn view<'a>(
             .into(),
         );
     }
-    match &desktop.tiles {
-        Tiles::Hidden => {}
+    // The same layers every frame, filled or not: frames are compared layer
+    // by layer (`render::Screen`), and one missing would shift the full-screen
+    // dock layer onto another and redraw everything when a banner goes.
+    let nothing = || iced_widget::space().into();
+    let (behind_tiles, tiles): (Element<'a, Message>, Element<'a, Message>) = match &desktop.tiles {
+        // A click anywhere else closes a menu, as a menu does.
+        _ if desktop.system_menu.is_some() => (
+            mouse_area(
+                iced_widget::space()
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .on_press(Message::ToggleSystemMenu)
+            .into(),
+            pin(system_menu(
+                theme,
+                desktop.system_menu.as_deref().unwrap_or_default(),
+            ))
+            .x(SYSTEM_MENU_LEFT)
+            .y(MENU_BAR_HEIGHT + 2.0)
+            .into(),
+        ),
+        Tiles::Hidden => (nothing(), nothing()),
         Tiles::Banners(shown) => {
             let mut shown = shown.clone();
             shown.sort_by_key(|t| (t.state != TileState::NeedsYou, t.started_at.unix_seconds()));
             let banners = shown
                 .into_iter()
                 .map(|task| tiles::view(theme, task, desktop.now, thumbnail(task)));
-            layers.push(
-                pin(Column::with_children(banners).spacing(12))
-                    .x(size.0 - TILES_RIGHT - tiles::WIDTH)
-                    .y(TILES_TOP)
-                    .into(),
-            );
+            let banners = pin(mouse_area(Column::with_children(banners).spacing(12))
+                .on_enter(Message::HoldBanners)
+                .on_exit(Message::LetBannersGo))
+            .x(size.0 - TILES_RIGHT - tiles::WIDTH)
+            .y(TILES_TOP);
+            (nothing(), banners.into())
         }
-        Tiles::Menu => {
-            // A click anywhere else closes the menu, as a menu does.
-            layers.push(
-                mouse_area(
-                    iced_widget::space()
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                )
-                .on_press(Message::CloseAgents)
+        Tiles::Menu => (
+            mouse_area(
+                iced_widget::space()
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .on_press(Message::CloseAgents)
+            .into(),
+            pin(agents_menu(theme, desktop, &thumbnail, size.1))
+                .x(size.0 - TILES_RIGHT - tiles::WIDTH - MENU_PADDING)
+                .y(TILES_TOP - MENU_PADDING)
                 .into(),
-            );
-            layers.push(
-                pin(agents_menu(theme, desktop, &thumbnail, size.1))
-                    .x(size.0 - TILES_RIGHT - tiles::WIDTH - MENU_PADDING)
-                    .y(TILES_TOP - MENU_PADDING)
-                    .into(),
-            );
-        }
-    }
-    layers.extend(overlay);
+        ),
+    };
+    layers.push(behind_tiles);
+    layers.push(tiles);
+    layers.push(overlay.unwrap_or_else(nothing));
     layers.push(menu_bar(theme, desktop));
     layers.push(
         container(dock(theme, desktop))
@@ -262,14 +285,30 @@ fn agents_menu<'a>(
 fn menu_bar<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
     let bar = theme.menu_bar;
     let label = |s: String, font| text(s).size(13).font(font).color(bar.text);
-    let mut left = Row::new()
+    let mut menus = Row::new()
         .spacing(20)
         .align_y(Vertical::Center)
-        .push(icons::view(&icons::MARK_SMALL, bar.text, 16.0, 16.0))
         .push(label(desktop.app.clone(), fonts::SEMIBOLD));
     for menu in &desktop.menus {
-        left = left.push(label(menu.clone(), fonts::SANS));
+        menus = menus.push(label(menu.clone(), fonts::SANS));
     }
+    // The mark opens the system menu; its highlight reaches past the mark,
+    // which stays where it was drawn before it was a button.
+    let open = desktop.system_menu.is_some();
+    let mark = button(
+        container(icons::view(&icons::MARK_SMALL, bar.text, 16.0, 16.0))
+            .center_x(Length::Fixed(MARK_WIDTH))
+            .center_y(Length::Fixed(22.0)),
+    )
+    .on_press(Message::ToggleSystemMenu)
+    .padding(0)
+    .style(style::button_like(style::panel(
+        if open { bar.fill } else { Color::TRANSPARENT },
+        6.0,
+    )));
+    let left = row![mark, menus]
+        .spacing(20.0 - MARK_REACH)
+        .align_y(Vertical::Center);
     let right = row![
         agents_pill(theme, desktop.tasks, desktop.tiles == Tiles::Menu),
         icons::view(&icons::SPARK, bar.text, 16.0, 16.0),
@@ -281,10 +320,55 @@ fn menu_bar<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
     .align_y(Vertical::Center);
     container(row![left, iced_widget::space().width(Length::Fill), right].align_y(Vertical::Center))
         .width(Length::Fill)
-        .height(Length::Fixed(32.0))
-        .padding(Padding::from([0.0, 16.0]))
-        .center_y(Length::Fixed(32.0))
+        .height(Length::Fixed(MENU_BAR_HEIGHT))
+        .padding(Padding {
+            left: 16.0 - MARK_REACH,
+            right: 16.0,
+            ..Padding::ZERO
+        })
+        .center_y(Length::Fixed(MENU_BAR_HEIGHT))
         .style(move |_| style::panel(bar.background, 0.0))
+        .into()
+}
+
+const MENU_BAR_HEIGHT: f32 = 32.0;
+/// How far the mark's highlight reaches either side of it.
+const MARK_REACH: f32 = 6.0;
+const MARK_WIDTH: f32 = 16.0 + MARK_REACH * 2.0;
+const SYSTEM_MENU_LEFT: f32 = 6.0;
+
+/// The system menu: signing out (Shift Super Q, as Shift Command Q on a
+/// Mac). Locking the screen and switching users wait for the compositor
+/// (ADR 0019).
+fn system_menu<'a>(theme: &Theme, person: &str) -> Element<'a, Message> {
+    let ink = hex(0xF3F5F7);
+    let item = button(
+        row![
+            text(if person.is_empty() {
+                "Sign out…".to_owned()
+            } else {
+                format!("Sign out {person}…")
+            })
+            .size(13)
+            .wrapping(Wrapping::None),
+            text("Shift Super Q")
+                .size(12)
+                .color(hex(0xA9B1BC))
+                .wrapping(Wrapping::None),
+        ]
+        .spacing(32)
+        .align_y(Vertical::Center),
+    )
+    .on_press(Message::SignOut)
+    .padding(Padding::from([5.0, 10.0]))
+    .style(style::menu_item(ink, theme.accent));
+    // As wide as the longest item, as a menu is.
+    container(item)
+        .padding(5)
+        .style(|_| container::Style {
+            shadow: style::shadow(0.35, 12.0, 30.0),
+            ..style::outlined(hexa(0x15181D, 0.94), 10.0, 1.0, hex(0x262B32))
+        })
         .into()
 }
 

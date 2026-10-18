@@ -88,6 +88,10 @@ pub enum Message {
     ToggleAgents,
     /// A click outside the agents menu, or Esc: close it.
     CloseAgents,
+    /// The pointer is on the banners: they stay until it leaves, as macOS
+    /// keeps a notification you're reading.
+    HoldBanners,
+    LetBannersGo,
     /// Open the command bar (Ctrl Space).
     OpenCommandBar,
     CommandChanged(String),
@@ -100,6 +104,9 @@ pub enum Message {
     SignIn,
     /// The sign-in screen's "Switch user": the next person who can sign in.
     SwitchUser,
-    /// End the session and go back to the sign-in screen (Shift Super Q).
+    /// End the session and go back to the sign-in screen (Shift Super Q, or
+    /// the system menu).
     SignOut,
+    /// The mark at the left of the menu bar: open or close the system menu.
+    ToggleSystemMenu,
 }

@@ -67,3 +67,36 @@ fn a_keystroke_in_the_command_bar_redraws_in_a_few_milliseconds() {
         eprintln!("keystroke {:?}: {damage:?}", started.elapsed());
     }
 }
+
+#[test]
+#[ignore]
+fn a_banner_coming_and_going_redraws_only_the_top_right() {
+    use glass_api::{Event, TileState};
+    use glass_shell::live::BANNER;
+
+    let theme = Theme::glass();
+    let mut live = Live::new(Vec::new()).without_wallpaper();
+    let size = (1280.0, 800.0);
+    let at = OffsetDateTime::from_unix_timestamp(fixtures::now().unix_seconds()).expect("valid");
+    let mut screen = Screen::new(Size::new(size.0, size.1), 1.0);
+    screen.set_backdrop(wallpaper::backdrop(&theme.wallpaper, 1280, 800));
+    screen.render(live.view(&theme, None, at, size), None);
+    let working = fixtures::tasks()
+        .into_iter()
+        .find(|t| t.state == TileState::Working)
+        .expect("a working tile");
+    let now = Instant::now();
+    live.apply_at(
+        Event::TaskUpdated {
+            task: Box::new(working),
+        },
+        now,
+    );
+    let started = Instant::now();
+    let damage = screen.render(live.view(&theme, None, at, size), None);
+    eprintln!("banner comes {:?}: {damage:?}", started.elapsed());
+    live.tick(now + BANNER);
+    let started = Instant::now();
+    let damage = screen.render(live.view(&theme, None, at, size), None);
+    eprintln!("banner goes {:?}: {damage:?}", started.elapsed());
+}

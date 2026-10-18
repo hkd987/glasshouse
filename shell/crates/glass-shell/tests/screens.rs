@@ -56,6 +56,22 @@ fn render_agents_menu() -> Frame {
     )
 }
 
+/// The system menu, opened from the mark at the left of the menu bar.
+fn render_system_menu() -> Frame {
+    let theme = Theme::glass();
+    let tasks = fixtures::tasks();
+    let state = desktop::Desktop {
+        tiles: desktop::Tiles::Hidden,
+        system_menu: Some("Dana Ruiz".into()),
+        ..fixtures::desktop(&tasks)
+    };
+    frame(
+        desktop::view(&theme, &state, Vec::new(), |_| None, None, SCREEN),
+        size(),
+        1.0,
+    )
+}
+
 fn render_desktop() -> Frame {
     let theme = Theme::glass();
     let tasks = fixtures::tasks();
@@ -305,6 +321,7 @@ fn screens_match_their_snapshots() {
     snapshot("login", &render_login());
     snapshot("desktop", &render_desktop());
     snapshot("agents-menu", &render_agents_menu());
+    snapshot("system-menu", &render_system_menu());
     snapshot("command-bar", &render_command_bar());
     snapshot("expanded", &render_expanded());
     snapshot("expanded-review", &render_expanded_review());

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use iced_core::renderer::Style;
 use iced_core::{Color, Event, Pixels, Point, Rectangle, Size, clipboard, mouse, window};
-use iced_runtime::user_interface::{Cache, UserInterface};
+use iced_runtime::user_interface::{self as ui, Cache, UserInterface};
 use iced_tiny_skia::Layer;
 use iced_tiny_skia::graphics::{Viewport, damage};
 
@@ -51,6 +51,20 @@ pub struct Screen {
     /// What's behind the UI, such as the wallpaper, as B, G, R, A bytes;
     /// black when there's none.
     backdrop: Option<Vec<u8>>,
+    /// Where the pointer was at the last update or frame.
+    cursor: mouse::Cursor,
+    /// When the last frame asked to be drawn again, such as a text field's
+    /// caret blinking.
+    wake: Option<iced_core::time::Instant>,
+}
+
+/// What the UI made of some input.
+#[derive(Debug)]
+pub struct Updated<Message> {
+    pub messages: Vec<Message>,
+    /// It looks different now without a message, such as a button the
+    /// pointer went onto.
+    pub redraw: bool,
 }
 
 /// A part of the screen that changed, in physical pixels.
@@ -85,6 +99,8 @@ impl Screen {
                 .expect("a screen has a size"),
             shown: None,
             backdrop: None,
+            cursor: mouse::Cursor::Unavailable,
+            wake: None,
         }
     }
 
@@ -112,18 +128,50 @@ impl Screen {
         view: Element<'_, Message>,
         events: &[Event],
         cursor: Option<Point>,
-    ) -> Vec<Message> {
+    ) -> Updated<Message> {
         let mut messages = Vec::new();
+        let mut redraw = false;
+        let (before, cursor) = (self.cursor, pointer(cursor));
         self.with_ui(view, |ui, renderer| {
+            // Widgets are built afresh for every update, and a button only
+            // asks for a redraw when its look changes from the one it was
+            // last drawn with; a redraw at the pointer's last place tells it
+            // that look first.
             let _ = ui.update(
+                &[Event::Window(window::Event::RedrawRequested(
+                    iced_core::time::Instant::now(),
+                ))],
+                before,
+                renderer,
+                &mut clipboard::Null,
+                &mut Vec::new(),
+            );
+            let (state, _) = ui.update(
                 events,
-                pointer(cursor),
+                cursor,
                 renderer,
                 &mut clipboard::Null,
                 &mut messages,
             );
+            // A widget asks for the next frame when it looks different (a
+            // button the pointer went onto). A blinking caret asks for a
+            // later one, which isn't a reason to draw now.
+            redraw = matches!(
+                state,
+                ui::State::Updated {
+                    redraw_request: window::RedrawRequest::NextFrame,
+                    ..
+                }
+            );
         });
-        messages
+        self.cursor = cursor;
+        Updated { messages, redraw }
+    }
+
+    /// When the last frame wants drawing again even if nothing else
+    /// changes: a focused text field's caret blinks.
+    pub fn next_redraw(&self) -> Option<std::time::Instant> {
+        self.wake
     }
 
     /// Gives the keyboard focus to the widget with this id, such as the
@@ -146,9 +194,11 @@ impl Screen {
         cursor: Option<Point>,
     ) -> Vec<Damage> {
         let cursor = pointer(cursor);
+        self.cursor = cursor;
+        let mut wake = None;
         self.with_ui(view, |ui, renderer| {
             // One redraw, as a window gets for each frame.
-            let _ = ui.update(
+            let (state, _) = ui.update(
                 &[Event::Window(window::Event::RedrawRequested(
                     iced_core::time::Instant::now(),
                 ))],
@@ -157,6 +207,13 @@ impl Screen {
                 &mut clipboard::Null,
                 &mut Vec::new(),
             );
+            wake = match state {
+                ui::State::Updated {
+                    redraw_request: window::RedrawRequest::At(at),
+                    ..
+                } => Some(at),
+                _ => None,
+            };
             ui.draw(
                 renderer,
                 &iced_widget::Theme::Light,
@@ -166,13 +223,14 @@ impl Screen {
                 cursor,
             );
         });
+        self.wake = wake;
         let screen = Rectangle::with_size(self.viewport.logical_size());
         let layers = self.renderer.layers().to_vec();
         let changed = match &self.shown {
             Some(shown) => damage::diff(shown, &layers, |l| vec![l.bounds], layer_damage),
             None => vec![screen],
         };
-        let changed = damage::group(changed, screen);
+        let changed = merge_overlapping(damage::group(changed, screen));
         // The renderer fills a damaged area and redraws everything over it,
         // but a quad inside the area casts its shadow past it unclipped. So
         // each area is drawn into scratch on its own and only it is kept.
@@ -298,6 +356,26 @@ impl Screen {
         let mut ui = UserInterface::build(view, self.size, cache, &mut self.renderer);
         run(&mut ui, &mut self.renderer);
         self.cache = ui.into_cache();
+    }
+}
+
+/// Joins areas that overlap where one area costs no more to draw than the
+/// two: each is drawn on its own, so an overlap would be drawn twice.
+/// (`damage::group` only joins areas next to each other in its order.)
+fn merge_overlapping(mut areas: Vec<Rectangle>) -> Vec<Rectangle> {
+    'again: loop {
+        for i in 0..areas.len() {
+            for j in i + 1..areas.len() {
+                let (a, b) = (areas[i], areas[j]);
+                let union = a.union(&b);
+                if a.intersects(&b) && union.area() <= a.area() + b.area() {
+                    areas[i] = union;
+                    areas.swap_remove(j);
+                    continue 'again;
+                }
+            }
+        }
+        return areas;
     }
 }
 

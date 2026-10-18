@@ -53,6 +53,27 @@ pub fn button_like(
     }
 }
 
+/// A menu item: plain until the pointer is on it, then `highlight` (the
+/// accent, as a Mac menu highlights the item under the pointer).
+pub fn menu_item(
+    text: Color,
+    highlight: Color,
+) -> impl Fn(&iced_widget::Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let on = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: on.then_some(Background::Color(highlight)),
+            text_color: if on { Color::WHITE } else { text },
+            border: Border {
+                radius: border::Radius::from(6.0),
+                ..Border::default()
+            },
+            shadow: Shadow::default(),
+            snap: true,
+        }
+    }
+}
+
 /// A circle of `diameter` in `color`.
 pub fn dot(color: Color, diameter: f32) -> container::Style {
     panel(color, diameter / 2.0)

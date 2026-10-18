@@ -180,7 +180,7 @@ element-by-element map is in [docs/design](design/README.md).
 
 | Id | Status | Notes |
 |---|---|---|
-| DK-1 Mac-like desktop | Partial | menu bar, dock, tiles, command bar and a tile's expanded view (the agent becomes the menu bar's app); the desktop shows on the VM's screen with live tiles and clock, and takes clicks and keys from evdev. The machine boots into the sign-in screen and signs in to the desktop; Shift Super Q signs out (ADR 0019). No app windows yet |
+| DK-1 Mac-like desktop | Partial | menu bar, dock, tiles, command bar and a tile's expanded view (the agent becomes the menu bar's app); the desktop shows on the VM's screen with live tiles and clock, and takes clicks and keys from evdev. The machine boots into the sign-in screen and signs in to the desktop; Shift Super Q or the system menu under the mark signs out (ADR 0019). Notification banners stay while the pointer is on them. No app windows yet |
 | UX-1 Chef's-choice defaults | Not started | |
 | UX-2 Setup asks ≤ 5 questions (none when enrolled), desktop in < 5 min | Not started | first-run setup (Setup mockup) |
 | UX-10 One theme restyles the whole system | Partial | the shell keeps every color and the wallpaper in one `Theme`; only Glass exists, no picker |

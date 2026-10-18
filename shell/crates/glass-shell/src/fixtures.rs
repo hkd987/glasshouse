@@ -351,6 +351,7 @@ pub fn desktop(tasks: &[TaskView]) -> Desktop<'_> {
         // The artboard's three tiles, as banners.
         tiles: Tiles::Banners(tasks.iter().collect()),
         wallpaper: true,
+        system_menu: None,
     }
 }
 

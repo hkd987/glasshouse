@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use glass_platform::framebuffer::{Framebuffer, Order};
-use glass_shell::render::Screen;
+use glass_shell::render::{Screen, Updated};
 use glass_shell::{Element, Message, Size};
 use iced_core::keyboard::{Key, Modifiers};
 use iced_core::{Point, mouse};
@@ -27,7 +27,7 @@ pub struct Display {
 /// A batch of input as the UI takes it.
 #[derive(Default)]
 pub struct Typed {
-    /// Clicks, wheel turns and keys for the UI.
+    /// Where the pointer went, clicks, wheel turns and keys, for the UI.
     pub events: Vec<iced_core::Event>,
     /// Keys the caller claimed as shortcuts, as the messages they stand for.
     pub shortcuts: Vec<Message>,
@@ -80,21 +80,27 @@ impl Display {
     ) -> Typed {
         let (w, h) = self.size();
         let mut typed = Typed::default();
+        // Where the pointer is goes to the UI once per batch, and before a
+        // click, not for every step on the way.
+        let mut moved = false;
+        let moved_to =
+            |pointer| iced_core::Event::Mouse(mouse::Event::CursorMoved { position: pointer });
         for input in batch {
             match *input {
-                Input::MovedTo(x, y) => self.pointer = Point::new(x, y),
+                Input::MovedTo(x, y) => {
+                    self.pointer = Point::new(x, y);
+                    moved = true;
+                }
                 Input::MovedBy(dx, dy) => {
                     self.pointer = Point::new(
                         (self.pointer.x + dx).clamp(0.0, w - 1.0),
                         (self.pointer.y + dy).clamp(0.0, h - 1.0),
                     );
+                    moved = true;
                 }
                 Input::Button(button, down) => {
-                    typed
-                        .events
-                        .push(iced_core::Event::Mouse(mouse::Event::CursorMoved {
-                            position: self.pointer,
-                        }));
+                    typed.events.push(moved_to(self.pointer));
+                    moved = false;
                     typed.events.push(iced_core::Event::Mouse(if down {
                         mouse::Event::ButtonPressed(button)
                     } else {
@@ -122,18 +128,33 @@ impl Display {
                 }
             }
         }
+        if moved {
+            typed.events.push(moved_to(self.pointer));
+        }
         self.paint_pointer();
         typed
     }
 
-    /// Feeds `events` to `view` with the pointer where it is, and returns
-    /// the messages it produced.
+    /// Feeds `events` to `view` with the pointer where it is.
     pub fn update(
         &mut self,
         view: Element<'_, Message>,
         events: &[iced_core::Event],
-    ) -> Vec<Message> {
-        self.screen.update(view, events, Some(self.pointer))
+    ) -> Updated<Message> {
+        let mut updated = self.screen.update(view, events, Some(self.pointer));
+        // A press or a key can change how the UI looks without a message (a
+        // focused input, a held button); the pointer only moving changes it
+        // when a widget says so.
+        updated.redraw |= events
+            .iter()
+            .any(|e| !matches!(e, iced_core::Event::Mouse(mouse::Event::CursorMoved { .. })));
+        updated
+    }
+
+    /// When the screen wants drawing again though nothing changed: a
+    /// focused text field's caret blinks.
+    pub fn next_redraw(&self) -> Option<Instant> {
+        self.screen.next_redraw()
     }
 
     /// Gives the keyboard focus to the widget with this id.

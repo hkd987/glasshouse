@@ -61,7 +61,11 @@ decision, so the perf scenario leaves Asks out.
   shadows), and the wallpaper stays drawn as the screen's backdrop rather
   than being scaled again for every area. A vendored patch to
   `iced_tiny_skia` (`shell/vendor/README.md`) computes a drop shadow only
-  inside the area being redrawn. Measured with `cargo test -p glass-shell
+  inside the area being redrawn. The desktop has the same layers every
+  frame, filled or empty, since frames are compared layer by layer and a
+  layer going away made the full-screen dock layer read as changed; areas
+  that overlap are joined, so nothing is drawn twice. Moving the pointer
+  redraws only when a widget changes under it. Measured with `cargo test -p glass-shell
   --test redraw_cost -- --ignored --nocapture` (laptop) and the
   `drawn in` lines of `/var/log/glass-shell-fb.log` (VM):
 
@@ -70,6 +74,7 @@ decision, so the perf scenario leaves Asks out.
   | Menu bar clock turns over | 122 ms | 1.8 ms | 1.1 s | 47 ms |
   | A key typed in the command bar | 42 ms | 5 ms | 1.7 s | 28 to 60 ms |
   | Nothing changed | 190 ms | 0.4 ms | 2 s | 3 to 7 ms |
+  | A notification banner comes or goes | | 23 ms, 3 ms | 0.4 to 0.9 s | 60 to 220 ms |
   | Whole screen (first frame, opening the command bar) | 191 ms | 60 ms | 3 s | 1.5 to 1.9 s |
 
 ## Rules for new code

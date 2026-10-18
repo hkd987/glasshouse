@@ -33,8 +33,14 @@ pub struct Live {
     open: Option<Open>,
     /// Tiles showing as notifications, newest last.
     banners: Vec<Banner>,
+    /// The pointer is on the banners, so none goes.
+    held: bool,
     /// The agents menu is open.
     menu: bool,
+    /// The system menu (under the mark in the menu bar) is open.
+    system_menu: bool,
+    /// Who is signed in, as the system menu names them.
+    person: String,
 }
 
 /// How long a notification stays on screen, as a macOS banner does. One
@@ -44,6 +50,8 @@ pub const BANNER: Duration = Duration::from_secs(4);
 pub const NEEDS_YOU_BANNER: Duration = Duration::from_secs(7);
 /// Banners at once; an older one makes room for a newer one.
 const MOST_BANNERS: usize = 3;
+/// Once the pointer leaves the banners, the least time they stay.
+pub const AFTER_HOLD: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Banner {
@@ -120,7 +128,10 @@ impl Live {
             wallpaper: true,
             open: None,
             banners: Vec::new(),
+            held: false,
             menu: false,
+            system_menu: false,
+            person: String::new(),
         };
         let waiting: Vec<TaskId> = live
             .tasks
@@ -139,6 +150,12 @@ impl Live {
     /// its backdrop (`render::Screen::set_backdrop`).
     pub fn without_wallpaper(mut self) -> Self {
         self.wallpaper = false;
+        self
+    }
+
+    /// Who is signed in, for "Sign out <name>" in the system menu.
+    pub fn signed_in_as(mut self, person: impl Into<String>) -> Self {
+        self.person = person.into();
         self
     }
 
@@ -197,6 +214,10 @@ impl Live {
         } else {
             BANNER
         };
+        if self.banners.is_empty() {
+            // The pointer was on banners that are gone.
+            self.held = false;
+        }
         self.banners.retain(|b| b.task != task);
         self.banners.push(Banner {
             task,
@@ -207,9 +228,12 @@ impl Live {
         }
     }
 
-    /// Takes away the banners whose time is up at `at`. True when any went,
-    /// so the screen needs drawing.
+    /// Takes away the banners whose time is up at `at`, unless the pointer
+    /// is on them. True when any went, so the screen needs drawing.
     pub fn tick(&mut self, at: Instant) -> bool {
+        if self.held {
+            return false;
+        }
         let before = self.banners.len();
         self.banners.retain(|b| b.until > at);
         self.banners.len() != before
@@ -217,6 +241,9 @@ impl Live {
 
     /// When the next banner goes, for the shell to wake then.
     pub fn next_change(&self) -> Option<Instant> {
+        if self.held {
+            return None;
+        }
         self.banners.iter().map(|b| b.until).min()
     }
 
@@ -283,12 +310,57 @@ impl Live {
     /// What `message` asks for. Messages for parts not built yet (the
     /// desktop agent's answers, sign in) do nothing.
     pub fn update(&mut self, message: Message) -> Option<Effect> {
+        self.update_at(message, Instant::now())
+    }
+
+    /// [`Live::update`] at a given moment, which times the banners.
+    pub fn update_at(&mut self, message: Message, at: Instant) -> Option<Effect> {
+        let effect = self.react(message, at);
+        // Banners something now covers can't hear the pointer leave them.
+        if !self.banners_shown() {
+            self.held = false;
+        }
+        effect
+    }
+
+    /// Whether the banners are on screen: there are some, and nothing is
+    /// over them (as [`Live::view`] decides).
+    fn banners_shown(&self) -> bool {
+        !self.banners.is_empty()
+            && !self.menu
+            && !self.system_menu
+            && self.open.is_none()
+            && self.command.is_none()
+    }
+
+    fn react(&mut self, message: Message, at: Instant) -> Option<Effect> {
         match message {
+            Message::HoldBanners => {
+                self.held = !self.banners.is_empty();
+                None
+            }
+            Message::LetBannersGo => {
+                if std::mem::take(&mut self.held) {
+                    for banner in &mut self.banners {
+                        banner.until = banner.until.max(at + AFTER_HOLD);
+                    }
+                }
+                None
+            }
             // AW-10: open the tile; its activity and changes come from
             // `task.get`.
             Message::OpenTask(task) => self.open(task),
+            Message::ToggleSystemMenu => {
+                self.system_menu = !self.system_menu;
+                if self.system_menu {
+                    self.menu = false;
+                    self.command = None;
+                }
+                None
+            }
             Message::ToggleAgents => {
                 self.menu = !self.menu;
+                self.system_menu = false;
                 if self.menu {
                     // Everything is in the menu; nothing else on top.
                     self.command = None;
@@ -391,6 +463,7 @@ impl Live {
                 None
             }
             Message::OpenCommandBar => {
+                self.system_menu = false;
                 self.command.get_or_insert_with(String::new);
                 Some(Effect::Focus(command_bar::INPUT))
             }
@@ -409,7 +482,10 @@ impl Live {
             | Message::PasswordChanged(_)
             | Message::SignIn
             | Message::SwitchUser => None,
-            Message::SignOut => Some(Effect::SignOut),
+            Message::SignOut => {
+                self.system_menu = false;
+                Some(Effect::SignOut)
+            }
         }
     }
 
@@ -449,6 +525,7 @@ impl Live {
             }
             Key::Named(Named::Escape) if bar => Some(Message::CloseCommandBar),
             Key::Named(Named::Escape) if self.menu => Some(Message::CloseAgents),
+            Key::Named(Named::Escape) if self.system_menu => Some(Message::ToggleSystemMenu),
             Key::Named(Named::Escape) => {
                 let open = self.open.as_ref()?;
                 Some(match &open.rollback {
@@ -504,7 +581,7 @@ impl Live {
         let expanded = self.expanded(now);
         // Nothing sits over the command bar or the expanded view; otherwise
         // the menu if it's open, else whatever is a banner right now.
-        let tiles = if bar.is_some() || expanded.is_some() {
+        let tiles = if bar.is_some() || expanded.is_some() || self.system_menu {
             Tiles::Hidden
         } else if self.menu {
             Tiles::Menu
@@ -523,6 +600,7 @@ impl Live {
         let mut state = Desktop {
             tiles,
             wallpaper: self.wallpaper,
+            system_menu: self.system_menu.then(|| self.person.clone()),
             ..Desktop::live(&self.tasks, now)
         };
         let mut overlays = Vec::new();
@@ -926,6 +1004,74 @@ mod tests {
             at + Duration::from_secs(9),
         );
         assert_eq!(live.banners(), [task.id]);
+    }
+
+    #[test]
+    fn ux_a_banner_stays_while_the_pointer_is_on_it() {
+        let tasks = fixtures::tasks();
+        let mut live = Live::new(Vec::new());
+        let at = Instant::now();
+        let task = working(&tasks);
+        live.apply_at(
+            Event::TaskUpdated {
+                task: Box::new(task.clone()),
+            },
+            at,
+        );
+        live.update_at(Message::HoldBanners, at + Duration::from_secs(1));
+        assert_eq!(live.next_change(), None);
+        assert!(!live.tick(at + BANNER * 3), "read as long as it takes");
+        assert_eq!(live.banners(), [task.id]);
+        // Let go, it stays a moment longer, then goes.
+        let left = at + BANNER * 3;
+        live.update_at(Message::LetBannersGo, left);
+        assert_eq!(live.next_change(), Some(left + AFTER_HOLD));
+        assert!(live.tick(left + AFTER_HOLD));
+        assert!(live.banners().is_empty());
+    }
+
+    #[test]
+    fn ux_banners_the_menu_covers_stop_being_held() {
+        let tasks = fixtures::tasks();
+        let mut live = Live::new(Vec::new());
+        let at = Instant::now();
+        live.apply_at(
+            Event::TaskUpdated {
+                task: Box::new(working(&tasks)),
+            },
+            at,
+        );
+        live.update_at(Message::HoldBanners, at);
+        live.update_at(Message::ToggleAgents, at);
+        live.update_at(Message::ToggleAgents, at);
+        // A new banner isn't stuck behind a pointer that left long ago.
+        let later = at + Duration::from_secs(30);
+        let mut done = working(&tasks);
+        done.state = TileState::Done;
+        live.apply_at(
+            Event::TaskUpdated {
+                task: Box::new(done),
+            },
+            later,
+        );
+        assert_eq!(live.next_change(), Some(later + BANNER));
+    }
+
+    #[test]
+    fn the_system_menu_closes_with_esc_and_gives_way_to_the_agents_menu() {
+        let mut live = Live::new(fixtures::tasks());
+        live.update(Message::ToggleSystemMenu);
+        let esc = Key::Named(Named::Escape);
+        assert_eq!(
+            live.shortcut(&esc, Modifiers::empty()),
+            Some(Message::ToggleSystemMenu)
+        );
+        live.update(Message::ToggleAgents);
+        assert_eq!(
+            live.shortcut(&esc, Modifiers::empty()),
+            Some(Message::CloseAgents),
+            "one menu at a time"
+        );
     }
 
     #[test]

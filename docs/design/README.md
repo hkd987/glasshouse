@@ -28,7 +28,7 @@ light desktop; accent `#3D6BFF` for working and you're-driving; attention
 
 | Element | Source |
 |---|---|
-| One tile per running agent, needs-you on top (AW-1) | `task.list` → `TaskView`; sort by `state == NeedsYou`. **Tiles don't stay on screen** (product decision, 2026-10-19): a new agent, an ask or an ending shows as a banner at the top right for 4 s (an ask 7 s), like a macOS notification, then goes; approving or opening it takes it away at once. The stack the artboard shows lives in the **agents menu** (below) |
+| One tile per running agent, needs-you on top (AW-1) | `task.list` → `TaskView`; sort by `state == NeedsYou`. **Tiles don't stay on screen** (product decision, 2026-10-19): a new agent, an ask or an ending shows as a banner at the top right for 4 s (an ask 7 s), like a macOS notification, then goes; with the pointer on it, it stays until the pointer leaves (then 2 s more); approving or opening it takes it away at once. The stack the artboard shows lives in the **agents menu** (below) |
 | Agents menu: every agent, needs-you first, "3 running · 1 needs you" | The menu bar's agents pill opens it (`Message::ToggleAgents`); a tile opens its expanded view; a click outside or Esc closes it. `screens::desktop::Tiles::Menu`, `live::Live` |
 | Name and mode chip ("Actions", "Screen") | `agent_name`, `mode` |
 | Elapsed ("4 min") | now − `started_at` |

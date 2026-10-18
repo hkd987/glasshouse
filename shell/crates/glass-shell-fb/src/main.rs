@@ -27,7 +27,7 @@ use anyhow::{Context, anyhow, bail};
 use glass_api::{Event, TaskDetail, TaskRef, TaskView, UndoReport, methods};
 use glass_rpc::{Client, ClientError};
 use glass_shell::live::{Effect, Live};
-use glass_shell::{Theme, wallpaper};
+use glass_shell::{Message, Theme, wallpaper};
 use glass_shell_fb::display::Display;
 use glass_shell_fb::input::{self, Input};
 use time::{OffsetDateTime, UtcOffset};
@@ -95,8 +95,11 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow!("task.list: {e}"))?;
 
-    let mut shell = Shell::open(args.tty, offset, Live::new(tasks).without_wallpaper())?;
-    shell.draw();
+    let live = Live::new(tasks)
+        .without_wallpaper()
+        .signed_in_as(signed_in_as());
+    let mut shell = Shell::open(args.tty, offset, live)?;
+    shell.draw(true);
     if args.once {
         return Ok(());
     }
@@ -110,14 +113,10 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
     let mut interrupt = signal(SignalKind::interrupt())?;
     loop {
         let redraw;
-        // When the next notification banner's time is up.
-        let banner_due = shell.live.next_change();
-        let banner_gone = async move {
-            match banner_due {
-                Some(due) => tokio::time::sleep_until(due.into()).await,
-                None => std::future::pending().await,
-            }
-        };
+        // When the next notification banner's time is up, and when the
+        // command bar's caret blinks.
+        let banner_gone = until(shell.live.next_change());
+        let blink = until(shell.display.next_redraw());
         tokio::select! {
             note = client.next_notification() => {
                 // The open task changing asks for its detail again, once
@@ -149,15 +148,41 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
                 redraw = shell.changed();
             }
             () = banner_gone => redraw = shell.live.tick(Instant::now()),
+            () = blink => {
+                // Only the caret: not worth a log line twice a second.
+                shell.draw(false);
+                continue;
+            }
             () = tokio::time::sleep(until_next_minute(OffsetDateTime::now_utc())) => redraw = true,
             _ = terminate.recv() => break,
             _ = interrupt.recv() => break,
         }
         if redraw {
-            shell.draw();
+            shell.draw(true);
         }
     }
     Ok(())
+}
+
+/// Waits until `at`, or forever without one.
+async fn until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Who is signed in, as they'd read it: the account's full name, else its
+/// login name (`su -l` sets `USER`).
+fn signed_in_as() -> String {
+    let login = std::env::var("USER").unwrap_or_default();
+    glass_platform::users::people()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|p| p.name == login)
+        .map(|p| p.full_name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(login)
 }
 
 /// The desktop on the framebuffer: its state and the screen it draws on.
@@ -200,8 +225,8 @@ impl Shell {
         Ok(event.and_then(|event| self.live.apply(event)))
     }
 
-    /// Handles a batch of input: the pointer moves at once; clicks and keys
-    /// go through the UI. Returns what they ask for.
+    /// Handles a batch of input: the pointer moves at once; where it went,
+    /// clicks and keys go through the UI. Returns what they ask for.
     fn input(&mut self, batch: &[Input]) -> Vec<Effect> {
         let live = &self.live;
         let typed = self
@@ -213,14 +238,17 @@ impl Shell {
             let view = self
                 .live
                 .view(&self.theme, bar.as_ref(), self.now(), self.display.size());
-            messages.extend(self.display.update(view, &typed.events));
-            // A press or a key can change how the UI looks without a message
-            // (a focused input, a held button).
-            self.dirty = true;
+            let updated = self.display.update(view, &typed.events);
+            messages.extend(updated.messages);
+            self.dirty |= updated.redraw;
         }
         let mut effects = Vec::new();
         for message in messages {
-            self.dirty = true;
+            // The pointer resting on a banner, or leaving it, changes only
+            // when the banner goes.
+            if !matches!(message, Message::HoldBanners | Message::LetBannersGo) {
+                self.dirty = true;
+            }
             match self.live.update(message) {
                 Some(Effect::Focus(id)) => {
                     let bar = self.live.command_bar();
@@ -332,7 +360,8 @@ impl Shell {
         }
     }
 
-    fn draw(&mut self) {
+    /// Draws what changed, with a line in the log if `log`.
+    fn draw(&mut self, log: bool) {
         // This frame shows whatever was waiting to be shown.
         self.dirty = false;
         let bar = self.live.command_bar();
@@ -340,7 +369,9 @@ impl Shell {
             .live
             .view(&self.theme, bar.as_ref(), self.now(), self.display.size());
         let drawn = self.display.draw(view);
-        eprintln!("{} tiles: {drawn}", self.live.tasks().len());
+        if log {
+            eprintln!("{} tiles: {drawn}", self.live.tasks().len());
+        }
     }
 }
 

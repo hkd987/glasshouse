@@ -25,7 +25,48 @@ fn click(screen: &mut Screen, live: &Live, at: Point) -> Vec<Message> {
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
     ];
-    screen.update(view, &events, Some(at))
+    screen.update(view, &events, Some(at)).messages
+}
+
+/// The pointer moving to `at`, nothing pressed.
+fn point(screen: &mut Screen, live: &Live, at: Point) -> glass_shell::render::Updated<Message> {
+    let theme = Theme::glass();
+    let bar = live.command_bar();
+    let view = live.view(&theme, bar.as_ref(), artboard_time(), SIZE);
+    let moved = [Event::Mouse(mouse::Event::CursorMoved { position: at })];
+    screen.update(view, &moved, Some(at))
+}
+
+#[test]
+fn ux_the_pointer_on_a_banner_keeps_it_and_leaving_lets_it_go() {
+    let mut live = Live::new(fixtures::tasks());
+    assert!(
+        !live.banners().is_empty(),
+        "what's waiting shows as banners"
+    );
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    let empty = Point::new(400.0, 450.0);
+    let moved = point(&mut screen, &live, empty);
+    assert!(moved.messages.is_empty());
+    assert!(
+        !moved.redraw,
+        "the pointer crossing the wallpaper draws nothing"
+    );
+    // Onto the banners, at the top right.
+    let noticed = (60..300).step_by(20).any(|y| {
+        point(&mut screen, &live, Point::new(1200.0, y as f32)).messages == [Message::HoldBanners]
+    });
+    assert!(noticed, "the banners notice the pointer");
+    live.update(Message::HoldBanners);
+    assert_eq!(
+        live.next_change(),
+        None,
+        "held while the pointer is on them"
+    );
+    assert_eq!(
+        point(&mut screen, &live, empty).messages,
+        [Message::LetBannersGo]
+    );
 }
 
 #[test]
@@ -221,7 +262,7 @@ fn da1_typing_into_the_command_bar_after_ctrl_space() {
         let messages = {
             let bar = live.command_bar();
             let view = live.view(&theme, bar.as_ref(), artboard_time(), SIZE);
-            screen.update(view, &[press], None)
+            screen.update(view, &[press], None).messages
         };
         for message in messages {
             live.update(message);
@@ -302,4 +343,104 @@ fn redraws_match(backdrop: bool) {
     );
     let again = render(&mut kept, &live);
     assert!(again.is_empty(), "nothing changed: {again:?}");
+}
+
+#[test]
+fn ux_a_banner_coming_and_going_redraws_only_where_it_is() {
+    use glass_api::{Event as TaskEvent, TileState};
+    use glass_shell::live::BANNER;
+    use std::time::Instant;
+
+    let theme = Theme::glass();
+    let working = fixtures::tasks()
+        .into_iter()
+        .find(|t| t.state == TileState::Working)
+        .expect("a working tile");
+    let mut live = Live::new(Vec::new());
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    let mut render =
+        |live: &Live| screen.render(live.view(&theme, None, artboard_time(), SIZE), None);
+    render(&live);
+    let at = Instant::now();
+    live.apply_at(
+        TaskEvent::TaskUpdated {
+            task: Box::new(working),
+        },
+        at,
+    );
+    // The banner, the pill's count and the dock's agent: not the screen,
+    // and nothing drawn twice.
+    let came = render(&live);
+    let area: u32 = came.iter().map(|d| d.width * d.height).sum();
+    assert!(area < (SIZE.0 * SIZE.1 / 8.0) as u32, "{came:?}");
+    assert_eq!(came.len(), 2, "the top right and the dock: {came:?}");
+    assert!(live.tick(at + BANNER));
+    let went = render(&live);
+    assert!(!went.is_empty());
+    assert!(
+        went.iter().all(|d| d.y + d.height < 300),
+        "only the top right, where the banner was: {went:?}"
+    );
+}
+
+#[test]
+fn the_mark_opens_the_system_menu_and_sign_out_signs_out() {
+    let mut live = Live::new(fixtures::tasks()).signed_in_as("Dana Ruiz");
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    assert_eq!(
+        click(&mut screen, &live, Point::new(24.0, 16.0)),
+        [Message::ToggleSystemMenu]
+    );
+    live.update(Message::ToggleSystemMenu);
+    let found = (40..80)
+        .step_by(6)
+        .flat_map(|y| (20..300).step_by(40).map(move |x| (x, y)))
+        .find_map(|(x, y)| {
+            click(&mut screen, &live, Point::new(x as f32, y as f32))
+                .into_iter()
+                .find(|m| *m == Message::SignOut)
+        })
+        .expect("Sign out in the system menu");
+    assert_eq!(live.update(found), Some(Effect::SignOut));
+}
+
+#[test]
+fn the_pointer_going_onto_a_button_redraws_it_and_off_again() {
+    let live = Live::new(fixtures::tasks());
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    let theme = Theme::glass();
+    screen.render(
+        live.view(&theme, None, artboard_time(), SIZE),
+        Some(Point::new(400.0, 450.0)),
+    );
+    // The agents pill, in the menu bar at the top right.
+    let pill = (1100..1300)
+        .step_by(10)
+        .map(|x| Point::new(x as f32, 16.0))
+        .find(|&at| point(&mut screen, &live, at).redraw)
+        .expect("the pill notices the pointer");
+    assert!(!point(&mut screen, &live, pill).redraw, "still on it");
+    assert!(point(&mut screen, &live, Point::new(400.0, 450.0)).redraw);
+}
+
+#[test]
+fn a_focused_text_field_asks_to_be_drawn_again_for_its_caret() {
+    let theme = Theme::glass();
+    let mut live = Live::new(fixtures::tasks());
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    let draw = |screen: &mut Screen, live: &Live| {
+        let bar = live.command_bar();
+        screen.render(live.view(&theme, bar.as_ref(), artboard_time(), SIZE), None);
+    };
+    draw(&mut screen, &live);
+    assert_eq!(screen.next_redraw(), None, "nothing blinks on the desktop");
+    live.update(Message::OpenCommandBar);
+    let bar = live.command_bar();
+    screen.focus(
+        live.view(&theme, bar.as_ref(), artboard_time(), SIZE),
+        glass_shell::screens::command_bar::INPUT,
+    );
+    draw(&mut screen, &live);
+    let wake = screen.next_redraw().expect("the caret blinks");
+    assert!(wake <= std::time::Instant::now() + std::time::Duration::from_secs(1));
 }

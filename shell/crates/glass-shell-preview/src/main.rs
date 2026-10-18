@@ -6,7 +6,7 @@
 //! ```
 //!
 //! Writes `boot.png`, `login.png`, `desktop.png`, `desktop-banner.png`,
-//! `agents-menu.png`, `command-bar.png` and the
+//! `agents-menu.png`, `system-menu.png`, `command-bar.png` and the
 //! expanded view: `expanded.png` (the Expanded artboard), with its Changes
 //! tab, a roll back about to happen, a needs-you task's review and a
 //! finished task's receipt. The desktop shows the Desktop artboard's
@@ -148,6 +148,16 @@ fn main() -> anyhow::Result<()> {
     write(
         "agents-menu.png",
         desktop::view(&theme, &menu, vec![window()], thumbnail, None, (w, h)),
+    )?;
+    // The mark's system menu: signing out.
+    let system = desktop::Desktop {
+        tiles: desktop::Tiles::Hidden,
+        system_menu: Some("Dana Ruiz".into()),
+        ..state.clone()
+    };
+    write(
+        "system-menu.png",
+        desktop::view(&theme, &system, vec![window()], thumbnail, None, (w, h)),
     )?;
 
     // The command bar over the desktop (Ctrl Space).

@@ -264,12 +264,13 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
                     batch.push(more);
                 }
                 let typed = display.input(&batch, |_, _| None);
-                let messages = {
+                let updated = {
                     let sign_in = greeter.screen(now());
                     let view = login::view(&theme, &sign_in, display.size());
                     display.update(view, &typed.events)
                 };
-                for message in messages {
+                let redraw = updated.redraw || !updated.messages.is_empty();
+                for message in updated.messages {
                     match greeter.update(message) {
                         Some(Effect::Focus(id)) => {
                             let sign_in = greeter.screen(now());
@@ -292,13 +293,29 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
                         None => {}
                     }
                 }
-                draw(&mut display, &greeter);
+                if redraw {
+                    draw(&mut display, &greeter);
+                }
             }
             () = tokio::time::sleep(Duration::from_secs(60 - u64::from(now().second()))) => {
                 draw(&mut display, &greeter);
             }
+            // The password field's caret blinks.
+            () = blink(display.next_redraw()) => {
+                // Only the caret: not worth a log line twice a second.
+                let sign_in = greeter.screen(now());
+                display.draw(login::view(&theme, &sign_in, display.size()));
+            }
             _ = terminate.recv() => bail!("stopped"),
         }
+    }
+}
+
+/// Waits until `at`, or forever without one.
+async fn blink(at: Option<std::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
     }
 }
 
