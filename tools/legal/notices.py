@@ -19,7 +19,11 @@ dependencies, for the FreeBSD target) and writes:
                    publish it.
 
     tools/legal/notices.py --package glassd --package glassctl \\
+        --shell-package glass-greeter --assets shell/assets/fonts \\
         --notices build/legal/NOTICES.txt --sbom build/sbom/glasshouse.cdx.json
+
+`--shell-package` names a binary of the desktop shell's own workspace
+(shell/Cargo.toml); its crates join the root workspace's in one list.
 
 Exits non-zero if a shipped crate's license is missing or outside the
 allow list in deny.toml, so a bad dependency fails the build, not legal
@@ -45,34 +49,43 @@ LICENSE_FILE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|UNLICENSE|COPYRIGHT)", r
 ASSET_LICENSE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|OFL)", re.I)
 
 
-def metadata() -> dict:
+def metadata(manifest: Path = REPO / "Cargo.toml") -> dict:
     out = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", TARGET],
+        ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", TARGET,
+         "--manifest-path", str(manifest)],
         cwd=REPO, check=True, capture_output=True, text=True,
     ).stdout
     return json.loads(out)
 
 
-def shipped_closure(meta: dict, roots: list[str]) -> list[dict]:
-    """Third-party packages reachable from `roots` through non-dev edges."""
+def shipped_closure(meta: dict, roots: list[str], manifest: Path = REPO / "Cargo.toml") -> list[dict]:
+    """Third-party packages the `roots` binaries link for FreeBSD: their
+    normal and build dependencies with the features actually enabled, as
+    `cargo tree` resolves them (`cargo metadata`'s graph also lists optional
+    dependencies only named by weak features, such as iced's wgpu backend).
+    Path dependencies are ours, except vendored crates (shell/vendor)."""
     packages = {p["id"]: p for p in meta["packages"]}
-    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
-    members = set(meta["workspace_members"])
-    by_name = {packages[m]["name"]: m for m in members}
-    missing = [r for r in roots if r not in by_name]
+    members = {packages[m]["name"] for m in meta["workspace_members"]}
+    missing = [r for r in roots if r not in members]
     if missing:
         sys.exit(f"notices: not workspace packages: {', '.join(missing)}")
-    seen, stack = set(), [by_name[r] for r in roots]
-    while stack:
-        pid = stack.pop()
-        if pid in seen:
-            continue
-        seen.add(pid)
-        for dep in nodes[pid]["deps"]:
-            if any(k["kind"] in (None, "build") for k in dep["dep_kinds"]):
-                stack.append(dep["pkg"])
+    out = subprocess.run(
+        ["cargo", "tree", "--locked", "--manifest-path", str(manifest), "--target", TARGET,
+         "-e", "normal,build", "--prefix", "none", "--format", "{p}",
+         *[arg for r in roots for arg in ("-p", r)]],
+        cwd=REPO, check=True, capture_output=True, text=True,
+    ).stdout
+    linked = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].startswith("v"):
+            linked.add((parts[0], parts[1][1:]))
+
+    def ours(p: dict) -> bool:
+        return p["source"] is None and "/vendor/" not in p["manifest_path"]
+
     return sorted(
-        (packages[p] for p in seen if p not in members),
+        (p for p in packages.values() if (p["name"], p["version"]) in linked and not ours(p)),
         key=lambda p: (p["name"], p["version"]),
     )
 
@@ -213,6 +226,8 @@ def write_sbom(path: Path, packages: list[dict], roots: list[str], version: str)
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--package", action="append", required=True, help="a shipped workspace binary")
+    ap.add_argument("--shell-package", action="append", default=[],
+                    help="a shipped binary of the shell workspace (shell/Cargo.toml)")
     ap.add_argument("--notices", type=Path)
     ap.add_argument("--assets", type=Path, action="append", default=[], help="a directory of shipped assets")
     ap.add_argument("--sbom", type=Path)
@@ -221,6 +236,14 @@ def main() -> int:
 
     meta = metadata()
     packages = shipped_closure(meta, args.package)
+    if args.shell_package:
+        manifest = REPO / "shell/Cargo.toml"
+        shell = shipped_closure(metadata(manifest), args.shell_package, manifest)
+        ours = {(p["name"], p["version"]) for p in packages}
+        packages = sorted(
+            packages + [p for p in shell if (p["name"], p["version"]) not in ours],
+            key=lambda p: (p["name"], p["version"]),
+        )
     allowed = allowed_licenses()
     problems = [
         f"{p['name']} {p['version']}: license {p.get('license')!r} is not on the allow list"
@@ -238,7 +261,7 @@ def main() -> int:
             print(f"notices: {name} ships no license file; listed by SPDX id only", file=sys.stderr)
     if args.sbom:
         version = next(p["version"] for p in meta["packages"] if p["id"] in meta["workspace_members"])
-        write_sbom(args.sbom, packages, args.package, version)
+        write_sbom(args.sbom, packages, args.package + args.shell_package, version)
         print(f"notices: SBOM -> {args.sbom}", file=sys.stderr)
     return 1 if problems else 0
 
