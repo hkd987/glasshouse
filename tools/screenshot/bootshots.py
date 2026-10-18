@@ -40,6 +40,7 @@ def main() -> int:
 
     if not args.no_reboot:
         vm("run", "shutdown -r now >/dev/null 2>&1 &", check=True)
+        vm("ssh-close")
         time.sleep(2)
     start, last, frames, seen_down = time.monotonic(), None, [], args.no_reboot
     tmp = args.out / ".frame.png"

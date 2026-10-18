@@ -57,7 +57,7 @@ Other useful commands:
 
 SSH is `root@127.0.0.1:2222` with `build/vm/ssh/id_ed25519`. Host keys are never recorded.
 
-VM knobs (environment variables): `VM_CPUS` (2), `VM_MEM` (4096), `VM_DISK_SIZE` (20G),
+VM knobs (environment variables): `VM_CPUS` (host cores, at most 4), `VM_MEM` (4096), `VM_DISK_SIZE` (20G),
 `VM_SSH_PORT` (2222), `VM_BOOT_TIMEOUT` (900 s), `VM_CPU_MODEL`, `VM_DIR` (run a second VM),
 `VM_BASE_IMAGE` (boot a baked image instead of the stock one).
 

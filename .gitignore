@@ -13,3 +13,6 @@
 
 # Python bytecode from the tools/ scripts.
 __pycache__/
+
+# Parallel agents work in their own git worktrees here.
+/.claude/worktrees/

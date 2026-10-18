@@ -19,7 +19,9 @@ PRISTINE_IMAGE=$CACHE_DIR/${FREEBSD_VM_IMAGE%.xz}      # decompressed by fetch.s
 # VM knobs (override from the environment).
 VM_DIR=${VM_DIR:-$BUILD_DIR/vm}
 VM_SSH_PORT=${VM_SSH_PORT:-2222}
-VM_CPUS=${VM_CPUS:-2}
+# Up to 4: the e2e suite runs scenarios side by side, and QEMU's multi-threaded
+# TCG gives each virtual CPU its own host thread.
+VM_CPUS=${VM_CPUS:-$(n=$(nproc 2>/dev/null || echo 2); echo $((n < 4 ? n : 4)))}
 # KVM when usable, else TCG. QEMU 8.2 TCG mis-emulates AVX (15.1 panics in zfs.ko SIMD init),
 # so TCG gets a CPU model without AVX; la57 off saves a page-walk level.
 [[ -z ${VM_ACCEL:-} && -w /dev/kvm ]] && VM_ACCEL=kvm
@@ -56,10 +58,17 @@ SSH_OPTS=(
 	-i "$VM_SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes
 	-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null
 	-o LogLevel=ERROR -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4
+	# One connection, reused: each new ssh or scp skips the key exchange,
+	# which costs most of a second against the emulated VM.
+	-o ControlMaster=auto -o "ControlPath=$VM_DIR/ssh-%C" -o ControlPersist=120
 )
 
 # vm_ssh [ssh-args...] -- runs ssh as root against the dev VM.
 vm_ssh() { ssh "${SSH_OPTS[@]}" -p "$VM_SSH_PORT" root@127.0.0.1 "$@"; }
+
+# vm_ssh_close -- drops the shared connection; call it whenever the VM stops
+# or reboots, or later calls would wait on a dead one.
+vm_ssh_close() { ssh "${SSH_OPTS[@]}" -p "$VM_SSH_PORT" -O exit root@127.0.0.1 >/dev/null 2>&1 || true; }
 
 # vm_scp <src...> <remote-dest> -- copies host files into the VM as root.
 vm_scp() {

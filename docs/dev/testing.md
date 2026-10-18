@@ -11,7 +11,26 @@ Three levels, each proving something the one below can't.
 ## The FreeBSD VM
 
 Set it up with `make test-env`; see [test-environment.md](test-environment.md).
-Then `make e2e-vm` cross-compiles, deploys and runs the suite (~2 min).
+Then `make e2e-vm` cross-compiles, deploys and runs the suite: about a
+minute in a 4-CPU VM on an idle host (it was 2.5 min). What keeps it short:
+
+- **One SSH connection, reused** (`ControlMaster` in `scripts/lib.sh`): each
+  `vm.sh run` costs ~0.1 s instead of ~0.9 s against the emulated VM.
+  `vm.sh ssh-close` drops it; `up`, `down`, `wait` and reboots do it for you.
+- **Scenarios side by side.** `glass-e2e all` runs the ones that share
+  nothing in parallel (six at a time, under the per-user task limit), then
+  `invoices`, `tailor` and `perf` alone: they send mail others count,
+  change the user's layer, or measure latency. A new scenario goes in
+  `PARALLEL` in `tests/e2e/src/main.rs` only if it sends no mail, changes
+  no shared settings and keeps one task live at a time.
+- **4 virtual CPUs** by default (`VM_CPUS`, capped at the host's cores):
+  multi-threaded TCG gives each its own host thread.
+- Every step and scenario prints how long it took; look there first when the
+  suite slows down.
+
+Run one scenario while working on it: `make freebsd vm-deploy`, then
+`tests/e2e/run-vm.sh` is the whole suite, or in the VM
+`su demo -c '/usr/local/libexec/glasshouse-tests/glass-e2e <name>'`.
 
 The VM has a `demo` user (uid 1001) whose home is its own ZFS dataset, seeded
 with sample invoices by `post-install.sh`.

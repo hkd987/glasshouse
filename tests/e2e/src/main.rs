@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! glass-e2e all                 every single-user scenario
-//! glass-e2e invoices labels     just these
+//! glass-e2e invoices labels     just these, one after another
 //! glass-e2e perf                end-user latency budgets
 //! glass-e2e hold                start a waiting task, print its id
 //! glass-e2e isolation <id>      (as another user) that task is invisible
@@ -10,8 +10,9 @@
 //! glass-e2e sleeping|awake <id> its state after a system suspend / resume
 //! ```
 //!
-//! `tests/e2e/run-vm.sh` runs the full suite in the FreeBSD VM, including the
-//! parts that need several users and root.
+//! `all` runs the scenarios that share nothing side by side, then the rest one
+//! at a time. `tests/e2e/run-vm.sh` runs the full suite in the FreeBSD VM,
+//! including the parts that need several users and root.
 
 #![allow(clippy::print_stdout)]
 
@@ -20,31 +21,39 @@ mod perf;
 mod scenarios;
 
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Instant;
 
 use glass_types::TaskId;
+use tokio::task::JoinSet;
 
 use crate::harness::Harness;
 
-const ALL: &[&str] = &[
+/// Scenarios that can run side by side: none of them sends mail (others
+/// count the Sent folder), changes the user's layers, or measures latency,
+/// and each has at most one live task at a time.
+const PARALLEL: &[&str] = &[
     "scope",
     "containment",
-    "invoices",
     "decline",
     "labels",
     "stop",
     "takeover",
     "changes",
     "it",
-    "tailor",
     "harness",
-    "perf",
 ];
+/// Run after the parallel ones, one at a time: `invoices` sends mail,
+/// `tailor` changes the invoice agent's layer, and `perf` must run alone.
+const SERIAL: &[&str] = &["invoices", "tailor", "perf"];
+/// Live tasks one user may have is 8 (glassd.toml); stay under it.
+const AT_ONCE: usize = 6;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let harness = match Harness::connect().await {
-        Ok(h) => h,
+        Ok(h) => Arc::new(h),
         Err(e) => {
             eprintln!("glass-e2e: {e:#}");
             return ExitCode::FAILURE;
@@ -68,36 +77,21 @@ async fn main() -> ExitCode {
             }
         }
         _ => {
-            let wanted: Vec<&str> = if args.is_empty() || args.iter().any(|a| a == "all") {
-                ALL.to_vec()
+            let started = Instant::now();
+            let (failed, total) = if args.is_empty() || args.iter().any(|a| a == "all") {
+                let (parallel_failed, _) = run_parallel(&harness, PARALLEL).await;
+                let (serial_failed, _) = run_serial(&harness, SERIAL.iter().copied()).await;
+                (
+                    parallel_failed + serial_failed,
+                    PARALLEL.len() + SERIAL.len(),
+                )
             } else {
-                args.iter().map(String::as_str).collect()
+                run_serial(&harness, args.iter().map(String::as_str)).await
             };
-            let mut failed = 0;
-            for name in &wanted {
-                let outcome = match *name {
-                    "scope" => scenarios::scope(&harness).await,
-                    "containment" => scenarios::containment(&harness).await,
-                    "invoices" => scenarios::invoices(&harness).await,
-                    "decline" => scenarios::decline(&harness).await,
-                    "labels" => scenarios::labels(&harness).await,
-                    "stop" => scenarios::stop(&harness).await,
-                    "takeover" => scenarios::takeover(&harness).await,
-                    "changes" => scenarios::changes(&harness).await,
-                    "it" => scenarios::it(&harness).await,
-                    "tailor" => scenarios::tailor(&harness).await,
-                    "harness" => scenarios::harness(&harness).await,
-                    "perf" => perf::perf(&harness).await,
-                    other => Err(anyhow::anyhow!("unknown scenario {other}")),
-                };
-                if report(name, outcome).is_err() {
-                    failed += 1;
-                }
-            }
             println!(
-                "{} of {} scenarios passed",
-                wanted.len() - failed,
-                wanted.len()
+                "{} of {total} scenarios passed in {:.0}s",
+                total - failed,
+                started.elapsed().as_secs_f64()
             );
             if failed == 0 {
                 Ok(())
@@ -112,6 +106,70 @@ async fn main() -> ExitCode {
             eprintln!("glass-e2e: {e:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Runs `names` side by side, at most [`AT_ONCE`] at a time. Returns
+/// (failed, run).
+async fn run_parallel(harness: &Arc<Harness>, names: &[&'static str]) -> (usize, usize) {
+    let mut queue = names.iter().copied();
+    let mut running = JoinSet::new();
+    let mut failed = 0;
+    loop {
+        while running.len() < AT_ONCE {
+            let Some(name) = queue.next() else { break };
+            let harness = Arc::clone(harness);
+            running.spawn(async move { timed(name, &harness).await });
+        }
+        let Some(done) = running.join_next().await else {
+            break;
+        };
+        match done {
+            Ok(Ok(())) => {}
+            Ok(Err(())) => failed += 1,
+            Err(e) => {
+                println!("FAIL scenario panicked: {e}");
+                failed += 1;
+            }
+        }
+    }
+    (failed, names.len())
+}
+
+async fn run_serial<'a>(harness: &Harness, names: impl Iterator<Item = &'a str>) -> (usize, usize) {
+    let (mut failed, mut total) = (0, 0);
+    for name in names {
+        total += 1;
+        if timed(name, harness).await.is_err() {
+            failed += 1;
+        }
+    }
+    (failed, total)
+}
+
+/// Runs one scenario and prints PASS or FAIL with how long it took.
+async fn timed(name: &str, harness: &Harness) -> Result<(), ()> {
+    let started = Instant::now();
+    let outcome = scenario(name, harness).await;
+    let label = format!("{name} ({:.1}s)", started.elapsed().as_secs_f64());
+    report(&label, outcome).map_err(|_| ())
+}
+
+async fn scenario(name: &str, h: &Harness) -> anyhow::Result<()> {
+    match name {
+        "scope" => scenarios::scope(h).await,
+        "containment" => scenarios::containment(h).await,
+        "invoices" => scenarios::invoices(h).await,
+        "decline" => scenarios::decline(h).await,
+        "labels" => scenarios::labels(h).await,
+        "stop" => scenarios::stop(h).await,
+        "takeover" => scenarios::takeover(h).await,
+        "changes" => scenarios::changes(h).await,
+        "it" => scenarios::it(h).await,
+        "tailor" => scenarios::tailor(h).await,
+        "harness" => scenarios::harness(h).await,
+        "perf" => perf::perf(h).await,
+        other => Err(anyhow::anyhow!("unknown scenario {other}")),
     }
 }
 

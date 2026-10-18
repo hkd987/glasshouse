@@ -5,6 +5,7 @@
 #   status             show whether QEMU runs and SSH answers (exit 1 if stopped)
 #   wait [secs]        block until SSH answers and first-boot provisioning finished
 #   ssh [args]         interactive root shell, or run ssh args in the VM
+#   ssh-close          drop the shared SSH connection (after a reboot)
 #   run <cmd...>       run a shell command as root in the VM
 #   scp-in <src...> <dest>   copy host files into the VM
 #   exec <binary> [args]     copy a host binary into the VM and run it (usable as a cargo runner)
@@ -32,6 +33,7 @@ cmd_up() {
 		log "already running (pid $(vm_pid))"
 		return
 	fi
+	vm_ssh_close
 	need qemu-system-x86_64 qemu-img xorriso ssh-keygen
 	[[ -n ${VM_BASE_IMAGE:-} ]] || "$FREEBSD_SCRIPTS_DIR/fetch.sh"
 	mkdir -p "$VM_DIR" "$(dirname "$VM_SSH_KEY")"
@@ -79,6 +81,7 @@ cmd_down() {
 	if vm_ssh true 2>/dev/null; then
 		log "shutting down (pid $pid)"
 		vm_ssh 'shutdown -p now' >/dev/null 2>&1 || true
+		vm_ssh_close
 	else
 		log "ssh unreachable; stopping QEMU (pid $pid)"
 		deadline=$SECONDS
@@ -107,6 +110,7 @@ cmd_status() {
 cmd_wait() {
 	local timeout=${1:-$VM_BOOT_TIMEOUT} start=$SECONDS
 	vm_running || die "VM is not running (vm.sh up)"
+	vm_ssh_close
 	log "waiting up to ${timeout}s for SSH + first-boot provisioning"
 	# /firstboot is removed by rc(8) once every firstboot script (incl. nuageinit runcmd) is done.
 	until vm_ssh 'test ! -e /firstboot' 2>/dev/null; do
@@ -164,6 +168,7 @@ down) cmd_down ;;
 status) cmd_status ;;
 wait) cmd_wait "$@" ;;
 ssh) vm_ssh "$@" ;;
+ssh-close) vm_ssh_close ;;
 run)
 	(($# > 0)) || die "usage: vm.sh run <cmd...>"
 	vm_ssh "$*"

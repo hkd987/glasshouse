@@ -9,6 +9,7 @@
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{PermissionsExt, fchown};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
@@ -86,16 +87,46 @@ impl ConfinedDir {
         mode: Option<u32>,
     ) -> io::Result<bool> {
         let rel = relative(rel)?;
+        let existed = self.dir.symlink_metadata(rel).is_ok();
+        let tmp = self.stage(rel, data, owner, mode)?;
+        let result = self.dir.rename(&tmp, &self.dir, rel);
+        if result.is_err() {
+            let _ = self.dir.remove_file(&tmp);
+        }
+        result.map(|()| !existed)
+    }
+
+    /// Writes a new file atomically, failing with `AlreadyExists` instead of
+    /// replacing anything at `rel`, so concurrent writers can't overwrite
+    /// each other's files: the temporary file is linked into place, which
+    /// fails if the name is taken.
+    pub fn write_new(&self, rel: &Path, data: &[u8], owner: Option<Owner>) -> io::Result<()> {
+        let rel = relative(rel)?;
+        let tmp = self.stage(rel, data, owner, None)?;
+        let result = self.dir.hard_link(&tmp, &self.dir, rel);
+        let _ = self.dir.remove_file(&tmp);
+        result
+    }
+
+    /// A temporary file beside `rel` holding `data`, synced, with its owner
+    /// and mode set. Its name is unique within this process.
+    fn stage(
+        &self,
+        rel: &Path,
+        data: &[u8],
+        owner: Option<Owner>,
+        mode: Option<u32>,
+    ) -> io::Result<PathBuf> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let name = rel
             .file_name()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path names no file"))?;
         let parent = rel.parent().filter(|p| !p.as_os_str().is_empty());
-        let existed = self.dir.symlink_metadata(rel).is_ok();
-
         let tmp_name = format!(
-            ".{}.glass-tmp-{}",
+            ".{}.glass-tmp-{}-{}",
             name.to_string_lossy(),
-            std::process::id()
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         );
         let tmp = match parent {
             Some(p) => p.join(&tmp_name),
@@ -114,12 +145,15 @@ impl ConfinedDir {
             if let Some(mode) = mode {
                 std_file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))?;
             }
-            self.dir.rename(&tmp, &self.dir, rel)
+            Ok(())
         })();
-        if result.is_err() {
-            let _ = self.dir.remove_file(&tmp);
+        match result {
+            Ok(()) => Ok(tmp),
+            Err(e) => {
+                let _ = self.dir.remove_file(&tmp);
+                Err(e)
+            }
         }
-        result.map(|()| !existed)
     }
 
     pub fn list(&self, rel: &Path) -> io::Result<Vec<EntryInfo>> {
@@ -247,6 +281,25 @@ mod tests {
         std::fs::write(outer.path().join("secret.txt"), "top secret").unwrap();
         let dir = ConfinedDir::open(&outer.path().join("grant")).unwrap();
         (outer, dir)
+    }
+
+    #[test]
+    fn write_new_never_replaces_and_leaves_no_temporary_files() {
+        let (_outer, dir) = setup();
+        dir.write_new(Path::new("draft.eml"), b"first", None)
+            .unwrap();
+        let err = dir
+            .write_new(Path::new("draft.eml"), b"second", None)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(dir.read(Path::new("draft.eml"), 100).unwrap(), b"first");
+        let names: Vec<_> = dir
+            .list(Path::new(""))
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, ["draft.eml"], "no staging files left");
     }
 
     #[test]

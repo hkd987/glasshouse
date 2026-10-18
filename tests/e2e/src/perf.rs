@@ -18,6 +18,8 @@ use serde_json::Value;
 use crate::harness::Harness;
 
 const SAMPLES: usize = 20;
+/// For measurements that take most of a second each.
+const SLOW_SAMPLES: usize = 8;
 const LONG: Duration = Duration::from_secs(180);
 
 /// One budget: what the person waits for, the requirement it comes from, and
@@ -157,7 +159,7 @@ pub async fn perf(h: &Harness) -> anyhow::Result<()> {
     finish(h, task).await?;
     results.push(measure(
         &UNDO_PREVIEW,
-        timed(SAMPLES, || h.undo(task, true)).await?,
+        timed(SLOW_SAMPLES, || h.undo(task, true)).await?,
     ));
     for task in tasks {
         h.undo(task, false).await?;

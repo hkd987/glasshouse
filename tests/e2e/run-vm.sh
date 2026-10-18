@@ -3,8 +3,8 @@
 #
 #   1. single-user scenarios as `demo` (containment, delegation, labels, ...,
 #      and `perf`, the latency budgets in docs/dev/performance.md)
-#   2. isolation: a second user can't see, stop or answer demo's task
-#   3. sleep: running agents pause before the machine sleeps and resume after
+#   2. isolation: a second user can't see, stop or answer demo's task, and
+#   3. sleep: that task pauses before the machine sleeps and resumes after
 #   4. crash recovery: kill -9 glassd mid-task; on restart it removes the
 #      orphaned jail and the audit log is intact
 #   5. branding: no base-system name where a user looks (BR-1, BR-2)
@@ -17,7 +17,12 @@ profile="${FREEBSD_PROFILE:-vm}"
 target="${CARGO_TARGET_DIR:-$repo/target}/x86_64-unknown-freebsd/$profile"
 e2e=/usr/local/libexec/glasshouse-tests/glass-e2e
 
-step() { printf '\n== %s\n' "$*"; }
+# Each step says how long the one before it took, so slow steps show up.
+last=$SECONDS
+step() {
+	printf '   (%ss)\n\n== %s\n' "$((SECONDS - last))" "$*"
+	last=$SECONDS
+}
 # Plain su sets HOME, USER and SHELL for the target user (su(1)) without
 # running login scripts.
 glass_jails='jls name | grep -c "^glass-" || true'
@@ -29,26 +34,26 @@ cargo build --profile "$profile" --target x86_64-unknown-freebsd -p glass-e2e
 step "scenarios as demo"
 "$vm" run "su demo -c '$e2e all'"
 
-step "isolation between users"
+step "isolation between users, and agents pause for sleep (PM-5)"
+# One waiting task serves both: another user can't see it, and it pauses
+# through the rc.suspend/rc.resume hook and carries on after.
 task=$("$vm" run "su demo -c '$e2e hold'" | tail -1)
 "$vm" run "pw usershow e2e-other >/dev/null 2>&1 || pw useradd e2e-other -m -s /bin/sh
-su e2e-other -c '$e2e isolation $task'"
-"$vm" run "su demo -c '$e2e release $task'"
-
-step "agents pause for sleep (PM-5), through the rc.suspend/rc.resume hook"
-task=$("$vm" run "su demo -c '$e2e hold'" | tail -1)
-"$vm" run "service glassd suspend"
-"$vm" run "su demo -c '$e2e sleeping $task'"
-"$vm" run "service glassd resume"
-"$vm" run "su demo -c '$e2e awake $task'"
-"$vm" run "su demo -c '$e2e release $task'"
+su e2e-other -c '$e2e isolation $task'
+service glassd suspend
+su demo -c '$e2e sleeping $task'
+service glassd resume
+su demo -c '$e2e awake $task'
+su demo -c '$e2e release $task'"
 
 step "crash recovery"
 task=$("$vm" run "su demo -c '$e2e hold'" | tail -1)
 before=$("$vm" run "kill -9 \$(cat /var/run/glassd.pid); sleep 2; $glass_jails")
 [[ $before -ge 1 ]] || { echo "FAIL expected an orphaned jail after kill -9, found $before"; exit 1; }
+# The killed daemon's socket file is still there, so wait until the new one
+# answers: it removes orphans before it listens.
 "$vm" run "service glassd start >/tmp/glassd-start.log 2>&1
-for i in \$(jot 60); do [ -S /var/run/glasshouse/control.sock ] && break; sleep 1; done"
+for i in \$(jot 120); do glassctl status >/dev/null 2>&1 && break; sleep 0.5; done"
 after=$("$vm" run "$glass_jails")
 [[ $after -eq 0 ]] || { echo "FAIL $after orphaned jails survived the restart"; exit 1; }
 "$vm" run "grep -q 'removed a sandbox left behind' /var/log/glassd.log"
@@ -66,4 +71,4 @@ test \$($glass_jails) -eq 0 || { echo 'FAIL jails left behind'; exit 1; }
 if mount -p | grep -q /var/db/glasshouse/sandboxes; then echo 'FAIL mounts left behind'; exit 1; fi
 echo 'PASS nothing left behind'"
 
-step "all end-to-end checks passed"
+step "all end-to-end checks passed in ${SECONDS}s"

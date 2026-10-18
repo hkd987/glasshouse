@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use glass_api::ChangeKind;
-use glass_platform::fs::ConfinedDir;
+use glass_platform::fs::{ConfinedDir, Owner};
 use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -105,6 +105,37 @@ impl MailProvider {
             text.push('\n');
         }
         text
+    }
+
+    /// Saves a message under a name nobody else has taken: two tasks
+    /// mailing the same subject in the same second get two files.
+    fn save_new(
+        mail: &ConfinedDir,
+        folder: &str,
+        message: &Message,
+        index: usize,
+        text: &str,
+        owner: Owner,
+    ) -> std::io::Result<PathBuf> {
+        let name = Self::file_name(message, index);
+        let stem = name.trim_end_matches(".eml");
+        for attempt in 1..=100 {
+            let file = if attempt == 1 {
+                name.clone()
+            } else {
+                format!("{stem}-{attempt}.eml")
+            };
+            let rel = PathBuf::from(folder).join(file);
+            match mail.write_new(&rel, text.as_bytes(), Some(owner)) {
+                Ok(()) => return Ok(rel),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "no free file name",
+        ))
     }
 
     fn file_name(message: &Message, index: usize) -> String {
@@ -254,11 +285,13 @@ impl ActionProvider for MailProvider {
             "mail.draft" => {
                 let message: Message = parse_input(input)?;
                 Self::validate(&message)?;
-                let rel = PathBuf::from(DRAFTS).join(Self::file_name(&message, 0));
-                mail.write(
-                    &rel,
-                    Self::render(ctx, &message, false).as_bytes(),
-                    Some(ctx.owner),
+                let rel = Self::save_new(
+                    &mail,
+                    DRAFTS,
+                    &message,
+                    0,
+                    &Self::render(ctx, &message, false),
+                    ctx.owner,
                 )
                 .map_err(|e| ActionError::io("saving draft", e))?;
                 attribute(ctx, &Self::mail_dir(ctx).join(&rel));
@@ -279,11 +312,13 @@ impl ActionProvider for MailProvider {
                 messages.iter().try_for_each(Self::validate)?;
                 let mut changes = Vec::new();
                 for (index, message) in messages.iter().enumerate() {
-                    let rel = PathBuf::from(SENT).join(Self::file_name(message, index));
-                    mail.write(
-                        &rel,
-                        Self::render(ctx, message, true).as_bytes(),
-                        Some(ctx.owner),
+                    let rel = Self::save_new(
+                        &mail,
+                        SENT,
+                        message,
+                        index,
+                        &Self::render(ctx, message, true),
+                        ctx.owner,
                     )
                     .map_err(|e| ActionError::io("sending", e))?;
                     attribute(ctx, &Self::mail_dir(ctx).join(&rel));
@@ -361,6 +396,19 @@ mod tests {
         assert_eq!(drafts.len(), 1);
         let text = fs::read_to_string(drafts[0].path()).unwrap();
         assert!(text.contains("X-Glasshouse-Attribution: by invoice-demo for demo"));
+    }
+
+    #[test]
+    fn same_subject_in_the_same_second_makes_two_drafts() {
+        // Two tasks drafting at once must not overwrite each other.
+        let (dir, ctx) = setup();
+        let input = json!({ "to": ["ap@example.com"], "subject": "Same", "body": "x" });
+        let draft = "mail.draft".parse().unwrap();
+        let first = MailProvider.invoke(&ctx, &draft, &input).unwrap();
+        let second = MailProvider.invoke(&ctx, &draft, &input).unwrap();
+        assert_ne!(first.changes[0].paths, second.changes[0].paths);
+        let count = fs::read_dir(dir.path().join("Mail/Drafts")).unwrap().count();
+        assert_eq!(count, 2);
     }
 
     #[test]
