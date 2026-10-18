@@ -68,9 +68,9 @@ const TAKE_OVER: Budget = Budget {
 const UNDO_PREVIEW: Budget = Budget {
     what: "undo preview",
     source: "ceiling",
-    // Reads only the files the task changed (ADR 0017): 6 / 58 ms in the VM,
-    // down from 0.8 to 1.3 s when it ran `zfs diff`.
-    p95: Duration::from_millis(100),
+    // Reads only the files the task changed (ADR 0017): p50 6 to 9 ms, p95
+    // 58 to 94 ms in the VM, down from 0.8 to 1.3 s when it ran `zfs diff`.
+    p95: Duration::from_millis(150),
 };
 
 pub async fn perf(h: &Harness) -> anyhow::Result<()> {
