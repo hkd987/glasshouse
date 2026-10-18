@@ -19,7 +19,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use glass_api::{ActivityKind, ChangeEntry, ChangeKind, TileState, UndoReport, UndoRequest};
+use glass_api::{
+    ActivityKind, ChangeEntry, ChangeKind, DisplaySafe, TileState, UndoReport, UndoRequest,
+};
 use glass_audit::EventKind;
 use glass_platform::fs::{ConfinedDir, FileKind, Owner, Stat};
 use glass_platform::snapshot::{self, SnapshotHandle, Snapshotter};
@@ -145,6 +147,9 @@ impl Runtime {
             }
             self.publish(&task);
         }
+        // The audit record above keeps the paths as they are; the report
+        // shows them, and a file name is whatever the agent called it.
+        report.make_display_safe();
         Ok(report)
     }
 

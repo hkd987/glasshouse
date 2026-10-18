@@ -4,7 +4,7 @@
 //! rename the task once while it runs (`report_progress` with a `title`).
 //! Retry and take over keep the title.
 
-use glass_api::TITLE_MAX_CHARS;
+use glass_api::{TITLE_MAX_CHARS, invisible};
 
 /// About how long a title made from the prompt is, in characters.
 const MADE_CHARS: usize = 40;
@@ -58,14 +58,6 @@ pub(crate) fn check(title: &str) -> Result<String, String> {
         return Err(format!("a title is at most {TITLE_MAX_CHARS} characters"));
     }
     Ok(title.to_owned())
-}
-
-/// Characters that change how text around them shows without showing
-/// themselves, such as direction overrides, or that break the line.
-fn invisible(c: char) -> bool {
-    matches!(c,
-        '\u{200B}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{FEFF}'
-        | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// One line with control and invisible characters dropped and runs of

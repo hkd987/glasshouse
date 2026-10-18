@@ -2,8 +2,14 @@
 //! `TaskView` that `task.list` returns. Needs-you tiles carry the question
 //! and its two answers; working tiles show the three-line feed (actions
 //! agents) or the screen (screen agents), the caption and progress.
+//!
+//! Text an agent can reach goes through `glass_api::display_line` as it is
+//! drawn, as glassd already did, so a direction override can't reorder a
+//! tile even from an older glassd.
 
-use glass_api::{AgentMode, ApprovalView, TaskView, TileState};
+use std::borrow::Cow;
+
+use glass_api::{AgentMode, ApprovalView, TaskView, TileState, display_line};
 use glass_types::Timestamp;
 use iced_core::alignment::Vertical;
 use iced_core::{Color, Length, Padding};
@@ -35,13 +41,13 @@ pub fn view<'a>(
     if let (true, Some(ask)) = (needs, task.needs.as_ref()) {
         body = body
             .push(
-                text(&ask.summary)
+                text(display_line(&ask.summary))
                     .size(15)
                     .font(fonts::MEDIUM)
                     .color(t.text)
                     .line_height(1.4),
             )
-            .push(text(&task.caption).size(12).color(t.muted))
+            .push(text(display_line(&task.caption)).size(12).color(t.muted))
             .push(answers(t, ask));
     } else if screen {
         let display = thumbnail.unwrap_or_else(placeholder_thumbnail);
@@ -95,7 +101,7 @@ fn header<'a>(theme: &Theme, task: &'a TaskView, now: Timestamp) -> Element<'a, 
         .style(move |_| style::dot(color, 8.0));
     let mut name = row![
         dot,
-        text(&task.agent_name)
+        text(display_line(&task.agent_name))
             .size(13)
             .font(fonts::SEMIBOLD)
             .color(t.text)
@@ -148,7 +154,7 @@ fn header<'a>(theme: &Theme, task: &'a TaskView, now: Timestamp) -> Element<'a, 
 fn answers<'a>(t: TileColors, ask: &'a ApprovalView) -> Element<'a, Message> {
     let review = button(
         container(
-            text(&ask.labels.review)
+            text(display_line(&ask.labels.review))
                 .size(13)
                 .font(fonts::MEDIUM)
                 .color(t.text),
@@ -167,7 +173,7 @@ fn answers<'a>(t: TileColors, ask: &'a ApprovalView) -> Element<'a, Message> {
     )));
     let approve = button(
         container(
-            text(&ask.labels.approve)
+            text(display_line(&ask.labels.approve))
                 .size(13)
                 .font(fonts::SEMIBOLD)
                 .color(t.background),
@@ -195,9 +201,9 @@ fn feed<'a>(theme: &Theme, task: &'a TaskView) -> Element<'a, Message> {
     let lines = task.feed.iter().enumerate().map(|(i, line)| {
         let newest = i == last && task.state.is_live();
         let (verb, target) = if line.verb.is_empty() {
-            (String::new(), line.text.clone())
+            (Cow::Borrowed(""), display_line(&line.text))
         } else {
-            (line.verb.clone(), line.target.clone())
+            (display_line(&line.verb), display_line(&line.target))
         };
         let mut target_row = row![text(target).size(12).font(fonts::MONO).color(if newest {
             t.text
@@ -236,7 +242,8 @@ fn feed<'a>(theme: &Theme, task: &'a TaskView) -> Element<'a, Message> {
 
 fn caption_row<'a>(theme: &Theme, task: &'a TaskView) -> Element<'a, Message> {
     let t = theme.tile;
-    let mut caption = row![text(&task.caption).size(13).color(t.caption)].align_y(Vertical::Center);
+    let mut caption =
+        row![text(display_line(&task.caption)).size(13).color(t.caption)].align_y(Vertical::Center);
     let mut column = column![].spacing(8);
     if let Some(p) = task.progress {
         caption = caption.push(iced_widget::space().width(Length::Fill)).push(
@@ -331,7 +338,37 @@ pub fn elapsed(started: Timestamp, now: Timestamp) -> String {
 
 #[cfg(test)]
 mod tests {
+    use glass_api::DisplaySafe;
+
     use super::*;
+    use crate::render::frame;
+    use crate::{Size, fixtures};
+
+    /// A tile draws what an agent wrote as plain text (AW-3, AW-4): a
+    /// direction override can't make "fdp.exe" read "exe.pdf", nor a
+    /// control character hide part of a line.
+    #[test]
+    fn aw4_tiles_draw_agent_text_as_plain_text() {
+        let theme = Theme::glass();
+        let draw =
+            |element: Element<'_, Message>| frame(element, Size::new(WIDTH, 240.0), 1.0).rgba;
+        let mut task = fixtures::tasks().remove(1);
+        task.agent_name = "Meeting\u{202E} prep".into();
+        task.caption = "Saved \u{202E}fdp.exe\x1b[2J\rdone".into();
+        task.feed[2].target = "Briefs/\u{202E}dm.exe\u{200B}".into();
+        let mut shown = task.clone();
+        shown.make_display_safe();
+        assert_eq!(
+            draw(view(&theme, &task, fixtures::now(), None)),
+            draw(view(&theme, &shown, fixtures::now(), None))
+        );
+        // Drawn as it came, the override would show: the check above can fail.
+        let line = |caption: &'static str| text(caption).size(13).into();
+        assert_ne!(
+            draw(line("Saved \u{202E}fdp.exe")),
+            draw(line("Saved \u{FFFD}fdp.exe"))
+        );
+    }
 
     #[test]
     fn elapsed_reads_like_the_tile() {

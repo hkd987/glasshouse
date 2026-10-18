@@ -7,8 +7,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use glass_actions::TaskContext;
 use glass_api::{
-    ActivityEntry, ActivityKind, ApprovalView, ChangeEntry, FeedLine, Progress, Receipt,
-    ScopeRequest, SnapshotMarker, TaskDetail, TaskView, TileState,
+    ActivityEntry, ActivityKind, ApprovalView, ChangeEntry, DisplaySafe, FeedLine, Progress,
+    Receipt, ScopeRequest, SnapshotMarker, TaskDetail, TaskView, TileState, display_line,
 };
 use glass_platform::sandbox::SandboxSpec;
 use glass_platform::snapshot::SnapshotHandle;
@@ -205,7 +205,17 @@ impl Task {
         })
     }
 
+    /// What a tile shows. Every view and detail leaves glassd through here
+    /// or [`Task::detail`], so this is where text an agent, an action
+    /// argument or a file name wrote becomes one line of display text: a
+    /// caption can't clear a terminal, nor a file name reorder a tile.
     pub fn view(&self, needs: Option<ApprovalView>) -> TaskView {
+        let mut view = self.raw_view(needs);
+        view.make_display_safe();
+        view
+    }
+
+    fn raw_view(&self, needs: Option<ApprovalView>) -> TaskView {
         let state = self.lock();
         let needs = needs.filter(|_| state.tile.is_live());
         TaskView {
@@ -230,9 +240,9 @@ impl Task {
     }
 
     pub fn detail(&self, needs: Option<ApprovalView>) -> TaskDetail {
-        let view = self.view(needs.clone());
+        let view = self.raw_view(needs.clone());
         let state = self.lock();
-        TaskDetail {
+        let mut detail = TaskDetail {
             now: state.now_sentence(needs.as_ref()),
             prompt: self.prompt.clone(),
             plan: self.plan.clone(),
@@ -241,7 +251,9 @@ impl Task {
             cant_touch: self.cant_touch.clone(),
             snapshots: state.snapshots.iter().map(|s| s.marker.clone()).collect(),
             view,
-        }
+        };
+        detail.make_display_safe();
+        detail
     }
 }
 
@@ -258,14 +270,14 @@ impl TaskState {
         roots
     }
 
-    /// Adds a line to the activity log (AW-13).
+    /// Adds a line to the activity log (AW-13). Lines are kept as display
+    /// text, since most carry something the agent wrote, and the log also
+    /// tells a harness that takes over what the task did.
     pub fn note(&mut self, kind: ActivityKind, text: impl Into<String>) {
         let at = Timestamp::now();
-        self.activity.push(ActivityEntry {
-            at,
-            kind,
-            text: text.into(),
-        });
+        let mut text = text.into();
+        text.make_display_safe();
+        self.activity.push(ActivityEntry { at, kind, text });
         self.updated_at = at;
     }
 
@@ -274,9 +286,9 @@ impl TaskState {
         let at = Timestamp::now();
         self.feed.push_back(FeedLine {
             at,
-            text: text.to_owned(),
-            verb: verb.to_owned(),
-            target: target.to_owned(),
+            text: display_line(text).into_owned(),
+            verb: display_line(verb).into_owned(),
+            target: display_line(target).into_owned(),
         });
         while self.feed.len() > FEED_LINES {
             self.feed.pop_front();

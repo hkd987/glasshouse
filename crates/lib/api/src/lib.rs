@@ -8,10 +8,16 @@
 //!
 //! This crate is a contract. Changing a type here changes the wire format for
 //! every client, so add fields with `#[serde(default)]` and never repurpose one.
+//!
+//! Text in a view that an agent, an action argument or a file name could
+//! have written is one line of display text ([`display_line`]): glassd makes
+//! views [`DisplaySafe`] as it builds them, and clients pass what they print
+//! through the same function.
 
 mod approval;
 mod tailoring;
 mod task;
+mod text;
 
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +33,7 @@ pub use task::{
     HandoffCard, Progress, Receipt, ScopeLine, ScopeRequest, SnapshotMarker, TITLE_MAX_CHARS,
     TaskDetail, TaskRef, TaskRequest, TaskView, TileState, UndoReport, UndoRequest,
 };
+pub use text::{DisplaySafe, STAND_IN, display_char, display_line, invisible};
 
 /// Where `glassd` listens unless configured otherwise.
 pub const DEFAULT_CONTROL_SOCKET: &str = "/var/run/glasshouse/control.sock";

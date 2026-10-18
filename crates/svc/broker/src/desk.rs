@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
-use glass_api::{ApprovalAnswer, ApprovalScope, ApprovalState, ApprovalView};
+use glass_api::{ApprovalAnswer, ApprovalScope, ApprovalState, ApprovalView, DisplaySafe};
 use glass_types::{ActionName, ApprovalId, TaskId, Timestamp};
 use tokio::sync::oneshot;
 
@@ -70,7 +70,13 @@ impl ApprovalDesk {
     }
 
     /// Opens an ask. Only the user with `owner_uid` may answer it.
-    pub fn open(&self, view: ApprovalView, owner_uid: u32) -> oneshot::Receiver<Outcome> {
+    ///
+    /// Every view the desk hands out started here, so this is where an
+    /// ask's summary and review list (the agent's arguments: recipients,
+    /// subjects, file names) become display text that can't forge or hide
+    /// part of what the user is approving.
+    pub fn open(&self, mut view: ApprovalView, owner_uid: u32) -> oneshot::Receiver<Outcome> {
+        view.make_display_safe();
         let (reply, rx) = oneshot::channel();
         self.lock().pending.insert(
             view.id,
@@ -347,5 +353,24 @@ mod tests {
         assert_eq!(desk.end_task(task).len(), 1);
         assert_eq!(rx_b.await.unwrap(), Outcome::Withdrawn);
         assert!(desk.pending(None).is_empty());
+    }
+
+    /// What the user approves is what they read (DA-12): an agent's
+    /// arguments can't clear the screen, hide a line or reorder an item.
+    #[tokio::test]
+    async fn da12_asks_show_agent_text_as_plain_lines() {
+        let desk = ApprovalDesk::new();
+        let task = TaskId::new();
+        let mut v = view(task);
+        v.summary = "Send 1 email\x1b[2J\x1b[HApproved".into();
+        v.items = vec!["To a@example.com\rTo boss@example.com: Raise".into()];
+        v.labels.approve = "Approve\u{202E}".into();
+        let _rx = desk.open(v.clone(), 1001);
+        let shown = desk.pending_for_task(task).unwrap();
+        assert_eq!(shown.summary, "Send 1 email\u{FFFD}[2J\u{FFFD}[HApproved");
+        assert_eq!(shown.items, ["To a@example.com To boss@example.com: Raise"]);
+        assert_eq!(shown.labels.approve, "Approve\u{FFFD}");
+        let answered = desk.answer(v.id, ApprovalAnswer::Deny, 1001).unwrap();
+        assert_eq!(answered.summary, shown.summary);
     }
 }
