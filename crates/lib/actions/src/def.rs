@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use glass_api::ChangeKind;
+use glass_api::{AskLabels, ChangeKind};
 use glass_types::{ActionName, SideEffect, Tier};
 use serde_json::Value;
 
@@ -19,9 +19,20 @@ pub struct ActionDef {
     pub side_effect: SideEffect,
     /// The tier when no policy rule matches.
     pub default_tier: Tier,
+    /// How an ask for this action reads: "Review drafts", "Approve and
+    /// send". Defaults to "Review" and "Approve".
+    pub ask: AskLabels,
 }
 
 impl ActionDef {
+    /// The same action with its own answer labels.
+    pub fn asking(self, review: &str, approve: &str) -> Self {
+        Self {
+            ask: AskLabels::new(review, approve),
+            ..self
+        }
+    }
+
     /// The MCP tool name. MCP clients and model APIs restrict tool names to
     /// letters, digits, `_` and `-`, so dots become underscores.
     pub fn mcp_name(&self) -> String {

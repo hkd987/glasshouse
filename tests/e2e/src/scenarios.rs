@@ -444,6 +444,7 @@ pub async fn tailor(h: &Harness) -> anyhow::Result<()> {
         agent,
         prompt: "Reconcile invoices".into(),
         scope: ScopeRequest::default(),
+        title: None,
     };
     let card: HandoffCard = h.call(methods::TASK_PLAN, &request).await?;
     ensure!(card.layer.is_none(), "the published agent again");

@@ -220,8 +220,14 @@ fn recent_row(task: &TaskView) -> Element<'_, Message> {
             None => ("Working".to_owned(), LABEL),
         },
     };
+    // An older glassd sends no title; the agent's name stands in.
+    let name = if task.title.is_empty() {
+        &task.agent_name
+    } else {
+        &task.title
+    };
     row![
-        text(task.agent_name.as_str()).size(13).color(INK),
+        text(name.as_str()).size(13).color(INK),
         iced_widget::space().width(Length::Fill),
         text(status).size(13).color(color),
     ]

@@ -38,7 +38,14 @@ pub struct TaskRequest {
     pub prompt: String,
     #[serde(default)]
     pub scope: ScopeRequest,
+    /// A short name for the task, one line of at most [`TITLE_MAX_CHARS`]
+    /// characters. Without one, the OS names it from the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
+
+/// The longest task title, in characters.
+pub const TITLE_MAX_CHARS: usize = 60;
 
 /// What the task may touch. Paths are absolute paths on this machine and must
 /// be ones the requesting user can access.
@@ -169,6 +176,10 @@ pub struct TaskView {
     pub user: String,
     pub mode: AgentMode,
     pub state: TileState,
+    /// The task's short name, such as "Reconcile the October invoices",
+    /// for lists like the command bar's Recent. Empty from an older glassd.
+    #[serde(default)]
+    pub title: String,
     /// One-line, plain-language caption of the current step.
     pub caption: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

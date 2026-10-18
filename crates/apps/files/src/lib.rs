@@ -55,6 +55,7 @@ fn def(
         input_schema: schema,
         side_effect,
         default_tier: tier,
+        ask: Default::default(),
     }
 }
 
@@ -107,7 +108,8 @@ impl ActionProvider for FilesProvider {
                 }),
                 SideEffect::LocalReversible,
                 Tier::Notify,
-            ),
+            )
+            .asking("Review file", "Approve and save"),
             def(
                 "files.move",
                 "Move a file",
@@ -120,7 +122,8 @@ impl ActionProvider for FilesProvider {
                 }),
                 SideEffect::LocalReversible,
                 Tier::Notify,
-            ),
+            )
+            .asking("Review move", "Approve and move"),
             def(
                 "files.delete",
                 "Delete a file",
@@ -129,7 +132,8 @@ impl ActionProvider for FilesProvider {
                 path_schema("File to delete"),
                 SideEffect::LocalReversible,
                 Tier::Ask,
-            ),
+            )
+            .asking("Review file", "Approve and delete"),
         ]
     }
 

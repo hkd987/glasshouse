@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use glass_api::ChangeKind;
+use glass_api::{AskLabels, ChangeKind};
 use glass_platform::fs::{ConfinedDir, Owner};
 use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::Deserialize;
@@ -181,6 +181,7 @@ impl ActionProvider for MailProvider {
                 input_schema: message_schema(),
                 side_effect: SideEffect::LocalReversible,
                 default_tier: Tier::Auto,
+                ask: AskLabels::new("Review draft", "Approve and save"),
             },
             ActionDef {
                 name: "mail.send".parse().expect("static name"),
@@ -200,6 +201,7 @@ impl ActionProvider for MailProvider {
                 }),
                 side_effect: SideEffect::Irreversible,
                 default_tier: Tier::Ask,
+                ask: AskLabels::new("Review drafts", "Approve and send"),
             },
         ]
     }

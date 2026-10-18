@@ -8,6 +8,7 @@ use glass_api::{
     UndoReport,
 };
 use glass_audit::AuditRecord;
+use glass_types::TaskId;
 
 use crate::style::{bold, dim, orange, red, state_label, state_marker};
 
@@ -146,11 +147,15 @@ pub fn tile(view: &TaskView) -> String {
         .progress
         .map(|p| format!("  {}", dim(&format!("{} / {}", p.done, p.total))))
         .unwrap_or_default();
+    let name = if view.title.is_empty() {
+        bold(&view.agent_name)
+    } else {
+        format!("{} · {}", bold(&view.agent_name), view.title)
+    };
     let _ = writeln!(
         out,
-        "{} {}  {}  {}  {}",
+        "{} {name}  {}  {}  {}",
         state_marker(view.state),
-        bold(&view.agent_name),
         dim(&format!("{:?}", view.mode).to_lowercase()),
         state_label(view.state),
         dim(&view.id.short()),
@@ -174,15 +179,7 @@ pub fn tile(view: &TaskView) -> String {
     }
     if let Some(ask) = &view.needs {
         let _ = writeln!(out, "  {} {}", orange("Needs you:"), ask.summary);
-        let _ = writeln!(
-            out,
-            "    {}",
-            dim(&format!(
-                "glassctl approve {id} [--for-task]  ·  glassctl deny {id}  ·  glassctl show {task}",
-                id = ask.id.short(),
-                task = view.id.short()
-            ))
-        );
+        let _ = writeln!(out, "{}", answers(ask, Some(view.id)));
     }
     if let Some(failure) = &view.failure {
         let _ = writeln!(out, "  {}", red(failure));
@@ -384,8 +381,25 @@ pub fn approvals(views: &[ApprovalView]) -> String {
                 ask.expires_at.clock()
             ))
         );
+        let _ = writeln!(out, "{}", answers(ask, None));
     }
     out
+}
+
+/// An ask's answers, in the action's own words ("Approve and send"), with
+/// the command for each. `task` adds its Review, for a tile.
+fn answers(ask: &ApprovalView, task: Option<TaskId>) -> String {
+    let id = ask.id.short();
+    let review = task
+        .map(|task| format!("{}: glassctl show {}  ·  ", ask.labels.review, task.short()))
+        .unwrap_or_default();
+    format!(
+        "    {}",
+        dim(&format!(
+            "{review}{}: glassctl approve {id} [--for-task]  ·  Decline: glassctl deny {id}",
+            ask.labels.approve
+        ))
+    )
 }
 
 pub fn undo(report: &UndoReport) -> String {
@@ -464,5 +478,81 @@ fn plural(n: u32, noun: &str) -> String {
         format!("1 {noun}")
     } else {
         format!("{n} {noun}s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glass_api::{AgentMode, ApprovalState, AskLabels};
+    use glass_types::{ApprovalId, Timestamp};
+
+    use super::*;
+
+    /// The text without terminal colors, which tests run in a terminal get.
+    fn plain(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                chars.by_ref().find(|&c| c == 'm');
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn tiles_name_the_task_and_asks_answer_in_the_actions_words() {
+        let id = TaskId::new();
+        let ask = ApprovalView {
+            id: ApprovalId::new(),
+            task: id,
+            agent: "invoice-demo".parse().unwrap(),
+            action: "mail.send".parse().unwrap(),
+            summary: "Send 2 emails".into(),
+            items: vec!["To a@example.com: Invoice 1".into()],
+            rule: "default tier".into(),
+            requested_at: Timestamp::now(),
+            expires_at: Timestamp::now(),
+            state: ApprovalState::Pending,
+            labels: AskLabels::new("Review drafts", "Approve and send"),
+        };
+        let view = TaskView {
+            id,
+            agent: "invoice-demo".parse().unwrap(),
+            agent_name: "Invoice demo".into(),
+            user: "dana".into(),
+            mode: AgentMode::Actions,
+            state: TileState::NeedsYou,
+            title: "Reconcile the October invoices".into(),
+            caption: "Reminding late vendors".into(),
+            progress: None,
+            feed: Vec::new(),
+            needs: Some(ask.clone()),
+            receipt: None,
+            failure: None,
+            started_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+            driver_socket: None,
+            continues: None,
+        };
+        let shown = plain(&tile(&view));
+        assert!(
+            shown.starts_with("◉ Invoice demo · Reconcile the October invoices  actions"),
+            "{shown}"
+        );
+        let (task, approval) = (id.short(), ask.id.short());
+        assert!(shown.contains(&format!(
+            "Review drafts: glassctl show {task}  ·  Approve and send: glassctl approve {approval}"
+        )));
+        assert!(plain(&approvals(&[ask])).contains("Approve and send: glassctl approve"));
+
+        // An older glassd sends no title.
+        let untitled = TaskView {
+            title: String::new(),
+            ..view
+        };
+        assert!(plain(&tile(&untitled)).starts_with("◉ Invoice demo  actions"));
     }
 }

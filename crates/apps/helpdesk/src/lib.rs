@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use glass_api::ChangeKind;
+use glass_api::{AskLabels, ChangeKind};
 use glass_platform::fs::ConfinedDir;
 use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::Deserialize;
@@ -73,6 +73,7 @@ impl ActionProvider for HelpdeskProvider {
             }),
             side_effect: SideEffect::Irreversible,
             default_tier: Tier::Ask,
+            ask: AskLabels::new("Review ticket", "Approve and open"),
         }]
     }
 

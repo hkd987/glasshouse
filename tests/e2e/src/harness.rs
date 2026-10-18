@@ -68,6 +68,7 @@ impl Harness {
                 write: write.iter().map(|p| p.to_path_buf()).collect(),
                 restrict: Vec::new(),
             },
+            title: None,
         };
         let view: TaskView = self.call(methods::TASK_START, request).await?;
         Ok(view.id)

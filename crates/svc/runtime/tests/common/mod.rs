@@ -60,6 +60,7 @@ impl Harness {
                 write: write.iter().map(|p| self.home().join(p)).collect(),
                 restrict: Vec::new(),
             },
+            title: None,
         }
     }
 

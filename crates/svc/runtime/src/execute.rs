@@ -25,7 +25,7 @@ use serde_json::Value;
 use crate::runtime::display_path;
 use crate::task::{Gate, Task};
 use crate::written::{self, Seen, Touched};
-use crate::{REPORT_PROGRESS_TOOL, Runtime, labels};
+use crate::{REPORT_PROGRESS_TOOL, Runtime, labels, title};
 
 impl Runtime {
     pub(crate) async fn call_tool(
@@ -290,7 +290,7 @@ impl Runtime {
         } else {
             preview.items.clone()
         };
-        let view = new_view(
+        let mut view = new_view(
             task.id,
             task.entry.id.clone(),
             def.name.clone(),
@@ -299,6 +299,7 @@ impl Runtime {
             rule.to_owned(),
             timeout,
         );
+        view.labels = def.ask.clone();
         let id = view.id;
         let mut reply = self.desk.open(view, task.user.uid);
 
@@ -478,13 +479,40 @@ impl Runtime {
             done: Option<u32>,
             #[serde(default)]
             total: Option<u32>,
+            #[serde(default)]
+            title: Option<String>,
         }
         let args: Args = serde_json::from_value(args).map_err(RpcError::invalid_params)?;
         let caption: String = args.caption.chars().take(120).collect();
+        let title = match args.title.as_deref().map(title::check).transpose() {
+            Ok(title) => title,
+            Err(problem) => {
+                return Ok(CallToolResult::error(format!(
+                    "Nothing changed: {problem}."
+                )));
+            }
+        };
+        let mut renamed = None;
         {
             let mut state = task.lock();
             if *task.gate.borrow() == Gate::Ended {
                 return Ok(CallToolResult::error("This task has ended."));
+            }
+            // The agent may rename the task once, and never over a title
+            // the user gave: the title is how the user finds the task.
+            if let Some(title) = title {
+                if state.title_fixed {
+                    return Ok(CallToolResult::error(format!(
+                        "Nothing changed: this task's title is \"{}\" and can't change again. \
+                         Call {REPORT_PROGRESS_TOOL} without a title.",
+                        state.title
+                    )));
+                }
+                state.title_fixed = true;
+                if state.title != title {
+                    state.note(ActivityKind::State, format!("Renamed \"{title}\""));
+                    renamed = Some(std::mem::replace(&mut state.title, title));
+                }
             }
             if state.caption != caption {
                 state.note(ActivityKind::Notice, caption.clone());
@@ -498,6 +526,16 @@ impl Runtime {
                 _ => None,
             };
             state.updated_at = Timestamp::now();
+        }
+        if let Some(was) = renamed {
+            let title = task.lock().title.clone();
+            let mut event = self.task_event(
+                task,
+                EventKind::TaskStateChanged,
+                format!("Renamed: {title}"),
+            );
+            event.detail = serde_json::json!({ "title": title, "was": was });
+            self.audit(event);
         }
         self.publish(task);
         Ok(CallToolResult::ok("ok", Value::Null))

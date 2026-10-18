@@ -15,15 +15,17 @@ mod task;
 
 use serde::{Deserialize, Serialize};
 
-pub use approval::{AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalState, ApprovalView};
+pub use approval::{
+    AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalState, ApprovalView, AskLabels,
+};
 pub use tailoring::{
     CheckResult, CustomizationPoint, LayerChange, LayerCheck, LayerLine, LayerRef, LayerRevert,
     LayerStatus, LayerVersion, LayerView, PointKind,
 };
 pub use task::{
     ActivityEntry, ActivityKind, AgentMode, AgentSummary, ChangeEntry, ChangeKind, FeedLine,
-    HandoffCard, Progress, Receipt, ScopeLine, ScopeRequest, SnapshotMarker, TaskDetail, TaskRef,
-    TaskRequest, TaskView, TileState, UndoReport, UndoRequest,
+    HandoffCard, Progress, Receipt, ScopeLine, ScopeRequest, SnapshotMarker, TITLE_MAX_CHARS,
+    TaskDetail, TaskRef, TaskRequest, TaskView, TileState, UndoReport, UndoRequest,
 };
 
 /// Where `glassd` listens unless configured otherwise.
