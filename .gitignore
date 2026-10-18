@@ -1,0 +1,9 @@
+# Build outputs (cargo, FreeBSD sysroot, VM disks, staged payloads, images).
+/target/
+/build/
+
+# Editor and OS noise.
+.DS_Store
+*.swp
+.idea/
+.vscode/

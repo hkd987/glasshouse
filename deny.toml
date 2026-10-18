@@ -1,0 +1,43 @@
+# Dependency policy, enforced by `cargo deny check` (make deny).
+#
+# This is a closed-source product: third-party code must be under a
+# permissive license. Copyleft (GPL, LGPL, AGPL, MPL, EUPL, SSPL...) is not
+# allowed in anything we ship. See docs/dev/dependencies.md.
+
+[graph]
+targets = ["x86_64-unknown-freebsd", "x86_64-unknown-linux-gnu"]
+all-features = true
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+# The allow list is the policy, not an inventory of what's in use today.
+unused-allowed-license = "allow"
+
+# Our own crates are unpublished and carry the proprietary LICENSE.
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace path dependencies are not wildcards in any meaningful sense.
+allow-wildcard-paths = true
+
+[advisories]
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

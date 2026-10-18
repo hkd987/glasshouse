@@ -1,0 +1,58 @@
+# Glasshouse default agent policy.
+#
+# This is the policy a new org starts with, and it is meant to be safe to ship
+# unchanged: reads and drafts run quietly, local edits run and stay undoable,
+# anything that leaves the machine or can't be undone asks first, and security
+# settings are never touched by agents.
+#
+# Keys under `tiers` are action patterns ("files.write", "files.*", "*") and
+# must be quoted, because TOML treats unquoted dots as nested tables.
+
+version = 1
+
+[org]
+# Highest label any agent may open. Confidential content needs an explicit
+# group or agent rule plus a local or private model (see the PRD data labels).
+max_label = "internal"
+# An unanswered Ask holds the agent; after this the task pauses (DA-13).
+approval_timeout_secs = 900
+
+[org.tiers]
+"files.list" = "auto"
+"files.read" = "auto"
+"files.write" = "notify"
+"files.move" = "notify"
+"files.delete" = "ask"
+"mail.draft" = "auto"
+"mail.send" = "ask"
+"calendar.hold" = "notify"
+"records.save_draft" = "notify"
+"records.submit" = "ask"
+"payments.*" = "ask"
+"security.*" = "never"
+"vendors.bank_details.*" = "never"
+"data.export_bulk" = "never"
+
+[[group]]
+name = "everyone"
+agents = ["invoice-demo", "containment-probe"]
+
+# Scripted demo agent used to show delegation, approvals and undo end to end
+# before model-backed agents land.
+[[agent]]
+id = "invoice-demo"
+allowed_actions = ["files.*", "mail.*"]
+
+# Diagnostics agent that tries to break out of its sandbox and reports what it
+# could reach. Grants it nothing beyond reading its task scope.
+[[agent]]
+id = "containment-probe"
+allowed_actions = ["files.list", "files.read"]
+
+[[label]]
+path = "/home/*/Finance"
+label = "confidential"
+
+[[label]]
+path = "/home/*/Private"
+label = "restricted"

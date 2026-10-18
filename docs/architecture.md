@@ -1,0 +1,130 @@
+# Architecture
+
+This is how the prototype is built today. The PRD's "Containment and platform
+architecture" section is the target; [prd-traceability.md](prd-traceability.md)
+tracks the gap.
+
+## The one idea
+
+An agent is a first-class principal: its own identity (agent *for* user, on
+one task), its own sandbox, its own grants, its own audit trail, its own
+undo. Safety comes from the OS, not from the model behaving well.
+
+## Processes
+
+```text
+ glassctl / desktop shell ──control socket (JSON-RPC, authorized by uid)──┐
+                                                                           │
+                                                   ┌───────────────────────▼──────┐
+                                                   │ glassd (root)                 │
+                                                   │  runtime: tasks, tiles, undo  │
+                                                   │  broker: decide + approvals   │
+                                                   │  actions: files, mail, ...    │
+                                                   │  audit log writer             │
+                                                   └──┬──────────────┬─────────────┘
+                         task socket (MCP), one per task │              │ zfs(8), jail(8)
+ ┌───────────────────────────────────────────────────────▼──┐           │
+ │ jail glass-<id>  (no network, read-only base, own /work)  │◄──────────┘
+ │   agent process, as the user's uid                         │
+ └────────────────────────────────────────────────────────────┘
+```
+
+- **glassd** is the only privileged process. It hosts the runtime, broker and
+  action providers as libraries (ADR 0003) and serves two kinds of socket.
+- **The control socket** (`/var/run/glasshouse/control.sock`, mode 0666)
+  carries the `glass-api` methods. Every call is authorized by the caller's
+  kernel-reported uid: users see and act on their own tasks; root sees all.
+  Answering an approval is always the task owner's call.
+- **A task socket** is created per task *inside* that task's jail, owned by
+  the task's user, mode 0600. It speaks MCP (ADR 0004). It is the agent's only
+  way to affect anything outside the jail.
+
+## A task's life
+
+1. **Plan** (`task.plan`): resolve the agent from the catalog, compute the
+   effective policy for (user, agent), apply the user's restrictions (stricter
+   only, DA-10), validate the folders, and return the handoff card. No side
+   effects.
+2. **Start** (`task.start`): create the task record and its tile, then the
+   supervisor (`runtime/src/supervise.rs`) prepares app state, snapshots
+   writable folders, creates the jail, binds the task socket in it and starts
+   the agent with `jexec -u <user>`.
+3. **Act**: every MCP tool call runs the pipeline in `runtime/src/execute.rs`:
+
+   ```text
+   hold while paused → preview → decide (tier, then labels) → ask if needed
+     → snapshot if reversible → refuse side effects if audit is down
+     → invoke → audit + feed + changes
+   ```
+
+   Providers compute a side-effect-free *preview* first (what will this read
+   and write?), so the broker can decide, check labels, snapshot and log
+   before anything happens.
+4. **End**: on exit, stop or failure the supervisor always tears down: closes
+   the socket, withdraws open asks and task grants, destroys the jail (PA-2).
+   The record, snapshots and audit trail stay for review and undo.
+
+## Containment (PA-1)
+
+Each task gets a jail from a generated `jail.conf` + `fstab`
+(`platform/src/sandbox/jail.rs`), created and removed with `jail -f`:
+
+| Surface | Control |
+|---|---|
+| Files | Root is an empty directory. Base system (`/bin /lib /libexec /usr/*`) and agent programs are nullfs read-only. Private `/work` and `/tmp`. No user data mounted (ADR 0005). |
+| Network | `ip4 = disable`, `ip6 = disable`. Egress allowlists (pf per vnet jail) come with the model gateway. |
+| Processes | Jailed processes see and signal only their own jail. |
+| Privilege | `securelevel = 3`, no mounts, no raw sockets, no child jails, devfs ruleset 4. |
+| Identity | Runs as the user's uid, so files it causes to be written are the user's; the jail confines what that uid can reach. |
+
+`glass-probe` attacks all of this from inside and must come back 19/19; the
+e2e suite runs it on every change to the VM.
+
+The broker side matters as much: glassd runs as root and acts for agents, so
+all file actions go through `ConfinedDir` (cap-std), which refuses `..`,
+absolute paths and symlinks that leave the grant.
+
+## Decisions, approvals, labels
+
+- Tiers come from policy (`glass-policy`): org baseline, then group and agent
+  rules (stricter wins between them), then task restrictions (stricter only).
+  Actions outside an agent's allow-list are Never. Each decision records the
+  rule that made it.
+- Labels come from folder rules in policy and `glasshouse.label` extended
+  attributes on the file and its folders; the most sensitive wins. Above the
+  agent's limit, even Auto reads are blocked. Restricted is never opened.
+- Asks live in the approval desk (`glass-broker`): one approval per call
+  (batches carry a review list), answerable once or for the rest of the task,
+  timing out into a paused task, withdrawn when the task ends.
+
+## Undo
+
+File-level restore from snapshots (ADR 0006). The runtime snapshots each
+writable root when the task starts and before every Notify-tier change, and
+snapshots app data (such as mail drafts) before its first change. "Undo all"
+restores each root from the earliest snapshot covering it; "Roll back to"
+uses a later marker. Irreversible changes are listed, never silently ignored.
+
+## Audit
+
+`glass-audit` writes one JSON record per line, each carrying the SHA-256 of
+its body, each body carrying the previous record's hash. `glassctl verify`
+proves nothing was edited, dropped or reordered. If an append fails, the
+pipeline refuses further side effects (fail closed).
+
+## Code map
+
+| Crate | Layer | What it owns |
+|---|---|---|
+| `glass-types` | lib | Ids, tiers, labels, action names, principals |
+| `glass-policy` | lib | Policy schema, evaluation, default policy |
+| `glass-audit` | lib | Hash-chained log, verification |
+| `glass-rpc` | lib | JSON-RPC over Unix sockets, MCP types |
+| `glass-api` | lib | Control API contract (shell, CLI) |
+| `glass-platform` | lib | Jails, ZFS, confined file access, users, xattrs |
+| `glass-agent-sdk` | lib | Convenience MCP client for Rust agents |
+| `glass-actions` | svc | Action registry and first-party providers |
+| `glass-broker` | svc | Decisions and the approval desk |
+| `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
+| `glassd`, `glassctl`, `glass-mcp`, `glass-demo-agent`, `glass-probe` | bin | Executables |
+| `glass-e2e` | tests | End-to-end scenarios |

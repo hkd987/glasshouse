@@ -1,0 +1,16 @@
+[package]
+name = "glass-agent-sdk"
+description = "A thin convenience layer for agents talking MCP to their task socket."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-rpc.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

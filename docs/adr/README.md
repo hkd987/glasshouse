@@ -1,0 +1,15 @@
+# Architecture decision records
+
+One file per decision that is hard to reverse or would surprise a new
+engineer. Status is Accepted unless noted. Supersede, don't edit: write a new
+ADR and mark the old one superseded.
+
+| # | Decision |
+|---|---|
+| [0001](0001-rust-workspace-layering.md) | One Rust workspace, layered lib → svc → bin |
+| [0002](0002-freebsd-release-overlay.md) | Build on unmodified FreeBSD 15.1 releases plus our overlay; develop in a QEMU VM |
+| [0003](0003-single-daemon-for-prototype.md) | One privileged daemon hosting services as libraries, for now |
+| [0004](0004-mcp-over-task-sockets.md) | Agents speak MCP over a per-task Unix socket; JSON-RPC everywhere |
+| [0005](0005-brokered-file-access.md) | Agents get no user data mounted; file access is brokered |
+| [0006](0006-file-level-undo.md) | Undo restores files from snapshots, never rolls back datasets |
+| [0007](0007-drive-freebsd-through-admin-commands.md) | Drive jails and ZFS through their admin commands |
