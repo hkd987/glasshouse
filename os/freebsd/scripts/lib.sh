@@ -61,8 +61,11 @@ SSH_OPTS=(
 	-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null
 	-o LogLevel=ERROR -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4
 	# One connection, reused: each new ssh or scp skips the key exchange,
-	# which costs most of a second against the emulated VM.
-	-o ControlMaster=auto -o "ControlPath=$VM_DIR/ssh-%C" -o ControlPersist=120
+	# which costs most of a second against the emulated VM. The socket
+	# lives in /tmp because socket paths must stay under 104 bytes and a
+	# checkout's own path can be longer (worktrees); %C hashes the host,
+	# port and user, so each VM (VM_SSH_PORT) gets its own.
+	-o ControlMaster=auto -o "ControlPath=/tmp/glass-ssh-%C" -o ControlPersist=120
 )
 
 # vm_ssh [ssh-args...] -- runs ssh as root against the dev VM.

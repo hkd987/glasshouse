@@ -6,7 +6,7 @@ REPO_ROOT ?= $(CURDIR)
 FREEBSD_SCRIPTS := $(REPO_ROOT)/os/freebsd/scripts
 
 .PHONY: freebsd-host-deps freebsd-fetch freebsd-sysroot vm-up vm-down vm-status vm-wait \
-	vm-ssh vm-run vm-reset vm-console vm-deploy image
+	vm-ssh vm-run vm-reset vm-console vm-boot-timeline vm-deploy image
 
 freebsd-host-deps: ## Check host tools for the FreeBSD VM loop
 	$(FREEBSD_SCRIPTS)/check-host-deps.sh
@@ -41,6 +41,9 @@ vm-reset: ## Discard the dev VM disk (next vm-up is a fresh first boot)
 
 vm-console: ## Print the dev VM serial console log
 	$(FREEBSD_SCRIPTS)/vm.sh console-log
+
+vm-boot-timeline: ## Power-cycle the dev VM and print where boot time goes (RUNS=3, TRACE=1 per rc script)
+	$(REPO_ROOT)/tools/boot/timeline.py --runs $(or $(RUNS),3) $(if $(TRACE),--trace)
 
 vm-deploy: ## Stage build/dist/freebsd from built binaries and install it in the VM
 	$(FREEBSD_SCRIPTS)/stage-dist.sh

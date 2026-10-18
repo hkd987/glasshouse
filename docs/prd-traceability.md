@@ -23,15 +23,15 @@ Tests: *unit* = crate unit tests, *pipeline* =
 
 | Id | Status | Where | Verified by |
 |---|---|---|---|
-| PA-1 No grants → no files, network, processes | **Done** | `platform/sandbox/jail.rs` | e2e `containment` (19/19 probe checks in a real jail) |
-| PA-2 Grants per task, expire at end | **Done** | `runtime/supervise.rs`, `broker/desk.rs` | e2e `stop`, crash recovery; pipeline `stopping_tears_down…` |
+| PA-1 No grants → no files, network, processes | **Done** | `platform/sandbox/jail.rs` | e2e `containment` (20/20 probe checks in a real jail, including the resource limits) |
+| PA-2 Grants per task, expire at end | **Done** | `runtime/supervise.rs`, `broker/desk.rs`; the jail's resource limits go with it (`exec.poststop`, `platform/sandbox/jail.rs`) | e2e `stop`, crash recovery (orphaned jail and its limits removed); pipeline `stopping_tears_down…`; e2e root checks: no jails, mounts or limits left behind |
 | PA-3 Escapes are P0 bugs, bounty | Process | — | — |
 | PA-4 On-behalf-of tokens downstream | Not started | — | needs identity federation |
 | PA-5 Upstream FreeBSD + our layers | **Done** | `os/freebsd`, ADR 0002 | VM boots pinned 15.1-RELEASE |
 | PA-6 FDE, secure boot, TPM keys by default | Not started | — | image build work |
 | PA-7 Each agent its own directory identity with a human owner | Not started | catalog has id + version only | ADR 0008 (proposed) |
 | AD-14 Agents in Microsoft Agent 365 registry | Not started | | |
-| AD-15 Policy from Intune and Entra too | Not started | `policy.toml` is the local stand-in | |
+| AD-15 Policy from Intune and Entra too | Not started | `policy.toml` is the local stand-in. How managed policy will load is decided (ADR 0021): boot from the last applied policy on disk, fetch in the background, validate, apply whole with the previous version kept (`glass_policy::store`) | unit `store::tests` (fallback, apply, rollback) |
 
 ## Endpoint protection
 
@@ -133,7 +133,7 @@ thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
-| AD-1 … AD-5, AD-10 … AD-12 Console, SCIM, fleet | Not started | `policy.toml` + `glassd.toml` are the local stand-ins |
+| AD-1 … AD-5, AD-10 … AD-12 Console, SCIM, fleet | Not started | `policy.toml` + `glassd.toml` are the local stand-ins. A machine keeps the last good and the previous policy (AD-3's versions and rollback, on the device side) and falls back to the last good one when a new one doesn't validate (ADR 0021) |
 | AD-16 Communications archiving and supervision | Not started | agent-sent mail is already attributed and audited, which this builds on |
 | LA-1 … LA-3, LA-10 … LA-12, LA-20 Licensing and activation | Not started | Design constraint: a lapsed license pauses agents only; desktop, data and security updates keep working (LA-3) |
 | DV-1 … DV-3, DV-5, DV-10, DV-11 Developer program, private catalog | Not started | DV-3 (declared privileges the OS enforces) shapes the agent manifest: ADR 0008 (proposed) |
@@ -201,7 +201,7 @@ element-by-element map is in [docs/design](design/README.md).
 | UX-10 One theme restyles the whole system | Partial | the shell keeps every color and the wallpaper in one `Theme`; only Glass exists, no picker |
 | UX-20 Everything by keyboard, cheat sheet, Windows shortcuts too | Not started | shell |
 | UX-21 Snapping, saved layouts, optional tiling | Not started | compositor |
-| UX-22 Performance budgets on every build; papercut program | Partial | OS-side budgets in `glass-e2e perf` (docs/dev/performance.md); input lag, app launch, window open and wake need the shell |
+| UX-22 Performance budgets on every build; papercut program | Partial | OS-side budgets in `glass-e2e perf` (docs/dev/performance.md), and the same reads with two busy agents running (`glass-e2e load`; agents run below the person's priority with resource limits); a boot budget, measured with `tools/boot/timeline.py` and guarded on every build by `check-boot.sh`; input lag, app launch, window open and wake need the shell |
 | UX-30 "Ask the agent" on every error, crash and failed update | Partial | the IT agent diagnoses, fixes from IT's list and files tickets (AE-4); the notification and its button need the shell |
 | UX-3, UX-11, UX-31, UX-40 Try-it VM, org themes, explain any setting, tailorable desktop | P1 | UX-40 reuses tailoring layers (ADR 0014) |
 

@@ -157,9 +157,11 @@ impl Runtime {
     // ---- recording -------------------------------------------------------
 
     /// Appends to the audit log. A failed append marks the log unhealthy, and
-    /// the action pipeline then refuses side effects (fail closed).
+    /// the action pipeline then refuses side effects (fail closed). The
+    /// append waits for the disk (fsync), which takes long while agents
+    /// write a lot, so it runs off the async workers that answer the shell.
     pub(crate) fn audit(&self, event: AuditEvent) {
-        if let Err(e) = self.audit.append(event) {
+        if let Err(e) = blocking(|| self.audit.append(event)) {
             tracing::error!(error = %e, "audit append failed; refusing further side effects");
             self.audit_ok.store(false, Ordering::SeqCst);
         }
@@ -797,7 +799,7 @@ impl Runtime {
     /// Every record for one task, to rebuild it end to end (AU-3).
     pub fn audit_task(&self, caller: &Caller, id: TaskId) -> Result<Vec<AuditRecord>> {
         let task = self.authorized(caller, id)?;
-        glass_audit::read(self.audit.path(), |r| r.event.task == Some(task.id))
+        blocking(|| glass_audit::read(self.audit.path(), |r| r.event.task == Some(task.id)))
             .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
 
@@ -807,7 +809,7 @@ impl Runtime {
                 "verifying the whole log needs root".into(),
             ));
         }
-        let report = glass_audit::verify(self.audit.path())
+        let report = blocking(|| glass_audit::verify(self.audit.path()))
             .map_err(|e| RuntimeError::Internal(e.to_string()))?;
         Ok(AuditVerifyResult {
             records: report.records,
@@ -854,6 +856,21 @@ impl Runtime {
         event.targets = handle.parts.iter().map(|p| p.name.clone()).collect();
         self.audit(event);
         Ok(handle)
+    }
+}
+
+/// Runs blocking work (writing and syncing a file, reading the audit log)
+/// without stalling the async workers that answer everyone else: on
+/// glassd's multi-threaded runtime the worker hands its other tasks to
+/// another thread first (docs/dev/performance.md, rule 3). Elsewhere, such
+/// as single-threaded test runtimes, it just runs it.
+pub(crate) fn blocking<R>(work: impl FnOnce() -> R) -> R {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
     }
 }
 

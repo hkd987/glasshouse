@@ -73,6 +73,84 @@ const UNDO_PREVIEW: Budget = Budget {
     p95: Duration::from_millis(150),
 };
 
+/// How long each busy agent runs in [`under_load`]; the samples take about
+/// half of it.
+const LOAD_SECS: u64 = 15;
+const LOAD_SAMPLES: usize = 30;
+const LOADED_TILES: Budget = Budget {
+    what: "tiles, two busy agents",
+    source: "ceiling",
+    p95: Duration::from_millis(100),
+};
+const LOADED_EXPANDED: Budget = Budget {
+    what: "expanded view, two busy agents",
+    source: "AW-10",
+    p95: Duration::from_millis(200),
+};
+
+/// The same reads the shell makes (tiles, the expanded view) while two
+/// agents keep every CPU busy and write to disk as fast as their jails let
+/// them (`glass-probe`'s load mode). Agents run below the person's priority
+/// with resource limits, so these hold the idle budgets.
+pub async fn under_load(h: &Harness) -> anyhow::Result<()> {
+    let prompt = format!("load for {LOAD_SECS}s");
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        tasks.push(h.start("containment-probe", &prompt, &[], &[]).await?);
+    }
+    for &task in &tasks {
+        busy(h, task).await?;
+    }
+    let (mut tiles, mut expanded) = (Vec::new(), Vec::new());
+    for i in 0..LOAD_SAMPLES {
+        let started = Instant::now();
+        h.call::<Vec<TaskView>>(methods::TASK_LIST, Value::Null)
+            .await?;
+        tiles.push(started.elapsed());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let started = Instant::now();
+        h.detail(tasks[i % tasks.len()]).await?;
+        expanded.push(started.elapsed());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    for &task in &tasks {
+        let detail = h.detail(task).await?;
+        println!("    busy agent: {}", detail.view.caption);
+        if detail.view.state.is_live() {
+            h.act(methods::TASK_STOP, task).await?;
+        }
+    }
+    let results = [
+        measure(&LOADED_TILES, tiles),
+        measure(&LOADED_EXPANDED, expanded),
+    ];
+    let over: Vec<&str> = results.iter().filter(|r| !r.ok).map(|r| r.what).collect();
+    ensure!(over.is_empty(), "over budget: {}", over.join(", "));
+    Ok(())
+}
+
+/// Waits for a busy agent's first progress report.
+async fn busy(h: &Harness, task: TaskId) -> anyhow::Result<()> {
+    let deadline = Instant::now() + LONG;
+    while Instant::now() < deadline {
+        let detail = h.detail(task).await?;
+        if detail.view.caption.starts_with("Busy on") {
+            return Ok(());
+        }
+        ensure!(
+            detail.view.state.is_live(),
+            "the busy agent ended: {}",
+            detail
+                .view
+                .failure
+                .as_deref()
+                .unwrap_or(&detail.view.caption)
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    anyhow::bail!("the busy agent never got going")
+}
+
 pub async fn perf(h: &Harness) -> anyhow::Result<()> {
     let ws = h.workspace("perf")?;
     let request = TaskRequest {

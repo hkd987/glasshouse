@@ -4,7 +4,8 @@
 control_socket = "/var/run/glasshouse/control.sock"
 state_dir = "/var/db/glasshouse"
 # When this file is absent the built-in default policy is enforced. Print it
-# with `glassctl policy default`.
+# with `glassctl policy default`. If it doesn't validate, glassd enforces the
+# last policy that did (kept in state_dir/policy/) and says why (ADR 0021).
 policy = "/usr/local/etc/glasshouse/policy.toml"
 max_live_tasks_per_user = 8
 # Take over on an ended task carries on in this attended agent: the user's
@@ -17,6 +18,19 @@ model_secrets = "/usr/local/etc/glasshouse/model-secrets.toml"
 [sandbox]
 backend = "jail"
 agent_dirs = ["/usr/local/libexec/glasshouse"]
+
+# The person comes first: agents start below their CPU priority, and each
+# task's jail gets these limits for as long as it exists. Shares are of this
+# machine; 0 turns a limit off. Resource limits need the machine booted with
+# kern.racct.enable=1 (post-install.sh sets it). docs/dev/performance.md,
+# "Under load", has the measurements behind these.
+[sandbox.limits]
+nice = 10
+cpu_percent = 50
+memory_percent = 25
+read_mb_per_sec = 64
+write_mb_per_sec = 32
+max_processes = 256
 
 [snapshots]
 backend = "zfs"

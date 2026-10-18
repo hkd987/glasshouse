@@ -26,4 +26,5 @@ ADR and mark the old one superseded.
 | [0018](0018-model-gateway.md) | glassd brokers every model call: `model_complete` is an action routed by the labels the task has read, redacted, audited without prompt text; HTTPS on the base system's OpenSSL; secrets in a root-only file until the broker exists |
 | [0019](0019-signing-in.md) | Accepted: a greeter on the screen signs people in through PAM and starts their desktop with `su -l` |
 | [0020](0020-agents-that-may-run-elsewhere.md) | Proposed: agents may later run in the cloud with local hands; the task socket stays the only interface and task state stays data (FD-1 to FD-4) |
+| [0021](0021-managed-settings-load-from-disk.md) | Managed settings never block boot: glassd starts from the policy on disk, checked once, falling back to the last good one; new settings are fetched in the background and applied whole (fetch and live apply proposed) |
 | [0022](0022-build-on-pkgbase.md) | Accepted: build on pkgbase; an image is a list of packages from one repository, ours included; devices take whole images; FreeBSD stays behind `glass-platform` |

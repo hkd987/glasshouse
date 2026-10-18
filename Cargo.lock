@@ -548,6 +548,7 @@ version = "0.1.0"
 dependencies = [
  "glass-types",
  "serde",
+ "tempfile",
  "thiserror",
  "toml",
 ]

@@ -87,6 +87,9 @@ the containment probe is expected to fail there.
 | Boot into the sign-in screen, as a machine does | Every `make freebsd vm-deploy` turns it on (password `demo`); `make greeter-vm` puts debug builds in; Shift Super Q (`vm.sh key shift-meta_l-q`) signs out; `os/freebsd/scripts/shell-vm.sh greeter-off` gives `ttyv0` back to the console login |
 | Click, press keys or type on the VM's screen | `os/freebsd/scripts/vm.sh click <x> <y>`, `vm.sh point <x> <y>`, `vm.sh key ctrl-spc`, `vm.sh type "text"` (QEMU's USB tablet and keyboard, through QMP and the monitor) |
 | See what the VM's screen shows | `os/freebsd/scripts/vm.sh screendump shot.png`; `tools/screenshot/bootshots.py --out <dir>` reboots and records every boot screen |
+| See where boot time goes | `make vm-boot-timeline` (`tools/boot/timeline.py`): power-cycles the VM three times and prints each phase, firmware to login prompt and glassd ready. `TRACE=1` adds the kernel's milestones and each rc script's time through boottrace(4), which slows every script down; `RUNS=1` for one boot. See docs/dev/performance.md, "Boot" |
+| Run a second VM next to the default one | Give it its own directory and port: `VM_DIR=$PWD/build/vm2 VM_SSH_PORT=2223 VM_CPUS=2 VM_MEM=3072` before every `vm.sh` and `make vm-*` command. It shares the read-only base image and has its own disk |
+| Measure the desktop's responsiveness with busy agents | `su demo -c '/usr/local/libexec/glasshouse-tests/glass-e2e load'` in the VM, or start one yourself: `glassctl run --yes containment-probe "load for 30s"` keeps every CPU busy and writes as fast as its limits allow |
 
 ## Troubleshooting
 
@@ -100,9 +103,10 @@ the containment probe is expected to fail there.
 | `vm.sh run 'service x start'` never returns | A daemon inherited the SSH session's output. Redirect it: `service x start >/dev/null 2>&1`. (`vm-deploy` already does this.) |
 | `linker x86_64-unknown-freebsd-cc not found` / no sysroot | Run `make freebsd-sysroot`. |
 | `glassctl: is glassd running?` | `make vm-run CMD="service glassd status; tail /var/log/glassd.log"` |
-| `glassd` refuses to start | It validates config and policy first: `make vm-run CMD="glassd --check"` prints why. |
+| `glassd` refuses to start | It validates config and policy as it starts and says why in `/var/log/glassd.log` (and on the console at boot); `make vm-run CMD="glassd --check"` prints it too. A policy file that doesn't validate doesn't stop it: it enforces the last good policy and `glassctl status` says so (ADR 0021). |
+| Containment probe fails only "limits: below the person's priority, memory capped" right after a deploy | The VM hasn't restarted since the deploy turned resource accounting on (`kern.racct.enable`, read at boot): `vm.sh down && vm.sh up && vm.sh wait`. `check-boot.sh` in the e2e suite says the same. |
 | Containment probe fails in the VM | That's a real finding. Look at the `FAIL` lines in `/var/db/glasshouse/tasks/<id>/agent.log` before anything else. |
-| Out of disk | `make clean`, then `make vm-reset` (the VM disk grows to 20 GB). |
+| Out of disk | `make vm-run CMD="zpool trim zroot"` gives the space ZFS freed back to the host (the VM's disk is sparse; deploys turn `autotrim` on so it stays small). Then `make clean`, or `make vm-reset` (the VM disk grows to 20 GB). If the host disk filled while the VM was writing, QEMU pauses it: `info status` on its monitor says `paused (io-error)`; free space, then `cont`. |
 
 ## In Claude Code (web or cloud)
 

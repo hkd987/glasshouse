@@ -195,6 +195,36 @@ pub fn load() -> Result<Load> {
     }
 }
 
+/// What the sandbox's resource limits need to know about this machine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Resources {
+    pub cpus: u64,
+    /// Bytes, 0 when unknown.
+    pub physical_memory: u64,
+    /// Resource accounting is on (`kern.racct.enable=1`, read at boot), so
+    /// rctl(8) limits can be set. Off on other systems.
+    pub accounting: bool,
+}
+
+/// One `sysctl` call, so glassd can size each task's limits at start.
+pub fn resources() -> Resources {
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u64);
+    if !cfg!(target_os = "freebsd") {
+        return Resources {
+            cpus,
+            ..Resources::default()
+        };
+    }
+    // Names that don't exist make sysctl fail; then nothing is assumed.
+    let out = cmd::run("sysctl", &["-n", "hw.physmem", "kern.racct.enable"]).unwrap_or_default();
+    let mut lines = out.lines().map(str::trim);
+    Resources {
+        cpus,
+        physical_memory: lines.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+        accounting: lines.next() == Some("1"),
+    }
+}
+
 /// The user's busiest processes, most CPU first. Only that user's: what
 /// other people run is not the agent's business.
 pub fn top_processes(uid: u32, limit: usize) -> Result<Vec<Process>> {

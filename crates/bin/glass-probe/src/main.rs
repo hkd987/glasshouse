@@ -4,11 +4,16 @@
 //! Run as an agent with no scope, it tries everything it shouldn't be able
 //! to do and records what happened. Every check must come out denied, except
 //! one sanity check that the sandbox works at all (writing its own scratch
-//! space), so a pass can't come from a broken environment.
+//! space), so a pass can't come from a broken environment, and one that the
+//! sandbox puts the person first (lower priority, resource limits).
 //!
 //! Results go to stderr (the task log) and, summarized, to the tile caption.
 //! The exit code is 0 only when every check passed, so the task ends Done on
 //! a contained system and Failed on one that leaks.
+//!
+//! With a prompt starting `load` it is a busy agent instead ([`load`]).
+
+mod load;
 
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::os::unix::net::UnixStream;
@@ -115,6 +120,53 @@ fn processes() -> Result<String, String> {
     }
 }
 
+/// This machine's memory in bytes, from getconf(1) (FreeBSD names it
+/// PHYS_PAGES, glibc _PHYS_PAGES).
+fn physical_memory() -> Option<usize> {
+    let getconf = |name: &str| -> Option<usize> {
+        let out = Command::new("/usr/bin/getconf").arg(name).output().ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    };
+    let pages = getconf("PHYS_PAGES").or_else(|| getconf("_PHYS_PAGES"))?;
+    pages.checked_mul(getconf("PAGESIZE")?)
+}
+
+/// The person comes first: a contained agent starts below their CPU
+/// priority, and its task can't commit three quarters of the machine's
+/// memory (its limit is a quarter by default; without one, the commit
+/// succeeds). The memory limit stands for all of the jail's rctl limits,
+/// which are added in one go when the jail is created: one in force means
+/// all are.
+fn limited() -> Result<String, String> {
+    let out = Command::new("/bin/ps")
+        .args(["-o", "nice=", "-p", &std::process::id().to_string()])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let nice: i32 = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .map_err(|_| "can't read its own priority".to_owned())?;
+    if nice <= 0 {
+        return Err(format!("runs at the person's priority (nice {nice})"));
+    }
+    let total = physical_memory().ok_or("can't read this machine's memory size")?;
+    let want = total / 4 * 3;
+    let mut memory: Vec<u8> = Vec::new();
+    let reserved = memory.try_reserve_exact(want).is_ok();
+    // Keep the allocation from being optimized away.
+    std::hint::black_box(memory.as_mut_ptr());
+    let gb = want as f64 / f64::from(1 << 30);
+    if reserved {
+        Err(format!(
+            "nice {nice}, but committed {gb:.1} GB, three quarters of memory"
+        ))
+    } else {
+        Ok(format!(
+            "nice {nice}; committing {gb:.1} GB (three quarters of memory) was refused"
+        ))
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let agent = match Agent::from_env().await {
@@ -124,6 +176,18 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if agent.prompt.trim_start().starts_with("load") {
+        let outcome = load::run(&agent).await;
+        let (Ok(line) | Err(line)) = &outcome;
+        // The last line is the tile's summary (or failure reason).
+        eprintln!("{line}");
+        let _ = agent.progress(line, None, None).await;
+        return if outcome.is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
     let _ = agent.progress("Probing the sandbox", None, None).await;
     let work = agent.work_dir.clone();
 
@@ -208,6 +272,11 @@ async fn main() -> ExitCode {
             "dev: open /dev/mem",
             Want::Denied,
             io(std::fs::File::open("/dev/mem"), |_| "opened".into()),
+        ),
+        attempt(
+            "limits: below the person's priority, memory capped",
+            Want::Allowed,
+            limited(),
         ),
     ];
 

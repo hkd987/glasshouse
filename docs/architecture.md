@@ -84,8 +84,9 @@ Each task gets a jail from a generated `jail.conf` + `fstab`
 | Processes | Jailed processes see and signal only their own jail. |
 | Privilege | `securelevel = 3`, no mounts, no raw sockets, no child jails, devfs ruleset 4. |
 | Identity | Runs as the user's uid, so files it causes to be written are the user's; the jail confines what that uid can reach. |
+| Resources | The person comes first: the agent starts at `nice` 10 (`nice -n 10 jexec …`), and the jail's `exec.prestart` adds rctl(8) limits on CPU (half the machine), memory (a quarter of it, committed and resident), disk throughput and processes, which its `exec.poststop` removes with the jail (PA-2). `[sandbox.limits]` in `glassd.toml`; needs `kern.racct.enable=1` at boot. The rctl rules, `nice` and the sysctls it reads live in `glass-platform` (PL-1); on Linux the same limits are cgroup v2's `cpu.max`, `memory.max`, `io.max` and `pids.max`. |
 
-`glass-probe` attacks all of this from inside and must come back 19/19; the
+`glass-probe` attacks all of this from inside and must come back 20/20; the
 e2e suite runs it on every change to the VM.
 
 The broker side matters as much: glassd runs as root and acts for agents, so
@@ -94,6 +95,13 @@ absolute paths and symlinks that leave the grant.
 
 ## Decisions, approvals, labels
 
+- Policy at start comes from local disk only, checked once by glassd as it
+  starts: `policy.toml`, or the built-in default without one. If the file
+  doesn't validate, glassd enforces the last policy that did
+  (`<state_dir>/policy/last-good.toml`) and says why; with no good copy it
+  refuses to start. Managed settings will be fetched in the background
+  after the desktop is up and applied whole, never on the boot path
+  (ADR 0021).
 - Tiers come from policy (`glass-policy`): org baseline, then group and agent
   rules (stricter wins between them), then task restrictions (stricter only).
   Actions outside an agent's allow-list are Never. Each decision records the

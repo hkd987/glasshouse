@@ -4,6 +4,7 @@
 //! glass-e2e all                 every single-user scenario
 //! glass-e2e invoices labels     just these, one after another
 //! glass-e2e perf                end-user latency budgets
+//! glass-e2e load                the same reads while two busy agents run
 //! glass-e2e hold                start a waiting task, print its id
 //! glass-e2e isolation <id>      (as another user) that task is invisible
 //! glass-e2e release <id>        stop it
@@ -47,8 +48,9 @@ const PARALLEL: &[&str] = &[
     "harness",
 ];
 /// Run after the parallel ones, one at a time: `invoices` sends mail,
-/// `tailor` changes the invoice agent's layer, and `perf` must run alone.
-const SERIAL: &[&str] = &["invoices", "tailor", "perf"];
+/// `tailor` changes the invoice agent's layer, and `perf` and `load` must
+/// run alone.
+const SERIAL: &[&str] = &["invoices", "tailor", "perf", "load"];
 /// Live tasks one user may have is 8 (glassd.toml); stay under it.
 const AT_ONCE: usize = 6;
 
@@ -185,6 +187,7 @@ async fn scenario(name: &str, h: &Harness) -> anyhow::Result<()> {
         "harness" => scenarios::harness(h).await,
         "perf" => perf::perf(h).await,
         "models" => models::models(h).await,
+        "load" => perf::under_load(h).await,
         other => Err(anyhow::anyhow!("unknown scenario {other}")),
     }
 }

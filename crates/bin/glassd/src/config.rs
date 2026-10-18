@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use glass_platform::sandbox::ResourceLimits;
 use glass_runtime::CatalogEntry;
 use glass_types::AgentId;
 use serde::Deserialize;
@@ -59,6 +60,9 @@ pub struct SandboxConfig {
     /// Directories holding agent programs, mounted read-only into sandboxes.
     #[serde(default = "default_agent_dirs")]
     pub agent_dirs: Vec<PathBuf>,
+    /// What each task may use, so the person's own work comes first.
+    #[serde(default)]
+    pub limits: LimitsConfig,
 }
 
 impl Default for SandboxConfig {
@@ -68,7 +72,81 @@ impl Default for SandboxConfig {
             allow_insecure: false,
             base_mounts: None,
             agent_dirs: default_agent_dirs(),
+            limits: LimitsConfig::default(),
         }
+    }
+}
+
+/// `[sandbox.limits]`: agents run below the person's CPU priority, and each
+/// task's jail gets these limits for as long as it exists (PA-2). Shares
+/// are of this machine, so one config fits every model; 0 turns a limit
+/// off. See `glass_platform::sandbox::ResourceLimits` and
+/// docs/dev/performance.md ("Under load").
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LimitsConfig {
+    /// Niceness agents start with: 0 is the person's, 20 the lowest.
+    pub nice: u8,
+    /// CPU per task, in percent of the whole machine.
+    pub cpu_percent: u64,
+    /// Memory per task, in percent of physical memory.
+    pub memory_percent: u64,
+    /// Disk throughput per task, in MiB per second.
+    pub read_mb_per_sec: u64,
+    pub write_mb_per_sec: u64,
+    /// Disk operations per task, per second.
+    pub read_iops: u64,
+    pub write_iops: u64,
+    /// Processes per task at once.
+    pub max_processes: u64,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            nice: 10,
+            cpu_percent: 50,
+            memory_percent: 25,
+            read_mb_per_sec: 64,
+            write_mb_per_sec: 32,
+            read_iops: 0,
+            write_iops: 0,
+            max_processes: 256,
+        }
+    }
+}
+
+impl LimitsConfig {
+    /// The limits for a machine with `cpus` CPUs and `memory` bytes of
+    /// physical memory (0 when unknown, which leaves memory unlimited).
+    pub fn resolve(&self, cpus: u64, memory: u64) -> ResourceLimits {
+        const MIB: u64 = 1 << 20;
+        ResourceLimits {
+            nice: self.nice,
+            // rctl's pcpu counts one CPU as 100.
+            cpu_percent: self.cpu_percent * cpus,
+            memory_bytes: memory.saturating_mul(self.memory_percent) / 100,
+            read_bps: self.read_mb_per_sec.saturating_mul(MIB),
+            write_bps: self.write_mb_per_sec.saturating_mul(MIB),
+            read_iops: self.read_iops,
+            write_iops: self.write_iops,
+            max_processes: self.max_processes,
+        }
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.nice > 20 {
+            bail!("sandbox.limits.nice runs from 0 (the person's priority) to 20");
+        }
+        for (name, value) in [
+            ("cpu_percent", self.cpu_percent),
+            ("memory_percent", self.memory_percent),
+        ] {
+            if value > 100 {
+                bail!("sandbox.limits.{name} is a share of this machine: 0 (off) to 100");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -144,6 +222,7 @@ impl Config {
                  set sandbox.allow_insecure = true to use it for development"
             );
         }
+        self.sandbox.limits.validate()?;
         for agent in &self.agents {
             agent
                 .check()
@@ -275,6 +354,38 @@ mod tests {
         ))
         .unwrap();
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn agents_get_a_share_of_this_machine() {
+        let limits = LimitsConfig::default().resolve(4, 16 << 30);
+        assert_eq!(limits.nice, 10);
+        assert_eq!(limits.cpu_percent, 200, "half of four CPUs");
+        assert_eq!(limits.memory_bytes, 4 << 30, "a quarter of 16 GiB");
+        assert_eq!(limits.write_bps, 32 << 20);
+        assert_eq!(limits.max_processes, 256);
+        assert_eq!(
+            LimitsConfig::default().resolve(4, 0).memory_bytes,
+            0,
+            "unknown memory: no memory limit rather than a wrong one"
+        );
+    }
+
+    #[test]
+    fn limits_must_make_sense() {
+        let bad = |text: &str| {
+            let config: Config = toml::from_str(text).unwrap();
+            assert!(config.validate().is_err(), "{text}");
+        };
+        bad("[sandbox.limits]\nnice = 21\n");
+        bad("[sandbox.limits]\ncpu_percent = 150\n");
+        bad("[sandbox.limits]\nmemory_percent = 101\n");
+        let off: Config = toml::from_str("[sandbox.limits]\nnice = 0\ncpu_percent = 0\nmemory_percent = 0\nread_mb_per_sec = 0\nwrite_mb_per_sec = 0\nmax_processes = 0\n").unwrap();
+        off.validate().unwrap();
+        assert_eq!(
+            off.sandbox.limits.resolve(4, 1 << 30),
+            ResourceLimits::default()
+        );
     }
 
     #[test]
