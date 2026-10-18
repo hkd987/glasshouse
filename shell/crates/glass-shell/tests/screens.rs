@@ -258,7 +258,7 @@ fn desktop_has_menu_bar_tiles_and_dock_in_place() {
         f.pixel(1200, 300)
     );
     // The dock is light and floats above the bottom edge.
-    let dock = f.pixel(470, 830);
+    let dock = f.pixel(720, 822);
     assert!(dock.iter().take(3).all(|&c| c > 120), "dock: {dock:?}");
 }
 
@@ -270,7 +270,7 @@ fn command_bar_sits_over_the_dimmed_desktop() {
         "{:?}",
         f.pixel(500, 500)
     );
-    let dock = f.pixel(470, 830);
+    let dock = f.pixel(720, 822);
     assert!(
         dock.iter().take(3).all(|&c| c > 120),
         "the dock stays above the scrim: {dock:?}"
@@ -319,7 +319,7 @@ fn aw10_expanded_view_has_header_panes_and_timeline_in_place() {
         close(f.pixel(1200, 300), panel, 4),
         "no tile over the right column"
     );
-    let dock = f.pixel(470, 830);
+    let dock = f.pixel(720, 822);
     assert!(dock.iter().take(3).all(|&c| c > 120), "dock: {dock:?}");
 }
 

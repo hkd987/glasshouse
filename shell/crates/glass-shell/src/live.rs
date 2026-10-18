@@ -46,6 +46,8 @@ pub struct Live {
     about: system::About,
     /// About or Force Quit, when one is open.
     window: Option<SystemWindow>,
+    /// The Trash has something in it.
+    trash_full: bool,
 }
 
 /// A window the system menu opened.
@@ -147,6 +149,7 @@ impl Live {
             person: String::new(),
             about: system::About::default(),
             window: None,
+            trash_full: false,
         };
         let waiting: Vec<TaskId> = live
             .tasks
@@ -166,6 +169,11 @@ impl Live {
     pub fn without_wallpaper(mut self) -> Self {
         self.wallpaper = false;
         self
+    }
+
+    /// Whether the Trash has anything in it; true when that changed.
+    pub fn set_trash_full(&mut self, full: bool) -> bool {
+        std::mem::replace(&mut self.trash_full, full) != full
     }
 
     /// This build and computer, for About Glasshouse.
@@ -679,6 +687,7 @@ impl Live {
             tiles,
             wallpaper: self.wallpaper,
             system_menu: self.system_menu.then(|| self.person.clone()),
+            trash_full: self.trash_full,
             ..Desktop::live(&self.tasks, now)
         };
         let mut overlays = Vec::new();

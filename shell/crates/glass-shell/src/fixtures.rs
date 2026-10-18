@@ -352,6 +352,7 @@ pub fn desktop(tasks: &[TaskView]) -> Desktop<'_> {
         tiles: Tiles::Banners(tasks.iter().collect()),
         wallpaper: true,
         system_menu: None,
+        trash_full: false,
     }
 }
 

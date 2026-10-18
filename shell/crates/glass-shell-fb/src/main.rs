@@ -106,6 +106,8 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
         .without_wallpaper()
         .signed_in_as(signed_in_as())
         .about(about());
+    let mut live = live;
+    live.set_trash_full(trash_full());
     let mut shell = Shell::open(args.tty, offset, live)?;
     let opened = started.elapsed();
     shell.draw(true);
@@ -188,7 +190,11 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
                 shell.draw(false);
                 continue;
             }
-            () = tokio::time::sleep(until_next_minute(OffsetDateTime::now_utc())) => redraw = true,
+            () = tokio::time::sleep(until_next_minute(OffsetDateTime::now_utc())) => {
+                // The clock turns over; the Trash is looked at as often.
+                shell.live.set_trash_full(trash_full());
+                redraw = true;
+            }
             _ = terminate.recv() => break,
             _ = interrupt.recv() => break,
         }
@@ -258,6 +264,17 @@ fn about() -> system::About {
         memory_gb: computer.as_ref().map_or(0, |c| c.memory_mb.div_ceil(1024)),
         computer: computer.map(|c| c.name).unwrap_or_default(),
     }
+}
+
+/// Whether the person's Trash has anything in it: the freedesktop.org
+/// location (`~/.local/share/Trash/files`), where Files will put what's
+/// deleted.
+fn trash_full() -> bool {
+    let Some(home) = std::env::var_os("HOME") else {
+        return false;
+    };
+    std::fs::read_dir(std::path::Path::new(&home).join(".local/share/Trash/files"))
+        .is_ok_and(|mut entries| entries.next().is_some())
 }
 
 /// Who is signed in, as they'd read it: the account's full name, else its

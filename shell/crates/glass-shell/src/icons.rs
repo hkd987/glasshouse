@@ -499,6 +499,27 @@ pub const BAG: Icon = Icon {
     ],
 };
 
+/// The Trash, empty.
+pub const TRASH: Icon = Icon {
+    view_box: (18.0, 18.0),
+    shapes: &[
+        Shape::Path("M2.8 4.8h12.4M7 4.6V3h4v1.6", StrokeRound(1.5)),
+        Shape::Path("M4.3 5l.9 10.2h7.6L13.7 5", StrokeRound(1.5)),
+        Shape::Path("M7.4 7.6v5M10.6 7.6v5", StrokeRound(1.3)),
+    ],
+};
+
+/// The Trash with something in it: paper over the rim.
+pub const TRASH_FULL: Icon = Icon {
+    view_box: (18.0, 18.0),
+    shapes: &[
+        Shape::Path("M4.6 4.6l1.2-3.4 2.7 1.8 2.3-2.4 2.6 4z", Fill),
+        Shape::Path("M2.8 4.8h12.4", StrokeRound(1.5)),
+        Shape::Path("M4.3 5l.9 10.2h7.6L13.7 5", StrokeRound(1.5)),
+        Shape::Path("M7.4 7.6v5M10.6 7.6v5", StrokeRound(1.3)),
+    ],
+};
+
 pub const GEAR: Icon = Icon {
     view_box: (18.0, 18.0),
     shapes: &[

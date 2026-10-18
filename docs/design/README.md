@@ -38,7 +38,7 @@ light desktop; accent `#3D6BFF` for working and you're-driving; attention
 | "Allow sends for the rest of this task" | `ApprovalAnswer::Approve { scope: Task }` |
 | Screen thumbnail with labeled agent cursor (AW-2) | **Not built**: needs screen-control agents |
 | Menu bar: app menus, "3 agents" pill with one dot per tile (a button: it opens the agents menu), Wi-Fi, battery, clock | `task.list` counts and states; app menus come from the focused app (shell), and with none focused the left side is only the mark (product decision, 2026-10-18: the desktop isn't an app). The mark opens the system menu: "Hand an agent a task…" (Ctrl Space, the command bar) and "Sign out <name>…"; apps join it when they have windows. Wi-Fi and battery from the system (PM, CF) |
-| Dock: launcher, apps with open dots, calendar date, Agents with a needs-you badge | Apps from the catalog (shell); the badge is the count of `NeedsYou` tiles |
+| Dock: launcher, apps with open dots, calendar date, Agents with a needs-you badge | Apps from the catalog (shell); the badge is the count of `NeedsYou` tiles. Product decision (2026-10-19): Files always first and the Trash always last, as a Mac's Finder and Trash, with the agents beside the Trash past the separator; the Trash shows full when `~/.local/share/Trash/files` has anything. Arranging the apps between, and opening them, come with app windows (M2b) |
 | Command bar over everything, Ctrl Space (DA-1) | `task.plan` on enter; see Command bar below |
 | Live updates | `events.subscribe` → `event` notifications (`TaskUpdated`, `TaskRemoved`) |
 

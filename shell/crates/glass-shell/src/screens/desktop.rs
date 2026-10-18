@@ -37,6 +37,8 @@ pub struct Desktop<'a> {
     /// The menu under the mark at the left of the menu bar, when it's open:
     /// the name of the person signed in, for "Sign out <name>".
     pub system_menu: Option<String>,
+    /// Whether the Trash at the right end of the dock has anything in it.
+    pub trash_full: bool,
 }
 
 /// Which agent tiles the desktop shows. They don't stay on screen: a change
@@ -72,6 +74,7 @@ impl<'a> Desktop<'a> {
             tiles: Tiles::Hidden,
             wallpaper: true,
             system_menu: None,
+            trash_full: false,
         }
     }
 }
@@ -623,13 +626,21 @@ fn dock<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
             .style(move |_| style::panel(d.fill, 0.0)),
     )
     .center_y(Length::Fixed(52.0));
+    // Files always first and the Trash always last, as a Mac's Finder and
+    // Trash; the apps between are the person's to arrange (once apps have
+    // windows), and the agents sit with the Trash past the separator.
+    let trash = if desktop.trash_full {
+        &icons::TRASH_FULL
+    } else {
+        &icons::TRASH
+    };
     let items = row![
         slot(
-            app(hex(0xE9ECEF), glyph(&icons::LAUNCHER, hex(0x5F6875), 24.0)),
+            app(hex(0x2F7BEA), glyph(&icons::FOLDER, white, 26.0)),
             false
         ),
         slot(
-            app(hex(0x2F7BEA), glyph(&icons::FOLDER, white, 26.0)),
+            app(hex(0xE9ECEF), glyph(&icons::LAUNCHER, hex(0x5F6875), 24.0)),
             false
         ),
         slot(app(hex(0x1E9BF0), glyph(&icons::MAIL, white, 26.0)), false),
@@ -639,6 +650,10 @@ fn dock<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
         slot(app(hex(0x5F6875), glyph(&icons::GEAR, white, 26.0)), false),
         separator,
         agents,
+        slot(
+            app(hexa(0xFFFFFF, 0.55), glyph(trash, hex(0x5F6875), 26.0)),
+            false
+        ),
     ]
     .spacing(10)
     .align_y(Vertical::Top);

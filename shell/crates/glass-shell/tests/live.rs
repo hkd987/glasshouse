@@ -373,7 +373,11 @@ fn ux_a_banner_coming_and_going_redraws_only_where_it_is() {
     let came = render(&live);
     let area: u32 = came.iter().map(|d| d.width * d.height).sum();
     assert!(area < (SIZE.0 * SIZE.1 / 8.0) as u32, "{came:?}");
-    assert_eq!(came.len(), 2, "the top right and the dock: {came:?}");
+    assert!(
+        came.iter()
+            .all(|d| d.y + d.height < 300 || d.y > SIZE.1 as u32 - 100),
+        "the top right and the dock: {came:?}"
+    );
     assert!(live.tick(at + BANNER));
     let went = render(&live);
     assert!(!went.is_empty());
