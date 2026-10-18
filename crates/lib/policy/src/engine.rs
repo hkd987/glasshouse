@@ -8,7 +8,7 @@ use std::path::Path;
 use glass_types::{ActionName, AgentId, Label, SideEffect, Tier};
 use serde::{Deserialize, Serialize};
 
-use crate::document::{AgentPolicy, GroupPolicy, PolicyDocument, SCHEMA_VERSION};
+use crate::document::{AgentPolicy, Fixes, GroupPolicy, PolicyDocument, SCHEMA_VERSION};
 use crate::{ActionPattern, labels, pattern};
 
 /// The group name that implicitly contains every user.
@@ -77,6 +77,15 @@ impl Policy {
                 errors.push(format!("label rule path {:?} must be absolute", rule.path));
             }
         }
+        for service in &doc.fixes.services {
+            let plain = !service.is_empty()
+                && service
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            if !plain {
+                errors.push(format!("fixes.services: {service:?} is not a service name"));
+            }
+        }
         if errors.is_empty() {
             Ok(Self { doc })
         } else {
@@ -86,6 +95,11 @@ impl Policy {
 
     pub fn document(&self) -> &PolicyDocument {
         &self.doc
+    }
+
+    /// IT's approved fix list for the IT self-service agent (AE-4).
+    pub fn fixes(&self) -> &Fixes {
+        &self.doc.fixes
     }
 
     /// The groups `user` belongs to, including `everyone` when defined.

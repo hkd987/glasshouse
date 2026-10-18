@@ -155,8 +155,63 @@ impl ConfinedDir {
         self.dir.create_dir_all(relative(rel)?)
     }
 
+    /// Like [`create_dir_all`](Self::create_dir_all), but every directory
+    /// it creates belongs to `owner`, so a broker running as root never
+    /// leaves the user a folder they can't change.
+    pub fn create_dir_all_as(&self, rel: &Path, owner: Owner) -> io::Result<()> {
+        let mut prefix = PathBuf::new();
+        for part in relative(rel)?.components() {
+            prefix.push(part);
+            if self.dir.symlink_metadata(&prefix).is_ok() {
+                continue;
+            }
+            self.dir.create_dir(&prefix)?;
+            // A plain read-only handle: cap-std's directory handles can be
+            // O_PATH on Linux, which fchown refuses.
+            let created = self
+                .dir
+                .open_with(&prefix, OpenOptions::new().read(true))?
+                .into_std();
+            fchown(&created, Some(owner.uid), Some(owner.gid))?;
+        }
+        Ok(())
+    }
+
     pub fn exists(&self, rel: &Path) -> bool {
         relative(rel).is_ok_and(|rel| self.dir.symlink_metadata(rel).is_ok())
+    }
+
+    /// Whether `rel` is a directory itself, not a symlink to one.
+    pub fn is_real_dir(&self, rel: &Path) -> bool {
+        relative(rel).is_ok_and(|rel| {
+            self.dir
+                .symlink_metadata(rel)
+                .is_ok_and(|m| m.is_dir() && !m.is_symlink())
+        })
+    }
+
+    /// Removes a directory and everything in it. Symlinks inside are removed,
+    /// never followed.
+    pub fn remove_dir_all(&self, rel: &Path) -> io::Result<()> {
+        self.dir.remove_dir_all(relative(rel)?)
+    }
+
+    /// Bytes and files under `rel` (the root when empty), without following
+    /// symlinks.
+    pub fn disk_usage(&self, rel: &Path) -> io::Result<(u64, u64)> {
+        let (mut bytes, mut files) = (0, 0);
+        for entry in self.list(rel)? {
+            let child = rel.join(&entry.name);
+            if entry.is_dir {
+                let (b, f) = self.disk_usage(&child)?;
+                bytes += b;
+                files += f;
+            } else {
+                bytes += entry.size;
+                files += 1;
+            }
+        }
+        Ok((bytes, files))
     }
 }
 
@@ -192,6 +247,58 @@ mod tests {
         std::fs::write(outer.path().join("secret.txt"), "top secret").unwrap();
         let dir = ConfinedDir::open(&outer.path().join("grant")).unwrap();
         (outer, dir)
+    }
+
+    #[test]
+    fn measures_and_removes_trees_without_following_symlinks() {
+        let (outer, dir) = setup();
+        dir.create_dir_all(Path::new("cache/a")).unwrap();
+        dir.write(Path::new("cache/a/one.bin"), &[0; 100], None)
+            .unwrap();
+        dir.write(Path::new("cache/two.bin"), &[0; 50], None)
+            .unwrap();
+        symlink(
+            outer.path().join("secret.txt"),
+            outer.path().join("grant/cache/link"),
+        )
+        .unwrap();
+        symlink(
+            outer.path().join("grant/cache"),
+            outer.path().join("grant/alias"),
+        )
+        .unwrap();
+        assert!(dir.is_real_dir(Path::new("cache")));
+        assert!(
+            !dir.is_real_dir(Path::new("alias")),
+            "a symlink is not a real dir"
+        );
+        let (bytes, files) = dir.disk_usage(Path::new("cache")).unwrap();
+        assert_eq!(files, 3);
+        assert!(bytes >= 150);
+        dir.remove_dir_all(Path::new("cache/a")).unwrap();
+        dir.remove_file(Path::new("cache/link")).unwrap();
+        assert!(
+            outer.path().join("secret.txt").exists(),
+            "the link target stays"
+        );
+        assert!(!dir.exists(Path::new("cache/a")));
+    }
+
+    #[test]
+    fn directories_created_for_a_user_belong_to_them() {
+        use std::os::unix::fs::MetadataExt;
+        let (outer, dir) = setup();
+        let me = std::fs::metadata(outer.path()).unwrap();
+        let owner = Owner {
+            uid: me.uid(),
+            gid: me.gid(),
+        };
+        dir.create_dir_all_as(Path::new("a/b/c"), owner).unwrap();
+        for d in ["a", "a/b", "a/b/c"] {
+            let meta = std::fs::metadata(outer.path().join("grant").join(d)).unwrap();
+            assert_eq!((meta.uid(), meta.gid()), (owner.uid, owner.gid), "{d}");
+        }
+        dir.create_dir_all_as(Path::new("a/b/c"), owner).unwrap();
     }
 
     #[test]

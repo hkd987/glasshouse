@@ -17,3 +17,4 @@ ADR and mark the old one superseded.
 | [0009](0009-native-shell-web-apps.md) | A native Rust shell on Smithay and iced; apps are TypeScript web apps |
 | [0010](0010-agents-are-harness-bundles.md) | Proposed: agents are versioned harness bundles run by one runner; hard limits stay in the OS |
 | [0011](0011-branding-on-a-freebsd-base.md) | Branding: overlay now (tested), our own base build next; notices and SBOM generated from the build |
+| [0012](0012-system-actions-broker-role.md) | IT self-service runs as fixed-function system actions in glassd; policy is the broker role |

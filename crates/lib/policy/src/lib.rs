@@ -42,5 +42,38 @@ mod tests {
         assert_eq!(tier("security.firewall"), Never);
         assert!(eff.egress().is_empty());
         assert_eq!(eff.max_label(), glass_types::Label::Internal);
+        assert_eq!(
+            tier("system.service.restart"),
+            Never,
+            "system actions are the IT agent's alone"
+        );
+    }
+
+    #[test]
+    fn the_it_agent_checks_quietly_and_asks_before_changing_the_machine() {
+        // AE-4
+        let policy = Policy::from_toml(DEFAULT_POLICY).unwrap();
+        assert!(policy.fixes().services.iter().any(|s| s == "openvpn"));
+        let eff = policy
+            .effective("anyone", &"it-agent".parse().unwrap())
+            .unwrap();
+        let tier = |n: &str| {
+            eff.tier_for(&n.parse().unwrap(), glass_types::Tier::Auto)
+                .tier
+        };
+        use glass_types::Tier::*;
+        assert_eq!(tier("system.network.check"), Auto);
+        assert_eq!(tier("system.storage.clean_cache"), Notify);
+        assert_eq!(tier("system.service.restart"), Ask);
+        assert_eq!(tier("helpdesk.ticket.create"), Ask);
+        assert_eq!(tier("security.firewall"), Never, "never security settings");
+        assert_eq!(tier("files.read"), Never, "no user files");
+    }
+
+    #[test]
+    fn fix_lists_name_services_not_commands() {
+        let bad =
+            DEFAULT_POLICY.replace(r#"services = ["cron","#, r#"services = ["cron; reboot","#);
+        assert!(Policy::from_toml(&bad).is_err());
     }
 }

@@ -32,6 +32,7 @@ const ALL: &[&str] = &[
     "stop",
     "takeover",
     "changes",
+    "it",
 ];
 
 #[tokio::main(flavor = "current_thread")]
@@ -78,6 +79,7 @@ async fn main() -> ExitCode {
                     "stop" => scenarios::stop(&harness).await,
                     "takeover" => scenarios::takeover(&harness).await,
                     "changes" => scenarios::changes(&harness).await,
+                    "it" => scenarios::it(&harness).await,
                     other => Err(anyhow::anyhow!("unknown scenario {other}")),
                 };
                 if report(name, outcome).is_err() {

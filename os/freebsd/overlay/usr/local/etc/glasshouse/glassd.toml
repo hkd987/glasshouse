@@ -19,6 +19,19 @@ backend = "zfs"
 # agent may do is set by policy, not here.
 
 [[agent]]
+id = "it-agent"
+name = "IT agent"
+version = "0.1"
+description = "Fixes this computer: network and VPN, storage and slowdowns, from IT's approved list. Opens a help desk ticket with diagnostics when it can't."
+mode = "actions"
+program = "/usr/local/libexec/glasshouse/glass-it-agent"
+plan = [
+  "Check the parts of this computer your problem points to",
+  "Apply a fix from IT's approved list, undoable where it changes anything",
+  "Ask you before restarting anything or opening a help desk ticket",
+]
+
+[[agent]]
 id = "invoice-demo"
 name = "Invoice demo"
 version = "0.1"

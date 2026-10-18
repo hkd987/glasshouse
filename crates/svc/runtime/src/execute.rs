@@ -387,6 +387,14 @@ impl Runtime {
                 format!("Blocked: {} — {detail}", def.title),
             );
             self.publish(task);
+        } else if let ActionError::Failed(detail) | ActionError::NotFound(detail) = &error {
+            // A step the agent couldn't take is part of what the user sees,
+            // like "openvpn isn't set up on this computer".
+            task.lock().note(
+                ActivityKind::Notice,
+                format!("Not done: {} — {detail}", def.title),
+            );
+            self.publish(task);
         }
         CallToolResult::error(error.to_string())
     }

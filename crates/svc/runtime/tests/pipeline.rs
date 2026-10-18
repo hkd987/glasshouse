@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use glass_actions::Registry;
-use glass_actions::providers::{FilesProvider, MailProvider};
+use glass_actions::providers::{
+    FilesProvider, HelpdeskProvider, MailProvider, SystemOps, SystemProvider,
+};
 use glass_api::{
     AnswerApproval, ApprovalAnswer, ApprovalScope, ScopeRequest, TaskRequest, TileState,
     UndoRequest,
@@ -20,6 +22,7 @@ use glass_api::{
 use glass_audit::{AuditLog, Durability, EventKind, Outcome};
 use glass_platform::sandbox::HostSandbox;
 use glass_platform::snapshot::CopySnapshotter;
+use glass_platform::system;
 use glass_policy::Policy;
 use glass_rpc::Client;
 use glass_rpc::mcp::{CallToolResult, ListToolsResult};
@@ -31,6 +34,7 @@ struct Harness {
     dir: tempfile::TempDir,
     rt: Arc<Runtime>,
     me: Caller,
+    machine: Arc<FakeMachine>,
 }
 
 impl Harness {
@@ -71,7 +75,8 @@ impl Harness {
             .call("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}))
             .await
             .unwrap();
-        assert!(init["instructions"].as_str().unwrap().contains("Reconcile"));
+        let prompt = self.rt.get(&self.me, task).unwrap().prompt;
+        assert!(init["instructions"].as_str().unwrap().contains(&prompt));
         client
     }
 
@@ -128,25 +133,46 @@ fn harness_with(policy_extra: &str) -> Harness {
     let mut registry = Registry::new();
     registry.register(Arc::new(FilesProvider)).unwrap();
     registry.register(Arc::new(MailProvider)).unwrap();
+    let machine = Arc::new(FakeMachine::default());
+    let ops: Arc<dyn SystemOps> = machine.clone();
+    registry
+        .register(Arc::new(SystemProvider::new(ops, vec!["ntpd".into()])))
+        .unwrap();
+    registry
+        .register(Arc::new(HelpdeskProvider::new(dir.path().join("outbox"))))
+        .unwrap();
 
     let rt = Runtime::new(RuntimeParts {
         config: RuntimeConfig {
             state_dir: dir.path().join("state"),
-            catalog: vec![CatalogEntry {
-                id: "invoice-demo".parse().unwrap(),
-                name: "Invoice demo".into(),
-                version: "0.1".into(),
-                model: String::new(),
-                description: String::new(),
-                mode: glass_api::AgentMode::Actions,
-                program: "/bin/sleep".into(),
-                args: vec!["30".into()],
-                plan: vec![
-                    "Read invoices".into(),
-                    "Write the summary".into(),
-                    "Remind vendors".into(),
-                ],
-            }],
+            catalog: vec![
+                CatalogEntry {
+                    id: "it-agent".parse().unwrap(),
+                    name: "IT agent".into(),
+                    version: "0.1".into(),
+                    model: String::new(),
+                    description: String::new(),
+                    mode: glass_api::AgentMode::Actions,
+                    program: "/bin/sleep".into(),
+                    args: vec!["30".into()],
+                    plan: vec!["Check".into(), "Fix".into()],
+                },
+                CatalogEntry {
+                    id: "invoice-demo".parse().unwrap(),
+                    name: "Invoice demo".into(),
+                    version: "0.1".into(),
+                    model: String::new(),
+                    description: String::new(),
+                    mode: glass_api::AgentMode::Actions,
+                    program: "/bin/sleep".into(),
+                    args: vec!["30".into()],
+                    plan: vec![
+                        "Read invoices".into(),
+                        "Write the summary".into(),
+                        "Remind vendors".into(),
+                    ],
+                },
+            ],
             agent_dirs: Vec::new(),
             max_live_tasks_per_user: 4,
         },
@@ -165,7 +191,12 @@ fn harness_with(policy_extra: &str) -> Harness {
         gid: account.gid,
         home,
     };
-    Harness { dir, rt, me }
+    Harness {
+        dir,
+        rt,
+        me,
+        machine,
+    }
 }
 
 fn harness() -> Harness {
@@ -1013,4 +1044,114 @@ async fn an_ended_task_says_what_is_safe_and_can_be_retried() {
     })
     .unwrap();
     assert_eq!(started[0].event.detail["retry_of"], json!(first));
+}
+
+/// The machine as the IT agent's actions see it (AE-4), without touching
+/// the real one.
+#[derive(Debug, Default)]
+struct FakeMachine {
+    restarted: std::sync::Mutex<Vec<String>>,
+}
+
+impl SystemOps for FakeMachine {
+    fn network(&self) -> Result<system::NetworkStatus, String> {
+        Err("not in tests".into())
+    }
+    fn resolve(&self, _host: &str) -> Result<Vec<std::net::IpAddr>, String> {
+        Err("not in tests".into())
+    }
+    fn filesystem_usage(&self, _path: &std::path::Path) -> Result<system::FsUsage, String> {
+        Ok(system::FsUsage {
+            total_kb: 100,
+            used_kb: 95,
+            available_kb: 5,
+        })
+    }
+    fn load(&self) -> Result<system::Load, String> {
+        Err("not in tests".into())
+    }
+    fn top_processes(&self, _uid: u32) -> Result<Vec<system::Process>, String> {
+        Ok(Vec::new())
+    }
+    fn service_enabled(&self, name: &str) -> bool {
+        name == "ntpd"
+    }
+    fn restart_service(&self, name: &str) -> Result<(), String> {
+        self.restarted.lock().unwrap().push(name.into());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn only_the_it_agent_reaches_the_system_and_its_fixes_stay_undoable() {
+    // AE-4
+    let h = harness();
+    let other = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let agent = h.agent(other).await;
+    let tools: ListToolsResult = agent.call("tools/list", json!({})).await.unwrap();
+    assert!(!tools.tools.iter().any(|t| t.name.starts_with("system_")));
+    assert!(
+        tool(&agent, "system_storage_clean_cache", json!({}))
+            .await
+            .is_error
+    );
+
+    fs::create_dir_all(h.home().join(".cache/thumbs")).unwrap();
+    fs::write(h.home().join(".cache/thumbs/a.png"), vec![0u8; 4096]).unwrap();
+    let request = TaskRequest {
+        agent: "it-agent".parse().unwrap(),
+        prompt: "My disk is full".into(),
+        scope: ScopeRequest::default(),
+    };
+    let task = h.rt.start(&h.me, request).unwrap().id;
+    let agent = Arc::new(h.agent(task).await);
+    let checked = tool(&agent, "system_storage_check", json!({})).await;
+    assert!(checked.text().contains("95% full"), "{}", checked.text());
+
+    // Notify: runs without asking, snapshotted first.
+    let cleaned = tool(&agent, "system_storage_clean_cache", json!({})).await;
+    assert!(!cleaned.is_error, "{}", cleaned.text());
+    assert!(h.rt.approvals(&h.me).is_empty());
+    assert!(!h.home().join(".cache/thumbs").exists());
+    let change = h.rt.get(&h.me, task).unwrap().changes.remove(0);
+    assert_eq!(change.paths, ["~/.cache"]);
+    h.rt.undo(
+        &h.me,
+        UndoRequest {
+            task,
+            to: None,
+            changes: vec![change.id],
+            dry_run: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        h.home().join(".cache/thumbs/a.png").exists(),
+        "undo puts the cache back"
+    );
+
+    // A restart from IT's list asks first.
+    h.rt.resume(&h.me, task).unwrap();
+    let restart = {
+        let agent = Arc::clone(&agent);
+        tokio::spawn(async move {
+            tool(&agent, "system_service_restart", json!({"service": "ntpd"})).await
+        })
+    };
+    eventually(|| !h.rt.approvals(&h.me).is_empty()).await;
+    let ask = h.rt.approvals(&h.me).remove(0);
+    assert_eq!(ask.summary, "Restart the ntpd service");
+    h.rt.answer(
+        &h.me,
+        AnswerApproval {
+            approval: ask.id,
+            answer: ApprovalAnswer::Approve {
+                scope: ApprovalScope::Once,
+            },
+        },
+    )
+    .unwrap();
+    assert!(!restart.await.unwrap().is_error);
+    assert_eq!(*h.machine.restarted.lock().unwrap(), ["ntpd"]);
 }

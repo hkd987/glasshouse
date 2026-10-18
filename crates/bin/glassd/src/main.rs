@@ -11,7 +11,9 @@ use std::sync::Arc;
 use anyhow::{Context, bail};
 use clap::Parser;
 use glass_actions::Registry;
-use glass_actions::providers::{FilesProvider, MailProvider};
+use glass_actions::providers::{
+    FilesProvider, HelpdeskProvider, HostSystem, MailProvider, SystemProvider,
+};
 use glass_audit::{AuditEvent, AuditLog, Durability, EventKind};
 use glass_platform::sandbox::{HostSandbox, JailConfig, JailSandbox, Sandbox};
 use glass_platform::snapshot::{CopySnapshotter, Snapshotter, ZfsSnapshotter};
@@ -45,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let config = Config::load(&args.config)?;
     let (policy, policy_source) = load_policy(&config.policy)?;
-    let registry = registry()?;
+    let registry = registry(&config, &policy)?;
     for warning in policy.lint(&registry.lint_info()) {
         tracing::warn!("policy: {warning}");
     }
@@ -70,10 +72,19 @@ fn load_policy(path: &Path) -> anyhow::Result<(Policy, String)> {
     }
 }
 
-fn registry() -> anyhow::Result<Registry> {
+fn registry(config: &Config, policy: &Policy) -> anyhow::Result<Registry> {
     let mut registry = Registry::new();
     registry.register(Arc::new(FilesProvider))?;
     registry.register(Arc::new(MailProvider))?;
+    // The IT self-service agent's actions (AE-4). Policy decides who may use
+    // them; IT's fix list decides what they may restart.
+    registry.register(Arc::new(SystemProvider::new(
+        Arc::new(HostSystem),
+        policy.fixes().services.clone(),
+    )))?;
+    registry.register(Arc::new(HelpdeskProvider::new(
+        config.state_dir.join("helpdesk/outbox"),
+    )))?;
     Ok(registry)
 }
 

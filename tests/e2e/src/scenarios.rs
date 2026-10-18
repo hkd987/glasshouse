@@ -234,6 +234,77 @@ pub async fn changes(h: &Harness) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// IT self-service (AE-4) on the real system: a cache cleanup that undo puts
+/// back from a ZFS snapshot, a service restart from IT's list after an
+/// approval, and a help desk ticket when there's no fix.
+pub async fn it(h: &Harness) -> anyhow::Result<()> {
+    let cache = h.home.join(".cache/glass-e2e");
+    std::fs::create_dir_all(&cache)?;
+    std::fs::write(cache.join("blob.bin"), vec![7u8; 2 * 1024 * 1024])?;
+
+    let task = h
+        .start("it-agent", "My disk is filling up", &[], &[])
+        .await?;
+    let done = h.wait_for(task, TileState::Done, LONG).await?;
+    ensure!(
+        !cache.exists(),
+        "the cache was cleaned: {}",
+        done.view.caption
+    );
+    ensure!(
+        done.view.caption.starts_with("Fixed."),
+        "{}",
+        done.view.caption
+    );
+    let change = done
+        .changes
+        .iter()
+        .find(|c| c.action.as_str() == "system.storage.clean_cache")
+        .context("the cleanup is on the Changes list")?;
+    ensure!(change.reversible, "a cache cleanup can be undone");
+    h.undo_changes(task, vec![change.id], false).await?;
+    ensure!(cache.join("blob.bin").exists(), "undo put the cache back");
+    std::fs::remove_dir_all(&cache)?;
+
+    let task = h.start("it-agent", "Please restart cron", &[], &[]).await?;
+    h.wait_for(task, TileState::NeedsYou, LONG).await?;
+    let ask = h.the_ask(task).await?;
+    ensure!(ask.summary == "Restart the cron service", "{}", ask.summary);
+    h.approve_once(&ask).await?;
+    let done = h.wait_for(task, TileState::Done, SHORT).await?;
+    ensure!(
+        done.view.caption == "Fixed: Restarted cron",
+        "{}",
+        done.view.caption
+    );
+
+    let task = h
+        .start("it-agent", "The printer won't print", &[], &[])
+        .await?;
+    h.wait_for(task, TileState::NeedsYou, LONG).await?;
+    let ask = h.the_ask(task).await?;
+    ensure!(
+        ask.summary.starts_with("Open a help desk ticket"),
+        "{}",
+        ask.summary
+    );
+    h.approve_once(&ask).await?;
+    let done = h.wait_for(task, TileState::Done, SHORT).await?;
+    let receipt = done.view.receipt.context("an ended task has a receipt")?;
+    ensure!(
+        receipt.left_machine == 1,
+        "the ticket left the machine: {receipt:?}"
+    );
+    ensure!(
+        receipt
+            .flagged
+            .iter()
+            .any(|f| f.starts_with("Help desk ticket HD-")),
+        "{receipt:?}"
+    );
+    Ok(())
+}
+
 /// Data labels stored with files (DP-10) block even Auto reads above the
 /// agent's limit, and restricted data is never opened.
 pub async fn labels(h: &Harness) -> anyhow::Result<()> {

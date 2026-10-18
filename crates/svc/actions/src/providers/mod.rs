@@ -1,11 +1,16 @@
 //! First-party action providers. Every first-party app ships with full
-//! action coverage (NV-3); these are the first two.
+//! action coverage (NV-3): files and mail so far, plus the system and help
+//! desk actions the IT self-service agent uses (AE-4).
 
 mod files;
+mod helpdesk;
 mod mail;
+mod system;
 
 pub use files::{FilesProvider, MAX_READ_BYTES};
+pub use helpdesk::HelpdeskProvider;
 pub use mail::MailProvider;
+pub use system::{HostSystem, SystemOps, SystemProvider};
 
 use std::path::Path;
 

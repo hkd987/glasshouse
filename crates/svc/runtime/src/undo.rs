@@ -227,7 +227,13 @@ fn apply(
                 continue;
             };
             let shown = display_path(home, &change.path);
-            if only.is_some_and(|paths| !paths.contains(&shown)) {
+            // A change's path can be a folder (a cache cleanup): it covers
+            // everything under it.
+            if only.is_some_and(|paths| {
+                !paths
+                    .iter()
+                    .any(|p| shown == *p || shown.starts_with(&format!("{p}/")))
+            }) {
                 continue;
             }
             match change.kind {
@@ -261,7 +267,8 @@ fn restore(dir: &ConfinedDir, rel: &Path, old: &Path, owner: Owner) -> std::io::
     let data = std::fs::read(old)?;
     let mode = std::fs::metadata(old)?.permissions().mode();
     if let Some(parent) = rel.parent().filter(|p| !p.as_os_str().is_empty()) {
-        dir.create_dir_all(parent)?;
+        // Folders the rollback brings back belong to the user, not root.
+        dir.create_dir_all_as(parent, owner)?;
     }
     dir.write_as(rel, &data, Some(owner), Some(mode))
         .map(|_| ())

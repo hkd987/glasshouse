@@ -29,6 +29,14 @@ approval_timeout_secs = 900
 "records.save_draft" = "notify"
 "records.submit" = "ask"
 "payments.*" = "ask"
+# IT self-service (AE-4): checks read quietly, a cache cleanup runs and stays
+# undoable, a service restart and a help desk ticket ask first.
+"system.network.check" = "auto"
+"system.storage.check" = "auto"
+"system.performance.check" = "auto"
+"system.storage.clean_cache" = "notify"
+"system.service.restart" = "ask"
+"helpdesk.ticket.create" = "ask"
 "security.*" = "never"
 "vendors.bank_details.*" = "never"
 "data.export_bulk" = "never"
@@ -42,9 +50,21 @@ approval_timeout_secs = 900
 "payments.*" = "Payments"
 "records.submit" = "Posting or submitting records"
 
+# What the IT agent may fix beyond its checks and cache cleanup (AE-4).
+# Services it may restart, by rc.d name; anything else opens a ticket.
+[fixes]
+services = ["cron", "ntpd", "openvpn", "cupsd"]
+
 [[group]]
 name = "everyone"
-agents = ["invoice-demo", "containment-probe"]
+agents = ["it-agent", "invoice-demo", "containment-probe"]
+
+# IT self-service (AE-4): diagnoses this computer and fixes what's on IT's
+# list. The only agent allowed the system actions, which glassd runs with its
+# own privileges; it can't name a path or a command, only pick an action.
+[[agent]]
+id = "it-agent"
+allowed_actions = ["system.*", "helpdesk.ticket.create"]
 
 # Scripted demo agent used to show delegation, approvals and undo end to end
 # before model-backed agents land.

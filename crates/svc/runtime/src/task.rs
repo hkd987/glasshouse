@@ -254,7 +254,14 @@ impl TaskState {
             }
             TileState::Done => {
                 let r = self.receipt();
-                format!("Finished: {} actions, {} changes.", r.actions, r.changes)
+                let n = |count: u32, noun: &str| {
+                    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+                };
+                format!(
+                    "Finished: {}, {}.",
+                    n(r.actions, "action"),
+                    n(r.changes, "change")
+                )
             }
             TileState::Failed => {
                 format!(

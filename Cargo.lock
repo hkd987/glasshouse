@@ -376,6 +376,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-it-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glass-agent-sdk",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "glass-mcp"
 version = "0.1.0"
 dependencies = [

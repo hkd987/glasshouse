@@ -30,6 +30,19 @@ pub struct PolicyDocument {
     /// bank details") where no installed app names the action itself.
     #[serde(default)]
     pub names: BTreeMap<ActionPattern, String>,
+    /// What the IT self-service agent may fix (AE-4).
+    #[serde(default)]
+    pub fixes: Fixes,
+}
+
+/// IT's approved fix list (AE-4). Checks and cache cleanup need no list;
+/// anything that changes how the machine runs does.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fixes {
+    /// rc.d services an agent may restart, such as the VPN client.
+    #[serde(default)]
+    pub services: Vec<String>,
 }
 
 /// The org-wide baseline every group and agent rule overrides.

@@ -10,6 +10,8 @@
 //! - [`fs::ConfinedDir`]: file access that cannot escape a granted root, used
 //!   by brokers acting on an agent's behalf.
 //! - [`users`] and [`xattr`]: account lookup and data labels stored with files.
+//! - [`system`]: network, storage, load and services, for the IT self-service
+//!   agent (AE-4).
 //!
 //! All `unsafe` code in the workspace is confined to the FFI in `users` and
 //! `xattr`, each block with a SAFETY note.
@@ -18,6 +20,7 @@ mod cmd;
 pub mod fs;
 pub mod sandbox;
 pub mod snapshot;
+pub mod system;
 #[allow(unsafe_code)]
 pub mod users;
 #[allow(unsafe_code)]
