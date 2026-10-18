@@ -47,51 +47,44 @@ ACCENT = fg(75, bold=True)
 WORD_GRADIENT = [231, 195, 159, 123, 117, 81, 75]
 WORD_SHADOW = fg(25)
 
-# The house is pixel art: a glasshouse with a pitched roof, mullions, glass
-# with reflections, and an agent at work inside, in plain sight. Two pixels
-# per character cell (half blocks with a foreground and a background), so
-# the roof is a clean 45 degrees in any terminal.
+# The mark is a window of four panes with the lower right one filled: the
+# Boot mockup's 104-unit SVG, rasterized here so the console, the boot menu
+# and the splash all draw the same shape. White on black, like the mockup.
 PIXEL_COLORS = {
-    "W": 255,  # frame
-    "M": 252,  # mullion
-    "G": 25,  # glass
-    "g": 32,  # glass, catching the light
-    "A": 220,  # the agent (gold: stays yellow on 16-color consoles)
+    "W": 255,  # the mark
 }
+MARK_UNITS = 104.0
 
 
-def house_pixels(roof: int = 11, body: int = 10) -> list[str]:
-    """Rows of pixels, one character each ('.' is transparent)."""
-    width = 2 * roof + 3
-    mid = width // 2
+def _in_rounded(x: int, y: int, lo: int, hi: int, radius: float) -> bool:
+    """Whether pixel (x, y)'s center is inside the square lo..hi (inclusive)
+    with corners rounded to `radius`."""
+    if not (lo <= x <= hi and lo <= y <= hi):
+        return False
+    cx = min(max(x + 0.5, lo + radius), hi + 1 - radius)
+    cy = min(max(y + 0.5, lo + radius), hi + 1 - radius)
+    return (x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 <= radius * radius
+
+
+def mark_pixels(size: int = 22, stroke: int = 2, radius: int = 6) -> list[str]:
+    """The mark as pixel art on a size x size grid ('.' is transparent),
+    drawn on whole pixels so it stays crisp in a terminal: a rounded frame,
+    a 2-pixel cross that stops a pixel short of it, and the lower right pane
+    filled, a pixel clear of the cross, its outer corner rounded off."""
+    mid = size // 2 - 1  # the cross is columns/rows mid and mid + 1
+    near, far = stroke + 1, size - 2 - stroke  # the cross's ends
     rows = []
-    for r in range(roof):
-        row = ["."] * width
-        for x in range(mid - r, mid + r + 1):
-            row[x] = "G"
-        row[mid - r] = row[mid + r] = "W"
-        if r >= 2:
-            row[mid] = "M"
+    for y in range(size):
+        row = ""
+        for x in range(size):
+            frame = _in_rounded(x, y, 0, size - 1, radius) and not _in_rounded(
+                x, y, stroke, size - 1 - stroke, max(radius - stroke, 1)
+            )
+            cross = (mid <= x <= mid + 1 and near <= y <= far) or (mid <= y <= mid + 1 and near <= x <= far)
+            pane = mid + 3 <= x <= far and mid + 3 <= y <= far and (x, y) != (far, far)
+            row += "W" if frame or cross or pane else "."
         rows.append(row)
-    rows.append(["."] + ["W"] * (width - 2) + ["."])
-    agent_row = len(rows) + body // 2 - 1
-    for r in range(body):
-        y = len(rows)
-        row = ["."] + ["W"] + ["G"] * (width - 4) + ["W"] + ["."]
-        for x in (mid - (width - 4) // 3, mid + (width - 4) // 3):
-            row[x] = "M"
-        if y in (agent_row - 1, agent_row + 1):
-            row[mid] = "A"
-        if y == agent_row:
-            row[mid - 1 : mid + 2] = ["A"] * 3
-        rows.append(row)
-    rows.append(["."] + ["W"] * (width - 2) + ["."])
-    # Reflections: diagonal streaks across the glass.
-    for y, row in enumerate(rows):
-        for x, px in enumerate(row):
-            if px == "G" and (x + y) % 9 in (0, 1):
-                row[x] = "g"
-    return ["".join(r) for r in rows]
+    return rows
 
 
 def pixels_to_cells(pixels: list[str]) -> list[str]:
@@ -123,22 +116,18 @@ def pixels_to_cells(pixels: list[str]) -> list[str]:
 
 
 # ASCII for the boot loader (serial consoles can't draw the blocks above).
-HOUSE_ASCII = [
-    "          .          ",
-    "         /|\\         ",
-    "        /:|:\\        ",
-    "       /::|::\\       ",
-    "      /:::|:::\\      ",
-    "     /::::|::::\\     ",
-    "    /:::::|:::::\\    ",
-    "   /______|______\\   ",
-    "   |::|:::::::|::|   ",
-    "   |::|:::@:::|::|   ",
-    "   |::|:::::::|::|   ",
-    "   |__|_______|__|   ",
+MARK_ASCII = [
+    " .--------+--------. ",
+    " |        |        | ",
+    " |        |        | ",
+    " |        |        | ",
+    " +--------+--------+ ",
+    " |        |########| ",
+    " |        |########| ",
+    " |        |#######/  ",
+    " '--------+------'   ",
 ]
 
-# figlet "ANSI Shadow", stacked so it fits 80 columns beside the house.
 WORD_BIG = [
     " ██████╗ ██╗      █████╗ ███████╗███████╗",
     "██╔════╝ ██║     ██╔══██╗██╔════╝██╔════╝",
@@ -228,17 +217,17 @@ CLEAR = f"{ESC}H{ESC}2J"
 def issue() -> str:
     """Before login on the console: a clean screen (no startup messages
     above it) and the full mark."""
-    house = pixels_to_cells(house_pixels())
+    mark = pixels_to_cells(mark_pixels(22))
     word = color_big_word(WORD_BIG)
-    art = beside(house, word, gap=4)
-    tag = " " * (max(visible(l) for l in house) + 4) + DIM + TAGLINE + RESET
+    art = beside(mark, word, gap=4)
+    tag = " " * (max(visible(l) for l in mark) + 4) + DIM + TAGLINE + RESET
     return CLEAR + "\n" + "\n".join(art) + "\n" + tag + "\n\n"
 
 
 def motd() -> str:
     """After every login: the compact mark, then where to start. Shows the
     breadth of the OS, not one workflow."""
-    house = pixels_to_cells(house_pixels(roof=8, body=6))
+    mark = pixels_to_cells(mark_pixels(14, stroke=1, radius=4))
     right = color_small_word(WORD_SMALL) + [
         "",
         TEXT + TAGLINE + RESET,
@@ -247,16 +236,15 @@ def motd() -> str:
         f"{ACCENT}glassctl run{RESET}      {DIM}hand one a task, in plain words{RESET}",
         f"{ACCENT}glassctl tasks{RESET}    {DIM}watch them; pause, take over, undo{RESET}",
     ]
-    art = beside(house, right, gap=3)
+    art = beside(mark, right, gap=3)
     return "\n" + "\n".join(art) + "\n\n"
 
 
 def loader_color(line: str, esc: str = "\\027[") -> str:
-    """The loader understands 8-color ANSI: white frame, blue glass, the
-    agent in yellow."""
+    """The loader understands 8-color ANSI: the mark in bright white."""
     out, last = "", None
     for ch in line:
-        code = {":": "1;34", "@": "1;33"}.get(ch, "1;37") if ch != " " else last
+        code = "1;37" if ch != " " else last
         if code != last:
             out += f"{esc}{code}m"
             last = code
@@ -266,7 +254,7 @@ def loader_color(line: str, esc: str = "\\027[") -> str:
 
 def loader_preview() -> str:
     """How the boot menu's art looks on a color console."""
-    logo = [loader_color(l, ESC) for l in HOUSE_ASCII]
+    logo = [loader_color(l, ESC) for l in MARK_ASCII]
     brand = [f"{ESC}1;36m{l}{RESET}" for l in WORD_ASCII]
     return "\n".join(brand) + "\n\n" + "\n".join(" " * 44 + l for l in logo) + "\n"
 
@@ -276,7 +264,7 @@ def loader_lua() -> str:
     brand = "\n".join(
         f'				"\\027[1;36m{l.replace(chr(92), chr(92) * 2)}\\027[0m",' for l in WORD_ASCII
     )
-    logo = [loader_color(l.replace("\\", "\\\\")) for l in HOUSE_ASCII]
+    logo = [loader_color(l.replace("\\", "\\\\")) for l in MARK_ASCII]
     return f"""-- Generated by tools/branding/art.py; edit that, not this.
 -- The boot menu's brand and logo (BR-1), installed into /boot/lua by
 -- post-install.sh and chosen with loader_brand and loader_logo. Neither sets
@@ -306,51 +294,26 @@ return {{
 """
 
 
-def xterm_rgb(n: int) -> tuple[int, int, int]:
-    if n >= 232:
-        g = 8 + 10 * (n - 232)
-        return (g, g, g)
-    levels = [0, 95, 135, 175, 215, 255]
-    n -= 16
-    return (levels[n // 36], levels[n // 6 % 6], levels[n % 6])
+def mark_png(size: tuple[int, int], mark: int, background: tuple[int, int, int, int]) -> bytes:
+    """The mark, antialiased, `mark` pixels wide and centered: the boot
+    splash (white on black, as the Boot mockup) or the boot menu's logo."""
+    from PIL import Image, ImageDraw
 
-
-def word_pixels() -> list[list[int | None]]:
-    """The compact wordmark as square pixels: each cell is two pixels tall,
-    exactly as the terminal draws its half blocks."""
-    rows: list[list[int | None]] = []
-    for r, line in enumerate(WORD_SMALL):
-        color = WORD_GRADIENT[r * 2 + 1]
-        top, bottom = [], []
-        for ch in line:
-            on = {"█": (1, 1), "▀": (1, 0), "▄": (0, 1)}.get(ch, (0, 0))
-            top.append(color if on[0] else None)
-            bottom.append(color if on[1] else None)
-        rows += [top, bottom]
-    return rows
-
-
-def png(size: tuple[int, int], scale: int, word: bool) -> bytes:
-    """The terminal art's pixels, scaled up: the boot splash (house and
-    wordmark on the desktop's dark gray) or the boot menu's logo."""
-    from PIL import Image
-
-    img = Image.new("RGBA", size, (21, 24, 29, 255) if word else (0, 0, 0, 0))
-    house = [[PIXEL_COLORS.get(px) for px in row] for row in house_pixels()]
-    layers = [(house, scale)]
-    if word:
-        layers.append((word_pixels(), scale))
-    heights = [len(rows) * sc for rows, sc in layers]
-    gap = scale * 4
-    y = (size[1] - sum(heights) - gap * (len(layers) - 1)) // 2
-    for (rows, sc), height in zip(layers, heights):
-        x0 = (size[0] - len(rows[0]) * sc) // 2
-        for ry, row in enumerate(rows):
-            for rx, color in enumerate(row):
-                if color is not None:
-                    box = (x0 + rx * sc, y + ry * sc, x0 + (rx + 1) * sc, y + (ry + 1) * sc)
-                    img.paste(xterm_rgb(color) + (255,), box)
-        y += height + gap
+    ss = 4  # draw 4x and scale down for smooth edges
+    big = Image.new("L", (mark * ss, mark * ss), 0)
+    unit = mark * ss / MARK_UNITS
+    draw = ImageDraw.Draw(big)
+    draw.rounded_rectangle([3 * unit, 3 * unit, 101 * unit, 101 * unit], radius=27 * unit, fill=255)
+    draw.rounded_rectangle([9 * unit, 9 * unit, 95 * unit, 95 * unit], radius=21 * unit, fill=0)
+    draw.rectangle([49 * unit, 14 * unit, 55 * unit, 90 * unit], fill=255)
+    draw.rectangle([14 * unit, 49 * unit, 90 * unit, 55 * unit], fill=255)
+    draw.rectangle([58 * unit, 58 * unit, 70 * unit, 92 * unit], fill=255)
+    draw.rectangle([58 * unit, 58 * unit, 86 * unit, 76 * unit], fill=255)
+    draw.pieslice([54 * unit, 60 * unit, 86 * unit, 92 * unit], 0, 90, fill=255)
+    alpha = big.resize((mark, mark), Image.Resampling.LANCZOS)
+    img = Image.new("RGBA", size, background)
+    ink = Image.new("RGBA", (mark, mark), (245, 247, 250, 255))
+    img.paste(ink, ((size[0] - mark) // 2, (size[1] - mark) // 2), alpha)
     buf = io.BytesIO()
     img.save(buf, "PNG", optimize=True)
     return buf.getvalue()
@@ -363,8 +326,8 @@ def outputs(with_png: bool) -> dict[str, bytes]:
         "gfx-glasshouse.lua": loader_lua().encode(),
     }
     if with_png:
-        files["splash.png"] = png((640, 400), 8, word=True)
-        files["logo.png"] = png((150, 138), 6, word=False)
+        files["splash.png"] = mark_png((640, 400), 64, (0, 0, 0, 255))
+        files["logo.png"] = mark_png((150, 138), 110, (0, 0, 0, 0))
     return files
 
 
