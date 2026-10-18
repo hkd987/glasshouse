@@ -68,9 +68,10 @@ const TAKE_OVER: Budget = Budget {
 const UNDO_PREVIEW: Budget = Budget {
     what: "undo preview",
     source: "ceiling",
-    // `zfs diff` walks every change in the home dataset since the snapshot,
-    // so this varies with what else the machine wrote (0.8 to 1.3 s).
-    p95: Duration::from_secs(2),
+    // Reads only the files the task changed (ADR 0017); it took 0.8 to 1.3 s
+    // when it ran `zfs diff`. Set before the VM measured the new code: lower
+    // it to about 1.5x what the VM shows.
+    p95: Duration::from_secs(1),
 };
 
 pub async fn perf(h: &Harness) -> anyhow::Result<()> {

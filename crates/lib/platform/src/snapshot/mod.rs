@@ -1,10 +1,11 @@
 //! Point-in-time copies of a task's data, for rollback (PRD "Undo").
 //!
 //! A snapshot covers a set of roots (the folders a task may change). Undo
-//! works at file granularity on top of two primitives: what changed since a
-//! snapshot ([`Snapshotter::changes_since`]) and where a file's old content can
-//! be read ([`Snapshotter::snapshot_path`]). Restoring files one by one, rather
-//! than rolling back whole datasets, leaves everything outside the task alone.
+//! restores files one by one from where their old content can be read
+//! ([`Snapshotter::snapshot_path`]), rather than rolling back whole datasets,
+//! and only the files the task changed (ADR 0017). What changed since a
+//! snapshot ([`Snapshotter::changes_since`]) is for what the broker didn't
+//! see: the user's own edits while driving a task.
 
 mod copy;
 mod zfs;
@@ -80,6 +81,8 @@ pub trait Snapshotter: Send + Sync + fmt::Debug {
     }
 
     /// Files under the snapshot's roots that differ from the snapshot now.
+    /// With ZFS this walks every change in the dataset since the snapshot,
+    /// so keep it off paths that run often.
     fn changes_since(&self, handle: &SnapshotHandle) -> Result<Vec<FsChange>>;
 
     fn destroy(&self, handle: &SnapshotHandle) -> Result<()>;

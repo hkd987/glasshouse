@@ -11,7 +11,7 @@ ADR and mark the old one superseded.
 | [0003](0003-single-daemon-for-prototype.md) | One privileged daemon hosting services as libraries, for now |
 | [0004](0004-mcp-over-task-sockets.md) | Agents speak MCP over a per-task Unix socket; JSON-RPC everywhere |
 | [0005](0005-brokered-file-access.md) | Agents get no user data mounted; file access is brokered |
-| [0006](0006-file-level-undo.md) | Undo restores files from snapshots, never rolls back datasets |
+| [0006](0006-file-level-undo.md) | Undo restores files from snapshots, never rolls back datasets (superseded in part by 0017) |
 | [0007](0007-drive-freebsd-through-admin-commands.md) | Drive jails and ZFS through their admin commands |
 | [0008](0008-agent-manifests-declare-privileges.md) | Proposed: agents ship signed manifests; effective rights = declaration ∩ policy ∩ scope |
 | [0009](0009-native-shell-web-apps.md) | A native Rust shell on Smithay and iced; apps are TypeScript web apps |
@@ -22,3 +22,4 @@ ADR and mark the old one superseded.
 | [0014](0014-tailoring-layers.md) | Tailoring is a stack of personal layers glassd checks and applies; layers only narrow, every change is a version |
 | [0015](0015-take-over-in-your-harness.md) | Take over on an ended actions agent continues the task in the user's harness (Claude Code through `glass-mcp`); attended agents |
 | [0016](0016-showing-the-shell.md) | Proposed: the compositor shows the shell on the console framebuffer in the VM and through DRM on hardware |
+| [0017](0017-undo-from-change-records.md) | Undo restores only the files the task changed, from its change records; a file changed since is left and reported; take-over edits are changes |

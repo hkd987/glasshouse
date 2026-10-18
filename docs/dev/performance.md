@@ -17,7 +17,7 @@ glassd in the dev VM and fails when a 95th percentile goes over its budget:
 | An action that needs no snapshot (reads, lookups) | 100 ms | ceiling | 3 / 12 ms |
 | An action that snapshots first (writes) | 750 ms | ceiling | 243 / 391 ms |
 | Start to the agent's first step | 4 s | ceiling | 1.7 / 2.6 s |
-| Undo preview (`task.undo` dry run) | 2 s | ceiling | 0.8–0.9 / 1.0–1.3 s |
+| Undo preview (`task.undo` dry run) | 1 s | ceiling | not measured since ADR 0017 (0.8–1.3 s before) |
 
 The VM emulates its CPU (no KVM in the cloud containers), so it's several
 times slower than a laptop, and starting a process alone costs ~70 ms in it.
@@ -43,11 +43,16 @@ decision, so the perf scenario leaves Asks out.
   against the folder's device), so it doesn't run `zfs list` per folder
   each time. That cut take over from 355 to 203 ms and writes from 367 to
   243 ms in the VM.
-- **`zfs diff`.** Undo and hand back ask ZFS what changed since a snapshot.
-  It walks every change in the whole dataset (the user's home) since then,
-  not only the task's folders, so it costs most of a second in the VM and
-  grows as the home churns and the task ages. It's the whole undo preview
-  today.
+- **Undo** reads only the files the task changed (ADR 0017): a few `stat`
+  calls per file, and a read of the file and its snapshot copy when their
+  metadata differs. It used to ask `zfs diff`, which walks every change in
+  the whole home dataset since the snapshot and took 0.8 to 1.3 s per
+  preview in the VM; the 1 s ceiling is a placeholder until the VM measures
+  the new code.
+- **`zfs diff`** is left in hand back only, which asks what the user changed
+  while driving (the broker doesn't see those edits). It costs what the
+  home changed during the take over, so it grows with long take overs on a
+  busy machine.
 - **Sandbox start.** Creating the jail, mounting the agent's directories and
   the first snapshot make up most of "start to first step".
 - **Audit.** Records are written with `fsync` (`Durability::Sync`), a few
@@ -75,11 +80,7 @@ decision, so the perf scenario leaves Asks out.
 - **Snapshot retention (AU-20, 30 days).** Snapshots are never destroyed
   yet. They cost nothing until data diverges, but they will hold disk space
   on a busy machine.
-- **Undo driven by the broker's change records.** Agents change files only
-  through actions (ADR 0005), so the runtime already knows every path a
-  task changed. Restoring just those paths would make undo cost what the
-  task changed rather than what the home changed, and would stop undo from
-  rolling back the user's own edits in the same folder (ADR 0006's known
-  limit). It needs take-over edits recorded as changes too.
+- **Hand back still runs `zfs diff`** (above). Hand back has no budget yet;
+  give it one before it grows.
 - **GUI budgets** (cold launch under 1 s, UI-7; resume under 2 s, PM-1)
   wait for the GUI and real hardware.

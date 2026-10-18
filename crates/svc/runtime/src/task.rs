@@ -17,6 +17,7 @@ use glass_types::{TaskId, Timestamp};
 use serde_json::Value;
 use tokio::sync::{oneshot, watch};
 
+use crate::written::Written;
 use crate::{Caller, CatalogEntry};
 
 /// Lines a tile's feed shows (AW-3).
@@ -75,6 +76,8 @@ pub(crate) struct TaskState {
     pub feed: VecDeque<FeedLine>,
     pub activity: Vec<ActivityEntry>,
     pub changes: Vec<ChangeEntry>,
+    /// What each change touched and how the task left its files (undo).
+    pub written: Written,
     pub snapshots: Vec<TakenSnapshot>,
     pub actions: u32,
     pub failure: Option<String>,
@@ -150,6 +153,7 @@ impl Task {
                 feed: VecDeque::new(),
                 activity: Vec::new(),
                 changes: Vec::new(),
+                written: Written::default(),
                 snapshots: Vec::new(),
                 actions: 0,
                 failure: None,
@@ -231,6 +235,18 @@ impl Task {
 }
 
 impl TaskState {
+    /// Every root the task's snapshots cover.
+    pub fn snapshot_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = self
+            .snapshots
+            .iter()
+            .flat_map(|s| s.handle.parts.iter().flat_map(|p| p.roots.iter().cloned()))
+            .collect();
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
     /// Adds a line to the activity log (AW-13).
     pub fn note(&mut self, kind: ActivityKind, text: impl Into<String>) {
         let at = Timestamp::now();

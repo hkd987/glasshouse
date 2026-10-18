@@ -102,14 +102,18 @@ absolute paths and symlinks that leave the grant.
 
 ## Undo
 
-File-level restore from snapshots (ADR 0006). The runtime snapshots each
-writable root when the task starts and before every Notify-tier change, and
-snapshots app data (such as mail drafts) before its first change. "Undo all"
-restores each root from the earliest snapshot covering it; "Roll back to"
-uses a later marker. Undoing single changes (the Changes view's per-row
-Undo) does the same for just the files those changes wrote: every change
-records its files (`ChangeEntry.paths`). Irreversible changes are listed,
-never silently ignored, and every rollback is audited.
+File-level restore from snapshots (ADR 0006), of only the files the task
+changed (ADR 0017). The runtime snapshots each writable root when the task
+starts and before every Notify-tier change, and snapshots app data (such as
+mail drafts) before its first change. Every change records its files
+(`ChangeEntry.paths`) and which snapshots existed when it ran, and the
+runtime notes how the task left each file. "Undo all", "Roll back to" a
+marker and the Changes view's per-row Undo restore the files of the
+changes they cover from the latest snapshot before them, and leave alone,
+and report, any file someone changed since. Edits the user makes while
+driving become changes of the task at hand back, undoable like the agent's.
+Irreversible changes are listed, never silently ignored, and every rollback
+is audited.
 
 An ended task can be retried (`task.retry`): the same request and scope as
 a new task, checked against today's policy. The first run's changes stay

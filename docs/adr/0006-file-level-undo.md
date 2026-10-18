@@ -1,5 +1,9 @@
 # 0006. Undo restores files from snapshots, never rolls back datasets
 
+Status: **Superseded in part by [0017](0017-undo-from-change-records.md)**,
+which decides which files undo restores (the task's own, from its change
+records, not everything `zfs diff` reports under its roots).
+
 ## Context
 `zfs rollback` reverts a whole dataset, including the user's own changes and
 everything after the snapshot, and destroys later snapshots.

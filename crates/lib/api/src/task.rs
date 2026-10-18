@@ -317,7 +317,7 @@ pub struct UndoRequest {
     pub to: Option<SnapshotId>,
     /// Undo only these changes (`ChangeEntry::id`), the per-row Undo in the
     /// Changes view. Empty means every change since `to`. Undoing a change
-    /// puts its files back as they were before the task touched them.
+    /// puts its files back as they were just before it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<u32>,
     /// Report what would change without changing anything.
@@ -331,9 +331,10 @@ pub struct UndoReport {
     pub dry_run: bool,
     /// Files put back to their earlier content.
     pub restored: Vec<String>,
-    /// Files the agent created, removed again.
+    /// Files created during the task, removed again.
     pub removed: Vec<String>,
-    /// Changes that can't be undone, with the reason.
+    /// What wasn't undone, with the reason: changes that left the machine,
+    /// and files left as they are because someone changed them since.
     pub not_undone: Vec<String>,
 }
 

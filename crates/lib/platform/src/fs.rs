@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir, OpenOptions};
+use cap_std::fs::{Dir, Metadata, MetadataExt, OpenOptions};
 
 /// Who should own files the broker creates for a user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +26,49 @@ pub struct EntryInfo {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
+}
+
+/// What a path names, without following a symlink at its end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    File,
+    Dir,
+    /// A symlink, socket, device or pipe.
+    Other,
+}
+
+/// A file's identity and state, enough to tell whether it changed (undo
+/// compares what a task left with what is there now).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stat {
+    pub kind: FileKind,
+    pub ino: u64,
+    pub size: u64,
+    pub mode: u32,
+    /// Last modification, as seconds and nanoseconds since the epoch.
+    pub mtime: (i64, i64),
+    /// Last change to the content, owner, mode or links.
+    pub ctime: (i64, i64),
+}
+
+impl Stat {
+    fn of(meta: &Metadata) -> Self {
+        let kind = if meta.is_file() {
+            FileKind::File
+        } else if meta.is_dir() {
+            FileKind::Dir
+        } else {
+            FileKind::Other
+        };
+        Self {
+            kind,
+            ino: meta.ino(),
+            size: meta.size(),
+            mode: meta.mode(),
+            mtime: (meta.mtime(), meta.mtime_nsec()),
+            ctime: (meta.ctime(), meta.ctime_nsec()),
+        }
+    }
 }
 
 /// A directory capability: every operation resolves beneath `root`.
@@ -48,17 +91,22 @@ impl ConfinedDir {
         &self.root
     }
 
-    /// Reads a whole file, refusing files larger than `max_bytes`.
-    pub fn read(&self, rel: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
-        let rel = relative(rel)?;
-        let file = self.dir.open(rel)?;
-        let meta = file.metadata()?;
-        if !meta.is_file() {
+    /// Opens a regular file for reading.
+    pub fn open_file(&self, rel: &Path) -> io::Result<std::fs::File> {
+        let file = self.dir.open(relative(rel)?)?;
+        if !file.metadata()?.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "not a regular file",
             ));
         }
+        Ok(file.into_std())
+    }
+
+    /// Reads a whole file, refusing files larger than `max_bytes`.
+    pub fn read(&self, rel: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
+        let file = self.open_file(rel)?;
+        let meta = file.metadata()?;
         if meta.len() > max_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::FileTooLarge,
@@ -211,6 +259,43 @@ impl ConfinedDir {
         Ok(())
     }
 
+    /// What is at `rel` (the root when empty), without following a symlink
+    /// at the end; `None` if nothing is.
+    pub fn stat(&self, rel: &Path) -> io::Result<Option<Stat>> {
+        let rel = relative_or_root(rel)?;
+        let meta = if rel.as_os_str().is_empty() {
+            self.dir.dir_metadata()
+        } else {
+            self.dir.symlink_metadata(rel)
+        };
+        match meta {
+            Ok(meta) => Ok(Some(Stat::of(&meta))),
+            Err(e) if is_missing(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Everything under `rel` (the root when empty) that isn't a folder,
+    /// relative to the root, without following symlinks. Empty if `rel`
+    /// isn't a folder.
+    pub fn files(&self, rel: &Path) -> io::Result<Vec<PathBuf>> {
+        let entries = match self.list(rel) {
+            Ok(entries) => entries,
+            Err(e) if is_missing(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut out = Vec::new();
+        for entry in entries {
+            let child = rel.join(&entry.name);
+            if entry.is_dir {
+                out.extend(self.files(&child)?);
+            } else {
+                out.push(child);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn exists(&self, rel: &Path) -> bool {
         relative(rel).is_ok_and(|rel| self.dir.symlink_metadata(rel).is_ok())
     }
@@ -247,6 +332,14 @@ impl ConfinedDir {
         }
         Ok((bytes, files))
     }
+}
+
+/// Nothing there, or a file where a folder was expected on the way.
+fn is_missing(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
 }
 
 /// Rejects absolute paths and empty paths up front with a clear error;
@@ -414,6 +507,53 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn stats_and_lists_files_without_following_symlinks() {
+        let (outer, dir) = setup();
+        dir.create_dir_all(Path::new("a/b")).unwrap();
+        dir.write(Path::new("a/b/one.txt"), b"one", None).unwrap();
+        dir.write(Path::new("a/two.txt"), b"two!", None).unwrap();
+        symlink(
+            outer.path().join("secret.txt"),
+            outer.path().join("grant/a/link"),
+        )
+        .unwrap();
+
+        let one = dir.stat(Path::new("a/b/one.txt")).unwrap().unwrap();
+        assert_eq!((one.kind, one.size), (FileKind::File, 3));
+        assert_eq!(
+            dir.stat(Path::new("a")).unwrap().unwrap().kind,
+            FileKind::Dir
+        );
+        assert_eq!(
+            dir.stat(Path::new("")).unwrap().unwrap().kind,
+            FileKind::Dir
+        );
+        let link = dir.stat(Path::new("a/link")).unwrap().unwrap();
+        assert_eq!(link.kind, FileKind::Other, "the link, not its target");
+        assert_eq!(dir.stat(Path::new("missing")).unwrap(), None);
+        assert_eq!(dir.stat(Path::new("a/two.txt/under")).unwrap(), None);
+        assert!(dir.stat(Path::new("../secret.txt")).is_err());
+
+        dir.write(Path::new("a/b/one.txt"), b"uno", None).unwrap();
+        let again = dir.stat(Path::new("a/b/one.txt")).unwrap().unwrap();
+        assert_ne!(again, one, "a rewrite is a new file");
+
+        let mut files = dir.files(Path::new("a")).unwrap();
+        files.sort();
+        assert_eq!(
+            files,
+            ["a/b/one.txt", "a/link", "a/two.txt"].map(PathBuf::from)
+        );
+        assert_eq!(dir.files(Path::new("")).unwrap().len(), 3);
+        assert!(dir.files(Path::new("missing")).unwrap().is_empty());
+        assert!(dir.files(Path::new("a/two.txt")).unwrap().is_empty());
+        assert!(
+            dir.open_file(Path::new("a")).is_err(),
+            "a folder isn't a file"
+        );
     }
 
     #[test]

@@ -72,7 +72,7 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 | AW-12 Now bar | **Done** (data) | `TaskDetail::now` |
 | AW-13 Activity and Changes tabs | **Done** (data) | `TaskDetail::{activity, changes}` |
 | AW-14 Can't touch panel | **Done** (data) | IT's Never rules by name, plus limits |
-| AW-15 Timeline, roll back to a marker | **Done** | pipeline `rolling_back_to_a_marker…` |
+| AW-15 Timeline, roll back to a marker | **Done** | pipeline `rolling_back_to_a_marker…`; undo `rolling_back_to_a_marker_removes_drafts…` |
 | AW-16 Shrink back to tile | Not started | shell |
 | AW-20 Take over pauses at a safe point within 1 s | Partial | actions agents pause at the next action boundary, ~0.2 s in the VM (e2e `perf`); display/input hand-off needs screen agents |
 | AW-21 Hand back says what changed | **Done** | pipeline + e2e `takeover` |
@@ -110,7 +110,7 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 | AU-3 Rebuild any task end to end | **Done** | `audit.task`, `glassctl audit` |
 | AU-10 "by [agent] for [user]" metadata | **Done** | xattr on files, header on mail (verified in the VM) |
 | AU-20 Snapshots before Notify steps, every 5 min, kept 30 days | Partial | before Notify and first change done; cadence and retention not started (snapshots are never destroyed yet) |
-| AU-21 Undo all, lists what it couldn't undo | **Done** | pipeline + e2e `invoices`; single changes too (Changes mockup): pipeline `undoing_single_changes…`, e2e `changes` |
+| AU-21 Undo all, lists what it couldn't undo | **Done** | pipeline + e2e `invoices`; single changes too (Changes mockup): pipeline `undoing_single_changes…`, e2e `changes`. Only the task's own files, and a file changed since is left and listed (ADR 0017): `crates/svc/runtime/tests/undo.rs` |
 
 ## Admin, licensing, catalog
 

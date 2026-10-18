@@ -168,7 +168,7 @@ impl Snapshotter for ZfsSnapshotter {
 }
 
 /// Parses `zfs diff -FH` output: `<change>\t<type>\t<path>[\t<new path>]`.
-/// Directory entries are skipped; undo works on files.
+/// Directory entries are skipped: callers want files.
 fn parse_diff(out: &str) -> Vec<FsChange> {
     let mut changes = Vec::new();
     for line in out.lines() {

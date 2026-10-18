@@ -26,6 +26,7 @@ mod supervise;
 mod tailor;
 mod task;
 mod undo;
+mod written;
 
 pub use caller::Caller;
 pub use config::{CatalogEntry, RuntimeConfig};

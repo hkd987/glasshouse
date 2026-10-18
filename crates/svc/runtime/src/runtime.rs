@@ -610,22 +610,15 @@ impl Runtime {
         let handle = task.lock().takeover.take();
         let summary = match handle {
             Some(handle) => {
-                let snapshots = Arc::clone(&self.snapshots);
-                let changes = tokio::task::spawn_blocking(move || snapshots.changes_since(&handle))
-                    .await
-                    .map_err(|e| RuntimeError::Internal(e.to_string()))?
-                    .unwrap_or_default();
-                match changes.len() {
+                // The user's edits join the task's changes, undoable like
+                // the agent's (ADR 0017).
+                let edits = self.record_edits(&task, handle).await?;
+                match edits.len() {
                     0 => "You handed back without changing any files.".to_owned(),
                     n => format!(
                         "While you drove you changed {n} file{}: {}.",
                         if n == 1 { "" } else { "s" },
-                        changes
-                            .iter()
-                            .take(5)
-                            .map(|c| display_path(&task.user.home, &c.path))
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        edits[..n.min(5)].join(", ")
                     ),
                 }
             }

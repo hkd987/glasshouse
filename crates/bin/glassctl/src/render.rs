@@ -411,10 +411,10 @@ pub fn undo(report: &UndoReport) -> String {
     list(&mut out, &format!("{verb} restore:"), &report.restored);
     list(
         &mut out,
-        &format!("{verb} remove (created by the agent):"),
+        &format!("{verb} remove (created during the task):"),
         &report.removed,
     );
-    list(&mut out, "Can't undo:", &report.not_undone);
+    list(&mut out, "Not undone:", &report.not_undone);
     if report.restored.is_empty() && report.removed.is_empty() && report.not_undone.is_empty() {
         let _ = writeln!(out, "  {}", dim("nothing to roll back"));
     }

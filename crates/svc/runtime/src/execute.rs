@@ -24,6 +24,7 @@ use serde_json::Value;
 
 use crate::runtime::display_path;
 use crate::task::{Gate, Task};
+use crate::written::{self, Seen, Touched};
 use crate::{REPORT_PROGRESS_TOOL, Runtime, labels};
 
 impl Runtime {
@@ -167,12 +168,35 @@ impl Runtime {
             ));
         }
 
-        let result = {
+        // Undo needs the snapshots that existed as the call ran, and how it
+        // left the files it changed (ADR 0017).
+        let (before, roots) = {
+            let state = task.lock();
+            (state.snapshots.len(), state.snapshot_roots())
+        };
+        let (result, seen) = {
             let (ctx, name, input) = (task.ctx.clone(), def.name.clone(), args);
             let provider: Arc<dyn ActionProvider> = provider;
-            match tokio::task::spawn_blocking(move || provider.invoke(&ctx, &name, &input)).await {
-                Ok(result) => result,
-                Err(e) => Err(ActionError::Failed(e.to_string())),
+            let invoked = tokio::task::spawn_blocking(move || {
+                let result = provider.invoke(&ctx, &name, &input);
+                // Read right away, before anyone else can change them.
+                let seen = match &result {
+                    Ok(output) => written::look(
+                        &roots,
+                        output
+                            .changes
+                            .iter()
+                            .filter(|c| c.reversible)
+                            .flat_map(|c| c.paths.iter().map(PathBuf::as_path)),
+                    ),
+                    Err(_) => Seen::default(),
+                };
+                (result, seen)
+            })
+            .await;
+            match invoked {
+                Ok(invoked) => invoked,
+                Err(e) => (Err(ActionError::Failed(e.to_string())), Seen::default()),
             }
         };
         match result {
@@ -224,7 +248,10 @@ impl Runtime {
                                 .collect(),
                             undone: false,
                         });
+                        let paths = change.paths;
+                        state.written.touched(id, Touched { paths, before });
                     }
+                    state.written.note(seen);
                 }
                 self.publish(task);
                 Ok(CallToolResult::ok(output.text, output.data))
