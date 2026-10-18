@@ -12,16 +12,21 @@
 //! - [`users`] and [`xattr`]: account lookup and data labels stored with files.
 //! - [`system`]: network, storage, load and services, for the IT self-service
 //!   agent (AE-4).
-//! - [`framebuffer`]: the console framebuffer, where the shell draws when
-//!   there is no GPU driver (ADR 0016).
+//! - [`framebuffer`] and [`input`]: the console framebuffer and the evdev
+//!   keyboard and pointer, for the shell where there is no compositor or GPU
+//!   driver (ADR 0016).
 //!
 //! All `unsafe` code in the workspace is confined to the FFI in `users`,
-//! `xattr` and `framebuffer`, each block with a SAFETY note.
+//! `xattr`, `framebuffer` and `input`, each block with a SAFETY note.
 
 mod cmd;
 #[allow(unsafe_code)]
 pub mod framebuffer;
 pub mod fs;
+#[allow(unsafe_code)]
+pub mod input;
+#[cfg(target_os = "freebsd")]
+mod ioctl;
 pub mod sandbox;
 pub mod snapshot;
 pub mod system;

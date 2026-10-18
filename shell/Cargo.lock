@@ -556,6 +556,7 @@ dependencies = [
  "glass-rpc",
  "glass-shell",
  "glass-types",
+ "iced_core",
  "serde_json",
  "time",
  "tokio",

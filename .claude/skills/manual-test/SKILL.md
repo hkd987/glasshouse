@@ -44,8 +44,11 @@ a laptop; `VM_FIRMWARE=bios` shows the text-console path.
 
 The desktop shell: `make shell-vm` puts it on the VM's screen with the demo
 user's live tiles, then `os/freebsd/scripts/vm.sh screendump <png>` captures
-what the screen shows. Drive the tiles with `glassctl` as demo and capture
-again; `os/freebsd/scripts/shell-vm.sh stop` when done. For screens without
+what the screen shows. Drive the tiles with `glassctl` as demo, or click and
+type on the screen itself (`vm.sh click <x> <y>`, `vm.sh key ctrl-spc`,
+`vm.sh type "text"`), and capture again; `os/freebsd/scripts/shell-vm.sh
+stop` when done. A redraw takes about 2 s in the VM, so wait for the
+`drawn in` line in `/var/log/glass-shell-fb.log` before capturing. For screens without
 a live glassd, `make shell-preview` renders them to PNG.
 
 ## 3. Look before sending

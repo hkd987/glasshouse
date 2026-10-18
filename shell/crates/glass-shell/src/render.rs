@@ -7,7 +7,7 @@ use std::io::BufWriter;
 use std::path::Path;
 
 use iced_core::renderer::{Headless, Style};
-use iced_core::{Color, Event, Pixels, Size, clipboard, mouse, window};
+use iced_core::{Color, Event, Pixels, Point, Size, clipboard, mouse, window};
 use iced_runtime::user_interface::{Cache, UserInterface};
 
 use crate::{Element, fonts};
@@ -23,36 +23,114 @@ pub struct Frame {
 /// Draws `view` on a `size` (logical pixels) screen at `scale` (2.0 for a
 /// high-density display).
 pub fn frame<Message>(view: Element<'_, Message>, size: Size, scale: f32) -> Frame {
-    fonts::load();
-    let mut renderer = iced_tiny_skia::Renderer::new(fonts::SANS, Pixels(14.0));
-    let mut ui = UserInterface::build(view, size, Cache::default(), &mut renderer);
-    // One redraw, as a window would get on its first frame.
-    let mut messages = Vec::new();
-    let _ = ui.update(
-        &[Event::Window(window::Event::RedrawRequested(
-            iced_core::time::Instant::now(),
-        ))],
-        mouse::Cursor::Unavailable,
-        &mut renderer,
-        &mut clipboard::Null,
-        &mut messages,
-    );
-    ui.draw(
-        &mut renderer,
-        &iced_widget::Theme::Light,
-        &Style {
-            text_color: Color::WHITE,
-        },
-        mouse::Cursor::Unavailable,
-    );
-    let width = (size.width * scale).round() as u32;
-    let height = (size.height * scale).round() as u32;
-    let rgba = renderer.screenshot(Size::new(width, height), scale, Color::BLACK);
-    Frame {
-        width,
-        height,
-        rgba,
+    Screen::new(size, scale).draw(view, None)
+}
+
+/// A screen whose UI keeps its state between frames: what has the keyboard
+/// focus, which button is held down. The live shell feeds it input and
+/// draws it; [`frame`] draws a view once.
+pub struct Screen {
+    renderer: iced_tiny_skia::Renderer,
+    cache: Cache,
+    size: Size,
+    scale: f32,
+}
+
+impl Screen {
+    pub fn new(size: Size, scale: f32) -> Self {
+        fonts::load();
+        Self {
+            renderer: iced_tiny_skia::Renderer::new(fonts::SANS, Pixels(14.0)),
+            cache: Cache::default(),
+            size,
+            scale,
+        }
     }
+
+    /// Feeds input to `view`, with the pointer at `cursor`, and returns the
+    /// messages it produced.
+    pub fn update<Message>(
+        &mut self,
+        view: Element<'_, Message>,
+        events: &[Event],
+        cursor: Option<Point>,
+    ) -> Vec<Message> {
+        let mut messages = Vec::new();
+        self.with_ui(view, |ui, renderer| {
+            let _ = ui.update(
+                events,
+                pointer(cursor),
+                renderer,
+                &mut clipboard::Null,
+                &mut messages,
+            );
+        });
+        messages
+    }
+
+    /// Gives the keyboard focus to the widget with this id, such as the
+    /// command bar's input.
+    pub fn focus<Message>(&mut self, view: Element<'_, Message>, id: &'static str) {
+        self.with_ui(view, |ui, renderer| {
+            let mut focus = iced_core::widget::operation::focusable::focus::<()>(
+                iced_core::widget::Id::new(id),
+            );
+            ui.operate(renderer, &mut focus);
+        });
+    }
+
+    /// Draws `view` with the pointer at `cursor`.
+    pub fn draw<Message>(&mut self, view: Element<'_, Message>, cursor: Option<Point>) -> Frame {
+        let cursor = pointer(cursor);
+        self.with_ui(view, |ui, renderer| {
+            // One redraw, as a window gets for each frame.
+            let _ = ui.update(
+                &[Event::Window(window::Event::RedrawRequested(
+                    iced_core::time::Instant::now(),
+                ))],
+                cursor,
+                renderer,
+                &mut clipboard::Null,
+                &mut Vec::new(),
+            );
+            ui.draw(
+                renderer,
+                &iced_widget::Theme::Light,
+                &Style {
+                    text_color: Color::WHITE,
+                },
+                cursor,
+            );
+        });
+        let width = (self.size.width * self.scale).round() as u32;
+        let height = (self.size.height * self.scale).round() as u32;
+        let rgba = self
+            .renderer
+            .screenshot(Size::new(width, height), self.scale, Color::BLACK);
+        Frame {
+            width,
+            height,
+            rgba,
+        }
+    }
+
+    fn with_ui<Message>(
+        &mut self,
+        view: Element<'_, Message>,
+        run: impl FnOnce(
+            &mut UserInterface<'_, Message, iced_widget::Theme, iced_widget::Renderer>,
+            &mut iced_widget::Renderer,
+        ),
+    ) {
+        let cache = std::mem::take(&mut self.cache);
+        let mut ui = UserInterface::build(view, self.size, cache, &mut self.renderer);
+        run(&mut ui, &mut self.renderer);
+        self.cache = ui.into_cache();
+    }
+}
+
+fn pointer(at: Option<Point>) -> mouse::Cursor {
+    at.map_or(mouse::Cursor::Unavailable, mouse::Cursor::Available)
 }
 
 impl Frame {

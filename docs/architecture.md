@@ -189,7 +189,7 @@ pipeline refuses further side effects (fail closed).
 | `glass-audit` | lib | Hash-chained log, verification |
 | `glass-rpc` | lib | JSON-RPC over Unix sockets, MCP types |
 | `glass-api` | lib | Control API contract (shell, CLI) |
-| `glass-platform` | lib | Jails, ZFS, confined file access, users, xattrs, system facts, the console framebuffer |
+| `glass-platform` | lib | Jails, ZFS, confined file access, users, xattrs, system facts, the console framebuffer and evdev input |
 | `glass-agent-sdk` | lib | Convenience MCP client for Rust agents |
 | `glass-actions` | lib | The action contract: providers, previews, task context, registry |
 | `glass-app-files`, `-mail`, `-system`, `-helpdesk` | apps | Each app's actions (ADR 0013) |

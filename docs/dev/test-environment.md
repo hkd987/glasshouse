@@ -84,6 +84,7 @@ the containment probe is expected to fail there.
 | Bake a bootable image of the current build | `make image` (`make image-release` for a shippable one) |
 | Boot with a BIOS text console instead of UEFI | `make vm-down`, then `VM_FIRMWARE=bios make vm-up vm-wait`. UEFI (the default, `ovmf`) gives the 1280x800 framebuffer the shell draws on (`VM_SCREEN`, ADR 0016) |
 | Put the desktop shell on the VM's screen | `make shell-vm`, then `os/freebsd/scripts/vm.sh screendump shot.png`; `os/freebsd/scripts/shell-vm.sh stop` gives the console back |
+| Click, press keys or type on the VM's screen | `os/freebsd/scripts/vm.sh click <x> <y>`, `vm.sh point <x> <y>`, `vm.sh key ctrl-spc`, `vm.sh type "text"` (QEMU's USB tablet and keyboard, through QMP and the monitor) |
 | See what the VM's screen shows | `os/freebsd/scripts/vm.sh screendump shot.png`; `tools/screenshot/bootshots.py --out <dir>` reboots and records every boot screen |
 
 ## Troubleshooting

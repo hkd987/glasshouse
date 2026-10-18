@@ -34,6 +34,9 @@ pub struct Answer {
     pub sources: String,
 }
 
+/// The id of the bar's input, to give it the keyboard focus when it opens.
+pub const INPUT: &str = "command-bar-input";
+
 const WIDTH: f32 = 960.0;
 /// The artboard's 320 px column is content-box: plus 20 px padding each
 /// side and its 1 px rule.
@@ -69,6 +72,7 @@ pub fn view<'a>(theme: &Theme, bar: &'a CommandBar<'a>) -> Element<'a, Message> 
         .padding(Padding::from([3.0, 7.0]))
         .style(|_| style::outlined(Color::TRANSPARENT, 6.0, 1.0, CHIP));
     let input = text_input("Ask, or hand off a task", &bar.query)
+        .id(INPUT)
         .on_input(Message::CommandChanged)
         .size(18)
         .font(fonts::SANS)

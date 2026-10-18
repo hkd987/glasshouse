@@ -43,6 +43,7 @@ VM_SEED=$VM_DIR/seed.iso
 VM_PIDFILE=$VM_DIR/qemu.pid
 VM_CONSOLE=$VM_DIR/console.log
 VM_MONITOR=$VM_DIR/monitor.sock                         # QEMU human monitor, for screendumps
+VM_QMP=$VM_DIR/qmp.sock                                 # QEMU machine protocol, for pointer input
 VM_EFIVARS=$VM_DIR/efivars.fd
 
 log() { printf '[%s] %s\n' "${0##*/}" "$*" >&2; }

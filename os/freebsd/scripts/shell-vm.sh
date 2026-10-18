@@ -2,11 +2,12 @@
 # Usage: shell-vm.sh start|stop|once [user]
 # Puts the desktop shell on the VM's screen (ADR 0016, the first step of M2): copies the
 # cross-built glass-shell-fb in and runs it on the first virtual terminal as `user` (default
-# demo), drawing that user's live tiles until `stop`. `once` draws one frame and exits.
-# See it with `vm.sh screendump`. `make shell-vm` builds the binary and runs `start`.
+# demo), with that user's live tiles and the VM's keyboard and pointer, until `stop`. `once`
+# draws one frame and exits. See it with `vm.sh screendump`; drive it with `vm.sh click`,
+# `vm.sh key` and `vm.sh type`. `make shell-vm` builds the binary and runs `start`.
 #
-# Development only: the terminal is handed to the user here, where the session started by the
-# sign-in screen will own it later.
+# Development only: the terminal and input devices are handed to the user here, where the
+# session started by the sign-in screen will own them later.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -30,7 +31,7 @@ vm_ssh sh -eus -- "$cmd" "$user" <<'EOF'
 cmd=$1 user=$2
 mv /usr/local/bin/glass-shell-fb.new /usr/local/bin/glass-shell-fb
 pkill -x glass-shell-fb && while pgrep -qx glass-shell-fb; do sleep 0.2; done
-chown "$user" /dev/ttyv0
+chown "$user" /dev/ttyv0 /dev/input/event*
 log=/var/log/glass-shell-fb.log
 install -m 0644 -o "$user" /dev/null "$log"
 if [ "$cmd" = once ]; then

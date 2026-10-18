@@ -6,9 +6,10 @@
 //!   agent tiles.
 //! - [`tiles`]: an agent tile drawn from a `glass_api::TaskView`, the same
 //!   data `glassctl` shows.
-//! - [`render`]: draws any screen without a display, for previews and
-//!   snapshot tests; the compositor (next milestone) draws through the same
-//!   path into its own buffers.
+//! - [`live`]: the live desktop's state, kept current from glassd's events,
+//!   and what the person's clicks and keys ask of glassd.
+//! - [`render`]: draws any screen, once for previews and snapshot tests, or
+//!   frame after frame with its UI state kept ([`render::Screen`]).
 //!
 //! The shell is a control-API client: it knows `glass-api` types and
 //! nothing of the runtime behind them.
@@ -16,6 +17,7 @@
 pub mod fixtures;
 pub mod fonts;
 pub mod icons;
+pub mod live;
 pub mod render;
 pub mod screens;
 mod style;

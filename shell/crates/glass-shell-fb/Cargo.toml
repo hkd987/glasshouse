@@ -13,6 +13,7 @@ glass-api.workspace = true
 glass-platform.workspace = true
 glass-rpc.workspace = true
 glass-types.workspace = true
+iced_core.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 time.workspace = true

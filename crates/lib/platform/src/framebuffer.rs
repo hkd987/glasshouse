@@ -82,17 +82,24 @@ impl Framebuffer {
     /// the screen, from its top left corner. Rows and columns past the
     /// screen's edge are left out.
     pub fn write_rgba(&mut self, rgba: &[u8], width: u32, rows: Range<u32>) {
+        let stride = width as usize * 4;
+        let band = rows.start as usize * stride..(rows.end as usize * stride).min(rgba.len());
+        self.write_rows(rgba.get(band).unwrap_or_default(), width, rows.start);
+    }
+
+    /// Copies whole rows of straight RGBA pixels, `width` wide, onto the
+    /// screen from row `top` down, such as the band a moving pointer
+    /// crosses. Rows and columns past the screen's edge are left out.
+    pub fn write_rows(&mut self, rgba: &[u8], width: u32, top: u32) {
         let g = self.geometry;
         let src_stride = width as usize * 4;
-        let rows = rows.start..rows.end.min(g.height);
+        if src_stride == 0 {
+            return;
+        }
         let pixels = self.pixels_mut();
-        for y in rows {
-            let src = y as usize * src_stride;
-            let dst = y as usize * g.stride as usize;
-            let (Some(src), Some(dst)) = (
-                rgba.get(src..src + src_stride),
-                pixels.get_mut(dst..dst + g.stride as usize),
-            ) else {
+        for (y, src) in (top as usize..g.height as usize).zip(rgba.chunks_exact(src_stride)) {
+            let dst = y * g.stride as usize;
+            let Some(dst) = pixels.get_mut(dst..dst + g.stride as usize) else {
                 break;
             };
             g.pack_row(src, dst);
@@ -123,6 +130,7 @@ mod sys {
     use libc::{c_int, c_uint, c_ulong};
 
     use super::{BYTES_PER_PIXEL, Geometry};
+    use crate::ioctl::{self, check};
 
     /// `struct fbtype` from `<sys/fbio.h>`.
     #[repr(C)]
@@ -145,22 +153,16 @@ mod sys {
         blue: c_int,
     }
 
-    // `_IOC` from `<sys/ioccom.h>`.
-    const IOC_VOID: c_ulong = 0x2000_0000;
-    const IOC_OUT: c_ulong = 0x4000_0000;
-    const fn ioc(dir: c_ulong, group: u8, num: u8, len: usize) -> c_ulong {
-        dir | ((len as c_ulong & 0x1fff) << 16) | ((group as c_ulong) << 8) | num as c_ulong
-    }
-    pub(super) const FBIOGTYPE: c_ulong = ioc(IOC_OUT, b'F', 0, size_of::<FbType>());
-    pub(super) const FBIO_GETLINEWIDTH: c_ulong = ioc(IOC_OUT, b'F', 111, size_of::<c_uint>());
-    pub(super) const FBIO_GETRGBOFFS: c_ulong = ioc(IOC_OUT, b'F', 116, size_of::<RgbOffsets>());
-    // `<sys/consio.h>`: `_IOWINT`, the mode passed by value.
-    pub(super) const KDSETMODE: c_ulong = ioc(IOC_VOID, b'K', 10, size_of::<c_int>());
+    pub(super) const FBIOGTYPE: c_ulong = ioctl::read(b'F', 0, size_of::<FbType>());
+    pub(super) const FBIO_GETLINEWIDTH: c_ulong = ioctl::read(b'F', 111, size_of::<c_uint>());
+    pub(super) const FBIO_GETRGBOFFS: c_ulong = ioctl::read(b'F', 116, size_of::<RgbOffsets>());
+    // `<sys/consio.h>`.
+    pub(super) const KDSETMODE: c_ulong = ioctl::int(b'K', 10);
     const KD_TEXT: c_int = 0;
     const KD_GRAPHICS: c_int = 1;
-    pub(super) const VT_ACTIVATE: c_ulong = ioc(IOC_VOID, b'v', 5, size_of::<c_int>());
-    pub(super) const VT_GETACTIVE: c_ulong = ioc(IOC_OUT, b'v', 7, size_of::<c_int>());
-    pub(super) const VT_GETINDEX: c_ulong = ioc(IOC_OUT, b'v', 8, size_of::<c_int>());
+    pub(super) const VT_ACTIVATE: c_ulong = ioctl::int(b'v', 5);
+    pub(super) const VT_GETACTIVE: c_ulong = ioctl::read(b'v', 7, size_of::<c_int>());
+    pub(super) const VT_GETINDEX: c_ulong = ioctl::read(b'v', 8, size_of::<c_int>());
 
     pub(super) struct Mapping {
         tty: File,
@@ -298,14 +300,6 @@ mod sys {
             if libc::ioctl(fd, VT_ACTIVATE, other) == 0 {
                 libc::ioctl(fd, VT_ACTIVATE, ours);
             }
-        }
-    }
-
-    fn check(rc: c_int) -> io::Result<()> {
-        if rc < 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
         }
     }
 }

@@ -57,7 +57,7 @@ Consequences worth knowing:
 - Library crates expose a small surface from `lib.rs` with a module doc that
   says what the crate owns and what it doesn't.
 - `unsafe` is denied workspace-wide. The only exceptions are the FFI modules
-  in `glass-platform` (`users`, `xattr`, `framebuffer`), each block with a `SAFETY` note.
+  in `glass-platform` (`users`, `xattr`, `framebuffer`, `input`), each block with a `SAFETY` note.
   Prefer a base-system command or a vetted crate over new `unsafe`.
 - Tie behavior to PRD ids in comments and test names where it implements one
   (`// AU-21`), so traceability survives refactors.

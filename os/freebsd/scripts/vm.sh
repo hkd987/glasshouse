@@ -12,6 +12,10 @@
 #   reset              stop and delete the overlay + seed (next `up` is a fresh first boot)
 #   console-log [-f]   print (or follow) the serial console log
 #   screendump <out.png>     save what the VM's display shows right now (boot screens, splash)
+#   point <x> <y>            move the pointer to screen pixel (x, y) (the USB tablet)
+#   click <x> <y>            ... and click there
+#   key <key>...             press keys, QEMU names: ctrl-spc, ret, esc, a, shift-a
+#   type <text>              type text on the USB keyboard (letters, digits, space, . , - /)
 # Env knobs: VM_DIR VM_SSH_PORT VM_CPUS VM_CPU_MODEL VM_ACCEL VM_MEM VM_DISK_SIZE VM_BOOT_TIMEOUT VM_BASE_IMAGE
 #   VM_FIRMWARE=uefi|bios VM_SCREEN (see lib.sh).
 set -euo pipefail
@@ -57,7 +61,7 @@ cmd_up() {
 		firmware=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE"
 			-drive "if=pflash,format=raw,unit=1,file=$VM_EFIVARS")
 	fi
-	rm -f "$VM_MONITOR"
+	rm -f "$VM_MONITOR" "$VM_QMP"
 	qemu-system-x86_64 \
 		-name glasshouse-dev -machine q35 -accel "$VM_ACCEL" -cpu "$VM_CPU_MODEL" \
 		-smp "$VM_CPUS" -m "$VM_MEM" \
@@ -68,7 +72,8 @@ cmd_up() {
 		-vga none -device "VGA,xres=${VM_SCREEN%x*},yres=${VM_SCREEN#*x}" \
 		-device qemu-xhci -device usb-kbd -device usb-tablet \
 		"${firmware[@]}" \
-		-display none -monitor "unix:$VM_MONITOR,server,nowait" -serial "file:$VM_CONSOLE" \
+		-display none -monitor "unix:$VM_MONITOR,server,nowait" -qmp "unix:$VM_QMP,server,nowait" \
+		-serial "file:$VM_CONSOLE" \
 		-daemonize -pidfile "$VM_PIDFILE"
 	log "started (pid $(vm_pid), $VM_FIRMWARE), ssh on 127.0.0.1:$VM_SSH_PORT; next: vm.sh wait"
 }
@@ -123,6 +128,89 @@ cmd_wait() {
 		sleep 5
 	done
 	log "ready after $((SECONDS - start))s"
+}
+
+# qmp_input <json events>: sends input events through QMP.
+qmp_input() {
+	vm_running || die "VM is not running"
+	[[ -S $VM_QMP ]] || die "no QMP socket (restart the VM: vm.sh down && vm.sh up)"
+	python3 - "$VM_QMP" "$1" <<'PY'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+f = s.makefile("rw")
+f.readline()  # greeting
+for command in ({"execute": "qmp_capabilities"},
+                {"execute": "input-send-event", "arguments": {"events": json.loads(sys.argv[2])}}):
+    f.write(json.dumps(command) + "\n")
+    f.flush()
+    while True:
+        reply = json.loads(f.readline())
+        if "error" in reply:
+            sys.exit(f"vm.sh: QMP: {reply['error'].get('desc')}")
+        if "return" in reply:
+            break
+PY
+}
+
+# abs_events <x> <y>: the tablet events for screen pixel (x, y); QEMU's
+# absolute axes run 0 to 0x7fff across the screen.
+abs_events() {
+	local w=${VM_SCREEN%x*} h=${VM_SCREEN#*x}
+	printf '{"type":"abs","data":{"axis":"x","value":%d}},{"type":"abs","data":{"axis":"y","value":%d}}' \
+		$(($1 * 32767 / (w - 1))) $(($2 * 32767 / (h - 1)))
+}
+
+cmd_point() {
+	(($# == 2)) || die "usage: vm.sh point <x> <y>"
+	qmp_input "[$(abs_events "$1" "$2")]"
+}
+
+cmd_click() {
+	(($# == 2)) || die "usage: vm.sh click <x> <y>"
+	qmp_input "[$(abs_events "$1" "$2")]"
+	sleep 0.1
+	qmp_input '[{"type":"btn","data":{"down":true,"button":"left"}}]'
+	sleep 0.1
+	qmp_input '[{"type":"btn","data":{"down":false,"button":"left"}}]'
+}
+
+# monitor <command>: one human-monitor command.
+monitor() {
+	vm_running || die "VM is not running"
+	python3 - "$VM_MONITOR" "$1" <<'PY'
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.sendall(sys.argv[2].encode() + b"\n")
+time.sleep(0.15)
+s.close()
+PY
+}
+
+cmd_key() {
+	(($# >= 1)) || die "usage: vm.sh key <key>... (QEMU names: ctrl-spc, ret, esc, a, shift-a)"
+	local k
+	for k in "$@"; do monitor "sendkey $k"; done
+}
+
+cmd_type() {
+	(($# == 1)) || die "usage: vm.sh type <text>"
+	local text=$1 i c k
+	for ((i = 0; i < ${#text}; i++)); do
+		c=${text:i:1}
+		case $c in
+		[a-z0-9]) k=$c ;;
+		[A-Z]) k="shift-${c,}" ;;
+		' ') k="spc" ;;
+		.) k="dot" ;;
+		,) k="comma" ;;
+		-) k="minus" ;;
+		/) k="slash" ;;
+		*) die "vm.sh type: can't type '$c'" ;;
+		esac
+		monitor "sendkey $k"
+	done
 }
 
 cmd_screendump() {
@@ -183,6 +271,10 @@ scp-in)
 	;;
 exec) cmd_exec "$@" ;;
 screendump) cmd_screendump "$@" ;;
+point) cmd_point "$@" ;;
+click) cmd_click "$@" ;;
+key) cmd_key "$@" ;;
+type) cmd_type "$@" ;;
 reset) cmd_reset ;;
 console-log)
 	[[ ${1:-} == -f ]] && exec tail -F "$VM_CONSOLE"

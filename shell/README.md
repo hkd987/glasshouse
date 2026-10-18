@@ -25,9 +25,26 @@ os/freebsd/scripts/vm.sh screendump desktop.png   # see it
 VM and starts it on the first virtual terminal as `demo`
 (`os/freebsd/scripts/shell-vm.sh start|stop|once [user]`). It maps the
 console framebuffer (`glass_platform::framebuffer`), draws the user's
-tiles, and redraws when glassd reports a change (`events.subscribe`) or
-the menu bar clock turns over, copying only the rows that changed. Its log
-is `/var/log/glass-shell-fb.log` in the VM.
+tiles, and redraws when glassd reports a change (`events.subscribe`), the
+person clicks or types, or the menu bar clock turns over, copying only the
+rows that changed. Keyboard and pointer come from evdev
+(`glass_platform::input`): Approve on a needs-you tile answers the ask,
+Ctrl Space opens the command bar, Esc closes it. Its log is
+`/var/log/glass-shell-fb.log` in the VM.
+
+Drive it from the host through QEMU's USB tablet and keyboard:
+
+```sh
+os/freebsd/scripts/vm.sh click 1150 172        # a screen pixel
+os/freebsd/scripts/vm.sh key ctrl-spc          # QEMU key names
+os/freebsd/scripts/vm.sh type "Prep me for my 2pm"
+os/freebsd/scripts/vm.sh screendump shot.png
+```
+
+`glass_shell::live::Live` holds the desktop's state and turns messages
+into control-API calls; `glass_shell::render::Screen` keeps the UI's state
+(focus, held buttons) between frames. `tests/live.rs` clicks and types
+through them headlessly.
 
 `glass-shell-preview --scale 2` renders at 2x. The snapshot test keeps an
 FNV digest per screen in `crates/glass-shell/tests/snapshots/`; after an
@@ -42,11 +59,12 @@ under `shell/target/tmp/` so you can compare it.
 | `crates/glass-shell/src/theme.rs` | `Theme` (UX-10): every color, the wallpaper recipe. Screens take colors from it, never literals for themeable parts |
 | `crates/glass-shell/src/screens/` | `boot`, `login`, `desktop` (menu bar, dock, windows, tile stack), `command_bar` |
 | `crates/glass-shell/src/tiles.rs` | An agent tile from a `TaskView` (AW-1 to AW-4) |
-| `crates/glass-shell/src/render.rs` | Headless rendering: a view to an RGBA frame or PNG |
+| `crates/glass-shell/src/render.rs` | Rendering: a view to an RGBA frame or PNG, once or frame after frame (`Screen`) |
+| `crates/glass-shell/src/live.rs` | The live desktop's state and what clicks and keys ask of glassd |
 | `crates/glass-shell/src/icons.rs`, `wallpaper.rs` | Icons from the mockups' SVG paths and the blurred wallpaper, rasterized with tiny-skia |
 | `crates/glass-shell/src/fixtures.rs` | The mockups' content, for previews and tests |
 | `crates/glass-shell-preview` | The PNG renderer binary |
-| `crates/glass-shell-fb` | The desktop on the console framebuffer, with live tiles (M2 step 1) |
+| `crates/glass-shell-fb` | The desktop on the console framebuffer, with live tiles, keyboard and pointer (M2 step 1) |
 | `assets/fonts/` | Geist and Geist Mono, with their licenses |
 
 ## Why a separate workspace
@@ -90,10 +108,11 @@ font licenses land in the image's notices next to the crates'.
 2. **Live state.** Done in `glass-shell-fb`: it subscribes to
    `events.subscribe` and redraws tiles, the agents pill and the clock as
    they change.
-3. **Input.** Keyboard and pointer from the compositor into iced events:
-   Ctrl Space opens the command bar, Approve sends `approval.answer`,
-   opening a tile goes to `task.get` and its activity, sign in talks to the
-   session manager.
+3. **Input.** Started in `glass-shell-fb` from evdev: Ctrl Space opens
+   the command bar, Approve sends `approval.answer`. Next: opening a tile
+   goes to `task.get` and its activity, Review shows the items, sign in
+   talks to the session manager; then libinput and xkbcommon through the
+   compositor.
 4. **Agent screens.** Screen agents' virtual displays as tile thumbnails
    (UI-3), replacing the placeholder.
 5. **Accessibility and themes.** AccessKit for screen readers; a theme

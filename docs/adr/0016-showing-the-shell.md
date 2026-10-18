@@ -78,6 +78,16 @@ Run in the VM under UEFI with `-device VGA,xres=1280,yres=800`:
   would redraw it but erases the visible text, so on exit the shell
   switches to another terminal and back, which redraws it intact.
 - devmatch loads hms(4) for `usb-tablet` by itself.
+- Input before the compositor: `glass-shell-fb` reads `/dev/input/event*`
+  (evdev) directly, one thread per device, and feeds iced the events.
+  `EVIOCGRAB` on the keyboard keeps its keys from the console (hkbd stops
+  delivering to kbdmux while its evdev device is grabbed), so typing
+  doesn't reach the login prompt behind the shell. With the default
+  `kern.evdev.rcpt_mask` (12) only the hardware devices report, not the
+  kbdmux and sysmouse aggregates, so nothing arrives twice. Keys map with
+  a built-in US layout until xkbcommon arrives with the compositor.
+- Moving the pointer repaints only the rows it crosses over the last
+  frame; the UI is re-rendered only for clicks, keys and changes.
 - Drawing the full desktop takes 1.6 to 2 s in the emulated VM (debug
   build); copying the changed rows to the screen takes 10 to 40 ms. A
   clock tick changes 22 rows. Real hardware with an optimized build is

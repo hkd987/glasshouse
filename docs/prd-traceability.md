@@ -46,7 +46,7 @@ Tests: *unit* = crate unit tests, *pipeline* =
 
 | Id | Status | Where | Verified by |
 |---|---|---|---|
-| DA-1 Command bar with context | Partial | `glassctl run` (CLI stand-in) | shell not started |
+| DA-1 Command bar with context | Partial | `glassctl run` (CLI stand-in); on the VM's screen Ctrl Space opens the shell's command bar, typing works and Recent shows real tasks. Missing: the desktop agent's answers and handing off from the bar | `glass-shell` `tests/live.rs` |
 | DA-2 Handoff card | **Done** (data + CLI) | `runtime.rs::prepare`, `HandoffCard` (plan, version, touches, asks, can't do, data and model) | pipeline `plan_shows_the_handoff_card…`, `feed_lines_carry_verb_and_target` |
 | DA-3 Edit scope; policy limits locked | Partial | folders + `--block/--ask` restrictions | pipeline `restrictions_tighten…`; inline UI not started |
 | DA-10 IT tiers per agent/group; users stricter only | **Done** | `glass-policy` | unit `engine::*`, pipeline, e2e `scope` |
@@ -62,7 +62,7 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
-| AW-1 Stack, newest at bottom, needs-you on top | Partial | ordering in `glassctl`; GUI not started |
+| AW-1 Stack, newest at bottom, needs-you on top | Partial | ordering in `glassctl` and the shell's tile stack, live on the VM's screen; Approve on a needs-you tile answers its ask. Missing: the compositor, dismissing tiles |
 | AW-2 Live thumbnail ≤ 5 fps | Not started | needs screen agents |
 | AW-3 Three-line feed, verb + target | **Done** (data) | `FeedLine { verb, target, text }` |
 | AW-4 Name, mode, caption, progress | **Done** (data) | `report_progress` tool |
