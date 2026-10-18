@@ -49,7 +49,7 @@ Today `glass-demo-agent` is a scripted Rust program: no model, no bundle.
   approvals and finished tasks are already audit events per agent and
   version; user edits to agent output need post-task change tracking.
 - **Release bar (AE-11)** is a CI gate on the bundle: suite accuracy at or
-  above the workflow's target (proposed 95%), zero policy violations, no
+  above the workflow's target (95% for Pilot 1's invoice reconciliation, decided 2026-10-18), zero policy violations, no
   tracked metric regressing beyond tolerance.
 
 ## Consequences
