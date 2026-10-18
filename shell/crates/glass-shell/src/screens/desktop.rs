@@ -351,9 +351,10 @@ fn system_menu<'a>(theme: &Theme, person: &str) -> Element<'a, Message> {
             })
             .size(13)
             .wrapping(Wrapping::None),
+            // Translucent, so it reads on the menu and on the highlight.
             text("Shift Super Q")
                 .size(12)
-                .color(hex(0xA9B1BC))
+                .color(hexa(0xFFFFFF, 0.6))
                 .wrapping(Wrapping::None),
         ]
         .spacing(32)
