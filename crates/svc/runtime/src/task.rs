@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Mutex, MutexGuard};
 
 use glass_actions::TaskContext;
@@ -44,6 +45,8 @@ pub(crate) struct Task {
     pub gate: watch::Sender<Gate>,
     /// Fires once to make the supervisor kill the agent.
     pub stop: Mutex<Option<oneshot::Sender<()>>>,
+    /// Actions past every check and running now. Sleep waits for these.
+    pub in_flight: AtomicUsize,
     state: Mutex<TaskState>,
 }
 
@@ -67,6 +70,8 @@ pub(crate) struct TaskState {
     pub updated_at: Timestamp,
     /// Taken at take over, to tell the agent what the user changed (AW-21).
     pub takeover: Option<SnapshotHandle>,
+    /// Set while paused for sleep (PM-5): the caption to restore on wake.
+    pub sleeping: Option<String>,
 }
 
 impl Task {
@@ -97,6 +102,7 @@ impl Task {
             started_at: now,
             gate: watch::Sender::new(Gate::Run),
             stop: Mutex::new(Some(stop)),
+            in_flight: AtomicUsize::new(0),
             state: Mutex::new(TaskState {
                 tile: TileState::Starting,
                 caption: "Setting up a sandbox".into(),
@@ -109,6 +115,7 @@ impl Task {
                 failure: None,
                 updated_at: now,
                 takeover: None,
+                sleeping: None,
             }),
         }
     }
@@ -193,11 +200,13 @@ impl TaskState {
     }
 
     /// Adds a completed action to the feed and the activity log.
-    pub fn record_action(&mut self, text: &str) {
+    pub fn record_action(&mut self, verb: &str, target: &str, text: &str) {
         let at = Timestamp::now();
         self.feed.push_back(FeedLine {
             at,
             text: text.to_owned(),
+            verb: verb.to_owned(),
+            target: target.to_owned(),
         });
         while self.feed.len() > FEED_LINES {
             self.feed.pop_front();
@@ -228,6 +237,9 @@ impl TaskState {
                 Some(ask) => format!("Waiting for you to approve: {}.", ask.summary),
                 None => "Waiting for you.".into(),
             },
+            TileState::Paused if self.sleeping.is_some() => {
+                "Paused for sleep. It carries on when the computer wakes.".into()
+            }
             TileState::Paused => "Paused. Resume to let the agent continue.".into(),
             TileState::YouAreDriving => {
                 "Paused · you have control. Hand back when you're done.".into()

@@ -6,6 +6,7 @@
 //! glass-e2e hold                start a waiting task, print its id
 //! glass-e2e isolation <id>      (as another user) that task is invisible
 //! glass-e2e release <id>        stop it
+//! glass-e2e sleeping|awake <id> its state after a system suspend / resume
 //! ```
 //!
 //! `tests/e2e/run-vm.sh` runs the full suite in the FreeBSD VM, including the
@@ -45,12 +46,17 @@ async fn main() -> ExitCode {
 
     let result = match args.first().map(String::as_str) {
         Some("hold") => scenarios::hold(&harness).await,
-        Some(cmd @ ("isolation" | "release")) => {
+        Some(cmd @ ("isolation" | "release" | "sleeping" | "awake")) => {
             match args.get(1).and_then(|s| s.parse::<TaskId>().ok()) {
-                Some(task) if cmd == "isolation" => {
-                    report("isolation", scenarios::isolation(&harness, task).await)
+                Some(task) => {
+                    let outcome = match cmd {
+                        "isolation" => scenarios::isolation(&harness, task).await,
+                        "sleeping" => scenarios::sleeping(&harness, task).await,
+                        "awake" => scenarios::awake(&harness, task).await,
+                        _ => scenarios::release(&harness, task).await,
+                    };
+                    report(cmd, outcome)
                 }
-                Some(task) => report("release", scenarios::release(&harness, task).await),
                 None => Err(anyhow::anyhow!("usage: glass-e2e {cmd} <task-id>")),
             }
         }

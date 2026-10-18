@@ -60,6 +60,8 @@ impl Handler for ControlApi {
             }
             methods::AUDIT_TASK => to_result(&rt.audit_task(&caller, task_ref(params)?)?),
             methods::AUDIT_VERIFY => to_result(&rt.audit_verify(&caller)?),
+            methods::SYSTEM_SUSPEND => to_result(&rt.suspend(&caller).await?),
+            methods::SYSTEM_RESUME => to_result(&rt.wake(&caller)?),
             methods::EVENTS_SUBSCRIBE => {
                 self.forward_events(caller, conn);
                 Ok(Value::Null)

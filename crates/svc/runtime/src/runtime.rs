@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use glass_actions::{Grant, Registry, TaskContext};
 use glass_api::{
     ActivityKind, AgentSummary, AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalView,
-    AuditVerifyResult, Event, HandoffCard, ScopeLine, ScopeRequest, SnapshotMarker, SystemStatus,
-    TaskDetail, TaskRequest, TaskView, TileState,
+    AuditVerifyResult, Event, HandoffCard, PowerResult, ScopeLine, ScopeRequest, SnapshotMarker,
+    SystemStatus, TaskDetail, TaskRequest, TaskView, TileState,
 };
 use glass_audit::{ApprovalRef, AuditEvent, AuditLog, AuditRecord, EventKind};
 use glass_broker::{ApprovalDesk, DeskError};
@@ -19,6 +19,9 @@ use glass_types::{AgentPrincipal, SnapshotId, TaskId, Tier, Timestamp, UserRef};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::error::Result;
+
+/// How long sleep waits for actions already under way.
+const SLEEP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 use crate::task::{Gate, TakenSnapshot, Task};
 use crate::{Caller, CatalogEntry, RuntimeConfig, RuntimeError, supervise};
 
@@ -254,7 +257,7 @@ impl Runtime {
         let mut asks_before = Vec::new();
         let mut notifies = Vec::new();
         for def in self.registry.defs() {
-            let line = format!("{} ({})", def.title, def.name);
+            let line = def.title.clone();
             match policy.tier_for(&def.name, def.default_tier).tier {
                 Tier::Ask => asks_before.push(line),
                 Tier::Notify => notifies.push(line),
@@ -287,7 +290,17 @@ impl Runtime {
                 .collect(),
             asks_before,
             notifies,
-            cant_touch: policy.cant_touch(&known),
+            cant_touch: policy.cant_touch(&known, |name| {
+                self.registry
+                    .get(name)
+                    .map_or_else(|| name.to_string(), |(def, _)| def.title.clone())
+            }),
+            max_label: Some(policy.max_label()),
+            model: if entry.model.is_empty() {
+                "No model (scripted agent)".into()
+            } else {
+                entry.model.clone()
+            },
         };
         Ok(Prepared {
             entry,
@@ -434,6 +447,9 @@ impl Runtime {
         let pending = self.desk.pending_for_task(task.id).is_some();
         {
             let mut state = task.lock();
+            if let Some(caption) = state.sleeping.take() {
+                state.caption = caption;
+            }
             state.tile = if pending {
                 TileState::NeedsYou
             } else {
@@ -541,6 +557,75 @@ impl Runtime {
             .events
             .send((task.user.uid, Event::TaskRemoved { task: id }));
         Ok(())
+    }
+
+    // ---- power (PM-5) ------------------------------------------------------
+
+    /// The machine is about to sleep: hold every running agent at its next
+    /// safe point, and give actions already under way a moment to finish so
+    /// nothing is mid-change when it sleeps. Never holds up sleep for long.
+    /// Agents the user paused or is driving are left as they are.
+    pub async fn suspend(&self, caller: &Caller) -> Result<PowerResult> {
+        if !caller.is_admin() {
+            return Err(RuntimeError::PermissionDenied(
+                "only the system pauses agents for sleep".into(),
+            ));
+        }
+        let tasks: Vec<Arc<Task>> = self.tasks().values().cloned().collect();
+        let mut paused = Vec::new();
+        for task in tasks {
+            let mut state = task.lock();
+            let running = matches!(
+                state.tile,
+                TileState::Starting | TileState::Working | TileState::NeedsYou
+            );
+            if !running || state.sleeping.is_some() {
+                continue;
+            }
+            task.gate.send_replace(Gate::Hold);
+            let caption = std::mem::replace(&mut state.caption, "Paused for sleep".into());
+            state.sleeping = Some(caption);
+            state.tile = TileState::Paused;
+            state.note(ActivityKind::State, "Paused for sleep");
+            drop(state);
+            paused.push(task);
+        }
+        let deadline = tokio::time::Instant::now() + SLEEP_GRACE;
+        while paused
+            .iter()
+            .any(|t| t.in_flight.load(Ordering::SeqCst) > 0)
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        for task in &paused {
+            self.state_change(task, "Paused for sleep");
+        }
+        Ok(PowerResult {
+            tasks: paused.len(),
+        })
+    }
+
+    /// The machine woke: agents paused for sleep carry on where they were.
+    pub fn wake(&self, caller: &Caller) -> Result<PowerResult> {
+        if !caller.is_admin() {
+            return Err(RuntimeError::PermissionDenied(
+                "only the system resumes agents after sleep".into(),
+            ));
+        }
+        let sleeping: Vec<Arc<Task>> = self
+            .tasks()
+            .values()
+            .filter(|t| t.lock().sleeping.is_some())
+            .cloned()
+            .collect();
+        for task in &sleeping {
+            self.release(task, "Resumed after sleep");
+            self.state_change(task, "Resumed after sleep");
+        }
+        Ok(PowerResult {
+            tasks: sleeping.len(),
+        })
     }
 
     // ---- approvals -------------------------------------------------------

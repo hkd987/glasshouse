@@ -3,14 +3,16 @@
 #
 #   1. single-user scenarios as `demo` (containment, delegation, labels, ...)
 #   2. isolation: a second user can't see, stop or answer demo's task
-#   3. crash recovery: kill -9 glassd mid-task; on restart it removes the
+#   3. sleep: running agents pause before the machine sleeps and resume after
+#   4. crash recovery: kill -9 glassd mid-task; on restart it removes the
 #      orphaned jail and the audit log is intact
-#   4. root checks: audit chain verifies, no jails or mounts left behind
+#   5. root checks: audit chain verifies, no jails or mounts left behind
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 vm="$repo/os/freebsd/scripts/vm.sh"
-target="${CARGO_TARGET_DIR:-$repo/target}/x86_64-unknown-freebsd/release"
+profile="${FREEBSD_PROFILE:-vm}"
+target="${CARGO_TARGET_DIR:-$repo/target}/x86_64-unknown-freebsd/$profile"
 e2e=/usr/local/libexec/glasshouse-tests/glass-e2e
 
 step() { printf '\n== %s\n' "$*"; }
@@ -18,7 +20,7 @@ step() { printf '\n== %s\n' "$*"; }
 # running login scripts.
 glass_jails='jls name | grep -c "^glass-" || true'
 
-cargo build --release --target x86_64-unknown-freebsd -p glass-e2e
+cargo build --profile "$profile" --target x86_64-unknown-freebsd -p glass-e2e
 "$vm" run "mkdir -p ${e2e%/*}"
 "$vm" scp-in "$target/glass-e2e" "$e2e"
 
@@ -29,6 +31,14 @@ step "isolation between users"
 task=$("$vm" run "su demo -c '$e2e hold'" | tail -1)
 "$vm" run "pw usershow e2e-other >/dev/null 2>&1 || pw useradd e2e-other -m -s /bin/sh
 su e2e-other -c '$e2e isolation $task'"
+"$vm" run "su demo -c '$e2e release $task'"
+
+step "agents pause for sleep (PM-5), through the rc.suspend/rc.resume hook"
+task=$("$vm" run "su demo -c '$e2e hold'" | tail -1)
+"$vm" run "service glassd suspend"
+"$vm" run "su demo -c '$e2e sleeping $task'"
+"$vm" run "service glassd resume"
+"$vm" run "su demo -c '$e2e awake $task'"
 "$vm" run "su demo -c '$e2e release $task'"
 
 step "crash recovery"

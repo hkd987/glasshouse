@@ -139,6 +139,7 @@ impl Policy {
                 .collect(),
             agent_rules: agent.clone(),
             restrictions: Vec::new(),
+            names: self.doc.names.clone(),
         }
     }
 
@@ -249,6 +250,7 @@ pub struct EffectivePolicy {
     groups: Vec<(String, BTreeMap<ActionPattern, Tier>)>,
     agent_rules: AgentPolicy,
     restrictions: Vec<(ActionPattern, Tier)>,
+    names: BTreeMap<ActionPattern, String>,
 }
 
 impl EffectivePolicy {
@@ -379,26 +381,78 @@ impl EffectivePolicy {
         label.agent_may_open() && label <= self.max_label
     }
 
-    /// Plain-language lines for the "Can't touch" panel (AW-14): what policy
-    /// blocks for this task, so the user understands the agent's limits.
-    pub fn cant_touch(&self, known: &[(ActionName, Tier)]) -> Vec<String> {
-        let mut lines: Vec<String> = known
-            .iter()
-            .filter_map(|(name, default)| {
-                let decision = self.tier_for(name, *default);
-                (decision.tier == Tier::Never).then(|| format!("{name} ({})", decision.source))
-            })
-            .collect();
-        lines.push(match self.max_label {
+    /// Plain-language lines for the "Can't touch" panel (AW-14) and the
+    /// handoff card's "Can't do · set by IT" (DA-2).
+    ///
+    /// Installed actions at Never are listed by `title`. Never rules that
+    /// match no installed action are listed too, by their policy name, so the
+    /// list shows IT's intent ("Payments") whatever apps are installed.
+    /// Limits on data, network and scope come last.
+    pub fn cant_touch(
+        &self,
+        known: &[(ActionName, Tier)],
+        title: impl Fn(&ActionName) -> String,
+    ) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let mut push = |line: String| {
+            if !lines.contains(&line) {
+                lines.push(line);
+            }
+        };
+        for (name, default) in known {
+            if self.tier_for(name, *default).tier == Tier::Never {
+                push(title(name));
+            }
+        }
+        for pattern in self.never_patterns() {
+            if !known.iter().any(|(name, _)| pattern.matches(name)) {
+                push(self.display_name(pattern));
+            }
+        }
+        push(match self.max_label {
             Label::Public => "Anything labeled internal, confidential or restricted".into(),
             Label::Internal => "Anything labeled confidential or restricted".into(),
             _ => "Anything labeled restricted".into(),
         });
         if self.egress.is_empty() {
-            lines.push("The network (no destinations allowed)".into());
+            push("The network (no destinations allowed)".into());
         }
-        lines.push("Files and folders outside this task's scope".into());
+        push("Files and folders outside this task's scope".into());
         lines
+    }
+
+    /// Every pattern some rule puts at Never for this task.
+    fn never_patterns(&self) -> impl Iterator<Item = &ActionPattern> {
+        let rules = self
+            .org
+            .iter()
+            .chain(self.groups.iter().flat_map(|(_, rules)| rules.iter()))
+            .chain(self.agent_rules.tiers.iter())
+            .filter(|(_, tier)| **tier == Tier::Never)
+            .map(|(pattern, _)| pattern);
+        let restricted = self
+            .restrictions
+            .iter()
+            .filter(|(_, tier)| *tier == Tier::Never)
+            .map(|(pattern, _)| pattern);
+        rules.chain(restricted)
+    }
+
+    /// The policy's name for a rule, or a readable form of the pattern.
+    pub fn display_name(&self, pattern: &ActionPattern) -> String {
+        if let Some(name) = self.names.get(pattern) {
+            return name.clone();
+        }
+        let raw = pattern.as_str();
+        if raw == "*" {
+            return "Every other action".into();
+        }
+        let words = raw.trim_end_matches(".*").replace(['.', '_'], " ");
+        let mut chars = words.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().chain(chars).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -576,14 +630,42 @@ mod tests {
             (name("security.settings"), Tier::Ask),
             (name("files.read"), Tier::Auto),
         ];
-        let lines = invoice().cant_touch(&known);
-        assert!(lines[0].starts_with("security.settings (org rule security.*)"));
+        let lines = invoice().cant_touch(&known, |n| format!("[{n}]"));
+        assert_eq!(lines[0], "[security.settings]");
         assert!(
             lines
                 .iter()
                 .any(|l| l.contains("confidential or restricted"))
         );
         assert!(lines.iter().any(|l| l.contains("network")));
+    }
+
+    #[test]
+    fn cant_touch_shows_never_rules_without_installed_apps() {
+        let text = format!("{POLICY}\n[names]\n\"security.*\" = \"Security settings\"\n");
+        let policy = Policy::from_toml(&text).unwrap();
+        let mut eff = policy
+            .effective("demo", &"invoice-agent".parse().unwrap())
+            .unwrap();
+        let known = [
+            (name("files.read"), Tier::Auto),
+            (name("mail.send"), Tier::Ask),
+        ];
+        eff.restrict("payments.*".parse().unwrap(), Tier::Never, &known)
+            .unwrap();
+        let lines = eff.cant_touch(&known, |n| n.to_string());
+        // Named by policy; humanized from a group rule and a task restriction.
+        for expected in ["Security settings", "Files delete", "Payments"] {
+            assert!(
+                lines.contains(&expected.to_string()),
+                "{expected} in {lines:?}"
+            );
+        }
+        // A restriction on an installed action is listed by its title.
+        eff.restrict("mail.send".parse().unwrap(), Tier::Never, &known)
+            .unwrap();
+        let titled = eff.cant_touch(&known, |n| format!("title:{n}"));
+        assert!(titled.contains(&"title:mail.send".to_string()));
     }
 
     #[test]

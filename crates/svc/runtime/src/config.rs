@@ -11,6 +11,13 @@ use serde::Deserialize;
 pub struct CatalogEntry {
     pub id: AgentId,
     pub name: String,
+    /// Published version, shown on handoff cards and in the catalog.
+    #[serde(default)]
+    pub version: String,
+    /// The model the agent works with, shown under "Data and model" on the
+    /// handoff card. Empty for agents that use none.
+    #[serde(default)]
+    pub model: String,
     #[serde(default)]
     pub description: String,
     #[serde(default = "default_mode")]
@@ -35,6 +42,7 @@ impl CatalogEntry {
         AgentSummary {
             id: self.id.clone(),
             name: self.name.clone(),
+            version: self.version.clone(),
             description: self.description.clone(),
             mode: self.mode,
         }

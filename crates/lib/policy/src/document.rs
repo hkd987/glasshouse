@@ -26,6 +26,10 @@ pub struct PolicyDocument {
     /// Folder rules that label data by location (DP-10).
     #[serde(default, rename = "label")]
     pub labels: Vec<FolderLabel>,
+    /// Plain-language names for rules, shown to users ("Payments", "Vendor
+    /// bank details") where no installed app names the action itself.
+    #[serde(default)]
+    pub names: BTreeMap<ActionPattern, String>,
 }
 
 /// The org-wide baseline every group and agent rule overrides.

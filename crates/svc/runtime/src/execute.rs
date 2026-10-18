@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use glass_actions::{ActionDef, ActionError, ActionProvider, Preview};
@@ -105,6 +106,20 @@ impl Runtime {
             Verdict::Ask { .. } | Verdict::Run { .. } => {}
         }
 
+        // From here the call is committed. Count it so sleep can wait for it,
+        // and re-check the gate after counting, so a pause that landed in
+        // between is honored before anything changes.
+        let _in_flight = loop {
+            let guard = InFlight::enter(&task.in_flight);
+            if *task.gate.borrow() == Gate::Run {
+                break guard;
+            }
+            drop(guard);
+            if task.wait_runnable().await.is_err() {
+                return Ok(CallToolResult::error("This task has ended."));
+            }
+        };
+
         let mut snapshot = None;
         if def.side_effect == SideEffect::LocalReversible && !preview.snapshot_roots.is_empty() {
             let needed = verdict.tier() >= Tier::Notify || !task.covered(&preview.snapshot_roots);
@@ -166,7 +181,19 @@ impl Runtime {
                 );
                 {
                     let mut state = task.lock();
-                    state.record_action(&preview.summary);
+                    let verb = def
+                        .name
+                        .as_str()
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or_default()
+                        .replace('_', " ");
+                    let target = match preview.targets.as_slice() {
+                        [] => String::new(),
+                        [one] => one.clone(),
+                        [first, rest @ ..] => format!("{first} · {} more", rest.len()),
+                    };
+                    state.record_action(&verb, &target, &preview.summary);
                     let at = Timestamp::now();
                     for change in output.changes {
                         state.changes.push(ChangeEntry {
@@ -407,5 +434,21 @@ impl Runtime {
         }
         self.publish(task);
         Ok(CallToolResult::ok("ok", Value::Null))
+    }
+}
+
+/// Counts a call as running for as long as it lives.
+struct InFlight<'a>(&'a AtomicUsize);
+
+impl<'a> InFlight<'a> {
+    fn enter(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }

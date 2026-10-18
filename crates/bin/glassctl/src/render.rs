@@ -15,7 +15,18 @@ pub fn card(card: &HandoffCard) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{} {}", bold("Hand off to"), bold(&card.agent.name));
     let _ = writeln!(out, "  \"{}\"\n", card.prompt);
-    let _ = writeln!(out, "  {}", bold("Plan"));
+    let version = if card.agent.version.is_empty() {
+        String::new()
+    } else {
+        format!(" v{}", card.agent.version)
+    };
+    let mode = format!("{:?}", card.agent.mode).to_lowercase();
+    let _ = writeln!(
+        out,
+        "  {}  {}",
+        bold("Plan"),
+        dim(&format!("{}{version} · {mode}", card.agent.name))
+    );
     for (i, step) in card.plan.iter().enumerate() {
         let _ = writeln!(out, "    {}. {step}", i + 1);
     }
@@ -35,12 +46,18 @@ pub fn card(card: &HandoffCard) -> String {
     let _ = writeln!(
         out,
         "\n  {} {}",
-        bold("Can't touch"),
-        dim("(set by policy, locked)")
+        bold("Can't do"),
+        dim("· set by IT, locked")
     );
     for line in &card.cant_touch {
         let _ = writeln!(out, "    🔒 {line}");
     }
+    let data = card
+        .max_label
+        .map(|label| format!("Up to {label} data"))
+        .unwrap_or_default();
+    let _ = writeln!(out, "\n  {}", bold("Data and model"));
+    let _ = writeln!(out, "    {data} · {}", card.model);
     out
 }
 
@@ -78,7 +95,13 @@ pub fn tile(view: &TaskView) -> String {
             } else {
                 "├"
             };
-            let _ = writeln!(out, "  {} {}", dim(branch), line.text);
+            // Verb in its own column, as the tile shows it (AW-3).
+            let text = if line.verb.is_empty() {
+                line.text.clone()
+            } else {
+                format!("{:<6} {}", line.verb, line.target)
+            };
+            let _ = writeln!(out, "  {} {text}", dim(branch));
         }
     }
     if let Some(ask) = &view.needs {

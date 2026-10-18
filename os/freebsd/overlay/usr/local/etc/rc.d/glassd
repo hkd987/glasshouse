@@ -2,9 +2,13 @@
 #
 # PROVIDE: glassd
 # REQUIRE: LOGIN FILESYSTEMS
-# KEYWORD: shutdown
+# KEYWORD: shutdown suspend resume
 #
 # Glasshouse system daemon. Enable with:  sysrc glassd_enable=YES
+#
+# The suspend and resume keywords make /etc/rc.suspend and /etc/rc.resume
+# run "glassd suspend" before the machine sleeps (it waits for us) and
+# "glassd resume" after it wakes, so agents pause for sleep (PRD PM-5).
 #
 # glassd_config  (path)  Config file. Default /usr/local/etc/glasshouse/glassd.toml
 # glassd_log     (path)  Daemon log. Default /var/log/glassd.log
@@ -25,11 +29,25 @@ command="/usr/sbin/daemon"
 # -p records glassd's own pid (not the supervisor's) so rc.subr can track it.
 command_args="-f -p ${pidfile} -o ${glassd_log} ${procname} --config ${glassd_config}"
 start_precmd="glassd_precmd"
+extra_commands="suspend resume"
+suspend_cmd="glassd_suspend"
+resume_cmd="glassd_resume"
 
 glassd_precmd()
 {
 	# Refuse to start on a config or policy that doesn't validate.
 	"${procname}" --config "${glassd_config}" --check
+}
+
+glassd_suspend()
+{
+	# Bounded inside glassd; never hold up sleep on an error.
+	/usr/local/bin/glassctl system suspend || true
+}
+
+glassd_resume()
+{
+	/usr/local/bin/glassctl system resume || true
 }
 
 run_rc_command "$1"

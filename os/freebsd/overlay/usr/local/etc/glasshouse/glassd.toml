@@ -21,6 +21,7 @@ backend = "zfs"
 [[agent]]
 id = "invoice-demo"
 name = "Invoice demo"
+version = "0.1"
 description = "Scripted demo agent: reconciles invoices, writes a summary, drafts a note to AP and asks before reminding vendors."
 mode = "actions"
 program = "/usr/local/libexec/glasshouse/glass-demo-agent"
@@ -34,6 +35,7 @@ plan = [
 [[agent]]
 id = "containment-probe"
 name = "Containment probe"
+version = "0.1"
 description = "Diagnostics: tries to read files, reach the network and see processes it shouldn't, then reports what it could reach."
 mode = "actions"
 program = "/usr/local/libexec/glasshouse/glass-probe"

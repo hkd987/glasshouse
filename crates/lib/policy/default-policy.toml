@@ -33,6 +33,15 @@ approval_timeout_secs = 900
 "vendors.bank_details.*" = "never"
 "data.export_bulk" = "never"
 
+# Plain-language names for rules, shown on handoff cards and in "Can't touch"
+# when no installed app names the action itself.
+[names]
+"security.*" = "Security settings"
+"vendors.bank_details.*" = "Vendor bank details"
+"data.export_bulk" = "Exporting data in bulk"
+"payments.*" = "Payments"
+"records.submit" = "Posting or submitting records"
+
 [[group]]
 name = "everyone"
 agents = ["invoice-demo", "containment-probe"]

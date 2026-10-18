@@ -16,8 +16,8 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use glass_api::{
     AgentSummary, AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalView, AuditVerifyResult,
-    Event, HandoffCard, ScopeRequest, SystemStatus, TaskDetail, TaskRef, TaskRequest, TaskView,
-    TileState, UndoReport, UndoRequest, methods,
+    Event, HandoffCard, PowerResult, ScopeRequest, SystemStatus, TaskDetail, TaskRef, TaskRequest,
+    TaskView, TileState, UndoReport, UndoRequest, methods,
 };
 use glass_audit::AuditRecord;
 use glass_rpc::Client;
@@ -131,6 +131,17 @@ enum Command {
     /// Policy tools (offline).
     #[command(subcommand)]
     Policy(PolicyCommand),
+    /// Machine power events (root; run by the rc.d suspend/resume hooks).
+    #[command(subcommand)]
+    System(SystemCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum SystemCommand {
+    /// The machine is about to sleep: pause running agents (PM-5).
+    Suspend,
+    /// The machine woke: agents paused for sleep carry on.
+    Resume,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -423,6 +434,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             until,
             timeout,
         } => wait(&ctl, &task, until, timeout).await,
+        Command::System(cmd) => {
+            let (method, verb) = match cmd {
+                SystemCommand::Suspend => (methods::SYSTEM_SUSPEND, "Paused"),
+                SystemCommand::Resume => (methods::SYSTEM_RESUME, "Resumed"),
+            };
+            let result: PowerResult = ctl.call(method, Value::Null).await?;
+            ctl.show(&result, |r| {
+                let noun = if r.tasks == 1 { "agent" } else { "agents" };
+                format!("{verb} {} {noun}\n", r.tasks)
+            })
+        }
         Command::Policy(_) => unreachable!("handled before connecting"),
     }
 }

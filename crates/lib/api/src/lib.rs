@@ -62,6 +62,12 @@ pub mod methods {
     pub const AUDIT_TASK: &str = "audit.task";
     /// `()` → [`crate::AuditVerifyResult`]. Root only.
     pub const AUDIT_VERIFY: &str = "audit.verify";
+    /// `()` → [`crate::PowerResult`]. Root only. The machine is about to
+    /// sleep: every running agent pauses at its next safe point (PM-5).
+    pub const SYSTEM_SUSPEND: &str = "system.suspend";
+    /// `()` → [`crate::PowerResult`]. Root only. The machine woke: agents
+    /// paused for sleep carry on.
+    pub const SYSTEM_RESUME: &str = "system.resume";
     /// `()` → `()`, then [`EVENT`] notifications until disconnect.
     pub const EVENTS_SUBSCRIBE: &str = "events.subscribe";
     /// Server notification carrying an [`crate::Event`].
@@ -78,6 +84,12 @@ pub struct SystemStatus {
     pub policy: String,
     pub tasks_running: usize,
     pub approvals_pending: usize,
+}
+
+/// How many tasks a suspend paused, or a resume let continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PowerResult {
+    pub tasks: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

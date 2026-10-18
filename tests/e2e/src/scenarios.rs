@@ -346,6 +346,40 @@ pub async fn isolation(h: &Harness, task: TaskId) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// After the system suspended (PM-5): the task is paused for sleep.
+pub async fn sleeping(h: &Harness, task: TaskId) -> anyhow::Result<()> {
+    let detail = h.detail(task).await?;
+    ensure!(
+        detail.view.state == TileState::Paused,
+        "state is {:?}",
+        detail.view.state
+    );
+    ensure!(
+        detail.view.caption == "Paused for sleep",
+        "caption is {:?}",
+        detail.view.caption
+    );
+    Ok(())
+}
+
+/// After the system resumed: the task carries on (here, back to its ask).
+pub async fn awake(h: &Harness, task: TaskId) -> anyhow::Result<()> {
+    let detail = h.detail(task).await?;
+    ensure!(
+        detail.view.state == TileState::NeedsYou,
+        "state is {:?}",
+        detail.view.state
+    );
+    ensure!(
+        detail
+            .activity
+            .iter()
+            .any(|a| a.text == "Resumed after sleep"),
+        "wake is in the activity log"
+    );
+    Ok(())
+}
+
 /// Stops a task started by `hold`.
 pub async fn release(h: &Harness, task: TaskId) -> anyhow::Result<()> {
     h.act(methods::TASK_STOP, task).await?;

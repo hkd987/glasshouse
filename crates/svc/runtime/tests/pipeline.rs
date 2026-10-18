@@ -135,6 +135,8 @@ fn harness_with(policy_extra: &str) -> Harness {
             catalog: vec![CatalogEntry {
                 id: "invoice-demo".parse().unwrap(),
                 name: "Invoice demo".into(),
+                version: "0.1".into(),
+                model: String::new(),
                 description: String::new(),
                 mode: glass_api::AgentMode::Actions,
                 program: "/bin/sleep".into(),
@@ -184,10 +186,14 @@ async fn plan_shows_the_handoff_card_without_side_effects() {
             .unwrap();
     assert_eq!(card.plan.len(), 3);
     assert_eq!(card.touches.len(), 2);
-    assert!(card.asks_before.iter().any(|l| l.contains("mail.send")));
-    assert!(card.asks_before.iter().any(|l| l.contains("files.delete")));
-    assert!(card.notifies.iter().any(|l| l.contains("files.write")));
+    assert!(card.asks_before.contains(&"Send emails".to_string()));
+    assert!(card.asks_before.contains(&"Delete a file".to_string()));
+    assert!(card.notifies.contains(&"Write a file".to_string()));
     assert!(card.cant_touch.iter().any(|l| l.contains("network")));
+    // IT's Never rules show even though no installed app offers them.
+    for rule in ["Security settings", "Vendor bank details"] {
+        assert!(card.cant_touch.contains(&rule.to_string()), "{rule}");
+    }
     assert!(h.rt.list(&h.me).is_empty(), "planning starts nothing");
 }
 
@@ -220,7 +226,11 @@ async fn restrictions_tighten_and_never_loosen() {
     let mut request = h.request(&["Invoices"], &["Reports"]);
     request.scope.restrict = vec![("mail.send".into(), Tier::Never)];
     let card = h.rt.plan(&h.me, &request).unwrap();
-    assert!(card.cant_touch.iter().any(|l| l.starts_with("mail.send")));
+    assert!(
+        card.cant_touch.contains(&"Send emails".to_string()),
+        "{:?}",
+        card.cant_touch
+    );
     request.scope.restrict = vec![("mail.send".into(), Tier::Auto)];
     assert!(matches!(
         h.rt.plan(&h.me, &request),
@@ -683,6 +693,8 @@ fn rebuild(h: &Harness, policy: &str) -> Arc<Runtime> {
             catalog: vec![CatalogEntry {
                 id: "invoice-demo".parse().unwrap(),
                 name: "Invoice demo".into(),
+                version: "0.1".into(),
+                model: String::new(),
                 description: String::new(),
                 mode: glass_api::AgentMode::Actions,
                 program: "/bin/sleep".into(),
@@ -800,4 +812,103 @@ async fn other_users_cannot_see_drive_or_answer_a_task() {
     )
     .unwrap();
     assert!(call.await.unwrap().is_error);
+}
+
+#[tokio::test]
+async fn agents_pause_for_sleep_and_carry_on_after_wake() {
+    let h = harness();
+    let system = Caller {
+        uid: 0,
+        ..h.me.clone()
+    };
+    let user = Caller {
+        uid: 4242,
+        ..h.me.clone()
+    };
+    let task = h.rt.start(&h.me, h.request(&["Invoices"], &[])).unwrap().id;
+    let agent = Arc::new(h.agent(task).await);
+    tool(
+        &agent,
+        "report_progress",
+        json!({"caption": "Reading invoices"}),
+    )
+    .await;
+
+    assert!(matches!(
+        h.rt.suspend(&user).await,
+        Err(RuntimeError::PermissionDenied(_))
+    ));
+    assert_eq!(h.rt.suspend(&system).await.unwrap().tasks, 1);
+    let detail = h.rt.get(&h.me, task).unwrap();
+    assert_eq!(detail.view.state, TileState::Paused);
+    assert_eq!(detail.view.caption, "Paused for sleep");
+    assert!(detail.now.starts_with("Paused for sleep"));
+
+    let call = {
+        let agent = Arc::clone(&agent);
+        tokio::spawn(async move {
+            tool(
+                &agent,
+                "files_read",
+                json!({"path": "Invoices/inv-001.txt"}),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !call.is_finished(),
+        "agents stay held while the machine sleeps"
+    );
+
+    assert_eq!(h.rt.wake(&system).unwrap().tasks, 1);
+    assert!(!call.await.unwrap().is_error);
+    let view = h.rt.get(&h.me, task).unwrap().view;
+    assert_eq!(view.state, TileState::Working);
+    assert_eq!(view.caption, "Reading invoices", "the caption comes back");
+}
+
+#[tokio::test]
+async fn sleep_leaves_tasks_the_user_paused_alone() {
+    let h = harness();
+    let system = Caller {
+        uid: 0,
+        ..h.me.clone()
+    };
+    let task = h.rt.start(&h.me, h.request(&["Invoices"], &[])).unwrap().id;
+    let _agent = h.agent(task).await;
+    h.rt.pause(&h.me, task).unwrap();
+    assert_eq!(h.rt.suspend(&system).await.unwrap().tasks, 0);
+    assert_eq!(h.rt.wake(&system).unwrap().tasks, 0);
+    assert_eq!(
+        h.tile(task),
+        TileState::Paused,
+        "the user's pause outlives the wake"
+    );
+}
+
+#[tokio::test]
+async fn feed_lines_carry_verb_and_target() {
+    let h = harness();
+    let task =
+        h.rt.start(&h.me, h.request(&["Invoices"], &["Reports"]))
+            .unwrap()
+            .id;
+    let agent = h.agent(task).await;
+    tool(
+        &agent,
+        "files_write",
+        json!({"path": "Reports/a.csv", "content": "x"}),
+    )
+    .await;
+    let view = h.rt.get(&h.me, task).unwrap().view;
+    let line = view.feed.last().unwrap();
+    assert_eq!(
+        (line.verb.as_str(), line.target.as_str()),
+        ("write", "Reports/a.csv")
+    );
+    let card = h.rt.plan(&h.me, &h.request(&["Invoices"], &[])).unwrap();
+    assert_eq!(card.agent.version, "0.1");
+    assert_eq!(card.max_label, Some(glass_types::Label::Internal));
+    assert_eq!(card.model, "No model (scripted agent)");
 }

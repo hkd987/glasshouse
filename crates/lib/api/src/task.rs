@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use glass_types::{ActionName, AgentId, SnapshotId, TaskId, Tier, Timestamp};
+use glass_types::{ActionName, AgentId, Label, SnapshotId, TaskId, Tier, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::ApprovalView;
@@ -19,6 +19,9 @@ pub enum AgentMode {
 pub struct AgentSummary {
     pub id: AgentId,
     pub name: String,
+    /// The published version, such as "2.3".
+    #[serde(default)]
+    pub version: String,
     pub description: String,
     pub mode: AgentMode,
 }
@@ -65,6 +68,12 @@ pub struct HandoffCard {
     pub notifies: Vec<String>,
     /// What it can't do. Policy limits appear locked (DA-3).
     pub cant_touch: Vec<String>,
+    /// The most sensitive data the task may open ("Data and model").
+    #[serde(default)]
+    pub max_label: Option<Label>,
+    /// Which model does the work, such as "Claude via Amazon Bedrock".
+    #[serde(default)]
+    pub model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -134,7 +143,14 @@ pub struct Progress {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FeedLine {
     pub at: Timestamp,
+    /// The whole line, such as "Write Reports/summary.csv".
     pub text: String,
+    /// The verb alone ("write"), for tiles that set it in its own column.
+    #[serde(default)]
+    pub verb: String,
+    /// What it acted on ("Reports/summary.csv").
+    #[serde(default)]
+    pub target: String,
 }
 
 /// Everything a tile renders (AW-1 to AW-4).
