@@ -29,7 +29,15 @@ check "hostname" "$(hostname)"
 check "SSH version string" "$(sshd -T 2>/dev/null | grep -i '^versionaddendum')"
 require "SSH version string has no addendum" sh -c "sshd -T | grep -qix 'versionaddendum none'"
 require "boot loader brand" grep -qx 'loader_brand="glasshouse"' /boot/loader.conf
+require "boot loader logo" grep -qx 'loader_logo="glasshouse"' /boot/loader.conf
+require "boot menu title" grep -qx 'loader_menu_title="Welcome to Glasshouse"' /boot/loader.conf
+require "boot menu shown (with the brand and logo)" grep -qx 'beastie_disable="NO"' /boot/loader.conf
+require "boot splash is ours" grep -qx 'splash="/boot/images/glasshouse-splash.png"' /boot/loader.conf
+require "shutdown splash is ours" \
+	grep -qx 'shutdown_splash="/boot/images/glasshouse-splash.png"' /boot/loader.conf
 require "boot messages muted" grep -qx 'boot_mute="YES"' /boot/loader.conf
+check "pre-login screen (/etc/issue)" "$(cat /etc/issue)"
+require "pre-login screen has the mark" grep -q 'Agents you can see' /etc/issue
 check "glassctl" "$(su demo -c 'glassctl status; glassctl agents; glassctl --help' 2>&1)"
 require "legal notices ship (BR-2)" test -s /usr/local/share/glasshouse/legal/NOTICES.txt
 require "base-system notice reproduced (BR-2)" \

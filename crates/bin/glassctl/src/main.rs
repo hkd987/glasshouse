@@ -61,7 +61,11 @@ enum Command {
     },
     /// Your agents' tiles.
     #[command(alias = "ps")]
-    Tasks,
+    Tasks {
+        /// One line of counts by state, for the login screen.
+        #[arg(long)]
+        summary: bool,
+    },
     /// A task's expanded view: now, activity, changes, limits, timeline.
     Show {
         task: String,
@@ -364,9 +368,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 )
             })
         }
-        Command::Tasks => {
+        Command::Tasks { summary } => {
             let tasks: Vec<TaskView> = ctl.call(methods::TASK_LIST, Value::Null).await?;
-            ctl.show(&tasks, |t| render::tiles(t))
+            if summary {
+                ctl.show(&tasks, |t| render::summary(t))
+            } else {
+                ctl.show(&tasks, |t| render::tiles(t))
+            }
         }
         Command::Show { task } => {
             let detail: TaskDetail = ctl.task_call(methods::TASK_GET, &task).await?;

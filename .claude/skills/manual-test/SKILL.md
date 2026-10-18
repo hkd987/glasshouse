@@ -36,6 +36,12 @@ tools/screenshot/termshot.py --out <scratchpad>/shots/03-needs-you.png \
   outside the screenshot, so the shots stay readable.
 - Save to the session scratchpad, not the repo.
 
+Boot screens (the boot menu, splash and login screen) aren't terminal
+output: record them from the VM's display with
+`tools/screenshot/bootshots.py --out <scratchpad>/boot`, which reboots the VM
+and saves each distinct screen plus a contact sheet. Boot the VM with
+`VM_FIRMWARE=uefi` to see what UEFI laptops show.
+
 ## 3. Look before sending
 
 Read each PNG. Check it shows what the title claims (right task, colors,
@@ -59,3 +65,7 @@ Send as you go, not all at the end.
 - Containment: `run containment-probe`, then `grep -E '^(PASS|FAIL)'` in the
   task's `agent.log`, then `jls` (nothing left behind)
 - Audit: `glassctl audit <task>`, `glassctl verify`
+- IT agent (AE-4): `glassctl run it-agent "My disk is filling up" --yes`
+  (with a few MB in `~/.cache`), `"restart cron"` (asks), `"the printer
+  won't print"` (asks to open a ticket); `glassctl show`, `undo --change`
+- Login: `cat /etc/motd`, `glassctl tasks --summary`

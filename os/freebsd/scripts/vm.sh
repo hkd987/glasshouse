@@ -10,7 +10,9 @@
 #   exec <binary> [args]     copy a host binary into the VM and run it (usable as a cargo runner)
 #   reset              stop and delete the overlay + seed (next `up` is a fresh first boot)
 #   console-log [-f]   print (or follow) the serial console log
-# Env knobs: VM_DIR VM_SSH_PORT VM_CPUS VM_CPU_MODEL VM_ACCEL VM_MEM VM_DISK_SIZE VM_BOOT_TIMEOUT VM_BASE_IMAGE (see lib.sh).
+#   screendump <out.png>     save what the VM's display shows right now (boot screens, splash)
+# Env knobs: VM_DIR VM_SSH_PORT VM_CPUS VM_CPU_MODEL VM_ACCEL VM_MEM VM_DISK_SIZE VM_BOOT_TIMEOUT VM_BASE_IMAGE
+#   VM_FIRMWARE=bios|uefi (see lib.sh).
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -44,6 +46,14 @@ cmd_up() {
 		make_seed
 	fi
 	[[ -f $VM_CONSOLE ]] && mv -f "$VM_CONSOLE" "$VM_CONSOLE.prev"
+	local firmware=()
+	if [[ $VM_FIRMWARE == uefi ]]; then
+		[[ -f $OVMF_CODE ]] || die "VM_FIRMWARE=uefi needs OVMF ($OVMF_CODE): apt-get install ovmf"
+		[[ -f $VM_EFIVARS ]] || cp "$OVMF_VARS" "$VM_EFIVARS"
+		firmware=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE"
+			-drive "if=pflash,format=raw,unit=1,file=$VM_EFIVARS")
+	fi
+	rm -f "$VM_MONITOR"
 	qemu-system-x86_64 \
 		-name glasshouse-dev -machine q35 -accel "$VM_ACCEL" -cpu "$VM_CPU_MODEL" \
 		-smp "$VM_CPUS" -m "$VM_MEM" \
@@ -51,9 +61,10 @@ cmd_up() {
 		-drive "if=virtio,file=$VM_SEED,format=raw,readonly=on" \
 		-netdev "user,id=net0,hostname=glasshouse-dev,hostfwd=tcp:127.0.0.1:$VM_SSH_PORT-:22" \
 		-device virtio-net-pci,netdev=net0 -device virtio-rng-pci \
-		-display none -monitor none -serial "file:$VM_CONSOLE" \
+		"${firmware[@]}" \
+		-display none -monitor "unix:$VM_MONITOR,server,nowait" -serial "file:$VM_CONSOLE" \
 		-daemonize -pidfile "$VM_PIDFILE"
-	log "started (pid $(vm_pid)), ssh on 127.0.0.1:$VM_SSH_PORT; next: vm.sh wait"
+	log "started (pid $(vm_pid), $VM_FIRMWARE), ssh on 127.0.0.1:$VM_SSH_PORT; next: vm.sh wait"
 }
 
 cmd_down() {
@@ -106,6 +117,29 @@ cmd_wait() {
 	log "ready after $((SECONDS - start))s"
 }
 
+cmd_screendump() {
+	(($# == 1)) || die "usage: vm.sh screendump <out.png>"
+	vm_running || die "VM is not running"
+	[[ -S $VM_MONITOR ]] || die "no monitor socket (restart the VM: vm.sh down && vm.sh up)"
+	python3 - "$VM_MONITOR" "$1" <<'PY'
+import os, socket, sys, tempfile, time
+from PIL import Image
+monitor, out = sys.argv[1], sys.argv[2]
+ppm = tempfile.mktemp(suffix=".ppm")
+s = socket.socket(socket.AF_UNIX)
+s.connect(monitor)
+s.sendall(f"screendump {ppm}\n".encode())
+for _ in range(50):
+    if os.path.exists(ppm) and os.path.getsize(ppm) > 0:
+        break
+    time.sleep(0.1)
+time.sleep(0.2)
+s.close()
+Image.open(ppm).save(out)
+os.unlink(ppm)
+PY
+}
+
 cmd_exec() {
 	(($# >= 1)) || die "usage: vm.sh exec <binary> [args...]"
 	local bin=$1 dest
@@ -139,6 +173,7 @@ scp-in)
 	vm_scp "$@"
 	;;
 exec) cmd_exec "$@" ;;
+screendump) cmd_screendump "$@" ;;
 reset) cmd_reset ;;
 console-log)
 	[[ ${1:-} == -f ]] && exec tail -F "$VM_CONSOLE"

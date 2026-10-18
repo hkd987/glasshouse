@@ -21,14 +21,24 @@ sysrc -q osrelease_enable=NO update_motd=NO glasshouse_identity_enable=YES >/dev
 if [ "$(sysrc -n hostname 2>/dev/null)" = freebsd ]; then
 	sysrc -q hostname=glasshouse >/dev/null
 fi
-service glasshouse_identity start >/dev/null
-# Boot: our brand on the loader menu, no logo, and a quiet kernel and rc.
+# Boot: the menu shows our brand and logo for two seconds (the art comes from
+# tools/branding/art.py), then a quiet kernel and rc behind our splash. The
+# base system's defaults would title the menu and draw its own splash.
 # To debug boot, set boot_mute=NO in /boot/loader.conf and reboot.
 install -C -o root -g wheel -m 0444 "$branding/gfx-glasshouse.lua" /boot/lua/gfx-glasshouse.lua
-sysrc -q -f /boot/loader.conf loader_brand=glasshouse loader_logo=none \
-	beastie_disable=YES boot_mute=YES >/dev/null
+install -C -o root -g wheel -m 0444 "$branding/splash.png" /boot/images/glasshouse-splash.png
+install -C -o root -g wheel -m 0444 "$branding/logo.png" /boot/images/glasshouse-logo.png
+# (rc.d/glasshouse_identity sets the console for this machine's firmware.)
+sysrc -q -f /boot/loader.conf loader_brand=glasshouse loader_logo=glasshouse \
+	loader_menu_title="Welcome to Glasshouse" autoboot_delay=2 beastie_disable=NO \
+	boot_mute=YES \
+	splash=/boot/images/glasshouse-splash.png \
+	shutdown_splash=/boot/images/glasshouse-splash.png >/dev/null
 sysrc -q rc_startmsgs=NO >/dev/null
-# Console login banner: the product, not the base system's name (%s).
+service glasshouse_identity start >/dev/null
+# Console login: the full mark before the prompt, and a banner that names the
+# product, not the base system (%s).
+install -C -o root -g wheel -m 0644 "$branding/issue" /etc/issue
 sed -i '' -e 's|:im=\\r\\n%s/%m (%h) (%t)|:im=\\r\\nGlasshouse (%h) (%t)|' /etc/gettytab
 # No base-system tips at login, for new accounts and existing ones.
 for f in /usr/share/skel/dot.profile /usr/share/skel/dot.login /home/*/.profile /home/*/.login; do

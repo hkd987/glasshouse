@@ -55,32 +55,81 @@ def chrome() -> str:
     sys.exit("termshot: no Chromium found; set CHROME to a headless_shell or chromium binary")
 
 
+def xterm256(n: int) -> str:
+    """The xterm 256-color palette: 16 base colors, a 6x6x6 cube, grays."""
+    if n < 8:
+        return COLORS[30 + n]
+    if n < 16:
+        return COLORS[90 + n - 8]
+    if n < 232:
+        levels = [0, 95, 135, 175, 215, 255]
+        n -= 16
+        return "#{:02x}{:02x}{:02x}".format(levels[n // 36], levels[n // 6 % 6], levels[n % 6])
+    gray = 8 + 10 * (n - 232)
+    return f"#{gray:02x}{gray:02x}{gray:02x}"
+
+
+# Terminals draw block elements as solid cells; fonts leave hairline seams
+# between them. Paint the common ones as backgrounds instead.
+BLOCK_FILLS = {
+    "█": "{c}",
+    "▀": "linear-gradient({c} 50%, {b} 50%)",
+    "▄": "linear-gradient({b} 50%, {c} 50%)",
+    "▌": "linear-gradient(90deg, {c} 50%, {b} 50%)",
+    "▐": "linear-gradient(90deg, {b} 50%, {c} 50%)",
+}
+
+
+def blocks_to_cells(text: str, color: str, background: str) -> str:
+    return "".join(
+        f'<span class="cell" style="background:{BLOCK_FILLS[ch].format(c=color, b=background)}"></span>'
+        for ch in text
+    )
+
+
 def ansi_to_html(text: str) -> str:
     """Converts SGR color/weight codes to spans; drops other escapes."""
     text = OTHER_ESCAPES.sub("", text).replace("\r", "")
-    out, style = [], {"fg": None, "bold": False, "dim": False}
+    out, style = [], {"fg": None, "bg": None, "bold": False, "dim": False}
     pos = 0
 
     def emit(chunk: str) -> None:
         if not chunk:
             return
-        css = []
-        if style["fg"]:
-            css.append(f"color:{style['fg']}")
-        if style["bold"]:
-            css.append("font-weight:700")
-        if style["dim"]:
-            css.append("opacity:.6")
-        escaped = html.escape(chunk)
-        out.append(f'<span style="{";".join(css)}">{escaped}</span>' if css else escaped)
+        fg_color = style["fg"] or "#d6dbe1"
+        for run in re.findall(f"[{''.join(BLOCK_FILLS)}]+|[^{''.join(BLOCK_FILLS)}]+", chunk):
+            if run[0] in BLOCK_FILLS:
+                # Cells carry their own colors, background included.
+                out.append(blocks_to_cells(run, fg_color, style["bg"] or "transparent"))
+                continue
+            css = []
+            if style["fg"]:
+                css.append(f"color:{style['fg']}")
+            if style["bg"]:
+                css.append(f"background:{style['bg']}")
+            if style["bold"]:
+                css.append("font-weight:700")
+            if style["dim"]:
+                css.append("opacity:.6")
+            escaped = html.escape(run)
+            out.append(f'<span style="{";".join(css)}">{escaped}</span>' if css else escaped)
 
     for match in SGR.finditer(text):
         emit(text[pos : match.start()])
         pos = match.end()
         codes = [int(c) for c in match.group(1).split(";") if c] or [0]
-        for code in codes:
-            if code == 0:
-                style = {"fg": None, "bold": False, "dim": False}
+        while codes:
+            code = codes.pop(0)
+            if code in (38, 48) and codes[:1] == [5] and len(codes) >= 2:
+                style["fg" if code == 38 else "bg"] = xterm256(codes[1])
+                del codes[:2]
+            elif code in (38, 48) and codes[:1] == [2] and len(codes) >= 4:
+                style["fg" if code == 38 else "bg"] = "#{:02x}{:02x}{:02x}".format(*codes[1:4])
+                del codes[:4]
+            elif code == 49:
+                style["bg"] = None
+            elif code == 0:
+                style = {"fg": None, "bg": None, "bold": False, "dim": False}
             elif code == 1:
                 style["bold"] = True
             elif code == 2:
@@ -128,15 +177,16 @@ def render(title: str, steps: list[tuple[str, str]], prompt: str, width: int, ou
               font:600 13px 'DejaVu Sans', sans-serif; color:#a9b1bc; }}
       .dot {{ width:11px; height:11px; border-radius:50%; background:#3a414b; }}
       .title {{ margin-left:10px; }}
-      .term {{ padding:16px 20px 20px; font:13.5px/1.5 'DejaVu Sans Mono', 'Liberation Mono', monospace;
+      .term {{ padding:16px 20px 20px; font:15px/1.164 'DejaVu Sans Mono', 'Liberation Mono', monospace;
                color:#d6dbe1; white-space:pre-wrap; word-break:break-word; }}
+      .cell {{ display:inline-block; width:1ch; height:1.164em; vertical-align:top; }}
       .cmd {{ color:#ffffff; margin-top:6px; }}
       .prompt {{ color:#6fd39a; }}
       .out {{ margin-bottom:12px; }}
     </style></head><body><div class="win"><div class="bar"><span class="dot"></span><span class="dot"></span>
     <span class="dot"></span><span class="title">{html.escape(title)}</span></div>
     <div class="term">{''.join(blocks)}</div></div></body></html>"""
-    height = 140 + int(lines * 20.5)
+    height = 140 + int(lines * 17.5)
     with tempfile.TemporaryDirectory() as tmp:
         page_path = Path(tmp) / "shot.html"
         page_path.write_text(page)

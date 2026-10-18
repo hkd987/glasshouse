@@ -7,8 +7,9 @@
 #
 # BR-1: the system says Glasshouse wherever users look. Writes the OS
 # identity (/etc/os-release) and the login message (/etc/motd), which the
-# base system would otherwise fill in with its own name. post-install.sh
-# turns the base writers (osrelease_enable, update_motd) off.
+# base system would otherwise fill in with its own name, and keeps the boot
+# menu's console right for this machine's firmware. post-install.sh turns
+# the base writers (osrelease_enable, update_motd) off.
 
 . /etc/rc.subr
 
@@ -22,7 +23,7 @@ branding=/usr/local/share/glasshouse/branding
 
 glasshouse_identity_start()
 {
-	local version build t
+	local version build t console
 
 	version=$(sed -n 's/^version=//p' "$branding/build-info" 2>/dev/null)
 	build=$(sed -n 's/^build=//p' "$branding/build-info" 2>/dev/null)
@@ -41,6 +42,17 @@ glasshouse_identity_start()
 
 	install -C -o root -g wheel -m 644 "$branding/motd" /var/run/motd
 	[ -h /etc/motd ] || ln -sf ../var/run/motd /etc/motd
+
+	# The boot menu (our brand and logo) draws on the firmware's screen
+	# console and the serial one. The loader rejects the whole list if one
+	# name doesn't exist, so match it to how this machine boots.
+	case $(sysctl -n machdep.bootmethod 2>/dev/null) in
+	UEFI) console="efi" ;;
+	*) console="comconsole,vidconsole" ;;
+	esac
+	if [ "$(sysrc -f /boot/loader.conf -n console 2>/dev/null)" != "$console" ]; then
+		sysrc -q -f /boot/loader.conf console="$console" >/dev/null
+	fi
 }
 
 load_rc_config "$name"

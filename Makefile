@@ -36,8 +36,9 @@ check: ## Type-check everything, fastest feedback (no codegen)
 test: ## Unit and integration tests on this host
 	cargo test --workspace
 
-lint: check-layers ## Formatting, clippy (warnings are errors) and layering rules
+lint: check-layers ## Formatting, clippy (warnings are errors), layering rules, generated art
 	cargo fmt --all --check
+	tools/branding/art.py --check
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo clippy --workspace --target $(FREEBSD_TARGET) -- -D warnings
 

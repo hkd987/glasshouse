@@ -28,6 +28,9 @@ VM_ACCEL=${VM_ACCEL:-tcg,thread=multi}
 VM_CPU_MODEL=${VM_CPU_MODEL:-max,la57=off,avx=off,avx2=off}
 VM_MEM=${VM_MEM:-4096}
 VM_DISK_SIZE=${VM_DISK_SIZE:-20G}
+VM_FIRMWARE=${VM_FIRMWARE:-bios}                          # bios, or uefi (needs OVMF; like real hardware)
+OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
+OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
 VM_BOOT_TIMEOUT=${VM_BOOT_TIMEOUT:-900}                 # seconds; TCG first boot is slow
 BASE_IMAGE=${VM_BASE_IMAGE:-$PRISTINE_IMAGE}            # backing disk for new overlays
 VM_SSH_KEY=${VM_SSH_KEY:-$BUILD_DIR/vm/ssh/id_ed25519}  # dev-only key, shared by all VM_DIRs
@@ -36,6 +39,8 @@ VM_DISK=$VM_DIR/disk.qcow2
 VM_SEED=$VM_DIR/seed.iso
 VM_PIDFILE=$VM_DIR/qemu.pid
 VM_CONSOLE=$VM_DIR/console.log
+VM_MONITOR=$VM_DIR/monitor.sock                         # QEMU human monitor, for screendumps
+VM_EFIVARS=$VM_DIR/efivars.fd
 
 log() { printf '[%s] %s\n' "${0##*/}" "$*" >&2; }
 die() { log "error: $*"; exit 1; }

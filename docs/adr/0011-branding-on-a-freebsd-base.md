@@ -28,6 +28,21 @@ release images (ADR 0002), and "Product name" is still an open question.
 | SSH version string | `VersionAddendum none` |
 | Our own strings | the sandbox backend is `jail`; user-facing lines name no backend |
 
+**The art (done).** One generator, `tools/branding/art.py`, draws every
+screen that shows the mark, from one pixel grid: the boot menu's brand and
+logo (ASCII, colored, because the loader can't draw Unicode on a serial
+console), the graphical boot splash and shutdown splash (PNG, replacing the
+base system's own, which a muted boot would otherwise show), the console's
+pre-login screen (`/etc/issue`, which clears the startup messages first)
+and the login message. `make lint` fails if the overlay's copies are stale.
+The boot menu shows for two seconds, titled "Welcome to Glasshouse"; its
+console list must match the firmware (the loader rejects the whole list if
+one name is missing), so `rc.d/glasshouse_identity` sets `efi` on UEFI
+machines and `comconsole,vidconsole` on BIOS ones. The logo doesn't set
+`requires_color`: without color the loader would swap in its own logo.
+`tools/screenshot/bootshots.py` records the real boot screens from the VM
+(`VM_FIRMWARE=uefi` boots it the way laptops do).
+
 **Notices and SBOM (done).** `tools/legal/notices.py` walks the shipped
 binaries' dependency graph and writes `NOTICES.txt` (every crate's license
 and texts, identical texts once, plus the base system's `COPYRIGHT`), staged
@@ -42,7 +57,10 @@ source:
 
 - kernel identity: `uname -s`, `kern.ostype`, `uname -v`, the kernel's
   copyright line in `dmesg`;
-- loader and EFI boot strings and the base rc scripts' messages;
+- loader banners: the loader prints "FreeBSD/amd64 EFI loader" (UEFI) or
+  "FreeBSD/x86 bootstrap loader" (BIOS) and its boot details before it
+  reads any configuration, and the base rc scripts print their own messages
+  before the login screen clears them;
 - `freebsd-version`, `freebsd-update` (replaced by our image updates, EP-1)
   and `pkg`'s name and repository (DV-22 brands packages);
 - manual pages and other help text that names the system.

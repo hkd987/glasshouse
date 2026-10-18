@@ -82,6 +82,8 @@ the containment probe is expected to fail there.
 | Start the VM from a clean first boot | `make vm-reset vm-up vm-wait vm-deploy` |
 | Rebuild everything from scratch | `make clean` (keeps the FreeBSD downloads) |
 | Bake a bootable image of the current build | `make image` (`make image-release` for a shippable one) |
+| Boot the way laptops do (UEFI) | `make vm-down`, then `VM_FIRMWARE=uefi make vm-up vm-wait` (needs `ovmf`) |
+| See what the VM's screen shows | `os/freebsd/scripts/vm.sh screendump shot.png`; `tools/screenshot/bootshots.py --out <dir>` reboots and records every boot screen |
 
 ## Troubleshooting
 

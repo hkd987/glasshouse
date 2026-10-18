@@ -123,8 +123,9 @@ pub fn tile(view: &TaskView) -> String {
         (Some(receipt), TileState::Done) => {
             let _ = writeln!(
                 out,
-                "  Receipt: {} actions, {} changes",
-                receipt.actions, receipt.changes
+                "  Receipt: {}, {}",
+                plural(receipt.actions, "action"),
+                plural(receipt.changes, "change")
             );
             for flag in &receipt.flagged {
                 let _ = writeln!(out, "    {} {flag}", orange("⚑"));
@@ -169,6 +170,43 @@ pub fn tiles(views: &[TaskView]) -> String {
         .map(|v| tile(v))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// One line for the login screen: how many agents are in each state, the
+/// ones that need you first. Empty when there are none.
+pub fn summary(views: &[TaskView]) -> String {
+    let order = [
+        TileState::NeedsYou,
+        TileState::Failed,
+        TileState::Working,
+        TileState::Starting,
+        TileState::YouAreDriving,
+        TileState::Paused,
+        TileState::Done,
+        TileState::Stopped,
+    ];
+    let parts: Vec<String> = order
+        .iter()
+        .filter_map(|state| {
+            let n = views.iter().filter(|v| v.state == *state).count();
+            (n > 0).then(|| {
+                format!(
+                    "{} {n} {}",
+                    state_marker(*state),
+                    state.label().to_lowercase()
+                )
+            })
+        })
+        .collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    let next = if views.iter().any(|v| v.state == TileState::NeedsYou) {
+        "glassctl approvals"
+    } else {
+        "glassctl tasks"
+    };
+    format!("{}   {}\n", parts.join("   "), dim(&format!("→ {next}")))
 }
 
 /// The expanded view (AW-10 to AW-16).
@@ -348,4 +386,13 @@ pub fn audit(records: &[AuditRecord]) -> String {
         );
     }
     out
+}
+
+/// "1 change", "3 changes".
+fn plural(n: u32, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
 }

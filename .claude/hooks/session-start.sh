@@ -13,8 +13,9 @@ fi
 cd "${CLAUDE_PROJECT_DIR:-$(dirname "$0")/../..}"
 
 # Host packages: compilers and linker for FreeBSD cross-builds, shellcheck
-# and python3 for `make lint`, QEMU and friends for the dev VM.
-packages=(clang lld shellcheck python3 qemu-system-x86 qemu-utils xorriso openssh-client xz-utils curl)
+# and python3 for `make lint`, QEMU and friends for the dev VM (ovmf for its
+# UEFI mode), Pillow for screenshots and the boot art.
+packages=(clang lld shellcheck python3 python3-pil qemu-system-x86 qemu-utils ovmf xorriso openssh-client xz-utils curl)
 missing=()
 for pkg in "${packages[@]}"; do
 	dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed" || missing+=("$pkg")
