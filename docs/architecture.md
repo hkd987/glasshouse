@@ -163,6 +163,10 @@ pipeline refuses further side effects (fail closed).
   ADR 0010).** Nothing an agent ships or an improvement loop edits can
   change tiers, Never rules, labels or scope, so keep every limit enforced
   in `glassd`, never delegated to the agent.
+- **A calm, Mac-like desktop (DK-1, UX).** Menu bar, dock, window
+  controls on the left, tiles at the top right, Ctrl Space command bar. All
+  styling comes from one theme (UX-10), and anything a person waits on has
+  a latency budget checked on every build (UX-22).
 - **Users shape their tools; the OS keeps it safe (TL, GA, ADR 0014).**
   Tailoring is data the OS checks (settings for declared points, limits
   that only narrow), never code an agent ships. Apps built on request are

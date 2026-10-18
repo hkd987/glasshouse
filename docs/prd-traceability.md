@@ -6,10 +6,11 @@ OS — PRD"), plus engineering notes on P1 work that shapes today's design.
 what's missing. Update this file in the same change that moves a
 requirement; the `prd-sync` skill re-reads the PRD and diffs it.
 
-PRD revision last synced: 2026-10-18, fourth sync (users shape their own
-tools: tailoring catalog items with layers, TL-1, TL-2, TL-10, TL-11 and
-TL-13 in Pilot 1; apps built on request, GA-1 … GA-11, P1; a success
-metric for it; two new mockups). V1 is **US-only** and **x86 (Intel/AMD)
+PRD revision last synced: 2026-10-19, fifth sync (a Mac-like desktop:
+menu bar, dock, window controls on the left, Ctrl Space command bar; the
+"Desktop experience and design" section, UX-1 … UX-40, with UX-1, UX-2,
+UX-10, UX-20 … UX-22 and UX-30 in P0; four new mockups: boot, sign in,
+snapping and ask the agent, themes). V1 is **US-only** and **x86 (Intel/AMD)
 only**: we build and test `x86_64-unknown-freebsd` and nothing else.
 
 Tests: *unit* = crate unit tests, *pipeline* =
@@ -166,6 +167,24 @@ field. The compositor, GUI tiles and screen thumbnails are not started.
 | Id | Status | Notes |
 |---|---|---|
 | UI-1 … UI-6 Wayland compositor on Smithay, iced + AccessKit shell, web apps with manifests | Not started | ADR 0009. The control API already carries everything tiles, the expanded view, handoff and Changes show (docs/design) |
+
+## Desktop experience
+
+The desktop is Mac-like (DK-1, revised): menu bar, dock, window controls on
+the left, agent tiles at the top right, command bar on Ctrl Space. The
+element-by-element map is in [docs/design](design/README.md).
+
+| Id | Status | Notes |
+|---|---|---|
+| DK-1 Mac-like desktop | Not started | shell; the first shell crate renders the desktop, sign-in and boot screens headlessly (M1) |
+| UX-1 Chef's-choice defaults | Not started | |
+| UX-2 Setup asks ≤ 5 questions (none when enrolled), desktop in < 5 min | Not started | first-run setup (Setup mockup) |
+| UX-10 One theme restyles the whole system | Not started | the shell keeps every color, radius and wallpaper in one theme |
+| UX-20 Everything by keyboard, cheat sheet, Windows shortcuts too | Not started | shell |
+| UX-21 Snapping, saved layouts, optional tiling | Not started | compositor |
+| UX-22 Performance budgets on every build; papercut program | Partial | OS-side budgets in `glass-e2e perf` (docs/dev/performance.md); input lag, app launch, window open and wake need the shell |
+| UX-30 "Ask the agent" on every error, crash and failed update | Partial | the IT agent diagnoses, fixes from IT's list and files tickets (AE-4); the notification and its button need the shell |
+| UX-3, UX-11, UX-31, UX-40 Try-it VM, org themes, explain any setting, tailorable desktop | P1 | UX-40 reuses tailoring layers (ADR 0014) |
 
 ## Agent engine
 

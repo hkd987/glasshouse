@@ -2,10 +2,13 @@
 
 The PRD's mockups live in a Claude Design canvas, **"Agent Window — OS
 Mockups"**: <https://claude.ai/artifact/Y5fH2vFk3fWUvWumZTRATC>. The PNGs here
-are renders of its eighteen artboards, for reading without the canvas. They go
+are renders of its twenty-two artboards, for reading without the canvas. They go
 stale when the canvas changes; re-render them with the `prd-sync` skill
 (`.claude/skills/prd-sync`), which uses `tools/design/render-dc.py`.
 
+The desktop is **Mac-like** (DK-1, revised): a translucent menu bar across
+the top, a dock at the bottom, window controls on the left, agent tiles at
+the top right, and the command bar opening over everything with Ctrl Space.
 The shell (compositor and GUI) is not built yet. Everything a tile, the
 expanded view and the handoff card show already comes from the control API
 (`glass-api`), so the shell can be built directly against it. The tables
@@ -29,7 +32,9 @@ light desktop; accent `#3D6BFF` for working and you're-driving; attention
 | Needs-you question, Review drafts / Approve and send | `needs: ApprovalView` (`summary`, `items`) → `approval.answer` |
 | "Allow sends for the rest of this task" | `ApprovalAnswer::Approve { scope: Task }` |
 | Screen thumbnail with labeled agent cursor (AW-2) | **Not built**: needs screen-control agents |
-| Taskbar "3 agents" pill, command bar (DA-1) | `task.list` counts; command bar → `task.plan` |
+| Menu bar: app menus, "3 agents" pill with one dot per tile, Wi-Fi, battery, clock | `task.list` counts and states; app menus come from the focused app (shell); Wi-Fi and battery from the system (PM, CF) |
+| Dock: launcher, apps with open dots, calendar date, Agents with a needs-you badge | Apps from the catalog (shell); the badge is the count of `NeedsYou` tiles |
+| Command bar over everything, Ctrl Space (DA-1) | `task.plan` on enter; see Command bar below |
 | Live updates | `events.subscribe` → `event` notifications (`TaskUpdated`, `TaskRemoved`) |
 
 ## Expanded · watch, take over, rewind
@@ -129,7 +134,7 @@ e2e `changes` scenario.
 | Take over | For screen agents, the agent's display (not built). For an actions agent that ended: `task.continue` starts the task again in the user's own Claude Code, which is told what the agent did and why it stopped; `TaskView.driver_socket` is what to connect (`glass-mcp <socket>`), and hand back closes it (ADR 0015) |
 | Undo all | `task.undo {}` |
 | Catch-up panel, batched and summarized notifications, Focus until 4:00 PM (CF-71, P1) | **Not built**: a notification service in the shell; agents' tile events are one of its sources |
-| Taskbar "2 agents" with one red dot | `task.list` states |
+| Menu bar "2 agents" with one red dot | `task.list` states |
 
 ## First-run setup · AI models
 
@@ -222,7 +227,8 @@ The IT self-service agent (AE-4). Its first slice is built: `glass-it-agent`
 
 ![Command bar with the general agent](mockups/command-bar.png)
 
-The general desktop agent (AE-3) is the default for anything typed here.
+The general desktop agent (AE-3) is the default for anything typed here. It
+opens over everything with Ctrl Space, like Spotlight (DK-1).
 
 | Element | Source |
 |---|---|
@@ -287,4 +293,49 @@ Not built (GA-1 … GA-11, P1). What it builds on:
 | Overdue reminders to you only | An action at Auto for the owner and Ask for anyone else; sends outside follow the tiers (GA-7) |
 | Owner: Dana Ruiz | GA-9 ownership; the audit log already attributes every change to a user |
 | Share with the AP team: security checks and IT approval | GA-8 sharing steps, reusing the catalog checks (DV-2, DV-3) |
+
+## Boot
+
+![Boot screen](mockups/boot.png)
+
+Black, the four-pane Glasshouse mark and a progress bar. The mark replaces
+the house art: `tools/branding/art.py` draws it for the boot splash, the
+boot menu and the console screens. A static splash can't move its bar, so the
+splash shows the mark alone; the shell draws the bar once it starts (M2).
+
+## Sign in
+
+![Sign-in screen](mockups/login.png)
+
+| Element | Source |
+|---|---|
+| Date and large clock on the wallpaper | Shell (lock screen, UI-4) |
+| Avatar, name, password field, "Touch the fingerprint sensor" | The greeter, signing in through PAM (**not built**); fingerprint and passkeys are CF-2 (**not built**) |
+| "[Org name] managed device · signs in with Entra ID" | Enrollment and directory sign-in (AD-1, **not built**) |
+| Switch user, accessibility, Wi-Fi, battery | Shell; accessibility through AccessKit (UI-4) |
+
+Until the greeter exists, the console login screen (`/etc/issue`) carries
+the mark and the agent status line.
+
+## Snapping and ask the agent
+
+![Snapping and ask the agent](mockups/snap.png)
+
+| Element | Source |
+|---|---|
+| Snap to layout picker: halves, thirds, quarters, saved "Month-end" (UX-21) | Compositor window management (**not built**) |
+| "Expense portal stopped responding" with Ask the agent / Reload / Dismiss (UX-30) | A system notification; Ask the agent starts a desktop-agent task (`task.start`) with the crash details as its prompt and IT's diagnostics actions in scope (AE-4's `system.*`) |
+| Desktop agent's answer, Report it to IT / Thanks, done | The task's caption and receipt; Report it to IT is `helpdesk.ticket.create` |
+| "Hold Ctrl to see every shortcut" (UX-20) | Shell (**not built**) |
+
+## Themes
+
+![Themes in Settings](mockups/themes.png)
+
+| Element | Source |
+|---|---|
+| One theme restyles menu bar, dock, windows, tiles, notifications, terminal and wallpaper (UX-10) | The shell reads one theme (tokens: colors, radii, wallpaper); the first shell crate keeps every color in one `Theme` |
+| Light / Dark / Auto | Theme modes |
+| "[Org name] brand · Default · IT", "6 themes approved by IT", WCAG 2.2 AA (UX-11) | Policy: an org theme and an allow list (**not built**) |
+| Accent colors | Theme tokens |
 

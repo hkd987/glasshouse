@@ -20,7 +20,7 @@ V1 succeeds when a security team approves agents with real write access for a fl
 1. Let agents act across apps, files and legacy systems with enforced, IT-defined limits.
 2. Make every agent action visible live, attributable afterward and reversible.
 3. Keep sensitive data inside policy, so it never reaches an unapproved model or destination.
-4. Feel familiar enough that a Windows user is productive on day one without training.
+4. Feel simple and Mac-like, while Windows users stay productive on day one through familiar shortcuts and a short guided tour.
 5. Give IT one console to set agent policy, manage the fleet and prove compliance.
 **Non-goals for v1**
 - Replacing Windows for general knowledge workers who depend on heavy Windows-only apps.
@@ -68,7 +68,7 @@ When requirements conflict, these decide.
 4. **Quiet until it matters.** Tiles stay calm while work goes well. Only "needs you" pulses. Every extra prompt spends user trust.
 5. **The human can always grab the wheel.** Pause, take over and stop work instantly, at any point, on any agent.
 6. **Structured first, pixels last.** Agents use app actions and the accessibility tree. Screen control is a fallback for legacy apps, not the default.
-7. **Familiar on day one.** Taskbar, file browser, windows and shortcuts work the way Windows users expect. AI is added on top, never forced.
+7. **Familiar on day one.** A clean, Mac-like desktop, with the keyboard shortcuts Windows users already know. AI is added on top, never forced.
 8. **Provable to an auditor.** Every agent action is logged with who asked, what it touched and what policy allowed it.
 
 ## Agent window experience
@@ -424,7 +424,7 @@ Glasshouse needs a developer program and an IT-controlled catalog, not a consume
 ## Familiar desktop and app compatibility
 A Windows user should feel at home in minutes, and every app the beachhead uses must run on day one, natively, in the browser or in a managed Windows session.
 **Desktop**
-- DK-1. Bottom taskbar, launcher, window controls and file browser follow Windows conventions. The command bar sits in the taskbar center (see the Desktop artboard).
+- DK-1. The desktop is Mac-like: a menu bar across the top, a dock at the bottom, window controls on the left, and agent tiles at the top right. The command bar opens over everything with Ctrl Space, like Spotlight (see the Desktop artboard).
 - DK-2. Common Windows shortcuts work as expected (Alt Tab, Ctrl C, Win-key launcher equivalents).
 - DK-3. AI is optional. A user who never opens the command bar has a complete, normal desktop.
 - DK-4. Accessibility at WCAG 2.2 AA across the shell, with screen reader, high contrast and keyboard-only operation.
@@ -439,6 +439,25 @@ A Windows user should feel at home in minutes, and every app the beachhead uses 
 - DK-10. Before each deal, a compatibility assessment tool scans a sample of the customer's Windows fleet and lists each app's path.
 - DK-11. Printing, scanning, docks, webcams and headsets work on certified hardware with no setup.
 - DK-12. V1 ships on a short certified hardware list from one or two OEMs. Broad hardware support isn't a v1 goal.
+
+## Desktop experience and design
+Glasshouse should feel calm, fast and opinionated: great defaults out of the box, one switch to restyle everything, and an agent one click away from any problem. Some of these choices come from Omarchy, a popular agent-first Linux desktop that bills itself as a malleable OS for the age of agents ([omarchy.org](https://omarchy.org/)). It shows real demand for a desktop people can reshape with agents. Glasshouse's answer for the enterprise is malleable, but governed. See the Snapping and ask the agent and Themes artboards on the [mockups canvas](https://claude.ai/artifact/Y5fH2vFk3fWUvWumZTRATC).
+**Defaults and setup**
+- UX-1. Chef's-choice defaults: one curated set of apps, settings and layouts, so users face almost no upfront choices. IT policy covers the rest.
+- UX-2. Setup asks individuals five questions or fewer and org-enrolled devices none. A fresh install reaches a working desktop in under 5 minutes.
+- UX-3. A "Try Glasshouse" virtual machine runs on Mac and Windows, so evaluators and pilot teams can explore before installing.
+**Themes**
+- UX-10. One theme restyles the whole system at once: menu bar, dock, windows, tiles, notifications, terminal and wallpaper.
+- UX-11. IT can set an org brand theme and choose which other themes users may pick. Every theme must meet WCAG 2.2 AA contrast, and light and dark modes work everywhere.
+**Speed and the keyboard**
+- UX-20. Everything is reachable by keyboard, with a shortcut cheat sheet one key away. Familiar Windows shortcuts work alongside the Mac-style ones.
+- UX-21. Window snapping and saved layouts: drag a window to an edge or use the layout picker for side-by-side and grid layouts. An optional tiling mode serves power users.
+- UX-22. Performance budgets are checked on every build for input lag, app launch, window open and wake to a usable desktop. A standing papercut program fixes small annoyances fast.
+**An agent one click from any problem**
+- UX-30. Every error, crash and failed-update notification offers "Ask the agent." The agent examines logs or crash data within the user's permissions, explains what happened in plain language, fixes what policy allows, and otherwise opens a help desk ticket with diagnostics attached.
+- UX-31. Any setting can be explained ("why is this turned off?") and, within policy, changed by the agent. Admin policy can be exported as readable text, so it can be reviewed and versioned like code.
+**A malleable desktop**
+- UX-40. The desktop itself can be tailored. Menu-bar widgets, dock add-ons and shell extensions are catalog items that can be built on request (GA-1 to GA-11) or tailored with layers (TL-1 to TL-22), under the same review and permissions as everything else.
 
 ## Core OS and workplace features
 These are the everyday basics enterprise buyers check before anything AI-related. Sign-in, networking, meetings and laptop reliability are where non-Windows desktops have historically lost enterprise deals, so they're treated as release gates.
@@ -572,6 +591,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - UI stack: UI-1 to UI-6
 - Agent engine: AE-1, AE-2 (invoice reconciliation), AE-3, AE-4, AE-10 to AE-12, AE-30
 - Tailoring, minimal for Pilot 1: TL-1, TL-2, TL-10, TL-11 and TL-13 on our first-party agents, with undo
+- Desktop experience: UX-1, UX-2, UX-10, UX-20 to UX-22, UX-30
 **P1 · V1 GA**
 - AW-6, DA-4, DA-14, NV-4, NV-21, NV-22, NV-30 to NV-32
 - DP-6, DP-11, DP-20, DP-30, AU-4, AU-11, AU-22
@@ -587,6 +607,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Agent engine: AE-2 (remaining agents), AE-20 to AE-25
 - Apps built on request: GA-1 to GA-11
 - Tailoring catalog items: TL-3, TL-4, TL-12, TL-14, TL-20 to TL-22
+- Desktop experience: UX-3, UX-11, UX-31, UX-40
 **P2 · Later**
 - Undo into third-party SaaS through compensating actions at scale
 - A public agent and adapter marketplace
