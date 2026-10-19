@@ -81,6 +81,49 @@ pub fn about_overlay<'a>(theme: &Theme, about: &'a About) -> Element<'a, Message
     centered(window(body, 380.0), Message::CloseSystemWindow)
 }
 
+/// The keyboard shortcuts (UX-20), in their groups.
+pub fn shortcuts_overlay<'a>(theme: &Theme) -> Element<'a, Message> {
+    let mut groups = Column::new().spacing(14);
+    for (group, shortcuts) in crate::shortcuts::SHEET {
+        let mut lines = Column::new().spacing(6);
+        for shortcut in *shortcuts {
+            let keys = container(text(shortcut.keys).size(12).font(fonts::MEDIUM).color(INK))
+                .padding(Padding::from([2, 8]))
+                .style(|_| style::panel(hexa(0xFFFFFF, 0.10), 6.0));
+            lines = lines.push(
+                row![
+                    container(keys).width(Length::Fixed(130.0)),
+                    text(shortcut.does).size(13).color(INK),
+                ]
+                .spacing(12)
+                .align_y(Vertical::Center),
+            );
+        }
+        groups = groups.push(
+            column![
+                text(*group).size(12).font(fonts::SEMIBOLD).color(MUTED),
+                lines
+            ]
+            .spacing(8),
+        );
+    }
+    let body = column![
+        text("Keyboard Shortcuts")
+            .size(18)
+            .font(fonts::SEMIBOLD)
+            .color(INK),
+        divider(),
+        groups,
+        divider(),
+        row![
+            iced_widget::space().width(Length::Fill),
+            push_button(theme, "Close", Some(Message::CloseSystemWindow), true),
+        ],
+    ]
+    .spacing(12);
+    centered(window(body, 460.0), Message::CloseSystemWindow)
+}
+
 /// Force Quit: the running agents, one to choose, and the button that
 /// stops it.
 pub fn force_quit_overlay<'a>(theme: &Theme, quit: &ForceQuit<'a>) -> Element<'a, Message> {

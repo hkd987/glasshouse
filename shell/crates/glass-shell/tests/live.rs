@@ -398,7 +398,7 @@ fn the_mark_opens_the_system_menu_and_sign_out_signs_out() {
         [Message::ToggleSystemMenu]
     );
     live.update(Message::ToggleSystemMenu);
-    let task = (40..120)
+    let task = (40..180)
         .step_by(6)
         .flat_map(|y| (20..300).step_by(40).map(move |x| (x, y)))
         .find_map(|(x, y)| {
@@ -869,4 +869,63 @@ fn dk2_the_switcher_shows_each_window_with_the_chosen_one_marked() {
         at(&open, 40, 450),
         "the rest is left alone"
     );
+}
+
+#[test]
+fn ux20_the_cheat_sheet_lists_what_the_desktop_does_with_its_keys() {
+    let mut live = Live::new(fixtures::tasks());
+    live.set_windows(windows(&[(7, "Terminal"), (3, "Activity Monitor")]));
+    let ch = |c: &str| Key::Character(c.into());
+    let cases = [
+        (
+            "Ctrl Space",
+            Key::Named(Named::Space),
+            Modifiers::CTRL,
+            Message::OpenCommandBar,
+        ),
+        (
+            "Alt Tab",
+            Key::Named(Named::Tab),
+            Modifiers::ALT,
+            Message::SwitchWindows { back: false },
+        ),
+        ("Super /", ch("/"), Modifiers::LOGO, Message::OpenShortcuts),
+        ("Super L", ch("l"), Modifiers::LOGO, Message::LockScreen),
+        (
+            "Ctrl Super Q",
+            ch("q"),
+            Modifiers::CTRL | Modifiers::LOGO,
+            Message::LockScreen,
+        ),
+        (
+            "Shift Super Q",
+            ch("Q"),
+            Modifiers::SHIFT | Modifiers::LOGO,
+            Message::SignOut,
+        ),
+        (
+            "Alt Super Esc",
+            Key::Named(Named::Escape),
+            Modifiers::ALT | Modifiers::LOGO,
+            Message::OpenForceQuit,
+        ),
+        (
+            "Ctrl Shift Esc",
+            Key::Named(Named::Escape),
+            Modifiers::CTRL | Modifiers::SHIFT,
+            Message::OpenForceQuit,
+        ),
+    ];
+    for (keys, key, modifiers, does) in cases {
+        assert!(
+            glass_shell::shortcuts::listed(keys),
+            "{keys} isn't on the sheet"
+        );
+        assert_eq!(live.shortcut(&key, modifiers), Some(does), "{keys}");
+    }
+    // The sheet opens, and Esc closes it.
+    live.update(Message::OpenShortcuts);
+    assert!(live.takes_all_input());
+    let esc = live.shortcut(&Key::Named(Named::Escape), Modifiers::empty());
+    assert_eq!(esc, Some(Message::CloseSystemWindow));
 }

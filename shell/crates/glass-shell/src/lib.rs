@@ -26,6 +26,7 @@ pub mod render;
 pub mod screens;
 pub mod session;
 pub mod setup;
+pub mod shortcuts;
 mod style;
 pub mod theme;
 pub mod tiles;
@@ -133,6 +134,8 @@ pub enum Message {
     ToggleSystemMenu,
     /// The system menu's About Glasshouse.
     OpenAbout,
+    /// The keyboard shortcuts' cheat sheet (Super /, UX-20).
+    OpenShortcuts,
     /// The system menu's Force Quit… (Alt Super Esc, or Ctrl Shift Esc).
     OpenForceQuit,
     /// Choose the agent Force Quit would stop.

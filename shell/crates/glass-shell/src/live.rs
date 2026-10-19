@@ -86,6 +86,8 @@ struct Locked {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SystemWindow {
     About,
+    /// The keyboard shortcuts.
+    Shortcuts,
     /// The agent chosen to stop, if one is.
     ForceQuit(Option<TaskId>),
     /// "Restart now?" or "Shut down now?"
@@ -535,6 +537,13 @@ impl Live {
                 self.window = Some(SystemWindow::About);
                 None
             }
+            Message::OpenShortcuts => {
+                self.system_menu = false;
+                self.menu = false;
+                self.launcher = false;
+                self.window = Some(SystemWindow::Shortcuts);
+                None
+            }
             Message::OpenForceQuit => {
                 self.system_menu = false;
                 self.menu = false;
@@ -831,6 +840,10 @@ impl Live {
             {
                 Some(Message::LockScreen)
             }
+            // The cheat sheet: Super / (and Super ?, Shift held).
+            Key::Character(c) if (c == "/" || c == "?") && modifiers.logo() => {
+                Some(Message::OpenShortcuts)
+            }
             Key::Named(Named::Escape)
                 if (modifiers.alt() && modifiers.logo())
                     || (modifiers.control() && modifiers.shift()) =>
@@ -987,6 +1000,7 @@ impl Live {
         overlays.extend(bar.map(|bar| command_bar::overlay(theme, bar)));
         match self.window {
             Some(SystemWindow::About) => overlays.push(system::about_overlay(theme, &self.about)),
+            Some(SystemWindow::Shortcuts) => overlays.push(system::shortcuts_overlay(theme)),
             Some(SystemWindow::ForceQuit(chosen)) => {
                 let running = self.tasks.iter().filter(|t| t.state.is_live()).collect();
                 overlays.push(system::force_quit_overlay(

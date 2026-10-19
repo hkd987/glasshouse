@@ -361,6 +361,11 @@ fn system_menu<'a>(theme: &Theme, person: &str, lockable: bool) -> Element<'a, M
     let sections: [&[(String, &'static str, Option<Message>)]; 5] = [
         &[
             ("About Glasshouse".to_owned(), "", Some(Message::OpenAbout)),
+            (
+                "Keyboard Shortcuts".to_owned(),
+                "Super /",
+                Some(Message::OpenShortcuts),
+            ),
             // Updates arrive as whole images (BS-4, EP-1), which don't
             // ship yet.
             ("Check for Updates…".to_owned(), "", None),
