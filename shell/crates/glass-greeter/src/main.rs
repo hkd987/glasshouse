@@ -170,6 +170,15 @@ async fn supervise(args: &Args) -> anyhow::Result<()> {
             .spawn()
             .context("starting the desktop")?;
         let su = session.id();
+        // glassd learns who is at the screen and which `su` runs their
+        // desktop (ADR 0031), so the computer can sleep for them.
+        if let Some(pid) = su {
+            tell_glassd(
+                glass_api::methods::SEAT_BEGIN,
+                serde_json::json!({ "user": user, "session_pid": pid }),
+            )
+            .await;
+        }
         let tty_name = tty_name(&args.tty);
         let serving = serve(&mut session, &user, &tty_name);
         let Some(status) = until_stopped(serving, &mut terminate, || {
@@ -181,6 +190,7 @@ async fn supervise(args: &Args) -> anyhow::Result<()> {
             return stopped(&args.tty);
         };
         eprintln!("glass-greeter: {user}'s session ended ({status:?})");
+        tell_glassd(glass_api::methods::SEAT_END, serde_json::Value::Null).await;
         // What the session left running goes with it before the screen
         // and input devices go to anyone else (agents, in jails, stay).
         if let Err(e) = users::end_processes(&user) {
@@ -289,6 +299,24 @@ async fn unlock(user: &str, tty_name: &str, password: session::Password) -> &'st
             eprintln!("glass-greeter: unlocking: {e}");
             session::REFUSED
         }
+    }
+}
+
+/// Tells glassd about the seat (ADR 0031). Best effort: the desktop works
+/// without it; the computer just doesn't sleep on its own.
+async fn tell_glassd(method: &str, params: serde_json::Value) {
+    let socket = std::env::var_os(glass_api::CONTROL_SOCKET_ENV).map_or_else(
+        || PathBuf::from(glass_api::DEFAULT_CONTROL_SOCKET),
+        PathBuf::from,
+    );
+    let told = async {
+        let client = glass_rpc::Client::connect(&socket).await?;
+        client.call::<serde_json::Value>(method, params).await
+    };
+    match tokio::time::timeout(Duration::from_secs(2), told).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => eprintln!("glass-greeter: telling glassd {method}: {e}"),
+        Err(_) => eprintln!("glass-greeter: glassd didn't answer {method}"),
     }
 }
 

@@ -81,11 +81,16 @@ pub struct Live {
     /// When the person last pressed a key or moved the pointer, for
     /// locking after `lock.after_minutes` without use.
     last_input: Instant,
+    /// The screen is blank for going unused (`display.blank_after_minutes`,
+    /// ADR 0031): black until the next key or move, which only wakes it.
+    blank: bool,
 }
 
 /// The screen locks after this long without use unless IT or the person
 /// set otherwise (`lock.after_minutes`).
 const LOCK_AFTER_MINUTES: i64 = 10;
+/// And blanks after this long (`display.blank_after_minutes`); 0 is never.
+const BLANK_AFTER_MINUTES: i64 = 5;
 
 /// A list the arrows move through and Enter chooses from (UX-20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,6 +273,7 @@ impl Live {
             selected: None,
             settings: SettingsView::default(),
             last_input: Instant::now(),
+            blank: false,
         };
         let waiting: Vec<TaskId> = live
             .tasks
@@ -366,6 +372,38 @@ impl Live {
             && at.saturating_duration_since(self.last_input) >= limit
     }
 
+    /// Whether the screen should blank at `at` for going unused as long as
+    /// `display.blank_after_minutes` says (ADR 0031); 0 is never.
+    pub fn blank_due(&self, at: Instant) -> bool {
+        let minutes = self
+            .settings
+            .number("display.blank_after_minutes", BLANK_AFTER_MINUTES)
+            .clamp(0, 24 * 60);
+        let Ok(minutes) = u64::try_from(minutes) else {
+            return false;
+        };
+        minutes > 0
+            && !self.blank
+            && self.leaving.is_none()
+            && at.saturating_duration_since(self.last_input) >= Duration::from_secs(minutes * 60)
+    }
+
+    /// Blanks the screen.
+    pub fn blank(&mut self) {
+        self.blank = true;
+    }
+
+    /// Whether the screen is blank.
+    pub fn is_blank(&self) -> bool {
+        self.blank
+    }
+
+    /// A key or a move on a blank screen: it comes back, and that input
+    /// does nothing else. Whether it was blank.
+    pub fn wake(&mut self) -> bool {
+        std::mem::replace(&mut self.blank, false)
+    }
+
     pub fn shows_dock(&self) -> bool {
         self.dock_raised || self.launcher || self.windows.iter().all(|w| w.minimized)
     }
@@ -399,12 +437,13 @@ impl Live {
             || self.launcher
             || self.leaving.is_some()
             || self.switching.is_some()
+            || self.blank
     }
 
     /// Whether apps' windows may show: never behind the lock screen or the
     /// restarting frame.
     pub fn shows_windows(&self) -> bool {
-        self.locked.is_none() && self.leaving.is_none()
+        self.locked.is_none() && self.leaving.is_none() && !self.blank
     }
 
     /// The sign-in screen's answer to an unlock request.
@@ -1163,6 +1202,10 @@ impl Live {
         // everything, until the machine goes.
         if let Some(power) = self.leaving {
             return system::leaving_overlay(power);
+        }
+        // Blank for going unused: black, nothing else, until a key or move.
+        if self.blank {
+            return system::blank();
         }
         // Locked: the sign-in screen's look, for the person signed in.
         if let Some(locked) = &self.locked {

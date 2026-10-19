@@ -30,6 +30,7 @@ mod execute;
 mod labels;
 mod model;
 mod runtime;
+mod seat;
 mod supervise;
 mod tailor;
 mod task;

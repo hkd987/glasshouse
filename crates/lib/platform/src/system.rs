@@ -423,6 +423,28 @@ pub fn service_enabled(name: &str) -> bool {
         && cmd::run("service", &[name, "enabled"]).is_ok()
 }
 
+/// The parent of process `pid`, from the base system's `ps`; `None` when
+/// there is no such process.
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    cmd::run("ps", &["-o", "ppid=", "-p", &pid.to_string()])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// What puts the computer to sleep (ACPI S3) and returns once it wakes.
+pub const SLEEP_COMMAND: (&str, &[&str]) = ("acpiconf", &["-s", "3"]);
+
+/// Puts the computer to sleep, returning when it wakes (ADR 0031).
+/// Callers pause agents first (PM-5).
+pub fn sleep_machine() -> Result<()> {
+    if !cfg!(target_os = "freebsd") {
+        return Err(PlatformError::Unsupported("sleeping the computer".into()));
+    }
+    cmd::run(SLEEP_COMMAND.0, SLEEP_COMMAND.1).map(|_| ())
+}
+
 /// Restarts an rc.d service. Callers check it's on IT's approved list.
 pub fn restart_service(name: &str) -> Result<()> {
     if !cfg!(target_os = "freebsd") {
@@ -491,6 +513,14 @@ fn parse_ifconfig(text: &str) -> Vec<Interface> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adr0031_a_parent_comes_from_ps_and_sleep_is_acpi_s3() {
+        let me = std::process::id();
+        assert_eq!(parent_pid(me), Some(std::os::unix::process::parent_id()));
+        assert_eq!(parent_pid(u32::MAX), None);
+        assert_eq!(SLEEP_COMMAND, ("acpiconf", &["-s", "3"][..]));
+    }
 
     #[test]
     fn processes_name_their_jail() {

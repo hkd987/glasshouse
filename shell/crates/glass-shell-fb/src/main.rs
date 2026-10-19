@@ -61,6 +61,8 @@ const CONTROL_LAYOUT: Controls = Controls {
 const SETTLE: Duration = Duration::from_millis(50);
 /// While glassd isn't answering, how often to try it again.
 const RECONNECT: Duration = Duration::from_millis(500);
+/// How often, at most, the desktop tells glassd the person is using it.
+const SEAT_REPORT: Duration = Duration::from_secs(15);
 
 struct Args {
     tty: PathBuf,
@@ -183,6 +185,9 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
     };
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
+    // When glassd last heard the person is here (ADR 0031): only a desktop
+    // the sign-in screen started is the seat's.
+    let mut reported: Option<Instant> = None;
     let (mut apps_ready, apps_handled) = match shell.apps.as_mut().map(Compositor::fds).transpose()
     {
         Ok(Some(fds)) => watch_apps(fds),
@@ -238,7 +243,24 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 while let Ok(more) = inputs.try_recv() {
                     batch.push(more);
                 }
-                shell.live.touched(Instant::now());
+                let now = Instant::now();
+                shell.live.touched(now);
+                if args.from_sign_in && reported.is_none_or(|at| now.duration_since(at) >= SEAT_REPORT) {
+                    reported = Some(now);
+                    if let Some(client) = client.as_ref() {
+                        let said: Result<serde_json::Value, _> =
+                            client.call(methods::SEAT_ACTIVE, serde_json::Value::Null).await;
+                        if let Err(e) = said {
+                            eprintln!("seat: {e}");
+                        }
+                    }
+                }
+                // A blank screen comes back; that key or move does nothing else.
+                if shell.live.wake() {
+                    shell.display.show_pointer();
+                    shell.draw(true);
+                    continue;
+                }
                 let mut effects = shell.input(&batch);
                 let launching = &mut shell.launching;
                 effects.retain(|effect| match effect {
@@ -307,6 +329,12 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 if shell.live.idle_too_long(Instant::now()) {
                     let effects = Vec::from_iter(shell.live.update(Message::LockScreen));
                     shell.carry_out_all(client.as_ref(), effects).await;
+                }
+                // And whether it has gone unused long enough to blank
+                // (`display.blank_after_minutes`, ADR 0031).
+                if shell.live.blank_due(Instant::now()) {
+                    shell.live.blank();
+                    shell.display.hide_pointer();
                 }
                 redraw = true;
             }

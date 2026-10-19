@@ -1233,3 +1233,36 @@ fn ux1_the_clock_and_the_lock_follow_the_persons_settings() {
     let unlockable = Live::new(fixtures::tasks());
     assert!(!unlockable.idle_too_long(Instant::now() + Duration::from_secs(3600)));
 }
+
+#[test]
+fn adr0031_the_screen_blanks_after_the_persons_minutes_and_the_next_input_only_wakes_it() {
+    use glass_api::settings::{SettingFrom, SettingView, SettingsView};
+    use std::time::{Duration, Instant};
+
+    let mut live = Live::new(fixtures::tasks()).lockable();
+    let start = Instant::now();
+    live.touched(start);
+    let minutes = |n: u64| start + Duration::from_secs(n * 60);
+    assert!(!live.blank_due(minutes(4)), "five minutes by default");
+    assert!(live.blank_due(minutes(5)));
+    live.blank();
+    assert!(live.is_blank() && !live.blank_due(minutes(6)));
+    assert!(
+        live.takes_all_input(),
+        "nothing reaches apps while it's blank"
+    );
+    assert!(!live.shows_windows());
+    assert!(live.wake(), "the first key or move wakes it");
+    assert!(!live.wake() && !live.is_blank());
+
+    // IT sets 0: never.
+    live.set_settings(SettingsView {
+        settings: vec![SettingView {
+            id: "display.blank_after_minutes".into(),
+            value: serde_json::json!(0),
+            locked: true,
+            from: SettingFrom::It,
+        }],
+    });
+    assert!(!live.blank_due(minutes(600)));
+}

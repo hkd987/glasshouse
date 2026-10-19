@@ -8,10 +8,13 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+glass-api.workspace = true
+glass-rpc.workspace = true
 glass-shell.workspace = true
 glass-shell-fb.workspace = true
 glass-platform = { workspace = true, features = ["pam"] }
 anyhow.workspace = true
+serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
 

@@ -737,9 +737,12 @@ name = "glass-greeter"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "glass-api",
  "glass-platform",
+ "glass-rpc",
  "glass-shell",
  "glass-shell-fb",
+ "serde_json",
  "time",
  "tokio",
 ]

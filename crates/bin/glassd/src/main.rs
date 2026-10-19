@@ -402,6 +402,29 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // A new agent version re-checks every layer on it (TL-13).
     runtime.recheck_layers();
 
+    // The computer sleeps when the person at the screen has left it alone
+    // as long as their setting says, agents paused first (ADR 0031).
+    {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
+            loop {
+                tick.tick().await;
+                if !runtime.sleep_due(std::time::Instant::now()) {
+                    continue;
+                }
+                let slept = runtime
+                    .sleep_now(|| {
+                        glass_platform::system::sleep_machine().map_err(|e| e.to_string())
+                    })
+                    .await;
+                if let Err(e) = slept {
+                    tracing::warn!("couldn't sleep the computer: {e}");
+                }
+            }
+        });
+    }
+
     // Chat's keys and the records it kept out go in the audit log (AU-1);
     // news wakes the person's Chat (ADR 0030).
     {

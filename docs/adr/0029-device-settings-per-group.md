@@ -1,7 +1,8 @@
 # 0029. Device settings per group, set in the console
 
 Status: **Accepted.** Built: policy, the console, computers applying them
-and the Settings app. PRD UX-1, AD-2; the owner
+and the Settings app. ADR 0031 extends it to settings the computer applies
+itself (sleep, blank screen) and adds the seat: who is at the screen. PRD UX-1, AD-2; the owner
 asked that the console control device settings, pushed per role in a
 simple way (2026-10-19).
 

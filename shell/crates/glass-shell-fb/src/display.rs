@@ -131,6 +131,11 @@ impl Display {
         }
     }
 
+    /// The pointer shows again, from the next frame (a blank screen woke).
+    pub fn show_pointer(&mut self) {
+        self.pointer_shown = true;
+    }
+
     /// Makes this screen's terminal the one showing (`Framebuffer::show`).
     pub fn show(&self) -> std::io::Result<()> {
         self.fb.show()

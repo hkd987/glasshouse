@@ -64,7 +64,7 @@ pub struct Runtime {
     pub(crate) snapshots: Arc<dyn Snapshotter>,
     pub(crate) gateway: Arc<Gateway>,
     /// Device settings (UX-1, ADR 0029).
-    device_settings: SettingsHandle,
+    pub(crate) device_settings: SettingsHandle,
     /// Users' layers on catalog agents (TL-2).
     pub(crate) layers: LayerStore,
     audit: Arc<AuditLog>,
@@ -78,6 +78,8 @@ pub struct Runtime {
     /// When each person's data in each app last changed, for `app.status`
     /// waits (ADR 0030).
     pub(crate) app_changes: tokio::sync::watch::Sender<crate::apps::AppChanges>,
+    /// Who is at the screen (ADR 0031).
+    pub(crate) seat: Mutex<Option<crate::seat::Seat>>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -154,6 +156,7 @@ impl Runtime {
             supervisors: Mutex::new(Vec::new()),
             opening_app: Mutex::new(()),
             app_changes: tokio::sync::watch::Sender::new(Default::default()),
+            seat: Mutex::new(None),
         })
     }
 
@@ -894,6 +897,10 @@ impl Runtime {
                 "only the system pauses agents for sleep".into(),
             ));
         }
+        Ok(self.pause_for_sleep().await)
+    }
+
+    pub(crate) async fn pause_for_sleep(&self) -> PowerResult {
         let tasks: Vec<Arc<Task>> = self.tasks().values().cloned().collect();
         let mut paused = Vec::new();
         for task in tasks {
@@ -924,9 +931,9 @@ impl Runtime {
         for task in &paused {
             self.state_change(task, "Paused for sleep");
         }
-        Ok(PowerResult {
+        PowerResult {
             tasks: paused.len(),
-        })
+        }
     }
 
     /// The machine woke: agents paused for sleep carry on where they were.
@@ -936,6 +943,10 @@ impl Runtime {
                 "only the system resumes agents after sleep".into(),
             ));
         }
+        Ok(self.resume_after_sleep())
+    }
+
+    pub(crate) fn resume_after_sleep(&self) -> PowerResult {
         let sleeping: Vec<Arc<Task>> = self
             .tasks()
             .values()
@@ -946,9 +957,9 @@ impl Runtime {
             self.release(task, "Resumed after sleep");
             self.state_change(task, "Resumed after sleep");
         }
-        Ok(PowerResult {
+        PowerResult {
             tasks: sleeping.len(),
-        })
+        }
     }
 
     // ---- approvals -------------------------------------------------------

@@ -94,6 +94,15 @@ impl Handler for ControlApi {
             }
             methods::AUDIT_TASK => to_result(&rt.audit_task(&caller, task_ref(params)?)?),
             methods::AUDIT_VERIFY => to_result(&rt.audit_verify(&caller)?),
+            methods::SEAT_BEGIN => {
+                let begin: glass_api::SeatBegin = parse_params(params)?;
+                to_result(&rt.seat_begin(&caller, begin)?)
+            }
+            methods::SEAT_END => to_result(&rt.seat_end(&caller)?),
+            methods::SEAT_ACTIVE => {
+                let peer = conn.peer();
+                to_result(&blocking(|| rt.seat_active(peer))?)
+            }
             methods::SYSTEM_SUSPEND => to_result(&rt.suspend(&caller).await?),
             methods::SYSTEM_RESUME => to_result(&rt.wake(&caller)?),
             methods::EVENTS_SUBSCRIBE => {

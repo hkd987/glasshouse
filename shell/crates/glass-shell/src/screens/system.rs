@@ -243,6 +243,15 @@ pub fn power_overlay<'a>(theme: &Theme, power: Power, running: usize) -> Element
 
 /// The desktop's last frame while the computer restarts or shuts down: the
 /// screen it leaves up until the machine goes.
+/// A blank screen (ADR 0031): black, edge to edge.
+pub fn blank<'a>() -> Element<'a, Message> {
+    container(text(""))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_| style::panel(hex(0x000000), 0.0))
+        .into()
+}
+
 pub fn leaving_overlay<'a>(power: Power) -> Element<'a, Message> {
     let words = match power {
         Power::Restart => "Restarting…",

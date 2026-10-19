@@ -47,6 +47,15 @@ pub const DEFAULT_CONTROL_SOCKET: &str = "/var/run/glasshouse/control.sock";
 /// Environment variable clients read to find the control socket.
 pub const CONTROL_SOCKET_ENV: &str = "GLASS_CONTROL_SOCKET";
 
+/// Who is at the screen, from the sign-in screen (ADR 0031).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeatBegin {
+    pub user: String,
+    /// The `su` running their desktop: its one child is the desktop.
+    pub session_pid: u32,
+}
+
 /// Method names. Params → result types are noted on each.
 pub mod methods {
     /// `()` → [`crate::SystemStatus`]
@@ -114,6 +123,14 @@ pub mod methods {
     /// `()` → [`crate::settings::SettingsView`]: the caller's device
     /// settings (UX-1), as their desktop applies them.
     pub const SETTINGS_GET: &str = "settings.get";
+    /// [`crate::SeatBegin`] → `()`. Root only: the sign-in screen says who
+    /// is at the screen and which `su` runs their desktop (ADR 0031).
+    pub const SEAT_BEGIN: &str = "seat.begin";
+    /// `()` → `()`. Root only: their desktop ended.
+    pub const SEAT_END: &str = "seat.end";
+    /// `()` → `()`. From the desktop at the screen only: the person is
+    /// using it. At most every 15 seconds while there is input.
+    pub const SEAT_ACTIVE: &str = "seat.active";
     /// `()` → `()`, then [`EVENT`] notifications until disconnect.
     pub const EVENTS_SUBSCRIBE: &str = "events.subscribe";
     /// Server notification carrying an [`crate::Event`].

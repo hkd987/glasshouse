@@ -90,6 +90,34 @@ pub fn table() -> &'static [SettingDef] {
                 scope: Scope::Person,
                 default: SettingValue::Number(10),
             },
+            // The desktop blanks the screen; glassd sleeps the computer for
+            // the person at it (ADR 0031). 0 is never.
+            SettingDef {
+                id: "display.blank_after_minutes",
+                section: "Display & sleep",
+                title: "Blank the screen after",
+                help: "Turns the screen black after this long without use; a key or a move brings it back. 0 is never.",
+                kind: Kind::Number {
+                    min: 0,
+                    max: 240,
+                    unit: "minutes",
+                },
+                scope: Scope::Person,
+                default: SettingValue::Number(5),
+            },
+            SettingDef {
+                id: "power.sleep_after_minutes",
+                section: "Display & sleep",
+                title: "Sleep after",
+                help: "Puts the computer to sleep after this long without use. Agents pause first and carry on when it wakes. 0 is never.",
+                kind: Kind::Number {
+                    min: 0,
+                    max: 480,
+                    unit: "minutes",
+                },
+                scope: Scope::Person,
+                default: SettingValue::Number(30),
+            },
             toggle(
                 "clock.hour24",
                 "Date & time",
@@ -225,6 +253,7 @@ pub fn device(doc: &PolicyDocument) -> Vec<Resolved> {
 pub fn describe(def: &SettingDef, value: &SettingValue) -> String {
     match (def.kind, value) {
         (_, SettingValue::Bool(on)) => if *on { "on" } else { "off" }.into(),
+        (Kind::Number { min: 0, .. }, SettingValue::Number(0)) => "never".into(),
         (Kind::Number { unit, .. }, SettingValue::Number(n)) => format!("{n} {unit}"),
         (_, SettingValue::Number(n)) => n.to_string(),
         (_, SettingValue::Text(t)) if t.is_empty() => "none".into(),
