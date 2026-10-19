@@ -49,6 +49,7 @@ glass-app-people = { path = "crates/apps/people" }
 glass-app-settings = { path = "crates/apps/settings" }
 glass-app-chat = { path = "crates/apps/chat" }
 glass-app-meet = { path = "crates/apps/meet" }
+glass-media-relay = { path = "crates/svc/media-relay" }
 
 # Third-party crates. Licenses must pass `deny.toml` (no copyleft).
 anyhow = "1.0.104"
@@ -64,7 +65,8 @@ hex = "0.4.3"
 # to leave the machine; httparse also reads requests to our small servers
 # (glass-http: the app bridge in development, ADR 0024, and the console).
 # OpenSSL itself is for glass-crypto's sealing too (ADR 0030), and for no
-# other crate: tools/check-layers.py enforces both.
+# other crate: tools/check-layers.py enforces both. (str0m, below, runs
+# the meetings relay's DTLS on it.)
 httparse = "1.10.1"
 libc = "0.2.191"
 native-tls = "0.2.18"
@@ -72,6 +74,9 @@ openssl = "0.10.81"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 sha2 = "0.11.1"
+# The meetings relay (ADR 0030): WebRTC in Sans-IO style. Its DTLS and SRTP
+# run on OpenSSL; only glass-media-relay may use it (tools/check-layers.py).
+str0m = { version = "0.24.1", default-features = false, features = ["openssl"] }
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["serde", "formatting", "parsing", "macros"] }

@@ -1,0 +1,123 @@
+@import "../../sdk/src/base.css";
+
+/* Meet: the people in the meeting, then the controls (CF-21). */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #14171c;
+  color: #f2f4f7;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 20px;
+}
+
+.head h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.sealed {
+  color: #a9b2bf;
+  font-size: 12.5px;
+}
+
+.lobby {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  color: #c9d0da;
+}
+
+.stage {
+  display: grid;
+  flex: 1;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  min-height: 0;
+  padding: 0 20px;
+  position: relative;
+}
+
+.tile {
+  position: relative;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #22262d;
+}
+
+.tile video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.tile.self {
+  position: absolute;
+  right: 32px;
+  bottom: 12px;
+  width: 220px;
+  height: 124px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+}
+
+.tile.self video {
+  transform: scaleX(-1);
+}
+
+.tile.waiting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #a9b2bf;
+}
+
+.who {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.5);
+  font-size: 12px;
+}
+
+.controls {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px;
+}
+
+.controls button,
+.lobby button {
+  min-width: 96px;
+  height: 36px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 18px;
+  background: #2f343c;
+  color: #f2f4f7;
+}
+
+.controls button.off {
+  background: #f2f4f7;
+  color: #14171c;
+}
+
+.controls button.danger {
+  background: #d93a3a;
+}
+
+.lobby button.primary {
+  background: var(--accent);
+}

@@ -133,3 +133,11 @@ test("dv3 the first-party manifests check out, and overreach is caught", () => {
   assert.match(problems({ tiers: { "files.read": "auto" } }), /unknown field tiers/);
   assert.match(problems({ id: "Notes App" }), /slug/);
 });
+
+test("cf21 only a meeting app has the camera and microphone; Chat never does", () => {
+  const chat = JSON.parse(readFileSync(new URL("../../chat/manifest.json", import.meta.url), "utf8"));
+  assert.ok(!(chat.permissions ?? []).includes("media"));
+  assert.match(manifestProblems({ ...chat, permissions: ["media"] }).join("; "), /only an app that declares meet\.join/);
+  const meet = { id: "meet", name: "Meet", version: "0.1.0", actions: ["meet.list", "meet.join"], permissions: ["media"], labels: ["internal"] };
+  assert.deepEqual(manifestProblems(meet), []);
+});

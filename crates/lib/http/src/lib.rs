@@ -71,6 +71,7 @@ impl Response {
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
@@ -173,19 +174,24 @@ async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Request, ReadError
     })
 }
 
-/// Writes `response` and closes. A HEAD request gets the head only.
+/// Writes `response` and closes. A HEAD request gets the head only; a 204
+/// has neither a body nor a Content-Length (RFC 9110).
 pub async fn write_response<S: AsyncWrite + Unpin>(
     stream: &mut S,
     response: Response,
     head_only: bool,
 ) -> std::io::Result<()> {
+    let no_content = response.status == 204;
+    let length = match no_content {
+        true => String::new(),
+        false => format!("Content-Length: {}\r\n", response.body.len()),
+    };
     let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n\
+        "HTTP/1.1 {} {}\r\n{length}Connection: close\r\n\
          X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\
          Cross-Origin-Resource-Policy: same-origin\r\n",
         response.status,
         reason(response.status),
-        response.body.len()
     );
     for (name, value) in &response.headers {
         // Values are ours, but a newline must never split a header.
@@ -194,7 +200,7 @@ pub async fn write_response<S: AsyncWrite + Unpin>(
     }
     head.push_str("\r\n");
     stream.write_all(head.as_bytes()).await?;
-    if !head_only {
+    if !head_only && !no_content {
         stream.write_all(&response.body).await?;
     }
     stream.flush().await?;
@@ -260,5 +266,20 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("X-Test: aSet-Cookie: x=1\r\n"), "{text}");
         assert!(text.ends_with("\r\n\r\nhi"));
+    }
+
+    #[tokio::test]
+    async fn no_content_has_no_length_or_body() {
+        let mut out = Vec::new();
+        let response = Response {
+            status: 204,
+            headers: Vec::new(),
+            body: b"ignored".to_vec(),
+        };
+        write_response(&mut out, response, false).await.unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("HTTP/1.1 204 No Content\r\n"), "{text}");
+        assert!(!text.contains("Content-Length"), "{text}");
+        assert!(text.ends_with("\r\n\r\n"), "{text}");
     }
 }

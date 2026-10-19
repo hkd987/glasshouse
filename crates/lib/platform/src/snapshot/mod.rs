@@ -86,4 +86,13 @@ pub trait Snapshotter: Send + Sync + fmt::Debug {
     fn changes_since(&self, handle: &SnapshotHandle) -> Result<Vec<FsChange>>;
 
     fn destroy(&self, handle: &SnapshotHandle) -> Result<()>;
+
+    /// Destroys this backend's snapshots taken before `before`, except
+    /// those in `keep` (AU-20: kept 30 days, and for as long as a task in
+    /// memory could still undo from them). Returns how many went.
+    fn prune(
+        &self,
+        before: std::time::SystemTime,
+        keep: &std::collections::BTreeSet<SnapshotId>,
+    ) -> Result<usize>;
 }

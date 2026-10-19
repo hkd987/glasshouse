@@ -17,6 +17,6 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["check-manifests.ts", "sdk/src", "sdk/test", "mail/src", "mail/test", "calendar/src", "calendar/test", "store/src", "store/test", "settings/src", "chat/src", "console/src", "e2e"],
+  "include": ["check-manifests.ts", "sdk/src", "sdk/test", "mail/src", "mail/test", "calendar/src", "calendar/test", "store/src", "store/test", "settings/src", "chat/src", "meet/src", "meet/test", "console/src", "e2e"],
   "exclude": ["**/dist", "node_modules", "sdk/src/sw.ts"]
 }

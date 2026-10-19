@@ -20,6 +20,9 @@
 #   desk.sh point <x> <y>           move the pointer there, and wait for any redraw (hover)
 #   desk.sh app '<command>'         run an app as the person signed in, in their session (its
 #                                   windows open on the desktop); waits for the window count to change
+#   desk.sh browse <url>            open <url> in the person's Browser, as the dock does (its
+#                                   profile, so IT's settings and our window frame apply); never
+#                                   start the engine by hand with another --user-data-dir
 #   desk.sh wait <regex> [timeout]  wait for a new line in the greeter's log matching <regex>
 #   desk.sh shot <png>              save the screen (vm.sh screendump)
 #   desk.sh log [n]                 the greeter's log, without draw lines (default 20)
@@ -118,6 +121,12 @@ click | key | keydown | keyup | point | drag | scroll)
 	else
 		echo "nothing redrawn"
 	fi
+	;;
+browse)
+	(($# == 1)) || die "usage: desk.sh browse <url>"
+	# The flags of engine::browser (shell/crates/glass-shell/src/engine.rs): the
+	# running engine takes the window, in the Browser profile.
+	exec "$0" app "/usr/local/share/chromium/chrome --ozone-platform=wayland --disable-gpu --no-first-run --no-default-browser-check --disable-background-networking --password-store=basic --user-data-dir=\$HOME/.local/share/glasshouse/engine --profile-directory=Browser $(quote "$1")"
 	;;
 app)
 	(($# == 1)) || die "usage: desk.sh app '<command>'"

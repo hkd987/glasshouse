@@ -14,7 +14,7 @@ use glass_rpc::Client;
 use glass_types::TaskId;
 use serde_json::json;
 
-use crate::common::{Harness, harness, tool};
+use crate::common::{Harness, eventually, harness, tool};
 
 const CHANGED_SINCE: &str = "changed since this task, so it was left as it is";
 
@@ -291,4 +291,33 @@ async fn a_cache_cleanup_comes_back_whole_and_new_cache_files_stay() {
     );
     assert_eq!(read(&h, ".cache/fresh.tmp"), "new");
     assert_eq!(read(&h, ".cache/b.bin"), "new b");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn au20_old_snapshots_go_but_never_while_their_task_can_still_undo() {
+    let h = harness();
+    let task = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let agent = h.agent(task).await;
+    write(&agent, "Reports/existing.txt", "clobbered").await;
+
+    // However old, a snapshot its task still holds stays, so undo works.
+    assert_eq!(h.rt.prune_snapshots(std::time::Duration::ZERO).unwrap(), 0);
+    let report = undo(&h, task, vec![], true).await;
+    assert_eq!(report.restored, ["~/Reports/existing.txt"]);
+
+    // Stopped and dismissed, nothing can undo from them: they go, on the
+    // record.
+    h.rt.stop(&h.me, task).unwrap();
+    eventually(|| !h.rt.get(&h.me, task).unwrap().view.state.is_live()).await;
+    h.rt.dismiss(&h.me, task).unwrap();
+    assert!(h.rt.prune_snapshots(std::time::Duration::ZERO).unwrap() >= 1);
+    let records = glass_audit::read(&h.audit_path(), |r| {
+        r.event.kind == glass_audit::EventKind::SnapshotsRemoved
+    })
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        fs::read_to_string(h.home().join("Reports/existing.txt")).unwrap(),
+        "clobbered"
+    );
 }

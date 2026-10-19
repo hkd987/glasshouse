@@ -290,6 +290,8 @@ pipeline refuses further side effects (fail closed).
 | `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
 | `glassd`, `glassctl`, `glass-mcp`, `glass-app-bridge`, `glass-demo-agent`, `glass-it-agent`, `glass-probe` | bin | Executables |
 | `glass-console` | bin | The org's admin console server (AD-6, ADR 0023): policy, catalog, fleet, signing. Runs on our web servers, never ships in the image |
+| `glass-media-relay` | svc | The meetings relay (CF-21, ADR 0030): rooms the console admits participants to, RTP forwarded unchanged over str0m, its private API. The only crate that may use str0m |
+| `glass-sfu` | bin | The relay's daemon: one UDP port for media, the private API on loopback. Runs on our servers, never ships in the image |
 | `glass-e2e` | tests | End-to-end scenarios |
 | `@glasshouse/sdk`, Mail, Calendar | apps/ (TypeScript) | The first-party web apps and the SDK they share: bridge client, manifests, attribution, offline reads (ADR 0024, `apps/README.md`) |
 | Admin console | apps/console (TypeScript) | The admin console's web app, served by `glass-console` (ADR 0023) |

@@ -1,0 +1,9 @@
+{
+  "name": "@glasshouse/meet",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Meet: Glasshouse video meetings, sealed end to end with SFrame (CF-21, ADR 0030).",
+  "license": "UNLICENSED",
+  "type": "module",
+  "dependencies": { "@glasshouse/sdk": "0.1.0" }
+}

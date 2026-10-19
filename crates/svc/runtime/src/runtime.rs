@@ -902,6 +902,47 @@ impl Runtime {
         Ok(())
     }
 
+    // ---- snapshots (AU-20) -------------------------------------------------
+
+    /// Removes snapshots older than `max_age` that no task in memory could
+    /// still undo from (AU-20: kept 30 days by default). A task's own
+    /// snapshots stay as long as the task does, however old, so undo never
+    /// finds one missing. Blocking: it lists and destroys snapshots.
+    pub fn prune_snapshots(&self, max_age: std::time::Duration) -> Result<usize> {
+        let keep: std::collections::BTreeSet<glass_types::SnapshotId> = self
+            .tasks()
+            .values()
+            .flat_map(|task| {
+                let state = task.lock();
+                state
+                    .snapshots
+                    .iter()
+                    .map(|s| s.handle.id)
+                    .chain(state.takeover.as_ref().map(|h| h.id))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let before = std::time::SystemTime::now()
+            .checked_sub(max_age)
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let gone = self
+            .snapshots
+            .prune(before, &keep)
+            .map_err(|e| RuntimeError::Internal(format!("removing old snapshots: {e}")))?;
+        if gone > 0 {
+            let days = max_age.as_secs() / 86_400;
+            let mut event = AuditEvent::new(
+                EventKind::SnapshotsRemoved,
+                format!(
+                    "{gone} snapshot(s) older than {days} days removed; undo can't go back to them"
+                ),
+            );
+            event.detail = serde_json::json!({ "removed": gone, "older_than_days": days });
+            self.audit(event);
+        }
+        Ok(gone)
+    }
+
     // ---- power (PM-5) ------------------------------------------------------
 
     /// The machine is about to sleep: hold every running agent at its next

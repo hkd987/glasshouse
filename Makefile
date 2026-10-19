@@ -25,7 +25,7 @@ export DIST_PROFILE := $(FREEBSD_PROFILE)
 .PHONY: help build check test lint lint-all fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
 	test-env image-release legal-base ci clean shell shell-test shell-lint shell-preview shell-vm greeter-vm \
 	apps-build apps-test apps-lint apps-dev freebsd-ports \
-	console-dev console-test console-lint
+	console-dev console-test console-lint meet-test
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -166,6 +166,10 @@ console-test: apps-build ## Admin console: Rust tests, then Playwright on a 500-
 	cargo build $(CONSOLE_BINS)
 	cargo build -p glass-app-chat --example colleague
 	cd apps && PLAYWRIGHT_BROWSERS_PATH=$(APPS_BROWSERS) npx playwright test -c e2e/console.config.ts
+
+meet-test: apps-build ## Meetings' media path (CF-21, M1): two pages with the engine's fake camera, sealed with SFrame, through glass-sfu
+	cargo build -p glass-sfu
+	cd apps && PLAYWRIGHT_BROWSERS_PATH=$(APPS_BROWSERS) npx playwright test -c e2e/meet.config.ts
 
 console-lint: apps/node_modules ## Admin console: clippy, types, and no base-system name in what IT sees (BR-1)
 	cargo clippy -p glass-console --all-targets -- -D warnings
