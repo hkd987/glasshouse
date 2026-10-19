@@ -129,7 +129,8 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
     let mut live = Live::new(tasks)
         .without_wallpaper()
         .signed_in_as(signed_in_as())
-        .about(about());
+        .about(about())
+        .with_apps(installed_apps());
     // The sign-in screen started this session, so it can check the
     // password that unlocks the screen (`session`).
     if args.from_sign_in {
@@ -219,6 +220,10 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 effects.retain(|effect| match effect {
                     Effect::Unlock(password) => {
                         ask_to_unlock(password);
+                        false
+                    }
+                    Effect::Launch(program) => {
+                        launch(program);
                         false
                     }
                     _ => true,
@@ -339,6 +344,32 @@ fn sign_in_answers() -> mpsc::UnboundedReceiver<String> {
         eprintln!("unlock: the sign-in screen closed its end");
     });
     answers
+}
+
+/// The first-party apps installed here, for the launcher.
+fn installed_apps() -> Vec<glass_shell::apps::AppEntry> {
+    glass_shell::apps::FIRST_PARTY
+        .iter()
+        .filter(|app| std::path::Path::new(app.command).exists())
+        .cloned()
+        .collect()
+}
+
+/// Starts an app in the person's session: its window opens on this
+/// desktop's compositor. A thread waits for it, so it leaves no zombie.
+fn launch(program: &str) {
+    let started = std::process::Command::new(program)
+        .env("WAYLAND_DISPLAY", "wayland-0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn();
+    match started {
+        Ok(mut child) => {
+            eprintln!("apps: started {program}");
+            std::thread::spawn(move || child.wait());
+        }
+        Err(e) => eprintln!("apps: {program}: {e}"),
+    }
 }
 
 /// The compositor apps' windows open in, on `$XDG_RUNTIME_DIR/wayland-0`,
@@ -600,6 +631,9 @@ impl Shell {
         );
         self.send_to_apps(&typed.apps);
         let mut messages = typed.shortcuts;
+        if typed.super_tapped && !self.live.is_locked() {
+            messages.push(Message::ToggleLauncher);
+        }
         if !typed.events.is_empty() {
             let bar = self.live.command_bar();
             let view = self
@@ -679,8 +713,13 @@ impl Shell {
                 Vec::new()
             }
             // Done in `input`, which has the view; signing out ends the
-            // loop; an unlock request goes to the sign-in screen.
-            Effect::Focus(_) | Effect::SignOut | Effect::Power(_) | Effect::Unlock(_) => Vec::new(),
+            // loop; an unlock request goes to the sign-in screen, and an app
+            // starts there too.
+            Effect::Focus(_)
+            | Effect::SignOut
+            | Effect::Power(_)
+            | Effect::Unlock(_)
+            | Effect::Launch(_) => Vec::new(),
             Effect::Get(task) => {
                 let started = Instant::now();
                 let result: Result<TaskDetail, _> =

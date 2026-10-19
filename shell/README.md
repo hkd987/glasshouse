@@ -56,7 +56,9 @@ turns on `rc.d/glasshouse_greeter`, so a machine, and the dev VM after
 installs debug builds instead: the sign-in screen on the
 first virtual terminal, PAM checks the password (`demo` on development
 VMs), and the desktop starts as that person through `su -l`. Shift Super Q
-signs out back to the sign-in screen. The greeter stays on across reboots
+signs out back to the sign-in screen. Super tapped on its own, or the
+dock's launcher icon, opens the launcher (`apps::FIRST_PARTY`, the apps
+installed on the machine); a click starts the app in a window. The greeter stays on across reboots
 until `os/freebsd/scripts/shell-vm.sh greeter-off`; `make shell-vm` stops
 it while the desktop runs directly. Its log, the desktop's included, is
 `/var/log/glass-greeter.log`.

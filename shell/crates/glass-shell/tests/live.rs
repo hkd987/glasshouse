@@ -659,3 +659,46 @@ fn ui1_apps_windows_hide_behind_the_lock_screen_and_menus_take_the_input() {
     live.unlock_answered(true);
     assert!(live.shows_windows() && !live.takes_all_input());
 }
+
+#[test]
+fn dk2_the_launcher_offers_the_installed_apps_and_starts_one() {
+    use glass_shell::apps::FIRST_PARTY;
+    let mut live = Live::new(fixtures::tasks()).with_apps(FIRST_PARTY.to_vec());
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    // The dock's launcher icon opens it.
+    let opened = (480..960)
+        .step_by(8)
+        .find_map(|x| {
+            click(&mut screen, &live, Point::new(x as f32, 860.0))
+                .into_iter()
+                .find(|m| *m == Message::ToggleLauncher)
+        })
+        .expect("the launcher icon in the dock");
+    live.update(opened);
+    assert!(
+        live.takes_all_input(),
+        "over apps' windows, it takes the input"
+    );
+    // Its Terminal starts the program.
+    let launched = (300..1200)
+        .step_by(10)
+        .flat_map(|x| (300..600).step_by(10).map(move |y| (x, y)))
+        .find_map(|(x, y)| {
+            click(&mut screen, &live, Point::new(x as f32, y as f32))
+                .into_iter()
+                .find(|m| matches!(m, Message::Launch(_)))
+        })
+        .expect("Terminal in the launcher");
+    assert_eq!(
+        live.update(launched),
+        Some(Effect::Launch("/usr/local/bin/glass-terminal"))
+    );
+    assert!(!live.takes_all_input(), "starting an app closes it");
+    // Esc closes it too; an id it doesn't offer starts nothing.
+    live.update(Message::ToggleLauncher);
+    assert_eq!(
+        live.shortcut(&Key::Named(Named::Escape), Modifiers::empty()),
+        Some(Message::ToggleLauncher)
+    );
+    assert_eq!(live.update(Message::Launch("glass.nothing".into())), None);
+}

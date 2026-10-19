@@ -15,6 +15,7 @@
 //! The shell is a control-API client: it knows `glass-api` types and
 //! nothing of the runtime behind them.
 
+pub mod apps;
 pub mod fixtures;
 pub mod fonts;
 pub mod greeter;
@@ -112,6 +113,11 @@ pub enum Message {
     /// Lock the screen until the person's password is given again (Ctrl
     /// Super Q, Super L, or the system menu); agents keep working.
     LockScreen,
+    /// Open or close the launcher (the dock's launcher icon, or Super tapped
+    /// on its own).
+    ToggleLauncher,
+    /// Start the app with this id, from the launcher.
+    Launch(String),
     /// The mark at the left of the menu bar: open or close the system menu.
     ToggleSystemMenu,
     /// The system menu's About Glasshouse.

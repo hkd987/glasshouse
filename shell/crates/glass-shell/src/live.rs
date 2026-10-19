@@ -15,10 +15,12 @@ use glass_types::{ApprovalId, SnapshotId, TaskId};
 use iced_core::keyboard::{Key, Modifiers, key::Named};
 use time::OffsetDateTime;
 
+use crate::apps::AppEntry;
 use crate::greeter::{self, initials};
 use crate::screens::command_bar::{self, CommandBar};
 use crate::screens::desktop::{self, Desktop, Tiles};
 use crate::screens::expanded::{self, Expanded, Rollback, Tab};
+use crate::screens::launcher;
 use crate::screens::login;
 use crate::screens::system;
 use crate::session::Password;
@@ -58,6 +60,10 @@ pub struct Live {
     lockable: bool,
     /// The locked screen, while it's locked.
     locked: Option<Locked>,
+    /// The launcher is open.
+    launcher: bool,
+    /// The apps the launcher offers (`apps::FIRST_PARTY` installed here).
+    apps: Vec<AppEntry>,
 }
 
 /// The locked screen: the sign-in screen's look, for the person signed in.
@@ -137,6 +143,9 @@ pub enum Effect {
     /// Roll back (`task.undo`, AW-15) and hand the report to
     /// [`Live::undo_report`], or the refusal to [`Live::undo_failed`].
     Undo(UndoRequest),
+    /// Start this program, an app from the launcher, in the person's
+    /// session.
+    Launch(&'static str),
 }
 
 impl Effect {
@@ -181,6 +190,8 @@ impl Live {
             leaving: None,
             lockable: false,
             locked: None,
+            launcher: false,
+            apps: Vec::new(),
         };
         let waiting: Vec<TaskId> = live
             .tasks
@@ -209,6 +220,12 @@ impl Live {
         self
     }
 
+    /// The apps the launcher offers.
+    pub fn with_apps(mut self, apps: Vec<AppEntry>) -> Self {
+        self.apps = apps;
+        self
+    }
+
     /// Whether the screen is locked.
     pub fn is_locked(&self) -> bool {
         self.locked.is_some()
@@ -224,6 +241,7 @@ impl Live {
             || self.open.is_some()
             || self.window.is_some()
             || self.locked.is_some()
+            || self.launcher
             || self.leaving.is_some()
     }
 
@@ -529,6 +547,20 @@ impl Live {
                 }
                 None
             }
+            Message::ToggleLauncher => {
+                self.launcher = !self.launcher;
+                if self.launcher {
+                    self.menu = false;
+                    self.system_menu = false;
+                    self.command = None;
+                }
+                None
+            }
+            Message::Launch(id) => {
+                self.launcher = false;
+                let app = self.apps.iter().find(|a| a.id == id)?;
+                Some(Effect::Launch(app.command))
+            }
             Message::ToggleAgents => {
                 self.menu = !self.menu;
                 self.system_menu = false;
@@ -727,6 +759,7 @@ impl Live {
                 Some(Message::OpenForceQuit)
             }
             Key::Named(Named::Escape) if self.window.is_some() => Some(Message::CloseSystemWindow),
+            Key::Named(Named::Escape) if self.launcher => Some(Message::ToggleLauncher),
             Key::Named(Named::Space) if modifiers.control() => Some(if bar {
                 Message::CloseCommandBar
             } else {
@@ -824,23 +857,27 @@ impl Live {
         let expanded = self.expanded(now);
         // Nothing sits over the command bar or the expanded view; otherwise
         // the menu if it's open, else whatever is a banner right now.
-        let tiles =
-            if bar.is_some() || expanded.is_some() || self.system_menu || self.window.is_some() {
+        let tiles = if bar.is_some()
+            || expanded.is_some()
+            || self.system_menu
+            || self.window.is_some()
+            || self.launcher
+        {
+            Tiles::Hidden
+        } else if self.menu {
+            Tiles::Menu
+        } else {
+            let shown: Vec<&TaskView> = self
+                .banners
+                .iter()
+                .filter_map(|b| self.tasks.iter().find(|t| t.id == b.task))
+                .collect();
+            if shown.is_empty() {
                 Tiles::Hidden
-            } else if self.menu {
-                Tiles::Menu
             } else {
-                let shown: Vec<&TaskView> = self
-                    .banners
-                    .iter()
-                    .filter_map(|b| self.tasks.iter().find(|t| t.id == b.task))
-                    .collect();
-                if shown.is_empty() {
-                    Tiles::Hidden
-                } else {
-                    Tiles::Banners(shown)
-                }
-            };
+                Tiles::Banners(shown)
+            }
+        };
         let mut state = Desktop {
             tiles,
             wallpaper: self.wallpaper,
@@ -871,6 +908,9 @@ impl Live {
                 overlays.push(system::power_overlay(theme, power, running));
             }
             None => {}
+        }
+        if self.launcher {
+            overlays.push(launcher::overlay(theme, &self.apps));
         }
         let overlay = match overlays.len() {
             0 | 1 => overlays.pop(),

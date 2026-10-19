@@ -677,7 +677,14 @@ fn dock<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
             false
         ),
         slot(
-            app(hex(0xE9ECEF), glyph(&icons::LAUNCHER, hex(0x5F6875), 24.0)),
+            button(app(
+                hex(0xE9ECEF),
+                glyph(&icons::LAUNCHER, hex(0x5F6875), 24.0)
+            ))
+            .on_press(Message::ToggleLauncher)
+            .padding(0)
+            .style(style::button_like(style::panel(Color::TRANSPARENT, 0.0)))
+            .into(),
             false
         ),
         slot(app(hex(0x1E9BF0), glyph(&icons::MAIL, white, 26.0)), false),

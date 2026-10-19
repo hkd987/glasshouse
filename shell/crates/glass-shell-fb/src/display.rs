@@ -29,6 +29,8 @@ pub struct Display {
     pointer_shown: bool,
     /// A button went down over a window: its release goes there too.
     pressed_on_app: bool,
+    /// Super is down, alone so far.
+    super_alone: bool,
 }
 
 /// A batch of input as the UI takes it.
@@ -40,6 +42,9 @@ pub struct Typed {
     pub shortcuts: Vec<Message>,
     /// What goes to the apps' windows instead.
     pub apps: Vec<AppInput>,
+    /// Super went down and up with nothing else pressed (Windows' Start
+    /// key, DK-2).
+    pub super_tapped: bool,
 }
 
 /// Input for the window under the pointer or with the keyboard.
@@ -97,6 +102,7 @@ impl Display {
             painted: None,
             pointer_shown: true,
             pressed_on_app: false,
+            super_alone: false,
         })
     }
 
@@ -173,6 +179,7 @@ impl Display {
                     moved = true;
                 }
                 Input::Button(button, down) => {
+                    self.super_alone = false;
                     typed.events.push(moved_to(self.pointer));
                     moved = false;
                     // The bare desktop (no UI, no window) takes the keyboard
@@ -210,6 +217,14 @@ impl Display {
                         }));
                 }
                 Input::Key(code, value) => {
+                    // evdev's KEY_LEFTMETA and KEY_RIGHTMETA.
+                    let is_super = matches!(code, 125 | 126);
+                    match (is_super, value) {
+                        (true, 1) => self.super_alone = true,
+                        (true, 0) => typed.super_tapped |= std::mem::take(&mut self.super_alone),
+                        (false, 1) => self.super_alone = false,
+                        _ => {}
+                    }
                     let mut claimed_any = false;
                     for press in self.keyboard.key(code, value) {
                         let claimed =
