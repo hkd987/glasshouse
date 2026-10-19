@@ -387,9 +387,13 @@ fn start(app: &AppEntry) {
     let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     let (program, args) = match &app.start {
         Start::Program { command, .. } => (*command, Vec::new()),
-        Start::Browser { url } => (engine::ENGINE, engine::browser(&home, url.as_deref())),
+        Start::Browser { url } => {
+            seed_profile(&home.join(engine::BROWSER_PROFILE));
+            (engine::ENGINE, engine::browser(&home, url.as_deref()))
+        }
         Start::Web => {
             let port = bridge();
+            seed_profile(&home.join(engine::APPS_PROFILE));
             (engine::ENGINE, engine::web_app(&home, &app.id, port))
         }
     };
@@ -406,6 +410,22 @@ fn start(app: &AppEntry) {
             let _ = child.wait();
         }
         Err(e) => eprintln!("apps: {}: {program}: {e}", app.id),
+    }
+}
+
+/// A new engine profile starts with the desktop's preferences
+/// (`engine::NEW_PROFILE_PREFERENCES`); one that exists is left alone.
+fn seed_profile(profile: &std::path::Path) {
+    let file = profile.join(engine::PREFERENCES_FILE);
+    if profile.exists() {
+        return;
+    }
+    let written = file
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&file, engine::NEW_PROFILE_PREFERENCES));
+    if let Err(e) = written {
+        eprintln!("apps: {}: {e}", file.display());
     }
 }
 

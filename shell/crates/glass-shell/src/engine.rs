@@ -20,6 +20,15 @@ pub const BROWSER_PROFILE: &str = ".config/glasshouse/browser";
 /// Every web app's profile, under the person's home.
 pub const APPS_PROFILE: &str = ".local/share/glasshouse/app-runtime";
 
+/// What a new profile starts with, before the engine first opens it: the
+/// desktop's frame around its windows (the compositor's title bar and
+/// controls, DK-1) rather than the engine's own. The engine fills in the
+/// rest; a profile that exists already is left as it is.
+pub const NEW_PROFILE_PREFERENCES: &str = r#"{"browser":{"custom_chrome_frame":false}}"#;
+
+/// The file a new profile's preferences go in, under its folder.
+pub const PREFERENCES_FILE: &str = "Default/Preferences";
+
 /// Flags every window of the engine gets: our compositor; software
 /// drawing into shared memory (the compositor composites in software, so
 /// GPU rendering would only be copied back); none of the engine's own

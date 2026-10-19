@@ -421,3 +421,33 @@ fn dk1_the_minimize_control_hides_a_window_until_it_is_activated() {
     finish(&mut compositor, front);
     finish(&mut compositor, back);
 }
+
+#[test]
+fn ui1_a_window_fits_the_work_area_under_its_title_bar() {
+    let (mut compositor, socket, _dir) = compositor();
+    let room = (
+        SIZE.0 as i32,
+        SIZE.1 as i32 - WORK_AREA.top - WORK_AREA.bottom - TITLE_BAR,
+    );
+    // Told how big it may be before it draws anything...
+    let big = window(&socket, "Big", (SIZE.0, SIZE.1), 0xFF22_2222);
+    until_told(
+        &mut compositor,
+        &big,
+        &Event::Bounded {
+            width: room.0,
+            height: room.1,
+        },
+    );
+    // ...and, drawn bigger anyway, asked to fit, so it never sits under the
+    // dock or the menu bar.
+    until_told(
+        &mut compositor,
+        &big,
+        &Event::Sized {
+            width: room.0,
+            height: room.1,
+        },
+    );
+    finish(&mut compositor, big);
+}

@@ -63,13 +63,15 @@ use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
     set_data_device_focus,
 };
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
+use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 pub mod client;
@@ -190,6 +192,7 @@ impl Compositor {
         let state = State {
             compositor_state: CompositorState::new::<State>(&dh),
             xdg_shell_state: XdgShellState::new::<State>(&dh),
+            _decoration_state: XdgDecorationState::new::<State>(&dh),
             shm_state: ShmState::new::<State>(&dh, vec![]),
             output_manager_state: OutputManagerState::new_with_xdg_output::<State>(&dh),
             data_device_state: DataDeviceState::new::<State>(&dh),
@@ -681,6 +684,9 @@ fn toplevel_names(toplevel: &ToplevelSurface) -> (String, String) {
 struct State {
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
+    /// Windows are told the frame is ours (DK-1): every one gets our title
+    /// bar and controls, so none draws its own.
+    _decoration_state: XdgDecorationState,
     shm_state: ShmState,
     #[allow(dead_code)] // Keeps `wl_output` and `xdg_output` advertised.
     output_manager_state: OutputManagerState,
@@ -918,6 +924,12 @@ impl State {
         }
     }
 
+    /// The room a window has: the work area under its title bar.
+    fn work_size(&self) -> Size<i32, Logical> {
+        let height = self.size.1 - self.work_area.top - self.work_area.bottom - TITLE_BAR;
+        Size::from((self.size.0, height.max(1)))
+    }
+
     /// Places a window centered in the work area once it has a size.
     fn place(&mut self, surface: &WlSurface) {
         let Some(index) = self
@@ -930,6 +942,20 @@ impl State {
         let size: Size<i32, Logical> = self.unplaced[index].geometry().size;
         if size.w <= 0 || size.h <= 0 {
             return;
+        }
+        // One bigger than the work area is asked to fit it; it's placed at
+        // the size it has now and takes the new one when it next commits.
+        let fits = self.work_size();
+        let size = Size::from((size.w.min(fits.w), size.h.min(fits.h)));
+        if let Some(toplevel) = self.unplaced[index].toplevel()
+            && toplevel
+                .current_state()
+                .size
+                .is_none_or(|s| s.w > fits.w || s.h > fits.h)
+            && self.unplaced[index].geometry().size != size
+        {
+            toplevel.with_pending_state(|state| state.size = Some(size));
+            toplevel.send_pending_configure();
         }
         let window = self.unplaced.remove(index);
         // The window with its title bar, centered in the work area.
@@ -1006,6 +1032,10 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        // As big as it may be: the work area under its title bar
+        // (`xdg_toplevel.configure_bounds`); `place` holds it to that too.
+        let bounds = self.work_size();
+        surface.with_pending_state(|state| state.bounds = Some(bounds));
         let window = Window::new_wayland_window(surface);
         self.next_id += 1;
         self.frames.push(Frame {
@@ -1093,6 +1123,31 @@ impl OutputHandler for State {}
 delegate_compositor!(State);
 delegate_shm!(State);
 delegate_xdg_shell!(State);
+delegate_xdg_decoration!(State);
+
+impl XdgDecorationHandler for State {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        server_side(&toplevel);
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        server_side(&toplevel);
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        server_side(&toplevel);
+    }
+}
+
+/// Whatever a window asks, its frame is ours.
+fn server_side(toplevel: &ToplevelSurface) {
+    toplevel.with_pending_state(|state| {
+        state.decoration_mode = Some(DecorationMode::ServerSide);
+    });
+    if toplevel.is_initial_configure_sent() {
+        toplevel.send_pending_configure();
+    }
+}
 delegate_seat!(State);
 delegate_data_device!(State);
 delegate_output!(State);

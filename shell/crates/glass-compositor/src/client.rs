@@ -55,6 +55,16 @@ pub enum Event {
     Scrolled(i32),
     /// The compositor asked it to close.
     CloseAsked,
+    /// The compositor asked for this size (a configure with one).
+    Sized {
+        width: i32,
+        height: i32,
+    },
+    /// The compositor said how big it may be (`configure_bounds`).
+    Bounded {
+        width: i32,
+        height: i32,
+    },
 }
 
 /// A window's client, running on a thread of its own.
@@ -241,7 +251,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
                     app.compositor = Some(registry.bind(name, version.min(4), qh, ()))
                 }
                 "wl_shm" => app.shm = Some(registry.bind(name, 1, qh, ())),
-                "xdg_wm_base" => app.wm_base = Some(registry.bind(name, 1, qh, ())),
+                "xdg_wm_base" => app.wm_base = Some(registry.bind(name, version.min(4), qh, ())),
                 "wl_seat" => app.seat = Some(registry.bind(name, version.min(5), qh, ())),
                 _ => {}
             }
@@ -289,9 +299,18 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for App {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let xdg_toplevel::Event::Close = event {
-            app.close_asked = true;
-            app.tell(Event::CloseAsked);
+        match event {
+            xdg_toplevel::Event::Close => {
+                app.close_asked = true;
+                app.tell(Event::CloseAsked);
+            }
+            xdg_toplevel::Event::Configure { width, height, .. } if width > 0 && height > 0 => {
+                app.tell(Event::Sized { width, height });
+            }
+            xdg_toplevel::Event::ConfigureBounds { width, height } => {
+                app.tell(Event::Bounded { width, height });
+            }
+            _ => {}
         }
     }
 }
