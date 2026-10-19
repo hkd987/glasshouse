@@ -60,6 +60,10 @@ struct Args {
 /// didn't start.
 static READY: AtomicBool = AtomicBool::new(false);
 
+/// How long snapshots are kept (AU-20), and how often that is checked.
+const SNAPSHOTS_KEPT: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+const SNAPSHOT_CHECK: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
 fn main() -> ExitCode {
     // GLASS_LOG is `level` or `target=level,...`, e.g. `glass_runtime=debug,info`.
     let filter = std::env::var("GLASS_LOG")
@@ -421,6 +425,27 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
                     .await;
                 if let Err(e) = slept {
                     tracing::warn!("couldn't sleep the computer: {e}");
+                }
+            }
+        });
+    }
+
+    // Snapshots are kept 30 days (AU-20), and for as long as a task in
+    // memory could undo from them: checked at start and then daily.
+    {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(SNAPSHOT_CHECK);
+            loop {
+                tick.tick().await;
+                let runtime = Arc::clone(&runtime);
+                match tokio::task::spawn_blocking(move || runtime.prune_snapshots(SNAPSHOTS_KEPT))
+                    .await
+                {
+                    Ok(Ok(0)) => {}
+                    Ok(Ok(gone)) => tracing::info!(gone, "removed snapshots older than 30 days"),
+                    Ok(Err(e)) => tracing::warn!("removing old snapshots: {e}"),
+                    Err(e) => tracing::warn!("removing old snapshots: {e}"),
                 }
             }
         });

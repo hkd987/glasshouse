@@ -99,6 +99,8 @@ pub enum EventKind {
     /// The computer was put to sleep after the person at it left it alone,
     /// with the agents it paused (ADR 0031, PM-5).
     Slept,
+    /// Snapshots past their time were removed (AU-20: kept 30 days).
+    SnapshotsRemoved,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

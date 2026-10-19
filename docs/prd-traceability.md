@@ -126,7 +126,7 @@ thumbnails are not started.
 | AU-2 Append-only, hash-chained, streamed in OCSF/CEF to the SIEM | Partial | chain + verify done (unit tamper tests); OCSF/CEF export, streaming and OpenBSM not started |
 | AU-3 Rebuild any task end to end | **Done** | `audit.task`, `glassctl audit` |
 | AU-10 "by [agent] for [user]" metadata | **Done** | xattr on files, header on mail (verified in the VM), sealed inside an agent's chat message (`au10_an_agents_message_carries_by_agent_for_user_inside_the_seal`) |
-| AU-20 Snapshots before Notify steps, every 5 min, kept 30 days | Partial | before Notify and first change done; cadence and retention not started (snapshots are never destroyed yet) |
+| AU-20 Snapshots before Notify steps, every 5 min, kept 30 days | Partial | before Notify and first change done; kept 30 days: glassd removes older ones at start and daily, never one a task in memory could still undo from (`undo.rs` au20_…, `snapshot::*::au20_…`); the 5-minute cadence not started |
 | AU-21 Undo all, lists what it couldn't undo | **Done** | pipeline + e2e `invoices`; single changes too (Changes mockup): pipeline `undoing_single_changes…`, e2e `changes`. Only the task's own files, and a file changed since is left and listed (ADR 0017): `crates/svc/runtime/tests/undo.rs` |
 
 ## Admin, licensing, catalog

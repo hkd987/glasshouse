@@ -5,10 +5,11 @@
 //! through the hidden `.zfs/snapshot/<name>` directory and changes come from
 //! `zfs diff`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use glass_types::SnapshotId;
 
@@ -165,6 +166,41 @@ impl Snapshotter for ZfsSnapshotter {
         }
         Ok(())
     }
+
+    fn prune(&self, before: SystemTime, keep: &BTreeSet<SnapshotId>) -> Result<usize> {
+        let cutoff = before.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let kept: BTreeSet<String> = keep
+            .iter()
+            .map(|id| format!("{SNAPSHOT_PREFIX}{}", id.short()))
+            .collect();
+        let out = cmd::run(
+            "zfs",
+            &["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation"],
+        )?;
+        let mut gone = 0;
+        for (name, created) in ours(&out) {
+            let snap = name.split_once('@').map_or("", |(_, s)| s);
+            if created < cutoff && !kept.contains(snap) {
+                cmd::run("zfs", &["destroy", name])?;
+                gone += 1;
+            }
+        }
+        Ok(gone)
+    }
+}
+
+/// Our snapshots in `zfs list -H -p -t snapshot -o name,creation` output:
+/// each name and when it was taken (seconds since the epoch).
+fn ours(list: &str) -> Vec<(&str, u64)> {
+    list.lines()
+        .filter_map(|line| {
+            let (name, created) = line.split_once('\t')?;
+            let snap = name.split_once('@')?.1;
+            (snap.starts_with(SNAPSHOT_PREFIX) && !name.contains(char::is_whitespace))
+                .then_some(())?;
+            Some((name, created.trim().parse().ok()?))
+        })
+        .collect()
 }
 
 /// Parses `zfs diff -FH` output: `<change>\t<type>\t<path>[\t<new path>]`.
@@ -239,6 +275,22 @@ fn unescape(field: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn au20_only_our_snapshots_are_listed_for_pruning() {
+        let out = "zroot/home/demo@glass-0ea6688a\t1760900000\n\
+                   zroot/home/demo@nightly\t1700000000\n\
+                   zroot/home@glass-5d70ab28\t1700000001\n\
+                   garbage line\n\
+                   zroot/home/demo@glass-x\tnot-a-number\n";
+        assert_eq!(
+            ours(out),
+            [
+                ("zroot/home/demo@glass-0ea6688a", 1_760_900_000),
+                ("zroot/home@glass-5d70ab28", 1_700_000_001)
+            ]
+        );
+    }
 
     #[test]
     fn parses_diff_output() {

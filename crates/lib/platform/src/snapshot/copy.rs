@@ -1,8 +1,10 @@
 //! Snapshots by copying, for development hosts without ZFS. Each root is
 //! copied whole, so keep development data small.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use glass_types::SnapshotId;
 
@@ -89,6 +91,32 @@ impl Snapshotter for CopySnapshotter {
             _ => Ok(()),
         }
     }
+
+    fn prune(&self, before: SystemTime, keep: &BTreeSet<SnapshotId>) -> Result<usize> {
+        let entries = match fs::read_dir(&self.store) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(PlatformError::io("listing the snapshot store", e)),
+        };
+        let mut gone = 0;
+        for entry in entries.flatten() {
+            // Only folders named after a snapshot are ours.
+            let Some(id) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<SnapshotId>().ok())
+            else {
+                continue;
+            };
+            let dir = entry.path();
+            if !keep.contains(&id) && taken(&dir).is_some_and(|t| t < before) {
+                fs::remove_dir_all(&dir)
+                    .map_err(|e| PlatformError::io(format!("removing {}", dir.display()), e))?;
+                gone += 1;
+            }
+        }
+        Ok(gone)
+    }
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
@@ -102,6 +130,11 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
             .map_err(|e| PlatformError::io("copying into snapshot", e))?;
     }
     Ok(())
+}
+
+/// When a stored snapshot was taken: its folder's modification time.
+fn taken(dir: &Path) -> Option<SystemTime> {
+    fs::metadata(dir).and_then(|m| m.modified()).ok()
 }
 
 /// Regular files under `root`, relative to it. Symlinks are not followed.
@@ -134,6 +167,33 @@ fn list_files(root: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn au20_snapshots_past_their_time_go_unless_a_task_still_holds_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("a.txt"), "a").unwrap();
+        let snaps = CopySnapshotter::new(dir.path().join("snaps"));
+        let (old, held, new) = (SnapshotId::new(), SnapshotId::new(), SnapshotId::new());
+        for id in [old, held, new] {
+            snaps.snapshot(id, std::slice::from_ref(&home)).unwrap();
+        }
+        let long_ago = SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 3600);
+        for id in [old, held] {
+            fs::File::open(dir.path().join("snaps").join(id.to_string()))
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+        let month_ago = SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 3600);
+        assert_eq!(snaps.prune(month_ago, &BTreeSet::from([held])).unwrap(), 1);
+        let left: BTreeSet<String> = fs::read_dir(dir.path().join("snaps"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(left, BTreeSet::from([held.to_string(), new.to_string()]));
+    }
 
     #[test]
     fn detects_changes_and_serves_old_content() {
