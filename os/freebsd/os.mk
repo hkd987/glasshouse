@@ -54,5 +54,5 @@ image: ## Stage and bake build/images/glasshouse-<ver>-amd64.qcow2 (from the off
 	$(FREEBSD_SCRIPTS)/bake-image.sh
 
 image-pkgbase: ## Stage and bake glasshouse-<ver>-amd64-desktop.qcow2 from os/freebsd/images/desktop.pkgs (IMAGE=...)
-	$(FREEBSD_SCRIPTS)/stage-dist.sh
+	STAGE_FOR=pkgbase $(FREEBSD_SCRIPTS)/stage-dist.sh
 	$(FREEBSD_SCRIPTS)/bake-pkgbase.sh $(or $(IMAGE),desktop)

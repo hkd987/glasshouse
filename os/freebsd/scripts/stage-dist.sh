@@ -5,6 +5,8 @@
 # Binaries come from ${CARGO_TARGET_DIR:-target}/x86_64-unknown-freebsd/${DIST_PROFILE:-release}/,
 # and shell/<binary> from the shell workspace's ${SHELL_TARGET_DIR:-shell/target}/x86_64-unknown-freebsd/<same>/
 # (a worktree can stage another checkout's builds by pointing both at them).
+# STAGE_FOR=pkgbase (make image-pkgbase): for an image built from base packages; its source offer names
+# the pinned catalog's source packages instead of the release's src.txz.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -58,6 +60,19 @@ for name in "${shipped[@]}"; do notice_args+=(--package "$name"); done
 # The shell's crates, and the fonts it embeds.
 for name in "${shell_shipped[@]}"; do notice_args+=(--shell-package "$name"); done
 if ((${#shell_shipped[@]})); then notice_args+=(--assets "$REPO_ROOT/shell/assets/fonts"); fi
+# An image built from base packages (STAGE_FOR=pkgbase, make image-pkgbase) offers the source
+# packages of the catalog it's built from, not the release's src.txz (BR-3).
+if [[ ${STAGE_FOR:-} == pkgbase ]]; then
+	catalog=$CACHE_DIR/pkgbase/$FREEBSD_PKGBASE_REPO/$FREEBSD_PKGBASE_CATALOG
+	if [[ ! -s $catalog ]]; then
+		mkdir -p "$(dirname "$catalog")"
+		curl -fsSL "$FREEBSD_PKGBASE_MIRROR/$FREEBSD_PKGBASE_REPO/$FREEBSD_PKGBASE_CATALOG" -o "$catalog.part"
+		mv "$catalog.part" "$catalog"
+	fi
+	[[ $(sha256sum <"$catalog") == "$FREEBSD_PKGBASE_CATALOG_SHA256  -" ]] ||
+		die "${catalog#"$REPO_ROOT"/} isn't the catalog release.env pins"
+	notice_args+=(--pkgbase-catalog "$catalog" --pkgbase-catalog-sha256 "$FREEBSD_PKGBASE_CATALOG_SHA256")
+fi
 python3 "$REPO_ROOT/tools/legal/notices.py" "${notice_args[@]}" \
 	--base-txz "$CACHE_DIR/$FREEBSD_BASE_TXZ" \
 	--notices "$DIST_DIR/usr/local/share/glasshouse/legal/NOTICES.txt" 2>/dev/null ||

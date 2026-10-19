@@ -155,6 +155,34 @@ def base_legal(name: str) -> str:
     return path.read_text().strip() if path.exists() else ""
 
 
+def pkgbase_source(catalog: Path, sha256: str) -> list[str]:
+    """For an image built from base packages (ADR 0022): the source
+    packages in the same pinned catalog, which hold the complete
+    corresponding source of every base package in it (BR-3). A base package
+    gets a new version only when its files change, so the catalog's newest
+    source tree is the one each package was built from."""
+    data = subprocess.run(["tar", "-xOf", str(catalog), "data"], check=True, capture_output=True).stdout
+    found = {p["name"]: p for p in json.loads(data)["packages"] if p["name"] in ("FreeBSD-src", "FreeBSD-src-sys")}
+    if len(found) != 2:
+        sys.exit(f"notices: {catalog} has no FreeBSD-src and FreeBSD-src-sys packages")
+    lines = [f"  {name} {p['version']}, SHA-256 {p['sum']}" for name, p in sorted(found.items())]
+    return lines + [f"  in the base package catalog with SHA-256 {sha256}"]
+
+
+def source_offer(pkgbase: list[str] | None) -> str:
+    """The source offer: for the release's src.txz, or for the source
+    packages an image built from base packages came with."""
+    offer = base_legal("source-offer.txt")
+    if not offer or not pkgbase:
+        return offer
+    built_from = "is the unmodified source release\nthis software was built from:"
+    txz = re.compile(r"^  \S+ src\.txz, SHA-256 [0-9a-f]{64}$", re.M)
+    if offer.count(built_from) != 1 or len(txz.findall(offer)) != 1:
+        sys.exit("notices: os/freebsd/legal/source-offer.txt changed shape; update source_offer()")
+    offer = offer.replace(built_from, "is in the unmodified source packages\nthe base system's packages were built from:")
+    return txz.sub(lambda _: "\n".join(pkgbase), offer)
+
+
 def asset_licenses(dirs: list[Path]) -> list[tuple[str, str]]:
     """(label, text) for each license file in the asset directories."""
     found = []
@@ -198,7 +226,7 @@ def third_party(list_path: Path, licenses: Path | None) -> list[dict]:
 
 
 def write_notices(path: Path, packages: list[dict], base: str, assets: list[tuple[str, str]],
-                  libraries: list[dict]) -> list[str]:
+                  libraries: list[dict], offer: str) -> list[str]:
     """Writes the notices file; identical license texts (most Apache-2.0
     copies) are printed once and referenced. Returns crates that ship no
     license file of their own."""
@@ -211,7 +239,6 @@ def write_notices(path: Path, packages: list[dict], base: str, assets: list[tupl
         "is reproduced below as that license requires.",
         "",
     ]
-    offer = base_legal("source-offer.txt")
     if offer:
         out += [rule, offer, ""]
     if base:
@@ -330,7 +357,13 @@ def main() -> int:
     ap.add_argument("--third-party", type=Path, help="the staged third-party list (desktop.third-party)")
     ap.add_argument("--third-party-licenses", type=Path,
                     help="their staged license files (usr/local/share/licenses)")
+    ap.add_argument("--pkgbase-catalog", type=Path,
+                    help="for an image built from base packages: the pinned catalog (data.pkg), whose "
+                    "source packages the source offer names")
+    ap.add_argument("--pkgbase-catalog-sha256", help="that catalog's pinned SHA-256")
     args = ap.parse_args()
+    if bool(args.pkgbase_catalog) != bool(args.pkgbase_catalog_sha256):
+        ap.error("--pkgbase-catalog and --pkgbase-catalog-sha256 go together")
 
     meta = metadata()
     packages = shipped_closure(meta, args.package)
@@ -359,7 +392,10 @@ def main() -> int:
 
     if args.notices:
         assets = asset_licenses(args.assets)
-        bare = write_notices(args.notices, packages, base_copyright(args.base_txz), assets, libraries)
+        pkgbase = (pkgbase_source(args.pkgbase_catalog, args.pkgbase_catalog_sha256)
+                   if args.pkgbase_catalog else None)
+        bare = write_notices(args.notices, packages, base_copyright(args.base_txz), assets, libraries,
+                             source_offer(pkgbase))
         print(f"notices: {len(packages)} crates -> {args.notices}", file=sys.stderr)
         for name in bare:
             print(f"notices: {name} ships no license file; listed by SPDX id only", file=sys.stderr)
