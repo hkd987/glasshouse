@@ -19,6 +19,7 @@ the VM (status `io-error`), which looks like a hung VM.
      locked while the agent runs; once it has reported and you merged it,
      `git worktree unlock <path>` first);
    - debug-build incremental caches (rebuilt, slower once);
+   - test binaries left by earlier builds of the same test (only the newest stays);
    - `build/dist`, `build/logs`;
    - VM directories other than `build/vm` with no QEMU running.
    It also resumes any VM QEMU paused because the disk filled.

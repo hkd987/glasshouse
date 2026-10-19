@@ -35,6 +35,7 @@ use glass_compositor::{CONTROL_RADIUS, CONTROLS, Compositor, TITLE_BAR, WorkArea
 use glass_rpc::{Client, ClientError};
 use glass_shell::live::{Effect, Live};
 use glass_shell::screens::desktop::{DOCK_ROOM, MENU_BAR_HEIGHT};
+use glass_shell::screens::login;
 use glass_shell::screens::system;
 use glass_shell::screens::window::Controls;
 use glass_shell::session::Password;
@@ -508,8 +509,22 @@ impl Shell {
         let theme = Theme::glass();
         // The wallpaper stays drawn behind the UI, so a change redraws only
         // what's over it.
-        let display = Display::open(&tty, |w, h| wallpaper::backdrop(&theme.wallpaper, w, h))?;
+        let started = Instant::now();
+        let mut wallpaper_took = Duration::ZERO;
+        let display = Display::open(&tty, |w, h| {
+            let drawing = Instant::now();
+            let backdrop = wallpaper::backdrop(&theme.wallpaper, w, h);
+            wallpaper_took = drawing.elapsed();
+            backdrop
+        })?;
+        let opened = started.elapsed();
         let apps = open_apps(display.pixels());
+        eprintln!(
+            "screen: framebuffer {} ms, wallpaper {} ms, apps' compositor {} ms",
+            (opened - wallpaper_took).as_millis(),
+            wallpaper_took.as_millis(),
+            (started.elapsed() - opened).as_millis()
+        );
         Ok(Self {
             display,
             theme,
@@ -655,6 +670,11 @@ impl Shell {
                 Some(effect) => effects.push(effect),
                 None => {}
             }
+        }
+        // Locked, the password field is all there is to type into: a click
+        // anywhere else leaves it the keyboard.
+        if self.live.is_locked() && batch.iter().any(|i| matches!(i, Input::Button(..))) {
+            self.focus(login::PASSWORD);
         }
         effects
     }

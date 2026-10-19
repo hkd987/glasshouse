@@ -449,6 +449,12 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
                     let view = login::view(&theme, &sign_in, display.size());
                     display.update(view, &typed.events)
                 };
+                // The password field is all there is to type into: a click
+                // anywhere else leaves it the keyboard, as a Mac's does.
+                if batch.iter().any(|i| matches!(i, input::Input::Button(..))) {
+                    let sign_in = greeter.screen(now());
+                    display.focus(login::view(&theme, &sign_in, display.size()), login::PASSWORD);
+                }
                 let redraw = updated.redraw || !updated.messages.is_empty();
                 for message in updated.messages {
                     match greeter.update(message) {
