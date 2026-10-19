@@ -8,6 +8,9 @@
 #   desk.sh signin [password]       sign in (password demo); prints "desktop up in ..."
 #   desk.sh signout                 Shift Super Q, wait for the sign-in screen
 #   desk.sh restart                 restart the sign-in service on its binaries, wait for it
+#   desk.sh fresh <login>...        delete these accounts, their homes and the setup record, so
+#                                   the computer asks first-run setup's questions again (UX-2);
+#                                   for a throwaway VM, never the dev VM's demo account
 #   desk.sh click <x> <y>           click, and wait for the screen to redraw (if it does)
 #   desk.sh drag <x> <y> <x2> <y2>  drag from one point to the other, and wait for the redraw
 #   desk.sh key <keys>              press keys (vm.sh key names: ret, ctrl-spc, alt-meta_l-esc),
@@ -83,8 +86,24 @@ signout)
 restart)
 	n=$(lines)
 	vm_ssh 'service glasshouse_greeter restart >/dev/null'
-	wait_for "$n" "sign-in screen: drawn" 60 >/dev/null
-	echo "sign-in screen up"
+	line=$(wait_for "$n" "^(sign-in screen|setup): drawn" 60) || die "nothing drawn (desk.sh log)"
+	echo "${line%%:*} up"
+	;;
+fresh)
+	(($# >= 1)) || die "usage: desk.sh fresh <login>..."
+	vm_ssh "sh -s -- $(quote "$@")" <<'EOF'
+for login; do
+	pw usershow -n "$login" >/dev/null 2>&1 || continue
+	home=$(pw usershow -n "$login" | cut -d: -f9)
+	pw userdel -n "$login"
+	[ "$home" = "/home/$login" ] || continue # only homes setup made
+	dataset=$(zfs list -H -o name "$home" 2>/dev/null) && [ "${dataset##*/}" = "$login" ] &&
+		zfs destroy -r "$dataset"
+	rm -rf "$home"
+done
+rm -f /var/db/glasshouse/setup.toml
+EOF
+	"$0" restart
 	;;
 click | key | point | drag)
 	n=$(lines)
@@ -126,5 +145,5 @@ shot)
 log)
 	vm_ssh "grep -v 'drawn in' $log | tail -n ${1:-20}"
 	;;
-*) die "usage: desk.sh ready|signin [password]|signout|restart|click x y|key k|point x y|app '<command>'|wait <regex>|shot <png>|log [n]" ;;
+*) die "usage: desk.sh ready|signin [password]|signout|restart|fresh <login>...|click x y|key k|point x y|app '<command>'|wait <regex>|shot <png>|log [n]" ;;
 esac

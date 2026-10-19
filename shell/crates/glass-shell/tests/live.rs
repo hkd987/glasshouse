@@ -702,3 +702,65 @@ fn dk2_the_launcher_offers_the_installed_apps_and_starts_one() {
     );
     assert_eq!(live.update(Message::Launch("glass.nothing".into())), None);
 }
+
+#[test]
+fn ux2_tab_moves_through_setups_fields_and_shift_tab_back() {
+    use glass_shell::screens::setup;
+    use glass_shell::setup::Setup;
+    let theme = Theme::glass();
+    let mut setup = Setup::new(Vec::new());
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    screen.focus(setup::view(&theme, &setup.screen(), SIZE), setup::NAME);
+    let tab = |shift: bool| {
+        let Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            modified_key,
+            physical_key,
+            location,
+            text,
+            repeat,
+            ..
+        }) = key(Key::Named(Named::Tab), Some("\t"))
+        else {
+            unreachable!()
+        };
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            modified_key,
+            physical_key,
+            location,
+            modifiers: if shift {
+                Modifiers::SHIFT
+            } else {
+                Modifiers::empty()
+            },
+            text,
+            repeat,
+        })
+    };
+    let mut typed = Vec::new();
+    for press in [
+        key(Key::Character("a".into()), Some("a")),
+        tab(false),
+        key(Key::Character("b".into()), Some("b")),
+        tab(false),
+        key(Key::Character("c".into()), Some("c")),
+        tab(true),
+        key(Key::Character("d".into()), Some("d")),
+    ] {
+        let view = setup::view(&theme, &setup.screen(), SIZE);
+        for message in screen.update(view, &[press], None).messages {
+            typed.push(message.clone());
+            setup.update(message);
+        }
+    }
+    assert_eq!(
+        typed,
+        [
+            Message::SetupName("a".into()),
+            Message::SetupPassword("b".into()),
+            Message::SetupConfirm("c".into()),
+            Message::SetupPassword("bd".into()),
+        ]
+    );
+}

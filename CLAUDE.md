@@ -53,8 +53,9 @@ details this file leaves out.
   the failures; the whole output is in `build/logs/`. Read the log only
   when that isn't enough.
 - Drive the VM's screen with `os/freebsd/scripts/desk.sh` (`signin`,
-  `signout`, `click`, `key`, `point`, `app`, `shot`, `wait`, `log`): each step waits
-  for the screen to have drawn, so there are no sleep loops to write.
+  `signout`, `click`, `key`, `point`, `app`, `shot`, `wait`, `log`, `fresh` for
+  first-run setup): each step waits for the screen to have drawn, so there are
+  no sleep loops to write.
 - If you type the same multi-step sequence a second time, make it a
   script or a `desk.sh`/`vm.sh` command (and note it here or in the skill
   it belongs to) instead of a third time.

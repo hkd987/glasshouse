@@ -7,7 +7,10 @@ use std::io::BufWriter;
 use std::path::Path;
 
 use iced_core::renderer::Style;
-use iced_core::{Color, Event, Pixels, Point, Rectangle, Size, clipboard, mouse, window};
+use iced_core::widget::operation::{self, Operation, focusable};
+use iced_core::{
+    Color, Event, Pixels, Point, Rectangle, Size, clipboard, event, keyboard, mouse, window,
+};
 use iced_runtime::user_interface::{self as ui, Cache, UserInterface};
 use iced_tiny_skia::Layer;
 use iced_tiny_skia::graphics::{Viewport, damage};
@@ -162,7 +165,7 @@ impl Screen {
                 &mut clipboard::Null,
                 &mut Vec::new(),
             );
-            let (state, _) = ui.update(
+            let (state, statuses) = ui.update(
                 events,
                 cursor,
                 renderer,
@@ -179,6 +182,33 @@ impl Screen {
                     ..
                 }
             );
+            // Tab takes the keyboard to the next text field and Shift Tab
+            // to the one before, as in any form (UX-2's setup has three).
+            for (event, status) in events.iter().zip(&statuses) {
+                if let Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Tab),
+                    modifiers,
+                    ..
+                }) = event
+                    && *status == event::Status::Ignored
+                {
+                    let mut step: Box<dyn Operation> = if modifiers.shift() {
+                        Box::new(focusable::focus_previous())
+                    } else {
+                        Box::new(focusable::focus_next())
+                    };
+                    // It counts the fields first, then moves: one operation
+                    // chained to the next.
+                    loop {
+                        ui.operate(renderer, step.as_mut());
+                        match step.finish() {
+                            operation::Outcome::Chain(next) => step = next,
+                            _ => break,
+                        }
+                    }
+                    redraw = true;
+                }
+            }
         });
         self.cursor = cursor;
         Updated { messages, redraw }
@@ -194,9 +224,7 @@ impl Screen {
     /// command bar's input.
     pub fn focus<Message>(&mut self, view: Element<'_, Message>, id: &'static str) {
         self.with_ui(view, |ui, renderer| {
-            let mut focus = iced_core::widget::operation::focusable::focus::<()>(
-                iced_core::widget::Id::new(id),
-            );
+            let mut focus = focusable::focus::<()>(iced_core::widget::Id::new(id));
             ui.operate(renderer, &mut focus);
         });
     }
