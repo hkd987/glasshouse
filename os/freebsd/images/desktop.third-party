@@ -1,0 +1,20 @@
+# Third-party files the desktop needs, from FreeBSD's packages (ports): one package per line,
+# `<name>-<version> <path>...`, paths inside the package, relative to /.
+#
+# stage-dist.sh copies exactly these paths, and the package's license files
+# (usr/local/share/licenses/<name>-<version>/), out of the cached package into the staged root,
+# so they ship like our own binaries until they come as packages from our own repository (BS-2,
+# ADR 0022 item 3). The version is exact: a package the cache doesn't hold at that version fails
+# the build (`os/freebsd/scripts/ports.sh vm-install <name>` fetches it into the cache).
+#
+# Why files and not the packages: libxkbcommon's package depends on wayland, libxcb and libxml2
+# for its command-line tools and its X11 and layout-registry libraries, and FreeBSD's libxml2
+# package depends on GNU readline (GPLv3). Nothing of ours uses those; the library itself needs
+# only libc. Whether to ship readline is the owner's decision (docs/prd/proposals.md).
+
+# The keyboard: keymaps for the compositor (glass-shell-fb) and native apps' keys (glass-window).
+libxkbcommon-1.13.2     usr/local/lib/libxkbcommon.so.0 usr/local/lib/libxkbcommon.so.0.13.2
+# The keymaps' data, which libxkbcommon compiles a keymap from.
+xkeyboard-config-2.48   usr/local/share/xkeyboard-config-2 usr/local/share/X11/xkb
+# The compositor's software rendering (Smithay's pixman renderer).
+pixman-0.46.4           usr/local/lib/libpixman-1.so.0 usr/local/lib/libpixman-1.so.0.46.4

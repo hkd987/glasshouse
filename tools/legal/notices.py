@@ -17,6 +17,12 @@ dependencies, for the FreeBSD target) and writes:
   --sbom FILE      A CycloneDX 1.5 JSON SBOM. Admins and customer security
                    teams only (BR-4): never stage it into the image or
                    publish it.
+  --third-party LIST
+                   Also list the third-party libraries and data staged from
+                   packages (os/freebsd/images/desktop.third-party): in the
+                   notices with their licenses (from --third-party-licenses,
+                   the staged usr/local/share/licenses), and in the SBOM.
+                   Their licenses must be on deny.toml's allow list too.
   --base-packages FILE
                    Also list the image's base packages in the SBOM (BS-6):
                    the inventory a package-list image build writes beside
@@ -162,7 +168,37 @@ def asset_licenses(dirs: list[Path]) -> list[tuple[str, str]]:
     return found
 
 
-def write_notices(path: Path, packages: list[dict], base: str, assets: list[tuple[str, str]]) -> list[str]:
+def third_party(list_path: Path, licenses: Path | None) -> list[dict]:
+    """The staged third-party packages: name, version, license and the
+    license texts each package installs (catalog.mk names the license;
+    LICENSE only points at the texts)."""
+    found = []
+    for n, line in enumerate(list_path.read_text().splitlines(), 1):
+        fields = line.split("#", 1)[0].split()
+        if not fields:
+            continue
+        name, _, version = fields[0].rpartition("-")
+        if not name or len(fields) < 2:
+            sys.exit(f"notices: {list_path}:{n}: expected '<name>-<version> <path>...'")
+        entry = {"name": name, "version": version, "license": None, "texts": []}
+        folder = licenses / fields[0] if licenses else None
+        if folder and folder.is_dir():
+            catalog = (folder / "catalog.mk").read_text() if (folder / "catalog.mk").exists() else ""
+            ids = re.search(r"^_LICENSE=(.*)$", catalog, re.M)
+            entry["license"] = ids.group(1).strip() if ids else None
+            entry["texts"] = [
+                (f.name, f.read_text(errors="replace").strip())
+                for f in sorted(folder.iterdir())
+                if f.is_file() and f.name not in ("catalog.mk", "LICENSE")
+            ]
+        elif licenses:
+            sys.exit(f"notices: no license files for {fields[0]} in {licenses}")
+        found.append(entry)
+    return found
+
+
+def write_notices(path: Path, packages: list[dict], base: str, assets: list[tuple[str, str]],
+                  libraries: list[dict]) -> list[str]:
     """Writes the notices file; identical license texts (most Apache-2.0
     copies) are printed once and referenced. Returns crates that ship no
     license file of their own."""
@@ -198,6 +234,16 @@ def write_notices(path: Path, packages: list[dict], base: str, assets: list[tupl
                 refs[text] = f"[{len(texts)}]"
             out.append(f"  {name}: license text {refs[text]}")
         out.append("")
+    if libraries:
+        out += [rule, "Third-party libraries and data", rule, ""]
+        for lib in libraries:
+            out += [f"{lib['name']} {lib['version']}", f"  License: {lib['license'] or 'see below'}"]
+            for name, text in lib["texts"]:
+                if text not in refs:
+                    texts.append(text)
+                    refs[text] = f"[{len(texts)}]"
+                out.append(f"  {name}: license text {refs[text]}")
+            out.append("")
     if assets:
         out += [rule, "Fonts and other assets", rule, ""]
         for label, text in assets:
@@ -222,7 +268,7 @@ def base_packages(path: Path) -> list[tuple[str, str]]:
 
 
 def write_sbom(path: Path, packages: list[dict], roots: list[str], version: str,
-               base: list[tuple[str, str]]) -> None:
+               base: list[tuple[str, str]], libraries: list[dict]) -> None:
     components = [
         {
             "type": "library",
@@ -243,6 +289,17 @@ def write_sbom(path: Path, packages: list[dict], roots: list[str], version: str,
             "properties": [{"name": "glasshouse:layer", "value": "base"}],
         }
         for name, pkg_version in base
+    ]
+    components += [
+        {
+            "type": "library",
+            "name": lib["name"],
+            "version": lib["version"],
+            "purl": f"pkg:generic/{lib['name']}@{lib['version']}",
+            "licenses": [{"expression": lib["license"]}] if lib["license"] else [],
+            "properties": [{"name": "glasshouse:layer", "value": "third-party"}],
+        }
+        for lib in libraries
     ]
     sbom = {
         "bomFormat": "CycloneDX",
@@ -270,6 +327,9 @@ def main() -> int:
     ap.add_argument("--sbom", type=Path)
     ap.add_argument("--base-txz", type=Path, help="FreeBSD base.txz, for the base COPYRIGHT")
     ap.add_argument("--base-packages", type=Path, help="the image's base package inventory, for the SBOM")
+    ap.add_argument("--third-party", type=Path, help="the staged third-party list (desktop.third-party)")
+    ap.add_argument("--third-party-licenses", type=Path,
+                    help="their staged license files (usr/local/share/licenses)")
     args = ap.parse_args()
 
     meta = metadata()
@@ -288,21 +348,27 @@ def main() -> int:
         for p in packages
         if not p.get("license") or not license_ids(p["license"]) & allowed
     ]
+    libraries = third_party(args.third_party, args.third_party_licenses) if args.third_party else []
+    problems += [
+        f"{lib['name']} {lib['version']}: license {lib['license']!r} is not on the allow list"
+        for lib in libraries
+        if lib["license"] is not None and not license_ids(lib["license"]) & allowed
+    ]
     for problem in problems:
         print(f"notices: {problem}", file=sys.stderr)
 
     if args.notices:
         assets = asset_licenses(args.assets)
-        bare = write_notices(args.notices, packages, base_copyright(args.base_txz), assets)
+        bare = write_notices(args.notices, packages, base_copyright(args.base_txz), assets, libraries)
         print(f"notices: {len(packages)} crates -> {args.notices}", file=sys.stderr)
         for name in bare:
             print(f"notices: {name} ships no license file; listed by SPDX id only", file=sys.stderr)
     if args.sbom:
         version = next(p["version"] for p in meta["packages"] if p["id"] in meta["workspace_members"])
         base = base_packages(args.base_packages) if args.base_packages else []
-        write_sbom(args.sbom, packages, args.package + args.shell_package, version, base)
-        print(f"notices: SBOM -> {args.sbom} ({len(packages)} crates, {len(base)} base packages)",
-              file=sys.stderr)
+        write_sbom(args.sbom, packages, args.package + args.shell_package, version, base, libraries)
+        print(f"notices: SBOM -> {args.sbom} ({len(packages)} crates, {len(base)} base packages, "
+              f"{len(libraries)} third-party)", file=sys.stderr)
     return 1 if problems else 0
 
 

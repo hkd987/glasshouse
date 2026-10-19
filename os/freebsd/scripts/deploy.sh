@@ -35,6 +35,19 @@ fi
 mv "$new" "$state"
 rm -f "$tarball"
 
+# Every program and library we ship finds the libraries it links: one the system lacks shows
+# here, not when someone signs in (images/desktop.third-party lists those from packages).
+unlinked=$(grep -E '^/usr/local/(s?bin|lib|libexec/glasshouse)/' "$state" | while IFS= read -r f; do
+	[ -f "$f" ] && [ ! -L "$f" ] || continue
+	[ "$(head -c 4 "$f" | od -An -c | tr -d ' ')" = 177ELF ] || continue
+	ldd "$f" 2>/dev/null | grep 'not found' | sed "s|^|$f: |"
+done || true)
+if [ -n "$unlinked" ]; then
+	echo "$unlinked"
+	echo "deploy: shipped programs are missing libraries (above)" >&2
+	exit 1
+fi
+
 # Hooks get stdio on a temp file so daemons they start don't inherit (and pin open) the ssh channel.
 hook() {
 	out=$(mktemp)

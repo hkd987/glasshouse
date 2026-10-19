@@ -24,7 +24,7 @@ export DIST_PROFILE := $(FREEBSD_PROFILE)
 
 .PHONY: help build check test lint lint-all fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
 	test-env image-release legal-base ci clean shell shell-test shell-lint shell-preview shell-vm greeter-vm \
-	apps-build apps-test apps-lint apps-dev
+	apps-build apps-test apps-lint apps-dev freebsd-ports
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -64,7 +64,8 @@ BASE_INVENTORY ?= $(lastword $(sort $(wildcard build/images/glasshouse-*-desktop
 
 sbom: ## Software bill of materials, admins and security reviews only (BR-4); never ship it
 	tools/legal/notices.py $(addprefix --package ,$(SHIPPED)) $(addprefix --shell-package ,$(SHIPPED_SHELL)) \
-		$(if $(BASE_INVENTORY),--base-packages $(BASE_INVENTORY)) --sbom build/sbom/glasshouse.cdx.json
+		$(if $(BASE_INVENTORY),--base-packages $(BASE_INVENTORY)) --third-party os/freebsd/images/desktop.third-party \
+		--sbom build/sbom/glasshouse.cdx.json
 
 timings: ## Profile a clean build; opens target/cargo-timings/cargo-timing.html
 	cargo build --workspace --timings
@@ -79,9 +80,16 @@ dev-host: ## Run glassd here with the insecure host sandbox (development only)
 e2e-vm: freebsd vm-deploy ## Deploy to the FreeBSD VM and run the end-to-end suite
 	tests/e2e/run-vm.sh
 
+# The dev VM takes the packages whole, with all they depend on; images take only the files
+# os/freebsd/images/desktop.third-party lists (stage-dist.sh), from the same cached packages.
+DESKTOP_PORTS := libxkbcommon pixman xkeyboard-config
+freebsd-ports: ## Desktop libraries from packages: into the dev VM, the sysroot and the package cache
+	os/freebsd/scripts/ports.sh vm-install $(DESKTOP_PORTS)
+	os/freebsd/scripts/ports.sh sysroot libxkbcommon pixman
+
 test-env: ## First-time setup of a full test environment (tools, image, VM, deploy)
 	os/freebsd/scripts/check-host-deps.sh $(if $(filter 0,$(shell id -u)),--install)
-	$(MAKE) freebsd-fetch freebsd-sysroot vm-up vm-wait freebsd vm-deploy
+	$(MAKE) freebsd-fetch freebsd-sysroot vm-up vm-wait freebsd-ports freebsd vm-deploy
 	@echo "Test environment ready. Try: make vm-ssh, then: su demo; glassctl agents"
 
 image-release: ## Build a shippable image: release profile (thin LTO), baked qcow2

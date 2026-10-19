@@ -36,8 +36,23 @@ while read -r name path mode extra; do
 	n=$((n + 1))
 done <"$manifest"
 
+# Third-party libraries and data the desktop needs, from FreeBSD's packages, until they come as
+# packages from our own repository (os/freebsd/images/desktop.third-party says which and why).
+third_party=$FREEBSD_OS_DIR/images/desktop.third-party
+ports_cache=$CACHE_DIR/ports/$FREEBSD_PORTS_REPO/All
+need tar zstd
+while read -r package paths; do
+	[[ -z $package || $package == \#* ]] && continue
+	file=$(find "$ports_cache" \( -name "$package.pkg" -o -name "$package~*.pkg" \) 2>/dev/null | head -1)
+	[[ -n $file ]] || die "$package isn't in ${ports_cache#"$REPO_ROOT"/} (os/freebsd/scripts/ports.sh vm-install ${package%-*} fetches it)"
+	members=()
+	for path in $paths "usr/local/share/licenses/$package"; do members+=("/$path"); done
+	tar --zstd -xf "$file" -C "$DIST_DIR" "${members[@]}" 2>/dev/null ||
+		die "${file##*/} doesn't hold ${members[*]}"
+done < <(sed 's/#.*//' "$third_party")
+
 # Open-source notices for the shipped binaries and the base system (BR-2).
-notice_args=()
+notice_args=(--third-party "$third_party" --third-party-licenses "$DIST_DIR/usr/local/share/licenses")
 for name in "${shipped[@]}"; do notice_args+=(--package "$name"); done
 # The shell's crates, and the fonts it embeds.
 for name in "${shell_shipped[@]}"; do notice_args+=(--shell-package "$name"); done
