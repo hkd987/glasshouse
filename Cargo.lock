@@ -491,6 +491,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-console"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "glass-first-party",
+ "glass-http",
+ "glass-managed",
+ "glass-policy",
+ "glass-types",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "glass-demo-agent"
 version = "0.1.0"
 dependencies = [
