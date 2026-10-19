@@ -38,6 +38,8 @@ pub enum DocKind {
     Catalog,
     /// The org's people, for addressing them (AD-1).
     Directory,
+    /// Chat's settings: IT's compliance key and retention (ADR 0030).
+    Chat,
 }
 
 impl DocKind {
@@ -46,6 +48,7 @@ impl DocKind {
             Self::Policy => "policy",
             Self::Catalog => "catalog",
             Self::Directory => "directory",
+            Self::Chat => "chat",
         }
     }
 }

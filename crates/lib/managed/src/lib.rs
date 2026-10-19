@@ -23,6 +23,7 @@
 //! through `glass-gateway-providers`, the one crate that leaves the machine.
 
 pub mod catalog;
+pub mod chat;
 pub mod directory;
 pub mod signing;
 pub mod store;
@@ -36,7 +37,8 @@ pub use directory::{DirectoryHandle, DirectoryRelease, Person, Sender};
 pub use signing::{DocKind, OrgKey, PublicKey, Refusal, Signed};
 pub use store::ReleaseStore;
 pub use sync::{
-    DeviceReport, MAX_WAIT_SECS, PolicyRelease, Ring, RunningAgent, SyncRequest, SyncResponse,
+    ChatRelease, DeviceReport, MAX_WAIT_SECS, PolicyRelease, Ring, RunningAgent, SyncRequest,
+    SyncResponse,
 };
 
 /// SHA-256 of `bytes`, as lowercase hex.

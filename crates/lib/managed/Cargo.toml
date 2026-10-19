@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 ed25519-compact.workspace = true
+glass-crypto.workspace = true
 glass-types.workspace = true
 hex.workspace = true
 serde.workspace = true

@@ -18,6 +18,8 @@
 //! GET  /api/support                   support staff's page (CF-80)
 //! POST /device/v1/sync                a device's long poll (bearer token)
 //! POST /device/v1/report              a device's report (bearer token)
+//! POST /device/v1/chat/{keys,keys/lookup,conversations,messages,sync}
+//!                                     chat, sealed (ADR 0030)
 //! ```
 //!
 //! Admins are the directory's `it-admins`; support staff are the members of
@@ -34,7 +36,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use glass_http::{ReadError, Request, Response};
-use glass_managed::{DeviceReport, InstallMode, MAX_WAIT_SECS, Ring, SyncRequest};
+use glass_managed::{DeviceReport, InstallMode, MAX_WAIT_SECS, Ring, SyncRequest, chat};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
@@ -59,6 +61,8 @@ pub struct Console {
     sessions: Mutex<HashMap<String, String>>,
     /// Bumped whenever a release changes, to wake waiting devices.
     releases: watch::Sender<u64>,
+    /// Bumped whenever chat changes, to wake computers waiting on it.
+    chat_changed: watch::Sender<u64>,
     /// The built web app (`apps/console/dist`).
     web: PathBuf,
     /// The console's address, as devices reach it.
@@ -155,12 +159,14 @@ impl Console {
         url: String,
     ) -> Arc<Self> {
         let (releases, _) = watch::channel(0);
+        let (chat_changed, _) = watch::channel(0);
         Arc::new(Self {
             state: Mutex::new(state),
             directory,
             titles: Titles::first_party(),
             sessions: Mutex::new(HashMap::new()),
             releases,
+            chat_changed,
             web,
             url,
         })
@@ -606,6 +612,94 @@ impl Console {
                 self.state().report(report);
                 ok(json!({}))
             }
+            "chat/keys" => {
+                let register: chat::RegisterKey = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                let mut state = self.state();
+                let device = register.key.device.clone();
+                let login = register.key.login.clone();
+                match state
+                    .chat
+                    .register(&device, register.key, self.directory.as_ref())
+                {
+                    Ok(()) => {
+                        if let Err(e) = state.save_chat() {
+                            return error(500, &format!("{e:#}"));
+                        }
+                        tracing::info!(%login, %device, "chat: member key registered");
+                        ok(json!({}))
+                    }
+                    Err(r) => refused(r),
+                }
+            }
+            "chat/keys/lookup" => {
+                let lookup: chat::LookupKeys = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                let state = self.state();
+                ok(
+                    serde_json::to_value(state.chat.lookup(&lookup.logins, &state.chat.compliance))
+                        .unwrap_or_default(),
+                )
+            }
+            "chat/conversations" => {
+                let create: chat::CreateConversation = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                let mut state = self.state();
+                let result = state.chat.create(create, self.directory.as_ref());
+                match result {
+                    Ok(seq) => {
+                        if let Err(e) = state.save_chat() {
+                            return error(500, &format!("{e:#}"));
+                        }
+                        drop(state);
+                        self.chat_changed.send_modify(|n| *n += 1);
+                        ok(json!({ "seq": seq }))
+                    }
+                    Err(r) => refused(r),
+                }
+            }
+            "chat/messages" => {
+                let post: chat::PostMessage = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                let mut state = self.state();
+                let org = state.org.id.clone();
+                let result = state.chat.post(&post.device, &org, post.message);
+                match result {
+                    Ok(seq) => {
+                        if let Err(e) = state.save_chat() {
+                            return error(500, &format!("{e:#}"));
+                        }
+                        drop(state);
+                        self.chat_changed.send_modify(|n| *n += 1);
+                        ok(json!({ "seq": seq }))
+                    }
+                    Err(r) => refused(r),
+                }
+            }
+            "chat/sync" => {
+                let sync: chat::ChatSyncRequest = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                let wait = Duration::from_secs(sync.wait_secs.min(MAX_WAIT_SECS));
+                let mut changed = self.chat_changed.subscribe();
+                if wait.is_zero() || self.state().chat.news(&sync) {
+                    return ok(
+                        serde_json::to_value(self.state().chat.sync(&sync)).unwrap_or_default()
+                    );
+                }
+                // Long poll: answer as soon as chat changes.
+                let _ = tokio::time::timeout(wait, changed.changed()).await;
+                ok(serde_json::to_value(self.state().chat.sync(&sync)).unwrap_or_default())
+            }
             _ => error(404, "not found"),
         }
     }
@@ -763,6 +857,7 @@ mod tests {
                 policy: None,
                 catalog: None,
                 directory: have,
+                chat: None,
                 wait_secs: 0,
             })
         };

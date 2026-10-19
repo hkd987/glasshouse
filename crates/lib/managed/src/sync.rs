@@ -62,6 +62,9 @@ pub struct SyncRequest {
     pub catalog: Option<u64>,
     #[serde(default)]
     pub directory: Option<u64>,
+    /// The chat release it has (ADR 0030).
+    #[serde(default)]
+    pub chat: Option<u64>,
     /// How long the console may hold the answer waiting for a release.
     #[serde(default)]
     pub wait_secs: u64,
@@ -84,6 +87,43 @@ pub struct SyncResponse {
     pub catalog: Option<Signed>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<Signed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<Signed>,
+}
+
+/// Chat's settings from IT (ADR 0030, decision 4), signed like the
+/// directory and in force on every computer at once, without rings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatRelease {
+    /// IT's compliance key: uncompressed P-256, hex. Every epoch is sealed
+    /// to it too.
+    pub compliance: String,
+    /// What every computer shows, so IT can compare it with its file.
+    pub fingerprint: String,
+}
+
+impl ChatRelease {
+    pub fn new(compliance: &glass_crypto::PublicKey) -> Self {
+        let bytes = compliance.to_bytes();
+        let digest = hex::encode_upper(glass_crypto::sha256(&bytes));
+        let fingerprint = digest
+            .as_bytes()
+            .chunks(4)
+            .take(8)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self {
+            compliance: hex::encode(bytes),
+            fingerprint,
+        }
+    }
+
+    pub fn key(&self) -> Result<glass_crypto::PublicKey, glass_crypto::CryptoError> {
+        let bytes = hex::decode(&self.compliance).map_err(|_| glass_crypto::CryptoError::BadKey)?;
+        glass_crypto::PublicKey::from_bytes(&bytes)
+    }
 }
 
 /// An agent running on the device, for the fleet's live view (AD-4).

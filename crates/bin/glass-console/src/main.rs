@@ -9,6 +9,7 @@
 //! servers, the org's SSO and a managed database (not built).
 
 mod access;
+mod chat;
 mod directory;
 mod edits;
 mod fixture;

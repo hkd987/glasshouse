@@ -184,6 +184,7 @@ impl Managed {
                 policy: self.policy_version,
                 catalog: self.catalog_version,
                 directory: self.directory_version,
+                chat: None,
                 wait_secs: MAX_WAIT_SECS,
             };
             match client.sync(&request) {
@@ -619,6 +620,7 @@ mod tests {
             policy,
             catalog,
             directory: None,
+            chat: None,
         }
     }
 

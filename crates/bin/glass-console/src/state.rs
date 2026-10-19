@@ -139,6 +139,8 @@ pub struct State {
     pub policy: PolicyState,
     pub catalog: CatalogState,
     pub people: DirectoryState,
+    /// Chat (ADR 0030): sealed, so nothing here reads it.
+    pub chat: crate::chat::ChatState,
     pub fleet: FleetState,
     /// The fleet changed since it was last written.
     pub fleet_dirty: bool,
@@ -190,6 +192,7 @@ impl State {
             policy: read_json(&dir.join("policy.json"))?.unwrap_or_default(),
             catalog: read_json(&dir.join("catalog.json"))?.unwrap_or_default(),
             people: read_json(&dir.join("people.json"))?.unwrap_or_default(),
+            chat: read_json(&dir.join("chat.json"))?.unwrap_or_default(),
             fleet: read_json(&dir.join("fleet.json"))?.unwrap_or_default(),
             fleet_dirty: false,
         };
@@ -212,6 +215,7 @@ impl State {
             }
             state.save_policy()?;
         }
+        state.ensure_chat()?;
         Ok(state)
     }
 
@@ -570,12 +574,53 @@ impl State {
             .as_ref()
             .filter(|s| request.directory.is_none_or(|have| s.version > have))
             .cloned();
+        let chat = self
+            .chat
+            .release
+            .as_ref()
+            .filter(|s| request.chat.is_none_or(|have| s.version > have))
+            .cloned();
         SyncResponse {
             ring,
             policy,
             catalog,
             directory,
+            chat,
         }
+    }
+
+    // ---- chat (ADR 0030) -------------------------------------------------
+
+    /// Makes IT's compliance key, if there is none, and signs the release
+    /// that gives every computer its public half. Development only: the
+    /// private half is kept here, mode 0600. Slice C3 moves making it to
+    /// IT's own browser, so our servers never hold it.
+    pub fn ensure_chat(&mut self) -> anyhow::Result<()> {
+        if self.chat.release.is_some() {
+            return Ok(());
+        }
+        let secret = glass_crypto::SecretKey::generate().map_err(anyhow::Error::msg)?;
+        let path = self.dir.join("compliance-dev.key");
+        if !path.exists() {
+            write_private(
+                &path,
+                &hex::encode(secret.to_bytes().map_err(anyhow::Error::msg)?),
+            )?;
+        }
+        let secret = glass_crypto::SecretKey::from_bytes(&hex::decode(
+            std::fs::read_to_string(&path)?.trim(),
+        )?)
+        .map_err(anyhow::Error::msg)?;
+        let release =
+            glass_managed::ChatRelease::new(&secret.public().map_err(anyhow::Error::msg)?);
+        self.chat.compliance = release.compliance.clone();
+        let payload = serde_json::to_string(&release)?;
+        self.chat.release = Some(self.key.sign(DocKind::Chat, &self.org.id, 1, payload));
+        self.save_chat()
+    }
+
+    pub fn save_chat(&self) -> anyhow::Result<()> {
+        write_json(&self.dir.join("chat.json"), &self.chat)
     }
 
     pub fn report(&mut self, report: DeviceReport) {

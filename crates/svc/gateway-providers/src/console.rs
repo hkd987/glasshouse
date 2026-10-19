@@ -119,6 +119,7 @@ mod tests {
                 policy: Some(3),
                 catalog: None,
                 directory: None,
+                chat: None,
                 wait_secs: 0,
             })
             .unwrap();
@@ -143,6 +144,7 @@ mod tests {
                 policy: None,
                 catalog: None,
                 directory: None,
+                chat: None,
                 wait_secs: 0,
             })
             .unwrap_err();
