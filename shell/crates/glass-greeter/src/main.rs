@@ -28,7 +28,9 @@ use anyhow::{Context, bail};
 use glass_platform::auth::{self, AuthError};
 use glass_platform::users;
 use glass_shell::greeter::{Account, Effect, Greeter};
+use glass_shell::screens::setup::{self, ModelChoice};
 use glass_shell::screens::{login, system};
+use glass_shell::setup::{Effect as SetupEffect, Setup};
 use glass_shell::{Power, session};
 use glass_shell::{Theme, wallpaper};
 use glass_shell_fb::display::Display;
@@ -85,7 +87,13 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     if args.screen {
-        let user = runtime.block_on(screen(&args.tty, offset))?;
+        let user = runtime.block_on(async {
+            if first_run() {
+                setup(&args.tty).await
+            } else {
+                screen(&args.tty, offset).await
+            }
+        })?;
         // The answer to `supervise`, which reads this process's output.
         writeln!(std::io::stdout(), "signed-in {user}")?;
         return Ok(());
@@ -501,6 +509,118 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
     }
 }
 
+/// glassd's settings: a `[managed]` section means an organization manages
+/// this computer (ADR 0023).
+const GLASSD_CONFIG: &str = "/usr/local/etc/glasshouse/glassd.toml";
+/// What first-run setup recorded, beside glassd's state.
+const SETUP_RECORD: &str = "/var/db/glasshouse/setup.toml";
+
+/// First-run setup instead of the sign-in screen (UX-2): nobody can sign in
+/// yet, and no organization manages the computer. An enrolled computer
+/// asks nothing; its people come from the directory.
+fn first_run() -> bool {
+    let nobody = users::people().is_ok_and(|people| people.is_empty());
+    let config = std::fs::read_to_string(GLASSD_CONFIG).unwrap_or_default();
+    wants_setup(nobody, &config)
+}
+
+/// Setup is for a computer nobody signs in to yet that no organization
+/// manages (glassd's config has no `[managed]` section).
+fn wants_setup(nobody: bool, glassd_config: &str) -> bool {
+    nobody && !glassd_config.lines().any(|line| line.trim() == "[managed]")
+}
+
+/// First-run setup, until its person's account exists; returns who, to
+/// be signed in like someone who typed their password.
+async fn setup(tty: &Path) -> anyhow::Result<String> {
+    let taken = users::names().context("reading the accounts")?;
+    let mut setup = Setup::new(taken);
+    let theme = Theme::glass();
+    // Setup covers the whole screen: no wallpaper behind it.
+    let mut display = Display::open(tty, |_, _| Vec::new())?;
+    let draw = |display: &mut Display, setup: &Setup| {
+        let line = display.draw(setup::view(&theme, &setup.screen(), display.size()));
+        eprintln!("setup: {line}");
+    };
+    display.focus(
+        setup::view(&theme, &setup.screen(), display.size()),
+        setup::NAME,
+    );
+    draw(&mut display, &setup);
+    eprintln!("glass-greeter: first-run setup");
+    let (mut inputs, _) = input::start(display.pixels());
+    let mut terminate = signal(SignalKind::terminate())?;
+    loop {
+        tokio::select! {
+            Some(first) = inputs.recv() => {
+                let mut batch = vec![first];
+                while let Ok(more) = inputs.try_recv() {
+                    batch.push(more);
+                }
+                let typed = display.input(&batch, |_, _| None);
+                let updated = display.update(
+                    setup::view(&theme, &setup.screen(), display.size()),
+                    &typed.events,
+                );
+                let redraw = updated.redraw || !updated.messages.is_empty();
+                for message in updated.messages {
+                    match setup.update(message) {
+                        Some(SetupEffect::Focus(id)) => {
+                            display.focus(setup::view(&theme, &setup.screen(), display.size()), id);
+                        }
+                        Some(SetupEffect::Create { login, full_name, mut password, models }) => {
+                            draw(&mut display, &setup);
+                            let (who, name) = (login.clone(), full_name.clone());
+                            let created = tokio::task::spawn_blocking(move || {
+                                let created = users::create_person(&who, &name, &password);
+                                auth::wipe(&mut password);
+                                created
+                            })
+                            .await
+                            .context("creating the account")?;
+                            setup.wipe();
+                            match created {
+                                Ok(()) => {
+                                    eprintln!("glass-greeter: set up {login}");
+                                    record_setup(models.map(ModelChoice::id));
+                                    display.hand_over();
+                                    return Ok(login);
+                                }
+                                Err(e) => {
+                                    eprintln!("glass-greeter: creating {login}: {e}");
+                                    setup.failed("Your account couldn't be created. Try again.");
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                if redraw {
+                    draw(&mut display, &setup);
+                }
+            }
+            // The fields' caret blinks.
+            () = blink(display.next_redraw()) => {
+                display.draw(setup::view(&theme, &setup.screen(), display.size()));
+            }
+            _ = terminate.recv() => bail!("stopped"),
+        }
+    }
+}
+
+/// Records what setup asked that the account doesn't hold: how agents
+/// should reach AI models (MP-1), for Settings and the model gateway.
+fn record_setup(models: Option<&str>) {
+    let record = format!(
+        "# First-run setup (UX-2), {}\nmodels = \"{}\"\n",
+        OffsetDateTime::now_utc().date(),
+        models.unwrap_or("later")
+    );
+    if let Err(e) = std::fs::write(SETUP_RECORD, record) {
+        eprintln!("glass-greeter: {SETUP_RECORD}: {e}");
+    }
+}
+
 /// Waits until `at`, or forever without one.
 async fn blink(at: Option<std::time::Instant>) {
     match at {
@@ -520,6 +640,17 @@ fn sentence(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ux2_setup_only_on_an_empty_unmanaged_computer() {
+        let managed = "control_socket = \"/x\"\n\n[managed]\nurl = \"https://console\"\n";
+        assert!(super::wants_setup(true, "control_socket = \"/x\"\n"));
+        assert!(!super::wants_setup(true, managed), "enrolled: no questions");
+        assert!(
+            !super::wants_setup(false, ""),
+            "someone can sign in already"
+        );
+    }
+
     #[test]
     fn errors_read_as_sentences() {
         assert_eq!(

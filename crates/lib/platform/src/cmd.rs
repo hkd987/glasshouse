@@ -30,6 +30,42 @@ pub fn run(program: &str, args: &[&str]) -> Result<String> {
     }
 }
 
+/// [`run`] with `input` on the program's standard input, such as a
+/// password for `pw -h 0`. The input never appears in an error.
+pub fn run_with_input(program: &str, args: &[&str], input: &[u8]) -> Result<String> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let rendered = render(program, args);
+    tracing::debug!(command = %rendered, "running with input");
+    let mut child = Command::new(program)
+        .args(args)
+        .env_clear()
+        .env("PATH", "/sbin:/bin:/usr/sbin:/usr/bin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| PlatformError::io(format!("cannot run `{rendered}`"), e))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input)
+            .map_err(|e| PlatformError::io(format!("writing to `{rendered}`"), e))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| PlatformError::io(format!("waiting for `{rendered}`"), e))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(PlatformError::Command {
+            command: rendered,
+            status: output.status.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        })
+    }
+}
+
 fn render(program: &str, args: &[&str]) -> String {
     std::iter::once(program)
         .chain(args.iter().copied())

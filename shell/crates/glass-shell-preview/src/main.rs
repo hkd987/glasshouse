@@ -95,6 +95,28 @@ fn main() -> anyhow::Result<()> {
 
     write("boot.png", boot::view(&theme, 0.42))?;
     write("login.png", login::view(&theme, &sign_in, (w, h)))?;
+    // First-run setup (UX-2), one step after another.
+    let mut first_run = glass_shell::setup::Setup::new(vec!["root".into()]);
+    first_run.update(Message::SetupName("Dana Ruiz".into()));
+    first_run.update(Message::SetupPassword("correct horse".into()));
+    write(
+        "setup-account.png",
+        glass_shell::screens::setup::view(&theme, &first_run.screen(), (w, h)),
+    )?;
+    first_run.update(Message::SetupConfirm("correct horse".into()));
+    first_run.update(Message::SetupNext);
+    first_run.update(Message::SetupModels(
+        glass_shell::screens::setup::ModelChoice::ClaudeCode,
+    ));
+    write(
+        "setup-models.png",
+        glass_shell::screens::setup::view(&theme, &first_run.screen(), (w, h)),
+    )?;
+    first_run.update(Message::SetupNext);
+    write(
+        "setup-ready.png",
+        glass_shell::screens::setup::view(&theme, &first_run.screen(), (w, h)),
+    )?;
     // The locked screen, a password half typed.
     let mut locked = glass_shell::live::Live::new(tasks.clone())
         .signed_in_as("Dana Ruiz")

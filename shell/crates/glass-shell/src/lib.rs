@@ -7,6 +7,7 @@
 //! - [`tiles`]: an agent tile drawn from a `glass_api::TaskView`, the same
 //!   data `glassctl` shows.
 //! - [`greeter`]: the sign-in screen's state, for the greeter (ADR 0019).
+//! - [`setup`]: first-run setup's state (UX-2), also the greeter's.
 //! - [`live`]: the live desktop's state, kept current from glassd's events,
 //!   and what the person's clicks and keys ask of glassd.
 //! - [`render`]: draws any screen, once for previews and snapshot tests, or
@@ -24,6 +25,7 @@ pub mod live;
 pub mod render;
 pub mod screens;
 pub mod session;
+pub mod setup;
 mod style;
 pub mod theme;
 pub mod tiles;
@@ -134,4 +136,15 @@ pub enum Message {
     AskPower(Power),
     /// The answer to that question: go ahead.
     ConfirmPower,
+    /// First-run setup (UX-2): the account step's fields.
+    SetupName(String),
+    SetupPassword(String),
+    SetupConfirm(String),
+    /// Enter in a field: on to the field with this id.
+    SetupFocus(&'static str),
+    /// How agents should reach AI models.
+    SetupModels(screens::setup::ModelChoice),
+    /// Continue, or on the last step, create the account and sign in.
+    SetupNext,
+    SetupBack,
 }

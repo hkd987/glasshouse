@@ -329,6 +329,12 @@ pub const ARROW_RIGHT: Icon = Icon {
     shapes: &[Shape::Path("M3 7h8M7.5 3.5L11 7l-3.5 3.5", Line(1.8))],
 };
 
+/// A step done (first-run setup's side panel).
+pub const CHECK: Icon = Icon {
+    view_box: (14.0, 14.0),
+    shapes: &[Shape::Path("M3 7.5l2.8 2.8L11 4.5", Line(1.8))],
+};
+
 /// Expand a tile into the expanded view.
 pub const EXPAND: Icon = Icon {
     view_box: (16.0, 16.0),

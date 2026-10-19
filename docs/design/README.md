@@ -159,7 +159,9 @@ e2e `changes` scenario.
 
 ![First-run setup, AI models step](mockups/setup.png)
 
-Not built. Each step maps to a P0 area:
+Built for a personal computer (UX-2): your account, AI models, ready, in
+the sign-in screen (`screens::setup`); an enrolled computer skips it. The
+org steps (Entra ID sign-in, license) aren't. Each step maps to a P0 area:
 
 | Element | Requirement |
 |---|---|

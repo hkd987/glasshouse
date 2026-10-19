@@ -135,6 +135,109 @@ pub fn people_in(passwd: &str) -> Vec<Person> {
     found
 }
 
+/// Every account name in a `passwd(5)` file's text, people and system
+/// accounts alike: names a new account can't take.
+pub fn names_in(passwd: &str) -> Vec<String> {
+    passwd
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split(':').next())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Every account name on this computer.
+pub fn names() -> std::io::Result<Vec<String>> {
+    Ok(names_in(&std::fs::read_to_string("/etc/passwd")?))
+}
+
+/// Whether `login` is a name [`create_person`] takes: a lowercase letter,
+/// then up to 15 lowercase letters or digits.
+pub fn valid_login(login: &str) -> bool {
+    let mut chars = login.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && login.len() <= 16
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// Why `full_name` can't be an account's full name, if it can't: it goes
+/// into a `passwd(5)` field, where `:` and `,` separate fields.
+pub fn full_name_problem(full_name: &str) -> Option<&'static str> {
+    let name = full_name.trim();
+    if name.is_empty() {
+        Some("Enter your name")
+    } else if name.chars().count() > 64 {
+        Some("That name is too long")
+    } else if name.chars().any(|c| c.is_control() || c == ':' || c == ',') {
+        Some("A name can't have a colon or a comma")
+    } else {
+        None
+    }
+}
+
+/// Creates a person's account (first-run setup, UX-2): a login shell, a
+/// home of their own (its own ZFS dataset when `/home` is one, so undo can
+/// restore it from snapshots, PA-5), and their password, which `pw` reads
+/// from its standard input and never sees on a command line. Root only.
+pub fn create_person(login: &str, full_name: &str, password: &str) -> crate::Result<()> {
+    use crate::{PlatformError, cmd};
+
+    if !cfg!(target_os = "freebsd") {
+        return Err(PlatformError::Unsupported("creating accounts".into()));
+    }
+    if !valid_login(login) {
+        return Err(PlatformError::Unsafe(format!(
+            "{login:?} is not an account name"
+        )));
+    }
+    if let Some(problem) = full_name_problem(full_name) {
+        return Err(PlatformError::Unsafe(problem.into()));
+    }
+    if password.is_empty() || password.contains(['\n', '\r']) {
+        return Err(PlatformError::Unsafe(
+            "the password is empty or has a line break".into(),
+        ));
+    }
+    let home = format!("/home/{login}");
+    // /home's own dataset, when it has one: the person's home goes under it.
+    let dataset = cmd::run("zfs", &["list", "-H", "-o", "name,mountpoint", "/home"])
+        .ok()
+        .and_then(|out| {
+            let mut fields = out.lines().next()?.split('\t');
+            let (name, mountpoint) = (fields.next()?, fields.next()?);
+            (mountpoint == "/home").then(|| format!("{name}/{login}"))
+        });
+    if let Some(dataset) = &dataset {
+        cmd::run("zfs", &["create", dataset])?;
+    }
+    let mut input = password.as_bytes().to_vec();
+    input.push(b'\n');
+    let created = cmd::run_with_input(
+        "pw",
+        &[
+            "useradd",
+            "-n",
+            login,
+            "-c",
+            full_name.trim(),
+            "-d",
+            &home,
+            "-s",
+            "/bin/sh",
+            "-m",
+            "-M",
+            "0755",
+            "-h",
+            "0",
+        ],
+        &input,
+    );
+    input.fill(0);
+    created?;
+    cmd::run("chown", &[&format!("{login}:{login}"), &home]).map(drop)
+}
+
 #[cfg(test)]
 mod people_tests {
     use super::*;
@@ -159,5 +262,36 @@ svc:*:1003:1003::/home/svc:/usr/sbin/nologin
             names,
             [("demo", "Glasshouse demo user"), ("dana", "Dana Ruiz")]
         );
+        assert_eq!(
+            names_in(passwd),
+            ["root", "nobody", "glassd", "dana", "demo", "svc"]
+        );
+    }
+
+    #[test]
+    fn ux2_new_accounts_take_safe_names() {
+        assert!(valid_login("dana") && valid_login("d2"));
+        for bad in [
+            "",
+            "Dana",
+            "2dana",
+            "da-na",
+            "da na",
+            "dana:x",
+            "averyveryverylongname",
+        ] {
+            assert!(!valid_login(bad), "{bad:?}");
+        }
+        assert_eq!(full_name_problem("Dana Ruiz"), None);
+        assert!(full_name_problem("  ").is_some());
+        assert!(
+            full_name_problem("Dana:Ruiz").is_some(),
+            "passwd's field separator"
+        );
+        assert!(
+            full_name_problem("Dana, Room 4").is_some(),
+            "gecos' separator"
+        );
+        assert!(full_name_problem("Dana\nRuiz").is_some());
     }
 }

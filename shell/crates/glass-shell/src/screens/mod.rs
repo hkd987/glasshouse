@@ -6,5 +6,6 @@ pub mod desktop;
 pub mod expanded;
 pub mod launcher;
 pub mod login;
+pub mod setup;
 pub mod system;
 pub mod window;

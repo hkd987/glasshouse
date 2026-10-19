@@ -30,6 +30,25 @@ fn render_login() -> Frame {
     frame(login::view(&Theme::glass(), &screen, SCREEN), size(), 1.0)
 }
 
+/// First-run setup (UX-2): each step, as Dana answers it.
+fn render_setup() -> [Frame; 3] {
+    use glass_shell::Message;
+    use glass_shell::screens::setup::{ModelChoice, view};
+    let shot = |setup: &glass_shell::setup::Setup| {
+        frame(view(&Theme::glass(), &setup.screen(), SCREEN), size(), 1.0)
+    };
+    let mut setup = glass_shell::setup::Setup::new(vec!["root".into()]);
+    setup.update(Message::SetupName("Dana Ruiz".into()));
+    setup.update(Message::SetupPassword("correct horse".into()));
+    let account = shot(&setup);
+    setup.update(Message::SetupConfirm("correct horse".into()));
+    setup.update(Message::SetupNext);
+    setup.update(Message::SetupModels(ModelChoice::ClaudeCode));
+    let models = shot(&setup);
+    setup.update(Message::SetupNext);
+    [account, models, shot(&setup)]
+}
+
 /// The agents menu, opened from the menu bar's pill, over a window.
 fn render_agents_menu() -> Frame {
     let theme = Theme::glass();
@@ -394,6 +413,10 @@ fn snapshot(name: &str, f: &Frame) {
 fn screens_match_their_snapshots() {
     snapshot("boot", &render_boot());
     snapshot("login", &render_login());
+    let [account, models, ready] = render_setup();
+    snapshot("setup-account", &account);
+    snapshot("setup-models", &models);
+    snapshot("setup-ready", &ready);
     snapshot("desktop", &render_desktop());
     snapshot("agents-menu", &render_agents_menu());
     snapshot("system-menu", &render_system_menu());

@@ -714,6 +714,14 @@ impl Live {
                 Some(Effect::Unlock(Password::new(password)))
             }
             Message::RunSuggestion(_) | Message::AcceptAnswer | Message::SwitchUser => None,
+            // First-run setup is the sign-in screen's, before any desktop.
+            Message::SetupName(_)
+            | Message::SetupPassword(_)
+            | Message::SetupConfirm(_)
+            | Message::SetupFocus(_)
+            | Message::SetupModels(_)
+            | Message::SetupNext
+            | Message::SetupBack => None,
             Message::SignOut => {
                 self.system_menu = false;
                 Some(Effect::SignOut)
