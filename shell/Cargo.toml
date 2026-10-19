@@ -19,6 +19,7 @@ glass-shell-fb = { path = "crates/glass-shell-fb" }
 glass-compositor = { path = "crates/glass-compositor" }
 glass-window = { path = "crates/glass-window" }
 glass-terminal = { path = "crates/glass-terminal" }
+glass-activity = { path = "crates/glass-activity" }
 # The control API contract, shared with glassd and glassctl.
 glass-api = { path = "../crates/lib/api" }
 glass-rpc = { path = "../crates/lib/rpc" }
@@ -58,7 +59,7 @@ xkbcommon = "0.8.0"
 rustix = { version = "1.1.5", features = ["event"] }
 anyhow = "1.0.100"
 serde_json = "1.0"
-tokio = { version = "1.48", features = ["rt", "macros", "time", "signal", "process", "io-util"] }
+tokio = { version = "1.48", features = ["rt", "macros", "time", "signal", "process", "io-util", "sync"] }
 # The menu bar clock, in local time. Already built for glass-types.
 time = { version = "0.3.55", features = ["formatting", "macros", "local-offset"] }
 

@@ -452,6 +452,15 @@ pub const LAUNCHER: Icon = Icon {
     ],
 };
 
+/// Activity Monitor's pulse line.
+pub const ACTIVITY: Icon = Icon {
+    view_box: (24.0, 24.0),
+    shapes: &[Shape::Path(
+        "M2 12h4.5l2.5-7 5 14 2.5-7H22",
+        Ink::StrokeRound(2.0),
+    )],
+};
+
 pub const FOLDER: Icon = Icon {
     view_box: (18.0, 18.0),
     shapes: &[Shape::Path(

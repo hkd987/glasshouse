@@ -189,7 +189,7 @@ thumbnails are not started.
 | UI-6 Native apps with manifests | Partial | `glass-window` puts an iced view in a Wayland window with pointer and keys (ADR 0025, `ui6_*`); Terminal and Activity Monitor build on it. Owed: the accessibility tree, and action manifests on the app socket (ADR 0024) |
 | UI-7 Web app budgets: cold launch under 1 s, under 150 MB | **Done** (dev host) | `apps/e2e/perf.spec.ts` fails over budget; Mail and Calendar launch cold in about 0.18 s and use about 115 MB (renderer RSS), `docs/dev/performance.md` |
 | Terminal (product request 2026-10-19, pending PRD) | Partial | `glass-terminal`: the person's login shell in a window (alacritty's terminal state and pty, xterm keys, 256 colors, scrollback on the wheel), shown on the VM's desktop. Opens from the launcher. Not yet: copy and paste, resizing with the window, the accessibility tree. Native, ADR 0025; `docs/prd/proposals.md` |
-| Activity Monitor (product request 2026-10-19, pending PRD) | Not started | native, ADR 0025; `docs/prd/proposals.md` |
+| Activity Monitor (product request 2026-10-19, pending PRD) | Partial | `glass-activity`: the processors and memory, the person's agents (everything in each one's jail added up, by `ps`'s jail column) and their apps, by CPU and memory every 2 s; Stop agent (`task.stop`) and Quit (the person's own processes). Opens from the launcher; tested on the VM. Not yet: power per app (PM-7), "Ask the agent" about a slowdown (AE-4), network and disk. Native, ADR 0025; `docs/prd/proposals.md` |
 
 ## Desktop experience
 

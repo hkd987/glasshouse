@@ -8,7 +8,7 @@ use iced_widget::{Column, Row, button, column, container, mouse_area, text};
 
 use crate::apps::AppEntry;
 use crate::theme::{hex, hexa};
-use crate::{Element, Message, Theme, fonts, style};
+use crate::{Element, Message, Theme, fonts, icons, style};
 
 /// How many apps a row of the grid holds.
 const PER_ROW: usize = 6;
@@ -57,10 +57,12 @@ fn tile<'a>(_theme: &Theme, app: &AppEntry) -> Element<'a, Message> {
     .into()
 }
 
-/// An app's icon: Terminal's prompt; a letter for the rest.
+/// An app's icon: Terminal's prompt, Activity Monitor's pulse; a dot for
+/// the rest.
 fn icon<'a>(id: &str) -> Element<'a, Message> {
     let glyph = match id {
         "glass.terminal" => ">_",
+        "glass.activity" => return icons::view(&icons::ACTIVITY, hex(0x57AB5A), 34.0, 34.0),
         _ => "•",
     };
     text(glyph)

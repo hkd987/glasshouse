@@ -101,6 +101,7 @@ under `shell/target/tmp/` so you can compare it.
 | `crates/glass-shell-fb` | The desktop on the console framebuffer, with live tiles, keyboard and pointer (M2 step 1) |
 | `crates/glass-window` | A native app's window: an iced view in a Wayland window, keys through the compositor's keymap (UI-6, ADR 0025) |
 | `crates/glass-terminal` | Terminal: the person's shell in a window, on `glass-window` |
+| `crates/glass-activity` | Activity Monitor: CPU and memory by agent and app, Stop agent and Quit, on `glass-window` |
 | `crates/glass-compositor` | The Wayland compositor (M2b, UI-1): apps' windows composed in software onto one output, pointer and keys routed to them; `client` is a one-window test client |
 | `assets/fonts/` | Geist and Geist Mono, with their licenses |
 

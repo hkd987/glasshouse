@@ -254,6 +254,152 @@ pub fn top_processes(uid: u32, limit: usize) -> Result<Vec<Process>> {
     Ok(processes)
 }
 
+/// One of a user's processes, and the jail it runs in: agents run in jails
+/// named after their task (Activity Monitor groups them by it).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UserProcess {
+    pub pid: u32,
+    /// `None` outside any jail.
+    pub jail: Option<String>,
+    pub cpu_percent: f64,
+    pub memory_kb: u64,
+    pub command: String,
+}
+
+/// Every process `uid` runs, in jails or not.
+pub fn user_processes(uid: u32) -> Result<Vec<UserProcess>> {
+    let uid = uid.to_string();
+    // One -o per column: FreeBSD's ps folds `-o a=,b=` into one header.
+    let mut args = vec!["-U", &uid, "-o", "pid="];
+    if cfg!(target_os = "freebsd") {
+        args.extend(["-o", "jail="]);
+    }
+    args.extend(["-o", "pcpu=", "-o", "rss=", "-o", "comm="]);
+    Ok(parse_user_processes(
+        &cmd::run("ps", &args)?,
+        cfg!(target_os = "freebsd"),
+    ))
+}
+
+fn parse_user_processes(out: &str, jails: bool) -> Vec<UserProcess> {
+    out.lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid = parts.next()?.parse().ok()?;
+            let jail = match jails {
+                true => Some(parts.next()?).filter(|j| *j != "-").map(str::to_owned),
+                false => None,
+            };
+            Some(UserProcess {
+                pid,
+                jail,
+                cpu_percent: parts.next()?.parse().ok()?,
+                memory_kb: parts.next()?.parse().ok()?,
+                command: parts.collect::<Vec<_>>().join(" "),
+            })
+        })
+        .collect()
+}
+
+/// Time every processor has spent since boot, in clock ticks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CpuTime {
+    pub busy: u64,
+    pub total: u64,
+}
+
+impl CpuTime {
+    /// How busy the processors were between `earlier` and this, 0 to 100.
+    pub fn percent_busy_since(&self, earlier: &CpuTime) -> f64 {
+        let total = self.total.saturating_sub(earlier.total);
+        let busy = self.busy.saturating_sub(earlier.busy);
+        match total {
+            0 => 0.0,
+            _ => (busy as f64 * 100.0 / total as f64).min(100.0),
+        }
+    }
+}
+
+/// The processors' time so far (sample twice for how busy they are).
+pub fn cpu_time() -> Result<CpuTime> {
+    if cfg!(target_os = "freebsd") {
+        // user nice system interrupt idle
+        let ticks = cmd::run("sysctl", &["-n", "kern.cp_time"])?;
+        let ticks: Vec<u64> = ticks
+            .split_whitespace()
+            .filter_map(|t| t.parse().ok())
+            .collect();
+        let total: u64 = ticks.iter().sum();
+        Ok(CpuTime {
+            busy: total - ticks.get(4).copied().unwrap_or(0),
+            total,
+        })
+    } else if cfg!(target_os = "linux") {
+        let stat = std::fs::read_to_string("/proc/stat")
+            .map_err(|e| PlatformError::io("/proc/stat", e))?;
+        Ok(parse_proc_stat(&stat))
+    } else {
+        Err(PlatformError::Unsupported("processor time".into()))
+    }
+}
+
+/// /proc/stat's first line: user nice system idle iowait irq softirq steal.
+fn parse_proc_stat(stat: &str) -> CpuTime {
+    let ticks: Vec<u64> = stat
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("cpu "))
+        .unwrap_or_default()
+        .split_whitespace()
+        .take(8)
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    let total: u64 = ticks.iter().sum();
+    let idle = ticks.get(3).copied().unwrap_or(0) + ticks.get(4).copied().unwrap_or(0);
+    CpuTime {
+        busy: total - idle,
+        total,
+    }
+}
+
+/// Memory in use: neither free nor cache the system can take back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Memory {
+    pub total_mb: u64,
+    pub used_mb: u64,
+}
+
+pub fn memory() -> Result<Memory> {
+    if cfg!(target_os = "freebsd") {
+        let out = cmd::run(
+            "sysctl",
+            &[
+                "-n",
+                "hw.physmem",
+                "hw.pagesize",
+                "vm.stats.vm.v_free_count",
+                "vm.stats.vm.v_inactive_count",
+            ],
+        )?;
+        let v: Vec<u64> = out.lines().filter_map(|l| l.trim().parse().ok()).collect();
+        let [total, page, free, inactive] = v[..] else {
+            return Err(PlatformError::Unsupported("memory counters".into()));
+        };
+        let total_mb = total / 1024 / 1024;
+        let available_mb = (free + inactive) * page / 1024 / 1024;
+        Ok(Memory {
+            total_mb,
+            used_mb: total_mb.saturating_sub(available_mb),
+        })
+    } else {
+        let load = load()?;
+        Ok(Memory {
+            total_mb: load.memory_total_mb,
+            used_mb: load.memory_total_mb.saturating_sub(load.memory_free_mb),
+        })
+    }
+}
+
 /// Whether the service is enabled to run on this machine.
 pub fn service_enabled(name: &str) -> bool {
     cfg!(target_os = "freebsd")
@@ -329,6 +475,39 @@ fn parse_ifconfig(text: &str) -> Vec<Interface> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn processes_name_their_jail() {
+        let out =
+            "  812 glass-1a2b3c4d  12.5  20480 node\n  900 -   0.0  3100 glass-terminal\nbogus\n";
+        let got = parse_user_processes(out, true);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].jail.as_deref(), Some("glass-1a2b3c4d"));
+        assert_eq!((got[0].pid, got[0].memory_kb), (812, 20480));
+        assert_eq!(got[0].cpu_percent, 12.5);
+        assert_eq!(got[1].jail, None);
+        assert_eq!(got[1].command, "glass-terminal");
+        let linux = parse_user_processes(" 7 1.0 512 sh\n", false);
+        assert_eq!((linux[0].pid, linux[0].jail.as_deref()), (7, None));
+    }
+
+    #[test]
+    fn busy_is_the_share_of_ticks_not_idle() {
+        let a = parse_proc_stat("cpu  100 0 100 700 100 0 0 0 0 0\ncpu0 1 2 3\n");
+        assert_eq!(
+            a,
+            CpuTime {
+                busy: 200,
+                total: 1000
+            }
+        );
+        let b = CpuTime {
+            busy: 300,
+            total: 1200,
+        };
+        assert_eq!(b.percent_busy_since(&a), 50.0);
+        assert_eq!(a.percent_busy_since(&a), 0.0);
+    }
 
     #[test]
     fn parses_freebsd_ifconfig() {

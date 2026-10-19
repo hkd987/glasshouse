@@ -13,8 +13,15 @@ pub struct AppEntry {
 
 /// Every first-party app the launcher knows; the desktop offers those that
 /// are installed.
-pub const FIRST_PARTY: &[AppEntry] = &[AppEntry {
-    id: "glass.terminal",
-    name: "Terminal",
-    command: "/usr/local/bin/glass-terminal",
-}];
+pub const FIRST_PARTY: &[AppEntry] = &[
+    AppEntry {
+        id: "glass.terminal",
+        name: "Terminal",
+        command: "/usr/local/bin/glass-terminal",
+    },
+    AppEntry {
+        id: "glass.activity",
+        name: "Activity Monitor",
+        command: "/usr/local/bin/glass-activity",
+    },
+];

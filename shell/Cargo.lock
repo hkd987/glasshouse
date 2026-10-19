@@ -697,6 +697,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "151665d9be52f9bb40fc7966565d39666f2d1e69233571b71b87791c7e0528b3"
 
 [[package]]
+name = "glass-activity"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glass-api",
+ "glass-platform",
+ "glass-rpc",
+ "glass-shell",
+ "glass-types",
+ "glass-window",
+ "iced_core",
+ "iced_widget",
+ "tokio",
+]
+
+[[package]]
 name = "glass-api"
 version = "0.1.0"
 dependencies = [
