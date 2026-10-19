@@ -17,6 +17,7 @@
 //! nothing of the runtime behind them.
 
 pub mod apps;
+pub mod engine;
 pub mod fixtures;
 pub mod fonts;
 pub mod greeter;

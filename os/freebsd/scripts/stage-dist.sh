@@ -34,28 +34,53 @@ while read -r name path mode extra; do
 		continue
 	fi
 	if [[ $name == shell/* ]]; then shell_shipped+=("${name#shell/}"); else shipped+=("$name"); fi
-	install -D -m "$mode" "$from" "$DIST_DIR/$path"
+	install -p -D -m "$mode" "$from" "$DIST_DIR/$path"
 	n=$((n + 1))
 done <"$manifest"
 
-# Third-party libraries and data the desktop needs, from FreeBSD's packages, until they come as
-# packages from our own repository (os/freebsd/images/desktop.third-party says which and why).
-third_party=$FREEBSD_OS_DIR/images/desktop.third-party
+# Third-party libraries and data from FreeBSD's packages, until they come as packages from our own
+# repository: the desktop's, and the browser engine's (os/freebsd/images/*.third-party say which
+# and why). Packages the cache doesn't hold yet are fetched.
+third_party=("$FREEBSD_OS_DIR"/images/*.third-party)
 ports_cache=$CACHE_DIR/ports/$FREEBSD_PORTS_REPO/All
 need tar zstd
-while read -r package paths; do
-	[[ -z $package || $package == \#* ]] && continue
-	# No cache yet makes find fail; the message below says what to run.
-	file=$(find "$ports_cache" \( -name "$package.pkg" -o -name "$package~*.pkg" \) 2>/dev/null | head -1 || true)
-	[[ -n $file ]] || die "$package isn't in ${ports_cache#"$REPO_ROOT"/} (make freebsd-ports fetches it)"
-	members=()
-	for path in $paths "usr/local/share/licenses/$package"; do members+=("/$path"); done
-	tar --zstd -xf "$file" -C "$DIST_DIR" "${members[@]}" 2>/dev/null ||
-		die "${file##*/} doesn't hold ${members[*]}"
-done < <(sed 's/#.*//' "$third_party")
+python3 "$FREEBSD_SCRIPTS_DIR/third-party.py" fetch "${third_party[@]}" ||
+	die "couldn't fetch the third-party packages"
+for list in "${third_party[@]}"; do
+	while read -r package paths; do
+		[[ -z $package || $package == \#* ]] && continue
+		file=$(find "$ports_cache" -name "$package~*.pkg" 2>/dev/null | head -1 || true)
+		if [[ -z $file ]]; then
+			# Rebuilt upstream since our catalog was fetched (ports.sh fetch): the same version, a
+			# later build than the catalog pins. Fine for the VM; an image waits for the catalog
+			# to be fetched again and the lists bumped (third-party.py update --bump).
+			file=$(find "$ports_cache" -name "$package.pkg" 2>/dev/null | head -1 || true)
+			[[ -n $file ]] || die "$package isn't in ${ports_cache#"$REPO_ROOT"/}"
+			[[ ${STAGE_FOR:-} != pkgbase || -n ${ALLOW_REBUILT_PACKAGES:-} ]] ||
+				die "$package is a later build than the pinned ports catalog (ALLOW_REBUILT_PACKAGES=1 takes it)"
+		fi
+		members=()
+		for path in $paths "usr/local/share/licenses/$package"; do members+=("/$path"); done
+		tar --zstd -xf "$file" -C "$DIST_DIR" "${members[@]}" 2>/dev/null ||
+			die "${file##*/} doesn't hold ${members[*]}"
+	done < <(sed -e '/^#license/d' -e 's/#.*//' "$list")
+done
+
+# The web apps (UI-5): each one's manifest, which glassd installs it from, and its built files,
+# which the person's app bridge serves (make apps-build). The admin console isn't a device app.
+for manifest in "$REPO_ROOT"/apps/*/manifest.json; do
+	app=$(basename "$(dirname "$manifest")")
+	[[ -f $REPO_ROOT/apps/$app/dist/app.js ]] || die "apps/$app isn't built (make apps-build)"
+	install -D -m 0644 "$manifest" "$DIST_DIR/usr/local/share/glasshouse/apps/$app/manifest.json"
+	cp -Rp "$REPO_ROOT/apps/$app/dist" "$DIST_DIR/usr/local/share/glasshouse/apps/$app/dist"
+done
+# The desktop's fonts, for the browser engine too (os/freebsd/overlay/usr/local/etc/fonts).
+install -d "$DIST_DIR/usr/local/share/fonts/glasshouse"
+install -p -m 0644 "$REPO_ROOT"/shell/assets/fonts/*.ttf "$DIST_DIR/usr/local/share/fonts/glasshouse/"
 
 # Open-source notices for the shipped binaries and the base system (BR-2).
-notice_args=(--third-party "$third_party" --third-party-licenses "$DIST_DIR/usr/local/share/licenses")
+notice_args=(--third-party-licenses "$DIST_DIR/usr/local/share/licenses")
+for list in "${third_party[@]}"; do notice_args+=(--third-party "$list"); done
 for name in "${shipped[@]}"; do notice_args+=(--package "$name"); done
 # The shell's crates, and the fonts it embeds.
 for name in "${shell_shipped[@]}"; do notice_args+=(--shell-package "$name"); done

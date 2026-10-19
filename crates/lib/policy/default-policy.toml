@@ -97,15 +97,16 @@ services = ["cron", "ntpd", "openvpn", "cupsd"]
 # Groups and agents can narrow the list: `models = ["claude-bedrock"]`.
 
 # Profiles (role-based delivery, AD-7): which apps people get is policy.
-# Everyone gets Mail, Calendar, Activity Monitor (what is using their own
-# computer, UI-9) and Terminal (their own shell, UI-8); IT's tools for
+# Everyone gets the Browser (CF-15), Mail, Calendar, Activity Monitor (what
+# is using their own computer, UI-9) and Terminal (their own shell, UI-8);
+# IT's tools for
 # managing computers, the admin console first, are in the profiles of IT's
 # role only, and glassd opens them for no one else. In a managed fleet the
 # directory fills `it-admins` (SCIM, AD-1).
 [[group]]
 name = "everyone"
 agents = ["it-agent", "invoice-demo", "containment-probe", "claude-code"]
-apps = ["mail", "calendar", "activity-monitor", "terminal"]
+apps = ["browser", "mail", "calendar", "activity-monitor", "terminal"]
 
 [[group]]
 name = "it-admins"

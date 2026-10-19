@@ -1,0 +1,10 @@
+{
+  "BrowserSignin": 0,
+  "SyncDisabled": true,
+  "MetricsReportingEnabled": false,
+  "DefaultBrowserSettingEnabled": false,
+  "PromotionsEnabled": false,
+  "BackgroundModeEnabled": false,
+  "BrowserGuestModeEnabled": false,
+  "URLBlocklist": ["chrome://version", "chrome://gpu", "chrome://system", "chrome://sandbox"]
+}

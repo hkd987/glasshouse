@@ -109,7 +109,7 @@ fn the_launcher_opens_and_closes_in_a_frame() {
     let theme = Theme::glass();
     let mut live = Live::new(fixtures::tasks())
         .without_wallpaper()
-        .with_apps(glass_shell::apps::FIRST_PARTY.to_vec());
+        .with_apps(glass_shell::apps::natives());
     let size = (1280.0, 800.0);
     let at = OffsetDateTime::from_unix_timestamp(fixtures::now().unix_seconds()).expect("valid");
     let mut screen = Screen::new(Size::new(size.0, size.1), 1.0);

@@ -90,7 +90,13 @@ mod tests {
         };
         assert_eq!(
             ids("anyone"),
-            ["activity-monitor", "calendar", "mail", "terminal"]
+            [
+                "activity-monitor",
+                "browser",
+                "calendar",
+                "mail",
+                "terminal"
+            ]
         );
         let with_role = DEFAULT_POLICY.replace(
             "name = \"it-admins\"\n",
@@ -106,6 +112,7 @@ mod tests {
             pat,
             [
                 "activity-monitor",
+                "browser",
                 "calendar",
                 "console",
                 "mail",

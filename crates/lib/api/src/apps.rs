@@ -19,6 +19,15 @@ pub const DEFAULT_APP_SOCKET: &str = "/var/run/glasshouse/apps.sock";
 /// Environment variable app runtimes read to find the app socket.
 pub const APP_SOCKET_ENV: &str = "GLASS_APP_SOCKET";
 
+/// The loopback port a person's app bridge serves their apps on (ADR 0027):
+/// fixed per person, because an app's origin, `http://<app>.localhost:<port>`,
+/// includes it and the browser keeps each app's offline data by origin; and
+/// different for each person signed in. Below the kernel's ephemeral ports.
+pub fn app_bridge_port(uid: u32) -> u16 {
+    // 7300 to 8299; uid 1001 serves on 7301.
+    7300 + (uid % 1000) as u16
+}
+
 /// Methods on the app socket. Params → result types are noted on each.
 pub mod app_methods {
     /// [`crate::AppOpen`] → [`crate::AppSession`]. Opens a session for an

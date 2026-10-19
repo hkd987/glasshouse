@@ -63,13 +63,13 @@ pub fn step(at: Option<usize>, n: usize, step: Step) -> Option<usize> {
 }
 
 fn tile<'a>(_theme: &Theme, app: &AppEntry, selected: bool) -> Element<'a, Message> {
-    let icon = container(icon(app.id))
+    let icon = container(icon(&app.id))
         .center(Length::Fixed(72.0))
         .style(|_| style::panel(hex(0x15181D), 18.0));
     button(
         column![
             icon,
-            text(app.name)
+            text(app.name.clone())
                 .size(13)
                 .font(fonts::MEDIUM)
                 .color(Color::WHITE)
@@ -77,7 +77,7 @@ fn tile<'a>(_theme: &Theme, app: &AppEntry, selected: bool) -> Element<'a, Messa
         .spacing(8)
         .align_x(Horizontal::Center),
     )
-    .on_press(Message::Launch(app.id.to_owned()))
+    .on_press(Message::Launch(app.id.clone()))
     .padding(6)
     .style(style::button_like(style::panel(
         if selected {
@@ -90,12 +90,19 @@ fn tile<'a>(_theme: &Theme, app: &AppEntry, selected: bool) -> Element<'a, Messa
     .into()
 }
 
-/// An app's icon: Terminal's prompt, Activity Monitor's pulse; a dot for
+/// An app's icon: Terminal's prompt, Activity Monitor's pulse, and the
+/// dock's glyphs for the Browser, Mail, the console and the Store; a dot for
 /// the rest.
 pub(crate) fn icon<'a>(id: &str) -> Element<'a, Message> {
+    let drawn = |icon: &icons::Icon, color| icons::view(icon, hex(color), 32.0, 32.0);
     let glyph = match id {
         "terminal" => ">_",
         "activity-monitor" => return icons::view(&icons::ACTIVITY, hex(0x57AB5A), 34.0, 34.0),
+        "browser" => return drawn(&icons::GLOBE, 0x2BB5B5),
+        "mail" => return drawn(&icons::MAIL, 0x3AA8F5),
+        "console" => return drawn(&icons::GEAR, 0xA9B1BC),
+        "store" => return drawn(&icons::BAG, 0x8F7CF2),
+        "calendar" => "31",
         _ => "•",
     };
     text(glyph)

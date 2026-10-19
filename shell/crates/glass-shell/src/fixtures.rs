@@ -355,6 +355,8 @@ pub fn desktop(tasks: &[TaskView]) -> Desktop<'_> {
         lockable: false,
         trash_full: false,
         selected: None,
+        // The artboard's Browser, open.
+        open_apps: vec!["browser".into()],
     }
 }
 

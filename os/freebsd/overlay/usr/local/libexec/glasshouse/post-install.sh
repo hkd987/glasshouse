@@ -78,6 +78,14 @@ loader_tunable kern.racct.enable 1
 if [ "$(sysctl -n kern.racct.enable)" != 1 ]; then
 	echo "post-install: restart once to turn on agents' resource limits (kern.racct.enable)"
 fi
+# The browser engine shares memory between its processes through segments it
+# removes while they're still in use (ADR 0027).
+touch /etc/sysctl.conf
+if ! grep -qx 'kern.ipc.shm_allow_removed=1' /etc/sysctl.conf; then
+	sed -i '' -e '/^kern\.ipc\.shm_allow_removed=/d' /etc/sysctl.conf
+	echo 'kern.ipc.shm_allow_removed=1' >>/etc/sysctl.conf
+fi
+sysctl -q kern.ipc.shm_allow_removed=1 >/dev/null
 # Console login: the full mark before the prompt, and a banner that names the
 # product, not the base system (%s).
 install -C -o root -g wheel -m 0644 "$branding/issue" /etc/issue

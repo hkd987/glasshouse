@@ -45,14 +45,14 @@ vm-console: ## Print the dev VM serial console log
 vm-boot-timeline: ## Power-cycle the dev VM and print where boot time goes (RUNS=3, TRACE=1 per rc script)
 	$(REPO_ROOT)/tools/boot/timeline.py --runs $(or $(RUNS),3) $(if $(TRACE),--trace)
 
-vm-deploy: ## Stage build/dist/freebsd from built binaries and install it in the VM
+vm-deploy: apps-build ## Stage build/dist/freebsd from built binaries and install it in the VM
 	$(FREEBSD_SCRIPTS)/stage-dist.sh
 	$(FREEBSD_SCRIPTS)/deploy.sh
 
-image: ## Stage and bake build/images/glasshouse-<ver>-amd64.qcow2 (from the official VM image)
+image: apps-build ## Stage and bake build/images/glasshouse-<ver>-amd64.qcow2 (from the official VM image)
 	$(FREEBSD_SCRIPTS)/stage-dist.sh
 	$(FREEBSD_SCRIPTS)/bake-image.sh
 
-image-pkgbase: ## Stage and bake glasshouse-<ver>-amd64-desktop.qcow2 from os/freebsd/images/desktop.pkgs (IMAGE=...)
+image-pkgbase: apps-build ## Stage and bake glasshouse-<ver>-amd64-desktop.qcow2 from os/freebsd/images/desktop.pkgs (IMAGE=...)
 	STAGE_FOR=pkgbase $(FREEBSD_SCRIPTS)/stage-dist.sh
 	$(FREEBSD_SCRIPTS)/bake-pkgbase.sh $(or $(IMAGE),desktop)

@@ -26,6 +26,7 @@ fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
         ids(&h),
         [
             ("activity-monitor".into(), ProfileAppKind::Native),
+            ("browser".into(), ProfileAppKind::Native),
             ("calendar".into(), ProfileAppKind::Web),
             ("mail".into(), ProfileAppKind::Web),
             ("terminal".into(), ProfileAppKind::Native),
@@ -44,7 +45,16 @@ fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
             .into_iter()
             .map(|a| a.name)
             .collect();
-    assert_eq!(names, ["Activity Monitor", "Calendar", "Mail", "Terminal"]);
+    assert_eq!(
+        names,
+        [
+            "Activity Monitor",
+            "Browser",
+            "Calendar",
+            "Mail",
+            "Terminal"
+        ]
+    );
 
     // An app the profile names that isn't on this device isn't offered.
     h.apply_policy_replacing("\"terminal\"]", "\"terminal\", \"notes\"]", "");

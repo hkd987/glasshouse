@@ -99,6 +99,20 @@ fn tcp(addr: &str) -> Result<String, String> {
     )
 }
 
+/// Connecting to the app bridge of the person this agent works for, on
+/// the port their uid gives it.
+fn app_bridge() -> Result<String, String> {
+    let out = Command::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .map_err(|e| e.to_string())?;
+    let uid: u32 = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .map_err(|e| format!("id -u: {e}"))?;
+    tcp(&format!("127.0.0.1:{}", glass_api::app_bridge_port(uid)))
+}
+
 fn processes() -> Result<String, String> {
     let out = Command::new("/bin/ps")
         .args(["-ax", "-o", "pid=", "-o", "comm="])
@@ -267,6 +281,9 @@ async fn main() -> ExitCode {
                 "connected".into()
             }),
         ),
+        // The person's app bridge (ADR 0027) answers on loopback TCP, on
+        // their own port; an agent reaching it could act as any of their apps.
+        attempt("net: reach the app bridge", Want::Denied, app_bridge()),
         attempt("proc: see other processes", Want::Denied, processes()),
         attempt(
             "proc: signal init",

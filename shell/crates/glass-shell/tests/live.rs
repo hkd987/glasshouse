@@ -2,6 +2,7 @@
 //! shell (and later the compositor's) does with the person's input.
 
 use glass_api::{AnswerApproval, ApprovalAnswer, TaskRef, methods};
+use glass_shell::apps::AppEntry;
 use glass_shell::live::{Effect, Live};
 use glass_shell::render::Screen;
 use glass_shell::screens::login;
@@ -662,8 +663,7 @@ fn ui1_apps_windows_hide_behind_the_lock_screen_and_menus_take_the_input() {
 
 #[test]
 fn dk2_the_launcher_offers_the_installed_apps_and_starts_one() {
-    use glass_shell::apps::FIRST_PARTY;
-    let mut live = Live::new(fixtures::tasks()).with_apps(FIRST_PARTY.to_vec());
+    let mut live = Live::new(fixtures::tasks()).with_apps(glass_shell::apps::natives());
     let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
     // The dock's launcher icon opens it.
     let opened = (480..960)
@@ -691,7 +691,7 @@ fn dk2_the_launcher_offers_the_installed_apps_and_starts_one() {
         .expect("Terminal in the launcher");
     assert_eq!(
         live.update(launched),
-        Some(Effect::Launch("/usr/local/bin/glass-terminal"))
+        Some(Effect::Launch(AppEntry::native("terminal").unwrap()))
     );
     assert!(!live.takes_all_input(), "starting an app closes it");
     // Esc closes it too; an id it doesn't offer starts nothing.
@@ -1004,14 +1004,15 @@ fn ux20_the_selected_line_is_drawn_and_a_menu_opens_with_none_selected() {
 
 #[test]
 fn ux20_arrows_and_enter_launch_an_app_from_the_launcher() {
-    use glass_shell::apps::FIRST_PARTY;
-    let mut live = Live::new(fixtures::tasks()).with_apps(FIRST_PARTY.to_vec());
+    let mut live = Live::new(fixtures::tasks()).with_apps(glass_shell::apps::natives());
     live.update(Message::ToggleLauncher);
     press(&mut live, Named::ArrowRight); // Terminal
     press(&mut live, Named::ArrowRight); // Activity Monitor
     assert_eq!(
         press(&mut live, Named::Enter),
-        Some(Some(Effect::Launch("/usr/local/bin/glass-activity")))
+        Some(Some(Effect::Launch(
+            AppEntry::native("activity-monitor").unwrap()
+        )))
     );
     assert!(!live.takes_all_input(), "the launcher closed");
 }
@@ -1060,4 +1061,41 @@ fn ux20_arrows_and_enter_stay_the_apps_when_no_menu_is_open() {
     live.update(Message::ToggleSystemMenu);
     let shifted = live.shortcut(&Key::Named(Named::ArrowDown), Modifiers::SHIFT);
     assert_eq!(shifted, None);
+}
+
+#[test]
+fn ui5_the_docks_mail_opens_mail_and_once_open_brings_it_forward() {
+    use glass_shell::apps::Start;
+    let mail = AppEntry {
+        id: "mail".into(),
+        name: "Mail".into(),
+        start: Start::Web,
+    };
+    let mut live = Live::new(fixtures::tasks()).with_apps(vec![mail.clone()]);
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    let clicked = (480..960)
+        .step_by(8)
+        .find_map(|x| {
+            click(&mut screen, &live, Point::new(x as f32, 860.0))
+                .into_iter()
+                .find(|m| *m == Message::Launch("mail".into()))
+        })
+        .expect("Mail in the dock");
+    assert_eq!(live.update(clicked.clone()), Some(Effect::Launch(mail)));
+    // Its window open, the same click raises it instead of opening another.
+    live.set_windows(vec![
+        glass_shell::apps::AppWindow {
+            id: 4,
+            app_id: "glass.terminal".into(),
+            title: "Terminal".into(),
+        },
+        glass_shell::apps::AppWindow {
+            id: 9,
+            app_id: "chrome-mail.localhost__-Default".into(),
+            title: "Mail".into(),
+        },
+    ]);
+    assert_eq!(live.update(clicked), Some(Effect::Activate(9)));
+    // An app the profile doesn't give starts nothing.
+    assert_eq!(live.update(Message::Launch("calendar".into())), None);
 }

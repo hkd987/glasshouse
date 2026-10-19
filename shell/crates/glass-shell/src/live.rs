@@ -63,7 +63,7 @@ pub struct Live {
     locked: Option<Locked>,
     /// The launcher is open.
     launcher: bool,
-    /// The apps the launcher offers (`apps::FIRST_PARTY` installed here).
+    /// The apps the launcher offers (`apps::offered`).
     apps: Vec<AppEntry>,
     /// Apps' windows, the one last used first (the compositor's stack, top
     /// down).
@@ -192,9 +192,8 @@ pub enum Effect {
     /// Roll back (`task.undo`, AW-15) and hand the report to
     /// [`Live::undo_report`], or the refusal to [`Live::undo_failed`].
     Undo(UndoRequest),
-    /// Start this program, an app from the launcher, in the person's
-    /// session.
-    Launch(&'static str),
+    /// Start this app from the launcher in the person's session.
+    Launch(AppEntry),
     /// Raise the app window with this id and give it the keyboard (Alt
     /// Tab, DK-2).
     Activate(u64),
@@ -699,10 +698,15 @@ impl Live {
                 self.switching = None;
                 None
             }
+            // An app with a window open comes forward, its last used window
+            // first, as a Mac's dock does; otherwise it starts.
             Message::Launch(id) => {
                 self.launcher = false;
                 let app = self.apps.iter().find(|a| a.id == id)?;
-                Some(Effect::Launch(app.command))
+                match self.windows.iter().find(|w| app.owns_window(&w.app_id)) {
+                    Some(window) => Some(Effect::Activate(window.id)),
+                    None => Some(Effect::Launch(app.clone())),
+                }
             }
             Message::ToggleAgents => {
                 self.menu = !self.menu;
@@ -914,7 +918,7 @@ impl Live {
             List::Launcher => self
                 .apps
                 .iter()
-                .map(|app| Some(Message::Launch(app.id.to_owned())))
+                .map(|app| Some(Message::Launch(app.id.clone())))
                 .collect(),
         }
     }
@@ -1137,6 +1141,12 @@ impl Live {
                 .list()
                 .filter(|list| *list != List::Launcher)
                 .and_then(|list| self.selected_in(list)),
+            open_apps: self
+                .apps
+                .iter()
+                .filter(|app| self.windows.iter().any(|w| app.owns_window(&w.app_id)))
+                .map(|app| app.id.clone())
+                .collect(),
             ..Desktop::live(&self.tasks, now)
         };
         let mut overlays = Vec::new();
@@ -1171,7 +1181,7 @@ impl Live {
             ));
         }
         if let Some(chosen) = self.switching {
-            overlays.push(switcher::overlay(theme, &self.windows, chosen));
+            overlays.push(switcher::overlay(theme, &self.windows, chosen, &self.apps));
         }
         let overlay = match overlays.len() {
             0 | 1 => overlays.pop(),

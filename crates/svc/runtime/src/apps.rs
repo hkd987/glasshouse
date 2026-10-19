@@ -35,9 +35,11 @@ pub const MAX_OPEN_APPS_PER_USER: usize = 16;
 /// console's own servers and reads from them, not from this device.
 pub const CONSOLE_APP: &str = "console";
 
-/// Native apps a profile may name (ADR 0025), with their names.
+/// Native apps a profile may name (ADR 0025), with their names. The Browser
+/// is the browser engine's (CF-15, ADR 0027); the desktop starts it.
 const NATIVE_APPS: &[(&str, &str)] = &[
     ("activity-monitor", "Activity Monitor"),
+    ("browser", "Browser"),
     ("terminal", "Terminal"),
 ];
 

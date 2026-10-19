@@ -12,6 +12,8 @@
 //! - [`users`] and [`xattr`]: account lookup and data labels stored with files.
 //! - [`system`]: network, storage, load and services, for the IT self-service
 //!   agent (AE-4).
+//! - [`net`]: who owns the other end of a loopback connection, for the app
+//!   bridge (ADR 0027).
 //! - [`framebuffer`] and [`input`]: the console framebuffer and the evdev
 //!   keyboard and pointer, for the shell where there is no compositor or GPU
 //!   driver (ADR 0016).
@@ -33,6 +35,7 @@ pub mod fs;
 pub mod input;
 #[cfg(target_os = "freebsd")]
 mod ioctl;
+pub mod net;
 pub mod sandbox;
 pub mod snapshot;
 pub mod system;

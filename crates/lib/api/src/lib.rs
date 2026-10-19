@@ -28,7 +28,7 @@ pub use approval::{
 pub use apps::{
     APP_SOCKET_ENV, AppAction, AppCall, AppCallResult, AppManifest, AppOpen, AppPermission,
     AppSession, AppSessionRef, AppStatus, AppWaiting, DEFAULT_APP_SOCKET, ProfileApp,
-    ProfileAppKind, app_methods,
+    ProfileAppKind, app_bridge_port, app_methods,
 };
 pub use tailoring::{
     CheckResult, CustomizationPoint, LayerChange, LayerCheck, LayerLine, LayerRef, LayerRevert,

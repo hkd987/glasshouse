@@ -12,6 +12,7 @@ anyhow.workspace = true
 clap.workspace = true
 glass-api.workspace = true
 glass-http.workspace = true
+glass-platform.workspace = true
 glass-rpc.workspace = true
 glass-types.workspace = true
 serde.workspace = true

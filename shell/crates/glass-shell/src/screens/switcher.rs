@@ -6,7 +6,7 @@ use iced_core::alignment::Horizontal;
 use iced_core::{Color, Length};
 use iced_widget::{Row, column, container, text};
 
-use crate::apps::{self, AppWindow};
+use crate::apps::{AppEntry, AppWindow};
 use crate::screens::launcher;
 use crate::theme::{hex, hexa};
 use crate::{Element, Message, Theme, fonts, style};
@@ -14,9 +14,15 @@ use crate::{Element, Message, Theme, fonts, style};
 /// The longest title a card shows whole.
 const TITLE: usize = 22;
 
-pub fn overlay<'a>(_theme: &Theme, windows: &[AppWindow], chosen: u64) -> Element<'a, Message> {
+pub fn overlay<'a>(
+    _theme: &Theme,
+    windows: &[AppWindow],
+    chosen: u64,
+    apps: &[AppEntry],
+) -> Element<'a, Message> {
     let cards = windows.iter().fold(Row::new().spacing(12), |row, w| {
-        row.push(card(w, w.id == chosen))
+        let app = apps.iter().find(|a| a.owns_window(&w.app_id));
+        row.push(card(w, app, w.id == chosen))
     });
     let panel = container(cards)
         .padding(18)
@@ -24,9 +30,9 @@ pub fn overlay<'a>(_theme: &Theme, windows: &[AppWindow], chosen: u64) -> Elemen
     container(panel).center(Length::Fill).into()
 }
 
-fn card<'a>(window: &AppWindow, chosen: bool) -> Element<'a, Message> {
-    let icon: Element<'a, Message> = match apps::by_app_id(&window.app_id) {
-        Some(app) => launcher::icon(app.id),
+fn card<'a>(window: &AppWindow, app: Option<&AppEntry>, chosen: bool) -> Element<'a, Message> {
+    let icon: Element<'a, Message> = match app {
+        Some(app) => launcher::icon(&app.id),
         None => text(
             window
                 .title

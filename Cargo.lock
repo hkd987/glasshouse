@@ -378,6 +378,7 @@ dependencies = [
  "clap",
  "glass-api",
  "glass-http",
+ "glass-platform",
  "glass-rpc",
  "glass-types",
  "serde",
@@ -656,6 +657,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "glass-agent-sdk",
+ "glass-api",
  "serde_json",
  "tokio",
 ]

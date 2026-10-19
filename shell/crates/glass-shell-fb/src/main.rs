@@ -33,14 +33,14 @@ use anyhow::{Context, anyhow, bail};
 use glass_api::{Event, TaskDetail, TaskRef, TaskView, UndoReport, methods};
 use glass_compositor::{CONTROL_RADIUS, CONTROLS, Compositor, TITLE_BAR, WorkArea};
 use glass_rpc::{Client, ClientError};
-use glass_shell::apps::AppWindow;
+use glass_shell::apps::{AppEntry, AppWindow, Start};
 use glass_shell::live::{Effect, Live};
 use glass_shell::screens::desktop::{DOCK_ROOM, MENU_BAR_HEIGHT};
 use glass_shell::screens::login;
 use glass_shell::screens::system;
 use glass_shell::screens::window::Controls;
 use glass_shell::session::Password;
-use glass_shell::{Message, Power, Theme, session, wallpaper};
+use glass_shell::{Message, Power, Theme, engine, session, wallpaper};
 use glass_shell_fb::display::{AppInput, Display, Route};
 use glass_shell_fb::input::{self, Input};
 use std::os::fd::OwnedFd;
@@ -134,7 +134,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
         .without_wallpaper()
         .signed_in_as(signed_in_as())
         .about(about())
-        .with_apps(glass_shell::apps::offered(&installed_apps(), &profile));
+        .with_apps(offered(&profile));
     // The sign-in screen started this session, so it can check the
     // password that unlocks the screen (`session`).
     if args.from_sign_in {
@@ -210,7 +210,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 };
                 eprintln!("glassd: connected again, {} tiles", tasks.len());
                 client = Some(back);
-                shell.live.set_apps(glass_shell::apps::offered(&installed_apps(), &profile));
+                shell.live.set_apps(offered(&profile));
                 let effects = Vec::from_iter(shell.live.reload(tasks));
                 shell.carry_out_all(client.as_ref(), effects).await;
                 redraw = true;
@@ -227,8 +227,8 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                         ask_to_unlock(password);
                         false
                     }
-                    Effect::Launch(program) => {
-                        launch(program);
+                    Effect::Launch(app) => {
+                        launch(app);
                         false
                     }
                     _ => true,
@@ -292,7 +292,9 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
 /// Connects to glassd, subscribes to its events and lists the caller's
 /// tasks (subscribing first, so no change falls between the two) and the
 /// apps in their profile.
-async fn attach(socket: &std::path::Path) -> anyhow::Result<(Client, Vec<TaskView>, Vec<String>)> {
+async fn attach(
+    socket: &std::path::Path,
+) -> anyhow::Result<(Client, Vec<TaskView>, Vec<glass_api::ProfileApp>)> {
     // A glassd that takes the connection and never answers mustn't hold
     // up the desktop: it comes up without, and tries again.
     tokio::time::timeout(ATTACH_WITHIN, async {
@@ -311,11 +313,7 @@ async fn attach(socket: &std::path::Path) -> anyhow::Result<(Client, Vec<TaskVie
         );
         let tasks = tasks.map_err(|e| anyhow!("task.list: {e}"))?;
         let profile = profile.map_err(|e| anyhow!("apps.list: {e}"))?;
-        Ok((
-            client,
-            tasks,
-            profile.into_iter().map(|a| a.id.to_string()).collect(),
-        ))
+        Ok((client, tasks, profile))
     })
     .await
     .map_err(|_| anyhow!("glassd didn't answer in {} s", ATTACH_WITHIN.as_secs()))?
@@ -370,29 +368,80 @@ fn sign_in_answers() -> mpsc::UnboundedReceiver<String> {
 }
 
 /// The first-party apps installed here, for the launcher.
-fn installed_apps() -> Vec<glass_shell::apps::AppEntry> {
-    glass_shell::apps::FIRST_PARTY
-        .iter()
-        .filter(|app| std::path::Path::new(app.command).exists())
-        .cloned()
-        .collect()
+/// The apps in `profile` that can start on this device (AD-7).
+fn offered(profile: &[glass_api::ProfileApp]) -> Vec<AppEntry> {
+    glass_shell::apps::offered(profile, |program| std::path::Path::new(program).exists())
 }
 
-/// Starts an app in the person's session: its window opens on this
-/// desktop's compositor. A thread waits for it, so it leaves no zombie.
-fn launch(program: &str) {
+/// Starts an app in the person's session, on a thread of its own so the
+/// desktop never waits: its window opens on this desktop's compositor. A
+/// web app's window asks the person's app bridge for its pages, so that is
+/// started first if it isn't running. The thread waits for the app, so none
+/// is left a zombie.
+fn launch(app: &AppEntry) {
+    let app = app.clone();
+    std::thread::spawn(move || start(&app));
+}
+
+fn start(app: &AppEntry) {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let (program, args) = match &app.start {
+        Start::Program { command, .. } => (*command, Vec::new()),
+        Start::Browser { url } => (engine::ENGINE, engine::browser(&home, url.as_deref())),
+        Start::Web => {
+            let port = bridge();
+            (engine::ENGINE, engine::web_app(&home, &app.id, port))
+        }
+    };
     let started = std::process::Command::new(program)
+        .args(&args)
         .env("WAYLAND_DISPLAY", "wayland-0")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn();
     match started {
         Ok(mut child) => {
-            eprintln!("apps: started {program}");
-            std::thread::spawn(move || child.wait());
+            eprintln!("apps: started {} ({program})", app.id);
+            let _ = child.wait();
         }
-        Err(e) => eprintln!("apps: {program}: {e}"),
+        Err(e) => eprintln!("apps: {}: {program}: {e}", app.id),
     }
+}
+
+/// The person's app bridge (ADR 0027): started on first need, and again if
+/// it has exited. Its port, which every web app's origin includes.
+fn bridge() -> u16 {
+    static BRIDGE: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+    let mut running = BRIDGE.lock().unwrap_or_else(|p| p.into_inner());
+    let alive = running
+        .as_mut()
+        .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+    let port = glass_api::app_bridge_port(glass_platform::users::effective_uid());
+    if !alive {
+        // Its log (a connection refused) goes to this desktop's.
+        match std::process::Command::new("/usr/local/bin/glass-app-bridge")
+            .arg("--session")
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                eprintln!("apps: app bridge started");
+                *running = Some(child);
+                // Listening before the first window asks it for a page.
+                let at = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while std::net::TcpStream::connect_timeout(&at, Duration::from_millis(100)).is_err()
+                    && Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            Err(e) => eprintln!("apps: app bridge: {e}"),
+        }
+    }
+    port
 }
 
 /// The compositor apps' windows open in, on `$XDG_RUNTIME_DIR/wayland-0`,

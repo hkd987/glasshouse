@@ -19,10 +19,16 @@ dependencies, for the FreeBSD target) and writes:
                    publish it.
   --third-party LIST
                    Also list the third-party libraries and data staged from
-                   packages (os/freebsd/images/desktop.third-party): in the
-                   notices with their licenses (from --third-party-licenses,
-                   the staged usr/local/share/licenses), and in the SBOM.
-                   Their licenses must be on deny.toml's allow list too.
+                   packages (os/freebsd/images/*.third-party; repeatable): in
+                   the notices with their licenses (from
+                   --third-party-licenses, the staged
+                   usr/local/share/licenses), and in the SBOM. Ports name
+                   licenses their own way (BSD3CLAUSE); they're judged as
+                   SPDX ids by image_license() (ADR 0027): permissive ones
+                   ship, LGPL, MPL and GPL-2.0 libraries ship with the
+                   source offer, (L)GPL-3.0 never. A list may correct what
+                   a package's catalog says about the files it takes from it
+                   (`#license <package> <PORT-IDS>: <why>`).
   --base-packages FILE
                    Also list the image's base packages in the SBOM (BS-6):
                    the inventory a package-list image build writes beside
@@ -55,6 +61,31 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 BASE_LEGAL = REPO / "os/freebsd/legal"
 TARGET = "x86_64-unknown-freebsd"
+# How FreeBSD's ports name licenses (catalog.mk's _LICENSE), as SPDX ids.
+PORT_LICENSES = {
+    "AFL21": "AFL-2.1", "APACHE20": "Apache-2.0", "BSD2CLAUSE": "BSD-2-Clause",
+    "BSD3CLAUSE": "BSD-3-Clause", "BSD4CLAUSE": "BSD-4-Clause", "CC0-1.0": "CC0-1.0",
+    "CUPS": "LicenseRef-CUPS", "FTL": "FTL", "GFDL": "GFDL-1.3-or-later", "GPLv2": "GPL-2.0-only",
+    "GPLv2+": "GPL-2.0-or-later", "GPLv3": "GPL-3.0-only", "GPLv3+": "GPL-3.0-or-later",
+    "GPLv3RLE": "GPL-3.0-only WITH GCC-exception-3.1", "ICU": "ICU", "IJG": "IJG", "ISCL": "ISC",
+    "LGPL20": "LGPL-2.0-only", "LGPL20+": "LGPL-2.0-or-later", "LGPL21": "LGPL-2.1-only",
+    "LGPL21+": "LGPL-2.1-or-later", "LGPL3": "LGPL-3.0-only", "LGPL3+": "LGPL-3.0-or-later",
+    "Libpng": "Libpng", "MIT": "MIT", "MPL11": "MPL-1.1", "MPL20": "MPL-2.0", "OFL11": "OFL-1.1",
+    "PD": "LicenseRef-public-domain", "ZLIB": "Zlib",
+}
+# What an image may take from packages (ADR 0027). Permissive: deny.toml's list and these.
+IMAGE_PERMISSIVE = {
+    "AFL-2.1", "FTL", "ICU", "IJG", "Libpng", "OFL-1.1", "LicenseRef-public-domain",
+    # CUPS 2.3 and later: Apache-2.0 with exceptions that only loosen it.
+    "LicenseRef-CUPS",
+}
+# Unmodified, as separate shared libraries, with their source on offer (BR-3).
+IMAGE_WITH_OFFER = {
+    "LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later",
+    "MPL-1.1", "MPL-2.0", "GPL-2.0-only", "GPL-2.0-or-later",
+}
+# Never: version 3's installation-information terms don't fit devices that run only signed
+# software (EP-2). Anything else unknown is refused too, until someone decides.
 LICENSE_FILE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|UNLICENSE|COPYRIGHT)", re.I)
 # Asset licenses also include font licenses (OFL-Geist.txt).
 ASSET_LICENSE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|OFL)", re.I)
@@ -183,6 +214,26 @@ def source_offer(pkgbase: list[str] | None) -> str:
     return txz.sub(lambda _: "\n".join(pkgbase), offer)
 
 
+def third_party_offer(libraries: list[dict]) -> str:
+    """The source offer's part for third-party libraries under the LGPL, the
+    MPL or GPL-2.0: their source is the FreeBSD ports distribution files
+    they were built from, on the base system's terms above."""
+    offered = [lib for lib in libraries if lib.get("offer")]
+    if not offered:
+        return ""
+    out = [
+        "",
+        "These third-party libraries ship unmodified, as separate shared",
+        "libraries. Their complete corresponding source is the distribution",
+        "files they were built from, available on the same terms:",
+        "",
+    ]
+    for lib in offered:
+        files = ", ".join(lib["distfiles"]) or "(the port's distribution files)"
+        out.append(f"  {lib['name']} {lib['version']} ({lib['license']}): {files}")
+    return "\n".join(out)
+
+
 def asset_licenses(dirs: list[Path]) -> list[tuple[str, str]]:
     """(label, text) for each license file in the asset directories."""
     found = []
@@ -196,19 +247,46 @@ def asset_licenses(dirs: list[Path]) -> list[tuple[str, str]]:
     return found
 
 
+def image_license(ids: list[str], all_apply: bool, allowed: set[str]) -> tuple[str | None, bool]:
+    """Whether an image may ship a package under port license ids `ids`
+    (all of them, or a choice of one): the SPDX expression it ships under,
+    or None; and whether its source must be on offer."""
+    spdx = [PORT_LICENSES.get(i, f"LicenseRef-port-{i}") for i in ids]
+    permissive = allowed | IMAGE_PERMISSIVE
+    if all_apply:
+        if all(i in permissive or i in IMAGE_WITH_OFFER for i in spdx):
+            return " AND ".join(spdx), any(i in IMAGE_WITH_OFFER for i in spdx)
+        return None, False
+    # A choice: the most permissive one on offer.
+    for i in spdx:
+        if i in permissive:
+            return i, False
+    for i in spdx:
+        if i in IMAGE_WITH_OFFER:
+            return i, True
+    return None, False
+
+
 def third_party(list_path: Path, licenses: Path | None) -> list[dict]:
     """The staged third-party packages: name, version, license and the
     license texts each package installs (catalog.mk names the license;
     LICENSE only points at the texts)."""
     found = []
-    for n, line in enumerate(list_path.read_text().splitlines(), 1):
+    text = list_path.read_text()
+    # Corrections a person made: `#license <package> <PORT-IDS>: <why>`.
+    corrected = {
+        m.group(1): m.group(2).split()
+        for m in re.finditer(r"^#license\s+(\S+)\s+([^:]+):\s*\S", text, re.M)
+    }
+    for n, line in enumerate(text.splitlines(), 1):
         fields = line.split("#", 1)[0].split()
         if not fields:
             continue
         name, _, version = fields[0].rpartition("-")
         if not name or len(fields) < 2:
             sys.exit(f"notices: {list_path}:{n}: expected '<name>-<version> <path>...'")
-        entry = {"name": name, "version": version, "license": None, "all": False, "texts": []}
+        entry = {"name": name, "version": version, "license": None, "all": False, "texts": [],
+                 "distfiles": []}
         folder = licenses / fields[0] if licenses else None
         if folder and folder.is_dir():
             catalog = (folder / "catalog.mk").read_text() if (folder / "catalog.mk").exists() else ""
@@ -218,6 +296,11 @@ def third_party(list_path: Path, licenses: Path | None) -> list[dict]:
             # choice, "multi" means every one applies.
             comb = re.search(r"^_LICENSE_COMB=(.*)$", catalog, re.M)
             entry["all"] = bool(comb) and comb.group(1).strip() == "multi"
+            if name in corrected:
+                entry["license"], entry["all"] = " ".join(corrected[name]), True
+                entry["corrected"] = True
+            dist = re.search(r"^_LICENSE_DISTFILES=(.*)$", catalog, re.M)
+            entry["distfiles"] = dist.group(1).split() if dist else []
             entry["texts"] = [
                 (f.name, f.read_text(errors="replace").strip())
                 for f in sorted(folder.iterdir())
@@ -358,7 +441,8 @@ def main() -> int:
     ap.add_argument("--sbom", type=Path)
     ap.add_argument("--base-txz", type=Path, help="FreeBSD base.txz, for the base COPYRIGHT")
     ap.add_argument("--base-packages", type=Path, help="the image's base package inventory, for the SBOM")
-    ap.add_argument("--third-party", type=Path, help="the staged third-party list (desktop.third-party)")
+    ap.add_argument("--third-party", type=Path, action="append", default=[],
+                    help="a staged third-party list (os/freebsd/images/*.third-party); repeatable")
     ap.add_argument("--third-party-licenses", type=Path,
                     help="their staged license files (usr/local/share/licenses)")
     ap.add_argument("--pkgbase-catalog", type=Path,
@@ -385,7 +469,14 @@ def main() -> int:
         for p in packages
         if not p.get("license") or not license_ids(p["license"]) & allowed
     ]
-    libraries = third_party(args.third_party, args.third_party_licenses) if args.third_party else []
+    libraries, seen = [], set()
+    for path in args.third_party:
+        for lib in third_party(path, args.third_party_licenses):
+            # A package two lists take files from is one component.
+            if (lib["name"], lib["version"]) not in seen:
+                seen.add((lib["name"], lib["version"]))
+                libraries.append(lib)
+    libraries.sort(key=lambda lib: (lib["name"], lib["version"]))
     for lib in libraries:
         name = f"{lib['name']} {lib['version']}"
         if lib["license"] is None:
@@ -393,10 +484,22 @@ def main() -> int:
             if args.third_party_licenses:
                 problems.append(f"{name}: its license files don't say which license it is")
             continue
-        ids = license_ids(lib["license"])
-        ok = ids <= allowed if lib["all"] else bool(ids & allowed)
-        if not ok:
-            problems.append(f"{name}: license {lib['license']!r} is not on the allow list")
+        ids = lib["license"].split()
+        if lib.get("corrected") and args.third_party_licenses:
+            # A corrected license's text comes from a package that ships it under that name.
+            have = {n for n, _ in lib["texts"]}
+            for i in ids:
+                if i not in have:
+                    text = next(iter(sorted(args.third_party_licenses.glob(f"*/{i}"))), None)
+                    if text is None:
+                        problems.append(f"{name}: no staged package has the text of {i}")
+                    else:
+                        lib["texts"].append((i, text.read_text(errors="replace").strip()))
+        spdx, offer = image_license(ids, lib["all"], allowed)
+        if spdx is None:
+            problems.append(f"{name}: license {lib['license']!r} may not ship in an image (ADR 0027)")
+            continue
+        lib["license"], lib["offer"] = spdx, offer
     for problem in problems:
         print(f"notices: {problem}", file=sys.stderr)
 
@@ -405,7 +508,7 @@ def main() -> int:
         pkgbase = (pkgbase_source(args.pkgbase_catalog, args.pkgbase_catalog_sha256)
                    if args.pkgbase_catalog else None)
         bare = write_notices(args.notices, packages, base_copyright(args.base_txz), assets, libraries,
-                             source_offer(pkgbase))
+                             source_offer(pkgbase) + third_party_offer(libraries))
         print(f"notices: {len(packages)} crates -> {args.notices}", file=sys.stderr)
         for name in bare:
             print(f"notices: {name} ships no license file; listed by SPDX id only", file=sys.stderr)

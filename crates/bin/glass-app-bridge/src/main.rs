@@ -6,16 +6,22 @@
 //! attributed "by [app] for [user]". The bridge decides nothing: it serves
 //! the app's files and relays its calls.
 //!
-//! This first slice has one mode, `--dev`: loopback HTTP that a browser
-//! (Playwright's Chromium in the tests) can reach, each app on its own
-//! origin, `http://<app>.localhost:<port>`, so one app's page can't call as
-//! another.
+//! Both modes serve loopback HTTP that the browser engine reaches, each app
+//! on its own origin, `http://<app>.localhost:<port>`, so one app's page
+//! can't call as another.
 //!
-//! What dev mode trusts that the OS won't: any process on this machine that
-//! can reach the loopback port can act as any installed app for the user
-//! who ran the bridge, and the Host header names the app. In the OS the app
-//! runtime reaches the bridge over the user's own Unix socket and the bridge
-//! names the app from the installed copy it launched.
+//! - `--session`, on the device (ADR 0027): the desktop starts it for the
+//!   person signed in. It listens on their own port
+//!   ([`glass_api::app_bridge_port`]) and answers only connections whose
+//!   socket the kernel says is theirs; anyone else's is closed unanswered.
+//!   Agents can't connect at all (their jails have no network).
+//! - `--dev`, for development and the tests: any process on this machine
+//!   that can reach the port acts as any installed app for the user who ran
+//!   the bridge.
+//!
+//! Either way the Host header names the app, so any of the person's own
+//! processes can act as any of their apps; our own browser build will let
+//! the bridge name the app from the installed copy it launched (ADR 0024).
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -41,11 +47,15 @@ use glass_http::{ReadError, Request, Response};
     about = "Glasshouse app bridge: relays apps' calls to the system"
 )]
 struct Args {
-    /// Serve apps over loopback HTTP for development and tests. Required:
-    /// it is the only mode in this build.
+    /// Serve the person running it, on the device: their own port, their own
+    /// processes only.
+    #[arg(long, conflicts_with_all = ["dev", "listen"])]
+    session: bool,
+    /// Serve apps over loopback HTTP for development and tests, to any local
+    /// process.
     #[arg(long)]
     dev: bool,
-    /// Loopback address to listen on.
+    /// Loopback address to listen on (`--dev`).
     #[arg(long, default_value = "127.0.0.1:7300")]
     listen: SocketAddr,
     /// Installed apps: one folder per app, with manifest.json and dist/.
@@ -81,26 +91,31 @@ fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> anyhow::Result<()> {
-    if !args.dev {
-        bail!(
-            "only --dev is available in this build: apps reach the system through the \
-             app runtime, which isn't part of it yet"
-        );
+    if args.dev == args.session {
+        bail!("say which: --session (the device) or --dev (development and tests)");
     }
-    if !args.listen.ip().is_loopback() {
-        bail!("--dev serves loopback only; {} isn't", args.listen);
+    let uid = glass_platform::users::effective_uid();
+    let listen = if args.session {
+        SocketAddr::from(([127, 0, 0, 1], glass_api::app_bridge_port(uid)))
+    } else {
+        args.listen
+    };
+    if !listen.ip().is_loopback() {
+        bail!("the bridge serves loopback only; {listen} isn't");
     }
     let apps = installed(&args.apps)?;
     if apps.is_empty() {
         bail!("no apps in {}", args.apps.display());
     }
-    let listener = TcpListener::bind(args.listen)
+    let listener = TcpListener::bind(listen)
         .await
-        .with_context(|| format!("listening on {}", args.listen))?;
+        .with_context(|| format!("listening on {listen}"))?;
     let port = listener.local_addr()?.port();
-    tracing::warn!(
-        "development bridge: any process that can reach 127.0.0.1:{port} acts as these apps for this user"
-    );
+    if args.dev {
+        tracing::warn!(
+            "development bridge: any process that can reach 127.0.0.1:{port} acts as these apps for this user"
+        );
+    }
     for id in apps.keys() {
         tracing::info!("http://{id}.localhost:{port}/");
     }
@@ -110,10 +125,45 @@ async fn run(args: Args) -> anyhow::Result<()> {
         apps,
         sessions: Mutex::new(BTreeMap::new()),
     });
+    let only = args.session.then_some(uid);
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
         let bridge = Arc::clone(&bridge);
-        tokio::spawn(async move { bridge.serve(stream).await });
+        tokio::spawn(async move {
+            if let Some(uid) = only
+                && !owned_by(&stream, peer, uid).await
+            {
+                return;
+            }
+            bridge.serve(stream).await
+        });
+    }
+}
+
+/// Whether the kernel says the socket at `peer` belongs to `uid`. Anything
+/// it can't say (the peer gone, another user's sockets hidden) is no.
+async fn owned_by(stream: &TcpStream, peer: SocketAddr, uid: u32) -> bool {
+    let Ok(local) = stream.local_addr() else {
+        return false;
+    };
+    let owner =
+        tokio::task::spawn_blocking(move || glass_platform::net::loopback_peer_uid(local, peer))
+            .await
+            .ok()
+            .and_then(|r| r.map_err(|e| tracing::warn!("who is {peer}: {e}")).ok())
+            .flatten();
+    match owner {
+        Some(o) if o == uid => true,
+        Some(o) => {
+            tracing::warn!("refused a connection from {peer}: uid {o}'s, not {uid}'s");
+            false
+        }
+        // Gone already (the desktop checking the bridge is up), or another
+        // user's where those can't be seen.
+        None => {
+            tracing::debug!("refused a connection from {peer}: its owner isn't visible");
+            false
+        }
     }
 }
 

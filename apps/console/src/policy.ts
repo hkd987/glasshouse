@@ -11,6 +11,7 @@ import { capital, card, chip, mono, notice, plural, stat } from "./ui.ts";
 const TIERS: Tier[] = ["auto", "notify", "ask", "never"];
 /** Apps a profile may hold, as policy names them. */
 const PROFILE_APPS: [string, string][] = [
+  ["browser", "Browser"],
   ["mail", "Mail"],
   ["calendar", "Calendar"],
   ["console", "Admin console"],

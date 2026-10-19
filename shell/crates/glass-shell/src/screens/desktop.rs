@@ -46,6 +46,8 @@ pub struct Desktop<'a> {
     /// selected (UX-20): a line of [`system_menu_lines`], or a tile of
     /// [`ordered`].
     pub selected: Option<usize>,
+    /// The apps with a window open, by id: the dock shows a dot under each.
+    pub open_apps: Vec<String>,
 }
 
 /// Which agent tiles the desktop shows. They don't stay on screen: a change
@@ -84,6 +86,7 @@ impl<'a> Desktop<'a> {
             lockable: false,
             trash_full: false,
             selected: None,
+            open_apps: Vec::new(),
         }
     }
 }
@@ -667,6 +670,19 @@ fn dock<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
             .align_x(Horizontal::Center)
             .into()
     };
+    // An app's icon: a click opens it, or brings its window forward if it
+    // has one; the dot says it has.
+    let opens = |id: &str, tile: Element<'a, Message>| -> Element<'a, Message> {
+        let open = desktop.open_apps.iter().any(|a| a == id);
+        slot(
+            button(tile)
+                .on_press(Message::Launch(id.to_owned()))
+                .padding(0)
+                .style(style::button_like(style::panel(Color::TRANSPARENT, 0.0)))
+                .into(),
+            open,
+        )
+    };
     let needs = desktop
         .tasks
         .iter()
@@ -744,10 +760,13 @@ fn dock<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
             .into(),
             false
         ),
-        slot(app(hex(0x1E9BF0), glyph(&icons::MAIL, white, 26.0)), false),
-        slot(app(white, calendar.into()), false),
-        slot(app(hex(0x0E8A8A), glyph(&icons::GLOBE, white, 26.0)), true),
-        slot(app(hex(0x6E56E8), glyph(&icons::BAG, white, 26.0)), false),
+        opens("mail", app(hex(0x1E9BF0), glyph(&icons::MAIL, white, 26.0))),
+        opens("calendar", app(white, calendar.into())),
+        opens(
+            "browser",
+            app(hex(0x0E8A8A), glyph(&icons::GLOBE, white, 26.0))
+        ),
+        opens("store", app(hex(0x6E56E8), glyph(&icons::BAG, white, 26.0))),
         slot(app(hex(0x5F6875), glyph(&icons::GEAR, white, 26.0)), false),
         separator,
         agents,

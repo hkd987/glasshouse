@@ -12,7 +12,7 @@ SHELL := /bin/bash
 REPO_ROOT := $(CURDIR)
 FREEBSD_TARGET := x86_64-unknown-freebsd
 # Binaries shipped in the OS image (see os/freebsd/dist.manifest).
-SHIPPED := glassd glassctl glass-mcp glass-demo-agent glass-it-agent glass-probe
+SHIPPED := glassd glassctl glass-mcp glass-demo-agent glass-it-agent glass-probe glass-app-bridge
 # The sign-in screen and the desktop, from the shell workspace (shell/).
 SHIPPED_SHELL := glass-greeter glass-shell-fb glass-compositor glass-terminal glass-activity
 # Cargo profile for FreeBSD builds. `vm` rebuilds in seconds for the VM loop;
@@ -66,7 +66,7 @@ BASE_INVENTORY ?= $(lastword $(sort $(wildcard build/images/glasshouse-*-desktop
 
 sbom: ## Software bill of materials, admins and security reviews only (BR-4); never ship it
 	tools/legal/notices.py $(addprefix --package ,$(SHIPPED)) $(addprefix --shell-package ,$(SHIPPED_SHELL)) \
-		$(if $(BASE_INVENTORY),--base-packages $(BASE_INVENTORY)) --third-party os/freebsd/images/desktop.third-party \
+		$(if $(BASE_INVENTORY),--base-packages $(BASE_INVENTORY)) $(addprefix --third-party ,$(wildcard os/freebsd/images/*.third-party)) \
 		$(if $(wildcard build/dist/freebsd/usr/local/share/licenses),--third-party-licenses build/dist/freebsd/usr/local/share/licenses) \
 		--sbom build/sbom/glasshouse.cdx.json
 
