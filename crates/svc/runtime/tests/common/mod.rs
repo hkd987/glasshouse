@@ -46,6 +46,21 @@ impl Harness {
         self.me.home.clone()
     }
 
+    /// The default policy with `from` replaced by `to`, then `extra`, put
+    /// in force on the running runtime as managed settings do (ADR 0023).
+    #[allow(dead_code)]
+    pub fn apply_policy_replacing(&self, from: &str, to: &str, extra: &str) {
+        assert!(glass_policy::DEFAULT_POLICY.contains(from), "{from}");
+        let text = format!(
+            "{}\n{}",
+            glass_policy::DEFAULT_POLICY.replace(from, &to.replace("{me}", &self.me.name)),
+            extra.replace("{me}", &self.me.name)
+        );
+        let registry = test_registry(self.dir.path(), &self.machine, &self.catalog);
+        self.rt
+            .apply_policy(Policy::from_toml(&text).unwrap(), registry, "test");
+    }
+
     /// Puts the default policy plus `extra` in force on the running
     /// runtime, with a new registry, as managed settings do (ADR 0023).
     #[allow(dead_code)]
@@ -208,6 +223,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
             apps: vec![mail_app(), calendar_app()],
             // The app socket resolves callers by uid; their app data is
             // here, never in the real account's home.
+            console_url: None,
             dev_home: Some(home.clone()),
         },
         policy,
@@ -267,6 +283,7 @@ pub fn rebuild_with(h: &Harness, policy: &str, catalog: Vec<CatalogEntry>) -> Ar
             harness: Some("claude-code".parse().unwrap()),
             attended_dir: h.dir.path().join("run/attended"),
             apps: Vec::new(),
+            console_url: None,
             dev_home: None,
         },
         policy: Policy::from_toml(policy).unwrap(),

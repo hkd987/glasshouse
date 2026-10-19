@@ -45,6 +45,7 @@ impl Handler for ControlApi {
         match method.as_str() {
             methods::SYSTEM_STATUS => to_result(&rt.status()),
             methods::AGENTS_LIST => to_result(&rt.agents_for(&caller)),
+            methods::APPS_LIST => to_result(&rt.profile_apps(&caller)),
             methods::TASK_PLAN => {
                 let request: TaskRequest = parse_params(params)?;
                 to_result(&blocking(|| rt.plan(&caller, &request))?)

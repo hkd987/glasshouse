@@ -78,6 +78,51 @@ mod tests {
     }
 
     #[test]
+    fn profiles_give_it_tools_to_its_role_only() {
+        // Role-based delivery: which apps a person gets is policy.
+        let policy = Policy::from_toml(DEFAULT_POLICY).unwrap();
+        let ids = |user: &str| -> Vec<String> {
+            policy
+                .apps_for(user)
+                .into_iter()
+                .map(|a| a.to_string())
+                .collect()
+        };
+        assert_eq!(ids("anyone"), ["calendar", "mail"]);
+        let with_role = DEFAULT_POLICY.replace(
+            "name = \"it-admins\"\n",
+            "name = \"it-admins\"\nmembers = [\"pat\"]\n",
+        );
+        let policy = Policy::from_toml(&with_role).unwrap();
+        let pat: Vec<String> = policy
+            .apps_for("pat")
+            .into_iter()
+            .map(|a| a.to_string())
+            .collect();
+        assert_eq!(
+            pat,
+            [
+                "activity-monitor",
+                "calendar",
+                "console",
+                "mail",
+                "terminal"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_app_in_a_profile_cant_be_an_agent() {
+        // Apps and agents share one namespace (ADR 0024).
+        let bad = DEFAULT_POLICY.replace(
+            "apps = [\"mail\", \"calendar\"]",
+            "apps = [\"mail\", \"claude-code\"]",
+        );
+        let err = Policy::from_toml(&bad).unwrap_err().to_string();
+        assert!(err.contains("one namespace"), "{err}");
+    }
+
+    #[test]
     fn fix_lists_name_services_not_commands() {
         let bad =
             DEFAULT_POLICY.replace(r#"services = ["cron","#, r#"services = ["cron; reboot","#);

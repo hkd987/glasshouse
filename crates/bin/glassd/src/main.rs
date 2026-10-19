@@ -322,6 +322,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             harness: config.harness.clone(),
             attended_dir: run_dir.join("attended"),
             apps: apps.clone(),
+            console_url: None,
             dev_home: config.dev_home.clone(),
         },
         policy: loaded.policy.clone(),

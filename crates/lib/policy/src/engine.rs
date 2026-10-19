@@ -52,6 +52,15 @@ impl Policy {
             if !seen_groups.insert(group.name.as_str()) {
                 errors.push(format!("group {:?} is defined more than once", group.name));
             }
+            for app in &group.apps {
+                if doc.agents.iter().any(|a| &a.id == app) {
+                    errors.push(format!(
+                        "group {:?} lists {app:?} as an app, but it is an agent; apps and agents \
+                         share one namespace, so list it under agents",
+                        group.name
+                    ));
+                }
+            }
             for agent in &group.agents {
                 if !doc.agents.iter().any(|a| &a.id == agent) {
                     errors.push(format!(
@@ -110,6 +119,13 @@ impl Policy {
             .groups
             .iter()
             .filter(move |g| g.name == EVERYONE || g.members.iter().any(|m| m == user))
+    }
+
+    /// The apps in `user`'s profile: every one their groups list
+    /// (role-based delivery). glassd opens no other app for them, and the
+    /// launcher offers no other.
+    pub fn apps_for<'a>(&'a self, user: &'a str) -> std::collections::BTreeSet<&'a AgentId> {
+        self.groups_of(user).flat_map(|g| g.apps.iter()).collect()
     }
 
     /// Agents `user` may run, in catalog order.

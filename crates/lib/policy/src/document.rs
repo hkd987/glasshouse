@@ -237,6 +237,13 @@ pub struct GroupPolicy {
     /// Agents members of this group may run.
     #[serde(default)]
     pub agents: Vec<AgentId>,
+    /// Apps in members' profiles (role-based delivery): the launcher offers
+    /// them and glassd opens them for members only, so IT's tools reach the
+    /// people whose role grants them and nobody else. Web apps by their
+    /// manifest id, native apps such as `activity-monitor`, and `console`,
+    /// the admin console. Apps and agents share one namespace.
+    #[serde(default)]
+    pub apps: Vec<AgentId>,
     #[serde(default)]
     pub max_label: Option<Label>,
     #[serde(default)]
