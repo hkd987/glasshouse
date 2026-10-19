@@ -10,13 +10,15 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 import { type Browser, type BrowserContext, type Page, expect, test } from "@playwright/test";
 
-import { CONSOLE_SHOTS, CONSOLE_URL, DEVICE, STORE_URL } from "./console-env.ts";
+import { CALENDAR_URL, CONSOLE_SHOTS, CONSOLE_URL, DEVICE, MAIL_URL, STORE_URL } from "./console-env.ts";
 import { DEV, audit, glassctl, glassctlJson, mcp, outcome } from "./env.ts";
 
 /** AD-4: a page IT opens is interactive within this. */
 const PAGE_BUDGET_MS = 1000;
 /** AD-3: a published change is in force on an online pilot device within this. */
 const PROPAGATION_BUDGET_MS = 5000;
+/** A keystroke in an address field to the person suggested, debounce included (AD-1). */
+const SUGGEST_BUDGET_MS = 500;
 const RUNS = 3;
 const ADMIN = userInfo().username;
 
@@ -201,6 +203,46 @@ test("dv11 the Store shows what IT made available and installs it", async ({ bro
 
   await page.locator("article[data-id=contract-review] button", { hasText: "Remove" }).click();
   await expect(page.locator(".banner.done")).toContainText("Removed Contract Review agent");
+  await page.close();
+});
+
+test("ad1 ui5 Mail and Calendar suggest people from the org's directory as you type", async ({ browser }) => {
+  // The console signed the directory when it started; the device applied it.
+  const started = Date.now();
+  while (!audit().some((r) => r.event.kind === "directory_loaded")) {
+    expect(Date.now() - started, "directory on the device").toBeLessThan(PROPAGATION_BUDGET_MS * 4);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const page = await browser.newPage();
+  await page.goto(MAIL_URL);
+  await expect(page.locator("html[data-ready=true]")).toHaveCount(1);
+  await page.click("[data-test=compose]");
+  const to = page.locator("input[name=to]");
+  await to.pressSequentially("pr");
+  const typed = Date.now();
+  await to.press("i");
+  const priya = page.locator(".suggestion", { hasText: "priya@acme.example" });
+  await expect(priya).toHaveCount(1);
+  measured.people_suggest_ms = Date.now() - typed;
+  expect(measured.people_suggest_ms, "a keystroke to the person suggested").toBeLessThan(SUGGEST_BUDGET_MS);
+  await expect(priya).toContainText("Priya Shah");
+  await expect(priya).toContainText("Counsel");
+  await page.screenshot({ path: join(CONSOLE_SHOTS, "mail-people-suggested.png") });
+  await to.press("Enter");
+  await expect(to).toHaveValue("priya@acme.example, ");
+  const call = audit().find((r) => r.event.action === "people.search" && r.event.agent === "mail");
+  expect(call?.event.decision?.tier).toBe("auto");
+  expect(outcome(call!)).toBe("completed");
+
+  await page.goto(CALENDAR_URL);
+  await expect(page.locator("html[data-ready=true]")).toHaveCount(1);
+  await page.click("[data-test=new-event]");
+  const people = page.locator("input[name=attendees]");
+  await people.pressSequentially("dan");
+  await expect(page.locator(".suggestion", { hasText: "dana@acme.example" })).toHaveCount(1);
+  await page.screenshot({ path: join(CONSOLE_SHOTS, "calendar-people-suggested.png") });
+  await people.press("Tab");
+  await expect(people).toHaveValue("dana@acme.example, ");
   await page.close();
 });
 

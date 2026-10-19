@@ -12,6 +12,9 @@ export const CONSOLE_URL = `http://127.0.0.1:${CONSOLE_PORT}/`;
 /** The device's app bridge, for the Store (DV-11). */
 export const STORE_PORT = Number(process.env.GLASS_CONSOLE_E2E_STORE_PORT ?? 7411);
 export const STORE_URL = `http://store.localhost:${STORE_PORT}/`;
+/** Mail and Calendar on the same bridge, with the org's directory (AD-1). */
+export const MAIL_URL = `http://mail.localhost:${STORE_PORT}/`;
+export const CALENDAR_URL = `http://calendar.localhost:${STORE_PORT}/`;
 /** The fixture: devices, catalog items. */
 export const FIXTURE = [500, 50] as const;
 /** This device's id in the fleet. */

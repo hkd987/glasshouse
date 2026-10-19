@@ -1,14 +1,20 @@
 // Calendar (UI-5, NV-3): the week, an event's detail, new events. Holds an
 // agent made show who made them, "by [agent] for [user]" (AU-10). Creating
 // an event on the user's own calendar runs at Notify: it happens, quietly,
-// and stays undoable.
+// and stays undoable. Inviting people sends mail, so it waits for the
+// person's approval on the desktop (Ask); the people come from the org's
+// directory as they're typed (AD-1), and any address typed in full works.
 
 import {
+  addressField,
   Bridge,
+  BridgeError,
   Offline,
+  type Person,
   attributionChip,
   h,
   keepFilesOffline,
+  parseAddresses,
   parseAttribution,
   ready,
   show,
@@ -41,6 +47,10 @@ interface Draft {
   end: string;
   location: string;
   notes: string;
+  /** Who to invite, as typed. */
+  attendees: string;
+  /** The People field, made once per draft so its suggestions survive redraws. */
+  attendeesField: HTMLElement | null;
   errors: string[];
 }
 
@@ -85,15 +95,24 @@ function goTo(weekStart: Date): void {
 function newEvent(day = dayKey(new Date()), start = "10:00"): void {
   const [hh = 10, mm = 0] = start.split(":").map(Number);
   const end = `${String(Math.min(hh + 1, 23)).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
-  state.draft = { title: "", day, start, end, location: "", notes: "", errors: [] };
+  state.draft = { title: "", day, start, end, location: "", notes: "", attendees: "", attendeesField: null, errors: [] };
   state.selected = null;
   render();
   root.querySelector<HTMLInputElement>("input[name=title]")?.focus();
 }
 
+/** Colleagues in the org's directory whose name or address starts with `query` (AD-1). */
+async function lookup(query: string): Promise<Person[]> {
+  const found = await bridge.call<{ people: Person[] }>("people.search", { query, limit: 8 });
+  return found.ok ? found.data.people : [];
+}
+
 async function create(draft: Draft): Promise<void> {
+  const { addresses, bad } = parseAddresses(draft.attendees);
   draft.errors = formProblems(draft);
+  if (bad.length) draft.errors.push(`Not an address: ${bad.join(", ")}`);
   if (draft.errors.length) return render();
+  let event: CalendarEvent;
   try {
     const result = await bridge.call<{ event: CalendarEvent }>("calendar.create", {
       title: draft.title.trim(),
@@ -101,19 +120,41 @@ async function create(draft: Draft): Promise<void> {
       end: `${draft.day}T${draft.end}`,
       location: draft.location.trim(),
       notes: draft.notes,
+      attendees: addresses,
     });
     if (!result.ok) {
       draft.errors = [result.text];
       return render();
     }
+    event = result.data.event;
     state.draft = null;
-    state.selected = result.data.event.id;
+    state.selected = event.id;
     state.notice = `${result.text}.`;
     await loadWeek();
   } catch (error) {
     draft.errors = [error instanceof Offline ? "Adding events needs the system; it isn't answering." : String(error)];
-    render();
+    return render();
   }
+  if (addresses.length) await invite(event, addresses);
+}
+
+/** Invites people to an event: mail leaves the computer, so the desktop asks first. */
+async function invite(event: CalendarEvent, to: string[]): Promise<void> {
+  const people = to.length === 1 ? to[0] : `${to.length} people`;
+  state.notice = `Inviting ${people} waits for your approval on the desktop.`;
+  render();
+  try {
+    const result = await bridge.call("calendar.invite", { id: event.id, to });
+    state.notice = result.ok ? `${result.text}.` : result.text;
+  } catch (error) {
+    state.notice =
+      error instanceof Offline
+        ? "Not invited: the system isn't answering. Nobody was told."
+        : error instanceof BridgeError
+          ? error.message
+          : String(error);
+  }
+  render();
 }
 
 // ---- rendering ------------------------------------------------------------
@@ -298,7 +339,7 @@ function upcoming(): HTMLElement {
 }
 
 function form(draft: Draft): HTMLElement {
-  const input = (name: keyof Omit<Draft, "errors">, label: string, type = "text") =>
+  const input = (name: keyof Omit<Draft, "errors" | "attendees" | "attendeesField">, label: string, type = "text") =>
     h(
       "label",
       { class: "field" },
@@ -335,6 +376,16 @@ function form(draft: Draft): HTMLElement {
     input("day", "Day", "date"),
     h("div", { class: "times" }, input("start", "Starts", "time"), input("end", "Ends", "time")),
     input("location", "Where"),
+    (draft.attendeesField ??= addressField({
+      name: "attendees",
+      label: "People",
+      value: draft.attendees,
+      lookup,
+      onchange: (value) => {
+        draft.attendees = value;
+      },
+    })),
+    h("p", { class: "hint" }, "Inviting people waits for your approval on the desktop."),
     h("label", { class: "field" }, h("span", {}, "Notes"), notes),
     ...draft.errors.map((e) => h("div", { class: "banner refused" }, e)),
     h(

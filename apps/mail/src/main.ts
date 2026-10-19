@@ -5,13 +5,16 @@
 
 import {
   type AppStatus,
+  addressField,
   Bridge,
   BridgeError,
   Offline,
+  type Person,
   attributionChip,
   h,
   keepFilesOffline,
   ready,
+  recentPeople,
   show,
   showAttribution,
 } from "@glasshouse/sdk";
@@ -44,6 +47,8 @@ interface Pending {
 
 interface Compose {
   to: string;
+  /** The To field, made once per message so its suggestions survive redraws. */
+  toField: HTMLElement | null;
   subject: string;
   body: string;
   /** The draft it came from: sending it uses this text. */
@@ -108,6 +113,7 @@ async function refresh(): Promise<void> {
 function startCompose(from?: Outgoing, draft: string | null = null): void {
   state.compose = {
     to: from?.to.join(", ") ?? "",
+    toField: null,
     subject: from?.subject ?? "",
     body: from?.body ?? "",
     draft,
@@ -115,6 +121,18 @@ function startCompose(from?: Outgoing, draft: string | null = null): void {
   };
   render();
   root.querySelector<HTMLInputElement>(from ? "textarea" : "input[name=to]")?.focus();
+}
+
+/** Colleagues in the org's directory whose name or address starts with `query` (AD-1). */
+async function lookup(query: string): Promise<Person[]> {
+  const found = await bridge.call<{ people: Person[] }>("people.search", { query, limit: 8 });
+  return found.ok ? found.data.people : [];
+}
+
+/** People from the mail on this computer: who wrote and who was written to. */
+function recent(): Person[] {
+  const lists = Object.values(state.lists).flat();
+  return recentPeople(lists.flatMap((m) => [m.from, ...m.to]));
 }
 
 function outgoing(compose: Compose): { message: Outgoing; errors: string[] } {
@@ -433,6 +451,16 @@ function draftCard(draft: Summary): HTMLElement {
 }
 
 function composer(compose: Compose): HTMLElement {
+  compose.toField ??= addressField({
+    name: "to",
+    label: "To",
+    value: compose.to,
+    lookup,
+    recent,
+    onchange: (value) => {
+      compose.to = value;
+    },
+  });
   const field = (name: "to" | "subject", label: string) =>
     h(
       "label",
@@ -470,7 +498,7 @@ function composer(compose: Compose): HTMLElement {
       },
     },
     h("h2", {}, compose.draft ? "Edit draft" : compose.subject.startsWith("Re:") ? "Reply" : "New message"),
-    field("to", "To"),
+    compose.toField,
     field("subject", "Subject"),
     body,
     ...compose.errors.map((e) => h("div", { class: "banner refused" }, e)),

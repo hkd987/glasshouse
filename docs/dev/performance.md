@@ -104,6 +104,7 @@ with a dev-host glassd enrolled as a pilot device
 | Devices page interactive (500 rows) | 1 s | AD-4 | 294–326 ms |
 | Publish to in force on an online pilot device | 5 s | AD-3 | 121–176 ms |
 | An approval to the catalog on that device | 5 s | AD-5 | under 5 ms after the page confirms it |
+| A keystroke in Mail's To to the colleague suggested, from the org's directory | 500 ms | AD-1 | 374 ms (a 120 ms pause in typing included) |
 
 *Interactive* is a fresh browser context with the session cookie, from
 navigation to the page drawn with its data (`html[data-ready]`). *In force*

@@ -197,3 +197,60 @@ textarea:focus-visible {
   text-align: center;
   color: var(--faint);
 }
+
+.hint {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+/* Address fields (AD-1): suggestions under the field, over what follows. */
+.address-field {
+  position: relative;
+}
+.suggestions {
+  position: absolute;
+  z-index: 10;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 2px 0 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--window);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  box-shadow: 0 8px 24px rgb(20 23 28 / 14%);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.suggestion {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.suggestion.on,
+.suggestion:hover {
+  background: var(--accent-soft);
+}
+.suggestion .who {
+  font-weight: 600;
+}
+.suggestion .address {
+  color: var(--muted);
+}
+.suggestion .about {
+  grid-column: 1 / -1;
+  color: var(--faint);
+  font-size: 12px;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

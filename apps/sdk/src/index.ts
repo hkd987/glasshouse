@@ -1,5 +1,6 @@
 // @glasshouse/sdk: what every Glasshouse app builds on (UI-5, ADR 0024).
 
+export { addressField, type AddressFieldOptions } from "./address-field.ts";
 export { type Attribution, parseAttribution, showAttribution } from "./attribution.ts";
 export {
   Bridge,
@@ -26,3 +27,16 @@ export {
   type SideEffect,
   type Tier,
 } from "./manifest.ts";
+export {
+  addressesIn,
+  currentToken,
+  insertAddress,
+  matches,
+  mergeSuggestions,
+  narrowed,
+  parseAddresses,
+  type Person,
+  recentPeople,
+  stepHighlight,
+  SUGGESTIONS,
+} from "./people.ts";

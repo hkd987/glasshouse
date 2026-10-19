@@ -1,7 +1,7 @@
 // Mail's logic, apart from the page: what mail.list and mail.read return,
 // how dates read, how a reply starts, which draft answers which message.
 
-import type { Attribution } from "@glasshouse/sdk";
+import { type Attribution, parseAddresses } from "@glasshouse/sdk";
 
 export type Folder = "inbox" | "drafts" | "sent";
 export const FOLDERS: readonly { id: Folder; title: string }[] = [
@@ -137,18 +137,10 @@ export function wasSent(draft: Summary, sent: readonly Summary[]): boolean {
   );
 }
 
-const ADDRESS = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/;
-
 /** Splits what someone typed in To: into addresses, and what isn't one. */
 export function parseRecipients(text: string): { to: string[]; bad: string[] } {
-  const parts = text
-    .split(/[,;\s]+/)
-    .map((p) => p.trim())
-    .filter(Boolean);
-  return {
-    to: parts.filter((p) => ADDRESS.test(p)),
-    bad: parts.filter((p) => !ADDRESS.test(p)),
-  };
+  const { addresses, bad } = parseAddresses(text);
+  return { to: addresses, bad };
 }
 
 /** What a compose form lacks before it can be sent or saved. */

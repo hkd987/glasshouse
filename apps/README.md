@@ -9,7 +9,10 @@ live in `crates/apps` (`glass-app-mail`, `glass-app-calendar`).
 ```text
 apps/
   sdk/        @glasshouse/sdk: the bridge client, manifest types, attribution,
-              a text-only DOM builder, the offline service worker, base styles
+              a text-only DOM builder, the offline service worker, base styles,
+              and the address field that suggests people as they're typed
+              (address-field.ts, people.ts: the org's directory through
+              people.search, then people from recent mail; AD-1)
   mail/       manifest.json, index.html, src/ (main.ts: the page; mail.ts: logic)
   calendar/   manifest.json, index.html, src/ (main.ts; week.ts: the week's logic)
   store/      manifest.json, index.html, src/ (main.ts; store.ts: what the org's

@@ -44,6 +44,30 @@ test("au10 the inbox shows the reply an agent drafted, by claude-code for the us
   await expect(page.locator("[data-test=message] .meta .attribution")).toHaveText(/^by claude-code for /);
 });
 
+test("ui5 ad1 people from recent mail are suggested as you type, and any address works", async ({ page }) => {
+  // No directory on this computer: suggestions come from the mail on it.
+  await openMail(page);
+  await page.click("[data-test=compose]");
+  const to = page.locator("input[name=to]");
+  await to.pressSequentially("dan");
+  const dana = page.locator(".suggestion", { hasText: "dana@northwind.example" });
+  await expect(dana).toHaveCount(1);
+  await expect(to).toHaveAttribute("aria-expanded", "true");
+  await page.screenshot({ path: join(SHOTS, "mail-suggests-recent-people.png") });
+  await to.press("Enter");
+  await expect(to).toHaveValue("dana@northwind.example, ");
+  await expect(page.locator(".suggestion")).toHaveCount(0);
+  // Someone nobody has written to yet is kept as typed.
+  await to.pressSequentially("ops@vendor.example");
+  await to.press("Escape");
+  await expect(to).toHaveValue("dana@northwind.example, ops@vendor.example");
+  await page.locator("input[name=subject]").fill("Renewal");
+  await page.locator("textarea[name=body]").fill("Two of us.");
+  await page.getByRole("button", { name: "Save draft" }).click();
+  await page.click("[data-folder=drafts]");
+  await expect(page.locator(".row", { hasText: "Renewal" }).first()).toContainText("Renewal");
+});
+
 test("ui5 a send outside the team waits for approval on the desktop, then goes", async ({ page }) => {
   await openMail(page);
   await page.locator(".row", { hasText: "Renewal terms for next year" }).click();
