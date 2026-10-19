@@ -71,9 +71,13 @@ include GPL-3.0. What the engine actually links is much less.
    window controls. New windows are told the room they have
    (`configure_bounds`) and asked to fit if they draw bigger.
 6. **Managed policies.** `/usr/local/etc/chromium/policies/managed/
-   glasshouse.json`: no browser sign-in, sync, metrics, promotions or
-   guest mode; `chrome://version`, `gpu`, `system` and `sandbox`, which name
-   the base system, blocked (BR-1). The engine's user agent already reads
+   glasshouse.json`: no browser sign-in, sync, metrics, promotions, guest
+   mode, shopping, Labs or translation; HTTPS upgrades on;
+   `chrome://version`, `gpu`, `system` and `sandbox`, which name the base
+   system, blocked (BR-1). Defaults the person may change are in
+   `policies/recommended/`: Memory Saver, tabs restored at sign-in,
+   third-party cookies blocked, spelling, downloads to `~/Downloads`
+   (`docs/design/browser.md`). The engine's user agent already reads
    Linux, which sites accept. The console sets these per org later (CF-15).
 7. **What an image may take from packages.** `tools/legal/notices.py`
    reads every `*.third-party` list, maps ports' license names to SPDX
