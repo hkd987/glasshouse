@@ -90,6 +90,12 @@ pays about 25 s once to check the dependencies.
 - Iterate in the VM with the default `vm` profile; never pass `--release`
   in the loop.
 - Run one crate's tests while working on it: `cargo test -p glass-runtime`.
+- A worktree building into the main checkout's target dir (to save disk)
+  writes the same files as main: cargo names a workspace crate's build by
+  its path within the workspace, so the two overwrite each other and one
+  side compiles against the other's older crate ("no method named …" for
+  a method that is right there). `touch` the changed crates' sources and
+  rebuild; better, merge main into the branch first.
 
 ## Rules for new code
 
