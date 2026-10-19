@@ -35,6 +35,7 @@ glass-actions = { path = "crates/lib/actions" }
 glass-first-party = { path = "crates/svc/first-party" }
 glass-gateway = { path = "crates/svc/gateway" }
 glass-gateway-providers = { path = "crates/svc/gateway-providers" }
+glass-app-calendar = { path = "crates/apps/calendar" }
 glass-app-files = { path = "crates/apps/files" }
 glass-app-helpdesk = { path = "crates/apps/helpdesk" }
 glass-app-mail = { path = "crates/apps/mail" }

@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use glass_actions::Registry;
 use glass_api::{CustomizationPoint, PointKind, ScopeRequest, TaskRequest, TileState};
+use glass_app_calendar::CalendarProvider;
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
@@ -139,6 +140,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     let mut registry = Registry::new();
     registry.register(Arc::new(FilesProvider)).unwrap();
     registry.register(Arc::new(MailProvider)).unwrap();
+    registry.register(Arc::new(CalendarProvider)).unwrap();
     let machine = Arc::new(FakeMachine::default());
     let ops: Arc<dyn SystemOps> = machine.clone();
     registry
