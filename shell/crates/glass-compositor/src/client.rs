@@ -42,6 +42,7 @@ pub enum Event {
         x: i32,
         y: i32,
     },
+    PointerLeft,
     Button {
         button: u32,
         pressed: bool,
@@ -336,6 +337,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 x: surface_x as i32,
                 y: surface_y as i32,
             }),
+            wl_pointer::Event::Leave { .. } => app.tell(Event::PointerLeft),
             wl_pointer::Event::Button { button, state, .. } => app.tell(Event::Button {
                 button,
                 pressed: state == WEnum::Value(wl_pointer::ButtonState::Pressed),

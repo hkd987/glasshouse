@@ -363,3 +363,21 @@ fn ui8_the_wheel_scrolls_the_window_under_the_pointer() {
     until_told(&mut compositor, &hello, &Event::Scrolled(-10));
     finish(&mut compositor, hello);
 }
+
+#[test]
+fn ui1_the_pointer_leaving_a_window_tells_its_app() {
+    let (mut compositor, socket, _dir) = compositor();
+    let hello = window(&socket, "Hello", (200, 100), 0xFF2F_7BEA);
+    until_told(&mut compositor, &hello, &Event::Focused);
+    let w = compositor.windows()[0].area;
+    compositor.pointer_moved((f64::from(w.x + 50), f64::from(w.y + 50)));
+    until_told(
+        &mut compositor,
+        &hello,
+        &Event::PointerEntered { x: 50, y: 50 },
+    );
+    // Off the window (the desktop sends this first move off it).
+    compositor.pointer_moved((5.0, 5.0));
+    until_told(&mut compositor, &hello, &Event::PointerLeft);
+    finish(&mut compositor, hello);
+}

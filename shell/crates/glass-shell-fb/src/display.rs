@@ -29,6 +29,8 @@ pub struct Display {
     pointer_shown: bool,
     /// A button went down over a window: its release goes there too.
     pressed_on_app: bool,
+    /// The pointer was over a window when it last moved.
+    over_app: bool,
     /// Super is down, alone so far.
     super_alone: bool,
     /// Keys held down in the apps.
@@ -112,6 +114,7 @@ impl Display {
             super_alone: false,
             app_keys: AppKeys::default(),
             alt_held: false,
+            over_app: false,
         })
     }
 
@@ -281,12 +284,16 @@ impl Display {
         }
         if moved {
             typed.events.push(moved_to(self.pointer));
-            if self.app_has(self.pointer, route) || self.pressed_on_app {
+            // Over a window, the move is its app's; the first move off one
+            // goes too, so the app sees the pointer leave (a hover ends).
+            let over = self.app_has(self.pointer, route) || self.pressed_on_app;
+            if over || self.over_app {
                 typed.apps.push(AppInput::Moved(
                     f64::from(self.pointer.x),
                     f64::from(self.pointer.y),
                 ));
             }
+            self.over_app = over;
         }
         self.paint_pointer();
         typed
