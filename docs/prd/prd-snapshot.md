@@ -10,7 +10,7 @@ We are building a FreeBSD-based enterprise desktop where employees can safely ha
 - **No data control.** Sensitive content flows to external models with no OS-level checkpoint.
 So most enterprise AI programs stall at chat assistants and tightly scoped copilots. Security blocks broader autonomy because the platform can't enforce limits.
 **The thesis.** Make the agent a first-class principal in the OS, with its own identity, sandbox, permissions, audit trail and undo. Then make it visible: every agent gets a live tile the user can watch, take over or rewind ([mockups](https://claude.ai/artifact/Y5fH2vFk3fWUvWumZTRATC)). Windows and macOS are adding these protections after the fact. We design them in from day one.
-**The edge: everyone can shape their own tools, and the OS guarantees it stays safe.** Users tailor catalog apps and agents with layers (TL-1 to TL-22) and have the OS build new apps on request (GA-1 to GA-11). Every change is tested against the agent's release bar before it runs, can only narrow permissions, and can be undone across the whole machine.
+**The edge: everyone can shape their own tools, and the OS guarantees it stays safe.** Users tailor catalog apps and agents with layers (TL-1 to TL-22) and have the OS build new apps on request (GA-1 to GA-14), and remix any app, ours included (TL-5). Every change is tested against the agent's release bar before it runs, can only narrow permissions, and can be undone across the whole machine.
 Microsoft already offers user-built apps and agents through Power Apps and Copilot Studio, so customization alone isn't the differentiator. The difference is that Glasshouse enforces safety in the OS itself: test gates, permissions that can't widen, and machine-wide undo, across every app including legacy ones. Matching that would require rebuilding the Windows security model. Over time, each org's layers, suggestions and agent improvements accumulate, and Glasshouse becomes shaped to how they work. That is the switching cost we're building.
 **Working name:** to be decided. This doc says "the OS" throughout.
 
@@ -167,6 +167,7 @@ When no app exists for what someone needs, Glasshouse builds one for them in min
 **Building**
 - GA-1. When a need is repeatable, shared or needs its own screen, the desktop agent builds an app instead of just doing the task once. Examples: a vendor-dispute tracker, a month-end close checklist, an intake form, a dashboard combining several systems.
 - GA-2. Catalog first: if an approved app or agent already does the job, the agent suggests it instead of building a duplicate.
+- GA-12. Remix before building: when nothing in the catalog does the job, the agent starts from the closest app the person may remix, and builds from scratch only when there is none. The OS enforces the order: a new app can't be saved while something installable or remixable meets the need, unless the person turned it down, and the approval says so.
 - GA-3. Users change an app by asking ("add a due-date column", "remind me when something's overdue"). Every change is a new version that can be undone.
 - GA-4. Generated code is checked before it first runs: static analysis, only pre-approved libraries, and a test that its behavior matches its manifest.
 **Guardrails**
@@ -174,10 +175,12 @@ When no app exists for what someone needs, Glasshouse builds one for them in min
 - GA-6. App data lives in org storage with data labels, retention and legal hold, never in hidden local files.
 - GA-7. Actions inside an app follow the approval tiers, so a generated app can't send, post or move money without the usual approvals.
 - GA-8. Sharing moves in steps: personal, then team, then catalog. Sharing with a team runs the automated catalog checks (DV-2 and DV-3) and needs approval from IT or a delegated team owner. A catalog listing gets the full review.
+- GA-13. The store is the only way an app reaches another person: a personal app or remix can't be sent, copied or opened by anyone else. Sharing submits it for review, and the console re-runs every check itself and shows the reviewer what changed from the original and what the app can do beyond it.
 - GA-9. Every app shows its owner and version. Apps unused for 90 days are retired after the owner is notified, and ownership transfers when the owner leaves.
 **IT control**
 - GA-10. Admins set who can build apps, which data labels generated apps may use, how far they can be shared, and see an inventory of every generated app.
 - GA-11. IT or developers can take an app's TypeScript source and turn a popular app into a supported one.
+- GA-14. The Store credits the people who make things: a "Made at [org]" shelf, each app's maker, what it's based on, how many remixes and installs it has, and what changed between versions. IT sees the popular remixes and can adopt one as supported (GA-11).
 
 ## Tailoring catalog items
 Users adapt catalog apps and agents with layers, not copies. A small change is saved as a thin layer on top of the published version, so the original keeps getting updates and the change rides along. A full copy is only for changes too big for a layer. See the Tailoring a catalog agent artboard on the [mockups canvas](https://claude.ai/artifact/Y5fH2vFk3fWUvWumZTRATC).
@@ -186,6 +189,7 @@ Users adapt catalog apps and agents with layers, not copies. A small change is s
 - TL-2. Personal layers: a user asks for a change ("also flag auto-renewal clauses") and it's saved as a versioned, undoable layer on the published item.
 - TL-3. Team layers: a team owner can share a layer with their team, reviewed the same way as sharing a generated app (GA-8).
 - TL-4. Make my own version: when a change is too big for a layer, the user copies the item into a generated app they own. It stops receiving the publisher's updates and is clearly marked as a copy.
+- TL-5. Every app can be remixed, our built-in apps included. Each web app ships its TypeScript source, and "Make my own version" of Mail is a remix its maker owns, marked with the original it's based on and its changes. A remix can only do what its maker can, never keeps the original's lowered approval tiers, and says when the original has a new version so the maker's agent can carry the changes over.
 **Keeping it safe**
 - TL-10. Layers can only narrow permissions, never widen them. A change that needs new data or actions goes back through catalog review as a new version or a copy.
 - TL-11. Before an agent layer turns on, the agent is re-run against its evaluation suite with the layer applied and must still clear its release bar (AE-11).
@@ -611,6 +615,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - UI stack: UI-1 to UI-6, UI-8, UI-9
 - Agent engine: AE-1, AE-2 (invoice reconciliation), AE-3, AE-4, AE-10 to AE-12, AE-30
 - Tailoring, minimal for Pilot 1: TL-1, TL-2, TL-10, TL-11 and TL-13 on our first-party agents, with undo
+- Remix and share, the owner's focus from 2026-10-19: GA-1 to GA-14, TL-3 to TL-5, TL-20 to TL-22
 - Desktop experience: UX-1, UX-2, UX-10, UX-20 to UX-22, UX-30
 - Architecture commitments: FD-1 to FD-4
 - Base system and portability: BS-1 to BS-6, PL-1, PL-2
@@ -627,8 +632,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Compliance and commercial: AD-17, AU-30, CF-65, GT-20, GT-21, GT-40
 - Developer workspace, full: DW-2, DW-4 to DW-6, DW-12, DW-14 to DW-16, DW-22, DW-24 to DW-26
 - Agent engine: AE-2 (remaining agents), AE-20 to AE-25
-- Apps built on request: GA-1 to GA-11
-- Tailoring catalog items: TL-3, TL-4, TL-12, TL-14, TL-20 to TL-22
+- Tailoring catalog items: TL-12, TL-14
 - Desktop experience: UX-3, UX-11, UX-31, UX-40
 **P2 · Later**
 - Undo into third-party SaaS through compensating actions at scale
