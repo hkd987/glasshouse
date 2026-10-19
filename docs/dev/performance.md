@@ -16,7 +16,7 @@ goes over its budget:
 | Expanded view (`task.get`) | 200 ms | AW-10 | 4 / 4 ms |
 | Take over | 1 s | AW-20 | 203 / 245 ms |
 | An action that needs no snapshot (reads, lookups) | 100 ms | ceiling | 3 / 12 ms |
-| An action that snapshots first (writes) | 750 ms | ceiling | 243 / 391 ms |
+| An action that snapshots first (writes) | 750 ms | ceiling | 243 / 391 ms; 2026-10-19: 293–438 / 718–823 ms, over on the first run after a deploy twice, under on the rerun (watch it) |
 | Start to the agent's first step | 4 s | ceiling | 1.7 / 2.6 s |
 | Undo preview (`task.undo` dry run) | 150 ms | ceiling | 6–9 / 58–94 ms (0.8–1.3 s before ADR 0017) |
 | Tiles while two busy agents run (`load`) | 100 ms | ceiling | 5–6 / 13–43 ms |

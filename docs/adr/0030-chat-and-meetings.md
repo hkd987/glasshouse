@@ -533,12 +533,14 @@ Every test name carries its PRD id. Nothing reaches a pilot org before slices C2
   - `au10_an_agents_message_carries_by_agent_for_user_inside_the_seal`
   - `cf91_without_the_console_a_post_is_a_readable_refusal_and_not_queued`
 - glassd: `cf91_member_keys_are_root_only_in_the_state_dir`, plus the new probe check.
-- End to end, in `glass-e2e` with a console and two glassd: a message posted on one computer is read on the other within budget. The budget goes in `docs/dev/performance.md`: under 1 s on loopback.
-- Playwright, in `apps/e2e/chat.spec.ts`. It runs two glassd instances enrolled in one development console, each with its own state folder, sockets and bridge port:
-  - `cf91_two_people_message_each_other`
-  - `cf91_an_agents_post_waits_on_the_desktop_and_shows_its_by_line`
-  - `ui7_chat_launches_in_under_a_second_and_stays_under_150_mb`
-  - `cf91_chat_keeps_nothing_in_the_pages_storage`. After a session, the page's localStorage, IndexedDB and cache hold no message text.
+- End to end, as built: the console's `cf91_two_computers_chat_through_the_consoles_device_api` runs two computers' chat stores through its real device API and `ConsoleClient`. A local person on the development host is one login, so the second person is a colleague scripted with the same code (`crates/apps/chat/examples/colleague.rs`) rather than a second glassd.
+- Playwright, in `apps/e2e/chat.e2e.ts` (the console suite: glass-console, an enrolled glassd, the bridge, and the colleague):
+  - two people message each other, live: a colleague's message on screen in under 1 s (113 ms on loopback, `docs/dev/performance.md`);
+  - an agent's post waits on the desktop and shows its by-line;
+  - a channel made in Chat, read on the colleague's computer, its name never on the console;
+  - Chat keeps nothing in the page's storage (localStorage, IndexedDB, caches);
+  - and in `perf.spec.ts`, Chat's cold launch and memory against UI-7.
+- `app.status` waits: `cf91_chat_hears_of_a_new_message_without_reading_it` in `crates/svc/runtime/tests/chat.rs`.
 
 **C2. Several computers, membership, presence.** Pilot gate, part one.
 - Scope:
