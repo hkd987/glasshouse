@@ -47,8 +47,13 @@ approval_timeout_secs = 900
 "system.storage.clean_cache" = "notify"
 "system.service.restart" = "ask"
 "helpdesk.ticket.create" = "ask"
-# Catalog first (GA-2): looking up what IT approved reads only.
+# Catalog first (GA-2): looking up what IT approved reads only. Installing
+# or removing what it makes available (the Store, DV-11) runs and stays
+# undoable: it changes only which of those the person sees.
 "catalog.search" = "auto"
+"catalog.list" = "auto"
+"catalog.install" = "notify"
+"catalog.remove" = "notify"
 "security.*" = "never"
 "vendors.bank_details.*" = "never"
 "data.export_bulk" = "never"
@@ -97,16 +102,16 @@ services = ["cron", "ntpd", "openvpn", "cupsd"]
 # Groups and agents can narrow the list: `models = ["claude-bedrock"]`.
 
 # Profiles (role-based delivery, AD-7): which apps people get is policy.
-# Everyone gets the Browser (CF-15), Mail, Calendar, Activity Monitor (what
-# is using their own computer, UI-9) and Terminal (their own shell, UI-8);
-# IT's tools for
+# Everyone gets the Browser (CF-15), Mail, Calendar, the Store (what the
+# org's catalog offers them, DV-10), Activity Monitor (what is using their
+# own computer, UI-9) and Terminal (their own shell, UI-8); IT's tools for
 # managing computers, the admin console first, are in the profiles of IT's
 # role only, and glassd opens them for no one else. In a managed fleet the
 # directory fills `it-admins` (SCIM, AD-1).
 [[group]]
 name = "everyone"
 agents = ["it-agent", "invoice-demo", "containment-probe", "claude-code"]
-apps = ["browser", "mail", "calendar", "activity-monitor", "terminal"]
+apps = ["browser", "mail", "calendar", "store", "activity-monitor", "terminal"]
 
 [[group]]
 name = "it-admins"

@@ -53,6 +53,7 @@ async function rendererMemory(browser: Browser): Promise<number[]> {
 for (const [app, use] of [
   ["mail", async (page: Page) => page.locator(".row").first().click()],
   ["calendar", async (page: Page) => page.locator(".event").first().click()],
+  ["store", async (page: Page) => page.locator("input.search").fill("contracts")],
 ] as const) {
   test(`ui7 ${app} launches cold in under 1 s and uses under 150 MB`, async ({ browser }) => {
     const launches: number[] = [];

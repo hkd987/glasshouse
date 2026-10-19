@@ -58,9 +58,11 @@ impl Runtime {
     /// device is managed. Policy decides the profile per group (AD-7).
     pub fn profile_apps(&self, caller: &Caller) -> Vec<ProfileApp> {
         let policy = self.policy();
+        let reaches = self.catalog_reach(caller);
         policy
             .apps_for(&caller.name)
             .into_iter()
+            .filter(|id| reaches(id))
             .filter_map(|id| {
                 if let Some(manifest) = self.config.apps.iter().find(|m| &m.id == id) {
                     return Some(ProfileApp {
@@ -101,8 +103,9 @@ impl Runtime {
         let manifest = self
             .installed_app(app)
             .ok_or_else(|| RuntimeError::NotFound(format!("no app {app} is installed")))?;
-        // Role-based delivery: only apps in the caller's profile open.
-        if !self.policy().apps_for(&caller.name).contains(app) {
+        // Role-based delivery: only apps in the caller's profile open, and
+        // one the org's catalog makes available only once installed.
+        if !self.policy().apps_for(&caller.name).contains(app) || !self.catalog_reach(caller)(app) {
             let mut event = AuditEvent::new(
                 EventKind::AppRefused,
                 format!("{} isn't in {}'s profile", manifest.name, caller.name),

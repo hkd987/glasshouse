@@ -334,12 +334,29 @@ impl Runtime {
     pub fn agents_for(&self, caller: &Caller) -> Vec<AgentSummary> {
         let policy = self.policy();
         let allowed = policy.agents_for(&caller.name);
+        let reaches = self.catalog_reach(caller);
         self.config
             .catalog
             .iter()
-            .filter(|e| allowed.contains(&&e.id))
+            .filter(|e| allowed.contains(&&e.id) && reaches(&e.id))
             .map(CatalogEntry::summary)
             .collect()
+    }
+
+    /// Whether the org's catalog lets an item reach `caller` (DV-11): what
+    /// it doesn't list is policy's alone to decide; what it makes available
+    /// reaches them once they installed it from the Store; what it offers
+    /// their groups nothing of, or blocks, not at all. Only ever narrows.
+    pub(crate) fn catalog_reach<'a>(
+        &'a self,
+        caller: &'a Caller,
+    ) -> impl Fn(&glass_types::AgentId) -> bool + 'a {
+        let groups: Vec<String> = self
+            .policy()
+            .groups_of(&caller.name)
+            .map(|g| g.name.clone())
+            .collect();
+        move |id| self.config.org_catalog.reaches(&groups, &caller.home, id)
     }
 
     /// One view per tile. App sessions are tiles only while they need the
@@ -395,6 +412,12 @@ impl Runtime {
                     entry.id
                 ))
             })?;
+        if !self.catalog_reach(caller)(&entry.id) {
+            return Err(RuntimeError::PermissionDenied(format!(
+                "{} isn't installed: your organization's catalog offers it in the Store",
+                entry.name
+            )));
+        }
 
         let known = self.registry().known_tiers();
         // The user's layer narrows before the card's own limits (TL-10).

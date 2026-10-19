@@ -1,0 +1,9 @@
+{
+  "name": "@glasshouse/store",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Store: what the org's catalog offers you, and installing what IT made available.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "dependencies": { "@glasshouse/sdk": "0.1.0" }
+}

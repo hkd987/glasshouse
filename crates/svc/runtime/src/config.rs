@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use glass_api::{AgentMode, AgentSummary, AppManifest, CustomizationPoint};
 use glass_types::AgentId;
@@ -94,4 +95,26 @@ pub struct RuntimeConfig {
     /// where first-party apps keep their data, is this folder instead of
     /// the one their account names.
     pub dev_home: Option<PathBuf>,
+    /// What the org's catalog lets reach each person (ADR 0023, DV-11):
+    /// an item it makes *available* only once they install it. glassd's is
+    /// the catalog app's; [`OpenCatalog`] lets everything through.
+    pub org_catalog: Arc<dyn CatalogGate>,
+}
+
+/// Whether the org's catalog lets an agent or app reach a person, asked
+/// before policy's answer is used. It only ever narrows: an id it doesn't
+/// know reaches them.
+pub trait CatalogGate: Send + Sync + std::fmt::Debug {
+    /// For someone in `groups` whose home is `home`.
+    fn reaches(&self, groups: &[String], home: &Path, id: &AgentId) -> bool;
+}
+
+/// No catalog: policy alone decides.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenCatalog;
+
+impl CatalogGate for OpenCatalog {
+    fn reaches(&self, _groups: &[String], _home: &Path, _id: &AgentId) -> bool {
+        true
+    }
 }

@@ -1,0 +1,9 @@
+{
+  "id": "store",
+  "name": "Store",
+  "version": "0.1.0",
+  "description": "What your organization's catalog offers you: install what IT made available, see what it can do.",
+  "actions": ["catalog.list", "catalog.search", "catalog.install", "catalog.remove"],
+  "permissions": ["offline"],
+  "labels": ["public", "internal"]
+}

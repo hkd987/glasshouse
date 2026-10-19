@@ -40,7 +40,7 @@ mod written;
 pub use app_api::AppApi;
 pub use apps::MAX_OPEN_APPS_PER_USER;
 pub use caller::Caller;
-pub use config::{CatalogEntry, RuntimeConfig};
+pub use config::{CatalogEntry, CatalogGate, OpenCatalog, RuntimeConfig};
 pub use control_api::ControlApi;
 pub use error::RuntimeError;
 pub use runtime::{RunningAgent, Runtime, RuntimeParts};

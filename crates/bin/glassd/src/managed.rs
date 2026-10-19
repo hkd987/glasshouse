@@ -485,6 +485,7 @@ mod tests {
                 apps: Vec::new(),
                 console_url: Some("http://127.0.0.1:9".into()),
                 dev_home: None,
+                org_catalog: Arc::new(crate::OrgCatalog(catalog.clone())),
             },
             policy,
             policy_source: "policy file".into(),

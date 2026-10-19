@@ -7,12 +7,13 @@
   "workspaces": [
     "sdk",
     "mail",
-    "calendar"
+    "calendar",
+    "store"
   ],
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json && tsc -p sdk/tsconfig.sw.json",
-    "test:unit": "node --test --test-reporter=spec \"sdk/test/*.test.ts\" \"mail/test/*.test.ts\" \"calendar/test/*.test.ts\"",
+    "test:unit": "node --test --test-reporter=spec \"sdk/test/*.test.ts\" \"mail/test/*.test.ts\" \"calendar/test/*.test.ts\" \"store/test/*.test.ts\"",
     "test:e2e": "playwright test -c e2e/playwright.config.ts",
     "lint": "tsc -p tsconfig.json && tsc -p sdk/tsconfig.sw.json && node check-manifests.ts"
   },

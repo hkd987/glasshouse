@@ -12,6 +12,8 @@ apps/
               a text-only DOM builder, the offline service worker, base styles
   mail/       manifest.json, index.html, src/ (main.ts: the page; mail.ts: logic)
   calendar/   manifest.json, index.html, src/ (main.ts; week.ts: the week's logic)
+  store/      manifest.json, index.html, src/ (main.ts; store.ts: what the org's
+              catalog offers you, DV-10, DV-11)
   console/    the admin console's web app (ADR 0023): a site glass-console serves,
               not a device app (no manifest, no service worker)
   e2e/        Playwright: the apps against dev-host glassd and the bridge;

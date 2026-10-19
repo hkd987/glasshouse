@@ -10,7 +10,7 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 import { type Browser, type BrowserContext, type Page, expect, test } from "@playwright/test";
 
-import { CONSOLE_SHOTS, CONSOLE_URL, DEVICE } from "./console-env.ts";
+import { CONSOLE_SHOTS, CONSOLE_URL, DEVICE, STORE_URL } from "./console-env.ts";
 import { DEV, audit, glassctl, glassctlJson, mcp, outcome } from "./env.ts";
 
 /** AD-4: a page IT opens is interactive within this. */
@@ -175,6 +175,33 @@ test("dv11 ga2 an item IT approves reaches catalog.search on the device", async 
   expect(call?.event.decision?.tier).toBe("auto");
   expect(outcome(call!)).toBe("completed");
   await close();
+});
+
+test("dv11 the Store shows what IT made available and installs it", async ({ browser }) => {
+  const page = await browser.newPage();
+  // Approved for everyone, available, by the test before.
+  await expect(async () => {
+    await page.goto(STORE_URL);
+    await expect(page.locator("html[data-ready=true]")).toHaveCount(1, { timeout: 2000 });
+    await expect(page.locator("article[data-id=contract-review]")).toHaveCount(1, { timeout: 500 });
+  }).toPass({ timeout: 20_000 });
+  const card = page.locator("article[data-id=contract-review]");
+  await expect(card).toContainText("Contract Review agent");
+  await expect(card).toContainText("Can do");
+  await expect(card.locator("button")).toHaveText("Install");
+  await page.screenshot({ path: join(CONSOLE_SHOTS, "store-available.png") });
+
+  await card.locator("button").click();
+  await expect(page.locator(".banner.done")).toContainText("Installed Contract Review agent");
+  await expect(page.locator("section", { hasText: "Yours" }).locator("article[data-id=contract-review]")).toHaveCount(1);
+  await page.screenshot({ path: join(CONSOLE_SHOTS, "store-installed.png") });
+  const call = audit().find((r) => r.event.action === "catalog.install");
+  expect(call?.event.decision?.tier).toBe("notify");
+  expect(outcome(call!)).toBe("completed");
+
+  await page.locator("article[data-id=contract-review] button", { hasText: "Remove" }).click();
+  await expect(page.locator(".banner.done")).toContainText("Removed Contract Review agent");
+  await page.close();
 });
 
 test("ad4 the fleet shows the device on the new versions", async ({ browser }) => {

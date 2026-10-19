@@ -9,6 +9,9 @@ import { REPO } from "./env.ts";
 export const CONSOLE_STATE = process.env.GLASS_CONSOLE_E2E_STATE ?? join(REPO, "build/console-e2e/console");
 export const CONSOLE_PORT = Number(process.env.GLASS_CONSOLE_E2E_PORT ?? 7410);
 export const CONSOLE_URL = `http://127.0.0.1:${CONSOLE_PORT}/`;
+/** The device's app bridge, for the Store (DV-11). */
+export const STORE_PORT = Number(process.env.GLASS_CONSOLE_E2E_STORE_PORT ?? 7411);
+export const STORE_URL = `http://store.localhost:${STORE_PORT}/`;
 /** The fixture: devices, catalog items. */
 export const FIXTURE = [500, 50] as const;
 /** This device's id in the fleet. */

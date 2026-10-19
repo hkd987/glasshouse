@@ -12,6 +12,13 @@
 //!
 //! Read only, nothing leaves the machine: it runs at Auto and, like every
 //! action, is audited.
+//!
+//! The Store's actions, `catalog.list`, `catalog.install` and
+//! `catalog.remove`, are in [`store`].
+
+mod store;
+
+pub use store::{INSTALL, INSTALLS, LIST, REMOVE, installed, reaches};
 
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -61,11 +68,22 @@ impl CatalogHandle {
 #[derive(Debug)]
 pub struct CatalogProvider {
     catalog: CatalogHandle,
+    /// This device is managed by an org (ADR 0023): with no catalog yet,
+    /// one is on its way; unmanaged, none will come (DV-13).
+    managed: bool,
 }
 
 impl CatalogProvider {
     pub fn new(catalog: CatalogHandle) -> Self {
-        Self { catalog }
+        Self {
+            catalog,
+            managed: false,
+        }
+    }
+
+    pub fn managed(mut self, managed: bool) -> Self {
+        self.managed = managed;
+        self
     }
 }
 
@@ -101,6 +119,27 @@ impl SearchInput {
     }
 }
 
+/// `catalog.install` or `catalog.remove`: one item, by id; it changes the
+/// person's own list of what they installed, which undo restores.
+fn item_def(name: &str, title: &str, description: &str) -> ActionDef {
+    ActionDef {
+        name: name.parse().expect("static name"),
+        title: title.into(),
+        description: description.into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "The item's id, as catalog.list or catalog.search gives it" }
+            },
+            "required": ["id"],
+            "additionalProperties": false
+        }),
+        side_effect: SideEffect::LocalReversible,
+        default_tier: Tier::Notify,
+        ask: AskLabels::default(),
+    }
+}
+
 fn mode_text(mode: InstallMode) -> &'static str {
     match mode {
         InstallMode::Required => "IT installs it for them",
@@ -128,41 +167,82 @@ fn declares_text(item: &CatalogItem) -> String {
 
 impl ActionProvider for CatalogProvider {
     fn actions(&self) -> Vec<ActionDef> {
-        vec![ActionDef {
-            name: SEARCH.parse().expect("static name"),
-            title: "Search the org's catalog".into(),
-            description: "Catalog first: before building an app, or doing by hand a job that \
+        vec![
+            ActionDef {
+                name: SEARCH.parse().expect("static name"),
+                title: "Search the org's catalog".into(),
+                description: "Catalog first: before building an app, or doing by hand a job that \
                           repeats, look for an app, agent or recorded flow IT already approved \
                           that this user may install, and suggest it instead of building a \
                           duplicate. Describe the need in a sentence. Each result says how it \
                           reaches the user and what it is allowed to do."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "need": { "type": "string", "description": "What the user needs, in a sentence, such as \"track vendor disputes with overdue reminders\"", "maxLength": MAX_NEED },
-                    "kind": { "type": "string", "enum": ["agent", "app", "flow"], "description": "Only this kind of item" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT }
-                },
-                "required": ["need"],
-                "additionalProperties": false
-            }),
-            side_effect: SideEffect::None,
-            default_tier: Tier::Auto,
-            ask: AskLabels::default(),
-        }]
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "need": { "type": "string", "description": "What the user needs, in a sentence, such as \"track vendor disputes with overdue reminders\"", "maxLength": MAX_NEED },
+                        "kind": { "type": "string", "enum": ["agent", "app", "flow"], "description": "Only this kind of item" },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT }
+                    },
+                    "required": ["need"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::None,
+                default_tier: Tier::Auto,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: LIST.parse().expect("static name"),
+                title: "List the org's catalog".into(),
+                description: "Everything the org's catalog offers this user: apps, agents and \
+                          recorded flows, each with how it reaches them (required or \
+                          available), whether they installed it, and what it may do."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["agent", "app", "flow"], "description": "Only this kind of item" }
+                    },
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::None,
+                default_tier: Tier::Auto,
+                ask: AskLabels::default(),
+            },
+            item_def(
+                INSTALL,
+                "Install from the org's catalog",
+                "Install an item the org's catalog makes available to this user: it joins the apps and agents they see. Policy still decides what may run.",
+            ),
+            item_def(
+                REMOVE,
+                "Remove an item installed from the catalog",
+                "Remove an item this user installed from the org's catalog: it leaves the apps and agents they see.",
+            ),
+        ]
     }
 
     fn preview(
         &self,
-        _ctx: &TaskContext,
+        ctx: &TaskContext,
         action: &ActionName,
         input: &Value,
     ) -> Result<Preview, ActionError> {
-        if action.as_str() != SEARCH {
-            return Err(ActionError::InvalidInput(format!(
-                "catalog has no action {action}"
-            )));
+        match action.as_str() {
+            SEARCH => {}
+            LIST | INSTALL | REMOVE => {
+                return store::preview(
+                    self.catalog.current().as_deref(),
+                    ctx,
+                    action.as_str(),
+                    input,
+                );
+            }
+            _ => {
+                return Err(ActionError::InvalidInput(format!(
+                    "catalog has no action {action}"
+                )));
+            }
         }
         let input = SearchInput::parse(input)?;
         let need: String = display_line(input.need.trim()).chars().take(80).collect();
@@ -176,9 +256,21 @@ impl ActionProvider for CatalogProvider {
     fn invoke(
         &self,
         ctx: &TaskContext,
-        _action: &ActionName,
+        action: &ActionName,
         input: &Value,
     ) -> Result<ActionOutput, ActionError> {
+        if matches!(action.as_str(), LIST | INSTALL | REMOVE) {
+            let mut out = store::invoke(
+                self.catalog.current().as_deref(),
+                ctx,
+                action.as_str(),
+                input,
+            )?;
+            if let Some(data) = out.data.as_object_mut() {
+                data.insert("managed".into(), json!(self.managed));
+            }
+            return Ok(out);
+        }
         let input = SearchInput::parse(input)?;
         let Some(catalog) = self.catalog.current() else {
             return Ok(ActionOutput {
@@ -421,5 +513,135 @@ mod tests {
         assert!(preview.summary.starts_with("Search the org's catalog for"));
         assert!(!preview.summary.contains('\u{202E}'), "display-safe");
         assert!(preview.reads.is_empty() && preview.writes.is_empty());
+    }
+
+    fn as_in(
+        p: &CatalogProvider,
+        home: &std::path::Path,
+        groups: &[&str],
+        action: &str,
+        input: Value,
+    ) -> Result<ActionOutput, ActionError> {
+        let mut ctx = context(home);
+        ctx.owner = glass_platform::fs::Owner {
+            uid: glass_platform::users::effective_uid(),
+            gid: 0,
+        };
+        ctx.groups = groups.iter().map(|g| (*g).to_owned()).collect();
+        let action: ActionName = action.parse().unwrap();
+        p.preview(&ctx, &action, &input)?;
+        p.invoke(&ctx, &action, &input)
+    }
+
+    #[test]
+    fn dv11_installing_writes_the_persons_own_list_which_undo_restores() {
+        let home = tempfile::tempdir().unwrap();
+        let p = provider();
+        let groups = ["everyone", "ap-ops"];
+        let out = as_in(
+            &p,
+            home.path(),
+            &groups,
+            INSTALL,
+            json!({ "id": "vendor-disputes" }),
+        )
+        .unwrap();
+        assert_eq!(out.text, "Installed Vendor Disputes");
+        // One change, on the file in their home: undo restores it.
+        assert_eq!(out.changes.len(), 1);
+        assert_eq!(out.changes[0].paths, [home.path().join(INSTALLS)]);
+        assert!(out.changes[0].reversible);
+        assert!(installed(home.path()).contains(&"vendor-disputes".parse().unwrap()));
+
+        let listed = as_in(&p, home.path(), &groups, LIST, json!({})).unwrap();
+        assert_eq!(listed.data["items"][0]["installed"], json!(true));
+        assert_eq!(listed.data["managed"], json!(false));
+
+        let again = as_in(
+            &p,
+            home.path(),
+            &groups,
+            INSTALL,
+            json!({ "id": "vendor-disputes" }),
+        )
+        .unwrap();
+        assert!(again.changes.is_empty(), "nothing changed, nothing to undo");
+        let removed = as_in(
+            &p,
+            home.path(),
+            &groups,
+            REMOVE,
+            json!({ "id": "vendor-disputes" }),
+        )
+        .unwrap();
+        assert_eq!(removed.text, "Removed Vendor Disputes");
+        assert!(installed(home.path()).is_empty());
+    }
+
+    #[test]
+    fn dv11_only_what_is_available_to_their_groups_installs() {
+        let home = tempfile::tempdir().unwrap();
+        let p = provider();
+        // Another group's item, and one their group blocks.
+        assert!(
+            as_in(
+                &p,
+                home.path(),
+                &["everyone"],
+                INSTALL,
+                json!({ "id": "vendor-disputes" })
+            )
+            .is_err()
+        );
+        assert!(
+            as_in(
+                &p,
+                home.path(),
+                &["everyone", "ap-ops"],
+                INSTALL,
+                json!({ "id": "dispute-bot" })
+            )
+            .is_err()
+        );
+        // Required: IT installs it; it can't be removed either.
+        let err = as_in(
+            &p,
+            home.path(),
+            &["legal"],
+            REMOVE,
+            json!({ "id": "legal-disputes" }),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("IT installs"), "{err}");
+        assert!(!home.path().join(INSTALLS).exists());
+    }
+
+    #[test]
+    fn dv11_reaches_narrows_and_leaves_what_the_catalog_doesnt_list_to_policy() {
+        let p = provider();
+        let catalog = p.catalog.current();
+        let catalog = catalog.as_deref();
+        let none = std::collections::BTreeSet::new();
+        let id = |s: &str| -> glass_types::AgentId { s.parse().unwrap() };
+        assert!(reaches(catalog, &["everyone"], &none, &id("not-listed")));
+        assert!(
+            reaches(catalog, &["legal"], &none, &id("legal-disputes")),
+            "required"
+        );
+        assert!(
+            !reaches(catalog, &["ap-ops"], &none, &id("vendor-disputes")),
+            "not installed"
+        );
+        let mine: std::collections::BTreeSet<_> =
+            [id("vendor-disputes"), id("legal-disputes")].into();
+        assert!(reaches(catalog, &["ap-ops"], &mine, &id("vendor-disputes")));
+        assert!(
+            !reaches(catalog, &["everyone"], &mine, &id("legal-disputes")),
+            "never another group's"
+        );
+        assert!(
+            reaches(None, &["everyone"], &none, &id("vendor-disputes")),
+            "no catalog: policy's"
+        );
     }
 }

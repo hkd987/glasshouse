@@ -14,6 +14,7 @@ const PROFILE_APPS: [string, string][] = [
   ["browser", "Browser"],
   ["mail", "Mail"],
   ["calendar", "Calendar"],
+  ["store", "Store"],
   ["console", "Admin console"],
   ["activity-monitor", "Activity Monitor"],
   ["terminal", "Terminal"],

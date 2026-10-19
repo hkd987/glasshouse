@@ -220,11 +220,12 @@ pub fn harness_with(policy_extra: &str) -> Harness {
             max_live_tasks_per_user: 4,
             harness: Some("claude-code".parse().unwrap()),
             attended_dir: dir.path().join("run/attended"),
-            apps: vec![mail_app(), calendar_app()],
+            apps: vec![mail_app(), calendar_app(), store_app()],
             // The app socket resolves callers by uid; their app data is
             // here, never in the real account's home.
             console_url: None,
             dev_home: Some(home.clone()),
+            org_catalog: Arc::new(OrgCatalog(catalog.clone())),
         },
         policy,
         policy_source: "test".into(),
@@ -285,6 +286,7 @@ pub fn rebuild_with(h: &Harness, policy: &str, catalog: Vec<CatalogEntry>) -> Ar
             apps: Vec::new(),
             console_url: None,
             dev_home: None,
+            org_catalog: Arc::new(glass_runtime::OpenCatalog),
         },
         policy: Policy::from_toml(policy).unwrap(),
         policy_source: "test".into(),
@@ -443,4 +445,31 @@ pub fn calendar_app() -> AppManifest {
         "permissions": ["offline"], "labels": ["public", "internal"]
     }))
     .unwrap()
+}
+
+/// The Store as its manifest declares it (DV-10, DV-11).
+pub fn store_app() -> AppManifest {
+    serde_json::from_value(json!({
+        "id": "store", "name": "Store", "version": "0.1.0",
+        "actions": ["catalog.list", "catalog.search", "catalog.install", "catalog.remove"],
+        "permissions": ["offline"], "labels": ["public", "internal"]
+    }))
+    .unwrap()
+}
+
+/// The org's catalog as glassd gates by it (DV-11).
+#[derive(Debug)]
+pub struct OrgCatalog(pub CatalogHandle);
+
+impl glass_runtime::CatalogGate for OrgCatalog {
+    fn reaches(&self, groups: &[String], home: &Path, id: &glass_types::AgentId) -> bool {
+        let catalog = self.0.current();
+        catalog.is_none()
+            || glass_app_catalog::reaches(
+                catalog.as_deref(),
+                groups,
+                &glass_app_catalog::installed(home),
+                id,
+            )
+    }
 }

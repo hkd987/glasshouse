@@ -28,6 +28,9 @@ pub struct Setup {
     /// The org's catalog as this device last applied it, which glassd's
     /// managed sync swaps (ADR 0023); `catalog.search` reads it (GA-2).
     pub catalog: CatalogHandle,
+    /// This device is managed by an org, so a catalog is coming if none
+    /// has arrived (the Store says which).
+    pub managed: bool,
 }
 
 impl Setup {
@@ -38,6 +41,7 @@ impl Setup {
             helpdesk_outbox: PathBuf::from("/nonexistent"),
             system: Arc::new(HostSystem),
             catalog: CatalogHandle::new(),
+            managed: false,
         }
     }
 }
@@ -53,7 +57,9 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
         setup.restartable_services,
     )))?;
     registry.register(Arc::new(HelpdeskProvider::new(setup.helpdesk_outbox)))?;
-    registry.register(Arc::new(CatalogProvider::new(setup.catalog)))?;
+    registry.register(Arc::new(
+        CatalogProvider::new(setup.catalog).managed(setup.managed),
+    ))?;
     registry.register(Arc::new(ModelAction))?;
     Ok(registry)
 }

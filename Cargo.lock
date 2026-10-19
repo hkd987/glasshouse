@@ -409,6 +409,7 @@ dependencies = [
  "glass-actions",
  "glass-api",
  "glass-managed",
+ "glass-platform",
  "glass-types",
  "serde",
  "serde_json",

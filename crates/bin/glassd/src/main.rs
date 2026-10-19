@@ -198,6 +198,26 @@ fn console(message: &str) {
     }
 }
 
+/// What the org's catalog lets reach a person (DV-11): an available item
+/// once they install it from the Store. Read only when a catalog arrived.
+#[derive(Debug)]
+pub(crate) struct OrgCatalog(pub(crate) CatalogHandle);
+
+impl glass_runtime::CatalogGate for OrgCatalog {
+    fn reaches(
+        &self,
+        groups: &[String],
+        home: &std::path::Path,
+        id: &glass_types::AgentId,
+    ) -> bool {
+        let Some(catalog) = self.0.current() else {
+            return true;
+        };
+        let installed = glass_app_catalog::installed(home);
+        glass_app_catalog::reaches(Some(&catalog), groups, &installed, id)
+    }
+}
+
 fn registry(config: &Config, policy: &Policy, catalog: &CatalogHandle) -> anyhow::Result<Registry> {
     Ok(glass_first_party::registry(glass_first_party::Setup {
         // IT's fix list decides what the IT agent may restart (AE-4).
@@ -205,6 +225,7 @@ fn registry(config: &Config, policy: &Policy, catalog: &CatalogHandle) -> anyhow
         helpdesk_outbox: config.state_dir.join("helpdesk/outbox"),
         system: Arc::new(glass_app_system::HostSystem),
         catalog: catalog.clone(),
+        managed: config.managed.is_some(),
     })?)
 }
 
@@ -325,6 +346,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             apps: apps.clone(),
             console_url: config.managed.as_ref().map(|m| m.url.clone()),
             dev_home: config.dev_home.clone(),
+            org_catalog: Arc::new(OrgCatalog(catalog.clone())),
         },
         policy: loaded.policy.clone(),
         policy_source: policy_source.clone(),

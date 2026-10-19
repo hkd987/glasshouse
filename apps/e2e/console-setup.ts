@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, openSync, rmSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
-import { CONSOLE_PORT, CONSOLE_STATE, DEVICE, FIXTURE } from "./console-env.ts";
+import { CONSOLE_PORT, CONSOLE_STATE, DEVICE, FIXTURE, STORE_PORT } from "./console-env.ts";
 import { BIN, DEV, REPO, RUN, glassctlJson, sleep } from "./env.ts";
 
 const LOGS = join(DEV, "..");
@@ -77,6 +77,18 @@ export default async function consoleSetup(): Promise<() => Promise<void>> {
     await until("glassd", () => existsSync(join(RUN, "control.sock")));
     await until("the org's policy on the device", () =>
       glassctlJson<{ policy: string }>("status").policy.startsWith("managed v"),
+    );
+    // The device's apps, for the Store (DV-11).
+    started.push(
+      start("bridge", join(BIN, "glass-app-bridge"), [
+        "--dev",
+        "--listen",
+        `127.0.0.1:${STORE_PORT}`,
+        "--apps",
+        join(REPO, "apps"),
+        "--socket",
+        join(RUN, "apps.sock"),
+      ]),
     );
   } catch (error) {
     for (const child of started.reverse()) await stop(child);

@@ -29,6 +29,7 @@ fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
             ("browser".into(), ProfileAppKind::Native),
             ("calendar".into(), ProfileAppKind::Web),
             ("mail".into(), ProfileAppKind::Web),
+            ("store".into(), ProfileAppKind::Web),
             ("terminal".into(), ProfileAppKind::Native),
         ]
     );
@@ -52,6 +53,7 @@ fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
             "Browser",
             "Calendar",
             "Mail",
+            "Store",
             "Terminal"
         ]
     );

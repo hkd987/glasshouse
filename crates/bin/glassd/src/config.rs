@@ -585,7 +585,7 @@ mod tests {
         let (apps, skipped) = config.load_apps(&registry());
         assert!(skipped.is_empty(), "{skipped:?}");
         let ids: Vec<&str> = apps.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, ["calendar", "mail"]);
+        assert_eq!(ids, ["calendar", "mail", "store"]);
     }
 
     #[test]
