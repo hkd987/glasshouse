@@ -31,6 +31,7 @@ tarball=$BUILD_DIR/dist/freebsd.tar
 log "deploying $(wc -l <"$work/send") of $(wc -l <"$work/paths") files ($(du -h "$tarball" | cut -f1))"
 vm_scp "$tarball" /var/tmp/glasshouse-dist.tar
 vm_scp "$work/staged" /var/tmp/glasshouse-deploy.state
+rm -f "$tarball"
 
 vm_ssh 'sh -eus' <<'EOF'
 tarball=/var/tmp/glasshouse-dist.tar
