@@ -4,6 +4,12 @@
 // and stays undoable. Inviting people sends mail, so it waits for the
 // person's approval on the desktop (Ask); the people come from the org's
 // directory as they're typed (AD-1), and any address typed in full works.
+//
+// An event can be a Glasshouse meeting (CF-21): video with people in the
+// org, up to 25. The meetings the person is in come from meet.list, each
+// with Join, which opens the Meet app on it. They're fetched with
+// bridge.call, never kept in the page's storage: their titles are sealed
+// everywhere but on the computer.
 
 import {
   addressField,
@@ -22,15 +28,18 @@ import {
 } from "@glasshouse/sdk";
 import {
   type CalendarEvent,
+  type MeetingRow,
   addDays,
   dayKey,
   formProblems,
   isOwn,
   layout,
   longDay,
+  meetUrl,
   shortRange,
   startOfWeek,
   timeRange,
+  upcomingMeetings,
   wall,
   weekDays,
   weekTitle,
@@ -51,6 +60,8 @@ interface Draft {
   attendees: string;
   /** The People field, made once per draft so its suggestions survive redraws. */
   attendeesField: HTMLElement | null;
+  /** A Glasshouse meeting (CF-21). */
+  meeting: boolean;
   errors: string[];
 }
 
@@ -58,6 +69,8 @@ const bridge = new Bridge({ app: "calendar" });
 const state = {
   weekStart: startOfWeek(new Date()),
   events: [] as CalendarEvent[],
+  /** The meetings the person is in (CF-21). */
+  meetings: [] as MeetingRow[],
   selected: null as string | null,
   draft: null as Draft | null,
   offline: false,
@@ -86,6 +99,17 @@ async function loadWeek(): Promise<void> {
   render();
 }
 
+/** The meetings the person is in. Not cached: a call, not a read. */
+async function loadMeetings(): Promise<void> {
+  try {
+    const result = await bridge.call<{ meetings: MeetingRow[] }>("meet.list", {});
+    state.meetings = result.ok ? result.data.meetings : [];
+  } catch {
+    state.meetings = [];
+  }
+  render();
+}
+
 function goTo(weekStart: Date): void {
   state.weekStart = weekStart;
   state.selected = null;
@@ -95,7 +119,7 @@ function goTo(weekStart: Date): void {
 function newEvent(day = dayKey(new Date()), start = "10:00"): void {
   const [hh = 10, mm = 0] = start.split(":").map(Number);
   const end = `${String(Math.min(hh + 1, 23)).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
-  state.draft = { title: "", day, start, end, location: "", notes: "", attendees: "", attendeesField: null, errors: [] };
+  state.draft = { title: "", day, start, end, location: "", notes: "", attendees: "", attendeesField: null, meeting: false, errors: [] };
   state.selected = null;
   render();
   root.querySelector<HTMLInputElement>("input[name=title]")?.focus();
@@ -121,6 +145,7 @@ async function create(draft: Draft): Promise<void> {
       location: draft.location.trim(),
       notes: draft.notes,
       attendees: addresses,
+      meeting: draft.meeting,
     });
     if (!result.ok) {
       draft.errors = [result.text];
@@ -146,6 +171,8 @@ async function invite(event: CalendarEvent, to: string[]): Promise<void> {
   try {
     const result = await bridge.call("calendar.invite", { id: event.id, to });
     state.notice = result.ok ? `${result.text}.` : result.text;
+    // An approved meeting invitation made the meeting: it has Join now.
+    if (result.ok && event.meeting) await loadMeetings();
   } catch (error) {
     state.notice =
       error instanceof Offline
@@ -208,7 +235,7 @@ function grid(): HTMLElement {
           const block = h(
             "button",
             {
-              class: `event ${p.event.kind}${own ? "" : " invited"}${byAgent ? " by-agent" : ""}${p.height < 30 ? " short" : ""}${state.selected === p.event.id ? " selected" : ""}`,
+              class: `event ${p.event.kind}${p.event.meeting ? " meeting" : ""}${own ? "" : " invited"}${byAgent ? " by-agent" : ""}${p.height < 30 ? " short" : ""}${state.selected === p.event.id ? " selected" : ""}`,
               title: `${p.event.title}, ${timeRange(p.event.start, p.event.end)}`,
               "data-id": p.event.id,
               onclick: () => {
@@ -300,7 +327,11 @@ function detail(event: CalendarEvent): HTMLElement {
   return h(
     "article",
     { class: "detail", "data-test": "detail" },
-    h("div", { class: `kind kind-${event.kind}` }, event.kind === "hold" ? "Hold · tentative" : own ? "Event" : "Invitation"),
+    h(
+      "div",
+      { class: `kind kind-${event.kind}` },
+      event.kind === "hold" ? "Hold · tentative" : event.meeting ? "Glasshouse meeting" : own ? "Event" : "Invitation",
+    ),
     h("h2", {}, event.title),
     h("div", { class: "when" }, longDay(event.start)),
     h("div", { class: "muted" }, timeRange(event.start, event.end)),
@@ -310,7 +341,48 @@ function detail(event: CalendarEvent): HTMLElement {
     event.location ? row("Where", event.location) : null,
     row("Organizer", own ? `${event.organizer} (you)` : event.organizer),
     event.attendees.length ? row("People", event.attendees.join(", ")) : null,
+    event.meeting ? meetingJoin(event.meeting.id) : null,
     event.notes ? h("div", { class: "notes" }, event.notes) : null,
+  );
+}
+
+/** Join, once the meeting exists: its invitations went out. */
+function meetingJoin(id: string): HTMLElement {
+  return state.meetings.some((m) => m.id === id)
+    ? h("div", { class: "detail-join" }, joinLink(id))
+    : h("p", { class: "hint" }, "Join appears here once its invitations go out.");
+}
+
+/** Opens Meet, on its own origin, on the meeting (CF-21). */
+function joinLink(id: string): HTMLElement {
+  return h(
+    "a",
+    { class: "button primary join", href: meetUrl(location, id), target: "_blank", rel: "noopener", "data-test": "join" },
+    "Join",
+  );
+}
+
+function meetings(): HTMLElement | null {
+  const shown = upcomingMeetings(state.meetings);
+  if (!shown.length) return null;
+  return h(
+    "section",
+    { class: "meetings", "aria-label": "Meetings", "data-test": "meetings" },
+    h("h2", {}, "Meetings"),
+    ...shown.map((m) =>
+      h(
+        "div",
+        { class: "meeting-row", "data-test": "meeting", "data-id": m.id },
+        h(
+          "div",
+          { class: "meeting-text" },
+          h("strong", {}, m.title),
+          h("span", { class: "muted" }, `${longDay(m.start)} · ${timeRange(m.start, m.end)}`),
+          h("span", { class: "muted" }, m.organizer === state.user ? `You and ${m.people.length - 1} more` : `From ${m.organizer_name}`),
+        ),
+        joinLink(m.id),
+      ),
+    ),
   );
 }
 
@@ -325,6 +397,7 @@ function upcoming(): HTMLElement {
     { class: "upcoming" },
     h("h2", {}, "This week"),
     h("p", { class: "muted" }, `${state.events.length} event${state.events.length === 1 ? "" : "s"}${holds.length ? `, ${holds.length} hold${holds.length === 1 ? "" : "s"}` : ""}. Select one to see it.`),
+    meetings(),
     ...holds.map((hold) => {
       const attribution = parseAttribution(hold.attribution);
       return h(
@@ -338,8 +411,16 @@ function upcoming(): HTMLElement {
   );
 }
 
+/** What the form says about inviting, for an event or a meeting (CF-21). */
+function inviteHint(meeting: boolean): string {
+  return meeting
+    ? "Video with people in your organization, up to 25, sealed end to end. Inviting them waits for your approval on the desktop."
+    : "Inviting people waits for your approval on the desktop.";
+}
+
 function form(draft: Draft): HTMLElement {
-  const input = (name: keyof Omit<Draft, "errors" | "attendees" | "attendeesField">, label: string, type = "text") =>
+  const hint = h("p", { class: "hint" }, inviteHint(draft.meeting));
+  const input = (name: keyof Omit<Draft, "errors" | "attendees" | "attendeesField" | "meeting">, label: string, type = "text") =>
     h(
       "label",
       { class: "field" },
@@ -385,7 +466,21 @@ function form(draft: Draft): HTMLElement {
         draft.attendees = value;
       },
     })),
-    h("p", { class: "hint" }, "Inviting people waits for your approval on the desktop."),
+    h(
+      "label",
+      { class: "toggle", "data-test": "meeting-toggle" },
+      h("input", {
+        type: "checkbox",
+        name: "meeting",
+        checked: draft.meeting,
+        onchange: (e: Event) => {
+          draft.meeting = (e.target as HTMLInputElement).checked;
+          hint.textContent = inviteHint(draft.meeting);
+        },
+      }),
+      h("span", {}, "Glasshouse meeting"),
+    ),
+    hint,
     h("label", { class: "field" }, h("span", {}, "Notes"), notes),
     ...draft.errors.map((e) => h("div", { class: "banner refused" }, e)),
     h(
@@ -406,7 +501,7 @@ async function start(): Promise<void> {
   } catch (error) {
     state.notice = error instanceof Offline ? "Calendar hasn't been loaded on this device yet." : String(error);
   }
-  await loadWeek();
+  await Promise.all([loadWeek(), loadMeetings()]);
   // Start the day's hours in view.
   root.querySelector(".week-scroll")?.scrollTo({ top: 1 * HOUR_PX });
   ready();

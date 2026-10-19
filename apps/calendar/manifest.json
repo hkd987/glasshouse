@@ -2,8 +2,8 @@
   "id": "calendar",
   "name": "Calendar",
   "version": "0.1.0",
-  "description": "Your week, the events and holds in it, new events on your own calendar, and invitations to colleagues from the org's directory.",
-  "actions": ["calendar.list", "calendar.read", "calendar.create", "calendar.update", "calendar.invite", "people.search"],
+  "description": "Your week, the events and holds in it, new events on your own calendar, invitations to colleagues from the org's directory, and the Glasshouse meetings you're in, with Join.",
+  "actions": ["calendar.list", "calendar.read", "calendar.create", "calendar.update", "calendar.invite", "people.search", "meet.list"],
   "permissions": ["offline"],
   "labels": ["public", "internal"]
 }

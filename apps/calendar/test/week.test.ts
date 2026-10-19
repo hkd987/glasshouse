@@ -11,9 +11,12 @@ import {
   fromWall,
   isOwn,
   layout,
+  type MeetingRow,
+  meetUrl,
   shortRange,
   startOfWeek,
   timeRange,
+  upcomingMeetings,
   wall,
   weekDays,
   weekTitle,
@@ -91,4 +94,34 @@ test("own events, and what a new event lacks", () => {
 test("the week view's short times", () => {
   assert.match(shortRange("2026-10-20T09:00", "2026-10-20T09:30"), /^9 – 9:30\sAM$/);
   assert.match(shortRange("2026-10-20T11:00", "2026-10-20T12:00"), /^11\sAM – 12\sPM$/);
+});
+
+test("cf21 Join opens Meet on its own origin, on the meeting", () => {
+  const id = "cv-0123456789abcdef0123456789abcdef";
+  assert.equal(meetUrl({ protocol: "http:", host: "calendar.localhost:7301" }, id), `http://meet.localhost:7301/#${id}`);
+  assert.equal(meetUrl({ protocol: "http:", host: "calendar.localhost:7310" }, id), `http://meet.localhost:7310/#${id}`);
+});
+
+test("cf21 meetings still to come, soonest first", () => {
+  const meeting = (id: string, start: string, end: string): MeetingRow => ({
+    id,
+    title: id,
+    start,
+    end,
+    organizer: "dana",
+    organizer_name: "Dana Ruiz",
+    people: [],
+  });
+  const shown = upcomingMeetings(
+    [
+      meeting("later", "2026-10-21T09:00", "2026-10-21T09:30"),
+      meeting("over", "2026-10-20T09:00", "2026-10-20T10:00"),
+      meeting("now", "2026-10-20T14:00", "2026-10-20T15:00"),
+    ],
+    new Date(2026, 9, 20, 14, 30),
+  );
+  assert.deepEqual(
+    shown.map((m) => m.id),
+    ["now", "later"],
+  );
 });

@@ -48,6 +48,7 @@ glass-app-catalog = { path = "crates/apps/catalog" }
 glass-app-people = { path = "crates/apps/people" }
 glass-app-settings = { path = "crates/apps/settings" }
 glass-app-chat = { path = "crates/apps/chat" }
+glass-app-meet = { path = "crates/apps/meet" }
 
 # Third-party crates. Licenses must pass `deny.toml` (no copyleft).
 anyhow = "1.0.104"

@@ -15,11 +15,22 @@
 //!
 //! Times are wall-clock minutes in the user's time zone,
 //! `YYYY-MM-DDTHH:MM`; their fixed width makes text order time order.
+//!
+//! An event can be a Glasshouse meeting (CF-21, ADR 0030): video with
+//! people in the org, up to 25. Inviting people to one refuses anyone
+//! outside the org's directory, and once the invitation is approved it
+//! also makes the meeting's conversation, sealed and signed by the
+//! organizer's member key. Calendar reaches meetings through
+//! [`Meetings`], chat's store on this computer, never through Chat itself
+//! (ADR 0013).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use glass_api::{AskLabels, ChangeKind};
 use glass_managed::DirectoryHandle;
+use glass_managed::chat::{is_conversation_id, new_conversation_id};
+use glass_managed::meet::{MAX_INVITEES, MAX_PEOPLE, MeetingDetails, Meetings};
 use glass_platform::fs::ConfinedDir;
 use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -40,22 +51,47 @@ const MAX_EVENTS: usize = 5000;
 const MAX_RANGE_DAYS: i64 = 62;
 /// Longest single event.
 const MAX_EVENT_DAYS: i64 = 14;
-const MAX_INVITEES: usize = 50;
+/// Most people one event lists or invites; a meeting takes fewer.
+const MAX_EVENT_INVITEES: usize = 50;
 const MAX_LINE: usize = 200;
 const MAX_NOTES: usize = 4000;
+
+/// The app whose own calls are the person's: they make the person's
+/// member key for a meeting if there's none, as opening Chat does.
+const APP: &str = "calendar";
 
 /// The calendar, inviting as the person the org's directory says they are.
 #[derive(Debug, Clone, Default)]
 pub struct CalendarProvider {
     directory: DirectoryHandle,
+    /// The person's meetings in chat's store on this computer (CF-21);
+    /// none where meetings aren't wired in.
+    meetings: Option<Arc<dyn Meetings>>,
 }
 
 impl CalendarProvider {
     /// A calendar whose invitations name the person's name and address in
     /// `directory` as the organizer (AD-1), or their login without one.
     pub fn new(directory: DirectoryHandle) -> Self {
-        Self { directory }
+        Self {
+            directory,
+            meetings: None,
+        }
     }
+
+    /// Events can be Glasshouse meetings, kept in `meetings` (CF-21).
+    pub fn meetings(mut self, meetings: Arc<dyn Meetings>) -> Self {
+        self.meetings = Some(meetings);
+        self
+    }
+}
+
+/// A Glasshouse meeting on an event (CF-21): its conversation's id, chosen
+/// when the event becomes a meeting. The conversation itself is made when
+/// the first invitations go out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Meeting {
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +125,9 @@ pub struct Event {
     /// (AU-10). Empty for events the user made outside Glasshouse.
     #[serde(default)]
     pub attribution: String,
+    /// A Glasshouse meeting (CF-21).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meeting: Option<Meeting>,
 }
 
 #[derive(Deserialize)]
@@ -127,6 +166,9 @@ struct NewEvent {
     /// Listed on the event; nobody is told until `calendar.invite`.
     #[serde(default)]
     attendees: Vec<String>,
+    /// A Glasshouse meeting (CF-21).
+    #[serde(default)]
+    meeting: bool,
 }
 
 #[derive(Deserialize)]
@@ -143,6 +185,9 @@ struct Changes {
     location: Option<String>,
     #[serde(default)]
     notes: Option<String>,
+    /// Make it a Glasshouse meeting, or not, before its invitations go out.
+    #[serde(default)]
+    meeting: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -285,9 +330,9 @@ impl CalendarProvider {
     }
 
     fn emails(addresses: &[String]) -> Result<Vec<String>, ActionError> {
-        if addresses.len() > MAX_INVITEES {
+        if addresses.len() > MAX_EVENT_INVITEES {
             return Err(ActionError::InvalidInput(format!(
-                "at most {MAX_INVITEES} people per event"
+                "at most {MAX_EVENT_INVITEES} people per event"
             )));
         }
         for addr in addresses {
@@ -334,8 +379,13 @@ impl CalendarProvider {
         }
     }
 
-    fn new_event(ctx: &TaskContext, input: &Value, kind: EventKind) -> Result<Event, ActionError> {
-        let (title, start, end, location, notes, attendees) = match kind {
+    fn new_event(
+        &self,
+        ctx: &TaskContext,
+        input: &Value,
+        kind: EventKind,
+    ) -> Result<Event, ActionError> {
+        let (title, start, end, location, notes, attendees, meeting) = match kind {
             EventKind::Hold => {
                 let hold: NewHold = parse_input(input)?;
                 (
@@ -345,6 +395,7 @@ impl CalendarProvider {
                     String::new(),
                     hold.notes,
                     Vec::new(),
+                    false,
                 )
             }
             EventKind::Event => {
@@ -356,10 +407,16 @@ impl CalendarProvider {
                     event.location,
                     event.notes,
                     event.attendees,
+                    event.meeting,
                 )
             }
         };
         let (start, end) = Self::span(&start, &end)?;
+        let meeting = if meeting {
+            Some(self.new_meeting()?)
+        } else {
+            None
+        };
         Ok(Event {
             id: String::new(),
             title: Self::line("title", &title, true)?,
@@ -371,16 +428,56 @@ impl CalendarProvider {
             attendees: Self::emails(&attendees)?,
             organizer: ctx.principal.on_behalf_of.name.clone(),
             attribution: ctx.principal.attribution(),
+            meeting,
+        })
+    }
+
+    /// A new meeting's id, where this computer can have meetings (CF-21).
+    fn new_meeting(&self) -> Result<Meeting, ActionError> {
+        let meetings = self.meetings.as_ref().ok_or_else(|| {
+            ActionError::Failed("Glasshouse meetings aren't available on this computer".into())
+        })?;
+        meetings.ready().map_err(|e| {
+            ActionError::Failed(format!(
+                "No Glasshouse meeting: {}.",
+                e.to_string().trim_end_matches('.')
+            ))
+        })?;
+        let id = new_conversation_id().map_err(|e| ActionError::Failed(e.to_string()))?;
+        Ok(Meeting { id })
+    }
+
+    /// Whether `meeting`'s invitations went out: its conversation is in the
+    /// person's store.
+    fn invited(&self, ctx: &TaskContext, meeting: &Meeting) -> bool {
+        self.meetings.as_ref().is_some_and(|m| {
+            m.meetings(&ctx.principal.on_behalf_of.name)
+                .iter()
+                .any(|known| known.id == meeting.id)
         })
     }
 
     /// The event after `changes`, checked as a new one would be.
     fn changed(
+        &self,
         ctx: &TaskContext,
         mut event: Event,
         changes: Changes,
     ) -> Result<Event, ActionError> {
         Self::own(ctx, &event)?;
+        match (changes.meeting, &event.meeting) {
+            (Some(true), None) => event.meeting = Some(self.new_meeting()?),
+            (Some(false), Some(meeting)) => {
+                if self.invited(ctx, meeting) {
+                    return Err(ActionError::Failed(format!(
+                        "\"{}\" stays a Glasshouse meeting: its invitations went out",
+                        event.title
+                    )));
+                }
+                event.meeting = None;
+            }
+            _ => {}
+        }
         if let Some(title) = changes.title {
             event.title = Self::line("title", &title, true)?;
         }
@@ -440,12 +537,90 @@ impl CalendarProvider {
         for addr in to {
             ics.push_str(&format!("ATTENDEE;RSVP=TRUE:mailto:{addr}\r\n"));
         }
+        if let Some(meeting) = &event.meeting {
+            // Where the invitation's Join goes: the meeting's conversation.
+            ics.push_str(&format!("X-GLASSHOUSE-MEETING:{}\r\n", meeting.id));
+        }
         ics.push_str(&format!(
             "X-GLASSHOUSE-ATTRIBUTION:{}\r\nX-GLASSHOUSE-TASK:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
             ctx.principal.attribution(),
             ctx.principal.task
         ));
         ics
+    }
+
+    /// For an invitation to a Glasshouse meeting (CF-21): the invitees by
+    /// login, each in the org's directory and no more than 24, and whether
+    /// the meeting's conversation is still to be made. `None` for an event
+    /// that isn't a meeting.
+    #[allow(clippy::type_complexity)]
+    fn meeting_invitees(
+        &self,
+        ctx: &TaskContext,
+        event: &Event,
+        to: &[String],
+    ) -> Result<Option<(Arc<dyn Meetings>, Meeting, Vec<String>, bool)>, ActionError> {
+        let Some(meeting) = &event.meeting else {
+            return Ok(None);
+        };
+        let refuse = |why: String| Err(ActionError::Failed(why));
+        if !is_conversation_id(&meeting.id) {
+            return refuse(format!("\"{}\"'s meeting id is damaged", event.title));
+        }
+        let Some(meetings) = self.meetings.clone() else {
+            return refuse("Glasshouse meetings aren't available on this computer".into());
+        };
+        if let Err(e) = meetings.ready() {
+            return refuse(format!(
+                "Not sent: {}.",
+                e.to_string().trim_end_matches('.')
+            ));
+        }
+        let Some(directory) = self.directory.current() else {
+            return refuse(
+                "Not sent: Glasshouse meetings are for people in the org, and this computer \
+                 hasn't received the org's directory yet"
+                    .into(),
+            );
+        };
+        let me = &ctx.principal.on_behalf_of.name;
+        let mut logins: Vec<String> = Vec::new();
+        for addr in to {
+            let Some(person) = directory.release.by_email(addr) else {
+                return refuse(format!(
+                    "Glasshouse meetings are for people in the org for now; {addr} isn't in the directory"
+                ));
+            };
+            if &person.login != me && !logins.contains(&person.login) {
+                logins.push(person.login.clone());
+            }
+        }
+        if logins.is_empty() {
+            return Err(ActionError::InvalidInput(
+                "invite someone besides yourself".into(),
+            ));
+        }
+        if logins.len() > MAX_INVITEES {
+            return refuse(format!(
+                "A Glasshouse meeting is for up to {MAX_PEOPLE} people, you and {MAX_INVITEES} others; \
+                 this invites {}",
+                logins.len()
+            ));
+        }
+        let made = meetings
+            .meetings(me)
+            .into_iter()
+            .find(|m| m.id == meeting.id);
+        if let Some(made) = &made
+            && logins.iter().any(|login| !made.members.contains(login))
+        {
+            return refuse(
+                "This meeting's people were set when its first invitations went out; for now, \
+                 make a new meeting to invite anyone else"
+                    .into(),
+            );
+        }
+        Ok(Some((meetings, meeting.clone(), logins, made.is_none())))
     }
 
     fn new_id() -> String {
@@ -473,8 +648,12 @@ impl ActionProvider for CalendarProvider {
             if !hold {
                 properties["location"] = json!({ "type": "string", "maxLength": MAX_LINE });
                 properties["attendees"] = json!({
-                    "type": "array", "items": { "type": "string" }, "maxItems": MAX_INVITEES,
+                    "type": "array", "items": { "type": "string" }, "maxItems": MAX_EVENT_INVITEES,
                     "description": "Listed on the event. Nobody is told until calendar.invite."
+                });
+                properties["meeting"] = json!({
+                    "type": "boolean",
+                    "description": "A Glasshouse meeting: video with people in the org, up to 25"
                 });
             }
             object(properties, &["title", "start", "end"])
@@ -543,7 +722,11 @@ impl ActionProvider for CalendarProvider {
                         "start": time_schema("New start"),
                         "end": time_schema("New end"),
                         "location": { "type": "string", "maxLength": MAX_LINE },
-                        "notes": { "type": "string", "maxLength": MAX_NOTES }
+                        "notes": { "type": "string", "maxLength": MAX_NOTES },
+                        "meeting": {
+                            "type": "boolean",
+                            "description": "Make it a Glasshouse meeting, or not, before its invitations go out"
+                        }
                     }),
                     &["id"],
                 ),
@@ -564,13 +747,14 @@ impl ActionProvider for CalendarProvider {
                 name: "calendar.invite".parse().expect("static name"),
                 title: "Send calendar invitations".into(),
                 description: format!(
-                    "Invite people to an event the user organizes (up to {MAX_INVITEES}). \
-                     Invitations leave the machine and can't be recalled."
+                    "Invite people to an event the user organizes (up to {MAX_EVENT_INVITEES}). \
+                     Invitations leave the machine and can't be recalled. A Glasshouse \
+                     meeting is for people in the org's directory only, up to {MAX_INVITEES}."
                 ),
                 input_schema: object(
                     json!({
                         "id": id_schema(),
-                        "to": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": MAX_INVITEES }
+                        "to": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": MAX_EVENT_INVITEES }
                     }),
                     &["id", "to"],
                 ),
@@ -634,20 +818,25 @@ impl ActionProvider for CalendarProvider {
                 })
             }
             "calendar.hold" => {
-                let event = Self::new_event(ctx, input, EventKind::Hold)?;
+                let event = self.new_event(ctx, input, EventKind::Hold)?;
                 Ok(change(format!("Hold {}", Self::describe(&event)), &event))
             }
             "calendar.create" => {
-                let event = Self::new_event(ctx, input, EventKind::Event)?;
+                let event = self.new_event(ctx, input, EventKind::Event)?;
+                let what = if event.meeting.is_some() {
+                    "meeting"
+                } else {
+                    "event"
+                };
                 Ok(change(
-                    format!("Add event {}", Self::describe(&event)),
+                    format!("Add {what} {}", Self::describe(&event)),
                     &event,
                 ))
             }
             "calendar.update" => {
                 let changes: Changes = parse_input(input)?;
                 let event = Self::load(&Self::open(ctx)?, &changes.id)?;
-                let event = Self::changed(ctx, event, changes)?;
+                let event = self.changed(ctx, event, changes)?;
                 Ok(change(
                     format!("Change event {}", Self::describe(&event)),
                     &event,
@@ -672,10 +861,13 @@ impl ActionProvider for CalendarProvider {
                 let to = Self::emails(&to)?;
                 let event = Self::load(&Self::open(ctx)?, &id)?;
                 Self::own(ctx, &event)?;
+                // An outsider is refused here, before anyone is asked.
+                let meeting = self.meeting_invitees(ctx, &event, &to)?;
                 let n = to.len();
                 Ok(Preview {
                     summary: format!(
-                        "Send {n} invitation{}: {}",
+                        "Send {n} {}invitation{}: {}",
+                        if meeting.is_some() { "meeting " } else { "" },
                         if n == 1 { "" } else { "s" },
                         event.title
                     ),
@@ -737,7 +929,7 @@ impl ActionProvider for CalendarProvider {
                 } else {
                     EventKind::Event
                 };
-                let mut event = Self::new_event(ctx, input, kind)?;
+                let mut event = self.new_event(ctx, input, kind)?;
                 // A fresh name; a taken one (two writers at once) gets another.
                 let mut saved = None;
                 for _ in 0..5 {
@@ -774,7 +966,7 @@ impl ActionProvider for CalendarProvider {
             "calendar.update" => {
                 let changes: Changes = parse_input(input)?;
                 let event = Self::load(&cal, &changes.id)?;
-                let event = Self::changed(ctx, event, changes)?;
+                let event = self.changed(ctx, event, changes)?;
                 let path = Self::save(ctx, &cal, &event, false)
                     .map_err(|e| ActionError::io("saving event", e))?;
                 let line = Self::describe(&event);
@@ -817,6 +1009,35 @@ impl ActionProvider for CalendarProvider {
                 let to = Self::emails(&to)?;
                 let event = Self::load(&cal, &id)?;
                 Self::own(ctx, &event)?;
+                // A meeting's conversation first: if it can't be made,
+                // nobody is invited (CF-21).
+                let mut made = None;
+                if let Some((meetings, meeting, logins, new)) =
+                    self.meeting_invitees(ctx, &event, &to)?
+                {
+                    if new {
+                        let details = MeetingDetails {
+                            title: event.title.clone(),
+                            start: event.start.clone(),
+                            end: event.end.clone(),
+                        };
+                        meetings
+                            .create(
+                                &ctx.principal.on_behalf_of.name,
+                                ctx.principal.agent.as_str() == APP,
+                                &meeting.id,
+                                &logins,
+                                &details,
+                            )
+                            .map_err(|e| {
+                                ActionError::Failed(format!(
+                                    "Not sent: {}.",
+                                    e.to_string().trim_end_matches('.')
+                                ))
+                            })?;
+                        made = Some(logins.len() + 1);
+                    }
+                }
                 let text = self.invitation(ctx, &event, &to);
                 let stamp = Timestamp::now().unix_seconds();
                 let mut sent = None;
@@ -839,22 +1060,39 @@ impl ActionProvider for CalendarProvider {
                 let path = sent.ok_or_else(|| ActionError::Failed("no free file name".into()))?;
                 attribute(ctx, &path);
                 let line = Self::describe(&event);
+                let mut changes: Vec<Change> = to
+                    .iter()
+                    .map(|addr| Change {
+                        kind: ChangeKind::Sent,
+                        target: format!("Invitation to {addr}: {line}"),
+                        reversible: false,
+                        paths: vec![path.clone()],
+                    })
+                    .collect();
+                let mut text = format!(
+                    "Sent {} invitation{} to {line}",
+                    to.len(),
+                    if to.len() == 1 { "" } else { "s" }
+                );
+                if let Some(people) = made {
+                    text.push_str(&format!(
+                        "; the Glasshouse meeting is set up for {people} people"
+                    ));
+                    changes.push(Change {
+                        kind: ChangeKind::Created,
+                        target: format!("Glasshouse meeting: {line}"),
+                        reversible: false,
+                        paths: Vec::new(),
+                    });
+                }
                 Ok(ActionOutput {
-                    text: format!(
-                        "Sent {} invitation{} to {line}",
-                        to.len(),
-                        if to.len() == 1 { "" } else { "s" }
-                    ),
-                    data: json!({ "invited": to, "event": event.id }),
-                    changes: to
-                        .iter()
-                        .map(|addr| Change {
-                            kind: ChangeKind::Sent,
-                            target: format!("Invitation to {addr}: {line}"),
-                            reversible: false,
-                            paths: vec![path.clone()],
-                        })
-                        .collect(),
+                    text,
+                    data: json!({
+                        "invited": to,
+                        "event": event.id,
+                        "meeting": event.meeting.as_ref().map(|m| &m.id),
+                    }),
+                    changes,
                 })
             }
             _ => Err(ActionError::InvalidInput(format!(
@@ -1341,6 +1579,304 @@ mod tests {
             ),
             Err(ActionError::InvalidInput(_))
         ));
+    }
+
+    /// Meetings (CF-21): an org in memory whose directory has the test's
+    /// user ("demo"), Priya, Sam and `more` others, with Priya's computer
+    /// set up, and a calendar for demo on its own computer.
+    struct MeetingOrg {
+        _dir: tempfile::TempDir,
+        link: Arc<glass_managed::chat::testing::MemoryLink>,
+        priya: glass_app_chat::ChatHandle,
+        priya_meetings: glass_app_chat::ChatProvider,
+        calendar: CalendarProvider,
+    }
+
+    fn meeting_org(more: usize) -> MeetingOrg {
+        use glass_app_chat::{ChatHandle, ChatProvider};
+        use glass_managed::directory::Applied;
+        use glass_managed::{ChatRelease, DirectoryRelease, Person};
+        let person = |login: &str| Person {
+            login: login.into(),
+            name: login.into(),
+            email: format!("{login}@acme.example"),
+            title: String::new(),
+            department: String::new(),
+        };
+        let mut people: Vec<Person> = ["demo", "priya", "sam"].map(person).into();
+        people.extend((1..=more).map(|n| person(&format!("p{n:02}"))));
+        let directory = DirectoryHandle::new();
+        directory.set(Applied {
+            version: 1,
+            release: DirectoryRelease { people },
+        });
+        let it = glass_crypto::SecretKey::generate().unwrap();
+        let link = Arc::new(glass_managed::chat::testing::MemoryLink::new(
+            &it.public().unwrap(),
+        ));
+        let release = ChatRelease::new(&it.public().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let computer = |name: &str| {
+            let chat = ChatHandle::new(dir.path().join(name));
+            chat.connect("acme", name, link.clone());
+            chat.set_compliance(&release.compliance, &release.fingerprint)
+                .unwrap();
+            (chat.clone(), ChatProvider::new(chat, directory.clone()))
+        };
+        let (_, demo) = computer("dev-demo");
+        let (priya, priya_meetings) = computer("dev-priya");
+        // Priya opened Calendar on her computer once: she has a key.
+        Meetings::member(&priya_meetings, "priya", true).unwrap();
+        MeetingOrg {
+            _dir: dir,
+            link,
+            priya,
+            priya_meetings,
+            calendar: CalendarProvider::new(directory).meetings(Arc::new(demo)),
+        }
+    }
+
+    /// The person in their own Calendar.
+    fn in_calendar(ctx: &TaskContext) -> TaskContext {
+        let mut ctx = ctx.clone();
+        ctx.principal.agent = APP.parse().unwrap();
+        ctx
+    }
+
+    fn new_meeting(org: &MeetingOrg, ctx: &TaskContext) -> Event {
+        let out = org
+            .calendar
+            .invoke(
+                ctx,
+                &name("calendar.create"),
+                &json!({ "title": "Northwind sync", "start": "2026-10-20T14:00", "end": "2026-10-20T15:00", "meeting": true }),
+            )
+            .unwrap();
+        serde_json::from_value(out.data["event"].clone()).unwrap()
+    }
+
+    fn sent(dir: &Path) -> usize {
+        fs::read_dir(dir.join("Calendar/Sent")).unwrap().count()
+    }
+
+    #[test]
+    fn cf21_a_meeting_invitation_refuses_people_outside_the_org() {
+        let (dir, ctx) = setup();
+        let org = meeting_org(0);
+        let ctx = in_calendar(&ctx);
+        let event = new_meeting(&org, &ctx);
+        let meeting = event.meeting.clone().expect("a meeting");
+        assert!(is_conversation_id(&meeting.id));
+
+        let input = json!({ "id": event.id, "to": ["priya@acme.example", "x@other.com"] });
+        let refused = org
+            .calendar
+            .preview(&ctx, &name("calendar.invite"), &input)
+            .unwrap_err();
+        // A result the page or agent reads, before anyone is asked.
+        assert_eq!(
+            refused,
+            ActionError::Failed(
+                "Glasshouse meetings are for people in the org for now; x@other.com isn't in the directory"
+                    .into()
+            )
+        );
+        let refused = org
+            .calendar
+            .invoke(&ctx, &name("calendar.invite"), &input)
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("x@other.com isn't in the directory")
+        );
+        assert_eq!(sent(dir.path()), 0, "nobody was invited");
+        assert!(org.link.conversations().is_empty(), "no meeting was made");
+
+        // Addresses match the directory whatever their case; an event that
+        // isn't a meeting invites anyone.
+        org.calendar
+            .preview(
+                &ctx,
+                &name("calendar.invite"),
+                &json!({ "id": event.id, "to": ["Priya@ACME.example"] }),
+            )
+            .unwrap();
+        let plain = hold(&ctx);
+        org.calendar
+            .preview(
+                &ctx,
+                &name("calendar.invite"),
+                &json!({ "id": plain.id, "to": ["x@other.com"] }),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn cf21_a_meeting_is_for_up_to_25_people() {
+        let (_dir, ctx) = setup();
+        let org = meeting_org(24);
+        let ctx = in_calendar(&ctx);
+        let event = new_meeting(&org, &ctx);
+        let everyone: Vec<String> = (1..=24)
+            .map(|n| format!("p{n:02}@acme.example"))
+            .chain(["priya@acme.example".into()])
+            .collect();
+        let refused = org
+            .calendar
+            .preview(
+                &ctx,
+                &name("calendar.invite"),
+                &json!({ "id": event.id, "to": everyone }),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("up to 25 people, you and 24 others; this invites 25"),
+            "{refused}"
+        );
+        // 24 others, and the organizer listing themselves too, is fine.
+        let mut fits = everyone[..24].to_vec();
+        fits.push("demo@acme.example".into());
+        let preview = org
+            .calendar
+            .preview(
+                &ctx,
+                &name("calendar.invite"),
+                &json!({ "id": event.id, "to": fits }),
+            )
+            .unwrap();
+        assert_eq!(
+            preview.summary,
+            "Send 25 meeting invitations: Northwind sync"
+        );
+    }
+
+    #[test]
+    fn cf21_an_approved_meeting_invitation_makes_its_conversation() {
+        let (dir, ctx) = setup();
+        let org = meeting_org(0);
+        let event = new_meeting(&org, &in_calendar(&ctx));
+        let id = event.meeting.clone().unwrap().id;
+        let invite = json!({ "id": event.id, "to": ["priya@acme.example"] });
+
+        // An agent's approved invite can't make demo's keys: demo hasn't
+        // opened Calendar or Chat, so nothing is sent.
+        let refused = org
+            .calendar
+            .invoke(&ctx, &name("calendar.invite"), &invite)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.starts_with("Not sent: demo hasn't opened Calendar or Chat"),
+            "{refused}"
+        );
+        assert_eq!(sent(dir.path()), 0);
+
+        // The person's own invite, approved: the meeting's conversation,
+        // signed by demo's key, then the invitation.
+        let ctx = in_calendar(&ctx);
+        let out = org
+            .calendar
+            .invoke(&ctx, &name("calendar.invite"), &invite)
+            .unwrap();
+        assert!(
+            out.text
+                .ends_with("; the Glasshouse meeting is set up for 2 people"),
+            "{}",
+            out.text
+        );
+        assert_eq!(out.data["meeting"], id.as_str());
+        assert!(out.changes.iter().all(|c| !c.reversible));
+        let made = org.link.conversations();
+        assert_eq!(made.len(), 1);
+        let (conversation, _) = &made[0];
+        assert_eq!(conversation.id, id);
+        assert_eq!(
+            conversation.kind,
+            glass_managed::chat::ConversationKind::Meeting
+        );
+        assert_eq!(conversation.members, ["demo", "priya"]);
+        assert_eq!(conversation.created_by, "demo");
+        let ics = fs::read_dir(dir.path().join("Calendar/Sent"))
+            .unwrap()
+            .flatten()
+            .map(|e| fs::read_to_string(e.path()).unwrap())
+            .next()
+            .unwrap();
+        assert!(ics.contains(&format!("X-GLASSHOUSE-MEETING:{id}\r\n")));
+
+        // Priya's computer opens its title and time, for her Calendar.
+        org.priya.sync_once(0).unwrap();
+        let theirs = org.priya_meetings.meetings("priya");
+        assert_eq!(theirs.len(), 1);
+        let details = theirs[0].details.clone().unwrap();
+        assert_eq!(
+            (details.title.as_str(), details.start.as_str()),
+            ("Northwind sync", "2026-10-20T14:00")
+        );
+
+        // Inviting her again sends again; nobody new joins the meeting yet.
+        org.calendar
+            .invoke(&ctx, &name("calendar.invite"), &invite)
+            .unwrap();
+        assert_eq!(org.link.conversations().len(), 1);
+        let more = org
+            .calendar
+            .preview(
+                &ctx,
+                &name("calendar.invite"),
+                &json!({ "id": event.id, "to": ["sam@acme.example"] }),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(more.contains("people were set"), "{more}");
+        // And it stays a meeting.
+        let unmeet = org
+            .calendar
+            .invoke(
+                &ctx,
+                &name("calendar.update"),
+                &json!({ "id": event.id, "meeting": false }),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(unmeet.contains("stays a Glasshouse meeting"), "{unmeet}");
+    }
+
+    #[test]
+    fn cf21_a_calendar_without_meetings_says_so() {
+        let (_dir, ctx) = setup();
+        let refused = CalendarProvider::default()
+            .preview(
+                &ctx,
+                &name("calendar.create"),
+                &json!({ "title": "Sync", "start": "2026-10-20T14:00", "end": "2026-10-20T15:00", "meeting": true }),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("meetings aren't available"), "{refused}");
+        // An event becomes a meeting, and back, before invitations go out.
+        let org = meeting_org(0);
+        let mine = hold(&ctx);
+        let out = org
+            .calendar
+            .invoke(
+                &ctx,
+                &name("calendar.update"),
+                &json!({ "id": mine.id, "meeting": true }),
+            )
+            .unwrap();
+        assert!(out.data["event"]["meeting"]["id"].is_string());
+        let out = org
+            .calendar
+            .invoke(
+                &ctx,
+                &name("calendar.update"),
+                &json!({ "id": mine.id, "meeting": false }),
+            )
+            .unwrap();
+        assert!(out.data["event"].get("meeting").is_none());
     }
 
     #[test]

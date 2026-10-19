@@ -394,6 +394,8 @@ version = "0.1.0"
 dependencies = [
  "glass-actions",
  "glass-api",
+ "glass-app-chat",
+ "glass-crypto",
  "glass-managed",
  "glass-platform",
  "glass-types",
@@ -469,6 +471,22 @@ dependencies = [
  "glass-platform",
  "glass-policy",
  "glass-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "glass-app-meet"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-app-chat",
+ "glass-crypto",
+ "glass-managed",
+ "glass-types",
+ "hex",
  "serde",
  "serde_json",
  "tempfile",
@@ -609,6 +627,7 @@ dependencies = [
  "glass-app-files",
  "glass-app-helpdesk",
  "glass-app-mail",
+ "glass-app-meet",
  "glass-app-people",
  "glass-app-settings",
  "glass-app-system",
@@ -751,6 +770,7 @@ dependencies = [
  "glass-app-files",
  "glass-app-helpdesk",
  "glass-app-mail",
+ "glass-app-meet",
  "glass-app-people",
  "glass-app-settings",
  "glass-app-system",

@@ -16,6 +16,34 @@ export interface CalendarEvent {
   organizer: string;
   /** "by [agent] for [user]" for whoever last wrote it (AU-10). */
   attribution: string;
+  /** A Glasshouse meeting (CF-21): its conversation's id. */
+  meeting?: { id: string } | null;
+}
+
+/** A Glasshouse meeting the person is in, as meet.list returns it (CF-21). */
+export interface MeetingRow {
+  id: string;
+  title: string;
+  start: string;
+  end: string;
+  organizer: string;
+  organizer_name: string;
+  people: { login: string; name: string }[];
+}
+
+/**
+ * Where Join goes: the Meet app, on its own origin beside this one
+ * (`<app>.localhost:<port>`), opened on the meeting.
+ */
+export function meetUrl(here: { protocol: string; host: string }, id: string): string {
+  const host = here.host.replace(/^[a-z][a-z0-9-]*\./, "meet.");
+  return `${here.protocol}//${host}/#${encodeURIComponent(id)}`;
+}
+
+/** The meetings still to come or under way at `now`, soonest first. */
+export function upcomingMeetings(meetings: readonly MeetingRow[], now: Date = new Date()): MeetingRow[] {
+  const at = wall(now);
+  return meetings.filter((m) => !m.end || m.end > at).sort((a, b) => a.start.localeCompare(b.start) || a.id.localeCompare(b.id));
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");

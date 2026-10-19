@@ -18,6 +18,9 @@ serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# Meetings live in chat's store; the tests use the real one (CF-21).
+glass-app-chat.workspace = true
+glass-crypto.workspace = true
 tempfile.workspace = true
 
 [lints]

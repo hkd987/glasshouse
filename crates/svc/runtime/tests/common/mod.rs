@@ -18,6 +18,7 @@ use glass_app_chat::{ChatHandle, ChatProvider};
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
+use glass_app_meet::{MeetHandle, MeetProvider};
 use glass_app_people::PeopleProvider;
 use glass_app_settings::{SettingsHandle, SettingsProvider};
 use glass_app_system::{SystemOps, SystemProvider};
@@ -52,6 +53,9 @@ pub struct Harness {
     pub settings: SettingsHandle,
     /// Chat on this computer (CF-91); unconnected until a test connects it.
     pub chat: ChatHandle,
+    /// How meetings reach the console (CF-21); unconnected until a test
+    /// connects it.
+    pub meet: MeetHandle,
 }
 
 impl Harness {
@@ -77,6 +81,7 @@ impl Harness {
             &self.directory,
             &self.settings,
             &self.chat,
+            &self.meet,
             &policy,
         );
         self.rt.apply_policy(policy, registry, "test");
@@ -94,6 +99,7 @@ impl Harness {
             &self.directory,
             &self.settings,
             &self.chat,
+            &self.meet,
             &policy,
         );
         self.rt.apply_policy(policy, registry, source);
@@ -207,6 +213,7 @@ fn test_registry(
     directory: &DirectoryHandle,
     settings: &SettingsHandle,
     chat: &ChatHandle,
+    meet: &MeetHandle,
     policy: &Policy,
 ) -> Registry {
     let mut registry = Registry::new();
@@ -216,8 +223,20 @@ fn test_registry(
             MailProvider::new(directory.clone()).settings(policy.mail().cloned()),
         ))
         .unwrap();
+    // Meetings are conversations in chat's store (CF-21), as glassd wires it.
+    let chat = ChatProvider::new(chat.clone(), directory.clone());
+    let meetings: Arc<dyn glass_managed::meet::Meetings> = Arc::new(chat.clone());
     registry
-        .register(Arc::new(CalendarProvider::new(directory.clone())))
+        .register(Arc::new(
+            CalendarProvider::new(directory.clone()).meetings(meetings.clone()),
+        ))
+        .unwrap();
+    registry
+        .register(Arc::new(MeetProvider::new(
+            meetings,
+            meet.clone(),
+            directory.clone(),
+        )))
         .unwrap();
     registry
         .register(Arc::new(PeopleProvider::new(directory.clone())))
@@ -236,9 +255,7 @@ fn test_registry(
     registry
         .register(Arc::new(SettingsProvider::new(settings.clone())))
         .unwrap();
-    registry
-        .register(Arc::new(ChatProvider::new(chat.clone(), directory.clone())))
-        .unwrap();
+    registry.register(Arc::new(chat)).unwrap();
     registry
 }
 
@@ -268,6 +285,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     let directory = DirectoryHandle::new();
     let settings = SettingsHandle::new(dir.path().join("state/settings"));
     let chat = ChatHandle::new(dir.path().join("state/chat"));
+    let meet = MeetHandle::new();
     let registry = test_registry(
         dir.path(),
         &machine,
@@ -275,6 +293,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         &directory,
         &settings,
         &chat,
+        &meet,
         &policy,
     );
     // Policy names these providers; `down` is always rate limited (MP-8).
@@ -300,6 +319,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
                 store_app(),
                 settings_app(),
                 chat_app(),
+                meet_app(),
             ],
             // The app socket resolves callers by uid; their app data is
             // here, never in the real account's home.
@@ -345,6 +365,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         directory,
         settings,
         chat,
+        meet,
     }
 }
 
@@ -539,7 +560,7 @@ pub fn mail_app() -> AppManifest {
 pub fn calendar_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "calendar", "name": "Calendar", "version": "0.1.0",
-        "actions": ["calendar.list", "calendar.read", "calendar.create", "calendar.update", "calendar.invite", "people.search"],
+        "actions": ["calendar.list", "calendar.read", "calendar.create", "calendar.update", "calendar.invite", "people.search", "meet.list"],
         "permissions": ["offline"], "labels": ["public", "internal"]
     }))
     .unwrap()
@@ -571,6 +592,17 @@ pub fn chat_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "chat", "name": "Chat", "version": "0.1.0",
         "actions": ["chat.list", "chat.read", "chat.post", "chat.create", "people.search"],
+        "permissions": [], "labels": ["public", "internal"]
+    }))
+    .unwrap()
+}
+
+/// Meet as the computer side needs it (CF-21): its own manifest, with
+/// the `media` permission, is the Meet app's to add.
+pub fn meet_app() -> AppManifest {
+    serde_json::from_value(json!({
+        "id": "meet", "name": "Meet", "version": "0.1.0",
+        "actions": ["meet.list", "meet.join", "meet.keys", "meet.leave"],
         "permissions": [], "labels": ["public", "internal"]
     }))
     .unwrap()

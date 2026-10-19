@@ -30,6 +30,7 @@ fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
             ("calendar".into(), ProfileAppKind::Web),
             ("chat".into(), ProfileAppKind::Web),
             ("mail".into(), ProfileAppKind::Web),
+            ("meet".into(), ProfileAppKind::Web),
             ("settings".into(), ProfileAppKind::Web),
             ("store".into(), ProfileAppKind::Web),
             ("terminal".into(), ProfileAppKind::Native),
@@ -56,6 +57,7 @@ fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
             "Calendar",
             "Chat",
             "Mail",
+            "Meet",
             "Settings",
             "Store",
             "Terminal"

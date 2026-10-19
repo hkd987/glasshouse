@@ -15,6 +15,7 @@ glass-app-chat.workspace = true
 glass-app-files.workspace = true
 glass-app-helpdesk.workspace = true
 glass-app-mail.workspace = true
+glass-app-meet.workspace = true
 glass-app-people.workspace = true
 glass-app-settings.workspace = true
 glass-app-system.workspace = true

@@ -74,6 +74,26 @@ test("ui5 nv3 invitations to people typed in wait for approval on the desktop, t
   expect(invited.at(-1)?.event.decision?.tier).toBe("ask");
 });
 
+test("cf21 a Glasshouse meeting needs a managed computer, and the page says so", async ({ page }) => {
+  await openCalendar(page);
+  // Calendar asked which meetings the person is in: none here, quietly.
+  const listed = audit().filter((r) => r.event.action === "meet.list" && r.event.agent === "calendar");
+  expect(listed.map(outcome)).toContain("completed");
+  expect(listed.at(-1)?.event.decision?.tier).toBe("auto");
+  await expect(page.locator("[data-test=meetings]")).toHaveCount(0);
+
+  await page.click("[data-test=new-event]");
+  await page.fill("input[name=title]", "Northwind sync");
+  await page.fill("input[name=start]", "15:00");
+  await page.fill("input[name=end]", "15:30");
+  await page.check("input[name=meeting]");
+  await expect(page.locator("[data-test=event-form] .hint")).toContainText("up to 25");
+  await page.click("[data-test=add-event]");
+  // The development host isn't managed by an organization: no meetings.
+  await expect(page.locator(".banner.refused")).toContainText("isn't managed by an organization");
+  await page.screenshot({ path: join(SHOTS, "calendar-meeting-unmanaged.png") });
+});
+
 test("ui5 the loaded week reads offline", async ({ page, context }) => {
   await openCalendar(page);
   await page.evaluate(() => navigator.serviceWorker.ready);

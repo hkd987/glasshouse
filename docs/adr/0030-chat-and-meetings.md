@@ -6,7 +6,13 @@ to 25; the design below carries it out. Two choices in it are proposed
 defaults the owner can still change (end of this ADR). Slice C1 is built,
 on the development host and the VM: `glass-crypto`, the console's relay,
 on computers the member keys, store, sync and the four chat actions with
-`[[app]]` tiers, `app.status` waits, and the Chat app. Not for a pilot
+`[[app]]` tiers, `app.status` waits, and the Chat app. Slice M1's
+computer side is built on the development host: meetings as conversations
+of kind `meeting`, Calendar's meeting flag, invitations and Join,
+`glass-app-meet` (`meet.list`, `meet.join`, `meet.keys`, `meet.leave`) over
+the `MeetLink` trait in `glass-managed::meet`, and policy that refuses
+`meet.*` to agents. The console's meeting routes, `ConsoleClient`'s
+`MeetLink`, `glass-sfu` and the Meet app are not. Not for a pilot
 before P (device keys) and C2 (presence, several computers, membership). Policy with `[[app]]` needs a glassd that knows it
 (`PolicyDocument` refuses unknown fields), as `settings` did. PRD CF-91 (our own chat), CF-21 (Glasshouse meetings), CF-61 … CF-65, GT-3, AU-1, AU-10, NV-1 … NV-3, CF-41, UI-2, UI-5, UI-7, DV-3. Builds on:
 - ADR 0018: the base system's OpenSSL.
@@ -313,7 +319,7 @@ A new app crate, `glass-app-chat` (`crates/apps/chat`), is registered in `glass-
 | `POST /device/v1/chat/conversations/<id>/envelopes` | Fills gaps: the current key sealed to member keys that lack it |
 | `POST /device/v1/chat/conversations/<id>/messages` | A post: header, nonce, ciphertext, signature |
 | `POST /device/v1/chat/conversations/<id>/messages/<mid>/delete` | The sender's signed delete |
-| `POST /device/v1/meet/<id>/join`, `…/leave` | A participant's offer in, the relay's answer back (decision 6) |
+| `POST /device/v1/meet/<id>/join`, `…/keys`, `…/leave` | A participant's offer in, the relay's answer and the session's media keys back; the media keys alone; leaving. Each a `MeetRequest` signed by the member key (`glass-managed::meet`, decision 6) |
 | `GET /api/chat` | The Chat page: set up or not, fingerprint, retention, holds, exports, custody log, member keys by person |
 | `POST /api/chat/compliance/challenge`, `POST /api/chat/compliance` | Prove and install a compliance key; sign a Chat release |
 | `POST /api/chat/retention` | Set retention; sign a Chat release |
