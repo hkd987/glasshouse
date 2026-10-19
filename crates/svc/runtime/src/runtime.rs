@@ -80,6 +80,11 @@ pub struct Runtime {
     pub(crate) app_changes: tokio::sync::watch::Sender<crate::apps::AppChanges>,
     /// Who is at the screen (ADR 0031).
     pub(crate) seat: Mutex<Option<crate::seat::Seat>>,
+    /// How many times the computer has woken, for a sleep glassd asked
+    /// for to hear of it (ADR 0031).
+    pub(crate) wakes: tokio::sync::watch::Sender<u64>,
+    /// Where the seat is kept across a restart of glassd (ADR 0031).
+    pub(crate) seat_file: std::sync::OnceLock<PathBuf>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -157,6 +162,8 @@ impl Runtime {
             opening_app: Mutex::new(()),
             app_changes: tokio::sync::watch::Sender::new(Default::default()),
             seat: Mutex::new(None),
+            wakes: tokio::sync::watch::Sender::new(0),
+            seat_file: std::sync::OnceLock::new(),
         })
     }
 
@@ -950,7 +957,9 @@ impl Runtime {
                 "only the system resumes agents after sleep".into(),
             ));
         }
-        Ok(self.resume_after_sleep())
+        let resumed = self.resume_after_sleep();
+        self.woke();
+        Ok(resumed)
     }
 
     pub(crate) fn resume_after_sleep(&self) -> PowerResult {

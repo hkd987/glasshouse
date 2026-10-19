@@ -59,11 +59,18 @@ Extends ADR 0029.
    - glassd takes `seat.active` only from the desktop itself:
      - a connection from the seat's uid;
      - whose pid's parent is that `su`.
-     `su -l -c` runs one child, which execs the desktop; the person's
-     other programs are the desktop's children, not `su`'s, so none of
-     them can keep the computer awake or put it to sleep.
+     `su -l -c 'exec env … glass-shell-fb'` runs one child, the login
+     shell, which the `exec` replaces with the desktop. The check rests
+     on that `exec`: without it a shell would sit between them, and some
+     shells don't exec the last command themselves. The person's other
+     programs are the desktop's children, not `su`'s, so none of them
+     can keep the computer awake or put it to sleep.
    - glassd checks the parent once per connection, with the base
      system's `ps`, and remembers the answer.
+   - glassd keeps the seat in its run directory (`/var/run/glasshouse/seat`,
+     emptied at boot), so a restart of glassd doesn't forget who is at
+     the screen. It takes the seat back only while that `su` runs and
+     started before the seat was kept, so a pid used again doesn't count.
    - The same registration is what ADR 0028 step 1 and ADR 0030's
      presence need. They get it from here; neither builds its own.
 3. **glassd applies what changes the computer, through base commands.**
@@ -71,10 +78,20 @@ Extends ADR 0029.
      `cmd::run`, ADR 0007, ADR 0012).
    - Sleep:
      - pause agents first (PM-5's `Runtime::suspend`);
-     - then `acpiconf -s 3`;
-     - then wake them.
-     - Idle restarts from the wake, so the computer doesn't sleep again
-       at once.
+     - then `acpiconf -s 3`, which only asks: it returns before the
+       computer sleeps. The ask runs `/etc/rc.suspend`, which pauses
+       agents a second time (`system.suspend`); that is safe because
+       pausing skips an agent already paused for sleep, so keep that
+       skip;
+     - `/etc/rc.resume` calls `system.resume` on the wake, which lets
+       agents carry on and starts idle over, so the computer doesn't
+       sleep again at once. That holds however it slept (lid, button).
+     - If no wake comes within 30 seconds, or the ask fails, it didn't
+       sleep: agents carry on, and glassd doesn't ask again until the
+       person has used the computer.
+   - Each setting glassd applies or fails to apply, each sign-in and
+     sign-out, and each sleep go in the audit log
+     (`DeviceSettingApplied`, `SeatChanged`, `Slept`).
    - Blank stays in the desktop: it stops drawing and shows black, and
      the first key or move only wakes it. It is named "blank," not "off":
      turning a panel off (DPMS) waits for the display driver.

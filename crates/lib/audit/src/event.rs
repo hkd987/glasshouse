@@ -91,6 +91,14 @@ pub enum EventKind {
     ChatRefused,
     /// IT's Chat release (the compliance key) was applied (ADR 0030).
     ChatLoaded,
+    /// glassd applied a setting IT set for the whole computer, such as its
+    /// time zone or USB drives, or failed to (ADR 0031).
+    DeviceSettingApplied,
+    /// Someone signed in at the screen, or signed out (ADR 0031).
+    SeatChanged,
+    /// The computer was put to sleep after the person at it left it alone,
+    /// with the agents it paused (ADR 0031, PM-5).
+    Slept,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

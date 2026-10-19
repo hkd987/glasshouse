@@ -154,9 +154,15 @@ async fn supervise(args: &Args) -> anyhow::Result<()> {
         // Where the desktop's apps find it (their Wayland socket): su -l
         // starts from a clean environment, so it's set on the command.
         let runtime = runtime_dir(account.uid, account.gid);
+        // `exec`: the desktop takes the place of su's shell, so it is su's
+        // one child, the process glassd takes `seat.active` from (ADR 0031).
         let command = match &runtime {
-            Some(dir) => format!("env XDG_RUNTIME_DIR={} {}", dir.display(), args.session),
-            None => args.session.clone(),
+            Some(dir) => format!(
+                "exec env XDG_RUNTIME_DIR={} {}",
+                dir.display(),
+                args.session
+            ),
+            None => format!("exec {}", args.session),
         };
         // su(1) as root asks for nothing more, and sets up the session as
         // login(1) would: groups, login class, environment, PAM session.

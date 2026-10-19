@@ -433,6 +433,17 @@ pub fn parent_pid(pid: u32) -> Option<u32> {
         .ok()
 }
 
+/// How long process `pid` has run, from the base system's `ps`; `None`
+/// if there is no such process.
+pub fn process_age(pid: u32) -> Option<Duration> {
+    cmd::run("ps", &["-o", "etimes=", "-p", &pid.to_string()])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+        .map(Duration::from_secs)
+}
+
 /// The computer's offset from UTC now, in seconds east, from the base
 /// system's `date` (which reads `/etc/localtime` afresh each time).
 pub fn utc_offset_secs() -> Option<i32> {
@@ -456,8 +467,8 @@ fn parse_offset(text: &str) -> Option<i32> {
 
 /// Sets the computer's time zone to `zone` (`America/New_York`) with the
 /// base system's `tzsetup` (ADR 0031). Refused unless `zone` is a plain
-/// name of a file under `/usr/share/zoneinfo`.
-pub fn set_time_zone(zone: &str) -> Result<()> {
+/// name of a file under `/usr/share/zoneinfo`. Says whether it changed.
+pub fn set_time_zone(zone: &str) -> Result<bool> {
     if !cfg!(target_os = "freebsd") {
         return Err(PlatformError::Unsupported("setting the time zone".into()));
     }
@@ -477,7 +488,12 @@ pub fn set_time_zone(zone: &str) -> Result<()> {
             "{zone:?} is not a time zone"
         )));
     }
-    cmd::run("tzsetup", &[zone]).map(|_| ())
+    // tzsetup notes the zone it set; the same one again changes nothing.
+    let set = std::fs::read_to_string("/var/db/zoneinfo").unwrap_or_default();
+    if set.trim() == zone && Path::new("/etc/localtime").exists() {
+        return Ok(false);
+    }
+    cmd::run("tzsetup", &[zone]).map(|_| true)
 }
 
 /// Where glassd's devd rule turning USB drives off lives (ADR 0031).
@@ -519,7 +535,11 @@ pub fn set_usb_storage(allowed: bool) -> Result<bool> {
                 std::fs::create_dir_all(dir)
                     .map_err(|e| PlatformError::io(format!("creating {}", dir.display()), e))?;
             }
-            std::fs::write(rule, USB_STORAGE_RULE_TEXT)
+            // Written whole, then renamed in: devd never reads half a rule
+            // (it reads only names ending in .conf).
+            let new = rule.with_extension("conf.new");
+            std::fs::write(&new, USB_STORAGE_RULE_TEXT)
+                .and_then(|()| std::fs::rename(&new, rule))
                 .map_err(|e| PlatformError::io(format!("writing {USB_STORAGE_RULE}"), e))?;
         }
         cmd::run("service", &["devd", "restart"])?;

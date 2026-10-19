@@ -45,6 +45,7 @@ pub use config::{CatalogEntry, CatalogGate, OpenCatalog, RuntimeConfig};
 pub use control_api::ControlApi;
 pub use error::RuntimeError;
 pub use runtime::{RunningAgent, Runtime, RuntimeParts, SettingsHandle};
+pub use seat::WAKE_WAIT;
 
 /// The built-in tool every agent has for keeping its tile caption and
 /// progress current (AW-4). It has no side effects and needs no policy.

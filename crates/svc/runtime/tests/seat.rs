@@ -11,11 +11,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use glass_api::{SeatBegin, TileState, methods};
+use glass_audit::{EventKind, Outcome};
 use glass_rpc::Client;
 use glass_runtime::Caller;
 use serde_json::{Value, json};
 
-use crate::common::{Harness, harness_with};
+use crate::common::{Harness, harness_with, rebuild};
 
 fn root(h: &Harness) -> Caller {
     Caller {
@@ -93,13 +94,21 @@ async fn adr0031_pm5_the_computer_sleeps_after_the_persons_idle_minutes_agents_p
         "a minute alone"
     );
 
-    // An agent at work pauses for the sleep and carries on after it.
+    // An agent at work pauses for the sleep. Asking returns before the
+    // computer sleeps; it carries on when /etc/rc.resume says it woke.
     let task = h.rt.start(&h.me, h.request(&["Invoices"], &[])).unwrap().id;
     let during = Arc::new(Mutex::new(None));
-    let (rt, me, seen) = (Arc::clone(&h.rt), h.me.clone(), Arc::clone(&during));
-    h.rt.sleep_now(move || {
+    let (rt, me, seen, admin) = (
+        Arc::clone(&h.rt),
+        h.me.clone(),
+        Arc::clone(&during),
+        root(&h),
+    );
+    h.rt.sleep_now(Duration::from_secs(30), move || {
         let tile = rt.get(&me, task).unwrap().view.state;
         *seen.lock().unwrap() = Some(tile);
+        // The computer slept, and woke: rc.resume calls system.resume.
+        rt.wake(&admin).unwrap();
         Ok(())
     })
     .await
@@ -107,12 +116,92 @@ async fn adr0031_pm5_the_computer_sleeps_after_the_persons_idle_minutes_agents_p
     assert_eq!(*during.lock().unwrap(), Some(TileState::Paused));
     assert_ne!(h.rt.get(&h.me, task).unwrap().view.state, TileState::Paused);
     // Idle starts over from the wake.
-    assert!(!h.rt.sleep_due(Instant::now()));
+    let woke = Instant::now();
+    assert!(!h.rt.sleep_due(woke));
+    assert!(h.rt.sleep_due(woke + Duration::from_secs(61)));
 
-    // A sleep that fails still wakes the agents, and says why.
-    let failed = h.rt.sleep_now(|| Err("no S3 here".into())).await;
+    // Asked, but no wake came: it never slept. Agents carry on anyway, and
+    // glassd doesn't ask again until the person uses the computer.
+    h.rt.sleep_now(Duration::from_millis(200), || Ok(()))
+        .await
+        .unwrap();
+    assert_ne!(h.rt.get(&h.me, task).unwrap().view.state, TileState::Paused);
+    assert!(!h.rt.sleep_due(Instant::now() + Duration::from_secs(3600)));
+    let desktop = Client::connect(h.serve_control()).await.unwrap();
+    let _: Value = desktop
+        .call(methods::SEAT_ACTIVE, json!(null))
+        .await
+        .unwrap();
+    assert!(h.rt.sleep_due(Instant::now() + Duration::from_secs(61)));
+
+    // A sleep that fails wakes the agents at once, says why, and isn't
+    // tried again every few seconds.
+    let failed =
+        h.rt.sleep_now(Duration::from_secs(30), || Err("no S3 here".into()))
+            .await;
     assert!(failed.unwrap_err().to_string().contains("no S3 here"));
     assert_ne!(h.rt.get(&h.me, task).unwrap().view.state, TileState::Paused);
+    assert!(!h.rt.sleep_due(Instant::now() + Duration::from_secs(3600)));
+
+    // All of it is on the record (AU-1): who signed in, each sleep, and
+    // the one that failed.
+    h.rt.seat_end(&root(&h)).unwrap();
+    let kinds = |kind: EventKind| {
+        glass_audit::read(&h.audit_path(), |r| r.event.kind == kind)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect::<Vec<_>>()
+    };
+    let seat = kinds(EventKind::SeatChanged);
+    assert_eq!(seat.len(), 2, "signed in, signed out");
+    assert!(seat.iter().all(|e| e.user.as_deref() == Some(&*h.me.name)));
+    let slept = kinds(EventKind::Slept);
+    assert_eq!(slept.len(), 3);
+    assert_eq!(slept[0].detail["agents_paused"], 1);
+    assert!(matches!(
+        slept[2].outcome,
+        Some(Outcome::Failed { ref error }) if error == "no S3 here"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0031_a_restarted_glassd_still_knows_who_is_at_the_screen() {
+    let h = harness_with("");
+    let kept = h.dir.path().join("run-seat");
+    h.rt.keep_seat_in(kept.clone());
+    signed_in(&h, std::os::unix::process::parent_id());
+    assert!(kept.exists());
+
+    // glassd restarts: the `su` still runs, so the person is still there.
+    let again = rebuild(&h, glass_policy::DEFAULT_POLICY);
+    again.keep_seat_in(kept.clone());
+    assert!(again.sleep_due(Instant::now() + Duration::from_secs(31 * 60)));
+
+    // A kept seat whose `su` started after it was kept is a pid used
+    // again, not the session: it's dropped.
+    std::fs::write(
+        &kept,
+        json!({ "user": h.me.name, "session_pid": std::process::id() }).to_string(),
+    )
+    .unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&kept)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let later = rebuild(&h, glass_policy::DEFAULT_POLICY);
+    later.keep_seat_in(kept.clone());
+    assert!(!later.sleep_due(Instant::now() + Duration::from_secs(3600)));
+    assert!(!kept.exists());
+
+    // Signing out forgets it.
+    signed_in(&h, std::os::unix::process::parent_id());
+    assert!(kept.exists());
+    h.rt.seat_end(&root(&h)).unwrap();
+    assert!(!kept.exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]

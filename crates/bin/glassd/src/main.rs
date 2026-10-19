@@ -415,7 +415,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
                     continue;
                 }
                 let slept = runtime
-                    .sleep_now(|| {
+                    .sleep_now(glass_runtime::WAKE_WAIT, || {
                         glass_platform::system::sleep_machine().map_err(|e| e.to_string())
                     })
                     .await;
@@ -465,6 +465,8 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // What IT sets for the whole computer that glassd applies itself: the
     // time zone and USB drives (ADR 0031).
     device::watch(&org.settings, &runtime);
+    // Who is at the screen outlasts a restart of glassd, not a reboot.
+    runtime.keep_seat_in(run_dir.join("seat"));
 
     let listener = bind_control_socket(&config.control_socket)?;
     // The app socket (ADR 0024): world-connectable too, authorized by uid,
