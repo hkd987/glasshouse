@@ -6,7 +6,7 @@ REPO_ROOT ?= $(CURDIR)
 FREEBSD_SCRIPTS := $(REPO_ROOT)/os/freebsd/scripts
 
 .PHONY: freebsd-host-deps freebsd-fetch freebsd-sysroot vm-up vm-down vm-status vm-wait \
-	vm-ssh vm-run vm-reset vm-console vm-boot-timeline vm-deploy image
+	vm-ssh vm-run vm-reset vm-console vm-boot-timeline vm-deploy image image-pkgbase
 
 freebsd-host-deps: ## Check host tools for the FreeBSD VM loop
 	$(FREEBSD_SCRIPTS)/check-host-deps.sh
@@ -49,6 +49,10 @@ vm-deploy: ## Stage build/dist/freebsd from built binaries and install it in the
 	$(FREEBSD_SCRIPTS)/stage-dist.sh
 	$(FREEBSD_SCRIPTS)/deploy.sh
 
-image: ## Stage and bake build/images/glasshouse-<ver>-amd64.qcow2
+image: ## Stage and bake build/images/glasshouse-<ver>-amd64.qcow2 (from the official VM image)
 	$(FREEBSD_SCRIPTS)/stage-dist.sh
 	$(FREEBSD_SCRIPTS)/bake-image.sh
+
+image-pkgbase: ## Stage and bake glasshouse-<ver>-amd64-desktop.qcow2 from os/freebsd/images/desktop.pkgs (IMAGE=...)
+	$(FREEBSD_SCRIPTS)/stage-dist.sh
+	$(FREEBSD_SCRIPTS)/bake-pkgbase.sh $(or $(IMAGE),desktop)

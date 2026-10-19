@@ -4,7 +4,8 @@
 # or with `src` only src.txz (for the base system's notices, `make legal-base`),
 # verifies their SHA256 against release.env, and decompresses the VM image once.
 # Idempotent: verified files are stamped and skipped on later runs.
-# --print-pins prints upstream SHA256s for the configured release (for bumping release.env).
+# --print-pins prints upstream SHA256s for the configured release (for bumping release.env),
+# including the base package catalog's (bake-pkgbase.sh).
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -18,6 +19,8 @@ if [[ ${1:-} == --print-pins ]]; then
 	echo "FREEBSD_VM_IMAGE_SHA256=${img:?not found upstream}"
 	echo "FREEBSD_BASE_TXZ_SHA256=${base:?not found upstream}"
 	echo "FREEBSD_SRC_TXZ_SHA256=${src:?not found upstream}"
+	catalog=$(curl -fsSL "$FREEBSD_PKGBASE_MIRROR/$FREEBSD_PKGBASE_REPO/$FREEBSD_PKGBASE_CATALOG" | sha256sum)
+	echo "FREEBSD_PKGBASE_CATALOG_SHA256=${catalog%% *}"
 	exit 0
 fi
 
