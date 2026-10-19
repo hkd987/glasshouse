@@ -32,4 +32,6 @@ library we link is the base system's OpenSSL, for the model gateway's TLS
 sysroot's headers, so FreeBSD builds and the FreeBSD clippy need
 `make freebsd-sysroot`, and host builds need `libssl-dev` and `pkg-config`.
 Only `glass-gateway-providers` may depend on `native-tls`, `openssl` or
-`httparse`; nothing else gets an HTTP or TLS stack.
+`httparse`; nothing else gets an HTTP or TLS stack. The meetings relay's
+WebRTC library, str0m (ADR 0030), runs its DTLS on the same OpenSSL; only
+`glass-media-relay` may depend on it, and it never ships in the image.

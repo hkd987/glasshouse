@@ -1,0 +1,22 @@
+[package]
+name = "glass-media-relay"
+description = "The meetings relay (ADR 0030): rooms of participants the admin console admits, RTP forwarded between them unchanged, and its private API. Runs on our servers, never on a device."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+# The only crate that may use str0m (tools/check-layers.py): the relay's
+# media stack, with its DTLS and SRTP on OpenSSL.
+[dependencies]
+glass-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+str0m.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
