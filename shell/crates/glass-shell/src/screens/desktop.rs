@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 use time::macros::format_description;
 
 use crate::theme::{Surface, hex, hexa};
-use crate::{Element, Message, Theme, fonts, icons, style, tiles, wallpaper};
+use crate::{Element, Message, Power, Theme, fonts, icons, style, tiles, wallpaper};
 
 /// What the desktop shows, besides windows.
 #[derive(Debug, Clone, PartialEq)]
@@ -280,7 +280,7 @@ fn agents_menu<'a>(
         .max_height(height - TILES_TOP - DOCK_ROOM)
         .style(|_| container::Style {
             shadow: style::shadow(0.35, 18.0, 40.0),
-            ..style::outlined(hexa(0x15181D, 0.94), 18.0, 1.0, hex(0x262B32))
+            ..style::outlined(hex(0x15181D), 18.0, 1.0, hex(0x262B32))
         })
         .into()
 }
@@ -341,29 +341,48 @@ const MARK_WIDTH: f32 = 16.0 + MARK_REACH * 2.0;
 const SYSTEM_MENU_LEFT: f32 = 6.0;
 
 /// The system menu, under the mark, as a Mac's Apple menu: About
-/// Glasshouse; what can be started from anywhere (an agent's task, for now;
-/// apps join it when they have windows); Force Quit; signing out (Shift
-/// Super Q, as Shift Command Q on a Mac). Sleep, restart, locking the screen
-/// and switching users wait for the compositor (ADR 0019).
+/// Glasshouse and Check for Updates (there when updates ship); what can be
+/// started from anywhere (an agent's task, for now; apps join it when they
+/// have windows); Force Quit; Restart and Shut Down, each asked first;
+/// signing out (Shift Super Q, as Shift Command Q on a Mac). Sleep, locking
+/// the screen and switching users wait for the compositor (ADR 0019).
 fn system_menu<'a>(theme: &Theme, person: &str) -> Element<'a, Message> {
     let sign_out = if person.is_empty() {
         "Sign out…".to_owned()
     } else {
         format!("Sign out {person}…")
     };
-    let sections: [&[(String, &'static str, Message)]; 4] = [
-        &[("About Glasshouse".to_owned(), "", Message::OpenAbout)],
+    // A line without a message is shown but can't be chosen yet.
+    let sections: [&[(String, &'static str, Option<Message>)]; 5] = [
+        &[
+            ("About Glasshouse".to_owned(), "", Some(Message::OpenAbout)),
+            // Updates arrive as whole images (BS-4, EP-1), which don't
+            // ship yet.
+            ("Check for Updates…".to_owned(), "", None),
+        ],
         &[(
             "Hand an agent a task…".to_owned(),
             "Ctrl Space",
-            Message::OpenCommandBar,
+            Some(Message::OpenCommandBar),
         )],
         &[(
             "Force Quit…".to_owned(),
             "Alt Super Esc",
-            Message::OpenForceQuit,
+            Some(Message::OpenForceQuit),
         )],
-        &[(sign_out, "Shift Super Q", Message::SignOut)],
+        &[
+            (
+                "Restart…".to_owned(),
+                "",
+                Some(Message::AskPower(Power::Restart)),
+            ),
+            (
+                "Shut Down…".to_owned(),
+                "",
+                Some(Message::AskPower(Power::ShutDown)),
+            ),
+        ],
+        &[(sign_out, "Shift Super Q", Some(Message::SignOut))],
     ];
     // As wide as its longest line, as a menu is. Every line fills that
     // width so the highlight does; the width itself is reckoned from the
@@ -397,7 +416,7 @@ fn system_menu<'a>(theme: &Theme, person: &str) -> Element<'a, Message> {
         .padding(5)
         .style(|_| container::Style {
             shadow: style::shadow(0.35, 12.0, 30.0),
-            ..style::outlined(hexa(0x15181D, 0.94), 10.0, 1.0, hex(0x262B32))
+            ..style::outlined(hex(0x15181D), 10.0, 1.0, hex(0x262B32))
         })
         .into()
 }
@@ -407,7 +426,7 @@ fn menu_item<'a>(
     theme: &Theme,
     label: String,
     shortcut: &'static str,
-    message: Message,
+    message: Option<Message>,
 ) -> Element<'a, Message> {
     button(
         row![
@@ -422,7 +441,7 @@ fn menu_item<'a>(
         .spacing(32)
         .align_y(Vertical::Center),
     )
-    .on_press(message)
+    .on_press_maybe(message)
     .width(Length::Fill)
     .padding(Padding::from([5.0, 10.0]))
     .style(style::menu_item(hex(0xF3F5F7), theme.accent))

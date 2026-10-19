@@ -26,7 +26,8 @@ use anyhow::{Context, bail};
 use glass_platform::auth::{self, AuthError};
 use glass_platform::users;
 use glass_shell::greeter::{Account, Effect, Greeter};
-use glass_shell::screens::login;
+use glass_shell::screens::{login, system};
+use glass_shell::{Power, session};
 use glass_shell::{Theme, wallpaper};
 use glass_shell_fb::display::Display;
 use glass_shell_fb::input;
@@ -155,6 +156,31 @@ async fn supervise(args: &Args) -> anyhow::Result<()> {
             return stopped(&args.tty);
         };
         eprintln!("glass-greeter: {user}'s session ended ({status:?})");
+        // The desktop asked to restart or shut down: it can't (it isn't
+        // root); this does, from the person at the screen, whose desktop
+        // left "Restarting…" up. Shutting down stops this service too.
+        let asked = status
+            .as_ref()
+            .ok()
+            .and_then(|s| session::power_after(s.code()));
+        if let Some(power) = asked {
+            hand_devices(&args.tty, 0, 0);
+            let how = match power {
+                Power::Restart => "-r",
+                Power::ShutDown => "-p",
+            };
+            eprintln!("glass-greeter: {user} asked to {power:?}");
+            // The base system's shutdown messages go to the first terminal;
+            // the last frame moves to one nothing else writes to.
+            let leaving = leaving_screen(power);
+            run_quietly("/sbin/shutdown", &[how, "now"]);
+            // Until shutting down stops this service; the frame stays up.
+            terminate.recv().await;
+            if let Some(display) = leaving {
+                display.hand_over();
+            }
+            return stopped(&args.tty);
+        }
     }
 }
 
@@ -210,6 +236,28 @@ fn run_quietly(program: &str, args: &[&str]) {
     if !matches!(status, Ok(s) if s.success()) {
         eprintln!("glass-greeter: {program} {}: {status:?}", args.join(" "));
     }
+}
+
+/// The terminal the restarting or shutting-down frame shows on: one without
+/// a login (`/etc/ttys`) or console messages.
+const LEAVING_TTY: &str = "/dev/ttyv8";
+
+/// "Restarting…" or "Shutting down…" on `LEAVING_TTY`, made the terminal on
+/// screen. Without it (no such terminal) the desktop's own last frame
+/// stays, with the console's messages over it.
+fn leaving_screen(power: Power) -> Option<Display> {
+    let mut display = Display::open(Path::new(LEAVING_TTY), |w, h| {
+        vec![0; w as usize * h as usize * 4]
+    })
+    .inspect_err(|e| eprintln!("glass-greeter: {LEAVING_TTY}: {e:#}"))
+    .ok()?;
+    display.hide_pointer();
+    // Switch first: the console repaints the terminal it switches to.
+    if let Err(e) = display.show() {
+        eprintln!("glass-greeter: showing {LEAVING_TTY}: {e}");
+    }
+    display.draw(system::leaving_overlay(power));
+    Some(display)
 }
 
 /// Gives the terminal and the input devices to `uid` (root takes them back

@@ -7,6 +7,7 @@
 //!
 //! Writes `boot.png`, `login.png`, `desktop.png`, `desktop-banner.png`,
 //! `agents-menu.png`, `system-menu.png`, `about.png`, `force-quit.png`,
+//! `restart.png`,
 //! `command-bar.png` and the
 //! expanded view: `expanded.png` (the Expanded artboard), with its Changes
 //! tab, a roll back about to happen, a needs-you task's review and a
@@ -188,6 +189,21 @@ fn main() -> anyhow::Result<()> {
         chosen: running.first().map(|t| t.id),
         running,
     };
+    write(
+        "restart.png",
+        desktop::view(
+            &theme,
+            &bare,
+            vec![window()],
+            thumbnail,
+            Some(system::power_overlay(
+                &theme,
+                glass_shell::Power::Restart,
+                tasks.iter().filter(|t| t.state.is_live()).count(),
+            )),
+            (w, h),
+        ),
+    )?;
     write(
         "force-quit.png",
         desktop::view(

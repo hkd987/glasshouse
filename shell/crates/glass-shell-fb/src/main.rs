@@ -30,7 +30,7 @@ use glass_api::{Event, TaskDetail, TaskRef, TaskView, UndoReport, methods};
 use glass_rpc::{Client, ClientError};
 use glass_shell::live::{Effect, Live};
 use glass_shell::screens::system;
-use glass_shell::{Message, Theme, wallpaper};
+use glass_shell::{Message, Power, Theme, session, wallpaper};
 use glass_shell_fb::display::Display;
 use glass_shell_fb::input::{self, Input};
 use time::{OffsetDateTime, UtcOffset};
@@ -86,10 +86,17 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(run(args, offset))
+        .block_on(run(args, offset))?
+        .map_or(Ok(()), |power| {
+            // Everything is closed by now; the sign-in screen, waiting on
+            // this status, restarts or shuts down the computer.
+            std::process::exit(session::exit_code(power))
+        })
 }
 
-async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
+/// The desktop until it ends: with the restart or shut down it was asked
+/// for, if it was.
+async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
     let started = Instant::now();
     // The desktop comes up whether or not glassd answers yet (it may still
     // be starting, or restarting); its tiles arrive when it does.
@@ -119,7 +126,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
         (started.elapsed() - opened).as_millis()
     );
     if args.once {
-        return Ok(());
+        return Ok(None);
     }
     let (mut inputs, devices) = if args.input {
         input::start(shell.display.pixels())
@@ -174,12 +181,19 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
                     batch.push(more);
                 }
                 let effects = shell.input(&batch);
-                if effects.contains(&Effect::SignOut) {
-                    eprintln!("signing out");
+                let power = effects.iter().find_map(|e| match e {
+                    Effect::Power(power) => Some(*power),
+                    _ => None,
+                });
+                if power.is_some() || effects.contains(&Effect::SignOut) {
+                    eprintln!("signing out{}", power.map_or(String::new(), |p| format!(" to {p:?}")));
+                    // The last frame stays up for the sign-in screen, or
+                    // says the computer is going, until it does.
+                    shell.draw(true);
                     if args.from_sign_in {
                         shell.display.hand_over();
                     }
-                    return Ok(());
+                    return Ok(power);
                 }
                 shell.carry_out_all(client.as_ref(), effects).await;
                 redraw = shell.changed();
@@ -202,7 +216,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<()> {
             shell.draw(true);
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Connects to glassd, subscribes to its events and lists the caller's
@@ -413,7 +427,7 @@ impl Shell {
                 Vec::new()
             }
             // Done in `input`, which has the view; signing out ends the loop.
-            Effect::Focus(_) | Effect::SignOut => Vec::new(),
+            Effect::Focus(_) | Effect::SignOut | Effect::Power(_) => Vec::new(),
             Effect::Get(task) => {
                 let started = Instant::now();
                 let result: Result<TaskDetail, _> =

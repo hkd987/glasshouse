@@ -22,6 +22,9 @@ pub struct Display {
     pointer: Point,
     /// Where the pointer was painted, if it was.
     painted: Option<Point>,
+    /// Paint the pointer at all (a screen nobody uses, such as the one up
+    /// while the computer shuts down, has none).
+    pointer_shown: bool,
 }
 
 /// A batch of input as the UI takes it.
@@ -55,7 +58,18 @@ impl Display {
             keyboard: keys::Keyboard::default(),
             pointer: Point::new(size.width / 2.0, size.height / 2.0),
             painted: None,
+            pointer_shown: true,
         })
+    }
+
+    /// No pointer on this screen.
+    pub fn hide_pointer(&mut self) {
+        self.pointer_shown = false;
+    }
+
+    /// Makes this screen's terminal the one showing (`Framebuffer::show`).
+    pub fn show(&self) -> std::io::Result<()> {
+        self.fb.show()
     }
 
     /// Closes the screen, leaving its last frame up for the next program to
@@ -201,7 +215,7 @@ impl Display {
     fn paint_pointer(&mut self) {
         let (width, height) = self.pixels();
         let stride = width as usize * 4;
-        if self.painted == Some(self.pointer) {
+        if !self.pointer_shown || self.painted == Some(self.pointer) {
             return;
         }
         let at = (self.pointer.x as u32, self.pointer.y as u32);

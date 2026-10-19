@@ -11,7 +11,7 @@ use iced_widget::text::Wrapping;
 use iced_widget::{Column, button, column, container, mouse_area, row, stack, text};
 
 use crate::theme::{hex, hexa};
-use crate::{Element, Message, Theme, fonts, icons, style, tiles};
+use crate::{Element, Message, Power, Theme, fonts, icons, style, tiles};
 
 const INK: Color = hex(0xF3F5F7);
 const MUTED: Color = hex(0xA9B1BC);
@@ -168,6 +168,57 @@ pub fn force_quit_overlay<'a>(theme: &Theme, quit: &ForceQuit<'a>) -> Element<'a
     ]
     .spacing(12);
     centered(window(body, 480.0), Message::CloseSystemWindow)
+}
+
+/// "Restart now?" or "Shut down now?", with what it means for the agents
+/// still running.
+pub fn power_overlay<'a>(theme: &Theme, power: Power, running: usize) -> Element<'a, Message> {
+    let (title, go) = match power {
+        Power::Restart => ("Restart now?", "Restart"),
+        Power::ShutDown => ("Shut down now?", "Shut Down"),
+    };
+    let agents = match running {
+        0 => "No agents are running.".to_owned(),
+        1 => "The agent that's running will stop. What it changed can still be undone.".to_owned(),
+        n => format!(
+            "The {n} agents that are running will stop. What they changed can still be undone."
+        ),
+    };
+    let body = column![
+        text(title).size(17).font(fonts::SEMIBOLD).color(INK),
+        text(agents).size(13).color(MUTED),
+        row![
+            iced_widget::space().width(Length::Fill),
+            push_button(theme, "Cancel", Some(Message::CloseSystemWindow), false),
+            push_button(theme, go, Some(Message::ConfirmPower), true),
+        ]
+        .spacing(8),
+    ]
+    .spacing(12);
+    centered(window(body, 400.0), Message::CloseSystemWindow)
+}
+
+/// The desktop's last frame while the computer restarts or shuts down: the
+/// screen it leaves up until the machine goes.
+pub fn leaving_overlay<'a>(power: Power) -> Element<'a, Message> {
+    let words = match power {
+        Power::Restart => "Restarting…",
+        Power::ShutDown => "Shutting down…",
+    };
+    container(
+        column![
+            icons::view(&icons::MARK, INK, 64.0, 64.0),
+            text(words).size(17).font(fonts::MEDIUM).color(INK),
+        ]
+        .spacing(18)
+        .align_x(Horizontal::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Horizontal::Center)
+    .align_y(Vertical::Center)
+    .style(|_| style::panel(hex(0x0B0E13), 0.0))
+    .into()
 }
 
 /// How a running agent's state reads in the list.

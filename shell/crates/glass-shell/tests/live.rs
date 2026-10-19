@@ -405,7 +405,7 @@ fn the_mark_opens_the_system_menu_and_sign_out_signs_out() {
                 .find(|m| *m == Message::OpenCommandBar)
         });
     assert!(task.is_some(), "Hand an agent a task, in the system menu");
-    let found = (40..220)
+    let found = (40..280)
         .step_by(6)
         .flat_map(|y| (20..300).step_by(40).map(move |x| (x, y)))
         .find_map(|(x, y)| {
@@ -476,7 +476,7 @@ fn the_system_menu_has_about_and_force_quit() {
     let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
     live.update(Message::ToggleSystemMenu);
     let mut seen = Vec::new();
-    for y in (40..200).step_by(6) {
+    for y in (40..280).step_by(6) {
         for message in click(&mut screen, &live, Point::new(80.0, y as f32)) {
             if !seen.contains(&message) {
                 seen.push(message);
@@ -487,6 +487,8 @@ fn the_system_menu_has_about_and_force_quit() {
         Message::OpenAbout,
         Message::OpenCommandBar,
         Message::OpenForceQuit,
+        Message::AskPower(glass_shell::Power::Restart),
+        Message::AskPower(glass_shell::Power::ShutDown),
         Message::SignOut,
     ] {
         assert!(seen.contains(&want), "{want:?} in {seen:?}");

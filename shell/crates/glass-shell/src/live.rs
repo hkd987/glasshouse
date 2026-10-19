@@ -19,7 +19,7 @@ use crate::screens::command_bar::{self, CommandBar};
 use crate::screens::desktop::{self, Desktop, Tiles};
 use crate::screens::expanded::{self, Expanded, Rollback, Tab};
 use crate::screens::system;
-use crate::{Element, Message, Theme};
+use crate::{Element, Message, Power, Theme};
 
 #[derive(Debug)]
 pub struct Live {
@@ -48,6 +48,8 @@ pub struct Live {
     window: Option<SystemWindow>,
     /// The Trash has something in it.
     trash_full: bool,
+    /// Restarting or shutting down: the desktop's last frame says so.
+    leaving: Option<Power>,
 }
 
 /// A window the system menu opened.
@@ -56,6 +58,8 @@ enum SystemWindow {
     About,
     /// The agent chosen to stop, if one is.
     ForceQuit(Option<TaskId>),
+    /// "Restart now?" or "Shut down now?"
+    Power(Power),
 }
 
 /// How long a notification stays on screen, as a macOS banner does. One
@@ -106,6 +110,9 @@ pub enum Effect {
     /// End the session: the desktop program exits and the sign-in screen
     /// comes back (ADR 0019).
     SignOut,
+    /// End the session so the sign-in screen restarts or shuts down the
+    /// computer (`session::Power`); the desktop shows it's leaving first.
+    Power(Power),
     /// Roll back (`task.undo`, AW-15) and hand the report to
     /// [`Live::undo_report`], or the refusal to [`Live::undo_failed`].
     Undo(UndoRequest),
@@ -150,6 +157,7 @@ impl Live {
             about: system::About::default(),
             window: None,
             trash_full: false,
+            leaving: None,
         };
         let waiting: Vec<TaskId> = live
             .tasks
@@ -426,6 +434,20 @@ impl Live {
                 self.window = None;
                 None
             }
+            Message::AskPower(power) => {
+                self.system_menu = false;
+                self.menu = false;
+                self.command = None;
+                self.window = Some(SystemWindow::Power(power));
+                None
+            }
+            Message::ConfirmPower => {
+                let Some(SystemWindow::Power(power)) = self.window.take() else {
+                    return None;
+                };
+                self.leaving = Some(power);
+                Some(Effect::Power(power))
+            }
             Message::ToggleSystemMenu => {
                 self.system_menu = !self.system_menu;
                 if self.system_menu {
@@ -663,6 +685,11 @@ impl Live {
         now: OffsetDateTime,
         size: (f32, f32),
     ) -> Element<'a, Message> {
+        // Restarting or shutting down: that's all the screen says, over
+        // everything, until the machine goes.
+        if let Some(power) = self.leaving {
+            return system::leaving_overlay(power);
+        }
         let expanded = self.expanded(now);
         // Nothing sits over the command bar or the expanded view; otherwise
         // the menu if it's open, else whatever is a banner right now.
@@ -706,6 +733,10 @@ impl Live {
                     theme,
                     &system::ForceQuit { running, chosen },
                 ));
+            }
+            Some(SystemWindow::Power(power)) => {
+                let running = self.tasks.iter().filter(|t| t.state.is_live()).count();
+                overlays.push(system::power_overlay(theme, power, running));
             }
             None => {}
         }
@@ -1192,6 +1223,28 @@ mod tests {
             Some(Effect::Stop(running.id))
         );
         assert_eq!(live.shortcut(&esc, Modifiers::empty()), None, "it closed");
+    }
+
+    #[test]
+    fn restart_and_shut_down_ask_first_then_leave_a_last_frame() {
+        let mut live = Live::new(fixtures::tasks());
+        for power in [Power::Restart, Power::ShutDown] {
+            live.update(Message::AskPower(power));
+            let esc = Key::Named(Named::Escape);
+            assert_eq!(
+                live.shortcut(&esc, Modifiers::empty()),
+                Some(Message::CloseSystemWindow),
+                "Esc says no"
+            );
+            live.update(Message::CloseSystemWindow);
+            assert_eq!(live.update(Message::ConfirmPower), None, "nothing asked");
+        }
+        live.update(Message::AskPower(Power::Restart));
+        assert_eq!(
+            live.update(Message::ConfirmPower),
+            Some(Effect::Power(Power::Restart))
+        );
+        assert_eq!(live.leaving, Some(Power::Restart));
     }
 
     #[test]

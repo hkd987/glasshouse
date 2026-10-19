@@ -22,6 +22,7 @@ pub mod icons;
 pub mod live;
 pub mod render;
 pub mod screens;
+pub mod session;
 mod style;
 pub mod theme;
 pub mod tiles;
@@ -30,6 +31,7 @@ pub mod wallpaper;
 use glass_types::{ApprovalId, SnapshotId, TaskId};
 
 pub use iced_core::Size;
+pub use session::Power;
 pub use theme::Theme;
 
 /// An element of the shell's UI.
@@ -117,6 +119,10 @@ pub enum Message {
     ChooseToQuit(TaskId),
     /// Stop the chosen agent at once.
     ForceQuit,
-    /// Close About or Force Quit.
+    /// Close About, Force Quit or a Restart or Shut Down question.
     CloseSystemWindow,
+    /// Restart… or Shut Down… in the system menu: asks first.
+    AskPower(Power),
+    /// The answer to that question: go ahead.
+    ConfirmPower,
 }

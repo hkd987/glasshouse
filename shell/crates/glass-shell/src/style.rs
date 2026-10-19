@@ -54,16 +54,22 @@ pub fn button_like(
 }
 
 /// A menu item: plain until the pointer is on it, then `highlight` (the
-/// accent, as a Mac menu highlights the item under the pointer).
+/// accent, as a Mac menu highlights the item under the pointer); dimmed and
+/// never highlighted while it can't be chosen.
 pub fn menu_item(
     text: Color,
     highlight: Color,
 ) -> impl Fn(&iced_widget::Theme, button::Status) -> button::Style {
     move |_, status| {
         let on = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let text = match status {
+            button::Status::Disabled => Color { a: 0.4, ..text },
+            _ if on => Color::WHITE,
+            _ => text,
+        };
         button::Style {
             background: on.then_some(Background::Color(highlight)),
-            text_color: if on { Color::WHITE } else { text },
+            text_color: text,
             border: Border {
                 radius: border::Radius::from(6.0),
                 ..Border::default()

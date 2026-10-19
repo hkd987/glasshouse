@@ -113,6 +113,22 @@ impl Framebuffer {
         }
     }
 
+    /// Makes this framebuffer's virtual terminal the one on screen, and
+    /// returns once it is. The console repaints a terminal it switches to
+    /// (its text, here none, and a cursor), so draw after this; from then
+    /// on the console's messages, which go to the first terminal, don't
+    /// show, and nothing repaints this one while nothing writes to it.
+    pub fn show(&self) -> io::Result<()> {
+        #[cfg(target_os = "freebsd")]
+        {
+            self.inner.show()
+        }
+        #[cfg(not(target_os = "freebsd"))]
+        {
+            Ok(())
+        }
+    }
+
     /// Copies rows `rows` of a straight RGBA frame `width` pixels wide onto
     /// the screen, from its top left corner. Rows and columns past the
     /// screen's edge are left out.
@@ -162,7 +178,7 @@ impl Framebuffer {
 #[cfg(target_os = "freebsd")]
 mod sys {
     use std::fs::{File, OpenOptions};
-    use std::io;
+    use std::io::{self, Write};
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
     use std::path::Path;
@@ -202,6 +218,7 @@ mod sys {
     const KD_TEXT: c_int = 0;
     const KD_GRAPHICS: c_int = 1;
     pub(super) const VT_ACTIVATE: c_ulong = ioctl::int(b'v', 5);
+    pub(super) const VT_WAITACTIVE: c_ulong = ioctl::int(b'v', 6);
     pub(super) const VT_GETACTIVE: c_ulong = ioctl::read(b'v', 7, size_of::<c_int>());
     pub(super) const VT_GETINDEX: c_ulong = ioctl::read(b'v', 8, size_of::<c_int>());
 
@@ -330,6 +347,24 @@ mod sys {
         }
     }
 
+    impl Mapping {
+        pub(super) fn show(&self) -> io::Result<()> {
+            let fd = self.tty.as_raw_fd();
+            let mut ours: c_int = 0;
+            // SAFETY: VT_GETINDEX writes one `int` to the pointer;
+            // VT_ACTIVATE takes the terminal's number by value.
+            check(unsafe { libc::ioctl(fd, VT_GETINDEX, &mut ours as *mut c_int) })?;
+            // No cursor in the repaint (DECTCEM off).
+            (&self.tty).write_all(b"\x1b[?25l")?;
+            check(unsafe { libc::ioctl(fd, VT_ACTIVATE, ours) })?;
+            // SAFETY: VT_WAITACTIVE takes the terminal's number by value.
+            check(unsafe { libc::ioctl(fd, VT_WAITACTIVE, ours) })?;
+            // The repaint itself comes on the console's next flush.
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            Ok(())
+        }
+    }
+
     /// Text mode alone leaves the last frame up until the console next
     /// draws. Switching to another terminal and back has the console redraw
     /// all of this one now, if it's the one showing.
@@ -412,6 +447,7 @@ mod tests {
         assert_eq!(sys::FBIO_GETRGBOFFS, 0x400c_4674);
         assert_eq!(sys::KDSETMODE, 0x2004_4b0a);
         assert_eq!(sys::VT_ACTIVATE, 0x2004_7605);
+        assert_eq!(sys::VT_WAITACTIVE, 0x2004_7606);
         assert_eq!(sys::VT_GETACTIVE, 0x4004_7607);
         assert_eq!(sys::VT_GETINDEX, 0x4004_7608);
     }

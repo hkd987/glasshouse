@@ -63,6 +63,16 @@ environment, `setlogin`, PAM session modules, lastlog.
 - `glass-shell-fb` became a library (`display`: framebuffer, damage-tracked
   drawing, pointer, input) and the desktop binary; the greeter uses the
   library. Shift Super Q, or Sign out in the system menu, ends the session.
+- **Restart and Shut Down** (the mark's menu, each asked first) need root,
+  which the desktop doesn't have and the sign-in screen does: the desktop
+  draws "Restarting…" and ends its session with an exit status of its own
+  (`glass_shell::session`, 75 or 76), and the supervisor runs
+  `shutdown -r now` or `shutdown -p now`. Only the person at the screen can
+  ask, through the session the supervisor started. The base system's
+  shutdown messages go to the first terminal, so the supervisor shows the
+  last frame on `ttyv8` (no login there) and switches to it first; then the
+  kernel's own shutdown splash. Check for Updates is in the menu, dimmed
+  until updates ship as whole images (BS-4, EP-1).
 - Handing over, the screen that ends leaves its last frame up and the
   terminal in graphics mode (`Framebuffer::hand_over`) for the next to draw
   over, so the text console never shows between the sign-in screen and the

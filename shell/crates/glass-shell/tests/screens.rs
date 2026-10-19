@@ -116,6 +116,24 @@ fn render_force_quit() -> Frame {
     )
 }
 
+/// "Restart now?" with agents running.
+fn render_restart() -> Frame {
+    let theme = Theme::glass();
+    let tasks = fixtures::tasks();
+    let state = desktop::Desktop {
+        tiles: desktop::Tiles::Hidden,
+        ..fixtures::desktop(&tasks)
+    };
+    let running = tasks.iter().filter(|t| t.state.is_live()).count();
+    let overlay =
+        glass_shell::screens::system::power_overlay(&theme, glass_shell::Power::Restart, running);
+    frame(
+        desktop::view(&theme, &state, Vec::new(), |_| None, Some(overlay), SCREEN),
+        size(),
+        1.0,
+    )
+}
+
 fn render_desktop() -> Frame {
     let theme = Theme::glass();
     let tasks = fixtures::tasks();
@@ -368,6 +386,7 @@ fn screens_match_their_snapshots() {
     snapshot("system-menu", &render_system_menu());
     snapshot("about", &render_about());
     snapshot("force-quit", &render_force_quit());
+    snapshot("restart", &render_restart());
     snapshot("command-bar", &render_command_bar());
     snapshot("expanded", &render_expanded());
     snapshot("expanded-review", &render_expanded_review());

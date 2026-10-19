@@ -54,7 +54,11 @@ case $cmd in
 ready)
 	vm_ssh "pgrep -qf 'glass-greeter --screen' || pgrep -qx glass-shell-fb" ||
 		die "neither the sign-in screen nor the desktop is running (desk.sh restart)"
-	wait_for 0 "sign-in screen: drawn|tiles: drawn" "${1:-60}" >/dev/null
+	# Ready once the screen that opened last (sign-in or desktop) reads its input devices: keys
+	# typed before that are lost.
+	opened=$(vm_ssh "grep -n '^/dev/ttyv0:' $log | tail -1 | cut -d: -f1")
+	wait_for "$((${opened:-1} - 1))" "^input: " "${1:-60}" >/dev/null
+	sleep 0.5 # the rest of the devices open in the same moment
 	echo "ready"
 	;;
 signin)
