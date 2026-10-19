@@ -24,6 +24,11 @@ pub struct TaskContext {
     /// The user's home, where first-party apps keep their data.
     pub home: PathBuf,
     pub grants: Vec<Grant>,
+    /// The directory groups the user was in when the task started, as
+    /// policy resolved them, `everyone` included. Set by the runtime, never
+    /// from anything the agent sent, for actions that show only what the
+    /// user's groups may see, such as `catalog.search` (GA-2, DV-11).
+    pub groups: Vec<String>,
 }
 
 /// An agent-visible path resolved against the task's grants.

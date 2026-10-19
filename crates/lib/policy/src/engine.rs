@@ -309,6 +309,12 @@ impl EffectivePolicy {
         &self.user
     }
 
+    /// The groups this policy was built from: the user's, `everyone`
+    /// included when policy defines it.
+    pub fn groups(&self) -> impl Iterator<Item = &str> {
+        self.groups.iter().map(|(name, _)| name.as_str())
+    }
+
     pub fn max_label(&self) -> Label {
         self.max_label
     }

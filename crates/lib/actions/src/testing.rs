@@ -7,8 +7,9 @@ use glass_types::{AgentPrincipal, TaskId, UserRef};
 
 use crate::{Grant, TaskContext};
 
-/// A task for user `demo` (uid 1001) with home `root`, a read-only
-/// `Invoices` grant and a writable `Reports` grant under it.
+/// A task for user `demo` (uid 1001, in group `everyone` only) with home
+/// `root`, a read-only `Invoices` grant and a writable `Reports` grant
+/// under it.
 pub fn context(root: &Path) -> TaskContext {
     TaskContext {
         principal: AgentPrincipal {
@@ -36,5 +37,6 @@ pub fn context(root: &Path) -> TaskContext {
                 writable: true,
             },
         ],
+        groups: vec!["everyone".into()],
     }
 }

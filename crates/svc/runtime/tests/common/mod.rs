@@ -13,6 +13,7 @@ use std::time::Duration;
 use glass_actions::Registry;
 use glass_api::{AppManifest, CustomizationPoint, PointKind, ScopeRequest, TaskRequest, TileState};
 use glass_app_calendar::CalendarProvider;
+use glass_app_catalog::{CatalogHandle, CatalogProvider};
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
@@ -36,6 +37,8 @@ pub struct Harness {
     pub machine: Arc<FakeMachine>,
     /// The model provider `scripted` in policy reaches; what it was sent.
     pub model: Arc<ScriptedProvider>,
+    /// The org catalog `catalog.search` reads; empty until a test sets it.
+    pub catalog: CatalogHandle,
 }
 
 impl Harness {
@@ -160,6 +163,10 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         .register(Arc::new(HelpdeskProvider::new(dir.path().join("outbox"))))
         .unwrap();
     registry.register(Arc::new(ModelAction)).unwrap();
+    let catalog = CatalogHandle::new();
+    registry
+        .register(Arc::new(CatalogProvider::new(catalog.clone())))
+        .unwrap();
     // Policy names these providers; `down` is always rate limited (MP-8).
     let model = Arc::new(ScriptedProvider::echo());
     let gateway = Gateway::new().with("scripted", model.clone()).with(
@@ -204,6 +211,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         me,
         machine,
         model,
+        catalog,
     }
 }
 

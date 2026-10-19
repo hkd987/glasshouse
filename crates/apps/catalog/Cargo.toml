@@ -1,0 +1,22 @@
+[package]
+name = "glass-app-catalog"
+description = "The catalog app: catalog-first search of the org's approved apps, agents and flows, scoped to the user's groups (GA-2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-actions.workspace = true
+glass-api.workspace = true
+glass-managed.workspace = true
+glass-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

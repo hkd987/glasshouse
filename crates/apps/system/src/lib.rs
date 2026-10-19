@@ -552,6 +552,7 @@ mod tests {
             },
             home,
             grants: Vec::new(),
+            groups: Vec::new(),
         }
     }
 
