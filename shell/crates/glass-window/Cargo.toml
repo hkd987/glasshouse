@@ -1,0 +1,25 @@
+[package]
+name = "glass-window"
+description = "A native app's window: an iced view drawn with the shell's renderer into a Wayland window, with pointer and keyboard input."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-shell.workspace = true
+iced_core.workspace = true
+anyhow.workspace = true
+rustix.workspace = true
+tempfile.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+xkbcommon.workspace = true
+
+[dev-dependencies]
+glass-compositor.workspace = true
+iced_widget.workspace = true
+
+[lints]
+workspace = true

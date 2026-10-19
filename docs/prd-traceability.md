@@ -185,7 +185,9 @@ thumbnails are not started.
 |---|---|---|
 | UI-4 Shell in Rust with iced and AccessKit | Partial | `shell/` (its own workspace): boot, sign-in, desktop and command-bar screens match the mockups, from `glass_api` data. `glass-shell-fb` draws the desktop on the VM's screen (console framebuffer) with live tiles from `events.subscribe` (`make shell-vm`), keyboard and pointer from evdev, and redraws only what changed. `glass-greeter` signs people in on that screen through PAM and starts their desktop, and checks the password that unlocks its lock screen (ADR 0019, `make greeter-vm`). Missing: the compositor (ADR 0016), AccessKit |
 | UI-1 … UI-3 Wayland compositor on Smithay, isolation, agent displays | Partial | `shell/crates/glass-compositor` (UI-1): Wayland for apps, windows centered in the work area, focus and input routing, software composition (pixman) redrawing only what changed; tests with real clients (`ui1_*`). The desktop hosts it on the VM's screen: windows between the wallpaper and the shell's UI, hidden behind the lock screen, input routed to the window under the pointer or in focus (`tests/layers.rs`, `live::ui1_*`). Window frames and moving windows next; isolation (UI-2) and agent displays (UI-3) not started |
-| UI-5, UI-6 Web apps and native apps with manifests | Not started | ADR 0009 |
+| UI-5, UI-6 Web apps and native apps with manifests | Partial | Native (UI-6): `glass-window` puts an iced view in a Wayland window with pointer and keys (ADR 0025, `ui6_*`); Terminal and Activity Monitor build on it. Accessibility tree and action manifests owed. Web apps (UI-5): ADR 0009 |
+| Terminal (product request 2026-10-19, pending PRD) | In progress | native, ADR 0025; `docs/prd/proposals.md` |
+| Activity Monitor (product request 2026-10-19, pending PRD) | Not started | native, ADR 0025; `docs/prd/proposals.md` |
 
 ## Desktop experience
 

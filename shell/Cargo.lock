@@ -763,6 +763,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-window"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glass-compositor",
+ "glass-shell",
+ "iced_core",
+ "iced_widget",
+ "rustix 1.1.5",
+ "tempfile",
+ "wayland-client",
+ "wayland-protocols",
+ "xkbcommon",
+]
+
+[[package]]
 name = "guillotiere"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

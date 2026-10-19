@@ -28,3 +28,4 @@ ADR and mark the old one superseded.
 | [0020](0020-agents-that-may-run-elsewhere.md) | Proposed: agents may later run in the cloud with local hands; the task socket stays the only interface and task state stays data (FD-1 to FD-4) |
 | [0021](0021-managed-settings-load-from-disk.md) | Managed settings never block boot: glassd starts from the policy on disk, checked once, falling back to the last good one; new settings are fetched in the background and applied whole (fetch and live apply proposed) |
 | [0022](0022-build-on-pkgbase.md) | Accepted: build on pkgbase; an image is a list of packages from one repository, ours included; devices take whole images; FreeBSD stays behind `glass-platform` |
+| [0025](0025-native-first-party-apps.md) | Terminal and Activity Monitor are native apps (UI-6) on `glass-window`: iced views in Wayland windows, keys through the compositor's keymap; other first-party apps stay web apps |

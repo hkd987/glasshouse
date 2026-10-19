@@ -488,7 +488,7 @@ impl Compositor {
                     }
                     return;
                 }
-                Some((_, Part::Bar)) => return,
+                Some((_, Part::Bar | Part::Control)) => return,
                 _ => {}
             }
         }
@@ -611,6 +611,9 @@ enum Part {
     Content,
     Bar,
     Close,
+    /// Minimize or zoom: not built yet, so a click there does nothing
+    /// (rather than starting a drag).
+    Control,
 }
 
 impl State {
@@ -624,10 +627,13 @@ impl State {
             let width = window.geometry().size.w;
             let (x, y) = (at.x - f64::from(loc.x), at.y - f64::from(loc.y));
             if (0.0..f64::from(width)).contains(&x) && (-f64::from(TITLE_BAR)..0.0).contains(&y) {
-                let (cx, cy) = (f64::from(CONTROLS[0]), -f64::from(TITLE_BAR) / 2.0);
+                let cy = -f64::from(TITLE_BAR) / 2.0;
                 let reach = f64::from(CONTROL_RADIUS + 2);
-                let part = if (x - cx).powi(2) + (y - cy).powi(2) <= reach * reach {
+                let on = |cx: i32| (x - f64::from(cx)).powi(2) + (y - cy).powi(2) <= reach * reach;
+                let part = if on(CONTROLS[0]) {
                     Part::Close
+                } else if on(CONTROLS[1]) || on(CONTROLS[2]) {
+                    Part::Control
                 } else {
                     Part::Bar
                 };
