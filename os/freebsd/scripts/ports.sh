@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Usage: ports.sh vm-install <package>...   install FreeBSD packages (from ports) in the dev VM
+#        ports.sh fetch <package>...        download packages into the cache only (no VM), to look inside
 #        ports.sh sysroot <package>...      unpack the same packages into the cross-compile sysroot
 #
 # Third-party libraries the desktop links (libxkbcommon and pixman for the compositor, with
@@ -14,7 +15,7 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
 cmd=${1:-}
-(($# > 1)) || die "usage: ports.sh vm-install|sysroot <package>..."
+(($# > 1)) || die "usage: ports.sh vm-install|sysroot|fetch <package>..."
 shift
 cache=$CACHE_DIR/ports
 mkdir -p "$cache"
@@ -66,5 +67,42 @@ sysroot)
 		log "unpacked ${file##*/}"
 	done
 	;;
-*) die "usage: ports.sh vm-install|sysroot <package>..." ;;
+fetch)
+	# Download these packages into the cache without a VM, through the same mirror, for
+	# looking inside them on this machine (which files a program needs, their licenses).
+	port_file=$cache/.port
+	rm -f "$port_file"
+	python3 "$FREEBSD_SCRIPTS_DIR/pkg-mirror.py" --cache "$cache" \
+		--upstream "$FREEBSD_PORTS_MIRROR" --port-file "$port_file" &
+	mirror=$!
+	trap 'kill "$mirror" 2>/dev/null || true' EXIT
+	for _ in $(seq 100); do [[ -s $port_file ]] && break; sleep 0.1; done
+	[[ -s $port_file ]] || die "the package mirror didn't start"
+	base=http://127.0.0.1:$(cat "$port_file")/$FREEBSD_PORTS_REPO
+	curl -fsS -o /dev/null "$base/data.pkg" || die "no catalog from the mirror"
+	catalog=$cache/$FREEBSD_PORTS_REPO/data.pkg
+	for path in $(tar -xOf "$catalog" data | python3 -c '
+import json, sys
+want = set(sys.argv[1:])
+for p in json.load(sys.stdin)["packages"]:
+    if p["name"] in want:
+        want.discard(p["name"])
+        print(p["repopath"])
+for name in sorted(want):
+    print(f"ports.sh: no package {name} in the catalog", file=sys.stderr)
+' "$@"); do
+		if ! curl -fsS -o /dev/null "$base/$path" 2>/dev/null; then
+			# Upstream keeps only its current builds: a package rebuilt since our catalog was
+			# fetched is gone under its hashed name, but the same version may still be there
+			# under its plain one. Good enough to look inside; pkg in a VM would refuse it.
+			plain=${path/Hashed\//}
+			plain=${plain%%~*}.pkg
+			curl -fsS -o /dev/null "$base/$plain" || die "couldn't fetch $path or $plain"
+			log "warning: ${path##*/} is gone upstream; cached ${plain##*/}, a later build of that version"
+			continue
+		fi
+		log "cached ${path##*/}"
+	done
+	;;
+*) die "usage: ports.sh vm-install|sysroot|fetch <package>..." ;;
 esac

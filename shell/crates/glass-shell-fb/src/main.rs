@@ -585,7 +585,10 @@ impl Shell {
         }
         let windows = apps.windows();
         // Windows coming and going, for the log.
-        let titles: Vec<String> = windows.iter().map(|w| w.title.clone()).collect();
+        let titles: Vec<String> = windows
+            .iter()
+            .map(|w| format!("{} [{}]", w.title, w.app_id))
+            .collect();
         if titles != self.app_titles {
             eprintln!("apps: {} windows: {}", titles.len(), titles.join(", "));
             self.app_titles = titles;
