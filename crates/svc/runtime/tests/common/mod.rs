@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use glass_actions::Registry;
-use glass_api::{CustomizationPoint, PointKind, ScopeRequest, TaskRequest, TileState};
+use glass_api::{AppManifest, CustomizationPoint, PointKind, ScopeRequest, TaskRequest, TileState};
 use glass_app_calendar::CalendarProvider;
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
@@ -25,7 +25,7 @@ use glass_platform::system;
 use glass_policy::Policy;
 use glass_rpc::Client;
 use glass_rpc::mcp::CallToolResult;
-use glass_runtime::{Caller, CatalogEntry, Runtime, RuntimeConfig, RuntimeParts};
+use glass_runtime::{AppApi, Caller, CatalogEntry, Runtime, RuntimeConfig, RuntimeParts};
 use glass_types::TaskId;
 use serde_json::{Value, json};
 
@@ -80,6 +80,16 @@ impl Harness {
         let prompt = self.rt.get(&self.me, task).unwrap().prompt;
         assert!(init["instructions"].as_str().unwrap().contains(&prompt));
         client
+    }
+
+    /// Serves the app socket (ADR 0024) and returns where it listens.
+    pub fn serve_apps(&self) -> PathBuf {
+        let path = self.dir.path().join("run/apps.sock");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let api = Arc::new(AppApi::new(Arc::clone(&self.rt)));
+        tokio::spawn(glass_rpc::serve(listener, api));
+        path
     }
 
     pub fn tile(&self, task: TaskId) -> TileState {
@@ -167,8 +177,10 @@ pub fn harness_with(policy_extra: &str) -> Harness {
             max_live_tasks_per_user: 4,
             harness: Some("claude-code".parse().unwrap()),
             attended_dir: dir.path().join("run/attended"),
-            apps: Vec::new(),
-            dev_home: None,
+            apps: vec![mail_app(), calendar_app()],
+            // The app socket resolves callers by uid; their app data is
+            // here, never in the real account's home.
+            dev_home: Some(home.clone()),
         },
         policy,
         policy_source: "test".into(),
@@ -365,4 +377,24 @@ impl SystemOps for FakeMachine {
         self.restarted.lock().unwrap().push(name.into());
         Ok(())
     }
+}
+
+/// The Mail app as its manifest declares it (apps/mail/manifest.json).
+pub fn mail_app() -> AppManifest {
+    serde_json::from_value(json!({
+        "id": "mail", "name": "Mail", "version": "0.1.0",
+        "actions": ["mail.list", "mail.read", "mail.draft", "mail.send"],
+        "permissions": ["offline"], "labels": ["public", "internal"]
+    }))
+    .unwrap()
+}
+
+/// The Calendar app as its manifest declares it.
+pub fn calendar_app() -> AppManifest {
+    serde_json::from_value(json!({
+        "id": "calendar", "name": "Calendar", "version": "0.1.0",
+        "actions": ["calendar.list", "calendar.read", "calendar.create", "calendar.update"],
+        "permissions": ["offline"], "labels": ["public", "internal"]
+    }))
+    .unwrap()
 }

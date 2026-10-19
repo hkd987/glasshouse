@@ -11,11 +11,16 @@
 //!   through the model gateway (ADR 0018).
 //! - [`ControlApi`] serves the `glass-api` control socket for `glassctl` and
 //!   the desktop shell.
+//! - [`AppApi`] serves the app socket: an installed app's session acts for
+//!   the user who opened it, calling only the actions its manifest declares,
+//!   through the same pipeline (ADR 0024).
 //!
 //! Blocking platform work (sandboxes, snapshots, file I/O) runs on the
 //! blocking pool; nothing here holds a lock across an `.await`.
 
 mod agent_api;
+mod app_api;
+mod apps;
 mod caller;
 mod config;
 mod continuation;
@@ -32,6 +37,8 @@ mod title;
 mod undo;
 mod written;
 
+pub use app_api::AppApi;
+pub use apps::MAX_OPEN_APPS_PER_USER;
 pub use caller::Caller;
 pub use config::{CatalogEntry, RuntimeConfig};
 pub use control_api::ControlApi;

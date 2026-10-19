@@ -109,6 +109,7 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
     });
     rt.audit(event);
     rt.publish(&task);
+    rt.forget_if_unchanged(&task);
 }
 
 async fn setup_and_wait(
