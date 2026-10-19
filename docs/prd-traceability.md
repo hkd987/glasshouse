@@ -168,7 +168,9 @@ thumbnails are not started.
 | CF-60 Users can always see their own agents' logs | Partial | `audit.task` is open to the task's user; recordings don't exist yet |
 | CF-61, CF-62 Retention set by IT; no individual-level reporting | Not started | |
 | CF-63, CF-64 Recordings encrypted and labeled; legal hold | Not started | |
-| CF-80 … CF-82 Built-in remote help desk | Not started | |
+| CF-80 Remote help built in | Partial | Support staff sign in to the console by role and see the computers their role reaches (ADR 0028 slice a); sessions (seeing and controlling a screen) wait on the owner's answers in ADR 0028 |
+| CF-81 Support tiers by directory role, set by IT | Partial | `[support]` in policy: help desk, desktop support and security seeded into a new org; IT edits, previews and publishes them on the console's Remote help page; every console route needs an admin unless named a support route (`cf80_support_staff_reach_nothing_but_remote_help`). The tools themselves come with sessions |
+| CF-82 Consent per session, banner, unattended rules, audit | Not started | ADR 0028 slice b |
 
 ## Power management
 

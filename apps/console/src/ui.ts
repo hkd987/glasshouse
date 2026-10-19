@@ -43,6 +43,13 @@ export function ago(when: string): string {
   return `${Math.round(seconds / 86400)} d ago`;
 }
 
+/** "90 seconds", "2 minutes", "4 hours": the largest whole unit. */
+export function duration(seconds: number): string {
+  if (seconds >= 3600 && seconds % 3600 === 0) return plural(seconds / 3600, "hour");
+  if (seconds >= 60 && seconds % 60 === 0) return plural(seconds / 60, "minute");
+  return plural(seconds, "second");
+}
+
 export function capital(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }

@@ -1,5 +1,6 @@
-//! The console's HTTP surface: the web app's files, the admin API for
-//! signed-in admins, and the device API devices sync through (ADR 0023).
+//! The console's HTTP surface: the web app's files, the API for IT's
+//! admins and support staff, and the device API devices sync through
+//! (ADR 0023).
 //!
 //! ```text
 //! GET  /                              the console web app (apps/console)
@@ -11,11 +12,17 @@
 //! POST /api/catalog/<id>/{approve,block,public}
 //! GET  /api/fleet                     the fleet page
 //! POST /api/fleet/<device>/ring       move a device to another ring
+//! GET  /api/roles                     remote help's roles (CF-81)
+//! GET  /api/support                   support staff's page (CF-80)
 //! POST /device/v1/sync                a device's long poll (bearer token)
 //! POST /device/v1/report              a device's report (bearer token)
 //! ```
 //!
-//! Admins are the directory's `it-admins`. Sessions are a random cookie,
+//! Admins are the directory's `it-admins`; support staff are the members of
+//! the groups the pilot ring's policy gives a support role (ADR 0028).
+//! Every route needs an admin unless `api` names it a support route, so a
+//! new route is closed to support staff until someone opens it. Sessions
+//! are a random cookie,
 //! HttpOnly and SameSite=Strict; every change is a JSON POST whose Origin,
 //! when sent, is the console's own, so another site's page can't make one.
 
@@ -31,6 +38,7 @@ use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
+use crate::access::{Access, Need};
 use crate::directory::Directory;
 use crate::edits::Edit;
 use crate::impact::{self, Titles};
@@ -233,42 +241,77 @@ impl Console {
         lock(&self.sessions).get(token).cloned()
     }
 
+    /// What `user` may do now, by the directory and the roles in force.
+    fn access(&self, user: &str) -> Access {
+        let support = self.state().support_in_force();
+        Access::of(user, self.directory.as_ref(), &support)
+    }
+
+    /// Development sign-in: the org's admins and support staff to pick
+    /// from, never the whole directory. Our web servers sign people in with
+    /// the org's SSO instead (not built).
+    fn signed_out(&self) -> Response {
+        let support = self.state().support_in_force();
+        let mut people: Vec<&str> = self.directory.members(crate::directory::ADMINS);
+        for role in &support.roles {
+            for group in &role.groups {
+                if group != crate::directory::EVERYONE {
+                    people.extend(self.directory.members(group));
+                }
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        people.retain(|u| seen.insert(*u));
+        let people: Vec<Value> = people
+            .into_iter()
+            .map(|u| {
+                let access = Access::of(u, self.directory.as_ref(), &support);
+                json!({ "user": u, "display": self.directory.display_name(u), "title": access.title() })
+            })
+            .collect();
+        Response::json(
+            401,
+            &json!({ "error": "sign in", "people": people, "org": self.state().org.name }),
+        )
+    }
+
     fn session(&self, request: &Request) -> Response {
         match request.method.as_str() {
-            "GET" => match self.signed_in(request) {
-                Some(user) => {
-                    let state = self.state();
-                    ok(json!({
-                        "user": user,
-                        "display": self.directory.display_name(&user),
-                        "org": { "id": state.org.id, "name": state.org.name },
-                    }))
+            "GET" => {
+                let Some(user) = self.signed_in(request) else {
+                    return self.signed_out();
+                };
+                let access = self.access(&user);
+                // A role taken away while signed in ends the session.
+                if !access.any() {
+                    return self.signed_out();
                 }
-                None => {
-                    // Development sign-in: the directory's admins to pick
-                    // from. Our web servers sign people in with the org's
-                    // SSO instead (not built).
-                    let admins: Vec<Value> = self
-                        .directory
-                        .members(crate::directory::ADMINS)
-                        .into_iter()
-                        .map(|u| json!({ "user": u, "display": self.directory.display_name(u) }))
-                        .collect();
-                    Response::json(
-                        401,
-                        &json!({ "error": "sign in", "admins": admins, "org": self.state().org.name }),
-                    )
-                }
-            },
+                let roles: Vec<Value> = access
+                    .roles
+                    .iter()
+                    .map(|r| json!({ "id": r.id, "name": r.name, "tools": r.tools }))
+                    .collect();
+                let state = self.state();
+                ok(json!({
+                    "user": user,
+                    "display": self.directory.display_name(&user),
+                    "org": { "id": state.org.id, "name": state.org.name },
+                    "admin": access.admin,
+                    "roles": roles,
+                }))
+            }
             "POST" => {
                 let sign_in: SignIn = match body(request) {
                     Ok(b) => b,
                     Err(r) => return r,
                 };
-                if !self.directory.is_admin(&sign_in.user) {
+                if !self.access(&sign_in.user).any() {
                     return error(
                         403,
-                        &format!("{} isn't an admin of this org.", sign_in.user),
+                        &format!(
+                            "{} isn't an admin of this org and holds no support role.",
+                            sign_in.user
+                        ),
                     );
                 }
                 let token = match crate::state::random() {
@@ -314,7 +357,28 @@ impl Console {
         }
         let directory = self.directory.as_ref();
         let segments: Vec<&str> = path.split('/').collect();
+        // Default deny (ADR 0028): every route needs an admin unless it is
+        // named here.
+        let need = match (request.method.as_str(), segments.as_slice()) {
+            ("GET", ["support"]) => Need::Support,
+            _ => Need::Admin,
+        };
+        let access = self.access(&user);
+        if !access.allows(need) {
+            return error(
+                403,
+                match need {
+                    Need::Admin => "Only the org's IT admins can do that.",
+                    Need::Support => "Only support staff can open remote help.",
+                },
+            );
+        }
         match (request.method.as_str(), segments.as_slice()) {
+            ("GET", ["support"]) => ok(views::support(&self.state(), directory, &access)),
+            ("GET", ["roles"]) => match views::roles(&self.state(), directory) {
+                Ok(v) => ok(v),
+                Err(e) => error(500, &format!("{e:#}")),
+            },
             ("GET", ["policy"]) => {
                 let group = query(request, "group").unwrap_or(crate::directory::EVERYONE);
                 let state = self.state();
@@ -580,10 +644,55 @@ mod tests {
         serde_json::from_slice(&response.body).unwrap()
     }
 
+    /// Signs `user` in: their session cookie, or the status it was refused with.
+    async fn sign_in(console: &Console, user: &str) -> Result<String, u16> {
+        let r = console
+            .handle(&request(
+                "POST",
+                "/api/session",
+                &json!({ "user": user }),
+                &[],
+            ))
+            .await;
+        if r.status != 200 {
+            return Err(r.status);
+        }
+        let set = r
+            .headers
+            .iter()
+            .find(|(n, _)| *n == "Set-Cookie")
+            .unwrap()
+            .1
+            .clone();
+        assert!(
+            set.contains("HttpOnly") && set.contains("SameSite=Strict"),
+            "{set}"
+        );
+        Ok(set
+            .split(';')
+            .next()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1
+            .to_owned())
+    }
+
     impl Test {
         /// An admin's call.
         async fn call(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
-            let cookie = format!("{COOKIE}={}", self.cookie);
+            self.call_as(&self.cookie, method, path, body).await
+        }
+
+        /// A call by whoever has `session`.
+        async fn call_as(
+            &self,
+            session: &str,
+            method: &str,
+            path: &str,
+            body: Value,
+        ) -> (u16, Value) {
+            let cookie = format!("{COOKIE}={session}");
             let r = self
                 .console
                 .handle(&request(method, path, &body, &[("cookie", &cookie)]))
@@ -661,34 +770,7 @@ mod tests {
             dir.path().join("web"),
             "http://127.0.0.1:7400".into(),
         );
-        let r = console
-            .handle(&request(
-                "POST",
-                "/api/session",
-                &json!({ "user": "pat" }),
-                &[],
-            ))
-            .await;
-        assert_eq!(r.status, 200);
-        let set = r
-            .headers
-            .iter()
-            .find(|(n, _)| *n == "Set-Cookie")
-            .unwrap()
-            .1
-            .clone();
-        assert!(
-            set.contains("HttpOnly") && set.contains("SameSite=Strict"),
-            "{set}"
-        );
-        let cookie = set
-            .split(';')
-            .next()
-            .unwrap()
-            .split_once('=')
-            .unwrap()
-            .1
-            .to_owned();
+        let cookie = sign_in(&console, "pat").await.unwrap();
         Test {
             _dir: dir,
             console,
@@ -719,6 +801,200 @@ mod tests {
         let (status, session) = t.call("GET", "/api/session", Value::Null).await;
         assert_eq!(status, 200);
         assert_eq!(session["display"], "Pat Okafor");
+    }
+
+    #[tokio::test]
+    async fn cf80_support_staff_sign_in_and_see_their_roles_tools() {
+        let t = console().await;
+        // The development picker: admins and support staff, never the
+        // whole directory.
+        let r = t
+            .console
+            .handle(&request("GET", "/api/session", &Value::Null, &[]))
+            .await;
+        assert_eq!(r.status, 401);
+        let picker = json_of(&r);
+        let people: Vec<&str> = picker["people"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["user"].as_str().unwrap())
+            .collect();
+        assert_eq!(people, ["pat", "root", "jordan", "alex", "sasha"]);
+        assert_eq!(picker["people"][2]["title"], "IT Help Desk");
+
+        t.sync("d", None, 0).await;
+        let jordan = sign_in(&t.console, "jordan").await.unwrap();
+        let (status, session) = t.call_as(&jordan, "GET", "/api/session", Value::Null).await;
+        assert_eq!(status, 200);
+        assert_eq!(session["admin"], false);
+        assert_eq!(session["roles"][0]["name"], "IT Help Desk");
+        assert_eq!(session["roles"][0]["tools"], json!(["view", "control"]));
+
+        let (status, page) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
+        assert_eq!(status, 200, "{page}");
+        let tool = |id: &str| {
+            page["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(tool("view")["mine"], true);
+        assert_eq!(tool("install_apps")["mine"], false);
+        assert_eq!(tool("install_apps")["roles"], json!(["Desktop Support"]));
+        assert_eq!(tool("isolate")["roles"], json!(["Security"]));
+        assert!(
+            page["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|t| t["ready"] == false),
+            "sessions come with slice (b)"
+        );
+        assert_eq!(page["devices"][0]["id"], "d");
+
+        // Pat runs the org but holds no role: no remote help (ADR 0028).
+        let (status, _) = t.call("GET", "/api/support", Value::Null).await;
+        assert_eq!(status, 403);
+    }
+
+    #[tokio::test]
+    async fn cf80_someone_in_no_role_cant_sign_in() {
+        let t = console().await;
+        assert_eq!(sign_in(&t.console, "dana").await, Err(403));
+        assert_eq!(sign_in(&t.console, "nobody").await, Err(403));
+    }
+
+    #[tokio::test]
+    async fn cf80_support_staff_reach_nothing_but_remote_help() {
+        let t = console().await;
+        t.sync("d", None, 0).await;
+        let before = t.console.state().policy.clone();
+        let jordan = sign_in(&t.console, "jordan").await.unwrap();
+        for (method, path, body) in [
+            ("GET", "/api/policy", Value::Null),
+            (
+                "POST",
+                "/api/policy/edit",
+                json!({ "edit": "tier", "group": "everyone", "class": "send", "tier": "auto" }),
+            ),
+            ("POST", "/api/policy/preview", json!({})),
+            ("POST", "/api/policy/publish", json!({})),
+            ("POST", "/api/policy/promote", json!({ "ring": "early" })),
+            ("POST", "/api/policy/rollback", json!({ "to": 1 })),
+            ("POST", "/api/policy/discard", json!({})),
+            ("GET", "/api/catalog", Value::Null),
+            (
+                "POST",
+                "/api/catalog/x/approve",
+                json!({ "group": "everyone", "mode": "available" }),
+            ),
+            ("POST", "/api/catalog/x/block", json!({})),
+            ("POST", "/api/catalog/x/public", json!({})),
+            ("GET", "/api/fleet", Value::Null),
+            ("POST", "/api/fleet/d/ring", json!({ "ring": "pilot" })),
+            ("GET", "/api/mail", Value::Null),
+            ("GET", "/api/roles", Value::Null),
+            ("GET", "/api/a-route-nobody-wrote-yet", Value::Null),
+        ] {
+            let (status, _) = t.call_as(&jordan, method, path, body).await;
+            assert_eq!(status, 403, "{method} {path}");
+        }
+        assert_eq!(t.console.state().policy, before, "nothing changed");
+        assert_eq!(t.console.state().fleet.devices["d"].ring, Ring::Broad);
+    }
+
+    #[tokio::test]
+    async fn cf81_edit_a_roles_tools_then_publish_and_it_takes_effect() {
+        let t = console().await;
+        let jordan = sign_in(&t.console, "jordan").await.unwrap();
+        let installs = |page: &Value| {
+            page["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["id"] == "install_apps")
+                .unwrap()["mine"]
+                .clone()
+        };
+
+        let (status, roles) = t.call("GET", "/api/roles", Value::Null).await;
+        assert_eq!(status, 200);
+        assert_eq!(roles["changed"], false);
+        let desk = &roles["roles"][0];
+        assert_eq!(desk["holders"], json!(["Jordan Lee"]));
+        let mut role = json!({});
+        for field in [
+            "id",
+            "name",
+            "groups",
+            "tools",
+            "people",
+            "unattended",
+            "max_minutes",
+        ] {
+            role[field] = desk[field].clone();
+        }
+        role["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push("install_apps".into());
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/policy/edit",
+                json!({ "edit": "support_role", "id": "help-desk", "role": role }),
+            )
+            .await;
+        assert_eq!(status, 200);
+        let (_, impact) = t.call("POST", "/api/policy/preview", json!({})).await;
+        assert!(
+            impact["changes"]
+                .to_string()
+                .contains("Remote help: IT Help Desk may now install approved apps"),
+            "{impact}"
+        );
+        // Not in force until published.
+        let (_, page) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
+        assert_eq!(installs(&page), false);
+        let (status, _) = t.call("POST", "/api/policy/publish", json!({})).await;
+        assert_eq!(status, 200);
+        let (_, page) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
+        assert_eq!(installs(&page), true);
+
+        // A control without view is refused, as a device would.
+        role["tools"] = json!(["control"]);
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/policy/edit",
+                json!({ "edit": "support_role", "id": "help-desk", "role": role }),
+            )
+            .await;
+        assert_eq!(status, 400);
+
+        // Taking the role away ends Jordan's access once it is published.
+        t.call(
+            "POST",
+            "/api/policy/edit",
+            json!({ "edit": "support_role", "id": "help-desk", "role": null }),
+        )
+        .await;
+        let (_, impact) = t.call("POST", "/api/policy/preview", json!({})).await;
+        assert!(
+            impact["changes"]
+                .to_string()
+                .contains("Remote help: IT Help Desk taken out"),
+            "{impact}"
+        );
+        t.call("POST", "/api/policy/publish", json!({})).await;
+        let (status, _) = t.call_as(&jordan, "GET", "/api/session", Value::Null).await;
+        assert_eq!(status, 401);
+        let (status, _) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
+        assert_eq!(status, 403);
     }
 
     #[tokio::test]

@@ -2,13 +2,21 @@
 // over the console's own origin, with the session cookie. A refusal is an
 // answer with `error`, shown to IT as it is.
 
+/** Someone the development sign-in offers: an admin or support staff. */
+export interface Signer {
+  user: string;
+  display: string;
+  /** "IT admin", their support roles' names, or both. */
+  title: string;
+}
+
 export class SignedOut extends Error {
   readonly org: string;
-  readonly admins: { user: string; display: string }[];
-  constructor(org: string, admins: { user: string; display: string }[]) {
+  readonly people: Signer[];
+  constructor(org: string, people: Signer[]) {
     super("sign in");
     this.org = org;
-    this.admins = admins;
+    this.people = people;
   }
 }
 
@@ -23,7 +31,7 @@ export async function api<T>(method: "GET" | "POST" | "DELETE", path: string, bo
   });
   const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (response.status === 401) {
-    throw new SignedOut(String(data.org ?? ""), (data.admins as { user: string; display: string }[]) ?? []);
+    throw new SignedOut(String(data.org ?? ""), (data.people as Signer[]) ?? []);
   }
   if (!response.ok) throw new Refused(String(data.error ?? `The console answered ${response.status}`));
   return data as T;
@@ -33,10 +41,17 @@ export type Tier = "auto" | "notify" | "ask" | "never";
 export type Ring = "pilot" | "early" | "broad";
 export type Mode = "required" | "available" | "blocked";
 
+/** Remote help's tools (CF-81), a closed list. */
+export type SupportTool = "view" | "control" | "install_apps" | "collect_logs" | "restart_services" | "isolate" | "forensics";
+
 export interface Session {
   user: string;
   display: string;
   org: { id: string; name: string };
+  /** One of IT's admins: every page but Support. */
+  admin: boolean;
+  /** The support roles their groups hold: the Support page. */
+  roles: { id: string; name: string; tools: SupportTool[] }[];
 }
 
 export interface GroupRef {
@@ -164,4 +179,35 @@ export interface MailPage {
   rings: { ring: Ring; version: number | null; mail: MailSettings | null }[];
   /** The directory release devices have, if one was signed. */
   people: number | null;
+}
+
+/** The Support page (CF-80): the person's roles, every tool, and the computers they reach. */
+export interface SupportPage {
+  roles: { id: string; name: string; tools: SupportTool[]; people: string[]; unattended: string[]; max_minutes: number }[];
+  tools: { id: SupportTool; title: string; mine: boolean; roles: string[]; ready: boolean }[];
+  devices: { id: string; name: string; online: boolean; last_seen: string; users: string[]; os_version: string | null }[];
+  answer_within_secs: number;
+  policy_version: number | null;
+}
+
+/** A support role as policy carries it (ADR 0028). */
+export interface SupportRole {
+  id: string;
+  name: string;
+  groups: string[];
+  tools: SupportTool[];
+  people: string[];
+  unattended: string[];
+  max_minutes: number;
+}
+
+/** The Remote help page (CF-81): the draft's roles and who holds them. */
+export interface RolesPage {
+  answer_within_secs: number;
+  roles: (SupportRole & { holders: string[]; holder_count: number })[];
+  /** The draft's roles aren't what the pilot ring runs. */
+  changed: boolean;
+  pilot_version: number | null;
+  tools: { id: SupportTool; title: string }[];
+  groups: { name: string; display: string }[];
 }

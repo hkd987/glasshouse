@@ -3,7 +3,7 @@
 //! result as a device would before keeping it.
 
 use glass_policy::ActionPattern;
-use glass_policy::document::{GroupPolicy, MailSettings, PolicyDocument};
+use glass_policy::document::{GroupPolicy, MailSettings, PolicyDocument, SupportRole};
 use glass_types::{AgentId, Label, Tier};
 use serde::Deserialize;
 
@@ -39,6 +39,12 @@ pub enum Edit {
     },
     /// The org's mail service (NV-3); `None` takes it out.
     Mail { mail: Option<MailSettings> },
+    /// A remote help role (CF-81), added or replaced by its id; `None`
+    /// takes it out.
+    SupportRole {
+        id: String,
+        role: Option<SupportRole>,
+    },
 }
 
 fn group<'a>(doc: &'a mut PolicyDocument, name: &str) -> &'a mut GroupPolicy {
@@ -62,6 +68,20 @@ pub fn apply(doc: &mut PolicyDocument, edit: Edit) -> Result<(), String> {
     match edit {
         Edit::Mail { mail } => {
             doc.mail = mail;
+        }
+        Edit::SupportRole { id, role } => {
+            let at = doc.support.roles.iter().position(|r| r.id == id);
+            match (role, at) {
+                (Some(role), _) if role.id != id => {
+                    return Err("a role keeps its id: add a new role instead".into());
+                }
+                (Some(role), Some(at)) => doc.support.roles[at] = role,
+                (Some(role), None) => doc.support.roles.push(role),
+                (None, Some(at)) => {
+                    doc.support.roles.remove(at);
+                }
+                (None, None) => return Err(format!("no support role {id}")),
+            }
         }
         Edit::Tier {
             group: name,
@@ -221,5 +241,70 @@ mod tests {
         )
         .unwrap();
         glass_policy::Policy::from_document(d).unwrap();
+    }
+
+    #[test]
+    fn cf81_a_support_role_is_added_changed_and_taken_out_by_id() {
+        let mut d = doc();
+        let edit: Edit = serde_json::from_str(
+            r#"{"edit":"support_role","id":"desk","role":{"id":"desk","name":"Desk","groups":["it-helpdesk"],"tools":["view"]}}"#,
+        )
+        .unwrap();
+        apply(&mut d, edit.clone()).unwrap();
+        assert_eq!(
+            d.support.roles[0].people,
+            ["everyone"],
+            "everyone by default"
+        );
+        let Edit::SupportRole {
+            role: Some(mut role),
+            ..
+        } = edit
+        else {
+            unreachable!()
+        };
+        role.tools
+            .push(glass_policy::document::SupportTool::Control);
+        apply(
+            &mut d,
+            Edit::SupportRole {
+                id: "desk".into(),
+                role: Some(role.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(d.support.roles.len(), 1);
+        assert_eq!(d.support.roles[0].tools.len(), 2);
+        role.id = "other".into();
+        assert!(
+            apply(
+                &mut d,
+                Edit::SupportRole {
+                    id: "desk".into(),
+                    role: Some(role),
+                },
+            )
+            .is_err(),
+            "ids don't change"
+        );
+        apply(
+            &mut d,
+            Edit::SupportRole {
+                id: "desk".into(),
+                role: None,
+            },
+        )
+        .unwrap();
+        assert!(d.support.roles.is_empty());
+        assert!(
+            apply(
+                &mut d,
+                Edit::SupportRole {
+                    id: "desk".into(),
+                    role: None,
+                },
+            )
+            .is_err()
+        );
     }
 }

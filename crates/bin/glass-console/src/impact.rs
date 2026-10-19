@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use glass_policy::document::{AgentPolicy, GroupPolicy, PolicyDocument};
+use glass_policy::document::{AgentPolicy, GroupPolicy, PolicyDocument, Support, SupportRole};
 use glass_policy::{ActionPattern, Policy};
 use glass_types::{ActionName, SideEffect, Tier};
 use serde::Serialize;
@@ -225,6 +225,7 @@ pub fn preview(
         fixes: Default::default(),
         models: Default::default(),
         mail: None,
+        support: Default::default(),
     };
     let (base_version, old) = base.map_or((None, &empty), |(v, d)| (Some(v), d));
     let mut changes = Vec::new();
@@ -281,6 +282,7 @@ pub fn preview(
         });
     }
     org_wide |= changes.len() > org_wide_before;
+    let support_changed = support_lines(&old.support, &draft.support, directory, &mut changes);
 
     // Groups, without their members (the directory's, not IT's edit).
     let names: BTreeSet<&str> = old
@@ -365,6 +367,13 @@ pub fn preview(
             }
         }
     }
+    // A support role reaches the people who hold it and the people whose
+    // computers it may ask for.
+    for role in &support_changed {
+        for group in role.groups.iter().chain(&role.people) {
+            users.extend(directory.members(group));
+        }
+    }
     for group in &draft.groups {
         if group
             .agents
@@ -375,9 +384,21 @@ pub fn preview(
         }
     }
 
-    let warnings = Policy::from_document(draft.clone())
+    let mut warnings = Policy::from_document(draft.clone())
         .map(|p| p.lint(&titles.lint_info))
         .unwrap_or_default();
+    for role in draft
+        .support
+        .roles
+        .iter()
+        .filter(|r| !r.unattended.is_empty())
+    {
+        warnings.push(format!(
+            "{} may reach {} computers with nobody there to answer",
+            role.name,
+            role.unattended.join(", ")
+        ));
+    }
     Impact {
         base_version,
         users: users.len(),
@@ -391,6 +412,108 @@ pub fn preview(
         changes,
         warnings,
     }
+}
+
+fn tool_list(tools: &[glass_policy::document::SupportTool]) -> String {
+    let words: Vec<String> = tools.iter().map(|t| t.title().to_lowercase()).collect();
+    words.join(", ")
+}
+
+/// Remote help's roles (CF-81) in words; returns the roles that changed,
+/// as they were or now are.
+fn support_lines<'a>(
+    old: &'a Support,
+    new: &'a Support,
+    directory: &dyn Directory,
+    changes: &mut Vec<String>,
+) -> Vec<&'a SupportRole> {
+    let groups = |r: &SupportRole| -> String {
+        let names: Vec<String> = r
+            .groups
+            .iter()
+            .map(|g| directory.group_display(g))
+            .collect();
+        names.join(", ")
+    };
+    let mut changed = Vec::new();
+    for role in &new.roles {
+        let Some(was) = old.roles.iter().find(|o| o.id == role.id) else {
+            changes.push(format!(
+                "Remote help: {} ({}) may {}",
+                role.name,
+                groups(role),
+                tool_list(&role.tools)
+            ));
+            changed.push(role);
+            continue;
+        };
+        if was == role {
+            continue;
+        }
+        let gained: Vec<_> = role
+            .tools
+            .iter()
+            .filter(|t| !was.tools.contains(t))
+            .copied()
+            .collect();
+        let lost: Vec<_> = was
+            .tools
+            .iter()
+            .filter(|t| !role.tools.contains(t))
+            .copied()
+            .collect();
+        let mut parts = Vec::new();
+        if !gained.is_empty() {
+            parts.push(format!("may now {}", tool_list(&gained)));
+        }
+        if !lost.is_empty() {
+            parts.push(format!("may no longer {}", tool_list(&lost)));
+        }
+        if was.groups != role.groups {
+            parts.push(format!("held by {}", groups(role)));
+        }
+        if was.people != role.people {
+            let people: Vec<String> = role
+                .people
+                .iter()
+                .map(|g| directory.group_display(g))
+                .collect();
+            parts.push(format!("helps {}", people.join(", ")));
+        }
+        if was.max_minutes != role.max_minutes {
+            parts.push(format!("sessions up to {} minutes", role.max_minutes));
+        }
+        if was.unattended != role.unattended {
+            parts.push(if role.unattended.is_empty() {
+                "no unattended access".to_owned()
+            } else {
+                format!("unattended on {}", role.unattended.join(", "))
+            });
+        }
+        if was.name != role.name {
+            parts.push(format!("renamed from {}", was.name));
+        }
+        changes.push(format!("Remote help: {} {}", role.name, parts.join("; ")));
+        changed.extend([was, role]);
+    }
+    for gone in old
+        .roles
+        .iter()
+        .filter(|o| !new.roles.iter().any(|r| r.id == o.id))
+    {
+        changes.push(format!(
+            "Remote help: {} taken out; its people can't help anyone through it",
+            gone.name
+        ));
+        changed.push(gone);
+    }
+    if old.answer_within_secs != new.answer_within_secs {
+        changes.push(format!(
+            "Everyone: {} seconds to answer a request for help",
+            new.answer_within_secs
+        ));
+    }
+    changed
 }
 
 #[cfg(test)]

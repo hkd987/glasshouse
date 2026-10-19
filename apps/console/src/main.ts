@@ -2,7 +2,9 @@
 // own servers, where IT signs in and sets agent policy, approves catalog
 // items and sees the fleet. It reads everything from the console's API,
 // never from the device it's opened on. Pages: #/policy/<group>,
-// #/catalog, #/catalog/<item>, #/mail, #/devices.
+// #/catalog, #/catalog/<item>, #/mail, #/remote-help, #/devices for IT's
+// admins; #/support for support staff (ADR 0028). The pages someone sees
+// follow from their session; the console refuses the rest anyway.
 
 import { h, ready, show } from "@glasshouse/sdk";
 
@@ -11,17 +13,25 @@ import { catalogPage, itemPage } from "./catalog.ts";
 import { devicesPage } from "./devices.ts";
 import { mailPage } from "./mail.ts";
 import { policyPage } from "./policy.ts";
+import { rolesPage } from "./roles.ts";
+import { supportPage } from "./support.ts";
 import { notice } from "./ui.ts";
 
 const app = document.getElementById("app") as HTMLElement;
 let session: Session | null = null;
 
-const NAV: [string, string][] = [
+const ADMIN_NAV: [string, string][] = [
   ["policy", "Policies"],
   ["catalog", "Catalog"],
   ["mail", "Mail"],
+  ["remote-help", "Remote help"],
   ["devices", "Devices"],
 ];
+
+/** The pages this person's session opens, in the order the sidebar shows them. */
+function nav(): [string, string][] {
+  return [...(session?.admin ? ADMIN_NAV : []), ...(session?.roles.length ? ([["support", "Support"]] as [string, string][]) : [])];
+}
 
 function layout(current: string, content: HTMLElement): HTMLElement {
   return h(
@@ -31,10 +41,10 @@ function layout(current: string, content: HTMLElement): HTMLElement {
       "header",
       { class: "topbar" },
       h("span", { class: "logo", "aria-hidden": "true" }, "⊞"),
-      h("strong", {}, "Admin console"),
+      h("strong", {}, session?.admin ? "Admin console" : "IT support"),
       h("span", { class: "org" }, `· ${session?.org.name ?? ""}`),
       h("span", { class: "spacer" }),
-      h("span", { class: "who" }, session?.display ?? ""),
+      h("span", { class: "who" }, [session?.display, ...(session?.roles.map((r) => r.name) ?? [])].filter(Boolean).join(" · ")),
       h(
         "button",
         {
@@ -51,14 +61,13 @@ function layout(current: string, content: HTMLElement): HTMLElement {
     h(
       "nav",
       { class: "sidebar", "aria-label": "Sections" },
-      ...NAV.map(([id, name]) => h("a", { href: `#/${id}`, class: id === current ? "current" : "" }, name)),
+      ...nav().map(([id, name]) => h("a", { href: `#/${id}`, class: id === current ? "current" : "" }, name)),
     ),
     h("main", { class: "content" }, content),
   );
 }
 
 function signIn(error: SignedOut): void {
-  const admins = error.admins;
   show(
     app,
     h(
@@ -68,20 +77,21 @@ function signIn(error: SignedOut): void {
         "section",
         { class: "card" },
         h("h1", {}, "Admin console"),
-        h("p", { class: "sub" }, error.org ? `Sign in to manage ${error.org}.` : "Sign in."),
-        h("p", { class: "hint" }, "Development sign-in: pick one of the org's IT admins. On our web servers, your org's sign-in does this."),
-        ...admins.map((a) =>
+        h("p", { class: "sub" }, error.org ? `Sign in to ${error.org}'s console.` : "Sign in."),
+        h("p", { class: "hint" }, "Development sign-in: pick one of the org's IT admins or support staff. On our web servers, your org's sign-in does this."),
+        ...error.people.map((a) =>
           h(
             "button",
             {
-              class: "button wide",
+              class: "button wide signer",
               "data-user": a.user,
               onclick: async () => {
                 await api("POST", "/api/session", { user: a.user });
                 route();
               },
             },
-            a.display,
+            h("span", {}, a.display),
+            h("span", { class: "hint" }, a.title),
           ),
         ),
       ),
@@ -92,12 +102,18 @@ function signIn(error: SignedOut): void {
 
 async function route(): Promise<void> {
   document.documentElement.dataset.ready = "false";
-  const [, section = "policy", arg] = location.hash.replace(/^#/, "").split("/");
+  const [, asked, arg] = location.hash.replace(/^#/, "").split("/");
   const content = h("div", { class: "loading" });
+  let section = asked ?? "";
   try {
     session ??= await api<Session>("GET", "/api/session");
+    // A page this session doesn't open goes to the first one it does.
+    const pages = nav().map(([id]) => id);
+    if (!pages.includes(section)) section = pages[0] ?? "";
     show(app, layout(section, content));
-    if (section === "catalog" && arg) await itemPage(content, decodeURIComponent(arg));
+    if (section === "support") await supportPage(content);
+    else if (section === "remote-help") await rolesPage(content);
+    else if (section === "catalog" && arg) await itemPage(content, decodeURIComponent(arg));
     else if (section === "catalog") await catalogPage(content);
     else if (section === "devices") await devicesPage(content);
     else if (section === "mail") await mailPage(content);

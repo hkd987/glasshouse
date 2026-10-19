@@ -39,7 +39,8 @@ impl Draw {
 }
 
 /// The directory for `devices` people, one device each: AP Operations
-/// (214 at full size), Legal Operations, Finance and IT.
+/// (214 at full size), Legal Operations, Finance, and IT's admins and
+/// support tiers.
 pub fn directory(devices: usize, admin: &str) -> LocalDirectory {
     let mut dir = LocalDirectory::starter(admin);
     for n in 0..devices {
@@ -78,6 +79,9 @@ pub fn directory(devices: usize, admin: &str) -> LocalDirectory {
             "ap-ops" => group.members.extend(take(0, ap)),
             "legal-ops" => group.members.extend(take(ap, legal)),
             ADMINS => group.members.extend(take(ap + legal + finance, 4)),
+            "it-helpdesk" => group.members.extend(take(ap + legal + finance + 4, 6)),
+            "desktop-support" => group.members.extend(take(ap + legal + finance + 10, 3)),
+            "it-security" => group.members.extend(take(ap + legal + finance + 13, 2)),
             _ => {}
         }
     }
@@ -93,6 +97,9 @@ pub fn directory(devices: usize, admin: &str) -> LocalDirectory {
         ("legal-ops", "Legal"),
         ("finance", "Finance"),
         (ADMINS, "IT"),
+        ("it-helpdesk", "IT"),
+        ("desktop-support", "IT"),
+        ("it-security", "IT"),
     ] {
         let members = dir
             .members(group)

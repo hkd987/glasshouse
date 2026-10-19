@@ -5,10 +5,11 @@ use std::collections::BTreeSet;
 
 use glass_managed::{CatalogItem, InstallMode, Ring};
 use glass_policy::ActionPattern;
-use glass_policy::document::PolicyDocument;
+use glass_policy::document::{PolicyDocument, SupportRole, SupportTool};
 use glass_types::{Label, Tier, Timestamp};
 use serde_json::{Value, json};
 
+use crate::access::Access;
 use crate::directory::{ADMINS, Directory, EVERYONE};
 use crate::impact::Titles;
 use crate::state::{Review, State};
@@ -452,4 +453,130 @@ pub fn fleet(state: &State, directory: &dyn Directory, console_url: &str) -> Val
             "admins": directory.members(ADMINS).len(),
         },
     })
+}
+
+/// The Support page (CF-80, CF-81): the person's roles and tools, which
+/// role has the tools they don't, and the computers their roles reach,
+/// most recently heard from first. Seeing and controlling a screen come
+/// with sessions (ADR 0028, slice b): every tool says it isn't ready yet.
+pub fn support(state: &State, directory: &dyn Directory, access: &Access) -> Value {
+    let support = state.support_in_force();
+    let mine = access.tools();
+    let tools: Vec<Value> = SupportTool::ALL
+        .iter()
+        .map(|&tool| {
+            let roles: Vec<&str> = support
+                .roles
+                .iter()
+                .filter(|r| r.tools.contains(&tool))
+                .map(|r| r.name.as_str())
+                .collect();
+            json!({
+                "id": tool,
+                "title": tool.title(),
+                "mine": mine.contains(&tool),
+                "roles": roles,
+                "ready": false,
+            })
+        })
+        .collect();
+    let everyone = access
+        .roles
+        .iter()
+        .any(|r| r.people.iter().any(|g| g == EVERYONE));
+    let reach: BTreeSet<&str> = access
+        .roles
+        .iter()
+        .flat_map(|r| &r.people)
+        .flat_map(|g| directory.members(g))
+        .collect();
+    let now = Timestamp::now().unix_seconds();
+    let mut devices: Vec<_> = state
+        .fleet
+        .devices
+        .values()
+        .filter(|d| {
+            everyone
+                || d.report
+                    .as_ref()
+                    .is_some_and(|r| r.users.iter().any(|u| reach.contains(u.as_str())))
+        })
+        .collect();
+    devices.sort_by(|a, b| {
+        b.last_seen
+            .unix_seconds()
+            .cmp(&a.last_seen.unix_seconds())
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let devices: Vec<Value> = devices
+        .into_iter()
+        .map(|d| {
+            let r = d.report.as_ref();
+            json!({
+                "id": d.id,
+                "name": r.map_or_else(|| d.id.clone(), |r| r.name.clone()),
+                "online": now - d.last_seen.unix_seconds() <= ONLINE_SECS,
+                "last_seen": d.last_seen,
+                "users": r.map(|r| r.users.iter().map(|u| directory.display_name(u)).collect::<Vec<_>>()).unwrap_or_default(),
+                "os_version": r.map(|r| r.os_version.clone()),
+            })
+        })
+        .collect();
+    let roles: Vec<Value> = access
+        .roles
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "name": r.name,
+                "tools": r.tools,
+                "people": r.people.iter().map(|g| directory.group_display(g)).collect::<Vec<_>>(),
+                "unattended": r.unattended,
+                "max_minutes": r.max_minutes,
+            })
+        })
+        .collect();
+    json!({
+        "roles": roles,
+        "tools": tools,
+        "devices": devices,
+        "answer_within_secs": support.answer_within_secs,
+        "policy_version": state.in_force(Ring::Pilot).map(|v| v.version),
+    })
+}
+
+/// The Remote help page (CF-81): the draft's support roles, who holds
+/// each, and whether they differ from what the pilot ring runs.
+pub fn roles(state: &State, directory: &dyn Directory) -> anyhow::Result<Value> {
+    let draft = state.draft()?.support;
+    let role = |r: &SupportRole| {
+        let holders: BTreeSet<&str> = r.groups.iter().flat_map(|g| directory.members(g)).collect();
+        json!({
+            "id": r.id,
+            "name": r.name,
+            "groups": r.groups,
+            "tools": r.tools,
+            "people": r.people,
+            "unattended": r.unattended,
+            "max_minutes": r.max_minutes,
+            "holders": holders.iter().take(12).map(|u| directory.display_name(u)).collect::<Vec<_>>(),
+            "holder_count": holders.len(),
+        })
+    };
+    let groups: Vec<Value> = std::iter::once(json!({ "name": EVERYONE, "display": "Everyone" }))
+        .chain(
+            directory
+                .groups()
+                .iter()
+                .map(|g| json!({ "name": g.name, "display": directory.group_display(&g.name) })),
+        )
+        .collect();
+    Ok(json!({
+        "answer_within_secs": draft.answer_within_secs,
+        "roles": draft.roles.iter().map(role).collect::<Vec<_>>(),
+        "changed": draft != state.support_in_force(),
+        "pilot_version": state.in_force(Ring::Pilot).map(|v| v.version),
+        "tools": SupportTool::ALL.iter().map(|t| json!({ "id": t, "title": t.title() })).collect::<Vec<_>>(),
+        "groups": groups,
+    }))
 }

@@ -1,0 +1,27 @@
+# Remote help's tiers (CF-81, ADR 0028), as the PRD names them. The admin
+# console adds these to a new org's first policy; IT changes them on the
+# console's Remote help page. A device's own default has none: an
+# unmanaged computer has no remote help.
+[support]
+answer_within_secs = 120
+
+[[support.role]]
+id = "help-desk"
+name = "IT Help Desk"
+groups = ["it-helpdesk"]
+tools = ["view", "control"]
+max_minutes = 60
+
+[[support.role]]
+id = "desktop-support"
+name = "Desktop Support"
+groups = ["desktop-support"]
+tools = ["view", "control", "install_apps", "collect_logs", "restart_services"]
+max_minutes = 120
+
+[[support.role]]
+id = "security"
+name = "Security"
+groups = ["it-security"]
+tools = ["view", "control", "isolate", "forensics", "collect_logs"]
+max_minutes = 240

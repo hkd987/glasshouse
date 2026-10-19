@@ -17,6 +17,7 @@ pub mod mail;
 mod models;
 mod pattern;
 pub mod store;
+mod support;
 
 pub use engine::{
     EVERYONE, EffectivePolicy, LoosenRefused, Policy, PolicyError, RuleSource, TierDecision,
@@ -27,6 +28,10 @@ pub use pattern::{ActionPattern, InvalidPattern, Specificity};
 /// The policy a new org ships with. Also what `glassd` enforces when no
 /// policy file is installed.
 pub const DEFAULT_POLICY: &str = include_str!("../default-policy.toml");
+
+/// Remote help's tiers as the PRD names them (CF-81): the admin console adds
+/// them to a new org's first policy. Not in [`DEFAULT_POLICY`].
+pub const SUPPORT_TIERS: &str = include_str!("../support-tiers.toml");
 
 #[cfg(test)]
 mod tests {

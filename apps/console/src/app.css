@@ -543,3 +543,21 @@ input.text {
   grid-template-columns: 1fr 96px 140px;
   gap: 12px;
 }
+
+/* Sign-in (ADR 0028): each person with what they are in the org. */
+.button.signer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.button.signer .hint {
+  font-size: 12px;
+}
+
+/* Remote help: a role's choices wrap as a row of checkboxes. */
+.chips .check-row.inline {
+  padding: 2px 10px 2px 0;
+  gap: 6px;
+}

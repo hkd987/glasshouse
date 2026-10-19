@@ -89,6 +89,7 @@ impl Policy {
         }
         models::validate(&doc, &mut errors);
         crate::mail::validate(&doc, &mut errors);
+        crate::support::validate(&doc, &mut errors);
         for service in &doc.fixes.services {
             let plain = !service.is_empty()
                 && service
@@ -112,6 +113,11 @@ impl Policy {
     /// IT's approved fix list for the IT self-service agent (AE-4).
     pub fn fixes(&self) -> &Fixes {
         &self.doc.fixes
+    }
+
+    /// Remote help's roles (CF-81, ADR 0028).
+    pub fn support(&self) -> &crate::document::Support {
+        &self.doc.support
     }
 
     /// The org's mail service, if IT set one (NV-3).

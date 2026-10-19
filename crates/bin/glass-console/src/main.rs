@@ -5,9 +5,10 @@
 //!
 //! It runs on our web servers, never on a device. This slice has one mode,
 //! `--dev`: loopback HTTP, sign-in by picking one of the directory's
-//! admins, state as JSON files in a folder. Production adds TLS at our web
+//! admins or support staff, state as JSON files in a folder. Production adds TLS at our web
 //! servers, the org's SSO and a managed database (not built).
 
+mod access;
 mod directory;
 mod edits;
 mod fixture;

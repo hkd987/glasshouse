@@ -75,17 +75,21 @@ catalog releases from. Pages: Policies (per group: tiers by action class,
 allowed agents, apps in profiles, labels and models, versions and rings,
 preview impact, publish, promote, roll back, live numbers), Catalog (what
 an item declares; approve per group as required, available or blocked;
-block) and Devices (reports, rings, enrollment).
+block), Mail (the org's mail service), Remote help (support tiers: who
+holds each and its tools) and Devices (reports, rings, enrollment). Support
+staff, the members of the groups a support role names, see only Support:
+their tools and the computers their role reaches (ADR 0028).
 
 ```sh
-make console-dev FIXTURE=500,50       # http://127.0.0.1:7400, sign in as an IT admin
+make console-dev FIXTURE=500,50       # http://127.0.0.1:7400, sign in as an IT admin or support
 GLASS_DEV_ENROLL=build/console/enrollment.json make dev-host   # glassd as device dev-host
 ```
 
 `glass-console --dev` keeps its state in `build/console` (the org's key at
 mode 0600, `directory.toml` for people and groups, policy versions, the
 catalog, the fleet) and signs everyone in by picking one of the directory's
-`it-admins`; our web servers will add TLS, the org's SSO and a managed
+`it-admins` or support staff (jordan, alex and sasha in the starter org);
+our web servers will add TLS, the org's SSO and a managed
 database. The page is served with a CSP that allows only its own files and
 API; changes are JSON POSTs from its own origin with a SameSite=Strict
 session cookie.

@@ -280,6 +280,63 @@ test("nv3 ad2 the mail service IT sets in the console shows in Mail on the devic
   await mail.close();
 });
 
+/** Signs a support person in, in a context of their own. */
+async function supportSession(browser: Browser, user: string): Promise<{ page: Page; close: () => Promise<void> }> {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  page.on("pageerror", (e) => console.error(`page error: ${e.message}`));
+  await page.goto(CONSOLE_URL);
+  await page.click(`button[data-user="${user}"]`);
+  await page.waitForSelector("html[data-ready=true][data-page=support]");
+  return { page, close: () => context.close() };
+}
+
+test("cf80 a help desk person sees Support, not Policies", async ({ browser }) => {
+  const { page, close } = await supportSession(browser, "jordan");
+  const nav = page.locator("nav.sidebar");
+  await expect(nav).toContainText("Support");
+  await expect(nav).not.toContainText("Policies");
+  await expect(page.locator(".topbar")).toContainText("Jordan Lee · IT Help Desk");
+  await expect(page.locator("[data-tool=view]")).toContainText("Yours");
+  await expect(page.locator("[data-tool=install_apps]")).toContainText("Needs Desktop Support");
+  await expect(page.locator("[data-tool=isolate]")).toContainText("Needs Security");
+  await page.fill("input[name=search]", DEVICE);
+  await expect(page.locator(`tr[data-device="${DEVICE}"]`)).toHaveCount(1);
+  await shot(page, "support-help-desk");
+
+  // The console refuses the rest, whatever the page shows (ADR 0028).
+  for (const [method, path] of [
+    ["GET", "/api/policy"],
+    ["POST", "/api/policy/publish"],
+    ["GET", "/api/fleet"],
+    ["GET", "/api/roles"],
+  ] as const) {
+    const r = await page.request.fetch(new URL(path, CONSOLE_URL).href, { method, data: method === "POST" ? {} : undefined });
+    expect(r.status(), `${method} ${path}`).toBe(403);
+  }
+  // A page their session doesn't open lands on Support.
+  expect(await open(page, "#/policy/ap-ops", "support")).toBeLessThan(PAGE_BUDGET_MS);
+  await close();
+});
+
+test("cf81 IT gives the help desk a tool and it is theirs once published", async ({ browser }) => {
+  const { page, close } = await session(browser);
+  await open(page, "#/remote-help", "remote-help");
+  const desk = page.locator("[data-role=help-desk]");
+  await expect(desk).toContainText("Held by Jordan Lee");
+  await desk.locator("input[name=tool-install_apps]").check();
+  await desk.locator("[data-test=save-role]").click();
+  await expect(page.locator("[data-test=impact]")).toContainText("Remote help: IT Help Desk may now install approved apps");
+  await shot(page, "remote-help-previewed");
+  await page.click("[data-test=publish]");
+  await expect(page.locator(".notice")).toContainText("Published");
+  await close();
+
+  const jordan = await supportSession(browser, "jordan");
+  await expect(jordan.page.locator("[data-tool=install_apps]")).toContainText("Yours");
+  await jordan.close();
+});
+
 test("ad4 the fleet shows the device on the new versions", async ({ browser }) => {
   const { page, close } = await session(browser);
   const policy = version(status().policy);

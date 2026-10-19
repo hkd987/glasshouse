@@ -41,6 +41,114 @@ pub struct PolicyDocument {
     /// device (NV-3). Never credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mail: Option<MailSettings>,
+    /// Remote help's tiers (CF-81, ADR 0028): which directory groups may
+    /// help people, with which tools.
+    #[serde(default, skip_serializing_if = "Support::is_empty")]
+    pub support: Support,
+}
+
+/// Remote help (CF-80, CF-81, ADR 0028): the roles support staff sign in
+/// to the console with, each a set of tools for some people's computers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Support {
+    /// How long the person has to answer a request to help them.
+    #[serde(default = "default_answer_within_secs")]
+    pub answer_within_secs: u64,
+    #[serde(default, rename = "role")]
+    pub roles: Vec<SupportRole>,
+}
+
+impl Default for Support {
+    fn default() -> Self {
+        Self {
+            answer_within_secs: default_answer_within_secs(),
+            roles: Vec::new(),
+        }
+    }
+}
+
+impl Support {
+    pub fn is_empty(&self) -> bool {
+        self.roles.is_empty() && self.answer_within_secs == default_answer_within_secs()
+    }
+}
+
+fn default_answer_within_secs() -> u64 {
+    120
+}
+
+/// A support tier, such as the help desk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupportRole {
+    /// `help-desk`.
+    pub id: String,
+    /// What IT calls it: "IT Help Desk".
+    pub name: String,
+    /// The directory groups whose members hold it.
+    pub groups: Vec<String>,
+    pub tools: Vec<SupportTool>,
+    /// The policy groups whose computers it may help with.
+    #[serde(default = "everyone")]
+    pub people: Vec<String>,
+    /// Device types it may reach with nobody there to answer; none by
+    /// default.
+    #[serde(default)]
+    pub unattended: Vec<String>,
+    /// The longest a session may last.
+    #[serde(default = "default_max_minutes")]
+    pub max_minutes: u32,
+}
+
+fn everyone() -> Vec<String> {
+    vec![crate::EVERYONE.to_owned()]
+}
+
+fn default_max_minutes() -> u32 {
+    60
+}
+
+/// What a support role may do (CF-81). A closed list: new tools come with
+/// the code that carries them out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportTool {
+    /// See the person's screen, once they allow it.
+    View,
+    /// Use their mouse and keyboard, once they allow that too.
+    Control,
+    InstallApps,
+    CollectLogs,
+    RestartServices,
+    /// Cut a computer off the network except from IT.
+    Isolate,
+    Forensics,
+}
+
+impl SupportTool {
+    pub const ALL: [SupportTool; 7] = [
+        Self::View,
+        Self::Control,
+        Self::InstallApps,
+        Self::CollectLogs,
+        Self::RestartServices,
+        Self::Isolate,
+        Self::Forensics,
+    ];
+
+    /// What IT reads.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::View => "View the screen",
+            Self::Control => "Control with consent",
+            Self::InstallApps => "Install approved apps",
+            Self::CollectLogs => "Collect logs",
+            Self::RestartServices => "Restart services",
+            Self::Isolate => "Isolate the computer",
+            Self::Forensics => "Collect forensic data",
+        }
+    }
 }
 
 /// Where the org's mail is (NV-3): set by IT in the console, reaching

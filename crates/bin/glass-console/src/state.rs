@@ -142,7 +142,8 @@ pub struct State {
 
 impl State {
     /// Opens the state in `dir`, creating the org, its key and a first
-    /// policy version (the shipped default, safe as it is) on first start.
+    /// policy version on first start: the shipped default, safe as it is,
+    /// with the PRD's remote help tiers (CF-81).
     pub fn open(
         dir: &Path,
         org_id: &str,
@@ -190,11 +191,15 @@ impl State {
         };
         if state.policy.versions.is_empty() {
             if state.policy.draft.is_empty() {
-                state.policy.draft = glass_policy::DEFAULT_POLICY.to_owned();
+                state.policy.draft = format!(
+                    "{}\n{}",
+                    glass_policy::DEFAULT_POLICY,
+                    glass_policy::SUPPORT_TIERS
+                );
             }
             let version = state.release_policy(
                 directory,
-                "The default policy: safe to ship as it is",
+                "The default policy, with help desk, desktop support and security tiers",
                 "console",
                 None,
             )?;
@@ -248,6 +253,15 @@ impl State {
     pub fn in_force(&self, ring: Ring) -> Option<&PolicyVersion> {
         let version = self.policy.rings.get(&ring)?;
         self.policy.versions.iter().find(|v| v.version == *version)
+    }
+
+    /// The remote help roles in force (ADR 0028): the newest policy's, the
+    /// one the pilot ring runs. None before anything is published.
+    pub fn support_in_force(&self) -> glass_policy::document::Support {
+        self.in_force(Ring::Pilot)
+            .and_then(|v| toml::from_str::<PolicyDocument>(&v.text).ok())
+            .map(|doc| doc.support)
+            .unwrap_or_default()
     }
 
     pub fn latest_version(&self) -> u64 {

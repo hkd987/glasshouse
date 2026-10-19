@@ -3,7 +3,8 @@
 //! Today a local file, `directory.toml` in the console's state directory;
 //! later SCIM from Entra ID or Okta behind the same [`Directory`] trait.
 //! Roles are groups: the members of [`ADMINS`] may sign in to the console,
-//! and the same group's apps in policy put IT's tools in their profiles.
+//! and the same group's apps in policy put IT's tools in their profiles;
+//! the groups policy's support roles name sign in to remote help (ADR 0028).
 
 use std::path::Path;
 
@@ -144,8 +145,9 @@ impl LocalDirectory {
         Ok(dir)
     }
 
-    /// A small org to start from: a few people, AP and Legal, and IT.
-    /// `admin` (the person running the console in development) is in IT.
+    /// A small org to start from: a few people, AP and Legal, and IT with
+    /// its admins and a person in each support tier's group (CF-81).
+    /// `admin` (the person running the console in development) is an admin.
     pub fn starter(admin: &str) -> Self {
         let user = |name: &str, display: &str, title: &str, department: &str| User {
             name: name.into(),
@@ -160,6 +162,9 @@ impl LocalDirectory {
             user("priya", "Priya Shah", "Counsel", "Legal"),
             user("mei", "Mei Chen", "Controller", "Finance"),
             user("pat", "Pat Okafor", "IT administrator", "IT"),
+            user("jordan", "Jordan Lee", "Help desk analyst", "IT"),
+            user("alex", "Alex Kim", "Desktop support engineer", "IT"),
+            user("sasha", "Sasha Novak", "Security analyst", "IT"),
         ];
         if !users.iter().any(|u| u.name == admin) {
             users.push(user(admin, "", "", "IT"));
@@ -190,6 +195,24 @@ impl LocalDirectory {
                     &["priya"],
                 ),
                 group(ADMINS, "IT admins", "Entra ID group IT-Admins", &admins),
+                group(
+                    "it-helpdesk",
+                    "IT Help Desk",
+                    "Entra ID group IT-HelpDesk",
+                    &["jordan"],
+                ),
+                group(
+                    "desktop-support",
+                    "Desktop Support",
+                    "Entra ID group Desktop-Support",
+                    &["alex"],
+                ),
+                group(
+                    "it-security",
+                    "IT Security",
+                    "Entra ID group IT-Security",
+                    &["sasha"],
+                ),
             ],
         }
     }
