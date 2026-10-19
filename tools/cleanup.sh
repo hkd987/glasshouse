@@ -13,6 +13,8 @@
 #     (build/vm/bake) a failed image build left behind;
 #   - a package-list root that an interrupted `make image-pkgbase` left half built
 #     (build/images/.*.part); the finished root it keeps for the next build stays;
+#   - the compressed VM image download once the disk VMs start from was made from it;
+#   - base-system packages outside release.env's pinned catalog (build/cache/freebsd/*/pkgbase);
 #   - with --deep, FreeBSD downloads of releases other than release.env's (build/cache/freebsd/*).
 # It never touches build/vm itself (the dev VM), the current release's downloads or build/freebsd
 # (the sysroot). Either way it resumes any VM QEMU paused because the disk filled.
@@ -29,7 +31,9 @@ for arg in "$@"; do
 	esac
 done
 
-size() { du -sh "$@" 2>/dev/null | sort -h; }
+# du fails on a path that isn't there (an unmatched glob, such as no worktrees); that's no reason
+# to stop.
+size() { du -sh "$@" 2>/dev/null | sort -h || true; }
 gone() {
 	if $apply; then
 		rm -rf "$@"
@@ -92,17 +96,45 @@ for dir in build/*/ build/vm/*/; do
 done
 
 echo "== images and downloads"
-size build/images build/cache/freebsd/* 2>/dev/null || true
+size build/images build/cache/freebsd/*
 # A root an interrupted package-list build left half made; none while a bake VM runs.
 if ! bake_running; then
 	mapfile -t partial < <(find build/images -maxdepth 1 -name '.*.part' 2>/dev/null)
 	((${#partial[@]})) && gone "${partial[@]}"
 fi
+# shellcheck source=os/freebsd/release.env
+. os/freebsd/release.env
+cache=build/cache/freebsd/$FREEBSD_RELEASE
+# The VM image's download, once the disk VMs start from records that it was made from it: fetch.sh
+# doesn't fetch it again.
+xz=$cache/$FREEBSD_VM_IMAGE
+if [[ -f $xz && $(cat "$cache/${FREEBSD_VM_IMAGE%.xz}.sha256-ok" 2>/dev/null) == "$FREEBSD_VM_IMAGE_SHA256" ]]; then
+	gone "$xz" "$xz.sha256-ok"
+fi
+# Base-system packages (pkg-mirror.py keeps each one a build asks for): only the pinned catalog's
+# are of use. Repositories other than the pinned one go, and packages the pinned catalog no longer
+# names, once FreeBSD published new ones and release.env moved to them.
+pkgbase=$cache/pkgbase
+for dir in "$pkgbase"/*/*/; do
+	dir=${dir%/}
+	[[ -d $dir && ${dir#"$pkgbase"/} != "$FREEBSD_PKGBASE_REPO" ]] && gone "$dir"
+done
+repo=$pkgbase/$FREEBSD_PKGBASE_REPO
+if [[ -f $repo/$FREEBSD_PKGBASE_CATALOG && -d $repo/Hashed &&
+	$(sha256sum <"$repo/$FREEBSD_PKGBASE_CATALOG") == "$FREEBSD_PKGBASE_CATALOG_SHA256  -" ]]; then
+	mapfile -t unused < <(tar -xOf "$repo/$FREEBSD_PKGBASE_CATALOG" data | python3 -c '
+import json, os, sys
+named = {os.path.basename(p["repopath"]) for p in json.load(sys.stdin)["packages"]}
+for name in sorted(os.listdir(sys.argv[1])):
+    if name.endswith(".pkg") and name not in named:
+        print(os.path.join(sys.argv[1], name))
+' "$repo/Hashed")
+	((${#unused[@]})) && gone "${unused[@]}"
+fi
 if $deep; then
-	release=$(sed -n 's/^FREEBSD_RELEASE=//p' os/freebsd/release.env)
 	for dir in build/cache/freebsd/*/; do
 		dir=${dir%/}
-		[[ -n $release && ${dir##*/} != "$release" ]] && gone "$dir"
+		[[ ${dir##*/} != "$FREEBSD_RELEASE" ]] && gone "$dir"
 	done
 fi
 # A VM paused because the disk filled (status io-error) carries on once there's room.

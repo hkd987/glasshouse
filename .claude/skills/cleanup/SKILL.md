@@ -25,8 +25,15 @@ the VM (status `io-error`), which looks like a hung VM.
      VM (`build/vm/bake`) a failed image build left;
    - a half-built package-list root (`build/images/.*.part`). The finished
      root (`build/images/.desktop-root-<key>.qcow2`, about 250 MB) stays: the
-     next `make image-pkgbase` reuses it while the package list is unchanged.
-   It also resumes any VM QEMU paused because the disk filled.
+     next `make image-pkgbase` reuses it while the package list is unchanged,
+     and deletes it itself when it builds a root from new inputs;
+   - the compressed VM image download (about 640 MB) once the disk VMs
+     start from records it was made from it (`fetch.sh` then skips it);
+   - base-system packages outside the catalog `release.env` pins
+     (`build/cache/freebsd/<release>/pkgbase`): other repositories, and
+     packages the pinned catalog no longer names after a pin moved.
+   It also resumes any VM QEMU paused because the disk filled. It exits 0;
+   a report that stops after the disk summary is a bug in it.
 3. Still short? `tools/cleanup.sh --apply --deep` also drops the `vm`
    profile's incremental caches (the next `make freebsd vm-deploy` takes
    minutes instead of seconds) and the downloads of FreeBSD releases other

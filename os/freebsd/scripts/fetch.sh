@@ -49,15 +49,22 @@ if [[ ${1:-} == src ]]; then
 	fetch "$FREEBSD_BASE_URL/$FREEBSD_SRC_TXZ" "$CACHE_DIR/$FREEBSD_SRC_TXZ" "$FREEBSD_SRC_TXZ_SHA256"
 	exit 0
 fi
-fetch "$FREEBSD_VM_IMAGE_URL/$FREEBSD_VM_IMAGE" "$CACHE_DIR/$FREEBSD_VM_IMAGE" "$FREEBSD_VM_IMAGE_SHA256"
 fetch "$FREEBSD_BASE_URL/$FREEBSD_BASE_TXZ" "$CACHE_DIR/$FREEBSD_BASE_TXZ" "$FREEBSD_BASE_TXZ_SHA256"
 
-# Pristine base disk for VM overlays; read-only so nothing writes to it by accident.
-if [[ ! -f $PRISTINE_IMAGE || $CACHE_DIR/$FREEBSD_VM_IMAGE.sha256-ok -nt $PRISTINE_IMAGE ]]; then
-	log "decompressing ${FREEBSD_VM_IMAGE}"
-	rm -f "$PRISTINE_IMAGE"
-	xz -dc -T0 "$CACHE_DIR/$FREEBSD_VM_IMAGE" >"$PRISTINE_IMAGE.part"
-	mv "$PRISTINE_IMAGE.part" "$PRISTINE_IMAGE"
-	chmod a-w "$PRISTINE_IMAGE"
+# Pristine base disk for VM overlays; read-only so nothing writes to it by accident. Its stamp says
+# which download it was made from; once it matches the pin, the download isn't needed (cleanup.sh
+# removes it).
+if [[ -f $PRISTINE_IMAGE && $(cat "$PRISTINE_IMAGE.sha256-ok" 2>/dev/null) == "$FREEBSD_VM_IMAGE_SHA256" ]]; then
+	log "cached: ${PRISTINE_IMAGE##*/}"
+else
+	fetch "$FREEBSD_VM_IMAGE_URL/$FREEBSD_VM_IMAGE" "$CACHE_DIR/$FREEBSD_VM_IMAGE" "$FREEBSD_VM_IMAGE_SHA256"
+	if [[ ! -f $PRISTINE_IMAGE || $CACHE_DIR/$FREEBSD_VM_IMAGE.sha256-ok -nt $PRISTINE_IMAGE ]]; then
+		log "decompressing ${FREEBSD_VM_IMAGE}"
+		rm -f "$PRISTINE_IMAGE"
+		xz -dc -T0 "$CACHE_DIR/$FREEBSD_VM_IMAGE" >"$PRISTINE_IMAGE.part"
+		mv "$PRISTINE_IMAGE.part" "$PRISTINE_IMAGE"
+		chmod a-w "$PRISTINE_IMAGE"
+	fi
+	echo "$FREEBSD_VM_IMAGE_SHA256" >"$PRISTINE_IMAGE.sha256-ok"
 fi
 log "ok: $CACHE_DIR"
