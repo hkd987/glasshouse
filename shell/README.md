@@ -97,6 +97,7 @@ under `shell/target/tmp/` so you can compare it.
 | `crates/glass-shell/src/fixtures.rs` | The mockups' content, for previews and tests |
 | `crates/glass-shell-preview` | The PNG renderer binary |
 | `crates/glass-shell-fb` | The desktop on the console framebuffer, with live tiles, keyboard and pointer (M2 step 1) |
+| `crates/glass-compositor` | The Wayland compositor (M2b, UI-1): apps' windows composed in software onto one output, pointer and keys routed to them; `client` is a one-window test client |
 | `assets/fonts/` | Geist and Geist Mono, with their licenses |
 
 ## Why a separate workspace
@@ -138,6 +139,13 @@ so renders are the same on every machine. `iced_tiny_skia` always links
 softbuffer, which needs one backend to compile; the shell enables only
 `kms` (DRM dumb buffers).
 
+The compositor adds Smithay (MIT) with only `wayland_frontend`,
+`desktop` and `renderer_pixman`: no DRM, GBM, EGL, libinput, udev, X11 or
+Vulkan backends. It links two C libraries, libxkbcommon (keymaps) and
+pixman (composition), both MIT; the host needs `libxkbcommon-dev` and
+`libpixman-1-dev` (the session hook installs them), and the image needs
+the two packages once the compositor ships.
+
 `deny.toml` is a link to the root one; check with
 `cargo deny --manifest-path shell/Cargo.toml check licenses bans sources`.
 
@@ -148,10 +156,14 @@ font licenses land in the image's notices next to the crates'.
 
 ## Next: M2, inside the compositor
 
-1. **Present.** A Smithay-based compositor owns the display on the device
-   (DRM/KMS, libinput) and draws the shell as its desktop layer: the same
-   `tiny-skia` frames, presented through dumb buffers (or a pixman
-   renderer), so no GPU driver is required.
+1. **Present.** Started in `glass-compositor`: Smithay speaks Wayland to
+   apps (`wl_compositor`, `wl_shm`, `xdg_shell`, `wl_seat`, data device,
+   `wl_output`), places new windows centered between the menu bar and the
+   dock, raises and focuses on click, and composes with pixman into a
+   buffer, redrawing only what changed; tests drive it with real clients
+   over its socket. Next: on the VM's framebuffer with evdev input, then
+   the shell as its desktop layer (wallpaper below the windows, menu bar,
+   dock and tiles above).
 2. **Live state.** Done in `glass-shell-fb`: it subscribes to
    `events.subscribe` and redraws tiles, the agents pill and the clock as
    they change.
