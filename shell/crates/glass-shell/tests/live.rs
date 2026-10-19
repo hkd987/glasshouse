@@ -764,3 +764,109 @@ fn ux2_tab_moves_through_setups_fields_and_shift_tab_back() {
         ]
     );
 }
+
+/// Apps' windows as the compositor lists them for Alt Tab, the one last
+/// used first.
+fn windows(titles: &[(u64, &str)]) -> Vec<glass_shell::apps::AppWindow> {
+    titles
+        .iter()
+        .map(|&(id, title)| glass_shell::apps::AppWindow {
+            id,
+            app_id: "glass.terminal".into(),
+            title: title.into(),
+        })
+        .collect()
+}
+
+#[test]
+fn dk2_alt_tab_raises_the_window_used_before_and_alt_shift_tab_goes_back() {
+    let mut live = Live::new(fixtures::tasks());
+    let tab = |live: &Live, shift: bool| {
+        let mods = if shift {
+            Modifiers::ALT | Modifiers::SHIFT
+        } else {
+            Modifiers::ALT
+        };
+        live.shortcut(&Key::Named(Named::Tab), mods)
+    };
+    assert_eq!(tab(&live, false), None, "no windows: Alt Tab is the app's");
+    live.set_windows(windows(&[
+        (7, "Terminal"),
+        (3, "Activity Monitor"),
+        (9, "Notes"),
+    ]));
+
+    // Quick Alt Tab: the window used before this one.
+    let open = tab(&live, false).expect("Alt Tab is a shortcut");
+    assert_eq!(open, Message::SwitchWindows { back: false });
+    live.update(open);
+    assert!(live.is_switching() && live.takes_all_input());
+    assert_eq!(live.update(Message::SwitchDone), Some(Effect::Activate(3)));
+    assert!(!live.is_switching());
+
+    // Holding Alt, each Tab goes one further, wrapping; Shift Tab comes back.
+    live.update(Message::SwitchWindows { back: false });
+    live.update(Message::SwitchWindows { back: false });
+    live.update(Message::SwitchWindows { back: false });
+    live.update(tab(&live, true).unwrap());
+    assert_eq!(live.update(Message::SwitchDone), Some(Effect::Activate(9)));
+
+    // Alt Shift Tab from the start: the oldest window; Tab wraps around.
+    live.update(Message::SwitchWindows { back: true });
+    live.update(Message::SwitchWindows { back: false });
+    assert_eq!(live.update(Message::SwitchDone), Some(Effect::Activate(7)));
+
+    // Esc keeps things as they were, and Alt going up then raises nothing.
+    live.update(Message::SwitchWindows { back: false });
+    let esc = live.shortcut(&Key::Named(Named::Escape), Modifiers::ALT);
+    assert_eq!(esc, Some(Message::CancelSwitch));
+    live.update(Message::CancelSwitch);
+    assert_eq!(live.update(Message::SwitchDone), None);
+}
+
+#[test]
+fn dk2_the_switcher_follows_windows_closing_and_stays_off_the_lock_screen() {
+    let mut live = Live::new(fixtures::tasks()).signed_in_as("Dana Ruiz");
+    live.set_windows(windows(&[(7, "Terminal"), (3, "Activity Monitor")]));
+    live.update(Message::SwitchWindows { back: false });
+    // The chosen window closes while Alt is down: the first one is chosen.
+    live.set_windows(windows(&[(7, "Terminal")]));
+    assert_eq!(live.update(Message::SwitchDone), Some(Effect::Activate(7)));
+    // One window: Alt Tab raises it. None: nothing.
+    live.update(Message::SwitchWindows { back: false });
+    assert_eq!(live.update(Message::SwitchDone), Some(Effect::Activate(7)));
+    live.set_windows(Vec::new());
+    assert_eq!(live.update(Message::SwitchWindows { back: false }), None);
+    assert!(!live.is_switching());
+    // The command bar closes, so the raised window gets the keys.
+    live.set_windows(windows(&[(7, "Terminal")]));
+    live.update(Message::OpenCommandBar);
+    live.update(Message::SwitchWindows { back: false });
+    live.update(Message::SwitchDone);
+    assert!(!live.takes_all_input());
+}
+
+#[test]
+fn dk2_the_switcher_shows_each_window_with_the_chosen_one_marked() {
+    let theme = Theme::glass();
+    let mut live = Live::new(fixtures::tasks());
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    live.set_windows(windows(&[(7, "Terminal"), (3, "Activity Monitor")]));
+    screen.render(live.view(&theme, None, artboard_time(), SIZE), None);
+    let before = screen.frame().rgba;
+    live.update(Message::SwitchWindows { back: false });
+    screen.render(live.view(&theme, None, artboard_time(), SIZE), None);
+    let open = screen.frame().rgba;
+    // The panel sits in the middle of the screen.
+    let at = |rgba: &[u8], x: usize, y: usize| {
+        let i = (y * SIZE.0 as usize + x) * 4;
+        [rgba[i], rgba[i + 1], rgba[i + 2]]
+    };
+    let (cx, cy) = (SIZE.0 as usize / 2, SIZE.1 as usize / 2);
+    assert_ne!(at(&before, cx, cy), at(&open, cx, cy));
+    assert_eq!(
+        at(&before, 40, 450),
+        at(&open, 40, 450),
+        "the rest is left alone"
+    );
+}

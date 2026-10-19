@@ -510,6 +510,22 @@ impl Compositor {
         pointer.frame(&mut self.state);
     }
 
+    /// Raises the window with this id (from [`Compositor::windows`]) and
+    /// gives it the keyboard, as Alt Tab does (DK-2). An id no window has
+    /// any more does nothing.
+    pub fn activate(&mut self, id: u64) {
+        let Some(window) = self
+            .state
+            .frames
+            .iter()
+            .find(|f| f.id == id)
+            .map(|f| f.window.clone())
+        else {
+            return;
+        };
+        self.state.focus(Some(window), SERIAL_COUNTER.next_serial());
+    }
+
     /// A key (an evdev code) went down or up, for the focused window.
     pub fn key(&mut self, code: u32, pressed: bool) {
         let Some(keyboard) = self.state.seat.get_keyboard() else {

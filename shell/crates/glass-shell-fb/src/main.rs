@@ -33,6 +33,7 @@ use anyhow::{Context, anyhow, bail};
 use glass_api::{Event, TaskDetail, TaskRef, TaskView, UndoReport, methods};
 use glass_compositor::{CONTROL_RADIUS, CONTROLS, Compositor, TITLE_BAR, WorkArea};
 use glass_rpc::{Client, ClientError};
+use glass_shell::apps::AppWindow;
 use glass_shell::live::{Effect, Live};
 use glass_shell::screens::desktop::{DOCK_ROOM, MENU_BAR_HEIGHT};
 use glass_shell::screens::login;
@@ -512,6 +513,8 @@ struct Shell {
     apps: Option<Compositor>,
     /// The windows' titles, as last logged.
     app_titles: Vec<String>,
+    /// The windows as the desktop last heard of them, for Alt Tab.
+    listed: Vec<AppWindow>,
     /// Each window's title bar as last drawn: id, title, focus, width.
     bars: Vec<(u64, String, bool, i32)>,
 }
@@ -558,6 +561,7 @@ impl Shell {
             dirty: false,
             apps,
             app_titles: Vec::new(),
+            listed: Vec::new(),
             bars: Vec::new(),
         })
     }
@@ -576,6 +580,21 @@ impl Shell {
         if titles != self.app_titles {
             eprintln!("apps: {} windows: {}", titles.len(), titles.join(", "));
             self.app_titles = titles;
+        }
+        // For Alt Tab: the windows, the one last used (the top) first.
+        let listed: Vec<AppWindow> = windows
+            .iter()
+            .rev()
+            .map(|w| AppWindow {
+                id: w.id,
+                app_id: w.app_id.clone(),
+                title: w.title.clone(),
+            })
+            .collect();
+        if listed != self.listed {
+            self.dirty |= self.live.is_switching();
+            self.live.set_windows(listed.clone());
+            self.listed = listed;
         }
         // Title bars drawn again where a title, width or focus changed.
         self.bars.retain(|b| windows.iter().any(|w| w.id == b.0));
@@ -674,6 +693,9 @@ impl Shell {
         if typed.super_tapped && !self.live.is_locked() {
             messages.push(Message::ToggleLauncher);
         }
+        if typed.alt_released && self.live.is_switching() {
+            messages.push(Message::SwitchDone);
+        }
         if !typed.events.is_empty() {
             let bar = self.live.command_bar();
             let view = self
@@ -692,6 +714,13 @@ impl Shell {
             }
             match self.live.update(message) {
                 Some(Effect::Focus(id)) => self.focus(id),
+                Some(Effect::Activate(id)) => {
+                    if let Some(apps) = self.apps.as_mut() {
+                        apps.activate(id);
+                        let title = self.listed.iter().find(|w| w.id == id);
+                        eprintln!("alt tab: raised {}", title.map_or("?", |w| &w.title));
+                    }
+                }
                 Some(effect) => effects.push(effect),
                 None => {}
             }
@@ -757,10 +786,11 @@ impl Shell {
                 }
                 Vec::new()
             }
-            // Done in `input`, which has the view; signing out ends the
-            // loop; an unlock request goes to the sign-in screen, and an app
-            // starts there too.
+            // Done in `input`, which has the view and the windows; signing
+            // out ends the loop; an unlock request goes to the sign-in
+            // screen, and an app starts there too.
             Effect::Focus(_)
+            | Effect::Activate(_)
             | Effect::SignOut
             | Effect::Power(_)
             | Effect::Unlock(_)

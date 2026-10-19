@@ -15,6 +15,7 @@
 #   desk.sh drag <x> <y> <x2> <y2>  drag from one point to the other, and wait for the redraw
 #   desk.sh key <keys>              press keys (vm.sh key names: ret, ctrl-spc, alt-meta_l-esc),
 #                                   and wait for the redraw
+#   desk.sh keydown|keyup <key>     one key down or up (vm.sh), and wait for the redraw
 #   desk.sh point <x> <y>           move the pointer there, and wait for any redraw (hover)
 #   desk.sh app '<command>'         run an app as the person signed in, in their session (its
 #                                   windows open on the desktop); waits for the window count to change
@@ -105,7 +106,7 @@ rm -f /var/db/glasshouse/setup.toml
 EOF
 	"$0" restart
 	;;
-click | key | point | drag)
+click | key | keydown | keyup | point | drag)
 	n=$(lines)
 	"$vm" "$cmd" "$@" >/dev/null
 	# Whatever it changed is drawn within a few seconds even in the emulated VM (a redraw that
@@ -145,5 +146,5 @@ shot)
 log)
 	vm_ssh "grep -v 'drawn in' $log | tail -n ${1:-20}"
 	;;
-*) die "usage: desk.sh ready|signin [password]|signout|restart|fresh <login>...|click x y|key k|point x y|app '<command>'|wait <regex>|shot <png>|log [n]" ;;
+*) die "usage: desk.sh ready|signin [password]|signout|restart|fresh <login>...|click x y|key k|keydown k|keyup k|point x y|app '<command>'|wait <regex>|shot <png>|log [n]" ;;
 esac

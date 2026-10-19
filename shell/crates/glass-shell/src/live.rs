@@ -15,13 +15,14 @@ use glass_types::{ApprovalId, SnapshotId, TaskId};
 use iced_core::keyboard::{Key, Modifiers, key::Named};
 use time::OffsetDateTime;
 
-use crate::apps::AppEntry;
+use crate::apps::{AppEntry, AppWindow};
 use crate::greeter::{self, initials};
 use crate::screens::command_bar::{self, CommandBar};
 use crate::screens::desktop::{self, Desktop, Tiles};
 use crate::screens::expanded::{self, Expanded, Rollback, Tab};
 use crate::screens::launcher;
 use crate::screens::login;
+use crate::screens::switcher;
 use crate::screens::system;
 use crate::session::Password;
 use crate::{Element, Message, Power, Theme};
@@ -64,6 +65,11 @@ pub struct Live {
     launcher: bool,
     /// The apps the launcher offers (`apps::FIRST_PARTY` installed here).
     apps: Vec<AppEntry>,
+    /// Apps' windows, the one last used first (the compositor's stack, top
+    /// down).
+    windows: Vec<AppWindow>,
+    /// Alt Tab's switcher is open, on the window with this id.
+    switching: Option<u64>,
 }
 
 /// The locked screen: the sign-in screen's look, for the person signed in.
@@ -146,6 +152,9 @@ pub enum Effect {
     /// Start this program, an app from the launcher, in the person's
     /// session.
     Launch(&'static str),
+    /// Raise the app window with this id and give it the keyboard (Alt
+    /// Tab, DK-2).
+    Activate(u64),
 }
 
 impl Effect {
@@ -192,6 +201,8 @@ impl Live {
             locked: None,
             launcher: false,
             apps: Vec::new(),
+            windows: Vec::new(),
+            switching: None,
         };
         let waiting: Vec<TaskId> = live
             .tasks
@@ -232,6 +243,22 @@ impl Live {
         self.apps = apps;
     }
 
+    /// The apps' windows now, the one last used first. A window the
+    /// switcher had chosen that closed leaves it on the first.
+    pub fn set_windows(&mut self, windows: Vec<AppWindow>) {
+        if let Some(chosen) = self.switching
+            && !windows.iter().any(|w| w.id == chosen)
+        {
+            self.switching = windows.first().map(|w| w.id);
+        }
+        self.windows = windows;
+    }
+
+    /// Whether Alt Tab's switcher is open.
+    pub fn is_switching(&self) -> bool {
+        self.switching.is_some()
+    }
+
     /// Whether the screen is locked.
     pub fn is_locked(&self) -> bool {
         self.locked.is_some()
@@ -249,6 +276,7 @@ impl Live {
             || self.locked.is_some()
             || self.launcher
             || self.leaving.is_some()
+            || self.switching.is_some()
     }
 
     /// Whether apps' windows may show: never behind the lock screen or the
@@ -562,6 +590,41 @@ impl Live {
                 }
                 None
             }
+            Message::SwitchWindows { back } => {
+                let n = self.windows.len();
+                if n == 0 || !self.shows_windows() {
+                    return None;
+                }
+                let at = match self.switching {
+                    // The window used before this one, or the oldest.
+                    None if back => n - 1,
+                    None => 1 % n,
+                    Some(chosen) => {
+                        let at = self.windows.iter().position(|w| w.id == chosen);
+                        let at = at.unwrap_or(0);
+                        if back { (at + n - 1) % n } else { (at + 1) % n }
+                    }
+                };
+                self.switching = Some(self.windows[at].id);
+                // The window it raises gets the keyboard: nothing of the
+                // shell's that takes it stays open.
+                self.launcher = false;
+                self.menu = false;
+                self.system_menu = false;
+                self.command = None;
+                None
+            }
+            Message::SwitchDone => {
+                let chosen = self.switching.take()?;
+                self.windows
+                    .iter()
+                    .any(|w| w.id == chosen)
+                    .then_some(Effect::Activate(chosen))
+            }
+            Message::CancelSwitch => {
+                self.switching = None;
+                None
+            }
             Message::Launch(id) => {
                 self.launcher = false;
                 let app = self.apps.iter().find(|a| a.id == id)?;
@@ -772,6 +835,18 @@ impl Live {
             {
                 Some(Message::OpenForceQuit)
             }
+            // Alt Tab, Alt Shift Tab (DK-2); Esc while it's open.
+            Key::Named(Named::Tab)
+                if modifiers.alt()
+                    && !modifiers.control()
+                    && !modifiers.logo()
+                    && !self.windows.is_empty() =>
+            {
+                Some(Message::SwitchWindows {
+                    back: modifiers.shift(),
+                })
+            }
+            Key::Named(Named::Escape) if self.switching.is_some() => Some(Message::CancelSwitch),
             Key::Named(Named::Escape) if self.window.is_some() => Some(Message::CloseSystemWindow),
             Key::Named(Named::Escape) if self.launcher => Some(Message::ToggleLauncher),
             Key::Named(Named::Space) if modifiers.control() => Some(if bar {
@@ -925,6 +1000,9 @@ impl Live {
         }
         if self.launcher {
             overlays.push(launcher::overlay(theme, &self.apps));
+        }
+        if let Some(chosen) = self.switching {
+            overlays.push(switcher::overlay(theme, &self.windows, chosen));
         }
         let overlay = match overlays.len() {
             0 | 1 => overlays.pop(),

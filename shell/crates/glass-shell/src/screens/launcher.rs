@@ -59,7 +59,7 @@ fn tile<'a>(_theme: &Theme, app: &AppEntry) -> Element<'a, Message> {
 
 /// An app's icon: Terminal's prompt, Activity Monitor's pulse; a dot for
 /// the rest.
-fn icon<'a>(id: &str) -> Element<'a, Message> {
+pub(crate) fn icon<'a>(id: &str) -> Element<'a, Message> {
     let glyph = match id {
         "terminal" => ">_",
         "activity-monitor" => return icons::view(&icons::ACTIVITY, hex(0x57AB5A), 34.0, 34.0),

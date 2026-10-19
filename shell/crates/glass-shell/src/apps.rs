@@ -12,6 +12,8 @@ pub struct AppEntry {
     pub name: &'static str,
     /// The program that opens its window.
     pub command: &'static str,
+    /// The app id its windows carry (`xdg_toplevel.set_app_id`).
+    pub app_id: &'static str,
 }
 
 /// Every first-party app the launcher knows; the desktop offers those that
@@ -21,13 +23,30 @@ pub const FIRST_PARTY: &[AppEntry] = &[
         id: "terminal",
         name: "Terminal",
         command: "/usr/local/bin/glass-terminal",
+        app_id: "glass.terminal",
     },
     AppEntry {
         id: "activity-monitor",
         name: "Activity Monitor",
         command: "/usr/local/bin/glass-activity",
+        app_id: "glass.activity",
     },
 ];
+
+/// An app's window, as Alt Tab lists it (DK-2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppWindow {
+    /// The compositor's id for it.
+    pub id: u64,
+    /// The app id it carries.
+    pub app_id: String,
+    pub title: String,
+}
+
+/// The first-party app whose windows carry this app id.
+pub fn by_app_id(app_id: &str) -> Option<&'static AppEntry> {
+    FIRST_PARTY.iter().find(|app| app.app_id == app_id)
+}
 
 /// The first-party apps installed here (`installed`) that `profile`, the
 /// ids glassd says the person may use, names.

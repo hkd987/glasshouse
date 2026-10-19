@@ -120,6 +120,15 @@ pub enum Message {
     ToggleLauncher,
     /// Start the app with this id, from the launcher.
     Launch(String),
+    /// Alt Tab (DK-2): open the switcher on the window used before this
+    /// one, or move to the next (Shift Tab: the one before).
+    SwitchWindows {
+        back: bool,
+    },
+    /// Alt went up: raise the window the switcher shows chosen.
+    SwitchDone,
+    /// Esc: close the switcher and raise nothing.
+    CancelSwitch,
     /// The mark at the left of the menu bar: open or close the system menu.
     ToggleSystemMenu,
     /// The system menu's About Glasshouse.

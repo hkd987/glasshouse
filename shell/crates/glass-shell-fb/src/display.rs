@@ -31,6 +31,8 @@ pub struct Display {
     pressed_on_app: bool,
     /// Super is down, alone so far.
     super_alone: bool,
+    /// Keys held down in the apps.
+    app_keys: AppKeys,
 }
 
 /// A batch of input as the UI takes it.
@@ -45,6 +47,8 @@ pub struct Typed {
     /// Super went down and up with nothing else pressed (Windows' Start
     /// key, DK-2).
     pub super_tapped: bool,
+    /// Alt went up: the end of Alt Tab (DK-2).
+    pub alt_released: bool,
 }
 
 /// Input for the window under the pointer or with the keyboard.
@@ -103,6 +107,7 @@ impl Display {
             pointer_shown: true,
             pressed_on_app: false,
             super_alone: false,
+            app_keys: AppKeys::default(),
         })
     }
 
@@ -230,6 +235,8 @@ impl Display {
                         (false, 1) => self.super_alone = false,
                         _ => {}
                     }
+                    // evdev's KEY_LEFTALT and KEY_RIGHTALT.
+                    typed.alt_released |= matches!(code, 56 | 100) && value == 0;
                     let mut claimed_any = false;
                     for press in self.keyboard.key(code, value) {
                         let claimed =
@@ -245,9 +252,9 @@ impl Display {
                             None => typed.events.push(iced_core::Event::Keyboard(press.event)),
                         }
                     }
-                    // Apps repeat keys themselves, so only downs and ups.
-                    if route.keys_to_apps && !route.shell_only && !claimed_any && value != 2 {
-                        typed.apps.push(AppInput::Key(u32::from(code), value != 0));
+                    let to_apps = route.keys_to_apps && !route.shell_only && !claimed_any;
+                    if let Some(down) = self.app_keys.route(code, value, to_apps) {
+                        typed.apps.push(AppInput::Key(u32::from(code), down));
                     }
                 }
             }
@@ -404,5 +411,56 @@ fn button_code(button: mouse::Button) -> Option<u32> {
         mouse::Button::Right => Some(0x111),
         mouse::Button::Middle => Some(0x112),
         _ => None,
+    }
+}
+
+/// Keys whose press went to the apps: their release goes there too,
+/// whatever has the keyboard by then. Otherwise a key held down in an app
+/// stays down there, such as Alt after Alt Tab, whose switcher takes the
+/// keys while it's open. A shortcut's press doesn't go, so its release
+/// doesn't either.
+#[derive(Debug, Default)]
+struct AppKeys(Vec<u16>);
+
+impl AppKeys {
+    /// Whether the apps get this key event (evdev `value`: 1 down, 0 up,
+    /// 2 repeat) and as down or up. `to_apps`: they have the keyboard now.
+    /// Apps repeat keys themselves, so only downs and ups.
+    fn route(&mut self, code: u16, value: i32, to_apps: bool) -> Option<bool> {
+        match value {
+            1 if to_apps => {
+                self.0.push(code);
+                Some(true)
+            }
+            0 if self.0.contains(&code) => {
+                self.0.retain(|&c| c != code);
+                Some(false)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppKeys;
+
+    const ALT: u16 = 56;
+    const TAB: u16 = 15;
+
+    #[test]
+    fn dk2_a_key_pressed_in_an_app_is_released_there_after_alt_tab() {
+        let mut keys = AppKeys::default();
+        assert_eq!(keys.route(ALT, 1, true), Some(true));
+        // Tab is Alt Tab's: the app gets neither its press nor its release.
+        assert_eq!(keys.route(TAB, 1, false), None);
+        assert_eq!(keys.route(TAB, 2, false), None);
+        assert_eq!(keys.route(TAB, 0, true), None);
+        // The switcher has the keys, but Alt went down in the app.
+        assert_eq!(keys.route(ALT, 0, false), Some(false));
+        assert_eq!(keys.route(ALT, 0, true), None, "once");
+        // A key pressed while the shell had the keyboard isn't the app's.
+        assert_eq!(keys.route(30, 1, false), None);
+        assert_eq!(keys.route(30, 0, true), None);
     }
 }

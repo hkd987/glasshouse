@@ -2,7 +2,8 @@
 //! window opens centered in the work area showing its own pixels, clicks and
 //! keys reach the window they should, a click raises a window, a frame where
 //! nothing changed composes nothing, and each window's title bar (DK-1)
-//! stacks with it, moves it and closes it.
+//! stacks with it, moves it and closes it. Alt Tab (DK-2) raises a window
+//! by its id.
 
 #![allow(clippy::unwrap_used)]
 
@@ -322,4 +323,30 @@ fn dk1_a_title_bar_stacks_with_its_window() {
     });
     finish(&mut compositor, small);
     finish(&mut compositor, big);
+}
+
+#[test]
+fn dk2_activating_a_window_raises_it_and_gives_it_the_keyboard() {
+    let (mut compositor, socket, _dir) = compositor();
+    let back = window(&socket, "Back", (400, 300), 0xFFC5_3030);
+    until_told(&mut compositor, &back, &Event::Focused);
+    let front = window(&socket, "Front", (200, 100), 0xFF2E_9E5B);
+    until_told(&mut compositor, &front, &Event::Focused);
+    let back_id = compositor.windows()[0].id;
+    compositor.activate(back_id);
+    until_told(&mut compositor, &back, &Event::Focused);
+    let windows = compositor.windows();
+    assert_eq!(
+        windows.last().map(|w| (w.id, w.focused)),
+        Some((back_id, true))
+    );
+    // The front window's middle now shows the back window's pixels.
+    let f = windows[0].area;
+    until(&mut compositor, "the back window on top", |c| {
+        pixel(c, f.x + 100, f.y + 50) == bgra(0xFFC5_3030)
+    });
+    compositor.activate(u64::MAX);
+    assert_eq!(compositor.windows().last().map(|w| w.id), Some(back_id));
+    finish(&mut compositor, front);
+    finish(&mut compositor, back);
 }
