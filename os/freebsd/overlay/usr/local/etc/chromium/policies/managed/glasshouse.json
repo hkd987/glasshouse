@@ -9,11 +9,5 @@
   "BrowserLabsEnabled": false,
   "ShoppingListEnabled": false,
   "TranslateEnabled": false,
-  "HttpsUpgradesEnabled": true,
-  "URLBlocklist": [
-    "chrome://version",
-    "chrome://gpu",
-    "chrome://system",
-    "chrome://sandbox"
-  ]
+  "HttpsUpgradesEnabled": true
 }

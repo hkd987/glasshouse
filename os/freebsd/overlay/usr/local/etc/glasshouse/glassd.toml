@@ -6,6 +6,9 @@ control_socket = "/var/run/glasshouse/control.sock"
 app_socket = "/var/run/glasshouse/apps.sock"
 # Installed apps, each with the manifest.json glassd enforces (UI-5, DV-3).
 apps_dir = "/usr/local/share/glasshouse/apps"
+# The browser's settings from IT's policy (UX-1): glassd writes org.json in
+# managed/ (locked) and recommended/ (defaults) here.
+browser_policies = "/usr/local/etc/chromium/policies"
 state_dir = "/var/db/glasshouse"
 # When this file is absent the built-in default policy is enforced. Print it
 # with `glassctl policy default`. If it doesn't validate, glassd enforces the

@@ -4,11 +4,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use glass_actions::{Grant, Registry, TaskContext};
+use glass_api::settings::SettingsView;
 use glass_api::{
     ActivityKind, AgentSummary, AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalView,
     AuditVerifyResult, Event, HandoffCard, PowerResult, ScopeLine, ScopeRequest, SnapshotMarker,
     SystemStatus, TaskDetail, TaskRequest, TaskView, TileState,
 };
+pub use glass_app_settings::SettingsHandle;
 use glass_audit::{ApprovalRef, AuditEvent, AuditLog, AuditRecord, EventKind};
 use glass_broker::{ApprovalDesk, DeskError};
 use glass_gateway::Gateway;
@@ -42,10 +44,15 @@ pub struct RuntimeParts {
     /// The model providers this machine can reach (ADR 0018). An empty
     /// gateway refuses every model call.
     pub gateway: Arc<Gateway>,
+    /// Device settings (UX-1): the same handle the `settings` actions use.
+    pub settings: SettingsHandle,
 }
 
 /// Events carry the owner's uid so subscribers only see their own tasks.
 pub(crate) type OwnedEvent = (u32, Event);
+
+/// The owner of an event for everyone, such as new device settings.
+pub(crate) const EVERYONE_UID: u32 = u32::MAX;
 
 pub struct Runtime {
     pub(crate) config: RuntimeConfig,
@@ -56,6 +63,8 @@ pub struct Runtime {
     pub(crate) sandbox: Arc<dyn Sandbox>,
     pub(crate) snapshots: Arc<dyn Snapshotter>,
     pub(crate) gateway: Arc<Gateway>,
+    /// Device settings (UX-1, ADR 0029).
+    device_settings: SettingsHandle,
     /// Users' layers on catalog agents (TL-2).
     pub(crate) layers: LayerStore,
     audit: Arc<AuditLog>,
@@ -117,7 +126,13 @@ pub(crate) enum Origin {
 impl Runtime {
     pub fn new(parts: RuntimeParts) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
+        parts.settings.set_policy(&parts.policy);
+        let tell = events.clone();
+        parts.settings.on_change(move |uid| {
+            let _ = tell.send((uid.unwrap_or(EVERYONE_UID), Event::SettingsChanged));
+        });
         Arc::new(Self {
+            device_settings: parts.settings,
             layers: LayerStore::new(parts.config.state_dir.join("layers")),
             config: parts.config,
             settings: RwLock::new(Arc::new(Settings {
@@ -162,6 +177,18 @@ impl Runtime {
         }
     }
 
+    /// The caller's device settings, as their desktop applies them (UX-1).
+    pub fn settings_view(&self, caller: &Caller) -> SettingsView {
+        SettingsView {
+            settings: self
+                .device_settings
+                .person(&caller.name, caller.uid)
+                .iter()
+                .map(glass_app_settings::Effective::view)
+                .collect(),
+        }
+    }
+
     fn settings(&self) -> Arc<Settings> {
         Arc::clone(&self.settings.read().unwrap_or_else(PoisonError::into_inner))
     }
@@ -181,6 +208,8 @@ impl Runtime {
     /// Tasks and app sessions started from now on use it; running ones keep
     /// the effective policy they started with.
     pub fn apply_policy(&self, policy: Policy, registry: Registry, source: impl Into<String>) {
+        // Device settings follow at once; desktops hear if theirs changed.
+        self.device_settings.set_policy(&policy);
         *self
             .settings
             .write()

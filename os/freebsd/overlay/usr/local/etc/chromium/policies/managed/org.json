@@ -1,0 +1,8 @@
+{
+  "URLBlocklist": [
+    "chrome://version",
+    "chrome://gpu",
+    "chrome://system",
+    "chrome://sandbox"
+  ]
+}

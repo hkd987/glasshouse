@@ -14,6 +14,8 @@ use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
 use glass_app_people::PeopleProvider;
+pub use glass_app_settings::SettingsHandle;
+use glass_app_settings::SettingsProvider;
 use glass_app_system::{HostSystem, SystemOps, SystemProvider};
 use glass_gateway::ModelAction;
 use glass_managed::DirectoryHandle;
@@ -36,6 +38,8 @@ pub struct Setup {
     pub directory: DirectoryHandle,
     /// The org's mail service, from policy (NV-3).
     pub mail: Option<glass_policy::document::MailSettings>,
+    /// Device settings: policy's and each person's choices (UX-1).
+    pub settings: SettingsHandle,
     /// This device is managed by an org, so a catalog is coming if none
     /// has arrived (the Store says which).
     pub managed: bool,
@@ -51,6 +55,7 @@ impl Setup {
             catalog: CatalogHandle::new(),
             directory: DirectoryHandle::new(),
             mail: None,
+            settings: SettingsHandle::new("/nonexistent"),
             managed: false,
         }
     }
@@ -75,6 +80,7 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
     registry.register(Arc::new(
         PeopleProvider::new(setup.directory).managed(setup.managed),
     ))?;
+    registry.register(Arc::new(SettingsProvider::new(setup.settings)))?;
     registry.register(Arc::new(ModelAction))?;
     Ok(registry)
 }

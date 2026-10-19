@@ -1,7 +1,6 @@
 {
   "HighEfficiencyModeEnabled": true,
   "MemorySaverModeSavings": 1,
-  "RestoreOnStartup": 1,
   "SpellcheckEnabled": true,
   "DownloadDirectory": "${home}/Downloads",
   "PromptForDownloadLocation": false,

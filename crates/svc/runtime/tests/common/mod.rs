@@ -18,6 +18,7 @@ use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
 use glass_app_people::PeopleProvider;
+use glass_app_settings::{SettingsHandle, SettingsProvider};
 use glass_app_system::{SystemOps, SystemProvider};
 use glass_audit::{AuditLog, Durability};
 use glass_gateway::{Gateway, ModelAction, ProviderError, ScriptedProvider};
@@ -28,7 +29,9 @@ use glass_platform::system;
 use glass_policy::Policy;
 use glass_rpc::Client;
 use glass_rpc::mcp::CallToolResult;
-use glass_runtime::{AppApi, Caller, CatalogEntry, Runtime, RuntimeConfig, RuntimeParts};
+use glass_runtime::{
+    AppApi, Caller, CatalogEntry, ControlApi, Runtime, RuntimeConfig, RuntimeParts,
+};
 use glass_types::TaskId;
 use serde_json::{Value, json};
 
@@ -44,6 +47,8 @@ pub struct Harness {
     /// The org's people `people.search` reads and Mail and Calendar send
     /// as; empty until a test sets it.
     pub directory: DirectoryHandle,
+    /// Device settings: policy's and the test user's choices (UX-1).
+    pub settings: SettingsHandle,
 }
 
 impl Harness {
@@ -67,6 +72,7 @@ impl Harness {
             &self.machine,
             &self.catalog,
             &self.directory,
+            &self.settings,
             &policy,
         );
         self.rt.apply_policy(policy, registry, "test");
@@ -82,6 +88,7 @@ impl Harness {
             &self.machine,
             &self.catalog,
             &self.directory,
+            &self.settings,
             &policy,
         );
         self.rt.apply_policy(policy, registry, source);
@@ -127,6 +134,17 @@ impl Harness {
     }
 
     /// Serves the app socket (ADR 0024) and returns where it listens.
+    /// The control socket the desktop and glassctl use.
+    #[allow(dead_code)]
+    pub fn serve_control(&self) -> PathBuf {
+        let path = self.dir.path().join("run/control.sock");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let api = Arc::new(ControlApi::new(Arc::clone(&self.rt)));
+        tokio::spawn(glass_rpc::serve(listener, api));
+        path
+    }
+
     pub fn serve_apps(&self) -> PathBuf {
         let path = self.dir.path().join("run/apps.sock");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -182,6 +200,7 @@ fn test_registry(
     machine: &Arc<FakeMachine>,
     catalog: &CatalogHandle,
     directory: &DirectoryHandle,
+    settings: &SettingsHandle,
     policy: &Policy,
 ) -> Registry {
     let mut registry = Registry::new();
@@ -207,6 +226,9 @@ fn test_registry(
     registry.register(Arc::new(ModelAction)).unwrap();
     registry
         .register(Arc::new(CatalogProvider::new(catalog.clone())))
+        .unwrap();
+    registry
+        .register(Arc::new(SettingsProvider::new(settings.clone())))
         .unwrap();
     registry
 }
@@ -235,7 +257,15 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     let machine = Arc::new(FakeMachine::default());
     let catalog = CatalogHandle::new();
     let directory = DirectoryHandle::new();
-    let registry = test_registry(dir.path(), &machine, &catalog, &directory, &policy);
+    let settings = SettingsHandle::new(dir.path().join("state/settings"));
+    let registry = test_registry(
+        dir.path(),
+        &machine,
+        &catalog,
+        &directory,
+        &settings,
+        &policy,
+    );
     // Policy names these providers; `down` is always rate limited (MP-8).
     let model = Arc::new(ScriptedProvider::echo());
     let gateway = Gateway::new().with("scripted", model.clone()).with(
@@ -253,7 +283,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
             max_live_tasks_per_user: 4,
             harness: Some("claude-code".parse().unwrap()),
             attended_dir: dir.path().join("run/attended"),
-            apps: vec![mail_app(), calendar_app(), store_app()],
+            apps: vec![mail_app(), calendar_app(), store_app(), settings_app()],
             // The app socket resolves callers by uid; their app data is
             // here, never in the real account's home.
             console_url: None,
@@ -269,6 +299,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
             AuditLog::open(dir.path().join("audit.log"), Durability::Buffered).unwrap(),
         ),
         gateway: Arc::new(gateway),
+        settings: settings.clone(),
     });
     let me = Caller {
         name: account.name,
@@ -284,6 +315,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         model,
         catalog,
         directory,
+        settings,
     }
 }
 
@@ -331,6 +363,7 @@ pub fn rebuild_with(h: &Harness, policy: &str, catalog: Vec<CatalogEntry>) -> Ar
         snapshots: Arc::new(CopySnapshotter::new(h.dir.path().join("snapshots"))),
         audit: Arc::new(AuditLog::open(h.audit_path(), Durability::Buffered).unwrap()),
         gateway: Arc::new(Gateway::new()),
+        settings: SettingsHandle::new(h.dir.path().join("state/settings")),
     })
 }
 
@@ -489,6 +522,16 @@ pub fn store_app() -> AppManifest {
         "id": "store", "name": "Store", "version": "0.1.0",
         "actions": ["catalog.list", "catalog.search", "catalog.install", "catalog.remove"],
         "permissions": ["offline"], "labels": ["public", "internal"]
+    }))
+    .unwrap()
+}
+
+/// The Settings app as its manifest declares it.
+pub fn settings_app() -> AppManifest {
+    serde_json::from_value(json!({
+        "id": "settings", "name": "Settings", "version": "0.1.0",
+        "actions": ["settings.list", "settings.set"],
+        "permissions": ["offline"], "labels": ["public"]
     }))
     .unwrap()
 }

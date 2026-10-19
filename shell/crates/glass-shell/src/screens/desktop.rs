@@ -80,7 +80,7 @@ impl<'a> Desktop<'a> {
         Desktop {
             tasks,
             now: Timestamp::from_unix_seconds(now.unix_timestamp()).unwrap_or_else(Timestamp::now),
-            clock: clock(now),
+            clock: clock(now, false),
             app: String::new(),
             menus: Vec::new(),
             date: (
@@ -100,8 +100,17 @@ impl<'a> Desktop<'a> {
     }
 }
 
-/// The menu bar clock: "Mon Oct 19  2:14 PM".
-pub fn clock(at: OffsetDateTime) -> String {
+/// The menu bar clock: "Mon Oct 19  2:14 PM", or "Mon Oct 19  14:14" on
+/// a 24-hour clock (UX-1's `clock.hour24`).
+pub fn clock(at: OffsetDateTime, hour24: bool) -> String {
+    if hour24 {
+        return clock_part(
+            at,
+            format_description!(
+                "[weekday repr:short] [month repr:short] [day padding:none]  [hour repr:24]:[minute]"
+            ),
+        );
+    }
     clock_part(
         at,
         format_description!(
@@ -851,7 +860,9 @@ mod tests {
         assert_eq!(live.date, ("OCT".into(), 19));
         assert_eq!(live.now.unix_seconds(), afternoon.unix_timestamp());
         let morning = afternoon.replace_hour(9).expect("valid");
-        assert_eq!(clock(morning), "Mon Oct 19  9:14 AM");
+        assert_eq!(clock(morning, false), "Mon Oct 19  9:14 AM");
+        assert_eq!(clock(afternoon, true), "Mon Oct 19  14:14");
+        assert_eq!(clock(morning, true), "Mon Oct 19  09:14");
     }
 
     #[test]

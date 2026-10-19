@@ -781,6 +781,7 @@ dependencies = [
  "iced_widget",
  "kurbo",
  "png",
+ "serde_json",
  "softbuffer",
  "time",
  "tiny-skia",

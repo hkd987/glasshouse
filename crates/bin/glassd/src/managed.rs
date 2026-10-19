@@ -536,7 +536,7 @@ mod tests {
         let config = Config::load(&path).unwrap();
         std::fs::write(&config.policy, glass_policy::DEFAULT_POLICY).unwrap();
         let policy = Policy::from_toml(glass_policy::DEFAULT_POLICY).unwrap();
-        let org = OrgData::default();
+        let org = OrgData::new(&config.state_dir);
         let registry = crate::registry(&config, &policy, &org).unwrap();
         let runtime = Runtime::new(RuntimeParts {
             config: RuntimeConfig {
@@ -560,6 +560,7 @@ mod tests {
                 AuditLog::open(dir.path().join("audit.log"), Durability::Buffered).unwrap(),
             ),
             gateway: Arc::new(Gateway::new()),
+            settings: org.settings.clone(),
         });
         Device {
             dir,
@@ -732,7 +733,7 @@ mod tests {
 
         // A restart with no console: the catalog comes back from disk,
         // checked again.
-        let fresh = OrgData::default();
+        let fresh = OrgData::new(&d.config.state_dir);
         let again = Managed::start(&d.config, Arc::clone(&d.runtime), fresh.clone()).unwrap();
         assert_eq!(fresh.catalog.current().unwrap().version, 5);
         assert_eq!(again.catalog_version, Some(5));
@@ -755,7 +756,7 @@ mod tests {
         assert_eq!(m.report().directory_version, Some(2));
 
         // A restart with no console: the directory comes back from disk.
-        let fresh = OrgData::default();
+        let fresh = OrgData::new(&d.config.state_dir);
         let again = Managed::start(&d.config, Arc::clone(&d.runtime), fresh.clone()).unwrap();
         assert_eq!(fresh.directory.current().unwrap().version, 2);
         assert_eq!(again.directory_version, Some(2));

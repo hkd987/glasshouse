@@ -566,6 +566,8 @@ async function start(): Promise<void> {
     state.notice = error instanceof Offline ? "Mail hasn't been loaded on this device yet." : String(error);
   }
   await Promise.all([refresh(), loadAccount()]);
+  // The account may answer after the mail is drawn: draw it too.
+  render();
   ready();
 }
 

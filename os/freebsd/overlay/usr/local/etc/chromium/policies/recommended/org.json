@@ -1,0 +1,5 @@
+{
+  "RestoreOnStartup": 1,
+  "VideoCaptureAllowed": true,
+  "AudioCaptureAllowed": true
+}

@@ -102,6 +102,7 @@ mod tests {
                 "browser",
                 "calendar",
                 "mail",
+                "settings",
                 "store",
                 "terminal"
             ]
@@ -124,6 +125,7 @@ mod tests {
                 "calendar",
                 "console",
                 "mail",
+                "settings",
                 "store",
                 "terminal"
             ]

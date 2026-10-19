@@ -30,6 +30,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
+use glass_api::settings::SettingsView;
 use glass_api::{Event, TaskDetail, TaskRef, TaskView, UndoReport, methods};
 use glass_compositor::{CONTROL_RADIUS, CONTROLS, Compositor, TITLE_BAR, WorkArea};
 use glass_rpc::{Client, ClientError};
@@ -156,6 +157,11 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
     if args.once {
         return Ok(None);
     }
+    // The person's settings (UX-1) after the first frame: the clock and
+    // when the screen locks follow them.
+    shell
+        .carry_out_all(client.as_ref(), vec![Effect::LoadSettings])
+        .await;
     // With the desktop drawn, the browser engine and the app bridge get
     // ready for the first web app the person opens.
     if engine_wanted && shell.apps.is_some() {
@@ -221,7 +227,8 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 eprintln!("glassd: connected again, {} tiles", tasks.len());
                 client = Some(back);
                 shell.live.set_apps(offered(&profile));
-                let effects = Vec::from_iter(shell.live.reload(tasks));
+                let mut effects = Vec::from_iter(shell.live.reload(tasks));
+                effects.push(Effect::LoadSettings);
                 shell.carry_out_all(client.as_ref(), effects).await;
                 redraw = true;
             }
@@ -231,6 +238,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 while let Ok(more) = inputs.try_recv() {
                     batch.push(more);
                 }
+                shell.live.touched(Instant::now());
                 let mut effects = shell.input(&batch);
                 let launching = &mut shell.launching;
                 effects.retain(|effect| match effect {
@@ -292,8 +300,14 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 continue;
             }
             () = tokio::time::sleep(until_next_minute(OffsetDateTime::now_utc())) => {
-                // The clock turns over; the Trash is looked at as often.
+                // The clock turns over; the Trash is looked at as often,
+                // and whether the screen has gone unused long enough to
+                // lock (UX-1's `lock.after_minutes`).
                 shell.live.set_trash_full(trash_full());
+                if shell.live.idle_too_long(Instant::now()) {
+                    let effects = Vec::from_iter(shell.live.update(Message::LockScreen));
+                    shell.carry_out_all(client.as_ref(), effects).await;
+                }
                 redraw = true;
             }
             _ = terminate.recv() => break,
@@ -1076,6 +1090,14 @@ impl Shell {
             | Effect::Power(_)
             | Effect::Unlock(_)
             | Effect::Launch(_) => Vec::new(),
+            Effect::LoadSettings => {
+                let result: Result<SettingsView, _> = client.call(methods::SETTINGS_GET, ()).await;
+                match result {
+                    Ok(settings) => self.dirty |= self.live.set_settings(settings),
+                    Err(e) => eprintln!("settings.get: {e}"),
+                }
+                Vec::new()
+            }
             Effect::ListApps => {
                 let result: Result<Vec<glass_api::ProfileApp>, _> =
                     client.call(methods::APPS_LIST, ()).await;

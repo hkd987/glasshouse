@@ -471,6 +471,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-app-settings"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-policy",
+ "glass-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "glass-app-system"
 version = "0.1.0"
 dependencies = [
@@ -566,6 +579,7 @@ dependencies = [
  "glass-app-helpdesk",
  "glass-app-mail",
  "glass-app-people",
+ "glass-app-settings",
  "glass-app-system",
  "glass-gateway",
  "glass-managed",
@@ -705,6 +719,7 @@ dependencies = [
  "glass-app-helpdesk",
  "glass-app-mail",
  "glass-app-people",
+ "glass-app-settings",
  "glass-app-system",
  "glass-audit",
  "glass-broker",

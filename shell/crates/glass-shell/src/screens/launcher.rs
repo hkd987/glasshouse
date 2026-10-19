@@ -91,8 +91,8 @@ fn tile<'a>(_theme: &Theme, app: &AppEntry, selected: bool) -> Element<'a, Messa
 }
 
 /// An app's icon: Terminal's prompt, Activity Monitor's pulse, and the
-/// dock's glyphs for the Browser, Mail, the console and the Store; a dot for
-/// the rest.
+/// dock's glyphs for the Browser, Mail, Settings, the console and the Store;
+/// a dot for the rest.
 pub(crate) fn icon<'a>(id: &str) -> Element<'a, Message> {
     let drawn = |icon: &icons::Icon, color| icons::view(icon, hex(color), 32.0, 32.0);
     let glyph = match id {
@@ -100,7 +100,9 @@ pub(crate) fn icon<'a>(id: &str) -> Element<'a, Message> {
         "activity-monitor" => return icons::view(&icons::ACTIVITY, hex(0x57AB5A), 34.0, 34.0),
         "browser" => return drawn(&icons::GLOBE, 0x2BB5B5),
         "mail" => return drawn(&icons::MAIL, 0x3AA8F5),
-        "console" => return drawn(&icons::GEAR, 0xA9B1BC),
+        "settings" => return drawn(&icons::GEAR, 0xA9B1BC),
+        // IT's console: a gear in the accent, apart from Settings'.
+        "console" => return drawn(&icons::GEAR, 0x3D6BFF),
         "store" => return drawn(&icons::BAG, 0x8F7CF2),
         "calendar" => "31",
         _ => "•",

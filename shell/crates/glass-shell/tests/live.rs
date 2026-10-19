@@ -1183,3 +1183,53 @@ fn ui5_the_docks_mail_opens_mail_and_once_open_brings_it_forward() {
     // An app the profile doesn't give starts nothing.
     assert_eq!(live.update(Message::Launch("calendar".into())), None);
 }
+
+#[test]
+fn ux1_the_clock_and_the_lock_follow_the_persons_settings() {
+    use glass_api::settings::{SettingFrom, SettingView, SettingsView};
+    use std::time::{Duration, Instant};
+
+    let setting = |id: &str, value: serde_json::Value| SettingView {
+        id: id.into(),
+        value,
+        locked: true,
+        from: SettingFrom::It,
+    };
+    let mut live = Live::new(fixtures::tasks()).lockable();
+    // A new policy or the person's own change: ask glassd again.
+    assert_eq!(
+        live.apply(glass_api::Event::SettingsChanged),
+        Some(Effect::LoadSettings)
+    );
+
+    let start = Instant::now();
+    live.touched(start);
+    let minutes = |n: u64| start + Duration::from_secs(n * 60);
+    assert!(!live.idle_too_long(minutes(9)), "ten minutes by default");
+    assert!(live.idle_too_long(minutes(10)));
+
+    // IT locks it at five minutes and turns the 24-hour clock on.
+    assert!(
+        live.set_settings(SettingsView {
+            settings: vec![
+                setting("lock.after_minutes", serde_json::json!(5)),
+                setting("clock.hour24", serde_json::json!(true)),
+            ],
+        }),
+        "the clock changes what's drawn"
+    );
+    assert!(!live.idle_too_long(minutes(4)));
+    assert!(live.idle_too_long(minutes(5)));
+    live.touched(minutes(5));
+    assert!(
+        !live.idle_too_long(minutes(9)),
+        "using it starts the count again"
+    );
+
+    // A locked screen doesn't lock again.
+    live.update(Message::LockScreen);
+    assert!(!live.idle_too_long(minutes(30)));
+    // Nor does one that can't lock (no sign-in screen behind it).
+    let unlockable = Live::new(fixtures::tasks());
+    assert!(!unlockable.idle_too_long(Instant::now() + Duration::from_secs(3600)));
+}

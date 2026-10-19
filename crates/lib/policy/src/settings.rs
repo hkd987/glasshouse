@@ -98,14 +98,6 @@ pub fn table() -> &'static [SettingDef] {
                 Scope::Person,
                 false,
             ),
-            toggle(
-                "dock.keep_shown",
-                "Dock",
-                "Keep the dock shown",
-                "Otherwise it steps aside for windows and comes back at the bottom edge.",
-                Scope::Person,
-                false,
-            ),
             SettingDef {
                 id: "browser.home_page",
                 section: "Browser",
@@ -339,7 +331,7 @@ members = ["dana", "mei"]
         let mut d = doc(TWO_GROUPS);
         let everyone = d.groups.iter_mut().find(|g| g.name == EVERYONE).unwrap();
         everyone.settings.insert(
-            "dock.keep_shown".into(),
+            "browser.restore_tabs".into(),
             Managed {
                 value: SettingValue::Bool(true),
                 locked: false,
@@ -359,7 +351,7 @@ members = ["dana", "mei"]
         let mei = get("mei", "lock.after_minutes");
         assert_eq!((mei.value, mei.locked), (SettingValue::Number(30), false));
         assert_eq!(get("dana", "clock.hour24").value, SettingValue::Bool(true));
-        assert_eq!(get("sam", "dock.keep_shown").source, Source::Everyone);
+        assert_eq!(get("sam", "browser.restore_tabs").source, Source::Everyone);
         assert_eq!(get("sam", "lock.after_minutes").source, Source::Default);
     }
 

@@ -1,14 +1,13 @@
 # 0029. Device settings per group, set in the console
 
-Status: **Accepted.** The policy side and the console are built; computers
-applying them, and the Settings app, come next. PRD UX-1, AD-2; the owner
+Status: **Accepted.** Built: policy, the console, computers applying them
+and the Settings app. PRD UX-1, AD-2; the owner
 asked that the console control device settings, pushed per role in a
 simple way (2026-10-19).
 
 ## Context
 IT wants to set what people's computers do (lock after idle, the clock,
-the dock, the browser's home page and blocked sites, camera and
-microphone) for a role, once, and have it reach the right computers.
+the browser's home page and blocked sites, camera and microphone) for a role, once, and have it reach the right computers.
 Policy already reaches devices signed, per group, through the pilot,
 early and broad rings (ADR 0023). There is no Settings app on the device
 yet.
@@ -40,8 +39,14 @@ yet.
 ## Consequences
 - `GroupPolicy` refuses unknown fields, so devices must run a glassd that
   knows `settings` before the console publishes any (as for `[mail]`).
-- Next: glassd tells the desktop and apps a person's settings and keeps
-  their own choices for unlocked ones; the desktop applies the clock,
-  dock and lock; glassd writes the browser's managed (locked) and
-  recommended (default) policies; a Settings app shows each with "Set by
-  IT" where locked.
+- glassd keeps one `SettingsHandle`: the policy in force and each
+  person's own choices, in its state directory by uid, never in their
+  home. The desktop reads it with `settings.get` and hears
+  `SettingsChanged`; the Settings app reads and changes it with
+  `settings.list` and `settings.set`; agents may read, not change.
+- glassd writes the browser's settings as `managed/org.json` (locked) and
+  `recommended/org.json` (defaults). The image's own `glasshouse.json`
+  never sets a key those files own, which a test checks, because the
+  engine leaves it undefined which file wins.
+- Keeping the dock shown waits for the window manager to keep its space
+  free; until then the dock steps aside for windows (DK-1).

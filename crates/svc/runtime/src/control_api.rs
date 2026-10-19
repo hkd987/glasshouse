@@ -46,6 +46,7 @@ impl Handler for ControlApi {
             methods::SYSTEM_STATUS => to_result(&rt.status()),
             methods::AGENTS_LIST => to_result(&rt.agents_for(&caller)),
             methods::APPS_LIST => to_result(&rt.profile_apps(&caller)),
+            methods::SETTINGS_GET => to_result(&blocking(|| rt.settings_view(&caller))),
             methods::TASK_PLAN => {
                 let request: TaskRequest = parse_params(params)?;
                 to_result(&blocking(|| rt.plan(&caller, &request))?)
@@ -110,7 +111,9 @@ impl ControlApi {
     fn forward_events(&self, caller: Caller, conn: Arc<Connection>) {
         let events = self.rt.subscribe();
         tokio::spawn(async move {
-            let visible = |owner: u32| caller.is_admin() || owner == caller.uid;
+            let visible = |owner: u32| {
+                caller.is_admin() || owner == caller.uid || owner == crate::runtime::EVERYONE_UID
+            };
             let send = |event: Event| {
                 let conn = Arc::clone(&conn);
                 async move {
@@ -189,12 +192,14 @@ async fn forward<S, F>(
 /// Adds `event` to what is waiting, replacing an earlier one for the same
 /// task (keeping its place in line).
 fn merge(pending: &mut Vec<Event>, event: Event) {
-    let task = |e: &Event| match e {
-        Event::TaskUpdated { task } => task.id,
-        Event::TaskRemoved { task } => *task,
+    // Per task; settings changes are one, whoever's they were.
+    let key = |e: &Event| match e {
+        Event::TaskUpdated { task } => Some(task.id),
+        Event::TaskRemoved { task } => Some(*task),
+        Event::SettingsChanged => None,
     };
-    let id = task(&event);
-    match pending.iter_mut().find(|e| task(e) == id) {
+    let id = key(&event);
+    match pending.iter_mut().find(|e| key(e) == id) {
         Some(slot) => *slot = event,
         None => pending.push(event),
     }
@@ -279,13 +284,16 @@ mod tests {
         for task in [a, b, a] {
             merge(&mut pending, Event::TaskRemoved { task });
         }
-        let ids: Vec<TaskId> = pending
+        merge(&mut pending, Event::SettingsChanged);
+        merge(&mut pending, Event::SettingsChanged);
+        let ids: Vec<Option<TaskId>> = pending
             .iter()
             .map(|e| match e {
-                Event::TaskRemoved { task } => *task,
-                Event::TaskUpdated { task } => task.id,
+                Event::TaskRemoved { task } => Some(*task),
+                Event::TaskUpdated { task } => Some(task.id),
+                Event::SettingsChanged => None,
             })
             .collect();
-        assert_eq!(ids, [a, b]);
+        assert_eq!(ids, [Some(a), Some(b), None], "one settings change");
     }
 }

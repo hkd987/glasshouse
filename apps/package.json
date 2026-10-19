@@ -8,7 +8,8 @@
     "sdk",
     "mail",
     "calendar",
-    "store"
+    "store",
+    "settings"
   ],
   "scripts": {
     "build": "node build.mjs",

@@ -10,7 +10,7 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 import { type Browser, type BrowserContext, type Page, expect, test } from "@playwright/test";
 
-import { CALENDAR_URL, CONSOLE_SHOTS, CONSOLE_URL, DEVICE, MAIL_URL, STORE_URL } from "./console-env.ts";
+import { CALENDAR_URL, CONSOLE_SHOTS, CONSOLE_URL, DEVICE, MAIL_URL, SETTINGS_URL, STORE_URL } from "./console-env.ts";
 import { DEV, audit, glassctl, glassctlJson, mcp, outcome } from "./env.ts";
 
 /** AD-4: a page IT opens is interactive within this. */
@@ -281,22 +281,40 @@ test("nv3 ad2 the mail service IT sets in the console shows in Mail on the devic
   await mail.close();
 });
 
-test("ux1 IT locks a setting for a group, previews and publishes it", async ({ browser }) => {
+test("ux1 IT locks a setting for a group and the computer's Settings shows it locked", async ({ browser }) => {
   const { page, close } = await session(browser);
-  await open(page, "#/settings/ap-ops", "settings");
+  // This computer's person is one of IT's admins.
+  await open(page, "#/settings/it-admins", "settings");
   const lock = page.locator('[data-setting="lock.after_minutes"]');
   await lock.locator('[data-state="locked"]').click();
   await lock.locator('input[name="lock.after_minutes"]').fill("5");
   const home = page.locator('[data-setting="browser.home_page"]');
   await expect(home).toContainText("set it for Everyone");
   await page.click("[data-test=save-settings]");
-  await expect(page.locator("[data-test=impact]")).toContainText("AP Operations: Lock after 5 minutes (locked)");
+  await expect(page.locator("[data-test=impact]")).toContainText("IT admins: Lock after 5 minutes (locked)");
   await page.locator("h1").scrollIntoViewIfNeeded();
   await page.evaluate(() => document.querySelector("main.content")?.scrollTo(0, 0));
   await shot(page, "settings-locked-for-a-group");
   await page.click("[data-test=publish]");
   await expect(page.locator(".notice")).toContainText("Published");
   await close();
+
+  // The pilot device has it within the propagation budget, and Settings
+  // shows it locked; the person's own 24-hour clock is theirs to change.
+  const settings = await browser.newPage();
+  const started = Date.now();
+  await expect(async () => {
+    await settings.goto(SETTINGS_URL);
+    await expect(settings.locator('[data-setting="lock.after_minutes"] [data-test=locked]')).toHaveCount(1, { timeout: 300 });
+  }).toPass({ timeout: PROPAGATION_BUDGET_MS });
+  measured.setting_propagation_ms = Date.now() - started;
+  await expect(settings.locator('[data-setting="lock.after_minutes"]')).toContainText("5 minutes");
+  await settings.locator('input[name="clock.hour24"]').check();
+  await expect(settings.locator(".banner")).toContainText("24-hour clock is on");
+  await settings.screenshot({ path: join(CONSOLE_SHOTS, "settings-app-locked-by-it.png") });
+  await settings.locator('[data-setting="clock.hour24"] .link').click();
+  await expect(settings.locator(".banner")).toContainText("24-hour clock is off");
+  await settings.close();
 });
 
 /** Signs a support person in, in a context of their own. */

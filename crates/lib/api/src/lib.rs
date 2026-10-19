@@ -16,6 +16,7 @@
 
 mod approval;
 mod apps;
+pub mod settings;
 mod tailoring;
 mod task;
 mod text;
@@ -110,6 +111,9 @@ pub mod methods {
     /// `()` → [`crate::PowerResult`]. Root only. The machine woke: agents
     /// paused for sleep carry on.
     pub const SYSTEM_RESUME: &str = "system.resume";
+    /// `()` → [`crate::settings::SettingsView`]: the caller's device
+    /// settings (UX-1), as their desktop applies them.
+    pub const SETTINGS_GET: &str = "settings.get";
     /// `()` → `()`, then [`EVENT`] notifications until disconnect.
     pub const EVENTS_SUBSCRIBE: &str = "events.subscribe";
     /// Server notification carrying an [`crate::Event`].
@@ -147,6 +151,13 @@ pub struct AuditVerifyResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
-    TaskUpdated { task: Box<TaskView> },
-    TaskRemoved { task: glass_types::TaskId },
+    TaskUpdated {
+        task: Box<TaskView>,
+    },
+    TaskRemoved {
+        task: glass_types::TaskId,
+    },
+    /// The subscriber's device settings changed: a new policy, or their
+    /// own choice. Ask `settings.get` again (UX-1).
+    SettingsChanged,
 }

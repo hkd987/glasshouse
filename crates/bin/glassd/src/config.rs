@@ -31,6 +31,11 @@ pub struct Config {
     /// (`~/Mail`, `~/Calendar`) lives in this folder instead of their home.
     #[serde(default)]
     pub dev_home: Option<PathBuf>,
+    /// The browser engine's policy folder, where glassd writes the
+    /// browser's settings from policy as `managed/org.json` and
+    /// `recommended/org.json` (UX-1, ADR 0029). Unset writes none.
+    #[serde(default)]
+    pub browser_policies: Option<PathBuf>,
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
     /// Defaults to `<state_dir>/audit/audit.log`.
@@ -585,7 +590,7 @@ mod tests {
         let (apps, skipped) = config.load_apps(&registry());
         assert!(skipped.is_empty(), "{skipped:?}");
         let ids: Vec<&str> = apps.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, ["calendar", "mail", "store"]);
+        assert_eq!(ids, ["calendar", "mail", "settings", "store"]);
     }
 
     #[test]

@@ -641,6 +641,8 @@ async fn watch(ctl: &Ctl) -> anyhow::Result<()> {
             Event::TaskRemoved { task } => {
                 tiles.remove(&task);
             }
+            // The desktop's business, not a tile's.
+            Event::SettingsChanged => continue,
         }
         if interactive {
             redraw(&tiles);

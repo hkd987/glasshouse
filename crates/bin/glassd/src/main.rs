@@ -9,6 +9,7 @@
 //! it (fail closed), and with `--console-errors` (how rc.d/glassd starts it)
 //! the reason also goes to the system console, where it shows at boot.
 
+mod browser;
 mod config;
 mod managed;
 
@@ -156,10 +157,23 @@ struct Prepared {
 /// `catalog.search` and the Store read (GA-2, DV-11) and the people
 /// directory (AD-1). The sync replaces each whole; actions read the one in
 /// force.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct OrgData {
     pub(crate) catalog: CatalogHandle,
     pub(crate) directory: glass_managed::DirectoryHandle,
+    /// Device settings: policy's, and each person's choices, kept in the
+    /// state directory by uid (UX-1, ADR 0029).
+    pub(crate) settings: glass_runtime::SettingsHandle,
+}
+
+impl OrgData {
+    pub(crate) fn new(state_dir: &std::path::Path) -> Self {
+        Self {
+            catalog: CatalogHandle::new(),
+            directory: glass_managed::DirectoryHandle::new(),
+            settings: glass_runtime::SettingsHandle::new(state_dir.join("settings")),
+        }
+    }
 }
 
 /// Reads and checks the config and policy, from local disk only.
@@ -179,7 +193,7 @@ fn prepare(args: &Args) -> anyhow::Result<Prepared> {
             ));
         }
     }
-    let org = OrgData::default();
+    let org = OrgData::new(&config.state_dir);
     let registry = registry(&config, &loaded.policy, &org)?;
     for warning in loaded.policy.lint(&registry.lint_info()) {
         tracing::warn!("policy: {warning}");
@@ -239,6 +253,7 @@ fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<R
         // Mail's service from IT (NV-3): a new policy brings it, with the
         // registry rebuilt around it.
         mail: policy.mail().cloned(),
+        settings: org.settings.clone(),
         managed: config.managed.is_some(),
     })?)
 }
@@ -369,10 +384,28 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         snapshots,
         audit,
         gateway: models.gateway,
+        settings: org.settings.clone(),
     });
 
     // A new agent version re-checks every layer on it (TL-13).
     runtime.recheck_layers();
+
+    // The browser's settings from policy (UX-1): written now, and again
+    // whenever a new policy changes anyone's settings.
+    if let Some(dir) = config.browser_policies.clone() {
+        let settings = org.settings.clone();
+        let write = move || {
+            if let Err(e) = browser::write(&dir, &settings.device()) {
+                tracing::warn!("writing the browser's policy in {}: {e}", dir.display());
+            }
+        };
+        write();
+        org.settings.on_change(move |uid| {
+            if uid.is_none() {
+                write();
+            }
+        });
+    }
 
     let listener = bind_control_socket(&config.control_socket)?;
     // The app socket (ADR 0024): world-connectable too, authorized by uid,

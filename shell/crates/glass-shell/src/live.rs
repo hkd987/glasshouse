@@ -4,6 +4,7 @@
 //! makes the calls it returns, handing their answers back
 //! ([`Live::detail`], [`Live::undo_report`]).
 
+use glass_api::settings::SettingsView;
 use glass_api::{
     AnswerApproval, ApprovalAnswer, ApprovalScope, Event, TaskDetail, TaskRef, TaskView,
     UndoReport, UndoRequest, methods,
@@ -75,7 +76,16 @@ pub struct Live {
     /// What the keyboard has selected in the open menu or the launcher
     /// (UX-20): a line or app, by its place in [`Live::lines`].
     selected: Option<(List, usize)>,
+    /// The person's device settings from glassd (UX-1, ADR 0029).
+    settings: SettingsView,
+    /// When the person last pressed a key or moved the pointer, for
+    /// locking after `lock.after_minutes` without use.
+    last_input: Instant,
 }
+
+/// The screen locks after this long without use unless IT or the person
+/// set otherwise (`lock.after_minutes`).
+const LOCK_AFTER_MINUTES: i64 = 10;
 
 /// A list the arrows move through and Enter chooses from (UX-20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +213,9 @@ pub enum Effect {
     /// [`Live::set_apps`]: the launcher shows what they installed from the
     /// Store since it last opened (DV-11).
     ListApps,
+    /// Ask for the person's device settings again (`settings.get`) and
+    /// hand them to [`Live::set_settings`] (UX-1).
+    LoadSettings,
 }
 
 impl Effect {
@@ -253,6 +266,8 @@ impl Live {
             dock_raised: false,
             switching: None,
             selected: None,
+            settings: SettingsView::default(),
+            last_input: Instant::now(),
         };
         let waiting: Vec<TaskId> = live
             .tasks
@@ -320,6 +335,37 @@ impl Live {
     /// is on the screen, so windows have all of it under the menu bar, and
     /// is up when none is, with the launcher, or when the pointer brought
     /// it up at the screen's bottom edge ([`Live::pointer_at`]).
+    /// The person's device settings, from `settings.get` (UX-1). True when
+    /// it changes what's drawn.
+    pub fn set_settings(&mut self, settings: SettingsView) -> bool {
+        let redraw = settings.flag("clock.hour24", false) != self.hour24();
+        self.settings = settings;
+        redraw
+    }
+
+    fn hour24(&self) -> bool {
+        self.settings.flag("clock.hour24", false)
+    }
+
+    /// The person used the keyboard or pointer at `at`.
+    pub fn touched(&mut self, at: Instant) {
+        self.last_input = at;
+    }
+
+    /// Whether the screen should lock at `at` for going unused as long as
+    /// `lock.after_minutes` says (UX-1). Only a lockable, unlocked screen.
+    pub fn idle_too_long(&self, at: Instant) -> bool {
+        let minutes = self
+            .settings
+            .number("lock.after_minutes", LOCK_AFTER_MINUTES)
+            .clamp(1, 24 * 60);
+        let limit = Duration::from_secs(u64::try_from(minutes).unwrap_or(10) * 60);
+        self.lockable
+            && self.locked.is_none()
+            && self.leaving.is_none()
+            && at.saturating_duration_since(self.last_input) >= limit
+    }
+
     pub fn shows_dock(&self) -> bool {
         self.dock_raised || self.launcher || self.windows.iter().all(|w| w.minimized)
     }
@@ -435,6 +481,7 @@ impl Live {
                 }
                 None
             }
+            Event::SettingsChanged => Some(Effect::LoadSettings),
         }
     }
 
@@ -1182,6 +1229,7 @@ impl Live {
                 .collect(),
             apps: self.apps.iter().map(|app| app.id.clone()).collect(),
             dock: self.shows_dock(),
+            clock: desktop::clock(now, self.hour24()),
             ..Desktop::live(&self.tasks, now)
         };
         let mut overlays = Vec::new();
