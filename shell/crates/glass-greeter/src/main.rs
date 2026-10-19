@@ -181,6 +181,11 @@ async fn supervise(args: &Args) -> anyhow::Result<()> {
             return stopped(&args.tty);
         };
         eprintln!("glass-greeter: {user}'s session ended ({status:?})");
+        // What the session left running goes with it before the screen
+        // and input devices go to anyone else (agents, in jails, stay).
+        if let Err(e) = users::end_processes(&user) {
+            eprintln!("glass-greeter: ending {user}'s processes: {e}");
+        }
         if let Some(dir) = &runtime {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -606,6 +611,11 @@ async fn setup(tty: &Path) -> anyhow::Result<String> {
                                 Err(e) => {
                                     eprintln!("glass-greeter: creating {login}: {e}");
                                     setup.failed("Your account couldn't be created. Try again.");
+                                    // The password is to type again.
+                                    display.focus(
+                                        setup::view(&theme, &setup.screen(), display.size()),
+                                        setup::PASSWORD,
+                                    );
                                 }
                             }
                         }

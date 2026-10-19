@@ -33,6 +33,8 @@ pub struct Display {
     super_alone: bool,
     /// Keys held down in the apps.
     app_keys: AppKeys,
+    /// Alt is down (Alt Tab's switcher stays while it is, DK-2).
+    alt_held: bool,
 }
 
 /// A batch of input as the UI takes it.
@@ -47,8 +49,6 @@ pub struct Typed {
     /// Super went down and up with nothing else pressed (Windows' Start
     /// key, DK-2).
     pub super_tapped: bool,
-    /// Alt went up: the end of Alt Tab (DK-2).
-    pub alt_released: bool,
 }
 
 /// Input for the window under the pointer or with the keyboard.
@@ -108,6 +108,7 @@ impl Display {
             pressed_on_app: false,
             super_alone: false,
             app_keys: AppKeys::default(),
+            alt_held: false,
         })
     }
 
@@ -133,6 +134,11 @@ impl Display {
     /// draw over, so the text console doesn't flash in between.
     pub fn hand_over(self) {
         self.fb.hand_over();
+    }
+
+    /// Whether Alt is down, as of the last input.
+    pub fn alt_held(&self) -> bool {
+        self.alt_held
     }
 
     /// The screen's size in pixels.
@@ -236,7 +242,9 @@ impl Display {
                         _ => {}
                     }
                     // evdev's KEY_LEFTALT and KEY_RIGHTALT.
-                    typed.alt_released |= matches!(code, 56 | 100) && value == 0;
+                    if matches!(code, 56 | 100) && value != 2 {
+                        self.alt_held = value == 1;
+                    }
                     let mut claimed_any = false;
                     for press in self.keyboard.key(code, value) {
                         let claimed =

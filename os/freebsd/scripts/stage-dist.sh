@@ -43,8 +43,9 @@ ports_cache=$CACHE_DIR/ports/$FREEBSD_PORTS_REPO/All
 need tar zstd
 while read -r package paths; do
 	[[ -z $package || $package == \#* ]] && continue
-	file=$(find "$ports_cache" \( -name "$package.pkg" -o -name "$package~*.pkg" \) 2>/dev/null | head -1)
-	[[ -n $file ]] || die "$package isn't in ${ports_cache#"$REPO_ROOT"/} (os/freebsd/scripts/ports.sh vm-install ${package%-*} fetches it)"
+	# No cache yet makes find fail; the message below says what to run.
+	file=$(find "$ports_cache" \( -name "$package.pkg" -o -name "$package~*.pkg" \) 2>/dev/null | head -1 || true)
+	[[ -n $file ]] || die "$package isn't in ${ports_cache#"$REPO_ROOT"/} (make freebsd-ports fetches it)"
 	members=()
 	for path in $paths "usr/local/share/licenses/$package"; do members+=("/$path"); done
 	tar --zstd -xf "$file" -C "$DIST_DIR" "${members[@]}" 2>/dev/null ||

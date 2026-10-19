@@ -16,13 +16,16 @@ out=${IMAGE_OUT:-$IMAGES_DIR/glasshouse-$FREEBSD_VERSION-$FREEBSD_ARCH.qcow2}
 export VM_DIR=${BAKE_VM_DIR:-$BUILD_DIR/vm/bake} VM_SSH_PORT=${BAKE_SSH_PORT:-2223}
 vm=$FREEBSD_SCRIPTS_DIR/vm.sh
 
-trap '"$vm" down >/dev/null 2>&1 || true' EXIT
+# Running, for tools/cleanup.sh: build/dist and the bake VM are this build's until it ends.
+mkdir -p "$IMAGES_DIR"
+echo $$ >"$IMAGES_DIR/.bake.pid"
+trap '"$vm" down >/dev/null 2>&1 || true; rm -f "$IMAGES_DIR/.bake.pid"' EXIT
 "$vm" reset
 "$vm" up
 "$vm" wait
 "$FREEBSD_SCRIPTS_DIR/deploy.sh"
 "$vm" down
-trap - EXIT
+trap 'rm -f "$IMAGES_DIR/.bake.pid"' EXIT
 
 log "flattening into ${out#"$REPO_ROOT"/}"
 mkdir -p "$(dirname "$out")"

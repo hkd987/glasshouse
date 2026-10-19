@@ -29,18 +29,21 @@ list=$FREEBSD_OS_DIR/images/$image.pkgs
 out=${IMAGE_OUT:-$IMAGES_DIR/glasshouse-$FREEBSD_VERSION-$FREEBSD_ARCH-$image.qcow2}
 inventory=${out%.qcow2}.packages.txt
 # Everything the root is made from; the same inputs make the same root.
-key=$(cat "$list" "$FREEBSD_SCRIPTS_DIR/pkgbase-root.sh" <(echo "$FREEBSD_PKGBASE_CATALOG_SHA256 ${IMAGE_DISK_SIZE:-6G}") |
+# The build VM's image too: it brings pkg, the base packages' signing keys and the OS version.
+key=$(cat "$list" "$FREEBSD_SCRIPTS_DIR/pkgbase-root.sh" <(echo "$FREEBSD_PKGBASE_CATALOG_SHA256 $FREEBSD_VM_IMAGE_SHA256 ${IMAGE_DISK_SIZE:-6G}") |
 	sha256sum | cut -c1-12)
 root_disk=$IMAGES_DIR/.$image-root-$key.qcow2
 export VM_DIR=${BAKE_VM_DIR:-$BUILD_DIR/vm/bake} VM_SSH_PORT=${BAKE_SSH_PORT:-2223}
 vm=$FREEBSD_SCRIPTS_DIR/vm.sh
 start=$SECONDS
 mkdir -p "$VM_DIR" "$IMAGES_DIR"
+# Running, for tools/cleanup.sh: build/dist, the bake VM and a .part root are this build's.
+echo $$ >"$IMAGES_DIR/.bake.pid"
 mirror=
 cleanup() {
 	"$vm" down >/dev/null 2>&1 || true
 	[[ -z $mirror ]] || kill "$mirror" 2>/dev/null || true
-	rm -f "$root_disk.part" "$inventory.part"
+	rm -f "$root_disk.part" "$inventory.part" "$IMAGES_DIR/.bake.pid"
 }
 trap cleanup EXIT
 

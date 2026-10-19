@@ -757,6 +757,8 @@ impl Live {
                 self.menu = false;
                 self.command = None;
                 self.window = None;
+                self.launcher = false;
+                self.switching = None;
                 self.locked = Some(Locked::default());
                 Some(Effect::Focus(login::PASSWORD))
             }

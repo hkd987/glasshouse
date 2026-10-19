@@ -693,9 +693,6 @@ impl Shell {
         if typed.super_tapped && !self.live.is_locked() {
             messages.push(Message::ToggleLauncher);
         }
-        if typed.alt_released && self.live.is_switching() {
-            messages.push(Message::SwitchDone);
-        }
         if !typed.events.is_empty() {
             let bar = self.live.command_bar();
             let view = self
@@ -714,15 +711,17 @@ impl Shell {
             }
             match self.live.update(message) {
                 Some(Effect::Focus(id)) => self.focus(id),
-                Some(Effect::Activate(id)) => {
-                    if let Some(apps) = self.apps.as_mut() {
-                        apps.activate(id);
-                        let title = self.listed.iter().find(|w| w.id == id);
-                        eprintln!("alt tab: raised {}", title.map_or("?", |w| &w.title));
-                    }
-                }
+                Some(Effect::Activate(id)) => self.activate(id),
                 Some(effect) => effects.push(effect),
                 None => {}
+            }
+        }
+        // Alt let go of, at any point in the batch (even with the Tab that
+        // opened the switcher): Alt Tab ends, raising the window chosen.
+        if self.live.is_switching() && !self.display.alt_held() {
+            self.dirty = true;
+            if let Some(Effect::Activate(id)) = self.live.update(Message::SwitchDone) {
+                self.activate(id);
             }
         }
         // Locked, the password field is all there is to type into: a click
@@ -731,6 +730,19 @@ impl Shell {
             self.focus(login::PASSWORD);
         }
         effects
+    }
+
+    /// Raises an app's window and gives it the keyboard (Alt Tab), and
+    /// shows it at once: the apps hear of the focus and the windows are
+    /// composed again now, not with the next frame some app draws.
+    fn activate(&mut self, id: u64) {
+        let Some(apps) = self.apps.as_mut() else {
+            return;
+        };
+        apps.activate(id);
+        let title = self.listed.iter().find(|w| w.id == id);
+        eprintln!("alt tab: raised {}", title.map_or("?", |w| &w.title));
+        self.apps_turn();
     }
 
     /// Gives the keyboard focus to the widget with this id.

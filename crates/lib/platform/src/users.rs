@@ -180,6 +180,36 @@ pub fn full_name_problem(full_name: &str) -> Option<&'static str> {
 /// home of their own (its own ZFS dataset when `/home` is one, so undo can
 /// restore it from snapshots, PA-5), and their password, which `pw` reads
 /// from its standard input and never sees on a command line. Root only.
+/// Ends every process of `login`'s that isn't in a jail, when their
+/// session has ended: one left running could read the keyboard or the
+/// screen it opened, and so the next person's password. Agents run in
+/// jails and keep working (PM-5).
+pub fn end_processes(login: &str) -> crate::Result<()> {
+    use crate::PlatformError;
+
+    if !cfg!(target_os = "freebsd") {
+        return Err(PlatformError::Unsupported("ending processes".into()));
+    }
+    if login.is_empty() || login.starts_with('-') || login.contains(char::is_whitespace) {
+        return Err(PlatformError::Unsafe(format!(
+            "{login:?} is not an account name"
+        )));
+    }
+    let status = std::process::Command::new("/bin/pkill")
+        .args(["-KILL", "-U", login, "-j", "none"])
+        .status()
+        .map_err(|e| PlatformError::io("cannot run pkill", e))?;
+    // 1: nothing was left running.
+    match status.code() {
+        Some(0 | 1) => Ok(()),
+        _ => Err(PlatformError::Command {
+            command: format!("pkill -KILL -U {login} -j none"),
+            status: status.to_string(),
+            stderr: String::new(),
+        }),
+    }
+}
+
 pub fn create_person(login: &str, full_name: &str, password: &str) -> crate::Result<()> {
     use crate::{PlatformError, cmd};
 

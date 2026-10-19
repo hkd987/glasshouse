@@ -78,7 +78,14 @@ mapfile -t stale < <(find target/*/deps target/*/*/deps shell/target/*/deps shel
 	sort -rn | awk '{ key = $2; sub(/-[0-9a-f]+$/, "", key); if (seen[key]++) print $2 }')
 ((${#stale[@]})) && gone "${stale[@]}"
 # An image build deploys build/dist while its bake VM runs: leave it until then.
-bake_running() { [[ -f build/vm/bake/qemu.pid ]] && kill -0 "$(cat build/vm/bake/qemu.pid)" 2>/dev/null; }
+# The bake scripts keep their pid in build/images/.bake.pid while they run, QEMU up or not.
+bake_running() {
+	local pid
+	for pid in build/images/.bake.pid build/vm/bake/qemu.pid; do
+		[[ -f $pid ]] && kill -0 "$(cat "$pid")" 2>/dev/null && return 0
+	done
+	return 1
+}
 if bake_running; then echo "an image build is running: build/dist kept"; else [[ -e build/dist ]] && gone build/dist; fi
 [[ -e build/logs ]] && gone build/logs
 
@@ -88,6 +95,10 @@ for dir in build/*/ build/vm/*/; do
 	dir=${dir%/}
 	[[ -e $dir/qmp.sock || -e $dir/disk.qcow2 ]] || continue
 	[[ $dir == build/vm ]] && continue
+	if [[ $dir == build/vm/bake ]] && bake_running; then
+		echo "an image build is running, kept: $dir"
+		continue
+	fi
 	if running "$dir"; then
 		echo "running, kept: $dir"
 	else
