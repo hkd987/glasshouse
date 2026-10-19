@@ -257,6 +257,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 }
                 // A blank screen comes back; that key or move does nothing else.
                 if shell.live.wake() {
+                    eprintln!("blank: woke");
                     shell.display.show_pointer();
                     shell.draw(true);
                     continue;
@@ -333,6 +334,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 // And whether it has gone unused long enough to blank
                 // (`display.blank_after_minutes`, ADR 0031).
                 if shell.live.blank_due(Instant::now()) {
+                    eprintln!("blank: the screen went unused");
                     shell.live.blank();
                     shell.display.hide_pointer();
                 }
