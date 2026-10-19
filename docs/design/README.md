@@ -37,7 +37,7 @@ light desktop; accent `#3D6BFF` for working and you're-driving; attention
 | Needs-you question, Review drafts / Approve and send | `needs: ApprovalView` (`summary`, `items`; `labels` are the action's own answer words, `ActionDef.ask`, "Review" and "Approve" by default) → `approval.answer` |
 | "Allow sends for the rest of this task" | `ApprovalAnswer::Approve { scope: Task }` |
 | Screen thumbnail with labeled agent cursor (AW-2) | **Not built**: needs screen-control agents |
-| Menu bar: app menus, "3 agents" pill with one dot per tile (a button: it opens the agents menu), Wi-Fi, battery, clock | `task.list` counts and states; app menus come from the focused app (shell), and with none focused the left side is only the mark (product decision, 2026-10-18: the desktop isn't an app). The mark opens the system menu, as a Mac's Apple menu: About Glasshouse, Check for Updates (dimmed until updates ship), "Hand an agent a task…" (Ctrl Space, the command bar), Force Quit (Alt Super Esc, Ctrl Shift Esc), Restart…, Shut Down… (each asked first) and "Sign out <name>…"; apps join it when they have windows. Wi-Fi and battery from the system (PM, CF) |
+| Menu bar: app menus, "3 agents" pill with one dot per tile (a button: it opens the agents menu), Wi-Fi, battery, clock | `task.list` counts and states; app menus come from the focused app (shell), and with none focused the left side is only the mark (product decision, 2026-10-18: the desktop isn't an app). The mark opens the system menu, as a Mac's Apple menu: About Glasshouse, Check for Updates (dimmed until updates ship), "Hand an agent a task…" (Ctrl Space, the command bar), Force Quit (Alt Super Esc, Ctrl Shift Esc), Restart…, Shut Down… (each asked first), then Lock Screen (Ctrl Super Q, Super L) paired with "Sign out <name>…" as on a Mac; apps join it when they have windows. Wi-Fi and battery from the system (PM, CF) |
 | Dock: launcher, apps with open dots, calendar date, Agents with a needs-you badge | Apps from the catalog (shell); the badge is the count of `NeedsYou` tiles. Product decision (2026-10-19): Files always first and the Trash always last, as a Mac's Finder and Trash, with the agents beside the Trash past the separator; the Trash shows full when `~/.local/share/Trash/files` has anything. Arranging the apps between, and opening them, come with app windows (M2b) |
 | Command bar over everything, Ctrl Space (DA-1) | `task.plan` on enter; see Command bar below |
 | Live updates | `events.subscribe` → `event` notifications (`TaskUpdated`, `TaskRemoved`) |
@@ -322,7 +322,7 @@ splash shows the mark alone; the shell draws the bar once it starts (M2).
 
 | Element | Source |
 |---|---|
-| Date and large clock on the wallpaper | Shell (lock screen, UI-4) |
+| Date and large clock on the wallpaper | Shell (sign-in and lock screens, UI-4; the lock screen is the same look for the person signed in, unlocked through the sign-in service, ADR 0019) |
 | Avatar, name, password field, "Touch the fingerprint sensor" | The greeter, signing in through PAM (**not built**); fingerprint and passkeys are CF-2 (**not built**) |
 | "[Org name] managed device · signs in with Entra ID" | Enrollment and directory sign-in (AD-1, **not built**) |
 | Switch user, accessibility, Wi-Fi, battery | Shell; accessibility through AccessKit (UI-4) |

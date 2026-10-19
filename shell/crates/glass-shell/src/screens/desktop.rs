@@ -37,6 +37,9 @@ pub struct Desktop<'a> {
     /// The menu under the mark at the left of the menu bar, when it's open:
     /// the name of the person signed in, for "Sign out <name>".
     pub system_menu: Option<String>,
+    /// Whether the system menu's Lock Screen can be chosen: the sign-in
+    /// screen started this session and can check the password to unlock it.
+    pub lockable: bool,
     /// Whether the Trash at the right end of the dock has anything in it.
     pub trash_full: bool,
 }
@@ -74,6 +77,7 @@ impl<'a> Desktop<'a> {
             tiles: Tiles::Hidden,
             wallpaper: true,
             system_menu: None,
+            lockable: false,
             trash_full: false,
         }
     }
@@ -162,6 +166,7 @@ pub fn view<'a>(
             pin(system_menu(
                 theme,
                 desktop.system_menu.as_deref().unwrap_or_default(),
+                desktop.lockable,
             ))
             .x(SYSTEM_MENU_LEFT)
             .y(MENU_BAR_HEIGHT + 2.0)
@@ -346,7 +351,7 @@ const SYSTEM_MENU_LEFT: f32 = 6.0;
 /// have windows); Force Quit; Restart and Shut Down, each asked first;
 /// signing out (Shift Super Q, as Shift Command Q on a Mac). Sleep, locking
 /// the screen and switching users wait for the compositor (ADR 0019).
-fn system_menu<'a>(theme: &Theme, person: &str) -> Element<'a, Message> {
+fn system_menu<'a>(theme: &Theme, person: &str, lockable: bool) -> Element<'a, Message> {
     let sign_out = if person.is_empty() {
         "Sign out…".to_owned()
     } else {
@@ -382,7 +387,15 @@ fn system_menu<'a>(theme: &Theme, person: &str) -> Element<'a, Message> {
                 Some(Message::AskPower(Power::ShutDown)),
             ),
         ],
-        &[(sign_out, "Shift Super Q", Some(Message::SignOut))],
+        // Paired as on a Mac: Lock Screen (Control Command Q) over Log Out.
+        &[
+            (
+                "Lock Screen".to_owned(),
+                "Ctrl Super Q",
+                lockable.then_some(Message::LockScreen),
+            ),
+            (sign_out, "Shift Super Q", Some(Message::SignOut)),
+        ],
     ];
     // As wide as its longest line, as a menu is. Every line fills that
     // width so the highlight does; the width itself is reckoned from the

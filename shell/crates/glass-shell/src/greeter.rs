@@ -27,15 +27,19 @@ impl Account {
         }
     }
 
-    /// "Dana Ruiz" → "DR": the first letters of the first two words.
+    /// "Dana Ruiz" → "DR".
     pub fn initials(&self) -> String {
-        self.shown()
-            .split_whitespace()
-            .filter_map(|word| word.chars().next())
-            .take(2)
-            .flat_map(char::to_uppercase)
-            .collect()
+        initials(self.shown())
     }
+}
+
+/// "Dana Ruiz" → "DR": the first letters of the first two words.
+pub fn initials(name: &str) -> String {
+    name.split_whitespace()
+        .filter_map(|word| word.chars().next())
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect()
 }
 
 /// What a message asks the greeter to do.
@@ -127,14 +131,10 @@ impl Greeter {
     /// The screen at `now`, local time.
     pub fn screen(&self, now: OffsetDateTime) -> SignIn {
         let account = self.account();
-        let format = |f: &[time::format_description::BorrowedFormatItem<'_>]| {
-            now.format(f).unwrap_or_default()
-        };
+        let (date, time) = clock_lines(now);
         SignIn {
-            date: format(format_description!(
-                "[weekday repr:long], [month repr:long] [day padding:none]"
-            )),
-            time: format(format_description!("[hour repr:12 padding:none]:[minute]")),
+            date,
+            time,
             user: account.map(|a| a.shown().to_owned()).unwrap_or_default(),
             initials: account.map(Account::initials).unwrap_or_default(),
             managed_by: "Signs in with this computer's accounts".into(),
@@ -143,9 +143,23 @@ impl Greeter {
             message: self.message.clone(),
             // No fingerprint sign-in yet.
             fingerprint: false,
+            switch_user: true,
             wallpaper: false,
         }
     }
+}
+
+/// The sign-in screen's (and the lock screen's) date and big clock:
+/// "Monday, October 19" and "8:02".
+pub fn clock_lines(now: OffsetDateTime) -> (String, String) {
+    let format =
+        |f: &[time::format_description::BorrowedFormatItem<'_>]| now.format(f).unwrap_or_default();
+    (
+        format(format_description!(
+            "[weekday repr:long], [month repr:long] [day padding:none]"
+        )),
+        format(format_description!("[hour repr:12 padding:none]:[minute]")),
+    )
 }
 
 #[cfg(test)]

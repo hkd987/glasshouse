@@ -34,8 +34,9 @@ when something happens (a new agent, an ask, an ending) and then go, unless the 
 them; the menu bar's agents pill opens the agents menu with every agent,
 and the mark at its left the system menu (About Glasshouse, Check for
 Updates once updates ship, Hand an agent a task, Force Quit, Restart, Shut
-Down, Sign out; Restart and Shut Down ask first, and the sign-in screen
-carries them out, ADR 0019). With no app in front, the mark is all the menu bar shows on the
+Down, Lock Screen, Sign out; Restart and Shut Down ask first, and the
+sign-in screen carries them out and checks the password that unlocks a
+locked screen, ADR 0019). With no app in front, the mark is all the menu bar shows on the
 left. Buttons and menu
 items answer the pointer as it moves, redrawing only when one changes. Approve on a
 needs-you banner or menu tile answers the ask;

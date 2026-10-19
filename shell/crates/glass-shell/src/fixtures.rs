@@ -352,6 +352,7 @@ pub fn desktop(tasks: &[TaskView]) -> Desktop<'_> {
         tiles: Tiles::Banners(tasks.iter().collect()),
         wallpaper: true,
         system_menu: None,
+        lockable: false,
         trash_full: false,
     }
 }
@@ -420,6 +421,7 @@ pub fn sign_in() -> SignIn {
         password: String::new(),
         message: None,
         fingerprint: true,
+        switch_user: true,
         wallpaper: true,
     }
 }

@@ -63,6 +63,7 @@ fn render_system_menu() -> Frame {
     let state = desktop::Desktop {
         tiles: desktop::Tiles::Hidden,
         system_menu: Some("Dana Ruiz".into()),
+        lockable: true,
         ..fixtures::desktop(&tasks)
     };
     frame(
@@ -70,6 +71,18 @@ fn render_system_menu() -> Frame {
         size(),
         1.0,
     )
+}
+
+/// The locked screen, typing the password that unlocks it.
+fn render_lock() -> Frame {
+    let theme = Theme::glass();
+    let mut live = glass_shell::live::Live::new(fixtures::tasks())
+        .signed_in_as("Dana Ruiz")
+        .lockable();
+    live.update(Message::LockScreen);
+    live.update(Message::PasswordChanged("hunter2".into()));
+    let now = OffsetDateTime::from_unix_timestamp(fixtures::now().unix_seconds()).unwrap();
+    frame(live.view(&theme, None, now, SCREEN), size(), 1.0)
 }
 
 /// About Glasshouse, from the mark's menu.
@@ -384,6 +397,7 @@ fn screens_match_their_snapshots() {
     snapshot("desktop", &render_desktop());
     snapshot("agents-menu", &render_agents_menu());
     snapshot("system-menu", &render_system_menu());
+    snapshot("lock", &render_lock());
     snapshot("about", &render_about());
     snapshot("force-quit", &render_force_quit());
     snapshot("restart", &render_restart());

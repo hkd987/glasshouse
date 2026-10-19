@@ -72,7 +72,23 @@ environment, `setlogin`, PAM session modules, lastlog.
   shutdown messages go to the first terminal, so the supervisor shows the
   last frame on `ttyv8` (no login there) and switches to it first; then the
   kernel's own shutdown splash. Check for Updates is in the menu, dimmed
-  until updates ship as whole images (BS-4, EP-1).
+  until updates ship as whole images (BS-4, EP-1). Neither "Restarting…"
+  frame shows the pointer.
+- **Lock Screen** (the mark's menu, paired with Sign out as on a Mac; Ctrl
+  Super Q or Super L) covers the desktop with the sign-in screen's look for
+  the person signed in; agents keep working, and no shortcut, click or
+  banner gets through. Unlocking needs PAM, so the supervisor checks it: su
+  runs the desktop with its standard input and output piped to the
+  supervisor; the desktop writes `unlock`, a tab and the password as one
+  line, and the supervisor checks it for the session's own account (never
+  another), one request at a time, waits two seconds after a wrong one, and
+  answers `unlocked` or `refused` on the desktop's input. The password is
+  wiped once checked and never logged; other lines the desktop prints go to
+  the log. Only a desktop the sign-in screen started can be locked (`Live::
+  lockable`); one started by hand shows Lock Screen dimmed. The pipe is the
+  desktop's own: agents run in jails under their own uids and never inherit
+  it, and anything else that could write to it is the person's own process,
+  which gains nothing it couldn't get from `su` (and waits as long).
 - Handing over, the screen that ends leaves its last frame up and the
   terminal in graphics mode (`Framebuffer::hand_over`) for the next to draw
   over, so the text console never shows between the sign-in screen and the
@@ -94,3 +110,6 @@ environment, `setlogin`, PAM session modules, lastlog.
   is refused after two seconds; `demo` signs in to their desktop with live
   tiles; signing out returns to the sign-in screen with the devices back
   with root; restarting or stopping the service leaves nothing behind.
+  Locking from the menu or Ctrl Super Q shows the lock screen, a wrong
+  password is refused, shortcuts do nothing while locked, and `demo`'s
+  password brings the desktop back as it was.

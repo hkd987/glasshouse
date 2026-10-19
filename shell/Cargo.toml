@@ -41,7 +41,7 @@ softbuffer = { version = "0.4.8", default-features = false, features = ["kms"] }
 png = "0.18"
 anyhow = "1.0.100"
 serde_json = "1.0"
-tokio = { version = "1.48", features = ["rt", "macros", "time", "signal", "process"] }
+tokio = { version = "1.48", features = ["rt", "macros", "time", "signal", "process", "io-std", "io-util"] }
 # The menu bar clock, in local time. Already built for glass-types.
 time = { version = "0.3.55", features = ["formatting", "macros", "local-offset"] }
 

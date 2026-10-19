@@ -183,7 +183,7 @@ thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
-| UI-4 Shell in Rust with iced and AccessKit | Partial | `shell/` (its own workspace): boot, sign-in, desktop and command-bar screens match the mockups, from `glass_api` data. `glass-shell-fb` draws the desktop on the VM's screen (console framebuffer) with live tiles from `events.subscribe` (`make shell-vm`), keyboard and pointer from evdev, and redraws only what changed. `glass-greeter` signs people in on that screen through PAM and starts their desktop (ADR 0019, `make greeter-vm`). Missing: the compositor (ADR 0016), AccessKit |
+| UI-4 Shell in Rust with iced and AccessKit | Partial | `shell/` (its own workspace): boot, sign-in, desktop and command-bar screens match the mockups, from `glass_api` data. `glass-shell-fb` draws the desktop on the VM's screen (console framebuffer) with live tiles from `events.subscribe` (`make shell-vm`), keyboard and pointer from evdev, and redraws only what changed. `glass-greeter` signs people in on that screen through PAM and starts their desktop, and checks the password that unlocks its lock screen (ADR 0019, `make greeter-vm`). Missing: the compositor (ADR 0016), AccessKit |
 | UI-1 … UI-3 Wayland compositor on Smithay, isolation, agent displays | Not started | ADR 0016 (accepted): framebuffer output in the VM, verified with `glass-shell-fb`; DRM on hardware |
 | UI-5, UI-6 Web apps and native apps with manifests | Not started | ADR 0009 |
 

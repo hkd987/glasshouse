@@ -3,7 +3,7 @@
 
 use iced_core::alignment::{Horizontal, Vertical};
 use iced_core::{Background, Border, Color, Length, Padding, border};
-use iced_widget::{button, column, container, image, row, stack, text, text_input};
+use iced_widget::{Row, button, column, container, image, row, stack, text, text_input};
 
 use crate::theme::{hex, hexa};
 use crate::{Element, Message, Theme, fonts, icons, style, wallpaper};
@@ -27,6 +27,9 @@ pub struct SignIn {
     pub message: Option<String>,
     /// Whether the hint offers the fingerprint sensor.
     pub fingerprint: bool,
+    /// Whether "Switch user" is offered: on the sign-in screen, not the
+    /// locked screen, which only its own person unlocks.
+    pub switch_user: bool,
     /// False leaves the wallpaper out, for a screen that keeps it as its
     /// backdrop (`render::Screen::set_backdrop`).
     pub wallpaper: bool,
@@ -35,17 +38,17 @@ pub struct SignIn {
 /// The id of the password field, to give it the keyboard focus.
 pub const PASSWORD: &str = "sign-in-password";
 
-pub fn view<'a>(theme: &Theme, screen: &'a SignIn, size: (f32, f32)) -> Element<'a, Message> {
+pub fn view<'a>(theme: &Theme, screen: &SignIn, size: (f32, f32)) -> Element<'a, Message> {
     let glass = |alpha: f32| hexa(0xF5F7FA, alpha);
     let edge = hexa(0xFFFFFF, 0.25);
     let accent = theme.accent;
 
     let clock = column![
-        text(&screen.date)
+        text(screen.date.clone())
             .size(22)
             .font(fonts::MEDIUM)
             .color(Color { a: 0.85, ..INK }),
-        text(&screen.time)
+        text(screen.time.clone())
             .size(112)
             .font(fonts::SEMIBOLD)
             .color(INK)
@@ -55,7 +58,7 @@ pub fn view<'a>(theme: &Theme, screen: &'a SignIn, size: (f32, f32)) -> Element<
     .align_x(Horizontal::Center);
 
     let avatar = container(
-        text(&screen.initials)
+        text(screen.initials.clone())
             .size(26)
             .font(fonts::MEDIUM)
             .color(INK),
@@ -110,10 +113,13 @@ pub fn view<'a>(theme: &Theme, screen: &'a SignIn, size: (f32, f32)) -> Element<
 
     let user = column![
         avatar,
-        text(&screen.user).size(18).font(fonts::SEMIBOLD).color(INK),
+        text(screen.user.clone())
+            .size(18)
+            .font(fonts::SEMIBOLD)
+            .color(INK),
         password,
         match &screen.message {
-            Some(message) => text(message.as_str()).size(13).color(hex(0xFFD7A8)),
+            Some(message) => text(message.clone()).size(13).color(hex(0xFFD7A8)),
             None => text(if screen.fingerprint {
                 "Touch the fingerprint sensor or enter your password"
             } else {
@@ -126,15 +132,18 @@ pub fn view<'a>(theme: &Theme, screen: &'a SignIn, size: (f32, f32)) -> Element<
     .spacing(14)
     .align_x(Horizontal::Center);
 
-    let switch_user = button(text("Switch user").size(13).color(INK))
-        .on_press(Message::SwitchUser)
-        .padding(Padding::from([7.0, 12.0]))
-        .style(style::button_like(style::panel(glass(0.16), 16.0)));
-    let mut status = row![
-        switch_user,
-        icons::view(&icons::ACCESSIBILITY, INK, 20.0, 20.0),
-        icons::view(&icons::WIFI, INK, 20.0, 20.0),
-    ];
+    let mut status = Row::new();
+    if screen.switch_user {
+        status = status.push(
+            button(text("Switch user").size(13).color(INK))
+                .on_press(Message::SwitchUser)
+                .padding(Padding::from([7.0, 12.0]))
+                .style(style::button_like(style::panel(glass(0.16), 16.0))),
+        );
+    }
+    status = status
+        .push(icons::view(&icons::ACCESSIBILITY, INK, 20.0, 20.0))
+        .push(icons::view(&icons::WIFI, INK, 20.0, 20.0));
     if let Some(percent) = screen.battery_percent {
         status = status.push(
             row![
@@ -147,7 +156,7 @@ pub fn view<'a>(theme: &Theme, screen: &'a SignIn, size: (f32, f32)) -> Element<
     }
     let status = status.spacing(18).align_y(Vertical::Center);
     let bottom = row![
-        text(&screen.managed_by)
+        text(screen.managed_by.clone())
             .size(13)
             .color(Color { a: 0.75, ..INK }),
         iced_widget::space().width(Length::Fill),

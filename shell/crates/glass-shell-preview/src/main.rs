@@ -5,7 +5,7 @@
 //! glass-shell-preview [--out DIR] [--scale 2] [--socket /var/run/glasshouse/control.sock]
 //! ```
 //!
-//! Writes `boot.png`, `login.png`, `desktop.png`, `desktop-banner.png`,
+//! Writes `boot.png`, `login.png`, `lock.png`, `desktop.png`, `desktop-banner.png`,
 //! `agents-menu.png`, `system-menu.png`, `about.png`, `force-quit.png`,
 //! `restart.png`,
 //! `command-bar.png` and the
@@ -95,6 +95,13 @@ fn main() -> anyhow::Result<()> {
 
     write("boot.png", boot::view(&theme, 0.42))?;
     write("login.png", login::view(&theme, &sign_in, (w, h)))?;
+    // The locked screen, a password half typed.
+    let mut locked = glass_shell::live::Live::new(tasks.clone())
+        .signed_in_as("Dana Ruiz")
+        .lockable();
+    locked.update(Message::LockScreen);
+    locked.update(Message::PasswordChanged("hunter2".into()));
+    write("lock.png", locked.view(&theme, None, local_now, (w, h)))?;
 
     // Live tiles count their time from now, not the artboard's afternoon.
     let state = match live {
@@ -155,6 +162,7 @@ fn main() -> anyhow::Result<()> {
     let system = desktop::Desktop {
         tiles: desktop::Tiles::Hidden,
         system_menu: Some("Dana Ruiz".into()),
+        lockable: true,
         ..state.clone()
     };
     write(

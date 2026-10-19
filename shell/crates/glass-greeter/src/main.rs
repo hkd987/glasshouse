@@ -10,7 +10,9 @@
 //! `--screen`, as a child process), and when a password checks out it hands
 //! the terminal and input devices to that person and runs their desktop with
 //! `su -l <user> -c <session>`. When the desktop ends (signing out), it takes
-//! the devices back and shows the sign-in screen again.
+//! the devices back and shows the sign-in screen again. While the desktop
+//! runs, it checks the password that unlocks the desktop's locked screen
+//! (`glass_shell::session`): the desktop isn't root and can't ask PAM.
 //!
 //! With `--screen` it shows the sign-in screen until someone signs in, then
 //! prints `signed-in <user>` and exits. The screen runs as its own process
@@ -32,13 +34,18 @@ use glass_shell::{Theme, wallpaper};
 use glass_shell_fb::display::Display;
 use glass_shell_fb::input;
 use time::{OffsetDateTime, UtcOffset};
-use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 /// The PAM policy (`/usr/local/etc/pam.d/glasshouse`).
 const PAM_SERVICE: &str = "glasshouse";
 /// After a refused password, the wait before the next try.
 const AFTER_REFUSAL: Duration = Duration::from_secs(2);
+/// The longest line taken from the desktop at once: a password fits many
+/// times over, and nothing the desktop writes makes this root process hold
+/// more than that.
+const LONGEST_LINE: u64 = 4096;
 
 struct Args {
     tty: PathBuf,
@@ -143,11 +150,14 @@ async fn supervise(args: &Args) -> anyhow::Result<()> {
             .arg(&user)
             .arg("-c")
             .arg(&args.session)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
             .context("starting the desktop")?;
         let su = session.id();
-        let Some(status) = until_stopped(session.wait(), &mut terminate, || {
+        let tty_name = tty_name(&args.tty);
+        let serving = serve(&mut session, &user, &tty_name);
+        let Some(status) = until_stopped(serving, &mut terminate, || {
             su.into_iter().for_each(end_session);
         })
         .await
@@ -182,6 +192,88 @@ async fn supervise(args: &Args) -> anyhow::Result<()> {
             return stopped(&args.tty);
         }
     }
+}
+
+/// Waits for the desktop to end, answering its requests to unlock its
+/// locked screen meanwhile (`session`): the password is checked with PAM for
+/// the account signed in and no other, one request at a time, with a wait
+/// after a wrong one. Anything else the desktop prints goes to the log.
+async fn serve(
+    session: &mut Child,
+    user: &str,
+    tty_name: &str,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut answers = session.stdin.take();
+    let mut output = session.stdout.take().map(BufReader::new);
+    let mut line = Vec::new();
+    loop {
+        let next = async {
+            match output.as_mut() {
+                Some(out) => out.take(LONGEST_LINE).read_until(b'\n', &mut line).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            status = session.wait() => return status,
+            read = next => {
+                if !matches!(read, Ok(1..)) {
+                    // The desktop closed its output: no more requests.
+                    output = None;
+                    continue;
+                }
+                let mut text = String::from_utf8_lossy(&line).into_owned();
+                line.fill(0);
+                line.clear();
+                match session::parse_unlock(&text) {
+                    Some(password) => {
+                        let answer = unlock(user, tty_name, password).await;
+                        eprintln!("glass-greeter: {user}'s screen: {answer}");
+                        if let Some(desktop) = answers.as_mut() {
+                            let sent = desktop.write_all(format!("{answer}\n").as_bytes()).await;
+                            if let Err(e) = sent {
+                                eprintln!("glass-greeter: answering {user}'s desktop: {e}");
+                            }
+                        }
+                    }
+                    None => eprint!("{text}"),
+                }
+                auth::wipe(&mut text);
+            }
+        }
+    }
+}
+
+/// Checks the password that unlocks `user`'s screen: [`session::UNLOCKED`]
+/// or [`session::REFUSED`], the latter after [`AFTER_REFUSAL`].
+async fn unlock(user: &str, tty_name: &str, password: session::Password) -> &'static str {
+    let (user, tty_name) = (user.to_owned(), tty_name.to_owned());
+    // PAM blocks, and may take a while (it waits after a failure itself).
+    let checked = tokio::task::spawn_blocking(move || {
+        auth::check_password(PAM_SERVICE, &user, &tty_name, password.as_str())
+    })
+    .await;
+    match checked {
+        Ok(Ok(())) => session::UNLOCKED,
+        Ok(Err(AuthError::Refused)) => {
+            tokio::time::sleep(AFTER_REFUSAL).await;
+            session::REFUSED
+        }
+        Ok(Err(other)) => {
+            eprintln!("glass-greeter: unlocking: {other}");
+            session::REFUSED
+        }
+        Err(e) => {
+            eprintln!("glass-greeter: unlocking: {e}");
+            session::REFUSED
+        }
+    }
+}
+
+/// "ttyv0" for `/dev/ttyv0`, as PAM's `PAM_TTY`.
+fn tty_name(tty: &Path) -> String {
+    tty.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Waits for `work`, unless this program is told to stop first: then it
@@ -284,10 +376,7 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
     let mut greeter = Greeter::new(accounts);
     let theme = Theme::glass();
     let mut display = Display::open(tty, |w, h| wallpaper::backdrop(&theme.wallpaper, w, h))?;
-    let tty_name = tty
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let tty_name = tty_name(tty);
     let now = || OffsetDateTime::now_utc().to_offset(offset);
     let draw = |display: &mut Display, greeter: &Greeter| {
         let sign_in = greeter.screen(now());

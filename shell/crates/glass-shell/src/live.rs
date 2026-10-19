@@ -15,10 +15,13 @@ use glass_types::{ApprovalId, SnapshotId, TaskId};
 use iced_core::keyboard::{Key, Modifiers, key::Named};
 use time::OffsetDateTime;
 
+use crate::greeter::{self, initials};
 use crate::screens::command_bar::{self, CommandBar};
 use crate::screens::desktop::{self, Desktop, Tiles};
 use crate::screens::expanded::{self, Expanded, Rollback, Tab};
+use crate::screens::login;
 use crate::screens::system;
+use crate::session::Password;
 use crate::{Element, Message, Power, Theme};
 
 #[derive(Debug)]
@@ -50,6 +53,21 @@ pub struct Live {
     trash_full: bool,
     /// Restarting or shutting down: the desktop's last frame says so.
     leaving: Option<Power>,
+    /// Whether the screen can be locked: the sign-in screen started this
+    /// session and checks the password to unlock it (`session`).
+    lockable: bool,
+    /// The locked screen, while it's locked.
+    locked: Option<Locked>,
+}
+
+/// The locked screen: the sign-in screen's look, for the person signed in.
+#[derive(Debug, Default)]
+struct Locked {
+    password: String,
+    /// Why the last try didn't unlock it.
+    message: Option<String>,
+    /// A password is being checked.
+    checking: bool,
 }
 
 /// A window the system menu opened.
@@ -113,6 +131,9 @@ pub enum Effect {
     /// End the session so the sign-in screen restarts or shuts down the
     /// computer (`session::Power`); the desktop shows it's leaving first.
     Power(Power),
+    /// Ask the sign-in screen to check this password and unlock the screen
+    /// (`session`); its answer goes to [`Live::unlock_answered`].
+    Unlock(Password),
     /// Roll back (`task.undo`, AW-15) and hand the report to
     /// [`Live::undo_report`], or the refusal to [`Live::undo_failed`].
     Undo(UndoRequest),
@@ -158,6 +179,8 @@ impl Live {
             window: None,
             trash_full: false,
             leaving: None,
+            lockable: false,
+            locked: None,
         };
         let waiting: Vec<TaskId> = live
             .tasks
@@ -177,6 +200,30 @@ impl Live {
     pub fn without_wallpaper(mut self) -> Self {
         self.wallpaper = false;
         self
+    }
+
+    /// The screen can be locked: the sign-in screen started this session
+    /// and answers unlock requests (`session`).
+    pub fn lockable(mut self) -> Self {
+        self.lockable = true;
+        self
+    }
+
+    /// Whether the screen is locked.
+    pub fn is_locked(&self) -> bool {
+        self.locked.is_some()
+    }
+
+    /// The sign-in screen's answer to an unlock request.
+    pub fn unlock_answered(&mut self, unlocked: bool) -> Option<Effect> {
+        let locked = self.locked.as_mut()?;
+        if unlocked {
+            self.locked = None;
+            return None;
+        }
+        locked.checking = false;
+        locked.message = Some("That password didn't work. Try again.".into());
+        Some(Effect::Focus(login::PASSWORD))
     }
 
     /// Whether the Trash has anything in it; true when that changed.
@@ -383,12 +430,19 @@ impl Live {
         !self.banners.is_empty()
             && !self.menu
             && !self.system_menu
+            && self.locked.is_none()
             && self.window.is_none()
             && self.open.is_none()
             && self.command.is_none()
     }
 
     fn react(&mut self, message: Message, at: Instant) -> Option<Effect> {
+        // Locked, the screen is the lock screen: nothing else answers.
+        if self.locked.is_some()
+            && !matches!(message, Message::PasswordChanged(_) | Message::SignIn)
+        {
+            return None;
+        }
         match message {
             Message::HoldBanners => {
                 self.held = !self.banners.is_empty();
@@ -575,11 +629,34 @@ impl Live {
                 self.command = None;
                 None
             }
-            Message::RunSuggestion(_)
-            | Message::AcceptAnswer
-            | Message::PasswordChanged(_)
-            | Message::SignIn
-            | Message::SwitchUser => None,
+            Message::LockScreen => {
+                if !self.lockable {
+                    return None;
+                }
+                self.system_menu = false;
+                self.menu = false;
+                self.command = None;
+                self.window = None;
+                self.locked = Some(Locked::default());
+                Some(Effect::Focus(login::PASSWORD))
+            }
+            Message::PasswordChanged(text) => {
+                if let Some(locked) = self.locked.as_mut().filter(|l| !l.checking) {
+                    locked.password = text;
+                }
+                None
+            }
+            Message::SignIn => {
+                let locked = self.locked.as_mut()?;
+                if locked.checking || locked.password.is_empty() {
+                    return None;
+                }
+                locked.checking = true;
+                locked.message = None;
+                let password = std::mem::take(&mut locked.password);
+                Some(Effect::Unlock(Password::new(password)))
+            }
+            Message::RunSuggestion(_) | Message::AcceptAnswer | Message::SwitchUser => None,
             Message::SignOut => {
                 self.system_menu = false;
                 Some(Effect::SignOut)
@@ -610,8 +687,20 @@ impl Live {
     /// Super Q signs out; Alt Super Esc (a Mac's Option Command Esc) or Ctrl
     /// Shift Esc (Windows' task manager, DK-2) opens Force Quit.
     pub fn shortcut(&self, key: &Key, modifiers: Modifiers) -> Option<Message> {
+        // Locked, no shortcut does anything; the lock screen takes the keys.
+        if self.locked.is_some() {
+            return None;
+        }
         let bar = self.command.is_some();
         match key {
+            // Lock the screen: Super L as on Windows (DK-2), Ctrl Super Q as
+            // on a Mac (Control Command Q).
+            Key::Character(c)
+                if (c.eq_ignore_ascii_case("l") && modifiers.logo() && !modifiers.shift())
+                    || (c.eq_ignore_ascii_case("q") && modifiers.logo() && modifiers.control()) =>
+            {
+                Some(Message::LockScreen)
+            }
             Key::Named(Named::Escape)
                 if (modifiers.alt() && modifiers.logo())
                     || (modifiers.control() && modifiers.shift()) =>
@@ -690,6 +779,29 @@ impl Live {
         if let Some(power) = self.leaving {
             return system::leaving_overlay(power);
         }
+        // Locked: the sign-in screen's look, for the person signed in.
+        if let Some(locked) = &self.locked {
+            let (date, time) = greeter::clock_lines(now);
+            let message = if locked.checking {
+                Some("Checking…".to_owned())
+            } else {
+                locked.message.clone()
+            };
+            let screen = login::SignIn {
+                date,
+                time,
+                initials: initials(&self.person),
+                user: self.person.clone(),
+                managed_by: "Locked · agents keep working".into(),
+                battery_percent: None,
+                password: locked.password.clone(),
+                message,
+                fingerprint: false,
+                switch_user: false,
+                wallpaper: self.wallpaper,
+            };
+            return login::view(theme, &screen, size);
+        }
         let expanded = self.expanded(now);
         // Nothing sits over the command bar or the expanded view; otherwise
         // the menu if it's open, else whatever is a banner right now.
@@ -714,6 +826,7 @@ impl Live {
             tiles,
             wallpaper: self.wallpaper,
             system_menu: self.system_menu.then(|| self.person.clone()),
+            lockable: self.lockable,
             trash_full: self.trash_full,
             ..Desktop::live(&self.tasks, now)
         };

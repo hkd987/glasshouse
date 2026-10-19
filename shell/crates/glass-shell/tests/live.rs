@@ -4,6 +4,8 @@
 use glass_api::{AnswerApproval, ApprovalAnswer, TaskRef, methods};
 use glass_shell::live::{Effect, Live};
 use glass_shell::render::Screen;
+use glass_shell::screens::login;
+use glass_shell::session::Password;
 use glass_shell::{Message, Size, Theme, fixtures};
 use iced_core::keyboard::key::{Named, NativeCode, Physical};
 use iced_core::keyboard::{self, Key, Location, Modifiers};
@@ -405,7 +407,7 @@ fn the_mark_opens_the_system_menu_and_sign_out_signs_out() {
                 .find(|m| *m == Message::OpenCommandBar)
         });
     assert!(task.is_some(), "Hand an agent a task, in the system menu");
-    let found = (40..280)
+    let found = (40..320)
         .step_by(6)
         .flat_map(|y| (20..300).step_by(40).map(move |x| (x, y)))
         .find_map(|(x, y)| {
@@ -476,7 +478,7 @@ fn the_system_menu_has_about_and_force_quit() {
     let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
     live.update(Message::ToggleSystemMenu);
     let mut seen = Vec::new();
-    for y in (40..280).step_by(6) {
+    for y in (40..320).step_by(6) {
         for message in click(&mut screen, &live, Point::new(80.0, y as f32)) {
             if !seen.contains(&message) {
                 seen.push(message);
@@ -519,4 +521,124 @@ fn force_quit_lists_the_running_agents_to_choose_from() {
         [Message::CloseSystemWindow],
         "a click outside closes it"
     );
+}
+
+/// Everything the system menu offers, clicked line by line.
+fn system_menu_messages(live: &Live) -> Vec<Message> {
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    let mut seen = Vec::new();
+    for y in (40..320).step_by(6) {
+        for message in click(&mut screen, live, Point::new(80.0, y as f32)) {
+            if !seen.contains(&message) {
+                seen.push(message);
+            }
+        }
+    }
+    seen
+}
+
+/// A key pressed in the focused widget.
+fn key(key: Key, text: Option<&str>) -> Event {
+    Event::Keyboard(keyboard::Event::KeyPressed {
+        key: key.clone(),
+        modified_key: key,
+        physical_key: Physical::Unidentified(NativeCode::Unidentified),
+        location: Location::Standard,
+        modifiers: Modifiers::empty(),
+        text: text.map(Into::into),
+        repeat: false,
+    })
+}
+
+#[test]
+fn lock_screen_is_in_the_system_menu_when_the_sign_in_screen_can_unlock_it() {
+    let mut live = Live::new(fixtures::tasks()).signed_in_as("Dana Ruiz");
+    live.update(Message::ToggleSystemMenu);
+    let seen = system_menu_messages(&live);
+    assert!(seen.contains(&Message::SignOut), "{seen:?}");
+    assert!(
+        !seen.contains(&Message::LockScreen),
+        "shown, but nothing could unlock it: {seen:?}"
+    );
+
+    let mut live = Live::new(fixtures::tasks())
+        .signed_in_as("Dana Ruiz")
+        .lockable();
+    live.update(Message::ToggleSystemMenu);
+    let seen = system_menu_messages(&live);
+    assert!(seen.contains(&Message::LockScreen), "{seen:?}");
+    live.update(Message::LockScreen);
+    assert!(live.is_locked());
+}
+
+#[test]
+fn locked_the_screen_takes_only_the_password_and_unlocks_on_the_answer() {
+    let theme = Theme::glass();
+    let mut live = Live::new(fixtures::tasks())
+        .signed_in_as("Dana Ruiz")
+        .lockable();
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    // Super L as on Windows, Ctrl Super Q as on a Mac.
+    for (c, modifiers) in [
+        ("l", Modifiers::LOGO),
+        ("q", Modifiers::CTRL | Modifiers::LOGO),
+    ] {
+        assert_eq!(
+            live.shortcut(&Key::Character(c.into()), modifiers),
+            Some(Message::LockScreen)
+        );
+    }
+    let Some(Effect::Focus(id)) = live.update(Message::LockScreen) else {
+        panic!("locking focuses the password field");
+    };
+    assert!(live.is_locked());
+    // Nothing but the password: no shortcut, no other message.
+    assert_eq!(
+        live.shortcut(&Key::Named(Named::Space), Modifiers::CTRL),
+        None
+    );
+    assert_eq!(live.update(Message::SignOut), None);
+    assert_eq!(live.update(Message::OpenCommandBar), None);
+    assert!(live.command_bar().is_none());
+
+    screen.focus(live.view(&theme, None, artboard_time(), SIZE), id);
+    let typing = [
+        key(Key::Character("p".into()), Some("p")),
+        key(Key::Character("w".into()), Some("w")),
+        key(Key::Named(Named::Enter), None),
+    ];
+    let mut effects = Vec::new();
+    for press in typing {
+        let messages = {
+            let view = live.view(&theme, None, artboard_time(), SIZE);
+            screen.update(view, &[press], None).messages
+        };
+        effects.extend(messages.into_iter().filter_map(|m| live.update(m)));
+    }
+    assert_eq!(effects, [Effect::Unlock(Password::new("pw".into()))]);
+    // Asked once: pressing Enter again while it's checked asks nothing.
+    assert_eq!(live.update(Message::SignIn), None);
+
+    // A wrong password: still locked, the field focused for another try.
+    assert_eq!(
+        live.unlock_answered(false),
+        Some(Effect::Focus(login::PASSWORD))
+    );
+    assert!(live.is_locked());
+    // The right one: the desktop is back, and its shortcuts.
+    assert_eq!(live.unlock_answered(true), None);
+    assert!(!live.is_locked());
+    assert!(
+        live.shortcut(&Key::Named(Named::Space), Modifiers::CTRL)
+            .is_some()
+    );
+}
+
+#[test]
+fn an_unlocked_screen_cant_be_unlocked_and_a_plain_desktop_cant_lock() {
+    let mut live = Live::new(fixtures::tasks());
+    assert_eq!(live.update(Message::LockScreen), None);
+    assert!(!live.is_locked());
+    assert_eq!(live.unlock_answered(true), None);
+    assert_eq!(live.update(Message::SignIn), None);
 }

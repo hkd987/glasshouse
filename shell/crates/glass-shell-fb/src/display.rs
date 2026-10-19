@@ -62,9 +62,12 @@ impl Display {
         })
     }
 
-    /// No pointer on this screen.
+    /// No pointer on this screen from now on; one already painted goes.
     pub fn hide_pointer(&mut self) {
         self.pointer_shown = false;
+        if let Some(old) = self.painted.take() {
+            self.restore_under(old);
+        }
     }
 
     /// Makes this screen's terminal the one showing (`Framebuffer::show`).
@@ -218,17 +221,24 @@ impl Display {
         if !self.pointer_shown || self.painted == Some(self.pointer) {
             return;
         }
+        if let Some(old) = self.painted {
+            self.restore_under(old);
+        }
         let at = (self.pointer.x as u32, self.pointer.y as u32);
         let pixels = self.screen.bgra();
-        if let Some(old) = self.painted {
-            let rows = pointer::rows(old.y as u32, height);
-            let band = &pixels[rows.start as usize * stride..rows.end as usize * stride];
-            self.fb.write_rows(band, Order::Bgra, width, rows.start);
-        }
         let rows = pointer::rows(at.1, height);
         let mut band = pixels[rows.start as usize * stride..rows.end as usize * stride].to_vec();
         pointer::paint(&mut band, width, rows.start, at.0, at.1);
         self.fb.write_rows(&band, Order::Bgra, width, rows.start);
         self.painted = Some(self.pointer);
+    }
+
+    /// Copies the screen's own pixels back over a pointer painted at `at`.
+    fn restore_under(&mut self, at: Point) {
+        let (width, height) = self.pixels();
+        let stride = width as usize * 4;
+        let rows = pointer::rows(at.y as u32, height);
+        let band = &self.screen.bgra()[rows.start as usize * stride..rows.end as usize * stride];
+        self.fb.write_rows(band, Order::Bgra, width, rows.start);
     }
 }

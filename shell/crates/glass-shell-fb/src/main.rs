@@ -16,12 +16,16 @@
 //! The terminal shows the desktop until the program ends (Ctrl-C or
 //! SIGTERM), then goes back to text. With `--from-sign-in` (the sign-in
 //! screen starts it so) signing out leaves the last frame up for the
-//! sign-in screen to draw over, rather than flashing the text console. `--once` draws one frame and exits; it
+//! sign-in screen to draw over, rather than flashing the text console, and
+//! the screen can be locked: the sign-in screen checks the password that
+//! unlocks it, asked on standard output and answered on standard input
+//! (`glass_shell::session`). `--once` draws one frame and exits; it
 //! stays on screen until the console next draws. The tiles are the caller's,
 //! as `glassctl tasks` shows them, and the caller needs read and write
 //! access to the terminal and read access to `/dev/input/event*`.
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -30,10 +34,12 @@ use glass_api::{Event, TaskDetail, TaskRef, TaskView, UndoReport, methods};
 use glass_rpc::{Client, ClientError};
 use glass_shell::live::{Effect, Live};
 use glass_shell::screens::system;
+use glass_shell::session::Password;
 use glass_shell::{Message, Power, Theme, session, wallpaper};
 use glass_shell_fb::display::Display;
 use glass_shell_fb::input::{self, Input};
 use time::{OffsetDateTime, UtcOffset};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
@@ -109,11 +115,15 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
     };
 
     let asked = started.elapsed();
-    let live = Live::new(tasks)
+    let mut live = Live::new(tasks)
         .without_wallpaper()
         .signed_in_as(signed_in_as())
         .about(about());
-    let mut live = live;
+    // The sign-in screen started this session, so it can check the
+    // password that unlocks the screen (`session`).
+    if args.from_sign_in {
+        live = live.lockable();
+    }
     live.set_trash_full(trash_full());
     let mut shell = Shell::open(args.tty, offset, live)?;
     let opened = started.elapsed();
@@ -134,6 +144,11 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
         (mpsc::unbounded_channel().1, 0)
     };
     eprintln!("reading {devices} input devices");
+    let mut answers = if args.from_sign_in {
+        sign_in_answers()
+    } else {
+        mpsc::unbounded_channel().1
+    };
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     loop {
@@ -180,7 +195,14 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 while let Ok(more) = inputs.try_recv() {
                     batch.push(more);
                 }
-                let effects = shell.input(&batch);
+                let mut effects = shell.input(&batch);
+                effects.retain(|effect| match effect {
+                    Effect::Unlock(password) => {
+                        ask_to_unlock(password);
+                        false
+                    }
+                    _ => true,
+                });
                 let power = effects.iter().find_map(|e| match e {
                     Effect::Power(power) => Some(*power),
                     _ => None,
@@ -188,7 +210,11 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 if power.is_some() || effects.contains(&Effect::SignOut) {
                     eprintln!("signing out{}", power.map_or(String::new(), |p| format!(" to {p:?}")));
                     // The last frame stays up for the sign-in screen, or
-                    // says the computer is going, until it does.
+                    // says the computer is going (with no pointer on it),
+                    // until it does.
+                    if power.is_some() {
+                        shell.display.hide_pointer();
+                    }
                     shell.draw(true);
                     if args.from_sign_in {
                         shell.display.hand_over();
@@ -197,6 +223,13 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 }
                 shell.carry_out_all(client.as_ref(), effects).await;
                 redraw = shell.changed();
+            }
+            Some(answer) = answers.recv() => {
+                eprintln!("unlock: {answer}");
+                if let Some(Effect::Focus(id)) = shell.live.unlock_answered(answer == session::UNLOCKED) {
+                    shell.focus(id);
+                }
+                redraw = true;
             }
             () = banner_gone => redraw = shell.live.tick(Instant::now()),
             () = blink => {
@@ -243,6 +276,41 @@ async fn next_note(client: Option<&Client>) -> Option<glass_rpc::Request> {
         Some(client) => client.next_notification().await,
         None => std::future::pending().await,
     }
+}
+
+/// Asks the sign-in screen to check the password that unlocks the screen:
+/// one line on standard output (`session`). A whole line goes straight to
+/// the pipe, not through stdout's buffer, and the copy here is wiped.
+fn ask_to_unlock(password: &Password) {
+    let mut line = session::unlock_request(password);
+    let mut out = std::io::stdout().lock();
+    let asked = out.write_all(line.as_bytes()).and_then(|()| out.flush());
+    session::wipe(&mut line);
+    match asked {
+        Ok(()) => eprintln!("unlock: asked the sign-in screen"),
+        Err(e) => eprintln!("unlock: can't ask the sign-in screen: {e}"),
+    }
+}
+
+/// The sign-in screen's answers to unlock requests, a line each on
+/// standard input.
+fn sign_in_answers() -> mpsc::UnboundedReceiver<String> {
+    let (send, answers) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    if send.send(line).is_err() {
+                        return;
+                    }
+                }
+                Ok(None) => return eprintln!("unlock: the sign-in screen closed its end"),
+                Err(e) => return eprintln!("unlock: reading the sign-in screen's answers: {e}"),
+            }
+        }
+    });
+    answers
 }
 
 /// Waits until `at`, or forever without one.
@@ -368,18 +436,21 @@ impl Shell {
                 self.dirty = true;
             }
             match self.live.update(message) {
-                Some(Effect::Focus(id)) => {
-                    let bar = self.live.command_bar();
-                    let view =
-                        self.live
-                            .view(&self.theme, bar.as_ref(), self.now(), self.display.size());
-                    self.display.focus(view, id);
-                }
+                Some(Effect::Focus(id)) => self.focus(id),
                 Some(effect) => effects.push(effect),
                 None => {}
             }
         }
         effects
+    }
+
+    /// Gives the keyboard focus to the widget with this id.
+    fn focus(&mut self, id: &'static str) {
+        let bar = self.live.command_bar();
+        let view = self
+            .live
+            .view(&self.theme, bar.as_ref(), self.now(), self.display.size());
+        self.display.focus(view, id);
     }
 
     /// Whether the last input changed what the screen should show.
@@ -426,8 +497,9 @@ impl Shell {
                 }
                 Vec::new()
             }
-            // Done in `input`, which has the view; signing out ends the loop.
-            Effect::Focus(_) | Effect::SignOut | Effect::Power(_) => Vec::new(),
+            // Done in `input`, which has the view; signing out ends the
+            // loop; an unlock request goes to the sign-in screen.
+            Effect::Focus(_) | Effect::SignOut | Effect::Power(_) | Effect::Unlock(_) => Vec::new(),
             Effect::Get(task) => {
                 let started = Instant::now();
                 let result: Result<TaskDetail, _> =

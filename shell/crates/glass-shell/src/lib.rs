@@ -109,6 +109,9 @@ pub enum Message {
     /// End the session and go back to the sign-in screen (Shift Super Q, or
     /// the system menu).
     SignOut,
+    /// Lock the screen until the person's password is given again (Ctrl
+    /// Super Q, Super L, or the system menu); agents keep working.
+    LockScreen,
     /// The mark at the left of the menu bar: open or close the system menu.
     ToggleSystemMenu,
     /// The system menu's About Glasshouse.
