@@ -108,7 +108,7 @@ with a dev-host glassd enrolled as a pilot device
 | An approval to the catalog on that device | 5 s | AD-5 | under 5 ms after the page confirms it |
 | A keystroke in Mail's To to the colleague suggested, from the org's directory | 500 ms | AD-1 | 374 ms (a 120 ms pause in typing included) |
 | Chat open with a conversation, sealed messages opened by glassd | 1 s | UI-7, CF-91 | `chat.e2e.ts` asserts it |
-| A colleague's chat message, posted on their computer, on screen on this one | 1 s | CF-91 (ADR 0030) | `chat.e2e.ts` logs it; loopback |
+| A colleague's chat message, posted on their computer, on screen on this one | 1 s | CF-91 (ADR 0030) | 113 ms (loopback) |
 
 *Interactive* is a fresh browser context with the session cookie, from
 navigation to the page drawn with its data (`html[data-ready]`). *In force*

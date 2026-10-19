@@ -115,8 +115,30 @@ test("cf91 au10 an agent's post waits on the desktop and shows its by-line", asy
   await close();
 });
 
+test("cf91 a channel made in Chat with its people, who read it on their computer", async ({ browser }) => {
+  const { page, close } = await openChat(browser);
+  await page.getByRole("button", { name: "New channel" }).click();
+  await page.locator("[name=channel]").fill("northwind-deal");
+  await page.locator("[name=people]").fill("Pri");
+  await page.locator("[data-login=priya]").click();
+  await page.getByRole("button", { name: "Make channel" }).click();
+  await expect(page.locator(".pane-head h1")).toHaveText("#northwind-deal");
+  await page.locator("[name=message]").fill("Kickoff at 3 in the big room");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("[data-test=messages]")).toContainText("Kickoff at 3");
+  await expect(page.locator(".sidebar .row.active")).toContainText("northwind-deal");
+  expect(priya("read", "#northwind-deal")).toContain("Kickoff at 3 in the big room");
+  // The console keeps the channel's name sealed (ADR 0030).
+  expect(everything(CONSOLE_STATE)).not.toContain("northwind-deal");
+  await page.screenshot({ path: join(CONSOLE_SHOTS, "chat-channel.png") });
+  await close();
+});
+
 test("cf91 Chat keeps nothing in the page's storage", async ({ browser }) => {
   const { page, close } = await openChat(browser);
+  // Both conversations shown, then what the page kept is looked at.
+  await expect(page.locator("[data-test=messages]")).toContainText("Kickoff at 3");
+  await page.locator(".sidebar .row", { hasText: "Priya Shah" }).click();
   await expect(page.locator("[data-test=messages]")).toContainText(HELLO);
   const stored = await page.evaluate(async () => {
     const parts: unknown[] = [{ ...localStorage }, { ...sessionStorage }, await indexedDB.databases()];
@@ -128,5 +150,6 @@ test("cf91 Chat keeps nothing in the page's storage", async ({ browser }) => {
   });
   expect(stored).not.toContain("Northwind");
   expect(stored).not.toContain("Friday");
+  expect(stored).not.toContain("Kickoff");
   await close();
 });

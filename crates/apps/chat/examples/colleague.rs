@@ -9,6 +9,7 @@
 //!   open                 open Chat once, so others can message them
 //!   say <login> <text>   message <login>
 //!   read <login>         the direct messages with <login>, as JSON
+//!   read #<channel>      a channel's messages, as JSON
 //! ```
 
 // A command-line tool: its answer is what it prints.
@@ -106,11 +107,14 @@ fn run(args: Vec<String>) -> Result<String, String> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .find(|c| {
-                    c["kind"] == "direct"
-                        && c["people"]
-                            .as_array()
-                            .is_some_and(|p| p.iter().any(|x| x["login"] == *with))
+                .find(|c| match with.strip_prefix('#') {
+                    Some(_) => c["kind"] == "channel" && c["title"] == *with,
+                    None => {
+                        c["kind"] == "direct"
+                            && c["people"]
+                                .as_array()
+                                .is_some_and(|p| p.iter().any(|x| x["login"] == *with))
+                    }
                 })
                 .map(|c| c["id"].clone())
                 .ok_or_else(|| format!("no messages with {with}"))?;
