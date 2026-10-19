@@ -103,6 +103,11 @@ pub enum AppPermission {
     /// Keep what it loaded on the device and show it without a connection
     /// (UI-5: apps work offline).
     Offline,
+    /// Camera, microphone and a WebRTC connection, for meetings only
+    /// (CF-21, ADR 0030 §6): an app must declare `meet.join` to have it,
+    /// so Chat never does. Until our engine build (CF-15) enforces it per
+    /// origin, it is checked here and in `apps-lint`.
+    Media,
 }
 
 impl AppManifest {
@@ -145,6 +150,13 @@ impl AppManifest {
         if !self.network.is_empty() {
             return Err(format!(
                 "{}: network destinations aren't supported yet; apps reach the world through actions",
+                self.id
+            ));
+        }
+        if self.may(AppPermission::Media) && !self.actions.iter().any(|a| a.as_str() == "meet.join")
+        {
+            return Err(format!(
+                "{}: media is for meetings: only an app that declares meet.join may have it",
                 self.id
             ));
         }
@@ -288,6 +300,19 @@ mod tests {
         assert!(m.declares(&"mail.send".parse().unwrap()));
         assert!(!m.declares(&"files.delete".parse().unwrap()));
         assert!(m.may(AppPermission::Offline));
+    }
+
+    #[test]
+    fn cf21_only_a_meeting_app_has_the_camera_and_microphone() {
+        let mut m = manifest();
+        m.permissions.push(AppPermission::Media);
+        assert!(
+            m.check()
+                .unwrap_err()
+                .contains("only an app that declares meet.join")
+        );
+        m.actions.push("meet.join".parse().unwrap());
+        assert!(m.check().is_ok());
     }
 
     #[test]

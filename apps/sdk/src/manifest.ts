@@ -4,8 +4,11 @@
 export type Tier = "auto" | "notify" | "ask" | "never";
 export type SideEffect = "none" | "local_reversible" | "irreversible";
 export type Label = "public" | "internal" | "confidential" | "restricted";
-/** Powers beyond actions. `offline`: keep what was loaded and show it (UI-5). */
-export type AppPermission = "offline";
+/**
+ * Powers beyond actions. `offline`: keep what was loaded and show it (UI-5).
+ * `media`: camera, microphone and WebRTC, for meetings only (CF-21).
+ */
+export type AppPermission = "offline" | "media";
 
 /** An app's manifest: the OS enforces it, so the app can never exceed it (DV-3). */
 export interface AppManifest {
@@ -69,7 +72,7 @@ export interface AppStatus {
 const ID = /^[a-z][a-z0-9-]{0,62}$/;
 const ACTION = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
 const LABELS: readonly string[] = ["public", "internal", "confidential", "restricted"];
-const PERMISSIONS: readonly string[] = ["offline"];
+const PERMISSIONS: readonly string[] = ["offline", "media"];
 const FIELDS: readonly string[] = [
   "id",
   "name",
@@ -134,6 +137,12 @@ export function manifestProblems(value: unknown): string[] {
   }
   if (Array.isArray(m.network) && m.network.length > 0) {
     problems.push("network destinations aren't supported yet; apps reach the world through actions");
+  }
+  // CF-21: the camera and microphone are for meetings; Chat never has them.
+  const permissions = Array.isArray(m.permissions) ? m.permissions.map(String) : [];
+  const declared = Array.isArray(m.actions) ? m.actions.map(String) : [];
+  if (permissions.includes("media") && !declared.includes("meet.join")) {
+    problems.push("media is for meetings: only an app that declares meet.join may have it");
   }
   return problems;
 }

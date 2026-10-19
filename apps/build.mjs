@@ -8,7 +8,10 @@ import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
 
 const here = dirname(fileURLToPath(import.meta.url));
-export const APPS = ["mail", "calendar", "store", "settings", "chat"];
+export const APPS = ["mail", "calendar", "store", "settings", "chat", "meet"];
+/** Apps with a worker of their own, built beside the page: Meet's frame
+ * transform (ADR 0030 §6). */
+const WORKERS = { meet: "src/worker.ts" };
 /** Web apps our web servers serve rather than a device: the admin console
  * (ADR 0023). No offline service worker: they read from their server. */
 export const SITES = ["console"];
@@ -22,6 +25,7 @@ function options(app) {
       { in: join(dir, "src/main.ts"), out: "app" },
       { in: join(dir, "src/app.css"), out: "app" },
       ...(site ? [] : [{ in: join(here, "sdk/src/sw.ts"), out: "sw" }]),
+      ...(WORKERS[app] ? [{ in: join(dir, WORKERS[app]), out: "worker" }] : []),
     ],
     outdir: join(dir, "dist"),
     bundle: true,
