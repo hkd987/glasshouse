@@ -34,7 +34,17 @@ Asks wait for you on the desktop (`glassctl approvals`, `glassctl approve
 <id>`); the app shows what it's waiting for.
 
 Dev mode trusts anything on this machine that can reach the bridge's
-loopback port; see ADR 0024 for what the OS version will trust instead.
+loopback port.
+
+## On the device
+
+Images carry each app's manifest and `dist/` in
+`/usr/local/share/glasshouse/apps/<app>` (`stage-dist.sh`, after `make
+apps-build`) and the browser engine (ADR 0027). The launcher and the dock
+open an app as the engine's window on its own origin; the desktop starts
+`glass-app-bridge --session` for the person, on their own port
+(`glass_api::app_bridge_port`), and it answers only connections from their
+own processes. `make freebsd vm-deploy` puts all of it in the dev VM.
 
 ## Checks
 

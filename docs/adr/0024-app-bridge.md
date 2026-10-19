@@ -2,6 +2,9 @@
 
 Status: **Accepted** for the first slice (UI-5, DV-3, NV-1, AU-10). The
 OS-side identity of an app (below, "What this slice trusts") is proposed.
+Superseded in part by 0027: on the device, the bridge listens on the
+person's own loopback port and answers only their own processes, since a
+stock browser can't reach a Unix socket.
 Numbered 0024 because 0023 is taken on the admin console's branch.
 
 ## Context

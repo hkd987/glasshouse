@@ -38,8 +38,8 @@ small it looks.
 ## Prove it
 
 1. `make test lint`.
-2. `make e2e-vm`: the containment probe must stay 21/21 and "nothing left
-   behind" must pass.
+2. `make e2e-vm`: the containment probe must pass every check (22/22) and
+   "nothing left behind" must pass.
 3. New surface → new probe check in `crates/bin/glass-probe` (it must FAIL on
    the insecure host backend and PASS in a jail).
 4. A design change → an ADR; a requirement's status change →
