@@ -1,17 +1,21 @@
 //! The `mail` app's actions, backed by the first-party mail store in the
-//! user's home (`~/Mail/Drafts`, `~/Mail/Sent`).
+//! user's home (`~/Mail/Inbox`, `~/Mail/Drafts`, `~/Mail/Sent`).
 //!
-//! Drafts are local and undoable. Sending leaves the machine and can't be
+//! Reading the mailboxes is quiet (`mail.list`, `mail.read`), and each
+//! message comes back with its "by [agent] for [user]" line when an agent
+//! wrote it, so the Mail app can show it inline (AU-10). Drafts are local
+//! and undoable. Sending leaves the machine and can't be
 //! recalled, which is why `mail.send` defaults to Ask. Sends are batched:
 //! "Send 6 reminders" is one call, one approval with a review list (DA-12).
-//! Until the mail service lands, "sent" messages are delivered to `~/Mail/Sent`.
+//! Until the mail service lands, "sent" messages are delivered to `~/Mail/Sent`
+//! and the inbox is whatever is filed in `~/Mail/Inbox`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use glass_api::{AskLabels, ChangeKind};
 use glass_platform::fs::{ConfinedDir, Owner};
 use glass_types::{ActionName, SideEffect, Tier, Timestamp};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use glass_actions::{
@@ -20,10 +24,19 @@ use glass_actions::{
 };
 
 const MAIL_DIR: &str = "Mail";
+const INBOX: &str = "Inbox";
 const DRAFTS: &str = "Drafts";
 const SENT: &str = "Sent";
 /// Most messages one `mail.send` may carry.
 const MAX_BATCH: usize = 50;
+/// Largest message `mail.read` opens.
+const MAX_MESSAGE_BYTES: u64 = 1024 * 1024;
+/// Most messages one listing reads and returns; it returns
+/// [`DEFAULT_LIMIT`] unless asked for more.
+const MAX_LISTED: usize = 500;
+const DEFAULT_LIMIT: usize = 50;
+/// The header that carries "by [agent] for [user]" (AU-10).
+const ATTRIBUTION_HEADER: &str = "X-Glasshouse-Attribution";
 
 #[derive(Debug, Default)]
 pub struct MailProvider;
@@ -40,6 +53,116 @@ struct Message {
 #[serde(deny_unknown_fields)]
 struct SendInput {
     messages: Vec<Message>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListInput {
+    folder: Folder,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadInput {
+    id: String,
+}
+
+/// A mailbox in the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Folder {
+    Inbox,
+    Drafts,
+    Sent,
+}
+
+impl Folder {
+    const ALL: [Folder; 3] = [Folder::Inbox, Folder::Drafts, Folder::Sent];
+
+    fn dir(self) -> &'static str {
+        match self {
+            Folder::Inbox => INBOX,
+            Folder::Drafts => DRAFTS,
+            Folder::Sent => SENT,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Folder::Inbox => "inbox",
+            Folder::Drafts => "drafts",
+            Folder::Sent => "sent",
+        }
+    }
+}
+
+/// "by invoice-demo for demo", split into who wrote it and for whom.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct Attribution {
+    text: String,
+    by: String,
+    #[serde(rename = "for")]
+    for_user: String,
+}
+
+impl Attribution {
+    fn parse(text: &str) -> Option<Self> {
+        let (by, for_user) = text.strip_prefix("by ")?.rsplit_once(" for ")?;
+        Some(Self {
+            text: text.to_owned(),
+            by: by.to_owned(),
+            for_user: for_user.to_owned(),
+        })
+    }
+}
+
+/// A message as listings and reads return it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct Summary {
+    /// `<folder>/<file>`, what `mail.read` takes.
+    id: String,
+    folder: Folder,
+    from: String,
+    to: Vec<String>,
+    subject: String,
+    date: String,
+    /// The start of the body, on one line.
+    snippet: String,
+    /// Who wrote it, when an agent or app did (AU-10).
+    attribution: Option<Attribution>,
+}
+
+/// Splits a stored message into its headers and body. Folded header lines
+/// join the header before them.
+fn parse_message(text: &str) -> (Vec<(String, String)>, String) {
+    let mut headers: Vec<(String, String)> = Vec::new();
+    let mut lines = text.split_inclusive('\n');
+    for raw in lines.by_ref() {
+        let line = raw.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            break;
+        }
+        if line.starts_with([' ', '\t']) {
+            if let Some((_, value)) = headers.last_mut() {
+                value.push(' ');
+                value.push_str(line.trim());
+            }
+            continue;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            headers.push((name.trim().to_owned(), value.trim().to_owned()));
+        }
+    }
+    (headers, lines.collect())
+}
+
+fn header<'a>(headers: &'a [(String, String)], name: &str) -> &'a str {
+    headers
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map_or("", |(_, v)| v.as_str())
 }
 
 fn message_schema() -> Value {
@@ -169,11 +292,102 @@ impl MailProvider {
     fn describe(message: &Message) -> String {
         format!("To {}: {}", message.to.join(", "), message.subject)
     }
+
+    /// Checks a message id, `<folder>/<file>.eml`, and splits it. Plain
+    /// names only, so an id never leaves its mailbox.
+    fn message_ref(id: &str) -> Result<(Folder, &str), ActionError> {
+        let bad = || ActionError::InvalidInput(format!("{id:?} is not a message id"));
+        let (folder, name) = id.split_once('/').ok_or_else(bad)?;
+        let folder = Folder::ALL
+            .into_iter()
+            .find(|f| f.key() == folder)
+            .ok_or_else(bad)?;
+        let plain = name.len() <= 200
+            && name.ends_with(".eml")
+            && !name.starts_with('.')
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if plain {
+            Ok((folder, name))
+        } else {
+            Err(bad())
+        }
+    }
+
+    fn summary(folder: Folder, name: &str, text: &str) -> (Summary, String) {
+        let (headers, body) = parse_message(text);
+        let snippet: String = body
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(140)
+            .collect();
+        let summary = Summary {
+            id: format!("{}/{name}", folder.key()),
+            folder,
+            from: header(&headers, "From").to_owned(),
+            to: header(&headers, "To")
+                .split(',')
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            subject: header(&headers, "Subject").to_owned(),
+            date: header(&headers, "Date").to_owned(),
+            snippet,
+            attribution: Attribution::parse(header(&headers, ATTRIBUTION_HEADER)),
+        };
+        (summary, body)
+    }
+
+    fn read_text(mail: &ConfinedDir, rel: &Path) -> Result<String, ActionError> {
+        let raw = mail
+            .read(rel, MAX_MESSAGE_BYTES)
+            .map_err(|e| ActionError::io(format!("message {}", rel.display()), e))?;
+        Ok(String::from_utf8_lossy(&raw).into_owned())
+    }
 }
 
 impl ActionProvider for MailProvider {
     fn actions(&self) -> Vec<ActionDef> {
         vec![
+            ActionDef {
+                name: "mail.list".parse().expect("static name"),
+                title: "Read the mailboxes".into(),
+                description: format!(
+                    "List the messages in one mailbox (inbox, drafts or sent), newest first: \
+                     sender, recipients, subject, date, the start of the body, and who wrote it \
+                     when an agent did. Up to {MAX_LISTED}; {DEFAULT_LIMIT} unless limit says."
+                ),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "folder": { "type": "string", "enum": ["inbox", "drafts", "sent"] },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LISTED }
+                    },
+                    "required": ["folder"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::None,
+                default_tier: Tier::Auto,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: "mail.read".parse().expect("static name"),
+                title: "Read emails".into(),
+                description: "Read one message, by the id mail.list gave it.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::None,
+                default_tier: Tier::Auto,
+                ask: AskLabels::default(),
+            },
             ActionDef {
                 name: "mail.draft".parse().expect("static name"),
                 title: "Draft an email".into(),
@@ -208,7 +422,7 @@ impl ActionProvider for MailProvider {
 
     fn prepare(&self, ctx: &TaskContext) -> Result<(), ActionError> {
         let home = ConfinedDir::open(&ctx.home).map_err(|e| ActionError::io("home folder", e))?;
-        for folder in [DRAFTS, SENT] {
+        for folder in [INBOX, DRAFTS, SENT] {
             let rel = PathBuf::from(MAIL_DIR).join(folder);
             if !home.exists(&rel) {
                 home.create_dir_all(&rel)
@@ -234,6 +448,34 @@ impl ActionProvider for MailProvider {
     ) -> Result<Preview, ActionError> {
         let mail = Self::mail_dir(ctx);
         match action.as_str() {
+            "mail.list" => {
+                let ListInput { folder, limit } = parse_input(input)?;
+                if limit.is_some_and(|n| n == 0 || n > MAX_LISTED) {
+                    return Err(ActionError::InvalidInput(format!(
+                        "limit runs from 1 to {MAX_LISTED}"
+                    )));
+                }
+                Ok(Preview {
+                    summary: format!("Read mail: {}", folder.dir()),
+                    targets: vec![folder.dir().to_owned()],
+                    items: Vec::new(),
+                    reads: vec![mail.join(folder.dir())],
+                    writes: Vec::new(),
+                    snapshot_roots: Vec::new(),
+                })
+            }
+            "mail.read" => {
+                let ReadInput { id } = parse_input(input)?;
+                let (folder, name) = Self::message_ref(&id)?;
+                Ok(Preview {
+                    summary: format!("Read email {id}"),
+                    targets: vec![id.clone()],
+                    items: Vec::new(),
+                    reads: vec![mail.join(folder.dir()).join(name)],
+                    writes: Vec::new(),
+                    snapshot_roots: Vec::new(),
+                })
+            }
             "mail.draft" => {
                 let message: Message = parse_input(input)?;
                 Self::validate(&message)?;
@@ -284,6 +526,54 @@ impl ActionProvider for MailProvider {
         let mail = ConfinedDir::open(&Self::mail_dir(ctx))
             .map_err(|e| ActionError::io("mail store", e))?;
         match action.as_str() {
+            "mail.list" => {
+                let ListInput { folder, limit } = parse_input(input)?;
+                let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LISTED);
+                let entries = match mail.list(Path::new(folder.dir())) {
+                    Ok(entries) => entries,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                    Err(e) => return Err(ActionError::io("mail store", e)),
+                };
+                // Stored names start with the time they were saved, so the
+                // last names are the newest; the Date header orders them.
+                let mut messages: Vec<Summary> = entries
+                    .iter()
+                    .rev()
+                    .filter(|e| !e.is_dir)
+                    .filter(|e| Self::message_ref(&format!("{}/{}", folder.key(), e.name)).is_ok())
+                    .take(MAX_LISTED)
+                    .filter_map(|e| {
+                        let text =
+                            Self::read_text(&mail, &Path::new(folder.dir()).join(&e.name)).ok()?;
+                        Some(Self::summary(folder, &e.name, &text).0)
+                    })
+                    .collect();
+                messages.sort_by(|a, b| b.date.cmp(&a.date).then(b.id.cmp(&a.id)));
+                messages.truncate(limit);
+                let n = messages.len();
+                Ok(ActionOutput {
+                    text: format!(
+                        "{n} message{} in {}",
+                        if n == 1 { "" } else { "s" },
+                        folder.dir()
+                    ),
+                    data: json!({ "folder": folder, "messages": messages }),
+                    changes: Vec::new(),
+                })
+            }
+            "mail.read" => {
+                let ReadInput { id } = parse_input(input)?;
+                let (folder, name) = Self::message_ref(&id)?;
+                let text = Self::read_text(&mail, &Path::new(folder.dir()).join(name))?;
+                let (summary, body) = Self::summary(folder, name, &text);
+                let mut data = json!({ "message": summary });
+                data["message"]["body"] = Value::String(body);
+                Ok(ActionOutput {
+                    text: format!("From {}: {}", summary.from, summary.subject),
+                    data,
+                    changes: Vec::new(),
+                })
+            }
             "mail.draft" => {
                 let message: Message = parse_input(input)?;
                 Self::validate(&message)?;
@@ -413,6 +703,85 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn au10_listings_and_reads_say_who_wrote_each_message() {
+        let (dir, ctx) = setup();
+        fs::write(
+            dir.path().join("Mail/Inbox/1792400000-0-northwind.eml"),
+            "From: Dana Ruiz <dana@northwind.example>\nTo: demo@corp.example\n\
+             Subject: Renewal terms\nDate: 2026-10-19T08:00:00Z\n\nHi,\n\nCan we talk\n terms?\n",
+        )
+        .unwrap();
+        let input = json!({ "to": ["dana@northwind.example"], "subject": "Re: Renewal terms", "body": "Yes." });
+        MailProvider
+            .invoke(&ctx, &"mail.draft".parse().unwrap(), &input)
+            .unwrap();
+
+        let list = "mail.list".parse().unwrap();
+        let preview = MailProvider
+            .preview(&ctx, &list, &json!({ "folder": "inbox" }))
+            .unwrap();
+        assert_eq!(preview.reads, vec![dir.path().join("Mail/Inbox")]);
+        assert!(preview.writes.is_empty());
+        let inbox = MailProvider
+            .invoke(&ctx, &list, &json!({ "folder": "inbox" }))
+            .unwrap();
+        let message = &inbox.data["messages"][0];
+        assert_eq!(message["subject"], "Renewal terms");
+        assert_eq!(message["snippet"], "Hi, Can we talk terms?");
+        assert!(message["attribution"].is_null(), "a person wrote it");
+
+        let drafts = MailProvider
+            .invoke(&ctx, &list, &json!({ "folder": "drafts" }))
+            .unwrap();
+        let draft = &drafts.data["messages"][0];
+        assert_eq!(draft["attribution"]["by"], "invoice-demo");
+        assert_eq!(draft["attribution"]["for"], "demo");
+
+        let read = MailProvider
+            .invoke(
+                &ctx,
+                &"mail.read".parse().unwrap(),
+                &json!({ "id": draft["id"] }),
+            )
+            .unwrap();
+        assert_eq!(read.data["message"]["body"], "Yes.\n");
+        assert_eq!(
+            read.data["message"]["attribution"]["text"],
+            "by invoice-demo for demo"
+        );
+    }
+
+    #[test]
+    fn message_ids_stay_inside_their_mailbox() {
+        let (_dir, ctx) = setup();
+        let read = "mail.read".parse().unwrap();
+        for id in [
+            "inbox/../../etc/passwd.eml",
+            "inbox/.hidden.eml",
+            "archive/x.eml",
+            "inbox/x.txt",
+            "inbox",
+        ] {
+            assert!(
+                matches!(
+                    MailProvider.preview(&ctx, &read, &json!({ "id": id })),
+                    Err(ActionError::InvalidInput(_))
+                ),
+                "{id}"
+            );
+        }
+        assert!(
+            MailProvider
+                .preview(
+                    &ctx,
+                    &"mail.list".parse().unwrap(),
+                    &json!({ "folder": "trash" })
+                )
+                .is_err()
+        );
     }
 
     #[test]

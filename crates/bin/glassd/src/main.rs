@@ -301,6 +301,8 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             max_live_tasks_per_user: config.max_live_tasks_per_user,
             harness: config.harness.clone(),
             attended_dir: run_dir.join("attended"),
+            apps: Vec::new(),
+            dev_home: None,
         },
         policy: loaded.policy.clone(),
         policy_source: policy_source.clone(),
