@@ -1,0 +1,9 @@
+{
+  "id": "mail",
+  "name": "Mail",
+  "version": "0.1.0",
+  "description": "Read, reply and write mail. Sends that leave the team wait for your approval on the desktop.",
+  "actions": ["mail.list", "mail.read", "mail.draft", "mail.send"],
+  "permissions": ["offline"],
+  "labels": ["public", "internal"]
+}

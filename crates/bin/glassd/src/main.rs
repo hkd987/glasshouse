@@ -21,13 +21,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, bail};
 use clap::Parser;
 use glass_actions::Registry;
+use glass_api::AppManifest;
 use glass_audit::{AuditEvent, AuditLog, Durability, EventKind};
 use glass_gateway::{Gateway, Secrets};
 use glass_platform::sandbox::{HostSandbox, JailConfig, JailSandbox, Sandbox};
 use glass_platform::snapshot::{CopySnapshotter, Snapshotter, ZfsSnapshotter};
 use glass_policy::Policy;
 use glass_policy::store::{Loaded, Origin, PolicyStore};
-use glass_runtime::{ControlApi, Runtime, RuntimeConfig, RuntimeParts};
+use glass_runtime::{AppApi, ControlApi, Runtime, RuntimeConfig, RuntimeParts};
 use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::filter::{LevelFilter, Targets};
@@ -71,6 +72,7 @@ fn main() -> ExitCode {
             tracing::info!(
                 policy = %prepared.loaded.origin,
                 agents = prepared.config.agents.len(),
+                apps = prepared.apps.len(),
                 "configuration is valid"
             );
             return Ok(());
@@ -142,6 +144,8 @@ struct Prepared {
     store: PolicyStore,
     registry: Registry,
     models: Models,
+    /// Installed apps whose manifests check out (UI-5, DV-3).
+    apps: Vec<AppManifest>,
 }
 
 /// Reads and checks the config and policy, from local disk only.
@@ -166,12 +170,17 @@ fn prepare(args: &Args) -> anyhow::Result<Prepared> {
         tracing::warn!("policy: {warning}");
     }
     let models = gateway(&config, &loaded.policy);
+    let (apps, skipped) = config.load_apps(&registry);
+    for reason in &skipped {
+        tracing::warn!("app not installed: {reason}");
+    }
     Ok(Prepared {
         config,
         loaded,
         store,
         registry,
         models,
+        apps,
     })
 }
 
@@ -199,6 +208,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         store,
         registry,
         models,
+        apps,
     } = prepared;
     let policy_source = loaded.origin.to_string();
     let run_dir = config
@@ -208,6 +218,9 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     for (dir, mode) in [(config.state_dir.as_path(), 0o700), (run_dir, 0o755)] {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode))?;
+    }
+    if let Some(dir) = config.app_socket.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
 
     let sandbox: Arc<dyn Sandbox> = match config.sandbox.backend {
@@ -301,8 +314,8 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             max_live_tasks_per_user: config.max_live_tasks_per_user,
             harness: config.harness.clone(),
             attended_dir: run_dir.join("attended"),
-            apps: Vec::new(),
-            dev_home: None,
+            apps: apps.clone(),
+            dev_home: config.dev_home.clone(),
         },
         policy: loaded.policy.clone(),
         policy_source: policy_source.clone(),
@@ -317,8 +330,13 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     runtime.recheck_layers();
 
     let listener = bind_control_socket(&config.control_socket)?;
+    // The app socket (ADR 0024): world-connectable too, authorized by uid,
+    // and carrying only the app methods.
+    let app_listener = bind_control_socket(&config.app_socket)?;
     tracing::info!(
         socket = %config.control_socket.display(),
+        app_socket = %config.app_socket.display(),
+        apps = apps.len(),
         sandbox = sandbox.kind(),
         policy = %policy_source,
         agents = config.agents.len(),
@@ -338,12 +356,14 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     let mut interrupt = signal(SignalKind::interrupt())?;
     let served = tokio::select! {
         result = glass_rpc::serve(listener, Arc::new(ControlApi::new(Arc::clone(&runtime)))) => result.map_err(anyhow::Error::from),
+        result = glass_rpc::serve(app_listener, Arc::new(AppApi::new(Arc::clone(&runtime)))) => result.map_err(anyhow::Error::from),
         _ = terminate.recv() => Ok(()),
         _ = interrupt.recv() => Ok(()),
     };
     tracing::info!("shutting down: stopping running agents");
     runtime.shutdown().await;
     let _ = std::fs::remove_file(&config.control_socket);
+    let _ = std::fs::remove_file(&config.app_socket);
     served
 }
 
