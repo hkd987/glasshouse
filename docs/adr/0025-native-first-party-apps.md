@@ -8,7 +8,7 @@ The PRD makes first-party apps TypeScript web apps on our Chromium build
 (UI-5, ADR 0009), and allows native apps built with Rust if they run on
 Wayland, expose a full accessibility tree and declare their actions in a
 manifest (UI-6). The product owner asked for a Terminal and an Activity
-Monitor, which the PRD doesn't list yet (`docs/prd/proposals.md`). Both need
+Monitor (now UI-8 and UI-9 in the PRD). Both need
 what a web app can't have: a pseudo-terminal and a shell for one, the
 machine's processes for the other. And our browser engine isn't in the
 image yet, so no web app can open a window on the device today.

@@ -3,7 +3,7 @@
 Requests from the product owner that the PRD doesn't cover yet. Each is
 being built as described; the PRD doc itself is the owner's to change.
 
-## Terminal and Activity Monitor (requested 2026-10-19)
+## Terminal and Activity Monitor (requested 2026-10-19, now UI-8 and UI-9 in the PRD)
 - **Terminal.** A first-party terminal: the person's shell in a window,
   themed with the rest of the system (UX-10 already assumes one). Native
   (UI-6, ADR 0025), since it needs a pseudo-terminal. Agents can't drive it
@@ -14,12 +14,9 @@ being built as described; the PRD doc itself is the owner's to change.
   (AE-4, UX-30). Extends PM-7's per-app power view. Native (UI-6, ADR 0025),
   since it reads the machine's processes.
 
-## Publishing user-built apps beyond the org (asked 2026-10-19, open)
-The PRD keeps org-built apps private (DV-10) and lists on the public
-exchange only through the developer program (DV-1, DV-20). The owner asked
-about users' apps going to an enterprise store and then a global one. Built
-as the PRD says for now (personal → team → org catalog, GA-8); a reviewed,
-opt-in "publish to the exchange" step is the open question.
+## Publishing user-built apps beyond the org (decided 2026-10-19, now DV-13)
+Enterprise apps can never go public. Only single-user apps built on a
+device no organization manages can go to the public store.
 
 ## GNU readline in the image (found 2026-10-19, open)
 The desktop needs libxkbcommon (keymaps) and pixman (drawing) from FreeBSD's

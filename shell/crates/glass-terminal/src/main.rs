@@ -1,5 +1,5 @@
 //! `glass-terminal`: Terminal, the person's shell in a window. A native
-//! first-party app (ADR 0025; requested, `docs/prd/proposals.md`) on
+//! first-party app (UI-8, ADR 0025) on
 //! `glass-window`: alacritty's terminal state and pseudo-terminal, drawn as
 //! rows of text in Geist Mono in the desktop's dark style.
 //!

@@ -134,9 +134,12 @@ thumbnails are not started.
 | Id | Status | Notes |
 |---|---|---|
 | AD-1 … AD-5, AD-10 … AD-12 Console, SCIM, fleet | Not started | `policy.toml` + `glassd.toml` are the local stand-ins. A machine keeps the last good and the previous policy (AD-3's versions and rollback, on the device side) and falls back to the last good one when a new one doesn't validate (ADR 0021) |
+| AD-6 The admin console: a web app on our servers, the fleet at a glance | Not started | Added 2026-10-19 (Google Admin for Chromebooks is the model). The device side of the contract is ADR 0023 (glass-managed: devices fetch signed policy) |
+| AD-7 Apps in a profile by role; admin UI and IT tools only for the roles that grant them | Not started | Added 2026-10-19. Enforced by glassd from policy (role or group → apps), never by hiding UI in the shell; the launcher shows only what the profile holds |
 | AD-16 Communications archiving and supervision | Not started | agent-sent mail is already attributed and audited, which this builds on |
 | LA-1 … LA-3, LA-10 … LA-12, LA-20 Licensing and activation | Not started | Design constraint: a lapsed license pauses agents only; desktop, data and security updates keep working (LA-3) |
 | DV-1 … DV-3, DV-5, DV-10, DV-11 Developer program, private catalog | Not started | DV-3 (declared privileges the OS enforces) shapes the agent manifest: ADR 0008 (proposed) |
+| DV-13 Only single-user apps from unmanaged devices go public; enterprise apps never | Not started | Added 2026-10-19. The catalog refuses publishing anything org-scoped or built on a managed device |
 
 ## Core OS and workplace
 
@@ -188,8 +191,8 @@ thumbnails are not started.
 | UI-5 Web apps with manifests, reaching the system only through the brokers, offline | Partial | ADR 0024: glassd's app socket runs an app's calls through the pipeline as "by [app] for [user]", refusing undeclared actions (DV-3); `glass-app-bridge` (loopback dev mode); `apps/` (SDK, Mail, Calendar; reads offline). Runtime `apps.rs` tests, glassd `dv3_apps_install_only…`, `make apps-test` (Playwright). Missing: our Chromium build as the app runtime, the OS-side app identity, install through the catalog, packaging into the image |
 | UI-6 Native apps with manifests | Partial | `glass-window` puts an iced view in a Wayland window with pointer and keys (ADR 0025, `ui6_*`); Terminal and Activity Monitor build on it. Owed: the accessibility tree, and action manifests on the app socket (ADR 0024) |
 | UI-7 Web app budgets: cold launch under 1 s, under 150 MB | **Done** (dev host) | `apps/e2e/perf.spec.ts` fails over budget; Mail and Calendar launch cold in about 0.18 s and use about 115 MB (renderer RSS), `docs/dev/performance.md` |
-| Terminal (product request 2026-10-19, pending PRD) | Partial | `glass-terminal`: the person's login shell in a window (alacritty's terminal state and pty, xterm keys, 256 colors, scrollback on the wheel), shown on the VM's desktop. Opens from the launcher. Not yet: copy and paste, resizing with the window, the accessibility tree. Native, ADR 0025; `docs/prd/proposals.md` |
-| Activity Monitor (product request 2026-10-19, pending PRD) | Partial | `glass-activity`: the processors and memory, the person's agents (everything in each one's jail added up, by `ps`'s jail column) and their apps, by CPU and memory every 2 s; Stop agent (`task.stop`) and Quit (the person's own processes). Opens from the launcher; tested on the VM. Not yet: power per app (PM-7), "Ask the agent" about a slowdown (AE-4), network and disk. Native, ADR 0025; `docs/prd/proposals.md` |
+| UI-8 Terminal | Partial | `glass-terminal`: the person's login shell in a window (alacritty's terminal state and pty, xterm keys, 256 colors, scrollback on the wheel), shown on the VM's desktop. Opens from the launcher. Not yet: copy and paste, resizing with the window, the accessibility tree. Native, ADR 0025 |
+| UI-9 Activity Monitor | Partial | `glass-activity`: the processors and memory, the person's agents (everything in each one's jail added up, by `ps`'s jail column) and their apps, by CPU and memory every 2 s; Stop agent (`task.stop`) and Quit (the person's own processes). Opens from the launcher; tested on the VM. Not yet: power per app (PM-7), "Ask the agent" about a slowdown (AE-4), network and disk. Native, ADR 0025 |
 
 ## Desktop experience
 

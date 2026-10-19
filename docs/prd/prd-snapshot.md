@@ -253,6 +253,8 @@ The desktop itself is native Rust for speed and battery life. Apps, ours and thi
 - UI-5. Glasshouse apps are web apps written in TypeScript, running on our Chromium engine. A manifest declares each app's actions, permissions and data labels. System APIs are reached only through the brokers, apps install through the catalog, and they work offline.
 - UI-6. Native apps built with GTK, Qt or Rust are allowed if they run on Wayland, expose a full accessibility tree and declare their actions in a manifest.
 - UI-7. Performance budgets for web apps, checked every release: cold launch under 1 second and typical memory under 150 MB per app (proposed targets).
+- UI-8. Terminal: a first-party terminal for the person's own shell, in the system's look. It is native (UI-6), since it needs a pseudo-terminal. It declares no actions, so agents can't drive it.
+- UI-9. Activity Monitor: what is using the machine. It shows CPU, memory and power per app and per agent (everything in an agent's sandbox counts toward it), with Quit for apps, Stop for agents, and "Ask the agent" about a slowdown (AE-4). It is native (UI-6), since it reads the machine's processes.
 **Identity lifecycle, risk and always-on agents**
 - PA-7. Every agent is registered as its own directory identity: an Entra Agent ID, or the Okta equivalent. Each has a named human owner, an access review every quarter, and is retired automatically after 90 days unused or when its owner leaves.
 - PA-8. Agent permissions follow live risk signals. If a device falls out of compliance or the user is flagged as risky in Entra or Okta, that user's agents drop to read-only and pending tasks pause, until the signal clears.
@@ -377,6 +379,8 @@ One web console where IT sets agent policy, manages devices and proves complianc
 - AD-3. Policy changes are versioned, previewed ("this change affects 214 users and 3 agents") and rolled out in stages.
 - AD-4. A live view shows running agents across the fleet, pending approvals and policy blocks in the last 24 hours.
 - AD-5. An agent catalog where IT approves, versions and publishes agents and recorded flows to groups.
+- AD-6. The admin console is its own web app, served from our servers. Admins sign in from a browser and see their fleet: devices, people, groups, policy, apps and agents, in the way Google Admin manages Chromebooks.
+- AD-7. Which apps a person gets in their profile is policy, set by role or group. The admin UI and the IT tools for managing a computer appear on a device only for people whose role grants them, and they read from our servers. Everyone else never sees them.
 **Fleet**
 - AD-10. Zero-touch enrollment from the OEM or by USB image. Device joins the org on first sign-in.
 - AD-11. OS and app updates in rings (pilot, early, broad) with automatic rollback through ZFS boot environments.
@@ -428,6 +432,7 @@ Glasshouse needs a developer program and an IT-controlled catalog, not a consume
 - DV-10. Each org has a private catalog in the admin console. Only approved items can be installed. Internal apps and agents signed with the org's own certificate never appear publicly.
 - DV-11. Per group, each item is required (pushed silently), available (self-install) or blocked.
 - DV-12. Version pinning and staged rollout rings, with automatic rollback if an update causes failures.
+- DV-13. Only single-user apps built on a device no organization manages can go to the public store. Enterprise apps, and anything built on a managed device, stay in that organization's private catalog and can never be published.
 **Public exchange**
 - DV-20. A public exchange lists apps, agents, adapters, skills and recorded flows. Each listing shows the verified publisher, declared privileges, ratings and how many regulated orgs have approved it.
 - DV-21. Existing MCP servers and Claude Code plugins can be listed by adding a manifest, with no rewrite.
@@ -587,13 +592,13 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Platform: PA-1 to PA-6
 - Data: DP-1 to DP-5, DP-10
 - Audit and undo: AU-1 to AU-3, AU-10, AU-20, AU-21
-- Admin: AD-1 to AD-5, AD-10 to AD-12
+- Admin: AD-1 to AD-7, AD-10 to AD-12
 - Desktop: DK-1 to DK-3
 - Model providers and harnesses: MP-1 to MP-9, HX-1 to HX-7
 - Identity and integration: PA-7, AD-14, AD-15
 - Endpoint protection: EP-1 to EP-3, EP-6, EP-7, EP-9
 - Licensing: LA-1 to LA-3, LA-10 to LA-12, LA-20
-- Developer program and catalog: DV-1 to DV-3, DV-5, DV-10, DV-11
+- Developer program and catalog: DV-1 to DV-3, DV-5, DV-10, DV-11, DV-13
 - Core OS: CF-1 to CF-3, CF-10, CF-20, CF-30, CF-32, CF-40, CF-50, CF-60 to CF-62, CF-80 to CF-82
 - Power management: PM-1, PM-4, PM-5, PM-10
 - Browser: CF-15 to CF-17
@@ -602,7 +607,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Pilot readiness: GT-1 to GT-4, GT-10, GT-30
 - Developer workspace for automation teams: DW-1, DW-3, DW-10, DW-11, DW-13, DW-20, DW-21, DW-23
 - Branding and notices: BR-1 to BR-4
-- UI stack: UI-1 to UI-6
+- UI stack: UI-1 to UI-6, UI-8, UI-9
 - Agent engine: AE-1, AE-2 (invoice reconciliation), AE-3, AE-4, AE-10 to AE-12, AE-30
 - Tailoring, minimal for Pilot 1: TL-1, TL-2, TL-10, TL-11 and TL-13 on our first-party agents, with undo
 - Desktop experience: UX-1, UX-2, UX-10, UX-20 to UX-22, UX-30

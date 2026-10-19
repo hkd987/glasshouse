@@ -1,6 +1,5 @@
-//! `glass-activity`: Activity Monitor, what's using the machine (requested
-//! 2026-10-19, `docs/prd/proposals.md`). A native first-party app (ADR
-//! 0025) on `glass-window`: the processors and memory, the person's
+//! `glass-activity`: Activity Monitor, what's using the machine (UI-9). A
+//! native first-party app (ADR 0025) on `glass-window`: the processors and memory, the person's
 //! agents (everything in each one's jail added up) and their apps, by CPU
 //! and memory, every two seconds. Stop an agent or quit an app from here.
 //!
