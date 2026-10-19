@@ -1,7 +1,7 @@
 # 0031. The seat, and the settings a computer applies itself
 
 Status: **Accepted** (2026-10-19). Built: the seat, blank screen, sleep,
-time zone and Do Not Disturb. Next: USB storage, then Wi-Fi and VPN. PRD UX-1, AD-2, PM-5; the owner asked that IT control every device
+time zone, Do Not Disturb and USB drives. Next: Wi-Fi and VPN. PRD UX-1, AD-2, PM-5; the owner asked that IT control every device
 setting per role (2026-10-19) and chose four groups to add: updates and
 sleep, network and VPN, sharing and devices, notifications and region.
 Extends ADR 0029.
@@ -43,7 +43,7 @@ Extends ADR 0029.
    | Blank the screen after idle | person | built here |
    | Sleep after idle | person | built here |
    | Time zone | computer | built: glassd runs `tzsetup`; `settings.get` carries the offset, so the desktop's clock follows without signing out, and is read again on the hour for summer time |
-   | USB storage allowed or off | computer | next, with a devfs rule and a probe check |
+   | USB drives allowed or off | computer | built: a devd rule powers off any USB mass-storage interface that attaches (`usbconfig power_off`), and drives already in are powered off at once; seen on the VM with a hot-plugged stick (`vm.sh usb-stick`). Agents get no new surface: their jails see no disks |
    | Do Not Disturb for agents' banners | person | built: they wait in the menu bar's agents menu |
    | Wi-Fi networks, VPN | computer | after decision 4 below |
    | Update window and restart deadline | computer | with the updater (EP-1) |

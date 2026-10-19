@@ -480,6 +480,87 @@ pub fn set_time_zone(zone: &str) -> Result<()> {
     cmd::run("tzsetup", &[zone]).map(|_| ())
 }
 
+/// Where glassd's devd rule turning USB drives off lives (ADR 0031).
+pub const USB_STORAGE_RULE: &str = "/usr/local/etc/devd/glasshouse-usb-storage.conf";
+
+/// The devd rule: any USB interface of the mass-storage class (0x08) that
+/// attaches is powered off at once, so no drive or card reader connects.
+pub const USB_STORAGE_RULE_TEXT: &str = r#"# Written by glassd: IT turned USB drives off for this computer (ADR 0031).
+# glassd removes it when IT allows them again. Don't edit: it's rewritten.
+notify 100 {
+	match "system"		"USB";
+	match "subsystem"	"INTERFACE";
+	match "type"		"ATTACH";
+	match "intclass"	"0x08";
+	action "/usr/sbin/usbconfig -d $cdev power_off";
+};
+"#;
+
+/// Allows USB drives, or turns them off: off writes the devd rule and
+/// powers off any drive plugged in now; allowed removes the rule (a drive
+/// turned off connects when plugged in again). Whether anything changed.
+pub fn set_usb_storage(allowed: bool) -> Result<bool> {
+    if !cfg!(target_os = "freebsd") {
+        return Err(PlatformError::Unsupported("controlling USB drives".into()));
+    }
+    let rule = std::path::Path::new(USB_STORAGE_RULE);
+    let written = std::fs::read_to_string(rule).ok();
+    let changed = if allowed {
+        written.is_some()
+    } else {
+        written.as_deref() != Some(USB_STORAGE_RULE_TEXT)
+    };
+    if changed {
+        if allowed {
+            std::fs::remove_file(rule)
+                .map_err(|e| PlatformError::io(format!("removing {USB_STORAGE_RULE}"), e))?;
+        } else {
+            if let Some(dir) = rule.parent() {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| PlatformError::io(format!("creating {}", dir.display()), e))?;
+            }
+            std::fs::write(rule, USB_STORAGE_RULE_TEXT)
+                .map_err(|e| PlatformError::io(format!("writing {USB_STORAGE_RULE}"), e))?;
+        }
+        cmd::run("service", &["devd", "restart"])?;
+    }
+    if !allowed {
+        for device in usb_devices(&cmd::run("usbconfig", &["list"]).unwrap_or_default()) {
+            let config = cmd::run("usbconfig", &["-d", &device, "dump_curr_config_desc"])
+                .unwrap_or_default();
+            if mass_storage(&config) {
+                cmd::run("usbconfig", &["-d", &device, "power_off"])?;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// The devices `usbconfig list` names: `ugen0.4: <…>` → `ugen0.4`.
+fn usb_devices(list: &str) -> Vec<String> {
+    list.lines()
+        .filter_map(|line| line.split_once(':').map(|(name, _)| name.trim()))
+        .filter(|name| {
+            name.strip_prefix("ugen").is_some_and(|rest| {
+                rest.split('.').count() == 2
+                    && rest
+                        .split('.')
+                        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            })
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether a device's configuration has a mass-storage interface.
+fn mass_storage(config: &str) -> bool {
+    config.lines().any(|line| {
+        line.split_once('=').is_some_and(|(key, value)| {
+            key.trim() == "bInterfaceClass" && value.trim().starts_with("0x0008")
+        })
+    })
+}
+
 /// What puts the computer to sleep (ACPI S3) and returns once it wakes.
 pub const SLEEP_COMMAND: (&str, &[&str]) = ("acpiconf", &["-s", "3"]);
 
@@ -567,6 +648,22 @@ mod tests {
         assert_eq!(parent_pid(me), Some(std::os::unix::process::parent_id()));
         assert_eq!(parent_pid(u32::MAX), None);
         assert_eq!(SLEEP_COMMAND, ("acpiconf", &["-s", "3"][..]));
+    }
+
+    #[test]
+    fn adr0031_usb_drives_are_found_by_their_mass_storage_interface() {
+        let list = "ugen0.1: <XHCI root HUB (0x1b36)> at usbus0, cfg=0 md=HOST\n\
+                    ugen0.4: <QEMU USB HARDDRIVE QEMU> at usbus0, cfg=0 md=HOST\n\
+                    bogus line\nugen../x: <no>\n";
+        assert_eq!(usb_devices(list), ["ugen0.1", "ugen0.4"]);
+        assert!(mass_storage(
+            "    bInterfaceClass = 0x0008  <Mass storage>\n"
+        ));
+        assert!(!mass_storage(
+            "    bInterfaceClass = 0x0003  <HID device>\n"
+        ));
+        assert!(USB_STORAGE_RULE_TEXT.contains("match \"intclass\"\t\"0x08\";"));
+        assert!(USB_STORAGE_RULE_TEXT.contains("usbconfig -d $cdev power_off"));
     }
 
     #[test]

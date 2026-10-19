@@ -19,6 +19,8 @@
 #   keydown|keyup <key>      one key down or up on its own (keydown alt, key tab: Alt Tab's switcher)
 #   scroll up|down [n]       turn the wheel n notches where the pointer is
 #   type <text>              type text on the USB keyboard (letters, digits, space, . , - / :)
+#   usb-stick plug|unplug    plug a 16 MB USB drive into the running VM, or pull it out (tests of
+#                            IT's devices.usb_storage setting, ADR 0031)
 # Env knobs: VM_DIR VM_SSH_PORT VM_CPUS VM_CPU_MODEL VM_ACCEL VM_MEM VM_DISK_SIZE VM_BOOT_TIMEOUT VM_BASE_IMAGE
 #   VM_FIRMWARE=uefi|bios VM_SCREEN VM_EXTRA_DISK (see lib.sh).
 set -euo pipefail
@@ -221,6 +223,24 @@ s.close()
 PY
 }
 
+# usb-stick plug|unplug: a USB mass-storage drive hot-plugged through the monitor.
+cmd_usb_stick() {
+	local image=$VM_DIR/usb-stick.img
+	case ${1:-} in
+	plug)
+		[[ -f $image ]] || truncate -s 16M "$image"
+		monitor "drive_add 0 if=none,id=stick,file=$image,format=raw"
+		monitor "device_add usb-storage,id=stick,drive=stick"
+		;;
+	unplug)
+		monitor "device_del stick"
+		sleep 1
+		monitor "drive_del stick"
+		;;
+	*) die "usage: vm.sh usb-stick plug|unplug" ;;
+	esac
+}
+
 cmd_key() {
 	(($# >= 1)) || die "usage: vm.sh key <key>... (QEMU names: ctrl-spc, ret, esc, a, shift-a)"
 	local k
@@ -331,6 +351,7 @@ keydown) cmd_keyupdown true "$@" ;;
 scroll) cmd_scroll "$@" ;;
 keyup) cmd_keyupdown false "$@" ;;
 type) cmd_type "$@" ;;
+usb-stick) cmd_usb_stick "$@" ;;
 reset) cmd_reset ;;
 console-log)
 	[[ ${1:-} == -f ]] && exec tail -F "$VM_CONSOLE"

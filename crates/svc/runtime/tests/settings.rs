@@ -148,7 +148,7 @@ async fn ux1_the_desktop_reads_its_settings_hears_of_changes_and_the_app_changes
 
     let list = call(&apps, settings.session, "settings.list", json!({})).await;
     assert!(list.ok, "{}", list.text);
-    assert_eq!(list.text, "11 settings; IT locked 1.");
+    assert_eq!(list.text, "12 settings; IT locked 1.");
     assert!(
         list.data["device"]
             .as_array()

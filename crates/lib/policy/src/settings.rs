@@ -140,6 +140,16 @@ pub fn table() -> &'static [SettingDef] {
                 scope: Scope::Device,
                 default: SettingValue::Text(String::new()),
             },
+            // glassd writes a devd rule that powers off any USB
+            // mass-storage interface that attaches (ADR 0031).
+            toggle(
+                "devices.usb_storage",
+                "Devices",
+                "USB drives",
+                "Off: USB drives and card readers don't connect, and any plugged in is turned off.",
+                Scope::Device,
+                true,
+            ),
             toggle(
                 "notifications.do_not_disturb",
                 "Notifications",
