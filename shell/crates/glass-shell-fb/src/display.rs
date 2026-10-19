@@ -106,6 +106,11 @@ impl Display {
         })
     }
 
+    /// What's behind the UI from now on (`Display::open` takes it too).
+    pub fn set_backdrop(&mut self, bgra: Vec<u8>) {
+        self.screen.set_backdrop(bgra);
+    }
+
     /// No pointer on this screen from now on; one already painted goes.
     pub fn hide_pointer(&mut self) {
         self.pointer_shown = false;

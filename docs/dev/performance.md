@@ -124,7 +124,10 @@ and one stylesheet of about 6 KB.
   os/freebsd/scripts/shell-vm.sh greeter`): glassd 0.2 s, the screen 0.6 s,
   the first frame 1 s. The sign-in screen stays up until then (ADR 0019).
   With the faster whole-screen redraw it is up in 1.7 s: the screen 0.9 s,
-  the first frame 0.74 s.
+  the first frame 0.74 s. The desktop's start now logs where the screen step
+  goes (`screen:` in the same log): About's details took six programs (one
+  `sysctl` now), and the wallpaper is drawn on its own thread while the apps'
+  compositor starts. Up in 0.7 to 1.0 s (the screen step 0.3 to 0.45 s).
 
 ## Boot
 
@@ -160,6 +163,22 @@ starts right after glassd, so the screen is up with the last few startup
 scripts, a little before the serial console's login prompt the tool times.
 One cold boot with it on came out at 57.6 s to the login prompt (glassd
 ready at 56.3 s), no slower than the runs above.
+
+The package-list image (ADR 0022), carrying the desktop's libraries since
+2026-10-19, against the dev VM on the official image, the same hour on the
+same host with nothing else building (medians; this host ran slower than
+on the days above, so compare the two columns, not with the tables before):
+
+| | Dev VM (official image) | Package-list image |
+|---|---|---|
+| Power on to login prompt | 76.1 s (75.3–76.9) | 60.9 s (60.2–61.7) |
+| glassd ready, after power on | 75.5 s | 60.2 s |
+| Signing in to the desktop, first time after boot | | 2.3 s (the screen step 1.6 s, cold caches) |
+
+Traced, the package-list image runs 100 startup scripts and none stands
+out (netif 5.8 s, devfs 4.4 s traced; ours under 1 s each): what's left is
+their number, which the product image's list (no sshd, no nuageinit)
+brings down further.
 
 #### Apps (UI-7)
 

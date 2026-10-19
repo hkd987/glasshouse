@@ -136,6 +136,22 @@ pub struct Computer {
 
 /// The host name, processor model and memory.
 pub fn computer() -> Result<Computer> {
+    if cfg!(target_os = "freebsd") {
+        // One program for all three: each one started costs the desktop's
+        // sign-in a few milliseconds, many more under emulation.
+        let out = cmd::run("sysctl", &["-n", "kern.hostname", "hw.model", "hw.physmem"])?;
+        let mut lines = out.lines().map(str::trim);
+        let (Some(name), Some(processor), Some(memory)) =
+            (lines.next(), lines.next(), lines.next())
+        else {
+            return Err(PlatformError::Unsupported("computer description".into()));
+        };
+        return Ok(Computer {
+            name: name.to_owned(),
+            processor: processor.to_owned(),
+            memory_mb: memory.parse::<u64>().unwrap_or(0) / 1024 / 1024,
+        });
+    }
     let name = cmd::run("hostname", &[])?.trim().to_owned();
     let memory_mb = load()?.memory_total_mb;
     let processor = if cfg!(target_os = "freebsd") {

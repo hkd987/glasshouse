@@ -510,20 +510,33 @@ impl Shell {
         // The wallpaper stays drawn behind the UI, so a change redraws only
         // what's over it.
         let started = Instant::now();
-        let mut wallpaper_took = Duration::ZERO;
-        let display = Display::open(&tty, |w, h| {
-            let drawing = Instant::now();
-            let backdrop = wallpaper::backdrop(&theme.wallpaper, w, h);
-            wallpaper_took = drawing.elapsed();
-            backdrop
+        // The wallpaper is drawn on its own thread while the apps'
+        // compositor starts: neither needs the other.
+        let mut drawing = None;
+        let mut display = Display::open(&tty, |w, h| {
+            let wallpaper = theme.wallpaper.clone();
+            drawing = Some(std::thread::spawn(move || {
+                let started = Instant::now();
+                (wallpaper::backdrop(&wallpaper, w, h), started.elapsed())
+            }));
+            Vec::new()
         })?;
         let opened = started.elapsed();
         let apps = open_apps(display.pixels());
+        let compositor = started.elapsed() - opened;
+        let wallpaper_took = match drawing.map(std::thread::JoinHandle::join) {
+            Some(Ok((backdrop, took))) => {
+                display.set_backdrop(backdrop);
+                took
+            }
+            _ => Duration::ZERO,
+        };
         eprintln!(
-            "screen: framebuffer {} ms, wallpaper {} ms, apps' compositor {} ms",
-            (opened - wallpaper_took).as_millis(),
+            "screen: framebuffer {} ms, wallpaper {} ms and apps' compositor {} ms side by side, {} ms in all",
+            opened.as_millis(),
             wallpaper_took.as_millis(),
-            (started.elapsed() - opened).as_millis()
+            compositor.as_millis(),
+            started.elapsed().as_millis()
         );
         Ok(Self {
             display,
