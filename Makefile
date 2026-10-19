@@ -52,8 +52,9 @@ fmt: ## Format all Rust code
 check-layers: ## Enforce crate layering and manifest conventions
 	tools/check-layers.py
 
-deny: ## Check dependency licenses and advisories (needs cargo-deny)
+deny: ## Check dependency licenses and advisories, both workspaces (needs cargo-deny)
 	cargo deny check licenses bans sources
+	cd shell && cargo deny check licenses bans sources
 
 legal-base: ## Regenerate the base system's notices and source offer from its src.txz (BR-2, BR-3)
 	os/freebsd/scripts/fetch.sh src
