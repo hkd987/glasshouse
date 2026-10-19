@@ -31,13 +31,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
 use glass_api::{Event, TaskDetail, TaskRef, TaskView, UndoReport, methods};
+use glass_compositor::{Compositor, WorkArea};
 use glass_rpc::{Client, ClientError};
 use glass_shell::live::{Effect, Live};
+use glass_shell::screens::desktop::{DOCK_ROOM, MENU_BAR_HEIGHT};
 use glass_shell::screens::system;
 use glass_shell::session::Password;
 use glass_shell::{Message, Power, Theme, session, wallpaper};
-use glass_shell_fb::display::Display;
+use glass_shell_fb::display::{AppInput, Display, Route};
 use glass_shell_fb::input::{self, Input};
+use std::os::fd::OwnedFd;
 use time::{OffsetDateTime, UtcOffset};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
@@ -150,6 +153,15 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
     };
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
+    let (mut apps_ready, apps_handled) = match shell.apps.as_mut().map(Compositor::fds).transpose()
+    {
+        Ok(Some(fds)) => watch_apps(fds),
+        Ok(None) => (mpsc::unbounded_channel().1, None),
+        Err(e) => {
+            eprintln!("apps: {e}");
+            (mpsc::unbounded_channel().1, None)
+        }
+    };
     loop {
         let redraw;
         // When the next notification banner's time is up, and when the
@@ -229,6 +241,13 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                     shell.focus(id);
                 }
                 redraw = true;
+            }
+            Some(()) = apps_ready.recv() => {
+                shell.apps_turn();
+                if let Some(handled) = &apps_handled {
+                    let _ = handled.send(());
+                }
+                continue;
             }
             () = banner_gone => redraw = shell.live.tick(Instant::now()),
             () = blink => {
@@ -313,6 +332,61 @@ fn sign_in_answers() -> mpsc::UnboundedReceiver<String> {
     answers
 }
 
+/// The compositor apps' windows open in, on `$XDG_RUNTIME_DIR/wayland-0`,
+/// with windows placed between the menu bar and the dock; none without a
+/// runtime directory (the sign-in screen sets one up for the session).
+fn open_apps(size: (u32, u32)) -> Option<Compositor> {
+    let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        eprintln!("apps: no XDG_RUNTIME_DIR, so apps can't open windows");
+        return None;
+    };
+    let socket = std::path::Path::new(&dir).join("wayland-0");
+    // One left by a desktop that didn't end cleanly.
+    let _ = std::fs::remove_file(&socket);
+    let work_area = WorkArea {
+        top: MENU_BAR_HEIGHT as i32,
+        bottom: DOCK_ROOM as i32,
+    };
+    match Compositor::new(&socket.to_string_lossy(), size, work_area) {
+        Ok(apps) => {
+            eprintln!("apps: windows open on {}", socket.display());
+            Some(apps)
+        }
+        Err(e) => {
+            eprintln!("apps: {e:#}");
+            None
+        }
+    }
+}
+
+/// Watches the compositor's descriptors on a thread of its own: a message
+/// each time a client connects or sends something, then nothing until the
+/// loop says it has handled that (they stay readable until then).
+fn watch_apps(
+    fds: [OwnedFd; 2],
+) -> (
+    mpsc::UnboundedReceiver<()>,
+    Option<std::sync::mpsc::Sender<()>>,
+) {
+    use rustix::event::{PollFd, PollFlags, poll};
+    let (ready, apps_ready) = mpsc::unbounded_channel();
+    let (handled, wait) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        loop {
+            let mut watched = fds.each_ref().map(|fd| PollFd::new(fd, PollFlags::IN));
+            match poll(&mut watched, None) {
+                Ok(_) => {}
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(e) => return eprintln!("apps: waiting on the compositor: {e}"),
+            }
+            if ready.send(()).is_err() || wait.recv().is_err() {
+                return;
+            }
+        }
+    });
+    (apps_ready, Some(handled))
+}
+
 /// Waits until `at`, or forever without one.
 async fn until(at: Option<Instant>) {
     match at {
@@ -380,6 +454,11 @@ struct Shell {
     live: Live,
     /// Something changed that the next frame should show.
     dirty: bool,
+    /// Apps' windows (UI-1), when there's a runtime directory for the
+    /// socket they connect to.
+    apps: Option<Compositor>,
+    /// The windows' titles, as last logged.
+    app_titles: Vec<String>,
 }
 
 impl Shell {
@@ -388,13 +467,65 @@ impl Shell {
         // The wallpaper stays drawn behind the UI, so a change redraws only
         // what's over it.
         let display = Display::open(&tty, |w, h| wallpaper::backdrop(&theme.wallpaper, w, h))?;
+        let apps = open_apps(display.pixels());
         Ok(Self {
             display,
             theme,
             offset,
             live,
             dirty: false,
+            apps,
+            app_titles: Vec::new(),
         })
+    }
+
+    /// Handles what apps sent and shows what their windows drew.
+    fn apps_turn(&mut self) {
+        let Some(apps) = self.apps.as_mut() else {
+            return;
+        };
+        if let Err(e) = apps.dispatch() {
+            eprintln!("apps: {e:#}");
+        }
+        // Windows coming and going, for the log.
+        let titles: Vec<String> = apps.windows().into_iter().map(|w| w.title).collect();
+        if titles != self.app_titles {
+            eprintln!("apps: {} windows: {}", titles.len(), titles.join(", "));
+            self.app_titles = titles;
+        }
+        let areas = match apps.render() {
+            Ok(areas) => areas,
+            Err(e) => {
+                eprintln!("apps: {e:#}");
+                return;
+            }
+        };
+        if areas.is_empty() {
+            return;
+        }
+        let areas: Vec<_> = areas
+            .iter()
+            .map(|r| (r.x, r.y, r.width, r.height))
+            .collect();
+        let shown = self.live.shows_windows().then(|| apps.pixels());
+        self.display.present_windows(&areas, shown);
+    }
+
+    /// Hands input meant for apps to their windows.
+    fn send_to_apps(&mut self, input: &[AppInput]) {
+        let Some(apps) = self.apps.as_mut() else {
+            return;
+        };
+        for event in input {
+            match *event {
+                AppInput::Moved(x, y) => apps.pointer_moved((x, y)),
+                AppInput::Button(code, down) => apps.pointer_button(code, down),
+                AppInput::Key(code, down) => apps.key(code, down),
+            }
+        }
+        if !input.is_empty() {
+            self.apps_turn();
+        }
     }
 
     fn now(&self) -> OffsetDateTime {
@@ -415,9 +546,24 @@ impl Shell {
     /// clicks and keys go through the UI. Returns what they ask for.
     fn input(&mut self, batch: &[Input]) -> Vec<Effect> {
         let live = &self.live;
-        let typed = self
-            .display
-            .input(batch, |key, modifiers| live.shortcut(key, modifiers));
+        let apps = self.apps.as_ref();
+        let window_at = |at: iced_core::Point| {
+            apps.is_some_and(|a| a.window_at((f64::from(at.x), f64::from(at.y))))
+        };
+        let route = match apps {
+            Some(apps) => Route {
+                window_at: &window_at,
+                keys_to_apps: apps.has_focus(),
+                shell_only: live.takes_all_input(),
+            },
+            None => Route::SHELL,
+        };
+        let typed = self.display.input_routed(
+            batch,
+            |key, modifiers| live.shortcut(key, modifiers),
+            &route,
+        );
+        self.send_to_apps(&typed.apps);
         let mut messages = typed.shortcuts;
         if !typed.events.is_empty() {
             let bar = self.live.command_bar();
@@ -564,7 +710,12 @@ impl Shell {
         let view = self
             .live
             .view(&self.theme, bar.as_ref(), self.now(), self.display.size());
-        let drawn = self.display.draw(view);
+        let windows = self
+            .apps
+            .as_ref()
+            .filter(|_| self.live.shows_windows())
+            .map(Compositor::pixels);
+        let drawn = self.display.draw_over(view, windows);
         if log {
             eprintln!("{} tiles: {drawn}", self.live.tasks().len());
         }

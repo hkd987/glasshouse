@@ -12,6 +12,8 @@
 #   desk.sh key <keys>              press keys (vm.sh key names: ret, ctrl-spc, alt-meta_l-esc),
 #                                   and wait for the redraw
 #   desk.sh point <x> <y>           move the pointer there, and wait for any redraw (hover)
+#   desk.sh app '<command>'         run an app as the person signed in, in their session (its
+#                                   windows open on the desktop); waits for the window count to change
 #   desk.sh wait <regex> [timeout]  wait for a new line in the greeter's log matching <regex>
 #   desk.sh shot <png>              save the screen (vm.sh screendump)
 #   desk.sh log [n]                 the greeter's log, without draw lines (default 20)
@@ -95,6 +97,22 @@ click | key | point)
 		echo "nothing redrawn"
 	fi
 	;;
+app)
+	(($# == 1)) || die "usage: desk.sh app '<command>'"
+	n=$(lines)
+	vm_ssh "sh -s -- $(quote "$1")" <<'EOF'
+pid=$(pgrep -x glass-shell-fb | head -1)
+[ -n "$pid" ] || { echo "desk.sh: nobody is signed in" >&2; exit 1; }
+user=$(ps -o user= -p "$pid" | tr -d ' ')
+uid=$(id -u "$user")
+cd /
+# Detached, with nothing tying it to this SSH session.
+daemon -f su -l "$user" -c "env XDG_RUNTIME_DIR=/var/run/user/$uid $1"
+EOF
+	wait_for "$n" "^apps: [0-9]+ windows" "${DESK_SETTLE:-30}" | sed 's/^/opened: /' ||
+		die "no window came or went (desk.sh log)"
+	vm_ssh "n=0; while [ \$n -lt 20 ] && [ \"\$(wc -l <$log)\" != \"\$(sleep 0.5; wc -l <$log)\" ]; do n=\$((n + 1)); done"
+	;;
 wait)
 	(($# >= 1)) || die "usage: desk.sh wait <regex> [timeout]"
 	wait_for "$(lines)" "$1" "${2:-30}"
@@ -107,5 +125,5 @@ shot)
 log)
 	vm_ssh "grep -v 'drawn in' $log | tail -n ${1:-20}"
 	;;
-*) die "usage: desk.sh ready|signin [password]|signout|restart|click x y|key k|point x y|wait <regex>|shot <png>|log [n]" ;;
+*) die "usage: desk.sh ready|signin [password]|signout|restart|click x y|key k|point x y|app '<command>'|wait <regex>|shot <png>|log [n]" ;;
 esac

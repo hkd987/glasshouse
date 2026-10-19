@@ -143,13 +143,20 @@ async fn supervise(args: &Args) -> anyhow::Result<()> {
         };
         eprintln!("glass-greeter: {user} signed in");
         hand_devices(&args.tty, account.uid, account.gid);
+        // Where the desktop's apps find it (their Wayland socket): su -l
+        // starts from a clean environment, so it's set on the command.
+        let runtime = runtime_dir(account.uid, account.gid);
+        let command = match &runtime {
+            Some(dir) => format!("env XDG_RUNTIME_DIR={} {}", dir.display(), args.session),
+            None => args.session.clone(),
+        };
         // su(1) as root asks for nothing more, and sets up the session as
         // login(1) would: groups, login class, environment, PAM session.
         let mut session = Command::new("/usr/bin/su")
             .arg("-l")
             .arg(&user)
             .arg("-c")
-            .arg(&args.session)
+            .arg(&command)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -166,6 +173,9 @@ async fn supervise(args: &Args) -> anyhow::Result<()> {
             return stopped(&args.tty);
         };
         eprintln!("glass-greeter: {user}'s session ended ({status:?})");
+        if let Some(dir) = &runtime {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         // The desktop asked to restart or shut down: it can't (it isn't
         // root); this does, from the person at the screen, whose desktop
         // left "Restarting…" up. Shutting down stops this service too.
@@ -274,6 +284,38 @@ fn tty_name(tty: &Path) -> String {
     tty.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// Where each person's runtime directories live (XDG), one per uid.
+const RUNTIME_DIRS: &str = "/var/run/user";
+
+/// The session's runtime directory, `/var/run/user/<uid>`: the person's
+/// alone (0700), and empty at the start of each session, so nothing left
+/// from an earlier one (a socket, a symlink) is in it. The apps' Wayland
+/// socket lives there. None if it can't be made; the desktop then runs
+/// without app windows.
+fn runtime_dir(uid: u32, gid: u32) -> Option<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Path::new(RUNTIME_DIRS).join(uid.to_string());
+    let made = (|| -> std::io::Result<()> {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(RUNTIME_DIRS)?;
+        if dir.symlink_metadata().is_ok() {
+            // Doesn't follow a symlink: removes the link itself.
+            std::fs::remove_dir_all(&dir)?;
+        }
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        std::os::unix::fs::chown(&dir, Some(uid), Some(gid))
+    })();
+    match made {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            eprintln!("glass-greeter: {}: {e}", dir.display());
+            None
+        }
+    }
 }
 
 /// Waits for `work`, unless this program is told to stop first: then it

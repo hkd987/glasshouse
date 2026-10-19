@@ -642,3 +642,20 @@ fn an_unlocked_screen_cant_be_unlocked_and_a_plain_desktop_cant_lock() {
     assert_eq!(live.unlock_answered(true), None);
     assert_eq!(live.update(Message::SignIn), None);
 }
+
+#[test]
+fn ui1_apps_windows_hide_behind_the_lock_screen_and_menus_take_the_input() {
+    let mut live = Live::new(fixtures::tasks())
+        .signed_in_as("Dana Ruiz")
+        .lockable();
+    assert!(live.shows_windows() && !live.takes_all_input());
+    // A menu over the windows takes clicks and keys, and they still show.
+    live.update(Message::ToggleSystemMenu);
+    assert!(live.shows_windows() && live.takes_all_input());
+    live.update(Message::ToggleSystemMenu);
+    // Locked: nothing of them shows or hears anything.
+    live.update(Message::LockScreen);
+    assert!(!live.shows_windows() && live.takes_all_input());
+    live.unlock_answered(true);
+    assert!(live.shows_windows() && !live.takes_all_input());
+}

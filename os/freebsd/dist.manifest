@@ -11,3 +11,4 @@ glass-it-agent    usr/local/libexec/glasshouse/glass-it-agent        0755
 glass-probe       usr/local/libexec/glasshouse/glass-probe           0755
 shell/glass-greeter   usr/local/bin/glass-greeter                        0755
 shell/glass-shell-fb  usr/local/bin/glass-shell-fb                       0755
+shell/glass-hello     usr/local/libexec/glasshouse/glass-hello           0755

@@ -214,6 +214,25 @@ impl Live {
         self.locked.is_some()
     }
 
+    /// Whether the shell takes all input, so none reaches apps' windows: a
+    /// menu, one of its own windows, the command bar or the expanded view
+    /// is open, or the screen is locked or going.
+    pub fn takes_all_input(&self) -> bool {
+        self.menu
+            || self.system_menu
+            || self.command.is_some()
+            || self.open.is_some()
+            || self.window.is_some()
+            || self.locked.is_some()
+            || self.leaving.is_some()
+    }
+
+    /// Whether apps' windows may show: never behind the lock screen or the
+    /// restarting frame.
+    pub fn shows_windows(&self) -> bool {
+        self.locked.is_none() && self.leaving.is_none()
+    }
+
     /// The sign-in screen's answer to an unlock request.
     pub fn unlock_answered(&mut self, unlocked: bool) -> Option<Effect> {
         let locked = self.locked.as_mut()?;

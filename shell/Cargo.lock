@@ -727,11 +727,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "glass-api",
+ "glass-compositor",
  "glass-platform",
  "glass-rpc",
  "glass-shell",
  "glass-types",
  "iced_core",
+ "rustix 1.1.5",
  "serde_json",
  "time",
  "tokio",

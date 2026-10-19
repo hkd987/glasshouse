@@ -233,7 +233,7 @@ pub fn ordered(tasks: &[TaskView]) -> Vec<&TaskView> {
 /// Room around the tiles inside the agents menu.
 const MENU_PADDING: f32 = 12.0;
 /// Room the menu leaves for the dock.
-const DOCK_ROOM: f32 = 96.0;
+pub const DOCK_ROOM: f32 = 96.0;
 
 /// The agents menu: every agent's tile, needs-you first, in a panel that
 /// scrolls when they don't fit.
@@ -339,7 +339,7 @@ fn menu_bar<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
         .into()
 }
 
-const MENU_BAR_HEIGHT: f32 = 32.0;
+pub const MENU_BAR_HEIGHT: f32 = 32.0;
 /// How far the mark's highlight reaches either side of it.
 const MARK_REACH: f32 = 6.0;
 const MARK_WIDTH: f32 = 16.0 + MARK_REACH * 2.0;

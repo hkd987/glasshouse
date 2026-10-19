@@ -56,6 +56,10 @@ pub struct Screen {
     /// When the last frame asked to be drawn again, such as a text field's
     /// caret blinking.
     wake: Option<iced_core::time::Instant>,
+    /// Whether the screen shows apps' windows: when that changes, all of
+    /// it is composed again, so hiding them (the lock screen) leaves none
+    /// of their pixels anywhere, not only where the UI changed.
+    windows_shown: bool,
 }
 
 /// What the UI made of some input.
@@ -101,6 +105,7 @@ impl Screen {
             backdrop: None,
             cursor: mouse::Cursor::Unavailable,
             wake: None,
+            windows_shown: false,
         }
     }
 
@@ -193,6 +198,21 @@ impl Screen {
         view: Element<'_, Message>,
         cursor: Option<Point>,
     ) -> Vec<Damage> {
+        self.render_over(view, cursor, None)
+    }
+
+    /// [`Screen::render`] with apps' windows between the backdrop and the
+    /// UI: `windows` is the screen's size, B, G, R, A premultiplied and
+    /// transparent where no window is (the compositor's output). The UI
+    /// stays on top, so menus, banners and the lock screen cover windows.
+    /// Without a backdrop there's nothing to put them over, and they're
+    /// left out.
+    pub fn render_over<Message>(
+        &mut self,
+        view: Element<'_, Message>,
+        cursor: Option<Point>,
+        windows: Option<&[u8]>,
+    ) -> Vec<Damage> {
         let cursor = pointer(cursor);
         self.cursor = cursor;
         let mut wake = None;
@@ -235,7 +255,6 @@ impl Screen {
         // but a quad inside the area casts its shadow past it unclipped. So
         // each area is drawn into scratch on its own and only it is kept.
         let (width, height) = self.physical_size();
-        let stride = width as usize * 4;
         let mut damaged = Vec::with_capacity(changed.len());
         for area in changed {
             let Some(d) = self.physical(area) else {
@@ -261,46 +280,77 @@ impl Screen {
                 &[area],
                 background,
             );
-            let rows = d.y as usize..(d.y + d.height) as usize;
-            let columns = d.x as usize * 4..(d.x + d.width) as usize * 4;
-            for y in rows.clone() {
-                let row = y * stride + columns.start..y * stride + columns.end;
-                let from = self.backdrop.as_deref().unwrap_or(&self.scratch);
-                self.pixels[row.clone()].copy_from_slice(&from[row]);
-            }
-            if self.backdrop.is_some() {
-                self.composite(d);
-            }
+            self.compose_area(d, windows);
             damaged.push(d);
         }
         self.shown = Some(layers);
+        if let Some(all) = self.windows_toggled(windows) {
+            self.compose_area(all, windows);
+            return vec![all];
+        }
         damaged
     }
 
-    /// Lays the UI drawn into scratch over the backdrop already copied into
-    /// `pixels`, in area `d`.
-    fn composite(&mut self, d: Damage) {
-        let (width, height) = self.physical_size();
-        let Some(ui) =
-            tiny_skia::PixmapRef::from_bytes(&self.scratch, width, height).and_then(|all| {
-                all.clone_rect(tiny_skia::IntRect::from_xywh(
-                    d.x as i32, d.y as i32, d.width, d.height,
-                )?)
-            })
-        else {
-            return;
-        };
-        if let Some(mut screen) = tiny_skia::PixmapMut::from_bytes(&mut self.pixels, width, height)
-        {
-            screen.draw_pixmap(
-                d.x as i32,
-                d.y as i32,
-                ui.as_ref(),
-                &tiny_skia::PixmapPaint::default(),
-                tiny_skia::Transform::identity(),
-                None,
-            );
+    /// The whole screen, when `windows` shows or hides them unlike the
+    /// screen does now.
+    fn windows_toggled(&mut self, windows: Option<&[u8]>) -> Option<Damage> {
+        let shown = windows.is_some() && self.backdrop.is_some();
+        if std::mem::replace(&mut self.windows_shown, shown) == shown {
+            return None;
         }
+        let (width, height) = self.physical_size();
+        Some(Damage {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        })
+    }
+
+    /// Builds `areas` of the screen again from its layers, where only the
+    /// apps' windows changed: the backdrop, `windows` (as for
+    /// [`Screen::render_over`]) and the UI as last drawn there. Returns
+    /// what changed: all of the screen if the windows were shown and now
+    /// aren't, or the other way round.
+    pub fn compose(&mut self, areas: &[Damage], windows: Option<&[u8]>) -> Vec<Damage> {
+        if let Some(all) = self.windows_toggled(windows) {
+            self.compose_area(all, windows);
+            return vec![all];
+        }
+        for &d in areas {
+            self.compose_area(d, windows);
+        }
+        areas.to_vec()
+    }
+
+    /// Whether the UI draws anything at physical pixel (x, y): what's
+    /// there belongs to the shell rather than to a window under it.
+    pub fn ui_at(&self, x: u32, y: u32) -> bool {
+        let (width, height) = self.physical_size();
+        if self.backdrop.is_none() || x >= width || y >= height {
+            return true;
+        }
+        self.scratch[(y as usize * width as usize + x as usize) * 4 + 3] != 0
+    }
+
+    /// Area `d` of the screen from its layers. Without a backdrop the UI
+    /// was drawn over black in scratch, and that's the whole picture.
+    fn compose_area(&mut self, d: Damage, windows: Option<&[u8]>) {
+        let (width, height) = self.physical_size();
+        let stride = width as usize * 4;
+        let columns = d.x as usize * 4..(d.x + d.width) as usize * 4;
+        let from = self.backdrop.as_deref().unwrap_or(&self.scratch);
+        for y in d.y as usize..(d.y + d.height) as usize {
+            let row = y * stride + columns.start..y * stride + columns.end;
+            self.pixels[row.clone()].copy_from_slice(&from[row]);
+        }
+        if self.backdrop.is_none() {
+            return;
+        }
+        if let Some(windows) = windows.filter(|w| w.len() == self.pixels.len()) {
+            blend(&mut self.pixels, windows, (width, height), d);
+        }
+        blend(&mut self.pixels, &self.scratch, (width, height), d);
     }
 
     /// The screen's pixels: B, G, R, A bytes, rows top to bottom.
@@ -356,6 +406,28 @@ impl Screen {
         let mut ui = UserInterface::build(view, self.size, cache, &mut self.renderer);
         run(&mut ui, &mut self.renderer);
         self.cache = ui.into_cache();
+    }
+}
+
+/// Lays area `d` of `layer` (premultiplied, the screen's size) over the
+/// same area of `screen`.
+fn blend(screen: &mut [u8], layer: &[u8], (width, height): (u32, u32), d: Damage) {
+    let Some(part) = tiny_skia::PixmapRef::from_bytes(layer, width, height).and_then(|all| {
+        all.clone_rect(tiny_skia::IntRect::from_xywh(
+            d.x as i32, d.y as i32, d.width, d.height,
+        )?)
+    }) else {
+        return;
+    };
+    if let Some(mut screen) = tiny_skia::PixmapMut::from_bytes(screen, width, height) {
+        screen.draw_pixmap(
+            d.x as i32,
+            d.y as i32,
+            part.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            None,
+        );
     }
 }
 

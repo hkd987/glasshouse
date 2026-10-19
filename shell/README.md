@@ -161,9 +161,18 @@ font licenses land in the image's notices next to the crates'.
    `wl_output`), places new windows centered between the menu bar and the
    dock, raises and focuses on click, and composes with pixman into a
    buffer, redrawing only what changed; tests drive it with real clients
-   over its socket. Next: on the VM's framebuffer with evdev input, then
-   the shell as its desktop layer (wallpaper below the windows, menu bar,
-   dock and tiles above).
+   over its socket. The desktop (`glass-shell-fb`) hosts it: apps connect
+   to `$XDG_RUNTIME_DIR/wayland-0` (the sign-in screen makes
+   `/var/run/user/<uid>` for each session, 0700, emptied at sign in and
+   out), and their windows sit between the wallpaper and the shell's UI,
+   so the menu bar, dock, menus, banners and the lock screen stay on top;
+   behind the lock screen windows aren't drawn at all. The pointer over a
+   window where the UI draws nothing, and keys while a window has the
+   keyboard, go to the apps; shortcuts and anything while a menu or the
+   lock screen is up stay the shell's. `glass-hello` is a one-window demo
+   app (`desk.sh app /usr/local/libexec/glasshouse/glass-hello`). Next:
+   window frames with the controls on the left (DK-1), moving windows,
+   the focused app in the menu bar, then our browser engine as a client.
 2. **Live state.** Done in `glass-shell-fb`: it subscribes to
    `events.subscribe` and redraws tiles, the agents pill and the clock as
    they change.

@@ -24,4 +24,6 @@ case $0 in
 *++) cc=clang++ ;;
 *) cc=clang ;;
 esac
-exec "$cc" --target="$FREEBSD_TRIPLE" --sysroot="$sysroot" -fuse-ld=lld "$@"
+# Libraries from packages (scripts/ports.sh sysroot) live under /usr/local, as on the device.
+exec "$cc" --target="$FREEBSD_TRIPLE" --sysroot="$sysroot" -fuse-ld=lld \
+	-L"$sysroot/usr/local/lib" -I"$sysroot/usr/local/include" "$@"

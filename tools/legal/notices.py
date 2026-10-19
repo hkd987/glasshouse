@@ -71,9 +71,18 @@ def shipped_closure(meta: dict, roots: list[str], manifest: Path = REPO / "Cargo
     Path dependencies are ours, except vendored crates (shell/vendor)."""
     packages = {p["id"]: p for p in meta["packages"]}
     members = {packages[m]["name"] for m in meta["workspace_members"]}
+    # A root may name a binary rather than its package (glass-hello is a
+    # binary of glass-compositor): the package is what cargo tree takes.
+    binaries = {
+        t["name"]: packages[m]["name"]
+        for m in meta["workspace_members"]
+        for t in packages[m]["targets"]
+        if "bin" in t["kind"]
+    }
+    roots = sorted({r if r in members else binaries.get(r, r) for r in roots})
     missing = [r for r in roots if r not in members]
     if missing:
-        sys.exit(f"notices: not workspace packages: {', '.join(missing)}")
+        sys.exit(f"notices: not workspace packages or binaries: {', '.join(missing)}")
     out = subprocess.run(
         ["cargo", "tree", "--locked", "--manifest-path", str(manifest), "--target", TARGET,
          "-e", "normal,build", "--prefix", "none", "--format", "{p}",

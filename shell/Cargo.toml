@@ -48,6 +48,8 @@ smithay = { version = "0.7.0", default-features = false, features = ["wayland_fr
 wayland-client = "0.31.10"
 wayland-protocols = { version = "0.32.8", features = ["client"] }
 tempfile = "3.27.0"
+# poll(2) on the compositor's sockets, safely (already built for Smithay).
+rustix = { version = "1.1.5", features = ["event"] }
 anyhow = "1.0.100"
 serde_json = "1.0"
 tokio = { version = "1.48", features = ["rt", "macros", "time", "signal", "process", "io-util"] }

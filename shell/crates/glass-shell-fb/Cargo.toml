@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 glass-shell.workspace = true
+glass-compositor.workspace = true
+rustix.workspace = true
 glass-api.workspace = true
 glass-platform.workspace = true
 glass-rpc.workspace = true

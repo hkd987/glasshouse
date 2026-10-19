@@ -15,6 +15,7 @@
 //! New windows open centered in the work area, between the menu bar and the
 //! dock; a click raises a window and gives it the keyboard.
 
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -282,6 +283,29 @@ impl Compositor {
     /// is, it's transparent, for the desktop behind to show through.
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
+    }
+
+    /// What to wait on before calling [`Compositor::dispatch`], as copies
+    /// for an event loop to own: the listening socket (a new client) and
+    /// the display (a client sent something).
+    pub fn fds(&mut self) -> std::io::Result<[OwnedFd; 2]> {
+        Ok([
+            self.socket.as_fd().try_clone_to_owned()?,
+            self.display.backend().poll_fd().try_clone_to_owned()?,
+        ])
+    }
+
+    /// Whether a window is at `at` (pixels on the screen).
+    pub fn window_at(&self, at: (f64, f64)) -> bool {
+        self.state.space.element_under(at).is_some()
+    }
+
+    /// Whether a window has the keyboard.
+    pub fn has_focus(&self) -> bool {
+        self.state
+            .seat
+            .get_keyboard()
+            .is_some_and(|k| k.current_focus().is_some())
     }
 
     /// The windows, bottom to top.
