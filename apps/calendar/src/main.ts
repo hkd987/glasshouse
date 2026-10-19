@@ -300,7 +300,7 @@ function detail(event: CalendarEvent): HTMLElement {
   return h(
     "article",
     { class: "detail", "data-test": "detail" },
-    h("div", { class: `kind ${event.kind}` }, event.kind === "hold" ? "Hold · tentative" : own ? "Event" : "Invitation"),
+    h("div", { class: `kind kind-${event.kind}` }, event.kind === "hold" ? "Hold · tentative" : own ? "Event" : "Invitation"),
     h("h2", {}, event.title),
     h("div", { class: "when" }, longDay(event.start)),
     h("div", { class: "muted" }, timeRange(event.start, event.end)),
