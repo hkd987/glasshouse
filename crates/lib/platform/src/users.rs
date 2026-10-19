@@ -234,7 +234,14 @@ pub fn create_person(login: &str, full_name: &str, password: &str) -> crate::Res
         &input,
     );
     input.fill(0);
-    created?;
+    if let Err(e) = created {
+        // Nothing half made: the home made for an account that isn't
+        // there would stop setup trying the same name again.
+        if let Some(dataset) = &dataset {
+            let _ = cmd::run("zfs", &["destroy", dataset]);
+        }
+        return Err(e);
+    }
     cmd::run("chown", &[&format!("{login}:{login}"), &home]).map(drop)
 }
 

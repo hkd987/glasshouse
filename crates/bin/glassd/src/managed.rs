@@ -241,12 +241,16 @@ impl Managed {
         for warning in &warnings {
             tracing::warn!("managed policy v{}: {warning}", signed.version);
         }
-        self.policies
-            .apply(&self.config.policy, &release.policy)
-            .map_err(|e| e.to_string())?;
+        // The signed release first: if keeping it fails (a full disk), the
+        // policy file and what's in force stay as they were, as the refusal
+        // the caller audits says. If applying fails after, the kept release
+        // is put back at the next start or poll.
         if !again {
             self.releases.save(signed).map_err(|e| e.to_string())?;
         }
+        self.policies
+            .apply(&self.config.policy, &release.policy)
+            .map_err(|e| e.to_string())?;
         let _ = self.policies.remember(&glass_policy::store::Loaded {
             policy: policy.clone(),
             text: release.policy.clone(),

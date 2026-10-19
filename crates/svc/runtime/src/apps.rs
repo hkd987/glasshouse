@@ -113,6 +113,8 @@ impl Runtime {
                 manifest.name
             )));
         }
+        // Counted and added under one lock (released when this returns).
+        let _opening = self.opening_app.lock().unwrap_or_else(|p| p.into_inner());
         let open = self
             .tasks()
             .values()

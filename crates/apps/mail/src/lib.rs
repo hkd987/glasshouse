@@ -424,17 +424,12 @@ impl ActionProvider for MailProvider {
         let home = ConfinedDir::open(&ctx.home).map_err(|e| ActionError::io("home folder", e))?;
         for folder in [INBOX, DRAFTS, SENT] {
             let rel = PathBuf::from(MAIL_DIR).join(folder);
+            // The person's own, made and handed over through the confined
+            // handle: a chown on the joined path would follow a symlink
+            // they put there (PA-3).
             if !home.exists(&rel) {
-                home.create_dir_all(&rel)
+                home.create_dir_all_as(&rel, ctx.owner)
                     .map_err(|e| ActionError::io("mail folders", e))?;
-                for dir in [PathBuf::from(MAIL_DIR), rel.clone()] {
-                    std::os::unix::fs::chown(
-                        ctx.home.join(&dir),
-                        Some(ctx.owner.uid),
-                        Some(ctx.owner.gid),
-                    )
-                    .map_err(|e| ActionError::io("mail folders", e))?;
-                }
             }
         }
         Ok(())
@@ -656,6 +651,16 @@ mod tests {
         };
         MailProvider.prepare(&ctx).unwrap();
         (dir, ctx)
+    }
+
+    #[test]
+    fn pa3_mail_folders_are_never_made_through_a_symlink_out_of_home() {
+        let outside = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(MAIL_DIR)).unwrap();
+        let ctx = context(dir.path());
+        assert!(MailProvider.prepare(&ctx).is_err());
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
     #[test]

@@ -63,6 +63,9 @@ pub struct Runtime {
     events: broadcast::Sender<OwnedEvent>,
     tasks: Mutex<BTreeMap<TaskId, Arc<Task>>>,
     supervisors: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Held while an app session opens, so calls in parallel can't all
+    /// pass the per-person cap before any of them is counted.
+    pub(crate) opening_app: Mutex<()>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -131,6 +134,7 @@ impl Runtime {
             events,
             tasks: Mutex::new(BTreeMap::new()),
             supervisors: Mutex::new(Vec::new()),
+            opening_app: Mutex::new(()),
         })
     }
 

@@ -47,15 +47,17 @@ pub fn run_with_input(program: &str, args: &[&str], input: &[u8]) -> Result<Stri
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| PlatformError::io(format!("cannot run `{rendered}`"), e))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(input)
-            .map_err(|e| PlatformError::io(format!("writing to `{rendered}`"), e))?;
-    }
+    // Written, then closed; the child is waited for even when writing
+    // failed (it exited early), so none is left behind.
+    let written = child
+        .stdin
+        .take()
+        .map_or(Ok(()), |mut stdin| stdin.write_all(input));
     let output = child
         .wait_with_output()
         .map_err(|e| PlatformError::io(format!("waiting for `{rendered}`"), e))?;
     if output.status.success() {
+        written.map_err(|e| PlatformError::io(format!("writing to `{rendered}`"), e))?;
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
         Err(PlatformError::Command {

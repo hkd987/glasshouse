@@ -520,14 +520,31 @@ const SETUP_RECORD: &str = "/var/db/glasshouse/setup.toml";
 /// asks nothing; its people come from the directory.
 fn first_run() -> bool {
     let nobody = users::people().is_ok_and(|people| people.is_empty());
-    let config = std::fs::read_to_string(GLASSD_CONFIG).unwrap_or_default();
-    wants_setup(nobody, &config)
+    let set_up = Path::new(SETUP_RECORD).exists();
+    let config = std::fs::read_to_string(GLASSD_CONFIG).ok();
+    wants_setup(nobody, set_up, config.as_deref())
 }
 
-/// Setup is for a computer nobody signs in to yet that no organization
-/// manages (glassd's config has no `[managed]` section).
-fn wants_setup(nobody: bool, glassd_config: &str) -> bool {
-    nobody && !glassd_config.lines().any(|line| line.trim() == "[managed]")
+/// Setup is for a computer nobody signs in to yet, that hasn't been set up
+/// before and that no organization manages. It runs as root for whoever is
+/// at the screen, so anything in doubt means no setup: a config it can't
+/// read (every image has one) and any way of writing `managed` in it.
+fn wants_setup(nobody: bool, set_up: bool, glassd_config: Option<&str>) -> bool {
+    nobody && !set_up && glassd_config.is_some_and(|config| !managed(config))
+}
+
+/// Whether glassd's config sets `managed` in any TOML spelling: the
+/// `[managed]` table (a comment after it, its subtables), dotted
+/// `managed.url` keys or `managed = { … }`. Read generously: a false
+/// "managed" only skips setup.
+fn managed(config: &str) -> bool {
+    config.lines().any(|line| {
+        let key = line.trim_start().trim_start_matches(['[', '"', ' ', '\t']);
+        key.strip_prefix("managed").is_some_and(|rest| {
+            rest.trim_start_matches(['"', ' ', '\t'])
+                .starts_with([']', '.', '='])
+        })
+    })
 }
 
 /// First-run setup, until its person's account exists; returns who, to
@@ -642,12 +659,33 @@ fn sentence(text: &str) -> String {
 mod tests {
     #[test]
     fn ux2_setup_only_on_an_empty_unmanaged_computer() {
-        let managed = "control_socket = \"/x\"\n\n[managed]\nurl = \"https://console\"\n";
-        assert!(super::wants_setup(true, "control_socket = \"/x\"\n"));
-        assert!(!super::wants_setup(true, managed), "enrolled: no questions");
+        let plain = "control_socket = \"/x\"\n# [managed] comes with enrollment\n";
+        assert!(super::wants_setup(true, false, Some(plain)));
+        for managed in [
+            "[managed]\nurl = \"https://console\"\n",
+            "[managed] # by the org\n",
+            "  [managed.keys]\n",
+            "managed.url = \"https://console\"\n",
+            "managed = { url = \"https://console\" }\n",
+            "[\"managed\"]\n",
+        ] {
+            let config = format!("{plain}{managed}");
+            assert!(
+                !super::wants_setup(true, false, Some(&config)),
+                "enrolled: {managed}"
+            );
+        }
         assert!(
-            !super::wants_setup(false, ""),
+            !super::wants_setup(false, false, Some(plain)),
             "someone can sign in already"
+        );
+        assert!(
+            !super::wants_setup(true, true, Some(plain)),
+            "set up before (its only account disabled since)"
+        );
+        assert!(
+            !super::wants_setup(true, false, None),
+            "a config it can't read might be an enrolled computer's"
         );
     }
 
