@@ -419,7 +419,7 @@ function draftCard(draft: Summary): HTMLElement {
       h("strong", {}, sent ? "Your reply was sent" : "Reply drafted"),
       draft.attribution && showAttribution(draft.attribution, "mail") ? attributionChip(draft.attribution.text) : null,
     ),
-    h("div", { class: "draft-snippet" }, draft.snippet),
+    h("div", { class: "draft-snippet" }, draft.snippet.length >= 140 ? `${draft.snippet}…` : draft.snippet),
     h(
       "div",
       { class: "actions" },
