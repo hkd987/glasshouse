@@ -1,8 +1,8 @@
 # 0028. Remote help: support roles, consent-gated sessions through the console
 
-Status: **Proposed.** Slice (a), support roles and signing in by role, is
-built; slices (b) and (c) wait on the owner's answers below. PRD CF-80,
-CF-81, CF-82, UI-2. Builds on ADR 0023 (admin console, signed sync), 0016
+Status: **Accepted** (owner's answers 2026-10-19, below). Slice (a),
+support roles and signing in by role, is built; slice (b), sessions, is
+being built in three steps. PRD CF-80, CF-81, CF-82, UI-2, GT-3. Builds on ADR 0023 (admin console, signed sync), 0016
 (the desktop draws the screen itself), 0019 (sign-in screen), 0015
 (attended agents run as the person).
 
@@ -85,6 +85,40 @@ connections the device opens; nothing listens on the device. Everything
 is audited on both sides (requested, answered, started, control, ended,
 with who, why and how long; never pixels or keystrokes).
 
+### 4. End to end, so our servers carry only ciphertext (GT-3)
+The support person's browser and the device each make a one-time key
+pair for the session (ECDH, WebCrypto in the browser); the public halves
+travel in the offer and the answer, and both derive the session's keys
+(HKDF, AES-GCM, one key per direction, sequence-numbered). The console
+relays frames and input it cannot read and keeps none of them. A short
+code from both public keys shows on the consent card and on the support
+person's page; reading it aloud rules out a console that swapped keys.
+
+### 5. Unattended access, set in the console
+IT gives devices a type on the Devices page (`kiosk`, `lab`; none by
+default) the way it gives them a ring, and a role's `unattended` lists
+the types it may reach with nobody answering. The offer for such a
+session names the device's type and is signed like any offer; glassd
+starts it only if its own policy's role lists that type, and the banner
+shows all the same. The preview warns about every role with unattended
+access.
+
+### 6. What remote control never reaches
+Remote input never reaches the consent card, the lock or sign-in
+screen, power, sign out, or answering, undoing or stopping an agent's
+work; it acts in apps as the person, and every action in the session is
+audited as made during it. (Proposed with the other answers; the owner
+can narrow it.)
+
+### Building slice (b)
+1. Offers and consent, no pixels: "Ask to see screen" signs an offer,
+   the device checks it, the desktop asks, the answer and the banner are
+   real and audited on both sides.
+2. Frames: the desktop's changed tiles, encrypted end to end, relayed,
+   drawn in the support person's browser.
+3. Control: a second request and yes, input injected by the desktop with
+   the limits above.
+
 ## Consequences
 - Policy gains `[support]`; `PolicyDocument` refuses unknown fields, so
   the console deploys before devices that read it, as for `[mail]`.
@@ -93,18 +127,12 @@ with who, why and how long; never pixels or keystrokes).
 - Slice (b) grows the device contract (offers, per-device keys, the
   frame relay) and needs the owner's answers first.
 
-## Open questions (owner)
-1. **Customer screens through our servers.** The PRD says our cloud holds
-   metadata only (GT-3); relayed frames are not metadata. End-to-end
-   encryption between the device and the support person's browser as a
-   pilot gate, or a relay in the customer's own account?
-2. **Unattended access at the sign-in screen** (kiosks, labs): in V1?
-   Which device types, and who sets them (enrollment or the console)?
-3. **Separation of duties:** should IT admins get remote help without a
-   role naming them? Proposed: no.
-4. **Recording:** "every session is recorded in the audit log" read as
-   events, not video. Does compliance want recordings (which conflicts
-   with GT-3)?
-5. **What remote control may never do:** proposed above (no asks, power,
-   sign-out, unlock). Is acting in apps during control, marked with the
-   session, acceptable under AU-1?
+## The owner's answers (2026-10-19)
+1. **Customer screens through our servers:** end-to-end encrypted
+   between the device and the support person's browser (decision 4).
+2. **Unattended access:** in V1, by device type IT sets in the console
+   (decision 5).
+3. **Separation of duties:** roles only; IT admins get no tools by being
+   admins (decision 2, as built).
+4. **Recording:** events, not video (decision 3's audit).
+5. **What remote control never reaches:** decision 6, as proposed.
