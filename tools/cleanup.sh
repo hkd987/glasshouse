@@ -9,8 +9,12 @@
 #     `make freebsd vm-deploy` take minutes instead of seconds;
 #   - test binaries left from earlier builds of the same test (only the newest of each stays);
 #   - build/dist (staging, rewritten by every stage-dist.sh) and build/logs;
-#   - VM directories under build/ other than build/vm whose QEMU isn't running.
-# It never touches build/vm (the dev VM), build/cache (FreeBSD downloads) or build/freebsd
+#   - VM directories under build/ other than build/vm whose QEMU isn't running, and a bake VM
+#     (build/vm/bake) a failed image build left behind;
+#   - a package-list root that an interrupted `make image-pkgbase` left half built
+#     (build/images/.*.part); the finished root it keeps for the next build stays;
+#   - with --deep, FreeBSD downloads of releases other than release.env's (build/cache/freebsd/*).
+# It never touches build/vm itself (the dev VM), the current release's downloads or build/freebsd
 # (the sysroot). Either way it resumes any VM QEMU paused because the disk filled.
 set -euo pipefail
 
@@ -72,16 +76,32 @@ mapfile -t stale < <(find target/*/deps target/*/*/deps shell/target/*/deps shel
 for d in build/dist build/logs; do [[ -e $d ]] && gone "$d"; done
 
 echo "== VMs"
-for dir in build/*/; do
+running() { [[ -f $1/qemu.pid ]] && kill -0 "$(cat "$1/qemu.pid")" 2>/dev/null; }
+for dir in build/*/ build/vm/*/; do
 	dir=${dir%/}
 	[[ -e $dir/qmp.sock || -e $dir/disk.qcow2 ]] || continue
 	[[ $dir == build/vm ]] && continue
-	if [[ -f $dir/qemu.pid ]] && kill -0 "$(cat "$dir/qemu.pid")" 2>/dev/null; then
+	if running "$dir"; then
 		echo "running, kept: $dir"
 	else
 		gone "$dir"
 	fi
 done
+
+echo "== images and downloads"
+size build/images build/cache/freebsd/* 2>/dev/null || true
+# A root an interrupted package-list build left half made; none while a bake VM runs.
+if ! running build/vm/bake; then
+	mapfile -t partial < <(find build/images -maxdepth 1 -name '.*.part' 2>/dev/null)
+	((${#partial[@]})) && gone "${partial[@]}"
+fi
+if $deep; then
+	release=$(sed -n 's/^FREEBSD_RELEASE=//p' os/freebsd/release.env)
+	for dir in build/cache/freebsd/*/; do
+		dir=${dir%/}
+		[[ -n $release && ${dir##*/} != "$release" ]] && gone "$dir"
+	done
+fi
 # A VM paused because the disk filled (status io-error) carries on once there's room.
 python3 - "$root" <<'EOF'
 import glob, json, socket, sys

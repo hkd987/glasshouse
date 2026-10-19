@@ -21,11 +21,16 @@ the VM (status `io-error`), which looks like a hung VM.
    - debug-build incremental caches (rebuilt, slower once);
    - test binaries left by earlier builds of the same test (only the newest stays);
    - `build/dist`, `build/logs`;
-   - VM directories other than `build/vm` with no QEMU running.
+   - VM directories other than `build/vm` with no QEMU running, and a bake
+     VM (`build/vm/bake`) a failed image build left;
+   - a half-built package-list root (`build/images/.*.part`). The finished
+     root (`build/images/.desktop-root-<key>.qcow2`, about 250 MB) stays: the
+     next `make image-pkgbase` reuses it while the package list is unchanged.
    It also resumes any VM QEMU paused because the disk filled.
 3. Still short? `tools/cleanup.sh --apply --deep` also drops the `vm`
-   profile's incremental caches: the next `make freebsd vm-deploy` takes
-   minutes instead of seconds. Past that, ask before deleting
+   profile's incremental caches (the next `make freebsd vm-deploy` takes
+   minutes instead of seconds) and the downloads of FreeBSD releases other
+   than the one `release.env` pins. Past that, ask before deleting
    `build/cache` (the FreeBSD downloads, slow to fetch again) or
    `build/vm` (the dev VM: `make vm-reset` rebuilds it).
 
