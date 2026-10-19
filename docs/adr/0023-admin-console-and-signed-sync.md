@@ -157,6 +157,21 @@ the task started (`TaskContext::groups`), never by anything in the
 request: an item none of the user's groups gets, or one any of them
 blocks, is never returned. It is audited like every action.
 
+### The org's people on devices (AD-1)
+Devices get the org's people as a third kind of release,
+`DocKind::Directory` (`glass_managed::directory`): login, name, email,
+title and department, nothing more (no phone numbers, managers or
+employee ids). Mail and Calendar offer them as people type an address,
+and agents look colleagues up through an action. It is its own kind
+rather than part of policy, so a new hire doesn't wait for a policy to
+reach the broad ring, and is versioned like the catalog, without rings.
+The console signs it from the `Directory` (SCIM later), again only when the
+people changed, and a device checks it whole (one person per login and
+email, one-line fields, at most 25,000 people and 4 MiB) before it's
+kept and swapped in (`DirectoryLoaded` in the audit log). A sync answer
+lets unknown fields through: what a device trusts is each release's
+signature, and an older device keeps hearing of the kinds it knows.
+
 ## Changed since the first draft of this ADR
 The product owner's direction (AD-6, AD-7, DV-13) changed the first
 slice's plan:
@@ -197,3 +212,6 @@ slice's plan:
   already installed (DV-5) is not built.
 - An offline device enforces its last policy indefinitely; whether it
   should expire (ADR 0021) is still open.
+- Every change to the people sends the whole list to every device: about
+  2 MB for 10,000 people. With SCIM's steady trickle of changes, releases
+  need coalescing (one every few minutes at most), then deltas.

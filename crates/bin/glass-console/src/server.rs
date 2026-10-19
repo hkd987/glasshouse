@@ -490,7 +490,11 @@ impl Console {
                 let wait = Duration::from_secs(sync.wait_secs.min(MAX_WAIT_SECS));
                 let mut changed = self.releases.subscribe();
                 let first = self.state().sync(&sync);
-                if first.policy.is_some() || first.catalog.is_some() || wait.is_zero() {
+                if first.policy.is_some()
+                    || first.catalog.is_some()
+                    || first.directory.is_some()
+                    || wait.is_zero()
+                {
                     return ok(serde_json::to_value(first).unwrap_or_default());
                 }
                 // Long poll: answer as soon as something is released.
@@ -599,6 +603,46 @@ mod tests {
             assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
             serde_json::from_slice(&r.body).unwrap()
         }
+    }
+
+    #[tokio::test]
+    async fn ad1_the_directory_is_signed_once_per_change_and_reaches_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut directory = LocalDirectory::starter("root");
+        let mut state = State::open(dir.path(), "acme", "Acme Corp", &directory).unwrap();
+        assert_eq!(state.release_directory(&directory).unwrap(), Some(1));
+        // Nothing changed: nothing new to sign, after a restart too.
+        assert_eq!(state.release_directory(&directory).unwrap(), None);
+        let mut reopened = State::open(dir.path(), "acme", "Acme Corp", &directory).unwrap();
+        assert_eq!(reopened.release_directory(&directory).unwrap(), None);
+
+        let sync = |state: &mut State, have: Option<u64>| {
+            state.sync(&SyncRequest {
+                device: "dev-1".into(),
+                policy: None,
+                catalog: None,
+                directory: have,
+                wait_secs: 0,
+            })
+        };
+        let first = sync(&mut reopened, None).directory.expect("the directory");
+        let key: PublicKey = reopened.public_key().parse().unwrap();
+        let people: glass_managed::DirectoryRelease = first
+            .open(DocKind::Directory, "acme", &[key], None)
+            .unwrap();
+        assert_eq!(
+            people.person("priya").map(|p| p.email.as_str()),
+            Some("priya@acme.example")
+        );
+        assert!(sync(&mut reopened, Some(1)).directory.is_none());
+
+        // A new address is a new release.
+        directory.users[0].email = "dana.ruiz@acme.example".into();
+        assert_eq!(reopened.release_directory(&directory).unwrap(), Some(2));
+        assert_eq!(
+            sync(&mut reopened, Some(1)).directory.map(|s| s.version),
+            Some(2)
+        );
     }
 
     async fn console() -> Test {

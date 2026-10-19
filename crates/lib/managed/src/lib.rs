@@ -23,6 +23,7 @@
 //! through `glass-gateway-providers`, the one crate that leaves the machine.
 
 pub mod catalog;
+pub mod directory;
 pub mod signing;
 pub mod store;
 pub mod sync;
@@ -31,6 +32,7 @@ pub use catalog::{
     CatalogItem, CatalogRelease, Declared, InstallMode, ItemKind, Match, Provenance, Scope,
     StoreRefusal,
 };
+pub use directory::{DirectoryHandle, DirectoryRelease, Person};
 pub use signing::{DocKind, OrgKey, PublicKey, Refusal, Signed};
 pub use store::ReleaseStore;
 pub use sync::{

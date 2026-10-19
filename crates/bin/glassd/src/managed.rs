@@ -17,9 +17,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use glass_app_catalog::{Applied, CatalogHandle};
+use glass_app_catalog::Applied;
 use glass_audit::{AuditEvent, EventKind, Outcome};
 use glass_gateway_providers::ConsoleClient;
+use glass_managed::directory::{self, DirectoryRelease};
 use glass_managed::{
     CatalogRelease, DeviceReport, DocKind, MAX_WAIT_SECS, PolicyRelease, PublicKey, ReleaseStore,
     RunningAgent, Signed, SyncRequest, SyncResponse,
@@ -29,6 +30,7 @@ use glass_policy::store::PolicyStore;
 use glass_runtime::Runtime;
 use glass_types::Timestamp;
 
+use crate::OrgData;
 use crate::config::{Config, ManagedConfig};
 
 /// Backoff after a failed sync: 2 s, doubling, to 5 minutes.
@@ -46,10 +48,11 @@ pub struct Managed {
     releases: ReleaseStore,
     policies: PolicyStore,
     runtime: Arc<Runtime>,
-    catalog: CatalogHandle,
+    org: OrgData,
     /// Versions in force, from releases this device verified.
     policy_version: Option<u64>,
     catalog_version: Option<u64>,
+    directory_version: Option<u64>,
     /// Why the last release was refused or the last sync failed.
     last_error: Option<String>,
     /// Since when the console has been out of reach.
@@ -58,9 +61,10 @@ pub struct Managed {
 
 impl Managed {
     /// Picks up what this device applied before, from its own disk: the
-    /// catalog goes back in force; a policy release whose text isn't the
-    /// one in force (the file was changed, or didn't validate) is put back.
-    pub fn start(config: &Config, runtime: Arc<Runtime>, catalog: CatalogHandle) -> Option<Self> {
+    /// catalog and the directory go back in force; a policy release whose
+    /// text isn't the one in force (the file was changed, or didn't
+    /// validate) is put back.
+    pub fn start(config: &Config, runtime: Arc<Runtime>, org: OrgData) -> Option<Self> {
         let managed = config.managed.clone()?;
         let device = managed.device.clone().unwrap_or_else(hostname);
         let mut this = Self {
@@ -70,9 +74,10 @@ impl Managed {
             policies: PolicyStore::new(config.state_dir.join("policy")),
             managed,
             runtime,
-            catalog,
+            org,
             policy_version: None,
             catalog_version: None,
+            directory_version: None,
             last_error: None,
             offline_since: None,
         };
@@ -83,6 +88,14 @@ impl Managed {
                 }
             }
             None => tracing::info!("managed: no catalog from the console yet"),
+        }
+        match this.load(DocKind::Directory) {
+            Some(signed) => {
+                if let Err(e) = this.apply_directory(&signed, true) {
+                    this.refused(DocKind::Directory, &signed, &e);
+                }
+            }
+            None => tracing::info!("managed: no directory from the console yet"),
         }
         if let Some(signed) = this.load(DocKind::Policy) {
             let in_force = std::fs::read_to_string(&this.config.policy).unwrap_or_default();
@@ -170,6 +183,7 @@ impl Managed {
                 device: self.device.clone(),
                 policy: self.policy_version,
                 catalog: self.catalog_version,
+                directory: self.directory_version,
                 wait_secs: MAX_WAIT_SECS,
             };
             match client.sync(&request) {
@@ -211,6 +225,12 @@ impl Managed {
                 Err(e) => self.refused(DocKind::Catalog, &signed, &e),
             }
         }
+        if let Some(signed) = response.directory {
+            match self.apply_directory(&signed, false) {
+                Ok(()) => changed = true,
+                Err(e) => self.refused(DocKind::Directory, &signed, &e),
+            }
+        }
         self.runtime.set_policy_source(self.source());
         changed
     }
@@ -236,7 +256,7 @@ impl Managed {
             .map_err(|e| e.to_string())?;
         let policy = Policy::from_toml(&release.policy).map_err(|e| e.to_string())?;
         let registry =
-            crate::registry(&self.config, &policy, &self.catalog).map_err(|e| format!("{e:#}"))?;
+            crate::registry(&self.config, &policy, &self.org).map_err(|e| format!("{e:#}"))?;
         let warnings = policy.lint(&registry.lint_info());
         for warning in &warnings {
             tracing::warn!("managed policy v{}: {warning}", signed.version);
@@ -292,7 +312,7 @@ impl Managed {
             self.releases.save(signed).map_err(|e| e.to_string())?;
         }
         let items = release.items.len();
-        self.catalog.set(Applied {
+        self.org.catalog.set(Applied {
             version: signed.version,
             release,
         });
@@ -314,6 +334,54 @@ impl Managed {
         });
         self.runtime.append_audit(event);
         tracing::info!(version = signed.version, items, "managed: catalog applied");
+        Ok(())
+    }
+
+    /// Verifies, checks and swaps in a directory release (AD-1). Its size
+    /// is checked before it's read: every change sends the whole list.
+    fn apply_directory(&mut self, signed: &Signed, again: bool) -> Result<(), String> {
+        if signed.payload.len() > directory::MAX_PAYLOAD_BYTES {
+            return Err(format!(
+                "{} bytes is more than a directory release may be ({})",
+                signed.payload.len(),
+                directory::MAX_PAYLOAD_BYTES
+            ));
+        }
+        let have = if again { None } else { self.directory_version };
+        let release: DirectoryRelease = signed
+            .open(DocKind::Directory, &self.managed.org, self.keys(), have)
+            .map_err(|e| e.to_string())?;
+        release.check()?;
+        if !again {
+            self.releases.save(signed).map_err(|e| e.to_string())?;
+        }
+        let people = release.people.len();
+        self.org.directory.set(directory::Applied {
+            version: signed.version,
+            release,
+        });
+        self.directory_version = Some(signed.version);
+        let mut event = AuditEvent::new(
+            EventKind::DirectoryLoaded,
+            format!(
+                "Directory v{} from the admin console is in force ({people} people)",
+                signed.version
+            ),
+        );
+        event.detail = serde_json::json!({
+            "console": self.managed.url,
+            "version": signed.version,
+            "key": signed.key,
+            "payload_sha256": signed.payload_sha256,
+            "people": people,
+            "from_disk": again,
+        });
+        self.runtime.append_audit(event);
+        tracing::info!(
+            version = signed.version,
+            people,
+            "managed: directory applied"
+        );
         Ok(())
     }
 
@@ -349,6 +417,7 @@ impl Managed {
             users: self.runtime.users_seen(),
             policy_version: self.policy_version,
             catalog_version: self.catalog_version,
+            directory_version: self.directory_version,
             agents: self
                 .runtime
                 .running_agents()
@@ -424,7 +493,7 @@ mod tests {
         dir: tempfile::TempDir,
         config: Config,
         runtime: Arc<Runtime>,
-        catalog: CatalogHandle,
+        org: OrgData,
     }
 
     impl Device {
@@ -439,12 +508,7 @@ mod tests {
         }
 
         fn managed(&self) -> Managed {
-            Managed::start(
-                &self.config,
-                Arc::clone(&self.runtime),
-                self.catalog.clone(),
-            )
-            .unwrap()
+            Managed::start(&self.config, Arc::clone(&self.runtime), self.org.clone()).unwrap()
         }
     }
 
@@ -472,8 +536,8 @@ mod tests {
         let config = Config::load(&path).unwrap();
         std::fs::write(&config.policy, glass_policy::DEFAULT_POLICY).unwrap();
         let policy = Policy::from_toml(glass_policy::DEFAULT_POLICY).unwrap();
-        let catalog = CatalogHandle::new();
-        let registry = crate::registry(&config, &policy, &catalog).unwrap();
+        let org = OrgData::default();
+        let registry = crate::registry(&config, &policy, &org).unwrap();
         let runtime = Runtime::new(RuntimeParts {
             config: RuntimeConfig {
                 state_dir: config.state_dir.clone(),
@@ -485,7 +549,7 @@ mod tests {
                 apps: Vec::new(),
                 console_url: Some("http://127.0.0.1:9".into()),
                 dev_home: None,
-                org_catalog: Arc::new(crate::OrgCatalog(catalog.clone())),
+                org_catalog: Arc::new(crate::OrgCatalog(org.catalog.clone())),
             },
             policy,
             policy_source: "policy file".into(),
@@ -501,7 +565,7 @@ mod tests {
             dir,
             config,
             runtime,
-            catalog,
+            org,
         }
     }
 
@@ -553,6 +617,35 @@ mod tests {
             ring: glass_managed::Ring::Pilot,
             policy,
             catalog,
+            directory: None,
+        }
+    }
+
+    fn directory_release(key: &OrgKey, version: u64, people: &[(&str, &str)]) -> Signed {
+        let release = DirectoryRelease {
+            people: people
+                .iter()
+                .map(|(login, email)| glass_managed::Person {
+                    login: (*login).into(),
+                    name: login.to_uppercase(),
+                    email: (*email).into(),
+                    title: String::new(),
+                    department: String::new(),
+                })
+                .collect(),
+        };
+        key.sign(
+            DocKind::Directory,
+            "acme",
+            version,
+            serde_json::to_string(&release).unwrap(),
+        )
+    }
+
+    fn directory_sync(signed: Signed) -> SyncResponse {
+        SyncResponse {
+            directory: Some(signed),
+            ..sync(None, None)
         }
     }
 
@@ -632,17 +725,59 @@ mod tests {
         let key = OrgKey::from_seed([7; 32]);
         let d = device(&key);
         let mut m = d.managed();
-        assert!(d.catalog.current().is_none());
+        assert!(d.org.catalog.current().is_none());
         assert!(m.handle(sync(None, Some(catalog_release(&key, 5)))));
-        assert_eq!(d.catalog.current().unwrap().version, 5);
+        assert_eq!(d.org.catalog.current().unwrap().version, 5);
         assert_eq!(d.audited(EventKind::CatalogLoaded), 1);
 
         // A restart with no console: the catalog comes back from disk,
         // checked again.
-        let fresh = CatalogHandle::new();
+        let fresh = OrgData::default();
         let again = Managed::start(&d.config, Arc::clone(&d.runtime), fresh.clone()).unwrap();
-        assert_eq!(fresh.current().unwrap().version, 5);
+        assert_eq!(fresh.catalog.current().unwrap().version, 5);
         assert_eq!(again.catalog_version, Some(5));
+    }
+
+    #[tokio::test]
+    async fn ad1_the_directory_is_applied_and_back_in_force_after_a_restart_offline() {
+        let key = OrgKey::from_seed([7; 32]);
+        let d = device(&key);
+        let mut m = d.managed();
+        assert!(d.org.directory.current().is_none());
+        let people = [("dana", "dana@acme.example"), ("sam", "sam@acme.example")];
+        assert!(m.handle(directory_sync(directory_release(&key, 2, &people))));
+        assert_eq!(d.org.directory.current().unwrap().version, 2);
+        assert_eq!(
+            d.org.directory.person("sam").map(|p| p.email),
+            Some("sam@acme.example".into())
+        );
+        assert_eq!(d.audited(EventKind::DirectoryLoaded), 1);
+        assert_eq!(m.report().directory_version, Some(2));
+
+        // A restart with no console: the directory comes back from disk.
+        let fresh = OrgData::default();
+        let again = Managed::start(&d.config, Arc::clone(&d.runtime), fresh.clone()).unwrap();
+        assert_eq!(fresh.directory.current().unwrap().version, 2);
+        assert_eq!(again.directory_version, Some(2));
+    }
+
+    #[tokio::test]
+    async fn ad1_a_directory_with_duplicates_or_too_large_is_refused_and_changes_nothing() {
+        let key = OrgKey::from_seed([7; 32]);
+        let d = device(&key);
+        let mut m = d.managed();
+        assert!(m.handle(directory_sync(directory_release(
+            &key,
+            1,
+            &[("dana", "dana@acme.example")]
+        ))));
+        let twice = [("dana", "dana@acme.example"), ("sam", "DANA@acme.example")];
+        assert!(!m.handle(directory_sync(directory_release(&key, 2, &twice))));
+        let mut huge = directory_release(&key, 3, &[]);
+        huge.payload = " ".repeat(glass_managed::directory::MAX_PAYLOAD_BYTES + 1);
+        assert!(!m.handle(directory_sync(huge)));
+        assert_eq!(d.org.directory.current().unwrap().version, 1);
+        assert_eq!(d.audited(EventKind::ManagedRefused), 2);
     }
 
     #[tokio::test]

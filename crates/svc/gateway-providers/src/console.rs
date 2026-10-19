@@ -118,6 +118,7 @@ mod tests {
                 device: "dev-1".into(),
                 policy: Some(3),
                 catalog: None,
+                directory: None,
                 wait_secs: 0,
             })
             .unwrap();
@@ -141,6 +142,7 @@ mod tests {
                 device: "d".into(),
                 policy: None,
                 catalog: None,
+                directory: None,
                 wait_secs: 0,
             })
             .unwrap_err();

@@ -60,6 +60,8 @@ pub struct SyncRequest {
     pub policy: Option<u64>,
     #[serde(default)]
     pub catalog: Option<u64>,
+    #[serde(default)]
+    pub directory: Option<u64>,
     /// How long the console may hold the answer waiting for a release.
     #[serde(default)]
     pub wait_secs: u64,
@@ -69,15 +71,19 @@ pub struct SyncRequest {
 pub const MAX_WAIT_SECS: u64 = 25;
 
 /// The console's answer to a sync: releases newer than the device named,
-/// for the device's ring. `None` means nothing newer.
+/// for the device's ring. `None` means nothing newer. Unknown fields are
+/// let through, so a console that sends a kind of release a device
+/// doesn't know yet doesn't stop it hearing of the ones it does: what a
+/// device trusts is each release's signature, not the answer around it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SyncResponse {
     pub ring: Ring,
     #[serde(default)]
     pub policy: Option<Signed>,
     #[serde(default)]
     pub catalog: Option<Signed>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<Signed>,
 }
 
 /// An agent running on the device, for the fleet's live view (AD-4).
@@ -110,6 +116,8 @@ pub struct DeviceReport {
     pub policy_version: Option<u64>,
     #[serde(default)]
     pub catalog_version: Option<u64>,
+    #[serde(default)]
+    pub directory_version: Option<u64>,
     #[serde(default)]
     pub agents: Vec<RunningAgent>,
     #[serde(default)]

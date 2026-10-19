@@ -8,12 +8,15 @@
 use std::path::Path;
 
 use anyhow::Context;
+use glass_managed::{DirectoryRelease, Person};
 use serde::{Deserialize, Serialize};
 
 /// The group whose members administer the org.
 pub const ADMINS: &str = "it-admins";
 /// The group policy applies to everyone in.
 pub const EVERYONE: &str = glass_policy::EVERYONE;
+/// The starter org's mail domain.
+pub const STARTER_DOMAIN: &str = "acme.example";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +41,13 @@ pub struct User {
     pub name: String,
     #[serde(default)]
     pub display: String,
+    /// Where mail to them goes; devices offer it as people type (AD-1).
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub department: String,
 }
 
 /// The org's people and groups.
@@ -57,6 +67,28 @@ pub trait Directory: Send + Sync {
         self.group(group)
             .map(|g| g.members.iter().map(String::as_str).collect())
             .unwrap_or_default()
+    }
+
+    /// The people devices get (AD-1): what it takes to address them, by
+    /// login.
+    fn release(&self) -> DirectoryRelease {
+        let mut people: Vec<Person> = self
+            .users()
+            .iter()
+            .map(|u| Person {
+                login: u.name.clone(),
+                name: if u.display.is_empty() {
+                    u.name.clone()
+                } else {
+                    u.display.clone()
+                },
+                email: u.email.clone(),
+                title: u.title.clone(),
+                department: u.department.clone(),
+            })
+            .collect();
+        people.sort_by(|a, b| a.login.cmp(&b.login));
+        DirectoryRelease { people }
     }
 
     fn is_admin(&self, user: &str) -> bool {
@@ -106,25 +138,31 @@ impl LocalDirectory {
                 anyhow::bail!("group {} lists {stranger}, who isn't a user", group.name);
             }
         }
+        dir.release()
+            .check()
+            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
         Ok(dir)
     }
 
     /// A small org to start from: a few people, AP and Legal, and IT.
     /// `admin` (the person running the console in development) is in IT.
     pub fn starter(admin: &str) -> Self {
-        let user = |name: &str, display: &str| User {
+        let user = |name: &str, display: &str, title: &str, department: &str| User {
             name: name.into(),
             display: display.into(),
+            email: format!("{name}@{STARTER_DOMAIN}"),
+            title: title.into(),
+            department: department.into(),
         };
         let mut users = vec![
-            user("dana", "Dana Ruiz"),
-            user("sam", "Sam Lee"),
-            user("priya", "Priya Shah"),
-            user("mei", "Mei Chen"),
-            user("pat", "Pat Okafor"),
+            user("dana", "Dana Ruiz", "AP lead", "Finance"),
+            user("sam", "Sam Lee", "AP analyst", "Finance"),
+            user("priya", "Priya Shah", "Counsel", "Legal"),
+            user("mei", "Mei Chen", "Controller", "Finance"),
+            user("pat", "Pat Okafor", "IT administrator", "IT"),
         ];
         if !users.iter().any(|u| u.name == admin) {
-            users.push(user(admin, ""));
+            users.push(user(admin, "", "", "IT"));
         }
         let group = |name: &str, display: &str, source: &str, members: &[&str]| Group {
             name: name.into(),
@@ -186,6 +224,34 @@ mod tests {
         std::fs::write(&path, toml::to_string(&dir).unwrap()).unwrap();
         assert_eq!(LocalDirectory::load(&path).unwrap(), dir);
         std::fs::write(&path, "[[group]]\nname = \"x\"\nmembers = [\"ghost\"]\n").unwrap();
+        assert!(LocalDirectory::load(&path).is_err());
+    }
+
+    #[test]
+    fn ad1_users_carry_addresses_and_a_duplicate_email_is_refused() {
+        let dir = LocalDirectory::starter("pat");
+        let release = dir.release();
+        assert_eq!(release.check(), Ok(()));
+        let priya = release.person("priya").unwrap();
+        assert_eq!(
+            (
+                priya.name.as_str(),
+                priya.email.as_str(),
+                priya.title.as_str()
+            ),
+            ("Priya Shah", "priya@acme.example", "Counsel")
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("directory.toml");
+        let mut twice = dir.clone();
+        twice.users[1].email = twice.users[0].email.clone();
+        std::fs::write(&path, toml::to_string(&twice).unwrap()).unwrap();
+        let refused = LocalDirectory::load(&path).unwrap_err().to_string();
+        assert!(refused.contains("two people's email"), "{refused}");
+        let mut bad = dir;
+        bad.users[0].email = "dana at acme".into();
+        std::fs::write(&path, toml::to_string(&bad).unwrap()).unwrap();
         assert!(LocalDirectory::load(&path).is_err());
     }
 }

@@ -114,6 +114,14 @@ async fn run(args: Args) -> anyhow::Result<()> {
     if let Some((devices, items)) = fixture {
         fixture::fill(&mut state, &directory, devices, items)?;
     }
+    // The people devices get (AD-1), signed again only when they changed.
+    if let Some(version) = state.release_directory(&directory)? {
+        tracing::info!(
+            version,
+            people = directory.users.len(),
+            "directory released"
+        );
+    }
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("listening on {}", args.listen))?;

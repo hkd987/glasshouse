@@ -77,6 +77,9 @@ pub enum EventKind {
     AppRefused,
     /// A catalog release from the admin console was applied (ADR 0023).
     CatalogLoaded,
+    /// A directory release (the org's people) from the admin console was
+    /// applied (ADR 0023, AD-1).
+    DirectoryLoaded,
     /// A release from the admin console was refused; the device kept what
     /// it had (ADR 0023).
     ManagedRefused,

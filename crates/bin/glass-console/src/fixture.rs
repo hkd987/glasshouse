@@ -10,7 +10,7 @@ use glass_managed::{
 };
 use glass_types::{Label, Tier, Timestamp};
 
-use crate::directory::{ADMINS, Group, LocalDirectory, User};
+use crate::directory::{ADMINS, Directory, Group, LocalDirectory, STARTER_DOMAIN, User};
 use crate::state::{ConsoleItem, Device, Review, State};
 
 const FIRST: &[&str] = &[
@@ -22,6 +22,8 @@ const LAST: &[&str] = &[
     "Abara", "Berg", "Costa", "Dahl", "Eze", "Fischer", "Gomez", "Haddad", "Ito", "Jensen",
     "Kowalski", "Lund", "Moreau", "Novak", "Okoro", "Park", "Quist", "Rossi", "Sato", "Tan",
 ];
+
+const TITLES: &[&str] = &["Analyst", "Specialist", "Manager", "Associate", "Lead"];
 
 /// A small deterministic generator, so every run draws the same fleet.
 struct Draw(u64);
@@ -42,12 +44,27 @@ pub fn directory(devices: usize, admin: &str) -> LocalDirectory {
     let mut dir = LocalDirectory::starter(admin);
     for n in 0..devices {
         let name = format!("u{:04}", n + 1);
-        let display = format!(
-            "{} {}",
-            FIRST[n % FIRST.len()],
-            LAST[(n / FIRST.len()) % LAST.len()]
+        let (first, last) = (FIRST[n % FIRST.len()], LAST[(n / FIRST.len()) % LAST.len()]);
+        let display = format!("{first} {last}");
+        // first.last@, numbered once the names come round again.
+        let round = n / (FIRST.len() * LAST.len());
+        let email = format!(
+            "{}.{}{}@{STARTER_DOMAIN}",
+            first.to_lowercase(),
+            last.to_lowercase(),
+            if round == 0 {
+                String::new()
+            } else {
+                round.to_string()
+            }
         );
-        dir.users.push(User { name, display });
+        dir.users.push(User {
+            name,
+            display,
+            email,
+            title: TITLES[n % TITLES.len()].into(),
+            department: String::new(),
+        });
     }
     let people: Vec<String> = (0..devices).map(|n| format!("u{:04}", n + 1)).collect();
     let take = |from: usize, count: usize| -> Vec<String> {
@@ -70,6 +87,22 @@ pub fn directory(devices: usize, admin: &str) -> LocalDirectory {
         source: "Entra ID group Finance".into(),
         members: take(ap + legal, finance),
     });
+    // Each person's department, from the group they're in.
+    for (group, department) in [
+        ("ap-ops", "Accounts payable"),
+        ("legal-ops", "Legal"),
+        ("finance", "Finance"),
+        (ADMINS, "IT"),
+    ] {
+        let members = dir
+            .members(group)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for user in dir.users.iter_mut().filter(|u| members.contains(&u.name)) {
+            user.department = department.into();
+        }
+    }
     dir
 }
 
@@ -319,6 +352,7 @@ pub fn fill(
                     users: vec![user],
                     policy_version: Some(version),
                     catalog_version: Some(catalog_version),
+                    directory_version: None,
                     approvals_pending: u32::try_from(running.iter().filter(|a| a.waiting).count())
                         .unwrap_or(0),
                     agents: running,

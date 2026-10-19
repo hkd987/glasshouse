@@ -148,8 +148,18 @@ struct Prepared {
     models: Models,
     /// Installed apps whose manifests check out (UI-5, DV-3).
     apps: Vec<AppManifest>,
-    /// The org catalog `catalog.search` reads (GA-2).
-    catalog: CatalogHandle,
+    /// What the org's console sent this device, for actions to read.
+    org: OrgData,
+}
+
+/// What the org's admin console sent this device (ADR 0023): the catalog
+/// `catalog.search` and the Store read (GA-2, DV-11) and the people
+/// directory (AD-1). The sync replaces each whole; actions read the one in
+/// force.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OrgData {
+    pub(crate) catalog: CatalogHandle,
+    pub(crate) directory: glass_managed::DirectoryHandle,
 }
 
 /// Reads and checks the config and policy, from local disk only.
@@ -169,8 +179,8 @@ fn prepare(args: &Args) -> anyhow::Result<Prepared> {
             ));
         }
     }
-    let catalog = CatalogHandle::new();
-    let registry = registry(&config, &loaded.policy, &catalog)?;
+    let org = OrgData::default();
+    let registry = registry(&config, &loaded.policy, &org)?;
     for warning in loaded.policy.lint(&registry.lint_info()) {
         tracing::warn!("policy: {warning}");
     }
@@ -186,7 +196,7 @@ fn prepare(args: &Args) -> anyhow::Result<Prepared> {
         registry,
         models,
         apps,
-        catalog,
+        org,
     })
 }
 
@@ -218,13 +228,13 @@ impl glass_runtime::CatalogGate for OrgCatalog {
     }
 }
 
-fn registry(config: &Config, policy: &Policy, catalog: &CatalogHandle) -> anyhow::Result<Registry> {
+fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<Registry> {
     Ok(glass_first_party::registry(glass_first_party::Setup {
         // IT's fix list decides what the IT agent may restart (AE-4).
         restartable_services: policy.fixes().services.clone(),
         helpdesk_outbox: config.state_dir.join("helpdesk/outbox"),
         system: Arc::new(glass_app_system::HostSystem),
-        catalog: catalog.clone(),
+        catalog: org.catalog.clone(),
         managed: config.managed.is_some(),
     })?)
 }
@@ -237,7 +247,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         registry,
         models,
         apps,
-        catalog,
+        org,
     } = prepared;
     let policy_source = loaded.origin.to_string();
     let run_dir = config
@@ -346,7 +356,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             apps: apps.clone(),
             console_url: config.managed.as_ref().map(|m| m.url.clone()),
             dev_home: config.dev_home.clone(),
-            org_catalog: Arc::new(OrgCatalog(catalog.clone())),
+            org_catalog: Arc::new(OrgCatalog(org.catalog.clone())),
         },
         policy: loaded.policy.clone(),
         policy_source: policy_source.clone(),
@@ -387,7 +397,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             Ok(false) => {}
             Err(e) => tracing::warn!("couldn't record the last good policy: {e}"),
         }
-        if let Some(managed) = managed::Managed::start(&managed_config, managed_runtime, catalog) {
+        if let Some(managed) = managed::Managed::start(&managed_config, managed_runtime, org) {
             managed.run();
         }
     });

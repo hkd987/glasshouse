@@ -36,6 +36,8 @@ pub enum DocKind {
     Policy,
     /// The org's private catalog, DV-10.
     Catalog,
+    /// The org's people, for addressing them (AD-1).
+    Directory,
 }
 
 impl DocKind {
@@ -43,6 +45,7 @@ impl DocKind {
         match self {
             Self::Policy => "policy",
             Self::Catalog => "catalog",
+            Self::Directory => "directory",
         }
     }
 }

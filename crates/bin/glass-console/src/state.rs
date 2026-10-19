@@ -1,6 +1,7 @@
 //! The console's state and everything IT does to it: the policy draft,
 //! signed versions and rings (AD-2, AD-3), the private catalog (AD-5,
-//! DV-10, DV-11), and the fleet's reports (AD-4). Kept as JSON files in the
+//! DV-10, DV-11), the people devices get (AD-1), and the fleet's reports
+//! (AD-4). Kept as JSON files in the
 //! state directory, a stand-in for the managed database our web servers
 //! will use; each change is written whole with a rename.
 //!
@@ -87,6 +88,13 @@ pub struct CatalogState {
     pub released: Option<Signed>,
 }
 
+/// The people devices get (AD-1): the directory's last signed release.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DirectoryState {
+    #[serde(default)]
+    pub released: Option<Signed>,
+}
+
 /// A device in the fleet (AD-4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Device {
@@ -126,6 +134,7 @@ pub struct State {
     pub org: Org,
     pub policy: PolicyState,
     pub catalog: CatalogState,
+    pub people: DirectoryState,
     pub fleet: FleetState,
     /// The fleet changed since it was last written.
     pub fleet_dirty: bool,
@@ -175,6 +184,7 @@ impl State {
             org,
             policy: read_json(&dir.join("policy.json"))?.unwrap_or_default(),
             catalog: read_json(&dir.join("catalog.json"))?.unwrap_or_default(),
+            people: read_json(&dir.join("people.json"))?.unwrap_or_default(),
             fleet: read_json(&dir.join("fleet.json"))?.unwrap_or_default(),
             fleet_dirty: false,
         };
@@ -468,6 +478,40 @@ impl State {
         write_json(&self.dir.join("catalog.json"), &self.catalog)
     }
 
+    // ---- people (AD-1) ---------------------------------------------------
+
+    /// Signs the directory's people as the next directory release, if they
+    /// changed since the last one (a restart signs nothing new). Its
+    /// version, when it signed one.
+    pub fn release_directory(&mut self, directory: &dyn Directory) -> anyhow::Result<Option<u64>> {
+        let release = directory.release();
+        release.check().map_err(anyhow::Error::msg)?;
+        let payload = serde_json::to_string(&release)?;
+        if payload.len() > glass_managed::directory::MAX_PAYLOAD_BYTES {
+            bail!(
+                "the directory is {} bytes, more than devices take in one release ({})",
+                payload.len(),
+                glass_managed::directory::MAX_PAYLOAD_BYTES
+            );
+        }
+        let unchanged = self
+            .people
+            .released
+            .as_ref()
+            .is_some_and(|s| s.payload_sha256 == glass_managed::sha256_hex(payload.as_bytes()));
+        if unchanged {
+            return Ok(None);
+        }
+        let version = self.people.released.as_ref().map_or(0, |s| s.version) + 1;
+        self.people.released =
+            Some(
+                self.key
+                    .sign(DocKind::Directory, &self.org.id, version, payload),
+            );
+        write_json(&self.dir.join("people.json"), &self.people)?;
+        Ok(Some(version))
+    }
+
     // ---- devices (AD-4, AD-10) ------------------------------------------
 
     /// A device's ring; one IT hasn't seen yet joins the broad ring.
@@ -501,10 +545,17 @@ impl State {
             .as_ref()
             .filter(|s| request.catalog.is_none_or(|have| s.version > have))
             .cloned();
+        let directory = self
+            .people
+            .released
+            .as_ref()
+            .filter(|s| request.directory.is_none_or(|have| s.version > have))
+            .cloned();
         SyncResponse {
             ring,
             policy,
             catalog,
+            directory,
         }
     }
 
