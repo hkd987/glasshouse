@@ -38,12 +38,12 @@ Tests: *unit* = crate unit tests, *pipeline* =
 | Id | Status | Notes |
 |---|---|---|
 | EP-1 Read-only, signed, verified base; image updates via boot environments | Not started | Today the image is stock 15.1 plus our overlay (ADR 0002 notes the change) |
-| EP-2 Only signed software, veriexec in user and agent jails | Not started | Agents already run only programs from read-only `agent_dirs`; veriexec manifests are the next step |
+| EP-2 Only signed software, veriexec in user and agent jails | Not started | Design: ADR 0026 (Proposed). `mac_veriexec` and `veriexec(8)` aren't in 15.1's GENERIC kernel or base packages, so this needs our own kernel, loader and veriexec builds (BS-2). Agents already run only programs from read-only `agent_dirs` |
 | EP-3 Scan incoming files | Not started | |
 | EP-6 Ransomware recovery from clean snapshots, snapshots tamper-proof | Partial | Task snapshots live on datasets agents can't reach and users can't destroy without `zfs allow`; remote rollback from the console not built |
 | EP-7 Alerts and telemetry in OCSF to the customer's XDR | Not started | The audit record needs an OCSF mapping (also AU-2) |
 | EP-9 Removable-device control | Not started | Agent jails see no devices beyond the devfs jail ruleset |
-| EP-11 … EP-13 Signing keys, reproducible builds, isolated update infra | Not started | Pinned toolchain and `Cargo.lock` are the start of reproducible builds |
+| EP-11 … EP-13 Signing keys, reproducible builds, isolated update infra | Not started | Key layout in ADR 0026 (Proposed): an offline root over OS, package, developer CA and per-channel keys. Pinned toolchain and `Cargo.lock` are the start of reproducible builds |
 
 ## Delegation and approvals
 
