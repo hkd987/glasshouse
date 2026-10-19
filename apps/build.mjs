@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
 
 const here = dirname(fileURLToPath(import.meta.url));
-export const APPS = ["mail", "calendar", "store", "settings"];
+export const APPS = ["mail", "calendar", "store", "settings", "chat"];
 /** Web apps our web servers serve rather than a device: the admin console
  * (ADR 0023). No offline service worker: they read from their server. */
 export const SITES = ["console"];

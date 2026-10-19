@@ -152,6 +152,7 @@ impl ActionProvider for PeopleProvider {
             .iter()
             .map(|p| {
                 json!({
+                    "login": p.login,
                     "name": p.name,
                     "email": p.email,
                     "title": p.title,

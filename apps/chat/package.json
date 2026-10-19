@@ -1,0 +1,9 @@
+{
+  "name": "@glasshouse/chat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chat: the org's channels and direct messages, sealed end to end (CF-91, ADR 0030).",
+  "license": "UNLICENSED",
+  "type": "module",
+  "dependencies": { "@glasshouse/sdk": "0.1.0" }
+}

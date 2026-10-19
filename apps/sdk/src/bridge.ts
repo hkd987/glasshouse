@@ -159,9 +159,14 @@ export class Bridge {
     }
   }
 
-  /** Whether the session is open and what it waits on the user for. */
-  async status(): Promise<AppStatus> {
-    return this.#post<AppStatus>("status", {});
+  /**
+   * Whether the session is open and what it waits on the user for. With
+   * `waitSecs`, waits (25 s at most) for the person's data in this app to
+   * change after `since`, a cursor from an earlier status: `changed` then
+   * names this app. Ids only; read what changed with one call (ADR 0030).
+   */
+  async status(wait?: { waitSecs: number; since: number }): Promise<AppStatus> {
+    return this.#post<AppStatus>("status", wait ? { wait_secs: wait.waitSecs, since: wait.since } : {});
   }
 }
 

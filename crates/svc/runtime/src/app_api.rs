@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use glass_api::{AppCall, AppOpen, AppSessionRef, app_methods};
+use glass_api::{AppCall, AppOpen, AppSessionRef, AppStatusRequest, app_methods};
 use glass_rpc::{Connection, Handler, RpcError, parse_params, to_result};
 use glass_types::TaskId;
 use serde_json::Value;
@@ -101,9 +101,9 @@ impl Handler for AppApi {
                 to_result(&rt.app_call(&caller, call).await?)
             }
             app_methods::APP_STATUS => {
-                let session = parse_params::<AppSessionRef>(params)?.session;
-                self.owned(&conn, session)?;
-                to_result(&rt.app_status(&caller, session)?)
+                let request = parse_params::<AppStatusRequest>(params)?;
+                self.owned(&conn, request.session)?;
+                to_result(&rt.app_status_wait(&caller, request).await?)
             }
             app_methods::APP_CLOSE => {
                 let session = parse_params::<AppSessionRef>(params)?.session;

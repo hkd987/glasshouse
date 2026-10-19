@@ -54,6 +54,9 @@ for (const [app, use] of [
   ["mail", async (page: Page) => page.locator(".row").first().click()],
   ["calendar", async (page: Page) => page.locator(".event").first().click()],
   ["store", async (page: Page) => page.locator("input.search").fill("contracts")],
+  // This suite's computer is unmanaged, so Chat says it has no chat; the
+  // console suite times it with conversations (chat.e2e.ts).
+  ["chat", async (page: Page) => page.getByRole("button", { name: "New message" }).first().click()],
 ] as const) {
   test(`ui7 ${app} launches cold in under 1 s and uses under 150 MB`, async ({ browser }) => {
     const launches: number[] = [];

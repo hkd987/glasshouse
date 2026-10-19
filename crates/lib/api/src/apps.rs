@@ -226,7 +226,30 @@ pub struct AppStatus {
     /// A call waiting for the user's answer on the desktop.
     #[serde(default)]
     pub waiting: Option<AppWaiting>,
+    /// Ask again with this as `since` to hear of the next change.
+    #[serde(default)]
+    pub cursor: u64,
+    /// Whose data changed for the person since `since`: this app's id when
+    /// its did, such as a new chat message (ADR 0030). Ids only, never
+    /// content: the app reads what changed with one audited call.
+    #[serde(default)]
+    pub changed: Vec<String>,
 }
+
+/// `app.status`: the session's state, waiting up to `wait_secs` (at most
+/// [`APP_STATUS_MAX_WAIT_SECS`]) for the person's data in this app to
+/// change after `since`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppStatusRequest {
+    pub session: TaskId,
+    #[serde(default)]
+    pub wait_secs: u64,
+    #[serde(default)]
+    pub since: u64,
+}
+
+/// The longest an `app.status` waits for a change.
+pub const APP_STATUS_MAX_WAIT_SECS: u64 = 25;
 
 /// What the user is being asked, so the app can show it is waiting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

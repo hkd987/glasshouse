@@ -402,10 +402,19 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // A new agent version re-checks every layer on it (TL-13).
     runtime.recheck_layers();
 
-    // Chat's keys and the records it kept out go in the audit log (AU-1).
+    // Chat's keys and the records it kept out go in the audit log (AU-1);
+    // news wakes the person's Chat (ADR 0030).
     {
-        let runtime = Arc::clone(&runtime);
+        let runtime = Arc::downgrade(&runtime);
         org.chat.on_notice(move |notice| {
+            let Some(runtime) = runtime.upgrade() else {
+                return;
+            };
+            if let glass_first_party::ChatNotice::Changed { logins } = notice {
+                for login in logins {
+                    runtime.app_changed(login, "chat");
+                }
+            }
             if let Some(event) = managed::chat_event(notice) {
                 runtime.append_audit(event);
             }

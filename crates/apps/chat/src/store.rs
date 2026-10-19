@@ -228,6 +228,14 @@ impl ChatHandle {
         }
     }
 
+    /// `login`'s chat changed on this computer, such as a post from an
+    /// agent: their Chat hears of it.
+    pub(crate) fn changed(&self, login: &str) {
+        self.notify(&Notice::Changed {
+            logins: vec![login.to_owned()],
+        });
+    }
+
     pub(crate) fn connection(&self) -> Result<Connection, ChatFailure> {
         self.0
             .connection

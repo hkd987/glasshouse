@@ -354,14 +354,17 @@ impl ChatProvider {
                 epoch: epoch.clone(),
             })
             .map_err(ChatFailure::Link)?;
-        let _write = self.handle.lock();
-        let mut store = self.handle.load(me);
-        store.conversations.insert(id.clone(), conversation.clone());
-        store.epochs.entry(id).or_default().push(epoch);
-        for key in keys {
-            store.keys.entry(key.id.clone()).or_insert(key);
+        {
+            let _write = self.handle.lock();
+            let mut store = self.handle.load(me);
+            store.conversations.insert(id.clone(), conversation.clone());
+            store.epochs.entry(id).or_default().push(epoch);
+            for key in keys {
+                store.keys.entry(key.id.clone()).or_insert(key);
+            }
+            self.handle.save(me, &store)?;
         }
-        self.handle.save(me, &store)?;
+        self.handle.changed(me);
         Ok(conversation)
     }
 
@@ -420,10 +423,13 @@ impl ChatProvider {
             .map_err(ChatFailure::Link)?;
         message.seq = seq;
         message.at = Some(Timestamp::now().to_string());
-        let _write = self.handle.lock();
-        let mut store = self.handle.load(me);
-        store.keep(&conversation.id, message);
-        self.handle.save(me, &store)?;
+        {
+            let _write = self.handle.lock();
+            let mut store = self.handle.load(me);
+            store.keep(&conversation.id, message);
+            self.handle.save(me, &store)?;
+        }
+        self.handle.changed(me);
         Ok((conversation, title, header.id, seq))
     }
 

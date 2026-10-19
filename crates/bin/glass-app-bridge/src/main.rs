@@ -200,6 +200,15 @@ struct Open {
     session: AppSession,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct StatusBody {
+    #[serde(default)]
+    wait_secs: u64,
+    #[serde(default)]
+    since: u64,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CallBody {
@@ -305,12 +314,13 @@ impl Bridge {
                 Ok(serde_json::to_value(result).unwrap_or_default())
             }
             "status" => {
+                // A wait for the app's data to change (ADR 0030): how long
+                // and since when; glassd caps the wait.
+                let wait: StatusBody = serde_json::from_slice(body).unwrap_or_default();
                 let status: AppStatus = self
-                    .relay(
-                        app,
-                        app_methods::APP_STATUS,
-                        |session| json!({ "session": session }),
-                    )
+                    .relay(app, app_methods::APP_STATUS, |session| {
+                        json!({ "session": session, "wait_secs": wait.wait_secs, "since": wait.since })
+                    })
                     .await?;
                 Ok(serde_json::to_value(status).unwrap_or_default())
             }

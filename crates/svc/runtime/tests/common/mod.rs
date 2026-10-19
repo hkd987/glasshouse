@@ -318,6 +318,17 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         gateway: Arc::new(gateway),
         settings: settings.clone(),
     });
+    // News in chat wakes the person's Chat, as glassd wires it.
+    {
+        let rt = Arc::downgrade(&rt);
+        chat.on_notice(move |notice| {
+            if let (Some(rt), glass_app_chat::Notice::Changed { logins }) = (rt.upgrade(), notice) {
+                for login in logins {
+                    rt.app_changed(login, "chat");
+                }
+            }
+        });
+    }
     let me = Caller {
         name: account.name,
         uid: account.uid,

@@ -400,3 +400,53 @@ async fn cf91_without_the_console_a_post_is_a_readable_refusal_and_not_queued() 
     // And reading still works from what this computer kept.
     assert!(call(&apps, session, "chat.list", json!({})).await.ok);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cf91_chat_hears_of_a_new_message_without_reading_it() {
+    let h = harness_with("");
+    let org = org(&h);
+    org.priya("chat.list", json!({}));
+    let apps = Arc::new(Client::connect(h.serve_apps()).await.unwrap());
+    let session = open(&apps, "chat").await.session;
+    assert!(call(&apps, session, "chat.list", json!({})).await.ok);
+    let now: glass_api::AppStatus = apps
+        .call(app_methods::APP_STATUS, json!({ "session": session }))
+        .await
+        .unwrap();
+    let reads_before = audited(&h, "chat.read").len();
+    let waiting = {
+        let apps = Arc::clone(&apps);
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let status: glass_api::AppStatus = apps
+                .call(
+                    app_methods::APP_STATUS,
+                    json!({ "session": session, "wait_secs": 20, "since": now.cursor }),
+                )
+                .await
+                .unwrap();
+            (status, started.elapsed())
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    org.priya(
+        "chat.post",
+        json!({ "posts": [{ "to": [h.me.name], "text": "Ping" }] }),
+    );
+    h.chat.sync_once(0).unwrap();
+    let (status, took) = waiting.await.unwrap();
+    assert_eq!(status.changed, ["chat"]);
+    assert!(status.cursor > now.cursor);
+    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    // Only ids: hearing of it read nothing and audited no read.
+    assert_eq!(audited(&h, "chat.read").len(), reads_before);
+    // With nothing new, a wait times out with nothing changed.
+    let quiet: glass_api::AppStatus = apps
+        .call(
+            app_methods::APP_STATUS,
+            json!({ "session": session, "wait_secs": 1, "since": status.cursor }),
+        )
+        .await
+        .unwrap();
+    assert!(quiet.changed.is_empty());
+}

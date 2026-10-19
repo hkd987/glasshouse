@@ -424,6 +424,7 @@ dependencies = [
  "glass-actions",
  "glass-api",
  "glass-crypto",
+ "glass-gateway-providers",
  "glass-managed",
  "glass-types",
  "hex",

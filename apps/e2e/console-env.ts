@@ -17,6 +17,8 @@ export const MAIL_URL = `http://mail.localhost:${STORE_PORT}/`;
 export const CALENDAR_URL = `http://calendar.localhost:${STORE_PORT}/`;
 /** Settings on the same bridge: what IT set shows there (UX-1). */
 export const SETTINGS_URL = `http://settings.localhost:${STORE_PORT}/`;
+/** Chat on the same bridge: the org's chat, sealed end to end (CF-91). */
+export const CHAT_URL = `http://chat.localhost:${STORE_PORT}/`;
 /** The fixture: devices, catalog items. */
 export const FIXTURE = [500, 50] as const;
 /** This device's id in the fleet. */

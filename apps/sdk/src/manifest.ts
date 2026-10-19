@@ -60,6 +60,10 @@ export interface AppWaiting {
 export interface AppStatus {
   live: boolean;
   waiting: AppWaiting | null;
+  /** Pass as `since` to hear of the next change. */
+  cursor: number;
+  /** Apps whose data changed for the person since `since`. */
+  changed: string[];
 }
 
 const ID = /^[a-z][a-z0-9-]{0,62}$/;

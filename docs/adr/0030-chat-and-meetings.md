@@ -3,10 +3,11 @@
 Status: **Accepted** (2026-10-19): the owner decided chat and meetings are
 end to end encrypted, with a compliance key IT holds, meetings org only up
 to 25; the design below carries it out. Two choices in it are proposed
-defaults the owner can still change (end of this ADR). Building slice C1:
-`glass-crypto`, the console's relay, and on computers the member keys,
-store, sync and the four chat actions with `[[app]]` tiers are in; the
-Chat app is next. Policy with `[[app]]` needs a glassd that knows it
+defaults the owner can still change (end of this ADR). Slice C1 is built,
+on the development host and the VM: `glass-crypto`, the console's relay,
+on computers the member keys, store, sync and the four chat actions with
+`[[app]]` tiers, `app.status` waits, and the Chat app. Not for a pilot
+before P (device keys) and C2 (presence, several computers, membership). Policy with `[[app]]` needs a glassd that knows it
 (`PolicyDocument` refuses unknown fields), as `settings` did. PRD CF-91 (our own chat), CF-21 (Glasshouse meetings), CF-61 … CF-65, GT-3, AU-1, AU-10, NV-1 … NV-3, CF-41, UI-2, UI-5, UI-7, DV-3. Builds on:
 - ADR 0018: the base system's OpenSSL.
 - ADR 0023: the console, signed releases, the device API.

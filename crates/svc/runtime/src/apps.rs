@@ -15,8 +15,9 @@ use std::sync::Arc;
 
 use glass_actions::TaskContext;
 use glass_api::{
-    ActivityKind, AgentMode, AppAction, AppCall, AppCallResult, AppManifest, AppSession, AppStatus,
-    AppWaiting, DisplaySafe, ProfileApp, ProfileAppKind, ScopeRequest, TileState,
+    APP_STATUS_MAX_WAIT_SECS, ActivityKind, AgentMode, AppAction, AppCall, AppCallResult,
+    AppManifest, AppSession, AppStatus, AppStatusRequest, AppWaiting, DisplaySafe, ProfileApp,
+    ProfileAppKind, ScopeRequest, TileState,
 };
 use glass_audit::{AuditEvent, EventKind, Outcome as AuditOutcome, PolicyDecision};
 use glass_platform::fs::Owner;
@@ -27,6 +28,14 @@ use tokio::sync::oneshot;
 use crate::error::Result;
 use crate::task::{NewTask, Task};
 use crate::{Caller, CatalogEntry, Runtime, RuntimeError};
+
+/// When each person's data in each app last changed: a counter across
+/// the device, and per login and app the count at its last change.
+#[derive(Debug, Default)]
+pub(crate) struct AppChanges {
+    seq: u64,
+    last: BTreeMap<(String, String), u64>,
+}
 
 /// Apps one user may have open at once. Each open window is a session.
 pub const MAX_OPEN_APPS_PER_USER: usize = 16;
@@ -338,7 +347,42 @@ impl Runtime {
                 waiting.make_display_safe();
                 waiting
             });
-        Ok(AppStatus { live, waiting })
+        let changes = self.app_changes.borrow();
+        Ok(AppStatus {
+            live,
+            waiting,
+            cursor: changes.seq,
+            changed: Vec::new(),
+        })
+    }
+
+    /// `login`'s data in `app` changed, such as a chat message that
+    /// arrived: wakes that app's `app.status` waits (ADR 0030).
+    pub fn app_changed(&self, login: &str, app: &str) {
+        self.app_changes.send_modify(|c| {
+            c.seq += 1;
+            c.last.insert((login.to_owned(), app.to_owned()), c.seq);
+        });
+    }
+
+    /// `app.status`, waiting up to `request.wait_secs` for the caller's
+    /// data in this session's app to change after `request.since`.
+    pub async fn app_status_wait(
+        &self,
+        caller: &Caller,
+        request: AppStatusRequest,
+    ) -> Result<AppStatus> {
+        let task = self.app_session(caller, request.session)?;
+        let key = (caller.name.clone(), task.entry.id.to_string());
+        let wait = std::time::Duration::from_secs(request.wait_secs.min(APP_STATUS_MAX_WAIT_SECS));
+        let mut changes = self.app_changes.subscribe();
+        let changed = |c: &AppChanges| c.last.get(&key).is_some_and(|at| *at > request.since);
+        let _ = tokio::time::timeout(wait, changes.wait_for(changed)).await;
+        let mut status = self.app_status(caller, request.session)?;
+        if changed(&self.app_changes.borrow()) {
+            status.changed.push(key.1);
+        }
+        Ok(status)
     }
 
     /// Closes the caller's app session (`app.close`).

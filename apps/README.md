@@ -17,10 +17,16 @@ apps/
   calendar/   manifest.json, index.html, src/ (main.ts; week.ts: the week's logic)
   store/      manifest.json, index.html, src/ (main.ts; store.ts: what the org's
               catalog offers you, DV-10, DV-11)
+  settings/   the person's device settings, what IT set or locked (UX-1)
+  chat/       the org's chat (CF-91, ADR 0030): glassd seals and opens it; the
+              page keeps nothing (bridge.call only, no offline permission) and
+              hears of news from app.status waits, ids only
   console/    the admin console's web app (ADR 0023): a site glass-console serves,
               not a device app (no manifest, no service worker)
   e2e/        Playwright: the apps against dev-host glassd and the bridge;
-              console.config.ts: the console against glass-console and glassd
+              console.config.ts: the console against glass-console and glassd,
+              and Chat with a colleague scripted on another computer
+              (crates/apps/chat/examples/colleague.rs)
   build.mjs   esbuild: each app into <app>/dist (app.js, app.css, sw.js)
 ```
 

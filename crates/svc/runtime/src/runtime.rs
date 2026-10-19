@@ -75,6 +75,9 @@ pub struct Runtime {
     /// Held while an app session opens, so calls in parallel can't all
     /// pass the per-person cap before any of them is counted.
     pub(crate) opening_app: Mutex<()>,
+    /// When each person's data in each app last changed, for `app.status`
+    /// waits (ADR 0030).
+    pub(crate) app_changes: tokio::sync::watch::Sender<crate::apps::AppChanges>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -150,6 +153,7 @@ impl Runtime {
             tasks: Mutex::new(BTreeMap::new()),
             supervisors: Mutex::new(Vec::new()),
             opening_app: Mutex::new(()),
+            app_changes: tokio::sync::watch::Sender::new(Default::default()),
         })
     }
 

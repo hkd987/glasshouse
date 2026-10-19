@@ -50,6 +50,8 @@ fails when one goes over:
 | Calendar, cold launch | 1 s | UI-7 | 184 ms (178, 184, 185) |
 | Mail, memory | 150 MB | UI-7 | 116 MB |
 | Calendar, memory | 150 MB | UI-7 | 117 MB |
+| Chat, cold launch | 1 s | UI-7 | 127 ms (132, 127, 118) |
+| Chat, memory | 150 MB | UI-7 | 106 MB |
 
 *Cold launch* is a fresh browser context (no cache, no service worker, no
 stored data), from navigation to the app drawn with its data (the
@@ -105,6 +107,8 @@ with a dev-host glassd enrolled as a pilot device
 | Publish to in force on an online pilot device | 5 s | AD-3 | 121–176 ms |
 | An approval to the catalog on that device | 5 s | AD-5 | under 5 ms after the page confirms it |
 | A keystroke in Mail's To to the colleague suggested, from the org's directory | 500 ms | AD-1 | 374 ms (a 120 ms pause in typing included) |
+| Chat open with a conversation, sealed messages opened by glassd | 1 s | UI-7, CF-91 | `chat.e2e.ts` asserts it |
+| A colleague's chat message, posted on their computer, on screen on this one | 1 s | CF-91 (ADR 0030) | `chat.e2e.ts` logs it; loopback |
 
 *Interactive* is a fresh browser context with the session cookie, from
 navigation to the page drawn with its data (`html[data-ready]`). *In force*
@@ -248,6 +252,8 @@ fails when one goes over:
 | Calendar, cold launch | 1 s | UI-7 | 184 ms (178, 184, 185) |
 | Mail, memory | 150 MB | UI-7 | 116 MB |
 | Calendar, memory | 150 MB | UI-7 | 117 MB |
+| Chat, cold launch | 1 s | UI-7 | 127 ms (132, 127, 118) |
+| Chat, memory | 150 MB | UI-7 | 106 MB |
 
 *Cold launch* is a fresh browser context (no cache, no service worker, no
 stored data), from navigation to the app drawn with its data (the

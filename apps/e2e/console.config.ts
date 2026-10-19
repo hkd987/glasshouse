@@ -18,7 +18,9 @@ process.env.GLASS_APPS_E2E_RUN ??= join(tmpdir(), `glass-console-e2e-${userInfo(
 
 export default defineConfig({
   testDir: ".",
-  testMatch: "console.e2e.ts",
+  // Chat's tests need only what the setup brings up: the org's first policy
+  // and its Chat release.
+  testMatch: ["console.e2e.ts", "chat.e2e.ts"],
   globalSetup: "./console-setup.ts",
   outputDir: "results/console-artifacts",
   workers: 1,
