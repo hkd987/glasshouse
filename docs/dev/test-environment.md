@@ -60,6 +60,24 @@ make e2e-vm                 # before pushing anything that touches agents
 The VM keeps running between sessions (until the machine reboots or you run
 `make vm-down`). `make vm-status` tells you whether it's up.
 
+### A managed VM
+
+To try what IT does in the admin console on the VM (policy, the catalog,
+the Store), enroll it with a development console on this machine:
+
+```sh
+make console-dev &                  # the console on http://127.0.0.1:7400
+os/freebsd/scripts/enroll-dev.sh    # the VM syncs with it over HTTPS
+os/freebsd/scripts/enroll-dev.sh --undo
+```
+
+The VM only talks to a console over HTTPS, so the script puts
+`tools/dev/console-tls.py` in front of the console (as our web servers do in
+production) with a development certificate for 10.0.2.2, the host as the VM
+sees it, and tells the VM to trust it. A deploy puts the shipped
+`glassd.toml` back, which un-enrolls the VM; `make e2e-vm` expects it
+un-enrolled.
+
 ## Without the VM
 
 For work on the runtime, CLI or agents that doesn't need real containment:

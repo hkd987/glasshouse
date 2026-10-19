@@ -32,6 +32,8 @@ make vm-status            # "running: pid …, ssh … up" or not running
 - Full suite: `make e2e-vm` (~2 min). Run it after any change to the runtime,
   broker, actions, sandbox, undo or audit.
 - Logs: `/var/log/glassd.log`; per task `/var/db/glasshouse/tasks/<id>/agent.log`.
+- A managed VM (what IT sets in the console reaches it): `make console-dev &`,
+  then `os/freebsd/scripts/enroll-dev.sh` (`--undo`; a deploy un-enrolls it).
 
 ## Rules
 
