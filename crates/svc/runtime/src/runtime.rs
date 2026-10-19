@@ -254,6 +254,17 @@ impl Runtime {
             .collect();
         for task in apps {
             if let Some(manifest) = &task.app {
+                // Taken out of the person's profile: the open app closes.
+                if !policy.apps_for(&task.user.name).contains(&manifest.id) {
+                    if task.lock().tile.is_live() {
+                        self.end_task(
+                            &task,
+                            TileState::Stopped,
+                            "IT took this app out of your profile",
+                        );
+                    }
+                    continue;
+                }
                 task.follow_policy(policy.for_app(
                     &task.user.name,
                     &manifest.id,

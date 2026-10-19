@@ -231,8 +231,22 @@ agents = []
 
     // And back: IT lifts it, and the same window can add events again.
     h.apply_policy("", "managed v3");
-    let again = call(&apps, calendar.session, "calendar.create", standup).await;
+    let again = call(&apps, calendar.session, "calendar.create", standup.clone()).await;
     assert!(again.ok, "{}", again.text);
+
+    // IT takes Calendar out of everyone's profile: the open one closes.
+    h.apply_policy_replacing("\"mail\", \"calendar\", ", "\"mail\", ", "");
+    let closed: Result<Value, ClientError> = apps
+        .call(
+            app_methods::APP_CALL,
+            json!({ "session": calendar.session, "action": "calendar.create", "input": standup }),
+        )
+        .await;
+    let refused = match closed {
+        Ok(v) => serde_json::from_value::<AppCallResult>(v).map_or(true, |r| !r.ok),
+        Err(_) => true,
+    };
+    assert!(refused, "a closed app's calls go nowhere");
 }
 
 #[tokio::test]

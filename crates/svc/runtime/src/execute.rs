@@ -80,7 +80,7 @@ impl Runtime {
         let preview = {
             let (provider, ctx, name, input) = (
                 Arc::clone(&provider),
-                task.ctx.clone(),
+                task.call_ctx(),
                 def.name.clone(),
                 args.clone(),
             );
@@ -271,7 +271,7 @@ impl Runtime {
                 ),
             }
         } else {
-            let (ctx, name, input) = (task.ctx.clone(), def.name.clone(), args);
+            let (ctx, name, input) = (task.call_ctx(), def.name.clone(), args);
             let provider: Arc<dyn ActionProvider> = provider;
             let invoked = tokio::task::spawn_blocking(move || {
                 let result = provider.invoke(&ctx, &name, &input);

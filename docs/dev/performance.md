@@ -52,6 +52,10 @@ fails when one goes over:
 | Calendar, memory | 150 MB | UI-7 | 117 MB |
 | Chat, cold launch | 1 s | UI-7 | 127 ms (132, 127, 118) |
 | Chat, memory | 150 MB | UI-7 | 106 MB |
+| Meet, cold launch | 1 s | UI-7 | 108 ms (104, 115, 108) |
+| Meet, memory (before joining) | 150 MB | UI-7 | 100 MB |
+| Joining a meeting: Join to the other person on screen, through the computer, the console and the relay | 2 s | UI-7, CF-21 | 1427 ms (`meetings.e2e.ts`); 1311 ms page to relay alone (`meet.e2e.ts`) |
+| A page in a two-person call | 250 MB | UI-7, CF-21 | 169 MB |
 
 *Cold launch* is a fresh browser context (no cache, no service worker, no
 stored data), from navigation to the app drawn with its data (the
@@ -254,6 +258,10 @@ fails when one goes over:
 | Calendar, memory | 150 MB | UI-7 | 117 MB |
 | Chat, cold launch | 1 s | UI-7 | 127 ms (132, 127, 118) |
 | Chat, memory | 150 MB | UI-7 | 106 MB |
+| Meet, cold launch | 1 s | UI-7 | 108 ms (104, 115, 108) |
+| Meet, memory (before joining) | 150 MB | UI-7 | 100 MB |
+| Joining a meeting: Join to the other person on screen, through the computer, the console and the relay | 2 s | UI-7, CF-21 | 1427 ms (`meetings.e2e.ts`); 1311 ms page to relay alone (`meet.e2e.ts`) |
+| A page in a two-person call | 250 MB | UI-7, CF-21 | 169 MB |
 
 *Cold launch* is a fresh browser context (no cache, no service worker, no
 stored data), from navigation to the app drawn with its data (the

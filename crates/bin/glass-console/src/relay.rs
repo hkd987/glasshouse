@@ -108,14 +108,39 @@ impl Relay {
             body.len()
         );
         stream.write_all(request.as_bytes()).await.map_err(down)?;
+        // Read the head, then exactly Content-Length bytes: a relay that
+        // keeps the connection open mustn't make every join wait out WAIT.
         let mut reply = Vec::new();
-        stream
-            .take(MAX_REPLY)
-            .read_to_end(&mut reply)
-            .await
-            .map_err(down)?;
+        let mut chunk = [0u8; 4096];
+        loop {
+            if let Some(whole) = complete(&reply) {
+                reply.truncate(whole);
+                break;
+            }
+            let n = stream.read(&mut chunk).await.map_err(down)?;
+            if n == 0 || reply.len() as u64 + n as u64 > MAX_REPLY {
+                break;
+            }
+            reply.extend_from_slice(&chunk[..n]);
+        }
         parse(&reply).ok_or_else(|| RelayError::Down("the relay answered nonsense".into()))
     }
+}
+
+/// The length of the whole reply once its head and Content-Length bytes
+/// of body are in; `None` until then (and for a reply without the header,
+/// which then ends when the relay closes).
+fn complete(reply: &[u8]) -> Option<usize> {
+    let split = reply.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = std::str::from_utf8(&reply[..split]).ok()?;
+    let length: usize = head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse().ok())?
+    })?;
+    let whole = split + 4 + length;
+    (reply.len() >= whole).then_some(whole)
 }
 
 fn refusal(status: u16, reply: &Value) -> RelayError {
@@ -162,5 +187,17 @@ mod tests {
             (204, Value::Null)
         );
         assert!(parse(b"garbage").is_none());
+    }
+
+    #[test]
+    fn a_reply_is_whole_at_its_content_length_not_at_close() {
+        let head = b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\n";
+        assert_eq!(complete(head), None);
+        let mut reply = head.to_vec();
+        reply.extend_from_slice(b"null");
+        assert_eq!(complete(&reply), Some(reply.len()));
+        reply.extend_from_slice(b"extra");
+        assert_eq!(complete(&reply), Some(reply.len() - 5));
+        assert_eq!(complete(b"HTTP/1.1 204 No Content\r\n\r\n"), None);
     }
 }

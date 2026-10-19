@@ -57,6 +57,9 @@ for (const [app, use] of [
   // This suite's computer is unmanaged, so Chat says it has no chat; the
   // console suite times it with conversations (chat.e2e.ts).
   ["chat", async (page: Page) => page.getByRole("button", { name: "New message" }).first().click()],
+  // Meet opens on its lobby here; the console suite times joining and a
+  // call's memory with two people (meetings.e2e.ts).
+  ["meet", async (page: Page) => page.locator("[data-test=join]").hover()],
 ] as const) {
   test(`ui7 ${app} launches cold in under 1 s and uses under 150 MB`, async ({ browser }) => {
     const launches: number[] = [];

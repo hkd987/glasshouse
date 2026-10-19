@@ -159,6 +159,15 @@ impl Task {
         )
     }
 
+    /// The context an action runs in: the task's, with the groups of the
+    /// policy in force for it now (the catalog decides by them). For an
+    /// agent's task that is the policy it started with.
+    pub fn call_ctx(&self) -> TaskContext {
+        let mut ctx = self.ctx.clone();
+        ctx.groups = self.policy().groups().map(str::to_owned).collect();
+        ctx
+    }
+
     /// Puts `policy` in force for this task's next calls.
     pub(crate) fn follow_policy(&self, policy: EffectivePolicy) {
         *self

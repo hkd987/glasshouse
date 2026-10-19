@@ -119,7 +119,12 @@ between (DV-1, EP-12), keep booting from disk and keep working offline
   app has no handoff card, and the app bridge keeps one session per app
   for as long as the person is signed in, so a policy IT tightened would
   otherwise never reach an open Mail or Calendar
-  (`apps.rs` `ad3_dv3_a_policy_it_publishes_reaches_an_app_already_open`). The
+  (`apps.rs` `ad3_dv3_a_policy_it_publishes_reaches_an_app_already_open`).
+  Its groups follow too (each call's context takes them from the policy
+  in force, as the Store's catalog decides by them), and an app IT takes
+  out of the person's profile closes. Not yet: the page's own copy of its
+  tiers (the bridge's cached session) can say an action asks when it no
+  longer does; what glassd enforces is right. The
   model gateway is built at start only: a release that changes model
   providers takes effect at the next restart. Every apply and refusal is
   audited (`PolicyLoaded` with `source: managed`, `CatalogLoaded`,

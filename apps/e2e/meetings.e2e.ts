@@ -8,6 +8,7 @@
 // meeting's media key.
 
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { extname, join } from "node:path";
@@ -19,6 +20,10 @@ import { type ApprovalView, BIN, DEV, REPO, audit, glassctl, glassctlJson } from
 const me = userInfo().username;
 /** Priya's Meet page, served by the test the way her computer would. */
 const PRIYA_ORIGIN = "http://meet.localhost:7398";
+/** UI-7: Join to the other person on screen. */
+const JOIN_BUDGET_MS = 2000;
+/** UI-7: a page in a two-person call, video decoding. */
+const CALL_MEMORY_BUDGET_MB = 250;
 const TYPES: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
 
 /** Priya, on her own computer: `colleague` for Chat, `attendee` for Meet. */
@@ -180,12 +185,30 @@ test("cf21 a meeting made in Calendar: both people see and hear each other throu
   await watchConnections(theirs);
   const priyas = await priyasPage(theirs, meeting);
   expect(JSON.parse(priya("attendee", ["list"])).map((m: { id: string }) => m.id)).toContain(meeting);
+  // UI-7: from Join to seeing the other person, through her computer, the
+  // console and the relay.
+  const joining = Date.now();
   await priyas.click("[data-test=join]");
+  await expect.poll(async () => (await received(priyas)).framesDecoded, { timeout: 10_000, intervals: [50] }).toBeGreaterThan(0);
+  const joinMs = Date.now() - joining;
+  console.log(`meet: Priya sees the meeting ${joinMs} ms after Join`);
+  expect(joinMs, "joining a meeting (UI-7)").toBeLessThan(JOIN_BUDGET_MS);
 
   for (const page of [meet, priyas]) {
     await expect.poll(async () => (await received(page)).framesDecoded, { timeout: 15_000 }).toBeGreaterThan(30);
     await expect.poll(async () => (await received(page)).audioSamples, { timeout: 15_000 }).toBeGreaterThan(48_000);
   }
+  // A call's memory: the largest renderer is a page decoding video.
+  const cdp = await browser.newBrowserCDPSession();
+  const info = (await cdp.send("SystemInfo.getProcessInfo")) as { processInfo: { type: string; id: number }[] };
+  await cdp.detach();
+  const callMb = Math.max(
+    ...info.processInfo
+      .filter((p) => p.type === "renderer")
+      .map((p) => Number(/VmRSS:\s+(\d+)/.exec(readFileSync(`/proc/${p.id}/status`, "utf8"))?.[1] ?? 0) / 1024),
+  );
+  console.log(`meet: a renderer in the call uses ${callMb.toFixed(0)} MB`);
+  expect(callMb, "a meeting's memory (UI-7)").toBeLessThan(CALL_MEMORY_BUDGET_MB);
   await meet.screenshot({ path: join(CONSOLE_SHOTS, "meeting-you.png") });
   await priyas.screenshot({ path: join(CONSOLE_SHOTS, "meeting-priya.png") });
 
