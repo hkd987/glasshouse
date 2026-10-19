@@ -33,7 +33,7 @@ make vm-status            # "running: pid …, ssh … up" or not running
   broker, actions, sandbox, undo or audit.
 - Logs: `/var/log/glassd.log`; per task `/var/db/glasshouse/tasks/<id>/agent.log`.
 - A managed VM (what IT sets in the console reaches it): `make console-dev &`,
-  then `os/freebsd/scripts/enroll-dev.sh` (`--undo`; a deploy un-enrolls it).
+  then `os/freebsd/scripts/enroll-dev.sh`; `--undo` before `make e2e-vm`.
 
 ## Rules
 

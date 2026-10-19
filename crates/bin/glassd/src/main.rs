@@ -235,6 +235,7 @@ fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<R
         helpdesk_outbox: config.state_dir.join("helpdesk/outbox"),
         system: Arc::new(glass_app_system::HostSystem),
         catalog: org.catalog.clone(),
+        directory: org.directory.clone(),
         managed: config.managed.is_some(),
     })?)
 }

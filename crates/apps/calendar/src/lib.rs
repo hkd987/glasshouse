@@ -19,6 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use glass_api::{AskLabels, ChangeKind};
+use glass_managed::DirectoryHandle;
 use glass_platform::fs::ConfinedDir;
 use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -43,8 +44,19 @@ const MAX_INVITEES: usize = 50;
 const MAX_LINE: usize = 200;
 const MAX_NOTES: usize = 4000;
 
-#[derive(Debug, Default)]
-pub struct CalendarProvider;
+/// The calendar, inviting as the person the org's directory says they are.
+#[derive(Debug, Clone, Default)]
+pub struct CalendarProvider {
+    directory: DirectoryHandle,
+}
+
+impl CalendarProvider {
+    /// A calendar whose invitations name the person's name and address in
+    /// `directory` as the organizer (AD-1), or their login without one.
+    pub fn new(directory: DirectoryHandle) -> Self {
+        Self { directory }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -406,18 +418,21 @@ impl CalendarProvider {
     }
 
     /// The invitation as it would go out, in iCalendar form.
-    fn invitation(ctx: &TaskContext, event: &Event, to: &[String]) -> String {
+    fn invitation(&self, ctx: &TaskContext, event: &Event, to: &[String]) -> String {
         let stamp = |text: &str| text.replace(['-', ':'], "") + "00";
+        let organizer = self.directory.sender(&ctx.principal.on_behalf_of.name);
         let mut ics = format!(
             "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Glasshouse//Calendar//EN\r\nMETHOD:REQUEST\r\n\
              BEGIN:VEVENT\r\nUID:{id}@glasshouse\r\nDTSTAMP:{now}\r\nDTSTART:{start}\r\nDTEND:{end}\r\n\
-             SUMMARY:{title}\r\nORGANIZER;CN={user}:mailto:{user}\r\n",
+             SUMMARY:{title}\r\nORGANIZER;CN=\"{name}\":mailto:{address}\r\n",
             id = event.id,
             now = Timestamp::now(),
             start = stamp(&event.start),
             end = stamp(&event.end),
             title = ics_text(&event.title),
-            user = ctx.principal.on_behalf_of.name,
+            // A quoted parameter can't hold a quote.
+            name = organizer.name.replace('"', "'"),
+            address = organizer.address(),
         );
         if !event.location.is_empty() {
             ics.push_str(&format!("LOCATION:{}\r\n", ics_text(&event.location)));
@@ -802,7 +817,7 @@ impl ActionProvider for CalendarProvider {
                 let to = Self::emails(&to)?;
                 let event = Self::load(&cal, &id)?;
                 Self::own(ctx, &event)?;
-                let text = Self::invitation(ctx, &event, &to);
+                let text = self.invitation(ctx, &event, &to);
                 let stamp = Timestamp::now().unix_seconds();
                 let mut sent = None;
                 for attempt in 1..=100 {
@@ -1046,7 +1061,7 @@ mod tests {
             uid: meta.uid(),
             gid: meta.gid(),
         };
-        CalendarProvider.prepare(&ctx).unwrap();
+        CalendarProvider::default().prepare(&ctx).unwrap();
         (dir, ctx)
     }
 
@@ -1068,7 +1083,7 @@ mod tests {
     }
 
     fn hold(ctx: &TaskContext) -> Event {
-        let out = CalendarProvider
+        let out = CalendarProvider::default()
             .invoke(
                 ctx,
                 &name("calendar.hold"),
@@ -1081,7 +1096,7 @@ mod tests {
     #[test]
     fn nv3_holds_notify_are_undoable_and_attributed() {
         let (dir, ctx) = setup();
-        let defs = CalendarProvider.actions();
+        let defs = CalendarProvider::default().actions();
         let def = defs
             .iter()
             .find(|d| d.name.as_str() == "calendar.hold")
@@ -1094,7 +1109,7 @@ mod tests {
         assert_eq!(def.side_effect, SideEffect::LocalReversible);
 
         let input = json!({ "title": "Prep for Northwind", "start": "2026-10-20T14:00", "end": "2026-10-20T15:00" });
-        let preview = CalendarProvider
+        let preview = CalendarProvider::default()
             .preview(&ctx, &name("calendar.hold"), &input)
             .unwrap();
         assert_eq!(
@@ -1106,7 +1121,7 @@ mod tests {
             vec![dir.path().join("Calendar/Events")]
         );
 
-        let out = CalendarProvider
+        let out = CalendarProvider::default()
             .invoke(&ctx, &name("calendar.hold"), &input)
             .unwrap();
         let change = &out.changes[0];
@@ -1129,14 +1144,14 @@ mod tests {
         let (dir, ctx) = setup();
         seed_others(dir.path());
         hold(&ctx);
-        CalendarProvider
+        CalendarProvider::default()
             .invoke(
                 &ctx,
                 &name("calendar.create"),
                 &json!({ "title": "Standup", "start": "2026-10-19T09:00", "end": "2026-10-19T09:15", "attendees": ["sam@corp.example"] }),
             )
             .unwrap();
-        CalendarProvider
+        CalendarProvider::default()
             .invoke(
                 &ctx,
                 &name("calendar.create"),
@@ -1147,7 +1162,7 @@ mod tests {
         fs::write(dir.path().join("Calendar/Events/notes.txt"), "x").unwrap();
 
         let input = json!({ "from": "2026-10-19", "to": "2026-10-26" });
-        let preview = CalendarProvider
+        let preview = CalendarProvider::default()
             .preview(&ctx, &name("calendar.list"), &input)
             .unwrap();
         assert_eq!(
@@ -1155,7 +1170,7 @@ mod tests {
             "Read the calendar, from Mon Oct 19 to Sun Oct 25"
         );
         assert!(preview.writes.is_empty() && preview.snapshot_roots.is_empty());
-        let out = CalendarProvider
+        let out = CalendarProvider::default()
             .invoke(&ctx, &name("calendar.list"), &input)
             .unwrap();
         let titles: Vec<&str> = out.data["events"]
@@ -1180,7 +1195,7 @@ mod tests {
 
         let moved =
             json!({ "id": mine.id, "start": "2026-10-20T16:00", "end": "2026-10-20T17:00" });
-        let out = CalendarProvider
+        let out = CalendarProvider::default()
             .invoke(&ctx, &name("calendar.update"), &moved)
             .unwrap();
         assert_eq!(out.changes[0].kind, ChangeKind::Modified);
@@ -1199,13 +1214,13 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    CalendarProvider.preview(&ctx, &name(action), &input),
+                    CalendarProvider::default().preview(&ctx, &name(action), &input),
                     Err(ActionError::OutOfScope(_))
                 ),
                 "{action} on someone else's event"
             );
             assert!(matches!(
-                CalendarProvider.invoke(&ctx, &name(action), &input),
+                CalendarProvider::default().invoke(&ctx, &name(action), &input),
                 Err(ActionError::OutOfScope(_))
             ));
         }
@@ -1216,14 +1231,14 @@ mod tests {
         );
 
         let delete = json!({ "id": mine.id });
-        let preview = CalendarProvider
+        let preview = CalendarProvider::default()
             .preview(&ctx, &name("calendar.delete"), &delete)
             .unwrap();
         assert_eq!(
             preview.snapshot_roots,
             vec![dir.path().join("Calendar/Events")]
         );
-        let out = CalendarProvider
+        let out = CalendarProvider::default()
             .invoke(&ctx, &name("calendar.delete"), &delete)
             .unwrap();
         assert!(out.changes[0].reversible);
@@ -1233,7 +1248,7 @@ mod tests {
     #[test]
     fn nv3_invitations_leave_the_machine_and_ask_first() {
         let (dir, ctx) = setup();
-        let defs = CalendarProvider.actions();
+        let defs = CalendarProvider::default().actions();
         let def = defs
             .iter()
             .find(|d| d.name.as_str() == "calendar.invite")
@@ -1243,7 +1258,7 @@ mod tests {
 
         let mine = hold(&ctx);
         let input = json!({ "id": mine.id, "to": ["sam@corp.example", "dana@northwind.example"] });
-        let preview = CalendarProvider
+        let preview = CalendarProvider::default()
             .preview(&ctx, &name("calendar.invite"), &input)
             .unwrap();
         // One approval with a review list (DA-12).
@@ -1254,7 +1269,7 @@ mod tests {
             "invitations can't be undone"
         );
 
-        let out = CalendarProvider
+        let out = CalendarProvider::default()
             .invoke(&ctx, &name("calendar.invite"), &input)
             .unwrap();
         assert!(
@@ -1281,7 +1296,7 @@ mod tests {
             for (k, v) in patch.as_object().unwrap() {
                 input[k] = v.clone();
             }
-            CalendarProvider.preview(&ctx, &name("calendar.hold"), &input)
+            CalendarProvider::default().preview(&ctx, &name("calendar.hold"), &input)
         };
         for patch in [
             json!({ "start": "2026-13-01T10:00" }),
@@ -1300,12 +1315,16 @@ mod tests {
         }
         for id in ["../../etc/passwd", "Ev-1", "-x", ""] {
             assert!(matches!(
-                CalendarProvider.preview(&ctx, &name("calendar.read"), &json!({ "id": id })),
+                CalendarProvider::default().preview(
+                    &ctx,
+                    &name("calendar.read"),
+                    &json!({ "id": id })
+                ),
                 Err(ActionError::InvalidInput(_))
             ));
         }
         assert!(
-            CalendarProvider
+            CalendarProvider::default()
                 .preview(
                     &ctx,
                     &name("calendar.list"),
@@ -1315,7 +1334,7 @@ mod tests {
             "ranges are bounded"
         );
         assert!(matches!(
-            CalendarProvider.preview(
+            CalendarProvider::default().preview(
                 &ctx,
                 &name("calendar.invite"),
                 &json!({ "id": "ev-x", "to": ["not an address"] })

@@ -74,9 +74,11 @@ os/freebsd/scripts/enroll-dev.sh --undo
 The VM only talks to a console over HTTPS, so the script puts
 `tools/dev/console-tls.py` in front of the console (as our web servers do in
 production) with a development certificate for 10.0.2.2, the host as the VM
-sees it, and tells the VM to trust it. A deploy puts the shipped
-`glassd.toml` back, which un-enrolls the VM; `make e2e-vm` expects it
-un-enrolled.
+sees it, and tells the VM to trust it. `--undo` takes the VM back to its
+shipped settings and default policy; `make e2e-vm` refuses to run on an
+enrolled VM. Restart `make console-dev` after changing what devices and
+the console say to each other (`glass-managed`): an older console turns a
+newer device away.
 
 ## Without the VM
 

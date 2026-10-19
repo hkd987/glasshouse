@@ -10,8 +10,10 @@
 # for 10.0.2.2 (the host, as the VM sees it) that the VM is told to trust.
 # Needs `make console-dev` running (its state in build/console).
 #
-# A deploy puts back the shipped glassd.toml, which un-enrolls the VM; run
-# this again after one.
+# --undo takes out the settings, the token and what the console left on the
+# VM (its kept releases and the policy file it wrote), so the VM is back to
+# the shipped default policy. `make e2e-vm` refuses to run while it's
+# enrolled.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -28,7 +30,8 @@ end='# --- enroll-dev.sh: end'
 vm_running || die "VM is not running (vm.sh up && vm.sh wait)"
 
 if [[ ${1:-} == --undo ]]; then
-	vm_ssh "sed -i '' '/^$begin/,/^$end/d' $conf; rm -f $token; service glassd restart >/dev/null"
+	vm_ssh "sed -i '' '/^$begin/,/^$end/d' $conf; rm -f $token; rm -rf /var/db/glasshouse/managed
+	rm -f /usr/local/etc/glasshouse/policy.toml; service glassd restart >/dev/null"
 	log "the VM is no longer enrolled"
 	exit 0
 fi

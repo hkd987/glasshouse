@@ -394,6 +394,7 @@ version = "0.1.0"
 dependencies = [
  "glass-actions",
  "glass-api",
+ "glass-managed",
  "glass-platform",
  "glass-types",
  "serde",
@@ -448,11 +449,24 @@ version = "0.1.0"
 dependencies = [
  "glass-actions",
  "glass-api",
+ "glass-managed",
  "glass-platform",
  "glass-types",
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "glass-app-people"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-managed",
+ "glass-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -550,8 +564,10 @@ dependencies = [
  "glass-app-files",
  "glass-app-helpdesk",
  "glass-app-mail",
+ "glass-app-people",
  "glass-app-system",
  "glass-gateway",
+ "glass-managed",
 ]
 
 [[package]]
@@ -686,6 +702,7 @@ dependencies = [
  "glass-app-files",
  "glass-app-helpdesk",
  "glass-app-mail",
+ "glass-app-people",
  "glass-app-system",
  "glass-audit",
  "glass-broker",

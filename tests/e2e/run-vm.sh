@@ -35,6 +35,13 @@ glass_jails='jls name | grep -c "^glass-" || true'
 # rctl rules on task jails (PA-2: they go with the jail).
 glass_limits='rctl | grep -c "^jail:glass-" || true'
 
+# The suite runs on the shipped settings: a VM enrolled with a development
+# console (enroll-dev.sh) enforces what the console sends instead.
+if "$vm" run "grep -q '^# --- enroll-dev.sh: begin' /usr/local/etc/glasshouse/glassd.toml" 2>/dev/null; then
+	echo "run-vm.sh: the VM is enrolled with a development console; os/freebsd/scripts/enroll-dev.sh --undo first" >&2
+	exit 1
+fi
+
 # GLASS_E2E_BIN: a glass-e2e already built (another checkout's), instead of building one here.
 bin=${GLASS_E2E_BIN:-$target/glass-e2e}
 [[ -n ${GLASS_E2E_BIN:-} ]] || cargo build --profile "$profile" --target x86_64-unknown-freebsd -p glass-e2e

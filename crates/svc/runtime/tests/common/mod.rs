@@ -17,9 +17,11 @@ use glass_app_catalog::{CatalogHandle, CatalogProvider};
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
+use glass_app_people::PeopleProvider;
 use glass_app_system::{SystemOps, SystemProvider};
 use glass_audit::{AuditLog, Durability};
 use glass_gateway::{Gateway, ModelAction, ProviderError, ScriptedProvider};
+use glass_managed::DirectoryHandle;
 use glass_platform::sandbox::HostSandbox;
 use glass_platform::snapshot::CopySnapshotter;
 use glass_platform::system;
@@ -39,6 +41,9 @@ pub struct Harness {
     pub model: Arc<ScriptedProvider>,
     /// The org catalog `catalog.search` reads; empty until a test sets it.
     pub catalog: CatalogHandle,
+    /// The org's people `people.search` reads and Mail and Calendar send
+    /// as; empty until a test sets it.
+    pub directory: DirectoryHandle,
 }
 
 impl Harness {
@@ -56,7 +61,12 @@ impl Harness {
             glass_policy::DEFAULT_POLICY.replace(from, &to.replace("{me}", &self.me.name)),
             extra.replace("{me}", &self.me.name)
         );
-        let registry = test_registry(self.dir.path(), &self.machine, &self.catalog);
+        let registry = test_registry(
+            self.dir.path(),
+            &self.machine,
+            &self.catalog,
+            &self.directory,
+        );
         self.rt
             .apply_policy(Policy::from_toml(&text).unwrap(), registry, "test");
     }
@@ -66,7 +76,12 @@ impl Harness {
     #[allow(dead_code)]
     pub fn apply_policy(&self, extra: &str, source: &str) {
         let policy = test_policy(&self.me.home, &self.me.name, extra);
-        let registry = test_registry(self.dir.path(), &self.machine, &self.catalog);
+        let registry = test_registry(
+            self.dir.path(),
+            &self.machine,
+            &self.catalog,
+            &self.directory,
+        );
         self.rt.apply_policy(policy, registry, source);
     }
 
@@ -160,11 +175,23 @@ fn test_policy(home: &Path, me: &str, extra: &str) -> Policy {
 }
 
 /// The apps' actions as glassd registers them, on fakes.
-fn test_registry(dir: &Path, machine: &Arc<FakeMachine>, catalog: &CatalogHandle) -> Registry {
+fn test_registry(
+    dir: &Path,
+    machine: &Arc<FakeMachine>,
+    catalog: &CatalogHandle,
+    directory: &DirectoryHandle,
+) -> Registry {
     let mut registry = Registry::new();
     registry.register(Arc::new(FilesProvider)).unwrap();
-    registry.register(Arc::new(MailProvider)).unwrap();
-    registry.register(Arc::new(CalendarProvider)).unwrap();
+    registry
+        .register(Arc::new(MailProvider::new(directory.clone())))
+        .unwrap();
+    registry
+        .register(Arc::new(CalendarProvider::new(directory.clone())))
+        .unwrap();
+    registry
+        .register(Arc::new(PeopleProvider::new(directory.clone())))
+        .unwrap();
     let ops: Arc<dyn SystemOps> = machine.clone();
     registry
         .register(Arc::new(SystemProvider::new(ops, vec!["ntpd".into()])))
@@ -202,7 +229,8 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     let policy = test_policy(&home, &account.name, policy_extra);
     let machine = Arc::new(FakeMachine::default());
     let catalog = CatalogHandle::new();
-    let registry = test_registry(dir.path(), &machine, &catalog);
+    let directory = DirectoryHandle::new();
+    let registry = test_registry(dir.path(), &machine, &catalog, &directory);
     // Policy names these providers; `down` is always rate limited (MP-8).
     let model = Arc::new(ScriptedProvider::echo());
     let gateway = Gateway::new().with("scripted", model.clone()).with(
@@ -250,6 +278,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         machine,
         model,
         catalog,
+        directory,
     }
 }
 
@@ -274,7 +303,9 @@ pub fn rebuild(h: &Harness, policy: &str) -> Arc<Runtime> {
 pub fn rebuild_with(h: &Harness, policy: &str, catalog: Vec<CatalogEntry>) -> Arc<Runtime> {
     let mut registry = Registry::new();
     registry.register(Arc::new(FilesProvider)).unwrap();
-    registry.register(Arc::new(MailProvider)).unwrap();
+    registry
+        .register(Arc::new(MailProvider::new(h.directory.clone())))
+        .unwrap();
     Runtime::new(RuntimeParts {
         config: RuntimeConfig {
             state_dir: h.dir.path().join("state"),
@@ -431,7 +462,7 @@ impl SystemOps for FakeMachine {
 pub fn mail_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "mail", "name": "Mail", "version": "0.1.0",
-        "actions": ["mail.list", "mail.read", "mail.draft", "mail.send"],
+        "actions": ["mail.list", "mail.read", "mail.draft", "mail.send", "people.search"],
         "permissions": ["offline"], "labels": ["public", "internal"]
     }))
     .unwrap()
@@ -441,7 +472,7 @@ pub fn mail_app() -> AppManifest {
 pub fn calendar_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "calendar", "name": "Calendar", "version": "0.1.0",
-        "actions": ["calendar.list", "calendar.read", "calendar.create", "calendar.update"],
+        "actions": ["calendar.list", "calendar.read", "calendar.create", "calendar.update", "calendar.invite", "people.search"],
         "permissions": ["offline"], "labels": ["public", "internal"]
     }))
     .unwrap()

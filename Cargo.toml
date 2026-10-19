@@ -44,6 +44,7 @@ glass-runtime = { path = "crates/svc/runtime" }
 glass-managed = { path = "crates/lib/managed" }
 glass-http = { path = "crates/lib/http" }
 glass-app-catalog = { path = "crates/apps/catalog" }
+glass-app-people = { path = "crates/apps/people" }
 
 # Third-party crates. Licenses must pass `deny.toml` (no copyleft).
 anyhow = "1.0.104"

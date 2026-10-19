@@ -54,6 +54,8 @@ approval_timeout_secs = 900
 "catalog.list" = "auto"
 "catalog.install" = "notify"
 "catalog.remove" = "notify"
+# Looking colleagues up in the org's directory (AD-1) reads only.
+"people.search" = "auto"
 "security.*" = "never"
 "vendors.bank_details.*" = "never"
 "data.export_bulk" = "never"
@@ -137,7 +139,7 @@ allowed_actions = ["files.*", "mail.*"]
 # stays out of harnesses that send model traffic to their own provider (HX-7).
 [[agent]]
 id = "claude-code"
-allowed_actions = ["files.*", "mail.*", "calendar.*", "catalog.search"]
+allowed_actions = ["files.*", "mail.*", "calendar.*", "catalog.search", "people.search"]
 max_label = "internal"
 
 # Diagnostics agent that tries to break out of its sandbox and reports what it

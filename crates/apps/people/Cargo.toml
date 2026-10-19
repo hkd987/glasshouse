@@ -1,0 +1,19 @@
+[package]
+name = "glass-app-people"
+description = "The org's people: looking colleagues up in the directory IT's console sends (AD-1), for Mail, Calendar and agents."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-actions.workspace = true
+glass-api.workspace = true
+glass-managed.workspace = true
+glass-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

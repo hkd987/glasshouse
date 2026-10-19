@@ -8,6 +8,7 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+glass-managed.workspace = true
 glass-actions.workspace = true
 glass-api.workspace = true
 glass-platform.workspace = true

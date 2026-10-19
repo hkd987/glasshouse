@@ -202,6 +202,55 @@ impl DirectoryHandle {
         self.current()
             .and_then(|d| d.release.person(login).cloned())
     }
+
+    /// Who `login` is when they send mail or invitations: their name and
+    /// address from the directory, or their login alone without one.
+    pub fn sender(&self, login: &str) -> Sender {
+        match self.person(login) {
+            Some(p) if !p.email.is_empty() => Sender {
+                name: p.name,
+                email: Some(p.email),
+            },
+            _ => Sender {
+                name: login.to_owned(),
+                email: None,
+            },
+        }
+    }
+}
+
+/// Who sends a message or an invitation (AU-10 says which agent did it for
+/// them; this says who they are).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sender {
+    pub name: String,
+    pub email: Option<String>,
+}
+
+impl Sender {
+    /// For a mail header: `Priya Shah <priya@acme.example>`, the name
+    /// quoted when it has characters that would split it; the login alone
+    /// without an address.
+    pub fn mailbox(&self) -> String {
+        let Some(email) = &self.email else {
+            return self.name.clone();
+        };
+        let plain = self
+            .name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '\'' | '!' | '#' | '&'));
+        if plain {
+            format!("{} <{email}>", self.name)
+        } else {
+            let quoted = self.name.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{quoted}\" <{email}>")
+        }
+    }
+
+    /// The address replies go to: the email, or the login without one.
+    pub fn address(&self) -> &str {
+        self.email.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[cfg(test)]
@@ -318,5 +367,25 @@ mod tests {
         assert_eq!(handle.current().map(|d| d.version), Some(3));
         assert_eq!(handle.person("sam").map(|p| p.name), Some("Sam Lee".into()));
         assert!(handle.person("nobody").is_none());
+    }
+
+    #[test]
+    fn au10_a_sender_is_their_name_and_address_or_their_login() {
+        let handle = DirectoryHandle::new();
+        assert_eq!(handle.sender("demo").mailbox(), "demo");
+        let mut people = people();
+        people.push(person("o", "O'Brien, Jo \"J\"", "jo@acme.example", ""));
+        handle.set(Applied {
+            version: 1,
+            release: DirectoryRelease { people },
+        });
+        let priya = handle.sender("priya");
+        assert_eq!(priya.mailbox(), "Priya Shah <priya.shah@acme.example>");
+        assert_eq!(priya.address(), "priya.shah@acme.example");
+        assert_eq!(
+            handle.sender("o").mailbox(),
+            "\"O'Brien, Jo \\\"J\\\"\" <jo@acme.example>"
+        );
+        assert_eq!(handle.sender("nobody").address(), "nobody");
     }
 }

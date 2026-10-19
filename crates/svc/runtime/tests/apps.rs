@@ -122,7 +122,7 @@ async fn dv3_an_app_calls_only_what_its_manifest_declares() {
     for action in [
         "mail.send",
         "files.delete",
-        "calendar.invite",
+        "helpdesk.ticket.create",
         "nothing.here",
     ] {
         let refused = call(&apps, calendar.session, action, json!({})).await;

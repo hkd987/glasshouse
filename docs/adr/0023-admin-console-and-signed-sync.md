@@ -172,6 +172,16 @@ kept and swapped in (`DirectoryLoaded` in the audit log). A sync answer
 lets unknown fields through: what a device trusts is each release's
 signature, and an older device keeps hearing of the kinds it knows.
 
+`people.search` (`crates/apps/people`) reads it: Auto, read only, at most
+20 people a call, audited, and only people with an address. Mail and
+Calendar declare it; agents get it where policy allows (the attended
+harness by default). Mail's `From:` and an invitation's organizer are the
+person's directory name and address (`DirectoryHandle::sender`), taken
+from who the task acts for, never from the request; without a directory,
+their login as before. Directory data has no label: an agent kept to
+public data can still read colleagues' names and addresses, which
+labels on non-file data (a later ADR) would close.
+
 ## Changed since the first draft of this ADR
 The product owner's direction (AD-6, AD-7, DV-13) changed the first
 slice's plan:

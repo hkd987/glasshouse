@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use glass_api::{AskLabels, ChangeKind};
+use glass_managed::DirectoryHandle;
 use glass_platform::fs::{ConfinedDir, Owner};
 use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -38,8 +39,19 @@ const DEFAULT_LIMIT: usize = 50;
 /// The header that carries "by [agent] for [user]" (AU-10).
 const ATTRIBUTION_HEADER: &str = "X-Glasshouse-Attribution";
 
-#[derive(Debug, Default)]
-pub struct MailProvider;
+/// Mail, sent as the person the org's directory says they are.
+#[derive(Debug, Clone, Default)]
+pub struct MailProvider {
+    directory: DirectoryHandle,
+}
+
+impl MailProvider {
+    /// Mail whose `From:` is the person's name and address in `directory`
+    /// (AD-1), or their login without one.
+    pub fn new(directory: DirectoryHandle) -> Self {
+        Self { directory }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -209,10 +221,13 @@ impl MailProvider {
         Ok(())
     }
 
-    fn render(ctx: &TaskContext, message: &Message, sent: bool) -> String {
+    fn render(&self, ctx: &TaskContext, message: &Message, sent: bool) -> String {
         let mut text = format!(
-            "From: {user}\nTo: {to}\nSubject: {subject}\nDate: {date}\nX-Glasshouse-Attribution: {attr}\nX-Glasshouse-Task: {task}\n",
-            user = ctx.principal.on_behalf_of.name,
+            "From: {from}\nTo: {to}\nSubject: {subject}\nDate: {date}\nX-Glasshouse-Attribution: {attr}\nX-Glasshouse-Task: {task}\n",
+            from = self
+                .directory
+                .sender(&ctx.principal.on_behalf_of.name)
+                .mailbox(),
             to = message.to.join(", "),
             subject = message.subject,
             date = Timestamp::now(),
@@ -577,7 +592,7 @@ impl ActionProvider for MailProvider {
                     DRAFTS,
                     &message,
                     0,
-                    &Self::render(ctx, &message, false),
+                    &self.render(ctx, &message, false),
                     ctx.owner,
                 )
                 .map_err(|e| ActionError::io("saving draft", e))?;
@@ -604,7 +619,7 @@ impl ActionProvider for MailProvider {
                         SENT,
                         message,
                         index,
-                        &Self::render(ctx, message, true),
+                        &self.render(ctx, message, true),
                         ctx.owner,
                     )
                     .map_err(|e| ActionError::io("sending", e))?;
@@ -649,7 +664,7 @@ mod tests {
             uid: meta.uid(),
             gid: meta.gid(),
         };
-        MailProvider.prepare(&ctx).unwrap();
+        MailProvider::default().prepare(&ctx).unwrap();
         (dir, ctx)
     }
 
@@ -659,7 +674,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path(), dir.path().join(MAIL_DIR)).unwrap();
         let ctx = context(dir.path());
-        assert!(MailProvider.prepare(&ctx).is_err());
+        assert!(MailProvider::default().prepare(&ctx).is_err());
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
@@ -669,7 +684,7 @@ mod tests {
         let input = json!({ "messages": (0..6).map(|i| json!({
             "to": [format!("vendor{i}@example.com")], "subject": "Invoice reminder", "body": "Please pay."
         })).collect::<Vec<_>>() });
-        let preview = MailProvider
+        let preview = MailProvider::default()
             .preview(&ctx, &"mail.send".parse().unwrap(), &input)
             .unwrap();
         assert_eq!(preview.summary, "Send 6 emails");
@@ -682,7 +697,7 @@ mod tests {
         let (dir, ctx) = setup();
         let input =
             json!({ "to": ["ap@example.com"], "subject": "Q3 summary", "body": "Attached." });
-        let out = MailProvider
+        let out = MailProvider::default()
             .invoke(&ctx, &"mail.draft".parse().unwrap(), &input)
             .unwrap();
         assert!(out.changes[0].reversible);
@@ -701,8 +716,12 @@ mod tests {
         let (dir, ctx) = setup();
         let input = json!({ "to": ["ap@example.com"], "subject": "Same", "body": "x" });
         let draft = "mail.draft".parse().unwrap();
-        let first = MailProvider.invoke(&ctx, &draft, &input).unwrap();
-        let second = MailProvider.invoke(&ctx, &draft, &input).unwrap();
+        let first = MailProvider::default()
+            .invoke(&ctx, &draft, &input)
+            .unwrap();
+        let second = MailProvider::default()
+            .invoke(&ctx, &draft, &input)
+            .unwrap();
         assert_ne!(first.changes[0].paths, second.changes[0].paths);
         let count = fs::read_dir(dir.path().join("Mail/Drafts"))
             .unwrap()
@@ -720,17 +739,17 @@ mod tests {
         )
         .unwrap();
         let input = json!({ "to": ["dana@northwind.example"], "subject": "Re: Renewal terms", "body": "Yes." });
-        MailProvider
+        MailProvider::default()
             .invoke(&ctx, &"mail.draft".parse().unwrap(), &input)
             .unwrap();
 
         let list = "mail.list".parse().unwrap();
-        let preview = MailProvider
+        let preview = MailProvider::default()
             .preview(&ctx, &list, &json!({ "folder": "inbox" }))
             .unwrap();
         assert_eq!(preview.reads, vec![dir.path().join("Mail/Inbox")]);
         assert!(preview.writes.is_empty());
-        let inbox = MailProvider
+        let inbox = MailProvider::default()
             .invoke(&ctx, &list, &json!({ "folder": "inbox" }))
             .unwrap();
         let message = &inbox.data["messages"][0];
@@ -738,14 +757,14 @@ mod tests {
         assert_eq!(message["snippet"], "Hi, Can we talk terms?");
         assert!(message["attribution"].is_null(), "a person wrote it");
 
-        let drafts = MailProvider
+        let drafts = MailProvider::default()
             .invoke(&ctx, &list, &json!({ "folder": "drafts" }))
             .unwrap();
         let draft = &drafts.data["messages"][0];
         assert_eq!(draft["attribution"]["by"], "invoice-demo");
         assert_eq!(draft["attribution"]["for"], "demo");
 
-        let read = MailProvider
+        let read = MailProvider::default()
             .invoke(
                 &ctx,
                 &"mail.read".parse().unwrap(),
@@ -772,14 +791,14 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    MailProvider.preview(&ctx, &read, &json!({ "id": id })),
+                    MailProvider::default().preview(&ctx, &read, &json!({ "id": id })),
                     Err(ActionError::InvalidInput(_))
                 ),
                 "{id}"
             );
         }
         assert!(
-            MailProvider
+            MailProvider::default()
                 .preview(
                     &ctx,
                     &"mail.list".parse().unwrap(),
@@ -794,8 +813,16 @@ mod tests {
         let (_dir, ctx) = setup();
         let draft = "mail.draft".parse().unwrap();
         let bad_addr = json!({ "to": ["not an address"], "subject": "x", "body": "y" });
-        assert!(MailProvider.preview(&ctx, &draft, &bad_addr).is_err());
+        assert!(
+            MailProvider::default()
+                .preview(&ctx, &draft, &bad_addr)
+                .is_err()
+        );
         let injected = json!({ "to": ["a@b.co"], "subject": "x\nBcc: all@corp.com", "body": "y" });
-        assert!(MailProvider.preview(&ctx, &draft, &injected).is_err());
+        assert!(
+            MailProvider::default()
+                .preview(&ctx, &draft, &injected)
+                .is_err()
+        );
     }
 }

@@ -32,7 +32,7 @@ pub use catalog::{
     CatalogItem, CatalogRelease, Declared, InstallMode, ItemKind, Match, Provenance, Scope,
     StoreRefusal,
 };
-pub use directory::{DirectoryHandle, DirectoryRelease, Person};
+pub use directory::{DirectoryHandle, DirectoryRelease, Person, Sender};
 pub use signing::{DocKind, OrgKey, PublicKey, Refusal, Signed};
 pub use store::ReleaseStore;
 pub use sync::{
