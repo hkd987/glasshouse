@@ -451,6 +451,7 @@ dependencies = [
  "glass-api",
  "glass-managed",
  "glass-platform",
+ "glass-policy",
  "glass-types",
  "serde",
  "serde_json",
@@ -568,6 +569,7 @@ dependencies = [
  "glass-app-system",
  "glass-gateway",
  "glass-managed",
+ "glass-policy",
 ]
 
 [[package]]

@@ -323,6 +323,10 @@ impl Console {
                     Err(e) => error(500, &format!("{e:#}")),
                 }
             }
+            ("GET", ["mail"]) => match views::mail(&self.state()) {
+                Ok(v) => ok(v),
+                Err(e) => error(500, &format!("{e:#}")),
+            },
             ("POST", ["policy", "edit"]) => {
                 let edit: Edit = match body(request) {
                     Ok(b) => b,
@@ -819,6 +823,63 @@ mod tests {
         let (_, page) = t.call("GET", "/api/policy?group=ap-ops", Value::Null).await;
         assert_eq!(page["group"]["display"], "AP Operations");
         assert_eq!(page["live"]["rollbacks_7d"], 1);
+    }
+
+    #[tokio::test]
+    async fn nv3_ad2_mail_settings_are_an_edit_previewed_and_published_like_policy() {
+        let t = console().await;
+        let mail = json!({
+            "service": "imap",
+            "address_template": "{login}@acme.example",
+            "incoming": { "host": "imap.acme.example", "port": 993, "security": "tls" },
+            "outgoing": { "host": "smtp.acme.example", "port": 587, "security": "starttls" },
+        });
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/policy/edit",
+                json!({ "edit": "mail", "mail": mail }),
+            )
+            .await;
+        assert_eq!(status, 200);
+        let (_, page) = t.call("GET", "/api/mail", Value::Null).await;
+        assert_eq!(page["draft"]["outgoing"]["host"], "smtp.acme.example");
+        assert_eq!(page["changed"], true);
+        let (_, impact) = t.call("POST", "/api/policy/preview", json!({})).await;
+        let changes = impact["changes"].to_string();
+        assert!(
+            changes.contains("Everyone: mail through IMAP and SMTP (imap.acme.example:993, smtp.acme.example:587)"),
+            "{changes}"
+        );
+
+        // What a device would refuse, the console doesn't keep.
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/policy/edit",
+                json!({ "edit": "mail", "mail": { "service": "imap" } }),
+            )
+            .await;
+        assert_eq!(status, 400);
+
+        let (status, published) = t.call("POST", "/api/policy/publish", json!({})).await;
+        assert_eq!(status, 200);
+        let v = published["version"].as_u64().unwrap();
+        // A pilot device gets it.
+        t.sync("d", None, 0).await;
+        t.call("POST", "/api/fleet/d/ring", json!({ "ring": "pilot" }))
+            .await;
+        let got = t.sync("d", None, 0).await.policy.unwrap();
+        assert_eq!(got.version, v);
+        let release: PolicyRelease = got.open(DocKind::Policy, "acme", &[t.key], None).unwrap();
+        let policy = glass_policy::Policy::from_toml(&release.policy).unwrap();
+        assert_eq!(
+            policy.mail().unwrap().incoming.as_ref().unwrap().host,
+            "imap.acme.example"
+        );
+        let (_, page) = t.call("GET", "/api/mail", Value::Null).await;
+        assert_eq!(page["changed"], false);
+        assert_eq!(page["rings"][0]["mail"]["service"], "imap");
     }
 
     #[tokio::test]

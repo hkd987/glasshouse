@@ -528,3 +528,18 @@ select {
 .signin .card {
   width: 380px;
 }
+
+/* Mail (NV-3): text fields and a server's host, port and security on a row. */
+input.text {
+  font: inherit;
+  height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+.server-row {
+  display: grid;
+  grid-template-columns: 1fr 96px 140px;
+  gap: 12px;
+}

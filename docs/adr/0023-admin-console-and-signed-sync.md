@@ -182,6 +182,20 @@ their login as before. Directory data has no label: an agent kept to
 public data can still read colleagues' names and addresses, which
 labels on non-file data (a later ADR) would close.
 
+### Mail settings (NV-3)
+IT sets the org's mail service once, on the console's Mail page: Microsoft
+365 or Google Workspace with the org's domain, or IMAP and SMTP servers
+with their ports and security (TLS or STARTTLS; there is no plain
+option), plus an address template for people the directory doesn't list.
+It is a `[mail]` section of policy, so it is checked like any rule (the
+console won't sign what a device would refuse), previewed, published to
+the pilot ring and promoted, and the device's registry is rebuilt with it.
+Credentials are never in policy. Mail's `mail.account` (Auto, read only)
+says who the person sends as and through which service; until the
+service is connected, sent mail stays in Sent on the computer and Mail
+says so. A device older than `[mail]` refuses a policy carrying it and
+keeps what it has.
+
 ## Changed since the first draft of this ADR
 The product owner's direction (AD-6, AD-7, DV-13) changed the first
 slice's plan:

@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 glass-managed.workspace = true
+glass-policy.workspace = true
 glass-actions.workspace = true
 glass-api.workspace = true
 glass-platform.workspace = true

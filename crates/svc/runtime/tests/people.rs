@@ -210,3 +210,58 @@ async fn au10_nv3_mail_goes_from_the_persons_directory_name_and_address() {
     );
     assert!(from.contains(&h.me.name.as_str()), "{from:?}");
 }
+
+#[tokio::test]
+async fn nv3_ad3_the_mail_service_from_policy_reaches_mail_account_and_follows_a_new_policy() {
+    let h = harness();
+    let apps = Client::connect(h.serve_apps()).await.unwrap();
+    let mail = open(&apps, "mail").await;
+
+    // No service from IT: Mail says so, and sends as the login.
+    let none = call(&apps, mail.session, "mail.account", json!({})).await;
+    assert!(none.ok, "{}", none.text);
+    assert_eq!(none.data["service"], Value::Null);
+    assert_eq!(none.data["source"], "login");
+
+    // IT sets the org's service and an address template (managed v2).
+    h.apply_policy(
+        r#"
+[mail]
+service = "imap"
+address_template = "{login}@acme.example"
+incoming = { host = "imap.acme.example", port = 993, security = "tls" }
+outgoing = { host = "smtp.acme.example", port = 587, security = "starttls" }
+"#,
+        "managed v2",
+    );
+    let mail = open(&apps, "mail").await;
+    let account = call(&apps, mail.session, "mail.account", json!({})).await;
+    assert!(account.ok, "{}", account.text);
+    assert_eq!(account.data["service"], "imap");
+    assert_eq!(account.data["outgoing"]["host"], "smtp.acme.example");
+    assert_eq!(account.data["connected"], false);
+    let template = format!("{}@acme.example", h.me.name);
+    assert_eq!(account.data["address"], template.as_str());
+    assert_eq!(account.data["source"], "template");
+    assert!(
+        account.text.contains("aren't connected"),
+        "{}",
+        account.text
+    );
+
+    // The directory's address wins over the template.
+    publish(&h);
+    let account = call(&apps, mail.session, "mail.account", json!({})).await;
+    assert_eq!(account.data["address"], "demo.person@acme.example");
+    assert_eq!(account.data["source"], "directory");
+
+    // The sender can't be named in the request.
+    let forged = call(
+        &apps,
+        mail.session,
+        "mail.draft",
+        json!({ "to": ["priya@acme.example"], "subject": "x", "body": "y", "from": "ceo@acme.example" }),
+    )
+    .await;
+    assert!(!forged.ok, "{}", forged.text);
+}

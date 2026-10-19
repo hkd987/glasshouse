@@ -3,7 +3,7 @@
 //! result as a device would before keeping it.
 
 use glass_policy::ActionPattern;
-use glass_policy::document::{GroupPolicy, PolicyDocument};
+use glass_policy::document::{GroupPolicy, MailSettings, PolicyDocument};
 use glass_types::{AgentId, Label, Tier};
 use serde::Deserialize;
 
@@ -37,6 +37,8 @@ pub enum Edit {
         app: AgentId,
         on: bool,
     },
+    /// The org's mail service (NV-3); `None` takes it out.
+    Mail { mail: Option<MailSettings> },
 }
 
 fn group<'a>(doc: &'a mut PolicyDocument, name: &str) -> &'a mut GroupPolicy {
@@ -58,6 +60,9 @@ fn group<'a>(doc: &'a mut PolicyDocument, name: &str) -> &'a mut GroupPolicy {
 /// Applies `edit` to `doc`, or says why it can't.
 pub fn apply(doc: &mut PolicyDocument, edit: Edit) -> Result<(), String> {
     match edit {
+        Edit::Mail { mail } => {
+            doc.mail = mail;
+        }
         Edit::Tier {
             group: name,
             class,

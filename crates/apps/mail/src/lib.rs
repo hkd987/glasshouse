@@ -13,8 +13,9 @@
 use std::path::{Path, PathBuf};
 
 use glass_api::{AskLabels, ChangeKind};
-use glass_managed::DirectoryHandle;
+use glass_managed::{DirectoryHandle, Sender};
 use glass_platform::fs::{ConfinedDir, Owner};
+use glass_policy::document::MailSettings;
 use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,19 +40,104 @@ const DEFAULT_LIMIT: usize = 50;
 /// The header that carries "by [agent] for [user]" (AU-10).
 const ATTRIBUTION_HEADER: &str = "X-Glasshouse-Attribution";
 
-/// Mail, sent as the person the org's directory says they are.
+/// Mail, sent as the person the org's directory says they are, through
+/// the service IT set in policy.
 #[derive(Debug, Clone, Default)]
 pub struct MailProvider {
     directory: DirectoryHandle,
+    settings: Option<MailSettings>,
 }
 
 impl MailProvider {
     /// Mail whose `From:` is the person's name and address in `directory`
     /// (AD-1), or their login without one.
     pub fn new(directory: DirectoryHandle) -> Self {
-        Self { directory }
+        Self {
+            directory,
+            settings: None,
+        }
+    }
+
+    /// The org's mail service from policy (NV-3): where mail goes, and the
+    /// person's address when the directory has none.
+    pub fn settings(mut self, settings: Option<MailSettings>) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Who `login` sends as: the directory's name and address, else the
+    /// address IT's template gives, else the login alone.
+    fn sender(&self, login: &str) -> (Sender, &'static str) {
+        let sender = self.directory.sender(login);
+        if sender.email.is_some() {
+            return (sender, "directory");
+        }
+        match self
+            .settings
+            .as_ref()
+            .and_then(|s| s.address_template.as_deref())
+        {
+            Some(template) => (
+                Sender {
+                    name: login.to_owned(),
+                    email: Some(glass_policy::mail::address_for(template, login)),
+                },
+                "template",
+            ),
+            None => (sender, "login"),
+        }
+    }
+
+    /// `mail.account`: who the person sends as, and through which service.
+    fn account(&self, ctx: &TaskContext) -> ActionOutput {
+        let (sender, source) = self.sender(&ctx.principal.on_behalf_of.name);
+        let Some(settings) = &self.settings else {
+            return ActionOutput {
+                text: format!(
+                    "No mail service from IT on this computer yet. Mail goes as {}, and sent mail \
+                     stays in Sent here.",
+                    sender.mailbox()
+                ),
+                data: json!({
+                    "name": sender.name, "address": sender.email, "source": source,
+                    "service": null, "connected": false,
+                }),
+                changes: Vec::new(),
+            };
+        };
+        let server = |s: &Option<glass_policy::document::MailServer>| {
+            s.as_ref()
+                .map(|s| json!({ "host": s.host, "port": s.port, "security": s.security }))
+        };
+        let through = match &settings.tenant {
+            Some(tenant) => format!("{} ({tenant})", settings.service.title()),
+            None => settings.service.title().to_owned(),
+        };
+        ActionOutput {
+            text: format!(
+                "Mail goes as {} through {through}, set up by IT. Sending and receiving aren't \
+                 connected to it yet: sent mail stays in Sent on this computer.",
+                sender.mailbox()
+            ),
+            data: json!({
+                "name": sender.name,
+                "address": sender.email,
+                "source": source,
+                "service": settings.service,
+                "service_title": settings.service.title(),
+                "tenant": settings.tenant,
+                "incoming": server(&settings.incoming),
+                "outgoing": server(&settings.outgoing),
+                "connected": false,
+            }),
+            changes: Vec::new(),
+        }
     }
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoInput {}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -224,10 +310,7 @@ impl MailProvider {
     fn render(&self, ctx: &TaskContext, message: &Message, sent: bool) -> String {
         let mut text = format!(
             "From: {from}\nTo: {to}\nSubject: {subject}\nDate: {date}\nX-Glasshouse-Attribution: {attr}\nX-Glasshouse-Task: {task}\n",
-            from = self
-                .directory
-                .sender(&ctx.principal.on_behalf_of.name)
-                .mailbox(),
+            from = self.sender(&ctx.principal.on_behalf_of.name).0.mailbox(),
             to = message.to.join(", "),
             subject = message.subject,
             date = Timestamp::now(),
@@ -369,6 +452,17 @@ impl ActionProvider for MailProvider {
     fn actions(&self) -> Vec<ActionDef> {
         vec![
             ActionDef {
+                name: "mail.account".parse().expect("static name"),
+                title: "See the mail account".into(),
+                description: "Who the user sends mail as (their name and address from the \
+                              org's directory) and the mail service IT set up for this computer."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                side_effect: SideEffect::None,
+                default_tier: Tier::Auto,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
                 name: "mail.list".parse().expect("static name"),
                 title: "Read the mailboxes".into(),
                 description: format!(
@@ -458,6 +552,14 @@ impl ActionProvider for MailProvider {
     ) -> Result<Preview, ActionError> {
         let mail = Self::mail_dir(ctx);
         match action.as_str() {
+            "mail.account" => {
+                let _: NoInput = parse_input(input)?;
+                Ok(Preview {
+                    summary: "See which mail account this is".into(),
+                    targets: vec!["Mail account".into()],
+                    ..Preview::default()
+                })
+            }
             "mail.list" => {
                 let ListInput { folder, limit } = parse_input(input)?;
                 if limit.is_some_and(|n| n == 0 || n > MAX_LISTED) {
@@ -533,6 +635,10 @@ impl ActionProvider for MailProvider {
         action: &ActionName,
         input: &Value,
     ) -> Result<ActionOutput, ActionError> {
+        if action.as_str() == "mail.account" {
+            let _: NoInput = parse_input(input)?;
+            return Ok(self.account(ctx));
+        }
         let mail = ConfinedDir::open(&Self::mail_dir(ctx))
             .map_err(|e| ActionError::io("mail store", e))?;
         match action.as_str() {

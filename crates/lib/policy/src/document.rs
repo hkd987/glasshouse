@@ -37,6 +37,72 @@ pub struct PolicyDocument {
     /// ADR 0018).
     #[serde(default)]
     pub models: Models,
+    /// The org's mail service, so Mail is set up with no steps on every
+    /// device (NV-3). Never credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mail: Option<MailSettings>,
+}
+
+/// Where the org's mail is (NV-3): set by IT in the console, reaching
+/// devices with policy. The person's own address comes from the org's
+/// directory; `address_template` stands in when the directory has none.
+/// Credentials are never in policy: a device's mail secrets stay on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailSettings {
+    pub service: MailService,
+    /// The person's address from their login, such as
+    /// `{login}@acme.example`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_template: Option<String>,
+    /// The Microsoft 365 tenant or Google Workspace domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    /// Where mail is read from (IMAP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incoming: Option<MailServer>,
+    /// Where mail is sent through (SMTP submission).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outgoing: Option<MailServer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MailService {
+    /// Any IMAP and SMTP service.
+    Imap,
+    #[serde(rename = "microsoft-365")]
+    Microsoft365,
+    GoogleWorkspace,
+}
+
+impl MailService {
+    /// What people call it.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Imap => "IMAP and SMTP",
+            Self::Microsoft365 => "Microsoft 365",
+            Self::GoogleWorkspace => "Google Workspace",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailServer {
+    pub host: String,
+    pub port: u16,
+    pub security: MailSecurity,
+}
+
+/// How the connection is protected; there is no plain option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MailSecurity {
+    /// TLS from the first byte (IMAPS 993, SMTPS 465).
+    Tls,
+    /// Plain, then STARTTLS before anything else (submission 587).
+    Starttls,
 }
 
 /// IT's model allowlist and routing (DP-2, DP-3, DP-5, MP-8). Empty means no

@@ -2,13 +2,14 @@
 // own servers, where IT signs in and sets agent policy, approves catalog
 // items and sees the fleet. It reads everything from the console's API,
 // never from the device it's opened on. Pages: #/policy/<group>,
-// #/catalog, #/catalog/<item>, #/devices.
+// #/catalog, #/catalog/<item>, #/mail, #/devices.
 
 import { h, ready, show } from "@glasshouse/sdk";
 
 import { Refused, type Session, SignedOut, api } from "./api.ts";
 import { catalogPage, itemPage } from "./catalog.ts";
 import { devicesPage } from "./devices.ts";
+import { mailPage } from "./mail.ts";
 import { policyPage } from "./policy.ts";
 import { notice } from "./ui.ts";
 
@@ -18,6 +19,7 @@ let session: Session | null = null;
 const NAV: [string, string][] = [
   ["policy", "Policies"],
   ["catalog", "Catalog"],
+  ["mail", "Mail"],
   ["devices", "Devices"],
 ];
 
@@ -98,6 +100,7 @@ async function route(): Promise<void> {
     if (section === "catalog" && arg) await itemPage(content, decodeURIComponent(arg));
     else if (section === "catalog") await catalogPage(content);
     else if (section === "devices") await devicesPage(content);
+    else if (section === "mail") await mailPage(content);
     else await policyPage(content, arg ? decodeURIComponent(arg) : "ap-ops");
     document.documentElement.dataset.page = section;
     performance.mark(`console:${section}`);

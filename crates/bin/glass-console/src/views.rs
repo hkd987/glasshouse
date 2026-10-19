@@ -282,6 +282,32 @@ fn mode_users(directory: &dyn Directory, item: &CatalogItem) -> Vec<Value> {
 }
 
 /// A catalog item as the catalog page shows it (DV-3: what it declares).
+/// The Mail page (NV-3): the org's mail service in IT's draft, and in the
+/// version each ring runs.
+pub fn mail(state: &State) -> anyhow::Result<Value> {
+    let draft = state.draft()?;
+    let rings: Vec<Value> = Ring::ALL
+        .iter()
+        .map(|&ring| {
+            let version = state.in_force(ring);
+            let mail = version
+                .and_then(|v| toml::from_str::<PolicyDocument>(&v.text).ok())
+                .and_then(|doc| doc.mail);
+            json!({ "ring": ring, "version": version.map(|v| v.version), "mail": mail })
+        })
+        .collect();
+    let changed = state.in_force(Ring::Pilot).is_none_or(|v| {
+        toml::from_str::<PolicyDocument>(&v.text).map_or(true, |doc| doc.mail != draft.mail)
+    });
+    Ok(json!({
+        "draft": draft.mail,
+        "draft_version": state.latest_version() + 1,
+        "changed": changed,
+        "rings": rings,
+        "people": state.people.released.as_ref().map(|s| s.version),
+    }))
+}
+
 pub fn item(state: &State, directory: &dyn Directory, titles: &Titles, id: &str) -> Option<Value> {
     let doc = state.draft().ok()?;
     let entry = state

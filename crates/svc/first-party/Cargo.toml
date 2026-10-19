@@ -17,6 +17,7 @@ glass-app-mail.workspace = true
 glass-app-people.workspace = true
 glass-app-system.workspace = true
 glass-managed.workspace = true
+glass-policy.workspace = true
 glass-gateway.workspace = true
 
 [lints]

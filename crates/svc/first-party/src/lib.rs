@@ -34,6 +34,8 @@ pub struct Setup {
     /// `people.search` reads them, and Mail and Calendar send as the person
     /// they name (AD-1).
     pub directory: DirectoryHandle,
+    /// The org's mail service, from policy (NV-3).
+    pub mail: Option<glass_policy::document::MailSettings>,
     /// This device is managed by an org, so a catalog is coming if none
     /// has arrived (the Store says which).
     pub managed: bool,
@@ -48,6 +50,7 @@ impl Setup {
             system: Arc::new(HostSystem),
             catalog: CatalogHandle::new(),
             directory: DirectoryHandle::new(),
+            mail: None,
             managed: false,
         }
     }
@@ -57,7 +60,9 @@ impl Setup {
 pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
     let mut registry = Registry::new();
     registry.register(Arc::new(FilesProvider))?;
-    registry.register(Arc::new(MailProvider::new(setup.directory.clone())))?;
+    registry.register(Arc::new(
+        MailProvider::new(setup.directory.clone()).settings(setup.mail),
+    ))?;
     registry.register(Arc::new(CalendarProvider::new(setup.directory.clone())))?;
     registry.register(Arc::new(SystemProvider::new(
         setup.system,

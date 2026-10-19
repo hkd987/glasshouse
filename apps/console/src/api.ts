@@ -140,3 +140,28 @@ export interface FleetPage {
   devices: DeviceRow[];
   enroll: { url: string; org: string; org_key: string; admins: number };
 }
+
+/** The org's mail service (NV-3), as policy carries it. */
+export interface MailServer {
+  host: string;
+  port: number;
+  security: "tls" | "starttls";
+}
+
+export interface MailSettings {
+  service: "imap" | "microsoft-365" | "google-workspace";
+  address_template?: string;
+  tenant?: string;
+  incoming?: MailServer;
+  outgoing?: MailServer;
+}
+
+export interface MailPage {
+  draft: MailSettings | null;
+  draft_version: number;
+  /** The draft's mail service isn't what the pilot ring runs. */
+  changed: boolean;
+  rings: { ring: Ring; version: number | null; mail: MailSettings | null }[];
+  /** The directory release devices have, if one was signed. */
+  people: number | null;
+}

@@ -224,6 +224,7 @@ pub fn preview(
         names: BTreeMap::new(),
         fixes: Default::default(),
         models: Default::default(),
+        mail: None,
     };
     let (base_version, old) = base.map_or((None, &empty), |(v, d)| (Some(v), d));
     let mut changes = Vec::new();
@@ -256,6 +257,28 @@ pub fn preview(
     }
     if old.fixes != draft.fixes {
         changes.push("Everyone: what the IT agent may fix".into());
+    }
+    if old.mail != draft.mail {
+        changes.push(match &draft.mail {
+            Some(mail) => {
+                let servers: Vec<String> = [&mail.incoming, &mail.outgoing]
+                    .into_iter()
+                    .flatten()
+                    .map(|s| format!("{}:{}", s.host, s.port))
+                    .chain(mail.tenant.clone())
+                    .collect();
+                format!(
+                    "Everyone: mail through {}{}",
+                    mail.service.title(),
+                    if servers.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", servers.join(", "))
+                    }
+                )
+            }
+            None => "Everyone: no mail service from IT".into(),
+        });
     }
     org_wide |= changes.len() > org_wide_before;
 

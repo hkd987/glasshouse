@@ -13,6 +13,7 @@
 pub mod document;
 mod engine;
 mod labels;
+pub mod mail;
 mod models;
 mod pattern;
 pub mod store;

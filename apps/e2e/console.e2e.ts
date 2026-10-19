@@ -246,6 +246,40 @@ test("ad1 ui5 Mail and Calendar suggest people from the org's directory as you t
   await page.close();
 });
 
+test("nv3 ad2 the mail service IT sets in the console shows in Mail on the device", async ({ browser }) => {
+  const { page, close } = await session(browser);
+  const before = version(status().policy);
+  await open(page, "#/mail", "mail");
+  await page.locator("select[name=service]").selectOption("microsoft-365");
+  await page.fill("input[name=tenant]", "acme.example");
+  await page.fill("input[name=address_template]", "{login}@acme.example");
+  await page.click("button[data-test=save-mail]");
+  await expect(page.locator("[data-test=impact]")).toContainText("Everyone: mail through Microsoft 365 (acme.example)");
+  await shot(page, "mail-settings-previewed");
+  await page.click("button[data-test=publish]");
+  await expect(page.locator(".notice")).toContainText("to the pilot ring");
+  await shot(page, "mail-settings-published");
+  const published = Date.now();
+  while (version(status().policy) <= before) {
+    expect(Date.now() - published, "mail settings on the device").toBeLessThan(PROPAGATION_BUDGET_MS);
+    await page.waitForTimeout(20);
+  }
+  await close();
+
+  const mail = await browser.newPage();
+  await mail.goto(MAIL_URL);
+  await expect(mail.locator("html[data-ready=true]")).toHaveCount(1);
+  const account = mail.locator("[data-test=account]");
+  await expect(account).toContainText("Microsoft 365 · acme.example · not connected yet");
+  await expect(account).toContainText("@acme.example");
+  await mail.click("[data-test=compose]");
+  await expect(mail.locator("[data-test=from]")).toContainText("@acme.example>");
+  await mail.screenshot({ path: join(CONSOLE_SHOTS, "mail-account-from-console.png") });
+  const call = audit().find((r) => r.event.action === "mail.account" && r.event.agent === "mail");
+  expect(call?.event.decision?.tier).toBe("auto");
+  await mail.close();
+});
+
 test("ad4 the fleet shows the device on the new versions", async ({ browser }) => {
   const { page, close } = await session(browser);
   const policy = version(status().policy);

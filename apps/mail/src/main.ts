@@ -68,7 +68,17 @@ const state = {
   loadedAt: null as number | null,
   notice: null as string | null,
   user: "",
+  account: null as Account | null,
 };
+
+/** Who mail goes as and through which service (`mail.account`, NV-3). */
+interface Account {
+  name: string;
+  address: string | null;
+  service_title?: string;
+  tenant?: string | null;
+  connected: boolean;
+}
 let nextKey = 1;
 
 const root = document.getElementById("app") as HTMLElement;
@@ -254,6 +264,20 @@ function sidebar(): HTMLElement {
         h("span", { class: "count" }, unread(f.id) || ""),
       ),
     ),
+    state.account
+      ? h(
+          "div",
+          { class: "account", "data-test": "account", title: state.account.connected ? "" : "Sent mail stays in Sent on this computer until the mail service is connected." },
+          h("div", { class: "account-address" }, state.account.address ?? state.account.name),
+          h(
+            "div",
+            { class: "account-service" },
+            state.account.service_title
+              ? `${state.account.service_title}${state.account.tenant ? ` · ${state.account.tenant}` : ""}${state.account.connected ? "" : " · not connected yet"}`
+              : "No mail service from IT yet",
+          ),
+        )
+      : null,
     waiting.length || done.length
       ? h(
           "section",
@@ -498,6 +522,7 @@ function composer(compose: Compose): HTMLElement {
       },
     },
     h("h2", {}, compose.draft ? "Edit draft" : compose.subject.startsWith("Re:") ? "Reply" : "New message"),
+    h("div", { class: "field from", "data-test": "from" }, h("span", {}, "From"), h("span", { class: "from-address" }, sender())),
     compose.toField,
     field("subject", "Subject"),
     body,
@@ -513,6 +538,23 @@ function composer(compose: Compose): HTMLElement {
   );
 }
 
+/** The account IT set up (NV-3); offline, Mail goes on without it. */
+async function loadAccount(): Promise<void> {
+  try {
+    const read = await bridge.read<Account>("mail.account", {});
+    if (read.result.ok) state.account = read.result.data;
+  } catch {
+    // Not loaded before going offline: nothing to show.
+  }
+}
+
+/** "Priya Shah <priya@acme.example>", or the login without an address. */
+function sender(): string {
+  const a = state.account;
+  if (!a) return state.user;
+  return a.address ? `${a.name} <${a.address}>` : a.name;
+}
+
 // ---- start ----------------------------------------------------------------
 
 async function start(): Promise<void> {
@@ -523,7 +565,7 @@ async function start(): Promise<void> {
   } catch (error) {
     state.notice = error instanceof Offline ? "Mail hasn't been loaded on this device yet." : String(error);
   }
-  await refresh();
+  await Promise.all([refresh(), loadAccount()]);
   ready();
 }
 

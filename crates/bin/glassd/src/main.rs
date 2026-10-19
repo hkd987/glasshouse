@@ -236,6 +236,9 @@ fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<R
         system: Arc::new(glass_app_system::HostSystem),
         catalog: org.catalog.clone(),
         directory: org.directory.clone(),
+        // Mail's service from IT (NV-3): a new policy brings it, with the
+        // registry rebuilt around it.
+        mail: policy.mail().cloned(),
         managed: config.managed.is_some(),
     })?)
 }

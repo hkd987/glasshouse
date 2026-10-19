@@ -61,14 +61,15 @@ impl Harness {
             glass_policy::DEFAULT_POLICY.replace(from, &to.replace("{me}", &self.me.name)),
             extra.replace("{me}", &self.me.name)
         );
+        let policy = Policy::from_toml(&text).unwrap();
         let registry = test_registry(
             self.dir.path(),
             &self.machine,
             &self.catalog,
             &self.directory,
+            &policy,
         );
-        self.rt
-            .apply_policy(Policy::from_toml(&text).unwrap(), registry, "test");
+        self.rt.apply_policy(policy, registry, "test");
     }
 
     /// Puts the default policy plus `extra` in force on the running
@@ -81,6 +82,7 @@ impl Harness {
             &self.machine,
             &self.catalog,
             &self.directory,
+            &policy,
         );
         self.rt.apply_policy(policy, registry, source);
     }
@@ -180,11 +182,14 @@ fn test_registry(
     machine: &Arc<FakeMachine>,
     catalog: &CatalogHandle,
     directory: &DirectoryHandle,
+    policy: &Policy,
 ) -> Registry {
     let mut registry = Registry::new();
     registry.register(Arc::new(FilesProvider)).unwrap();
     registry
-        .register(Arc::new(MailProvider::new(directory.clone())))
+        .register(Arc::new(
+            MailProvider::new(directory.clone()).settings(policy.mail().cloned()),
+        ))
         .unwrap();
     registry
         .register(Arc::new(CalendarProvider::new(directory.clone())))
@@ -230,7 +235,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     let machine = Arc::new(FakeMachine::default());
     let catalog = CatalogHandle::new();
     let directory = DirectoryHandle::new();
-    let registry = test_registry(dir.path(), &machine, &catalog, &directory);
+    let registry = test_registry(dir.path(), &machine, &catalog, &directory, &policy);
     // Policy names these providers; `down` is always rate limited (MP-8).
     let model = Arc::new(ScriptedProvider::echo());
     let gateway = Gateway::new().with("scripted", model.clone()).with(
@@ -462,7 +467,7 @@ impl SystemOps for FakeMachine {
 pub fn mail_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "mail", "name": "Mail", "version": "0.1.0",
-        "actions": ["mail.list", "mail.read", "mail.draft", "mail.send", "people.search"],
+        "actions": ["mail.account", "mail.list", "mail.read", "mail.draft", "mail.send", "people.search"],
         "permissions": ["offline"], "labels": ["public", "internal"]
     }))
     .unwrap()

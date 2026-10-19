@@ -24,6 +24,7 @@ approval_timeout_secs = 900
 "files.move" = "notify"
 "files.delete" = "ask"
 "mail.list" = "auto"
+"mail.account" = "auto"
 "mail.read" = "auto"
 "mail.draft" = "auto"
 "mail.send" = "ask"
