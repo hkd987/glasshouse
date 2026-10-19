@@ -365,6 +365,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-app-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "glass-api",
+ "glass-rpc",
+ "glass-types",
+ "httparse",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "glass-app-calendar"
 version = "0.1.0"
 dependencies = [
