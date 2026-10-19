@@ -101,18 +101,24 @@ updating, and the agent becomes the menu bar's app.
 
 ![Admin console policy page](mockups/admin.png)
 
-The admin console is not started. Today its content lives in `policy.toml`
-(`glassctl policy default` prints the shipped one):
+The admin console is built as a web app on our servers (ADR 0023):
+`glass-console` serves `apps/console` (`make console-dev`; `FIXTURE=500,50`
+fills it). Its Policies page follows this board; screenshots come from
+`make console-test`. Policy is still `policy.toml` underneath: the console
+edits a `PolicyDocument` and signs whole versions devices verify.
 
-| Element | Today |
+| Element | Source |
 |---|---|
-| Approval tiers per action, "stricter, never looser" | `[org.tiers]`, `[group.tiers]`, `[agent.tiers]`; users only tighten (DA-10) |
-| Plain-language action names | `[names]` |
+| Approval tiers per action, "stricter, never looser" | Action classes (`glass-console/src/views.rs` `CLASSES`) set `[group.tiers]` for every action in the class; users only tighten (DA-10) |
+| "Applies to 214 users · synced from the Entra ID group AP-Ops" | The console's directory (`directory.toml`, the SCIM seam, AD-1) |
 | Allowed agents per group | `[[group]] agents` |
-| Data labels and models | `max_label` rules; model routing waits for the gateway |
-| Preview impact, publish to pilot ring (AD-3) | **Not built** |
-| Live stats: running, waiting, blocked 24h, rollbacks 7d (AD-4) | **Not built**; the audit log has the data |
+| Data labels and models | `[models] routes` per label; the group's most sensitive label |
+| Preview impact ("affects 214 users and 3 agents") | `glass-console/src/impact.rs`: against what the broad ring runs, with the changes in words and lint warnings |
+| Publish to pilot ring, promote, roll back (AD-3) | Signed versions and rings; a rollback is a new version everywhere |
+| Live stats: running, waiting, blocked 24h, rollbacks 7d (AD-4) | Devices' reports, for the group's members |
+| Apps in their profiles (AD-7) | `[[group]] apps`, enforced by glassd (`apps.list`, `app.open`); not on the board |
 | Prompt fatigue nudge (DA-14, P1) | **Not built** |
+| Search users, devices, agents | **Not built** |
 
 ## Changes and undo
 
@@ -180,8 +186,9 @@ Not built (CF-80 … CF-82 are P0; CF-83 is P1). What exists that it builds on:
 
 ![Admin console security investigation](mockups/investigate.png)
 
-Not built: the admin console (AD-1) and the developer workspace (DW-*).
-What exists that it builds on:
+Not built: investigations in the admin console (it has Policies, Catalog
+and Devices, ADR 0023) and the developer workspace (DW-*). What exists
+that it builds on:
 
 | Element | Today |
 |---|---|
@@ -264,11 +271,15 @@ Claude Code in the workspace is HX-1.
 
 ![Catalog review](mockups/catalog.png)
 
+Built in the console's Catalog page (`#/catalog/<item>`, ADR 0023):
+
 | Element | Source |
 |---|---|
-| What it can do: declared by the publisher, enforced by the OS | The signed manifest (ADR 0008); today the closest thing is `[[agent]] allowed_actions` in policy |
-| Release bar: accuracy, policy violations, change from the last version | Eval suites and the release bar (AE-10, AE-11, ADR 0010): **not built** |
-| Approve for group, install mode, rollout ring, pin version | Today: `[[group]] agents` in policy. Rings and pinning are the console's (AD-3, DV-12) |
+| What it can do: declared by the publisher, enforced by the OS | The item's declared privileges (`glass_managed::Declared`, DV-3); the runtime doesn't yet intersect an agent's with policy (ADR 0008) |
+| Release bar: accuracy, policy violations, change from the last version | Eval suites and the release bar (AE-10, AE-11, ADR 0010): **not built**; the page shows the submission's reported checks instead |
+| Approve for group, install mode | Per group required, available or blocked (DV-11); each decision signs a catalog release for every device |
+| Rollout ring, pin version | Pin is recorded and synced; item rings and pin enforcement are DV-12 (P1), **not built** |
+| Approved by N regulated orgs | The public exchange (DV-20): **not built**; org items never go public (DV-13) |
 
 ## Tailoring a catalog agent
 
@@ -300,7 +311,7 @@ Not built (GA-1 … GA-11, P1). What it builds on:
 
 | Element | Source |
 |---|---|
-| "I checked the catalog and no approved app does this" | Catalog first (GA-2): needs the catalog service; `agents.list` is the local stand-in for agents |
+| "I checked the catalog and no approved app does this" | Catalog first (GA-2): `catalog.search`, scoped to the user's groups, over the catalog IT published to the device (ADR 0023) |
 | Data, reads, sends, shared with | Would be the generated app's manifest, enforced like any app's: declared actions join the registry (ADR 0013), tiers and labels from policy |
 | "Built for you · v3 · personal", v1 / v2 / v3 chips | Versioned like layers (ADR 0014), each version undoable (GA-3) |
 | Overdue reminders to you only | An action at Auto for the owner and Ask for anyone else; sends outside follow the tiers (GA-7) |

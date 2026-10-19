@@ -10,7 +10,7 @@
 //!
 //! Items share one id namespace whatever their kind, as apps and agents do
 //! on a device (ADR 0024): a release with two items under one id is
-//! refused. And the store rule: an org's items never go to the public
+//! refused. And the store rule (DV-13): an org's items never go to the public
 //! store. Only a single person's app, built on a device no org manages,
 //! may ([`CatalogItem::public_store_check`]).
 
@@ -185,7 +185,7 @@ impl CatalogItem {
         best
     }
 
-    /// The store rule: whether the item may be published to the public
+    /// The store rule (DV-13): whether the item may be published to the public
     /// store (DV-20). An org's items never may, whoever built them (DV-10);
     /// neither may anything built on a managed device. Only a single
     /// person's app, built on a device no org manages, may.
@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn dv10_store_rule_only_a_personal_app_from_an_unmanaged_device_goes_public() {
+    fn dv13_store_rule_only_a_personal_app_from_an_unmanaged_device_goes_public() {
         let mut it = item("x", "X", "", &[]);
         assert_eq!(it.public_store_check(), Err(StoreRefusal::OrgScoped));
         it.internal = false;

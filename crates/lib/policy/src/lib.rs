@@ -78,8 +78,8 @@ mod tests {
     }
 
     #[test]
-    fn profiles_give_it_tools_to_its_role_only() {
-        // Role-based delivery: which apps a person gets is policy.
+    fn ad7_profiles_give_it_tools_to_its_role_only() {
+        // AD-7: which apps a person gets is policy, by role or group.
         let policy = Policy::from_toml(DEFAULT_POLICY).unwrap();
         let ids = |user: &str| -> Vec<String> {
             policy

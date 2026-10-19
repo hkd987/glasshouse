@@ -53,10 +53,11 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 # console. No default features: no RNG, PEM or X25519, and no dependencies.
 ed25519-compact = { version = "2.6.0", default-features = false, features = ["std"] }
 hex = "0.4.3"
-# HTTPS for the model gateway (ADR 0018): responses parsed by httparse, TLS
-# from the base system's OpenSSL and its trust store through native-tls.
-# Only glass-gateway-providers may use them, except that httparse also reads
-# the app bridge's loopback requests in development (ADR 0024).
+# HTTPS for the model gateway and the admin console (ADR 0018, 0023):
+# responses parsed by httparse, TLS from the base system's OpenSSL and its
+# trust store through native-tls. Only glass-gateway-providers may use them
+# to leave the machine; httparse also reads requests to our small servers
+# (glass-http: the app bridge in development, ADR 0024, and the console).
 httparse = "1.10.1"
 libc = "0.2.191"
 native-tls = "0.2.18"

@@ -835,7 +835,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dv11_approve_for_a_group_and_dv10_never_to_the_public_store() {
+    async fn dv11_approve_for_a_group_and_dv13_never_to_the_public_store() {
         let t = console().await;
         {
             let mut state = t.console.state();

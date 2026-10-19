@@ -18,14 +18,15 @@ shell/               the desktop shell UI (ADR 0009): its own Cargo workspace, s
                      core never compiles the UI toolkit; a control-API client (shell/README.md)
 apps/                first-party web apps (ADR 0009, 0024): a TypeScript workspace with the
                      SDK (apps/sdk) and one folder per app with its manifest.json; their OS
-                     actions stay in crates/apps (apps/README.md)
+                     actions stay in crates/apps (apps/README.md). apps/console is the
+                     admin console's web app, a site glass-console serves (ADR 0023)
 tools/               developer tooling (checks, dev runners, screenshots, legal notices)
 docs/                architecture, decisions (adr/), developer guides (dev/)
 ```
 
 Future top-level areas, when they start: the compositor (M2, next to the
 shell in `shell/`), `agents/` (agent
-harness bundles, ADR 0010), `console/` (admin console), `gateway/` if the
+harness bundles, ADR 0010), `gateway/` if the
 model gateway outgrows its crates (`crates/svc/gateway`,
 `crates/svc/gateway-providers`, ADR 0018).
 
@@ -87,5 +88,9 @@ Consequences worth knowing:
   `apps/sdk`; add it to `APPS` in `apps/build.mjs`. Its actions are
   `crates/apps` providers like any other. Every npm dependency must pass
   `tools/legal/npm_licenses.py` (`make apps-lint`).
+- **A page of the admin console**: in `apps/console/src`, reading the
+  console's API (`crates/bin/glass-console/src/server.rs`), which builds
+  its view in `views.rs`. The console runs on our web servers, never on a
+  device: nothing it links ships in the image (ADR 0023).
 - **A decision**: write an ADR in `docs/adr/` when a choice is hard to
   reverse or would surprise a new engineer.

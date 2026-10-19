@@ -53,7 +53,7 @@ impl Runtime {
 
     /// The apps in `caller`'s profile, as the launcher offers them: web
     /// apps installed here, native apps, and the admin console when this
-    /// device is managed. Policy decides the profile per group.
+    /// device is managed. Policy decides the profile per group (AD-7).
     pub fn profile_apps(&self, caller: &Caller) -> Vec<ProfileApp> {
         let policy = self.policy();
         policy

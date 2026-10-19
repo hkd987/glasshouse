@@ -1,4 +1,4 @@
-//! `glass-console`: the org's admin console (ADR 0023). IT signs in, sets
+//! `glass-console`: the org's admin console (AD-6, ADR 0023). IT signs in, sets
 //! agent policy per group and rolls it out in rings, approves catalog
 //! items per group, and sees the fleet; devices sync signed policy and
 //! catalog releases from it and report back.

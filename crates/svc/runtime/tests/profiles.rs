@@ -1,4 +1,4 @@
-//! Role-based delivery: which apps a person gets is policy (per group),
+//! AD-7, role-based delivery: which apps a person gets is policy (per group),
 //! enforced by glassd. An app outside someone's profile isn't offered to
 //! them and doesn't open for them, and the refusal is audited.
 
@@ -20,7 +20,7 @@ fn ids(h: &common::Harness) -> Vec<(String, ProfileAppKind)> {
 }
 
 #[test]
-fn profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
+fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
     let h = harness();
     assert_eq!(
         ids(&h),
@@ -46,7 +46,7 @@ fn profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
 }
 
 #[tokio::test]
-async fn an_app_outside_the_profile_doesnt_open_and_the_refusal_is_audited() {
+async fn ad7_an_app_outside_the_profile_doesnt_open_and_the_refusal_is_audited() {
     let h = harness();
     h.apply_policy_replacing("apps = [\"mail\", \"calendar\"]", "apps = [\"mail\"]", "");
     assert_eq!(ids(&h), [("mail".into(), ProfileAppKind::Web)]);

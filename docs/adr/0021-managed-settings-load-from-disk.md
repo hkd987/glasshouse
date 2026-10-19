@@ -3,8 +3,9 @@
 Status: **Accepted** for how glassd starts (local disk only, one process,
 the last good policy as a fallback) and for the store's atomic apply and
 rollback. The background fetch from a management service, live apply to a
-running glassd and staged rollout are **Proposed**. PRD AD-1 … AD-5,
-AD-15, AD-3, EP-12, UX-22.
+running glassd and staged rollout were **Proposed** here and are now built
+for policy and the catalog (ADR 0023). PRD AD-1 … AD-5, AD-15, AD-3,
+EP-12, UX-22.
 
 ## Context
 Policy comes from a local `policy.toml` (or the built-in default) and the
