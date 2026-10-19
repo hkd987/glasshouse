@@ -102,6 +102,18 @@ and one stylesheet of about 6 KB.
   | A key typed in the command bar | 42 ms | 5 ms | 1.7 s | 28 to 60 ms |
   | Nothing changed | 190 ms | 0.4 ms | 2 s | 3 to 7 ms |
   | A notification banner comes or goes | | 23 ms, 3 ms | 0.4 to 0.9 s | 60 to 220 ms |
+  | Whole screen (first frame, opening the command bar) | 191 ms | 21 ms | 3 s | 0.7 s |
+  | Launcher opens (dims the whole screen), closes | 37 ms, 30 ms | 18 ms, 7 ms | 1.0 s, 1.0 s | 0.2 s, 55 ms |
+
+  A whole-screen redraw spent half its time laying the UI over the
+  wallpaper and windows through tiny-skia's general image pipeline, and a
+  sixth recomputing every drop shadow on the screen pixel by pixel. The
+  layers are now blended in integers, two bytes per multiply, skipping
+  clear pixels and copying opaque ones (`render::blend`), and the vendored
+  `iced_tiny_skia` keeps each shadow it computed (keyed by everything that
+  shapes it, so the pixels are the same) and blends in only the part being
+  redrawn. Laptop numbers here are the shipping `vm` profile
+  (`cargo test --profile vm …`).
 
   Coming up after signing in (`desktop up in` in
   `/var/log/glass-greeter.log`) took 5.3 s in the VM, most of it the
@@ -111,7 +123,8 @@ and one stylesheet of about 6 KB.
   1.8 s with the optimized `vm` build (`SHELL_PROFILE=vm
   os/freebsd/scripts/shell-vm.sh greeter`): glassd 0.2 s, the screen 0.6 s,
   the first frame 1 s. The sign-in screen stays up until then (ADR 0019).
-  | Whole screen (first frame, opening the command bar) | 191 ms | 60 ms | 3 s | 1.5 to 1.9 s |
+  With the faster whole-screen redraw it is up in 1.7 s: the screen 0.9 s,
+  the first frame 0.74 s.
 
 ## Boot
 

@@ -7,6 +7,7 @@
 #   - incremental build caches of debug builds (target/**/incremental, shell/target/**/incremental),
 #     rebuilt as needed, slower once; with --deep the `vm` profile's too, which makes the next
 #     `make freebsd vm-deploy` take minutes instead of seconds;
+#   - test binaries left from earlier builds of the same test (only the newest of each stays);
 #   - build/dist (staging, rewritten by every stage-dist.sh) and build/logs;
 #   - VM directories under build/ other than build/vm whose QEMU isn't running.
 # It never touches build/vm (the dev VM), build/cache (FreeBSD downloads) or build/freebsd
@@ -60,6 +61,14 @@ echo "== build caches"
 mapfile -t incremental < <(find target shell/target -maxdepth 3 -type d -name incremental 2>/dev/null |
 	if $deep; then cat; else grep -v '/vm/incremental$'; fi)
 ((${#incremental[@]})) && gone "${incremental[@]}"
+# Test binaries from earlier builds: each rebuild leaves the old one beside the new, under a new
+# hash. Only the newest of each name stays (two crates' tests of the same name: cargo relinks the
+# other when it next runs).
+mapfile -t stale < <(find target/*/deps target/*/*/deps shell/target/*/deps shell/target/*/*/deps \
+	-maxdepth 1 -type f -perm -u+x -regextype posix-extended -regex '.*/[a-z0-9_]+-[0-9a-f]{16}' \
+	-printf '%T@ %p\n' 2>/dev/null |
+	sort -rn | awk '{ key = $2; sub(/-[0-9a-f]+$/, "", key); if (seen[key]++) print $2 }')
+((${#stale[@]})) && gone "${stale[@]}"
 for d in build/dist build/logs; do [[ -e $d ]] && gone "$d"; done
 
 echo "== VMs"

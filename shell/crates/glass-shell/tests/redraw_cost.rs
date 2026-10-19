@@ -100,3 +100,27 @@ fn a_banner_coming_and_going_redraws_only_the_top_right() {
     let damage = screen.render(live.view(&theme, None, at, size), None);
     eprintln!("banner goes {:?}: {damage:?}", started.elapsed());
 }
+
+#[test]
+#[ignore]
+fn the_launcher_opens_and_closes_in_a_frame() {
+    use glass_shell::Message;
+
+    let theme = Theme::glass();
+    let mut live = Live::new(fixtures::tasks())
+        .without_wallpaper()
+        .with_apps(glass_shell::apps::FIRST_PARTY.to_vec());
+    let size = (1280.0, 800.0);
+    let at = OffsetDateTime::from_unix_timestamp(fixtures::now().unix_seconds()).expect("valid");
+    let mut screen = Screen::new(Size::new(size.0, size.1), 1.0);
+    screen.set_backdrop(wallpaper::backdrop(&theme.wallpaper, 1280, 800));
+    screen.render(live.view(&theme, None, at, size), None);
+    for _ in 0..3 {
+        for step in ["open", "close"] {
+            live.update(Message::ToggleLauncher);
+            let started = Instant::now();
+            let damage = screen.render(live.view(&theme, None, at, size), None);
+            eprintln!("{step} {:?}: {} areas", started.elapsed(), damage.len());
+        }
+    }
+}

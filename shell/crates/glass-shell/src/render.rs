@@ -421,25 +421,41 @@ impl Screen {
 }
 
 /// Lays area `d` of `layer` (premultiplied, the screen's size) over the
-/// same area of `screen`.
-fn blend(screen: &mut [u8], layer: &[u8], (width, height): (u32, u32), d: Damage) {
-    let Some(part) = tiny_skia::PixmapRef::from_bytes(layer, width, height).and_then(|all| {
-        all.clone_rect(tiny_skia::IntRect::from_xywh(
-            d.x as i32, d.y as i32, d.width, d.height,
-        )?)
-    }) else {
-        return;
-    };
-    if let Some(mut screen) = tiny_skia::PixmapMut::from_bytes(screen, width, height) {
-        screen.draw_pixmap(
-            d.x as i32,
-            d.y as i32,
-            part.as_ref(),
-            &tiny_skia::PixmapPaint::default(),
-            tiny_skia::Transform::identity(),
-            None,
-        );
+/// same area of `screen`: source over, in integers. Most of a UI layer is
+/// clear and most of the rest opaque, so those pixels cost one test each;
+/// tiny-skia's general image pipeline took half of a full-screen frame.
+fn blend(screen: &mut [u8], layer: &[u8], (width, _): (u32, u32), d: Damage) {
+    let stride = width as usize * 4;
+    let columns = d.x as usize * 4..(d.x + d.width) as usize * 4;
+    for y in d.y as usize..(d.y + d.height) as usize {
+        let row = y * stride + columns.start..y * stride + columns.end;
+        let (Some(under), Some(over)) = (screen.get_mut(row.clone()), layer.get(row)) else {
+            return;
+        };
+        for (under, over) in under.chunks_exact_mut(4).zip(over.chunks_exact(4)) {
+            let o = u32::from_le_bytes([over[0], over[1], over[2], over[3]]);
+            match o >> 24 {
+                0 => {}
+                255 => under.copy_from_slice(over),
+                alpha => {
+                    let u = u32::from_le_bytes([under[0], under[1], under[2], under[3]]);
+                    let out = o.wrapping_add(scale(u, 255 - alpha));
+                    under.copy_from_slice(&out.to_le_bytes());
+                }
+            }
+        }
     }
+}
+
+/// Each byte of `pixel` times `by / 255`, rounded: two bytes per multiply,
+/// each in its own 16-bit lane. Premultiplied source over can't carry from
+/// one byte into the next (`over + under * (255 - alpha) / 255 <= 255`).
+fn scale(pixel: u32, by: u32) -> u32 {
+    let lanes = |x: u32| {
+        let t = x * by + 0x0080_0080;
+        ((t + ((t >> 8) & 0x00FF_00FF)) >> 8) & 0x00FF_00FF
+    };
+    lanes(pixel & 0x00FF_00FF) | (lanes((pixel >> 8) & 0x00FF_00FF) << 8)
 }
 
 /// Joins areas that overlap where one area costs no more to draw than the
@@ -518,5 +534,42 @@ impl Frame {
             self.rgba[i + 2],
             self.rgba[i + 3],
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scaling_rounds_every_byte_on_its_own() {
+        for by in 0..=255u32 {
+            for v in 0..=255u32 {
+                let want = (v * by + 127) / 255;
+                let got = scale(u32::from_le_bytes([v as u8, 0, 255, v as u8]), by);
+                assert_eq!(got.to_le_bytes()[0] as u32, want, "{v} * {by} / 255");
+                assert_eq!(got.to_le_bytes()[3] as u32, want, "{v} * {by} / 255");
+                assert_eq!(got.to_le_bytes()[1], 0, "no carry into the next byte");
+                assert_eq!(got.to_le_bytes()[2] as u32, by, "255 * {by} / 255");
+            }
+        }
+    }
+
+    #[test]
+    fn clear_shows_what_is_under_and_opaque_covers_it() {
+        let size = (3, 1);
+        let all = Damage {
+            x: 0,
+            y: 0,
+            width: 3,
+            height: 1,
+        };
+        let mut screen = vec![10, 20, 30, 255, 10, 20, 30, 255, 200, 200, 200, 255];
+        // Clear, opaque red, and half-transparent black (premultiplied).
+        let layer = [0, 0, 0, 0, 0, 0, 255, 255, 0, 0, 0, 128];
+        blend(&mut screen, &layer, size, all);
+        assert_eq!(&screen[..4], &[10, 20, 30, 255]);
+        assert_eq!(&screen[4..8], &[0, 0, 255, 255]);
+        assert_eq!(&screen[8..], &[100, 100, 100, 255]);
     }
 }

@@ -9,6 +9,8 @@ use crate::text;
 #[derive(Debug)]
 pub struct Engine {
     text_pipeline: text::Pipeline,
+    // Glasshouse patch (shell/vendor/README.md): shadows already computed.
+    shadows: Vec<(ShadowKey, std::sync::Arc<Vec<u8>>)>,
 
     #[cfg(feature = "image")]
     pub(crate) raster_pipeline: crate::raster::Pipeline,
@@ -20,6 +22,7 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             text_pipeline: text::Pipeline::new(),
+            shadows: Vec::new(),
             #[cfg(feature = "image")]
             raster_pipeline: crate::raster::Pipeline::new(),
             #[cfg(feature = "svg")]
@@ -98,20 +101,58 @@ impl Engine {
             let half_width = physical_bounds.width / 2.0;
             let half_height = physical_bounds.height / 2.0;
 
-            let colors = (y..y + height)
-                .flat_map(|y| (x..x + width).map(move |x| (x as f32, y as f32)))
-                .filter_map(|(x, y)| {
-                    tiny_skia::Size::from_wh(half_width, half_height).map(
-                        |size| {
+            // Glasshouse patch (shell/vendor/README.md): the whole shadow is
+            // computed once, from everything that shapes it, and kept; each
+            // redraw blends in only its part inside the clip. Redrawing the
+            // whole screen recomputed every shadow on it, pixel by pixel.
+            let (x0, y0) = (shadow_bounds.x as u32, shadow_bounds.y as u32);
+            let (full_width, full_height) =
+                (shadow_bounds.width as u32, shadow_bounds.height as u32);
+            let scale = transformation.scale_factor();
+            let key = ShadowKey {
+                origin: (x0, y0),
+                size: (full_width, full_height),
+                shape: [
+                    physical_bounds.x,
+                    physical_bounds.y,
+                    half_width,
+                    half_height,
+                    shadow.offset.x,
+                    shadow.offset.y,
+                    shadow.blur_radius,
+                    scale,
+                    radii[0],
+                    radii[1],
+                    radii[2],
+                    radii[3],
+                    shadow.color.r,
+                    shadow.color.g,
+                    shadow.color.b,
+                    shadow.color.a,
+                ]
+                .map(f32::to_bits),
+            };
+            let image = match self.shadows.iter().find(|(k, _)| *k == key) {
+                Some((_, image)) => std::sync::Arc::clone(image),
+                None => {
+                    let colors: Vec<tiny_skia::PremultipliedColorU8> = (y0
+                        ..y0 + full_height)
+                        .flat_map(|y| {
+                            (x0..x0 + full_width).map(move |x| (x as f32, y as f32))
+                        })
+                        .map(|(x, y)| {
+                            let Some(size) =
+                                tiny_skia::Size::from_wh(half_width, half_height)
+                            else {
+                                return tiny_skia::PremultipliedColorU8::TRANSPARENT;
+                            };
                             let shadow_distance = rounded_box_sdf(
                                 Vector::new(
                                     x - physical_bounds.position().x
-                                        - (shadow.offset.x
-                                            * transformation.scale_factor())
+                                        - (shadow.offset.x * scale)
                                         - half_width,
                                     y - physical_bounds.position().y
-                                        - (shadow.offset.y
-                                            * transformation.scale_factor())
+                                        - (shadow.offset.y * scale)
                                         - half_height,
                                 ),
                                 size,
@@ -120,10 +161,8 @@ impl Engine {
                             .max(0.0);
                             let shadow_alpha = 1.0
                                 - smoothstep(
-                                    -shadow.blur_radius
-                                        * transformation.scale_factor(),
-                                    shadow.blur_radius
-                                        * transformation.scale_factor(),
+                                    -shadow.blur_radius * scale,
+                                    shadow.blur_radius * scale,
                                     shadow_distance,
                                 );
 
@@ -131,28 +170,20 @@ impl Engine {
                             color.apply_opacity(shadow_alpha);
 
                             color.to_color_u8().premultiply()
-                        },
-                    )
-                })
-                .collect();
-
-            if let Some(pixmap) = tiny_skia::IntSize::from_wh(width, height)
-                .and_then(|size| {
-                    tiny_skia::Pixmap::from_vec(
-                        bytemuck::cast_vec(colors),
-                        size,
-                    )
-                })
-            {
-                pixels.draw_pixmap(
-                    x as i32,
-                    y as i32,
-                    pixmap.as_ref(),
-                    &tiny_skia::PixmapPaint::default(),
-                    tiny_skia::Transform::default(),
-                    None,
-                );
-            }
+                        })
+                        .collect();
+                    let image = std::sync::Arc::new(bytemuck::cast_vec(colors));
+                    self.keep_shadow(key, std::sync::Arc::clone(&image));
+                    image
+                }
+            };
+            blend_part(
+                pixels,
+                &image,
+                full_width,
+                (x - x0, y - y0),
+                (x, y, width, height),
+            );
         }
 
         pixels.fill_path(
@@ -816,6 +847,80 @@ fn arc_to(
         }
         None => {
             path.line_to(x_to, y_to);
+        }
+    }
+}
+
+// Glasshouse patch (shell/vendor/README.md): the shadow cache.
+
+/// Everything that shapes a shadow's pixels, as bits, so a kept shadow is
+/// exactly the one that would be computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShadowKey {
+    origin: (u32, u32),
+    size: (u32, u32),
+    shape: [u32; 16],
+}
+
+/// Shadows kept at most, in bytes: a screenful of them.
+const SHADOWS_KEPT: usize = 16 << 20;
+
+impl Engine {
+    fn keep_shadow(&mut self, key: ShadowKey, image: std::sync::Arc<Vec<u8>>) {
+        self.shadows.push((key, image));
+        let mut total: usize = self.shadows.iter().map(|(_, i)| i.len()).sum();
+        while total > SHADOWS_KEPT && self.shadows.len() > 1 {
+            total -= self.shadows.remove(0).1.len();
+        }
+    }
+}
+
+/// Lays the part of `image` (premultiplied, `image_width` pixels wide)
+/// that starts at `from` over `pixels` at `to` (x, y, width, height):
+/// source over, two bytes per multiply.
+fn blend_part(
+    pixels: &mut tiny_skia::PixmapMut<'_>,
+    image: &[u8],
+    image_width: u32,
+    from: (u32, u32),
+    (x, y, width, height): (u32, u32, u32, u32),
+) {
+    let stride = pixels.width() as usize * 4;
+    let width = width.min(pixels.width().saturating_sub(x)) as usize * 4;
+    let height = height.min(pixels.height().saturating_sub(y));
+    let data = pixels.data_mut();
+    for row in 0..height {
+        let under = (y + row) as usize * stride + x as usize * 4;
+        let over = ((from.1 + row) as usize * image_width as usize
+            + from.0 as usize)
+            * 4;
+        let (Some(under), Some(over)) = (
+            data.get_mut(under..under + width),
+            image.get(over..over + width),
+        ) else {
+            return;
+        };
+        for (under, over) in
+            under.chunks_exact_mut(4).zip(over.chunks_exact(4))
+        {
+            let o = u32::from_le_bytes([over[0], over[1], over[2], over[3]]);
+            match o >> 24 {
+                0 => {}
+                255 => under.copy_from_slice(over),
+                alpha => {
+                    let u = u32::from_le_bytes([
+                        under[0], under[1], under[2], under[3],
+                    ]);
+                    let keep = 255 - alpha;
+                    let lanes = |v: u32| {
+                        let t = v * keep + 0x0080_0080;
+                        ((t + ((t >> 8) & 0x00FF_00FF)) >> 8) & 0x00FF_00FF
+                    };
+                    let kept = lanes(u & 0x00FF_00FF)
+                        | (lanes((u >> 8) & 0x00FF_00FF) << 8);
+                    under.copy_from_slice(&o.wrapping_add(kept).to_le_bytes());
+                }
+            }
         }
     }
 }
