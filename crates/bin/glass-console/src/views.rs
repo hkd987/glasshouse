@@ -411,6 +411,7 @@ pub fn fleet(state: &State, directory: &dyn Directory, console_url: &str) -> Val
                 "id": d.id,
                 "name": r.map_or_else(|| d.id.clone(), |r| r.name.clone()),
                 "ring": d.ring,
+                "kind": d.kind,
                 "online": online,
                 "last_seen": d.last_seen,
                 "users": r.map(|r| r.users.iter().map(|u| directory.display_name(u)).collect::<Vec<_>>()).unwrap_or_default(),
@@ -434,7 +435,17 @@ pub fn fleet(state: &State, directory: &dyn Directory, console_url: &str) -> Val
             })
         })
         .collect();
+    // The kinds a device can be: those roles reach unattended, and any
+    // a device already has.
+    let mut kinds: BTreeSet<String> = state
+        .support_in_force()
+        .roles
+        .into_iter()
+        .flat_map(|r| r.unattended)
+        .collect();
+    kinds.extend(state.fleet.devices.values().filter_map(|d| d.kind.clone()));
     json!({
+        "kinds": kinds,
         "totals": {
             "devices": devices.len(),
             "online": totals.0,
@@ -512,9 +523,14 @@ pub fn support(state: &State, directory: &dyn Directory, access: &Access) -> Val
         .into_iter()
         .map(|d| {
             let r = d.report.as_ref();
+            let unattended = d.kind.as_ref().is_some_and(|k| {
+                access.roles.iter().any(|role| role.unattended.contains(k))
+            });
             json!({
                 "id": d.id,
                 "name": r.map_or_else(|| d.id.clone(), |r| r.name.clone()),
+                "kind": d.kind,
+                "unattended": unattended,
                 "online": now - d.last_seen.unix_seconds() <= ONLINE_SECS,
                 "last_seen": d.last_seen,
                 "users": r.map(|r| r.users.iter().map(|u| directory.display_name(u)).collect::<Vec<_>>()).unwrap_or_default(),

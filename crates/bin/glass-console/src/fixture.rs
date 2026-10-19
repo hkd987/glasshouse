@@ -350,6 +350,7 @@ pub fn fill(
             Device {
                 id: id.clone(),
                 ring,
+                kind: None,
                 enrolled: now,
                 last_seen: now,
                 report: Some(DeviceReport {

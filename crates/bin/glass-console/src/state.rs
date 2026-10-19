@@ -100,6 +100,10 @@ pub struct DirectoryState {
 pub struct Device {
     pub id: String,
     pub ring: Ring,
+    /// What kind of computer IT says it is (`kiosk`, `lab`), for roles
+    /// that may reach it with nobody there (ADR 0028); none by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub enrolled: Timestamp,
     pub last_seen: Timestamp,
     #[serde(default)]
@@ -537,6 +541,7 @@ impl State {
             .or_insert_with(|| Device {
                 id: id.to_owned(),
                 ring: Ring::Broad,
+                kind: None,
                 enrolled: Timestamp::now(),
                 last_seen: Timestamp::now(),
                 report: None,
@@ -586,6 +591,29 @@ impl State {
             .get_mut(id)
             .ok_or_else(|| Refused::NotFound(format!("No device {id}.")))?;
         device.ring = ring;
+        self.fleet_dirty = true;
+        Ok(())
+    }
+
+    /// Gives a device a kind for unattended access (ADR 0028), or none.
+    pub fn set_kind(&mut self, id: &str, kind: Option<String>) -> Result<(), Refused> {
+        if let Some(k) = &kind
+            && (k.is_empty()
+                || k.len() > 32
+                || !k
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'))
+        {
+            return Err(Refused::Invalid(vec![
+                "a kind is lowercase letters, digits, - and _".into(),
+            ]));
+        }
+        let device = self
+            .fleet
+            .devices
+            .get_mut(id)
+            .ok_or_else(|| Refused::NotFound(format!("No device {id}.")))?;
+        device.kind = kind;
         self.fleet_dirty = true;
         Ok(())
     }

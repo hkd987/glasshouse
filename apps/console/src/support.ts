@@ -32,7 +32,14 @@ export async function supportPage(root: HTMLElement): Promise<void> {
             h(
               "tr",
               { "data-device": d.id },
-              h("td", {}, h("span", { class: `dot ${d.online ? "green" : "grey"}` }), mono(d.name)),
+              h(
+                "td",
+                {},
+                h("span", { class: `dot ${d.online ? "green" : "grey"}` }),
+                mono(d.name),
+                d.kind ? h("span", { class: "hint" }, ` · ${d.kind}`) : null,
+                d.unattended ? h("div", {}, chip("Nobody needs to answer", "wait")) : null,
+              ),
               h("td", {}, d.users.join(", ") || "–"),
               h("td", { class: "hint" }, ago(d.last_seen)),
               h("td", { class: "num" }, h("button", { class: "button", disabled: true, title: "Remote sessions aren't available yet" }, "Ask to see screen")),

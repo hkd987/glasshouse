@@ -136,6 +136,8 @@ export interface DeviceRow {
   id: string;
   name: string;
   ring: Ring;
+  /** What kind of computer IT says it is, for unattended remote help (ADR 0028). */
+  kind: string | null;
   online: boolean;
   last_seen: string;
   users: string[];
@@ -149,6 +151,8 @@ export interface DeviceRow {
 }
 
 export interface FleetPage {
+  /** The kinds a device can be given: those support roles reach unattended. */
+  kinds: string[];
   totals: { devices: number; online: number; running: number; waiting: number; blocked_24h: number; users: number };
   rings: { ring: Ring; devices: number; policy_version: number | null }[];
   catalog_version: number | null;
@@ -185,7 +189,7 @@ export interface MailPage {
 export interface SupportPage {
   roles: { id: string; name: string; tools: SupportTool[]; people: string[]; unattended: string[]; max_minutes: number }[];
   tools: { id: SupportTool; title: string; mine: boolean; roles: string[]; ready: boolean }[];
-  devices: { id: string; name: string; online: boolean; last_seen: string; users: string[]; os_version: string | null }[];
+  devices: { id: string; name: string; kind: string | null; unattended: boolean; online: boolean; last_seen: string; users: string[]; os_version: string | null }[];
   answer_within_secs: number;
   policy_version: number | null;
 }

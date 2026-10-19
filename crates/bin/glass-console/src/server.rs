@@ -12,6 +12,7 @@
 //! POST /api/catalog/<id>/{approve,block,public}
 //! GET  /api/fleet                     the fleet page
 //! POST /api/fleet/<device>/ring       move a device to another ring
+//! POST /api/fleet/<device>/kind       say what kind of computer it is
 //! GET  /api/roles                     remote help's roles (CF-81)
 //! GET  /api/support                   support staff's page (CF-80)
 //! POST /device/v1/sync                a device's long poll (bearer token)
@@ -137,6 +138,12 @@ struct Approve {
 #[serde(deny_unknown_fields)]
 struct SetRing {
     ring: Ring,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetKind {
+    kind: Option<String>,
 }
 
 impl Console {
@@ -522,6 +529,16 @@ impl Console {
                     Err(r) => refused(r),
                 }
             }
+            ("POST", ["fleet", device, "kind"]) => {
+                let set: SetKind = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                match self.state().set_kind(device, set.kind) {
+                    Ok(()) => ok(json!({})),
+                    Err(r) => refused(r),
+                }
+            }
             _ if get || post => error(404, "not found"),
             _ => error(405, "method not allowed"),
         }
@@ -896,6 +913,7 @@ mod tests {
             ("POST", "/api/catalog/x/public", json!({})),
             ("GET", "/api/fleet", Value::Null),
             ("POST", "/api/fleet/d/ring", json!({ "ring": "pilot" })),
+            ("POST", "/api/fleet/d/kind", json!({ "kind": "kiosk" })),
             ("GET", "/api/mail", Value::Null),
             ("GET", "/api/roles", Value::Null),
             ("GET", "/api/a-route-nobody-wrote-yet", Value::Null),
@@ -995,6 +1013,61 @@ mod tests {
         assert_eq!(status, 401);
         let (status, _) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
         assert_eq!(status, 403);
+    }
+
+    #[tokio::test]
+    async fn adr0028_it_sets_a_devices_kind_and_a_role_reaches_it_unattended() {
+        let t = console().await;
+        t.sync("kiosk-1", None, 0).await;
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/fleet/kiosk-1/kind",
+                json!({ "kind": "Lobby Kiosk" }),
+            )
+            .await;
+        assert_eq!(status, 400, "kinds are plain words");
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/fleet/kiosk-1/kind",
+                json!({ "kind": "kiosk" }),
+            )
+            .await;
+        assert_eq!(status, 200);
+        let (_, fleet) = t.call("GET", "/api/fleet", Value::Null).await;
+        assert_eq!(fleet["devices"][0]["kind"], "kiosk");
+
+        let alex = sign_in(&t.console, "alex").await.unwrap();
+        let unattended = |page: &Value| page["devices"][0]["unattended"].clone();
+        let (_, page) = t.call_as(&alex, "GET", "/api/support", Value::Null).await;
+        assert_eq!(unattended(&page), false, "no role reaches kiosks yet");
+
+        let (_, roles) = t.call("GET", "/api/roles", Value::Null).await;
+        let desktop = &roles["roles"][1];
+        let mut role = json!({});
+        for field in ["id", "name", "groups", "tools", "people", "max_minutes"] {
+            role[field] = desktop[field].clone();
+        }
+        role["unattended"] = json!(["kiosk"]);
+        t.call(
+            "POST",
+            "/api/policy/edit",
+            json!({ "edit": "support_role", "id": "desktop-support", "role": role }),
+        )
+        .await;
+        let (_, impact) = t.call("POST", "/api/policy/preview", json!({})).await;
+        assert!(
+            impact["warnings"]
+                .to_string()
+                .contains("Desktop Support may reach kiosk computers with nobody there"),
+            "{impact}"
+        );
+        t.call("POST", "/api/policy/publish", json!({})).await;
+        let (_, page) = t.call_as(&alex, "GET", "/api/support", Value::Null).await;
+        assert_eq!(unattended(&page), true);
+        let (_, fleet) = t.call("GET", "/api/fleet", Value::Null).await;
+        assert_eq!(fleet["kinds"], json!(["kiosk"]));
     }
 
     #[tokio::test]

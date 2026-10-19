@@ -11,20 +11,27 @@ const RINGS: Ring[] = ["pilot", "early", "broad"];
 
 export async function devicesPage(root: HTMLElement): Promise<void> {
   let message: string | null = null;
-  const draw = (page: FleetPage) => show(root, render(page, message, setRing));
-  async function setRing(device: string, ring: Ring): Promise<void> {
+  const draw = (page: FleetPage) => show(root, render(page, message, setRing, setKind));
+  async function change(device: string, what: "ring" | "kind", value: string | null): Promise<void> {
     try {
-      await api("POST", `/api/fleet/${encodeURIComponent(device)}/ring`, { ring });
-      message = `${device} is in the ${ring} ring now.`;
+      await api("POST", `/api/fleet/${encodeURIComponent(device)}/${what}`, { [what]: value });
+      message = what === "ring" ? `${device} is in the ${value} ring now.` : value ? `${device} is a ${value} now.` : `${device} has no kind now.`;
     } catch (error) {
       message = (error as Error).message;
     }
     draw(await api<FleetPage>("GET", "/api/fleet"));
   }
+  const setRing = (device: string, ring: Ring) => change(device, "ring", ring);
+  const setKind = (device: string, kind: string | null) => change(device, "kind", kind);
   draw(await api<FleetPage>("GET", "/api/fleet"));
 }
 
-function render(page: FleetPage, message: string | null, setRing: (device: string, ring: Ring) => Promise<void>): HTMLElement {
+function render(
+  page: FleetPage,
+  message: string | null,
+  setRing: (device: string, ring: Ring) => Promise<void>,
+  setKind: (device: string, kind: string | null) => Promise<void>,
+): HTMLElement {
   const t = page.totals;
   return h(
     "div",
@@ -68,7 +75,7 @@ function render(page: FleetPage, message: string | null, setRing: (device: strin
               h(
                 "tr",
                 {},
-                ...["Device", "People", "Ring", "Policy", "Catalog"].map((x) => h("th", {}, x)),
+                ...["Device", "People", "Ring", "Kind", "Policy", "Catalog"].map((x) => h("th", {}, x)),
                 ...["Agents", "Waiting", "Blocked 24h"].map((x) => h("th", { class: "num" }, x)),
                 h("th", {}, "Last seen"),
               ),
@@ -93,6 +100,22 @@ function render(page: FleetPage, message: string | null, setRing: (device: strin
                       },
                       ...RINGS.map((r) => h("option", { value: r, selected: r === d.ring }, capital(r))),
                     ),
+                  ),
+                  h(
+                    "td",
+                    {},
+                    page.kinds.length
+                      ? h(
+                          "select",
+                          {
+                            "aria-label": `Kind of computer ${d.name} is`,
+                            name: "kind",
+                            onchange: (e: Event) => setKind(d.id, (e.target as HTMLSelectElement).value || null),
+                          },
+                          h("option", { value: "", selected: !d.kind }, "–"),
+                          ...page.kinds.map((k) => h("option", { value: k, selected: k === d.kind }, capital(k))),
+                        )
+                      : "–",
                   ),
                   h("td", {}, d.policy_version ? mono(`v${d.policy_version}`) : "–"),
                   h("td", {}, d.catalog_version ? mono(`v${d.catalog_version}`) : "–"),
