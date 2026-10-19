@@ -247,7 +247,13 @@ impl ConfinedDir {
             if self.dir.symlink_metadata(&prefix).is_ok() {
                 continue;
             }
-            self.dir.create_dir(&prefix)?;
+            match self.dir.create_dir(&prefix) {
+                Ok(()) => {}
+                // Another task made it between the check and here; it is
+                // left as it is, like one that was already there.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
             // A plain read-only handle: cap-std's directory handles can be
             // O_PATH on Linux, which fchown refuses.
             let created = self
