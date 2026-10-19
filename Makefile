@@ -67,6 +67,7 @@ BASE_INVENTORY ?= $(lastword $(sort $(wildcard build/images/glasshouse-*-desktop
 sbom: ## Software bill of materials, admins and security reviews only (BR-4); never ship it
 	tools/legal/notices.py $(addprefix --package ,$(SHIPPED)) $(addprefix --shell-package ,$(SHIPPED_SHELL)) \
 		$(if $(BASE_INVENTORY),--base-packages $(BASE_INVENTORY)) --third-party os/freebsd/images/desktop.third-party \
+		$(if $(wildcard build/dist/freebsd/usr/local/share/licenses),--third-party-licenses build/dist/freebsd/usr/local/share/licenses) \
 		--sbom build/sbom/glasshouse.cdx.json
 
 timings: ## Profile a clean build; opens target/cargo-timings/cargo-timing.html

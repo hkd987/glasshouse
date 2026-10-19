@@ -208,12 +208,16 @@ def third_party(list_path: Path, licenses: Path | None) -> list[dict]:
         name, _, version = fields[0].rpartition("-")
         if not name or len(fields) < 2:
             sys.exit(f"notices: {list_path}:{n}: expected '<name>-<version> <path>...'")
-        entry = {"name": name, "version": version, "license": None, "texts": []}
+        entry = {"name": name, "version": version, "license": None, "all": False, "texts": []}
         folder = licenses / fields[0] if licenses else None
         if folder and folder.is_dir():
             catalog = (folder / "catalog.mk").read_text() if (folder / "catalog.mk").exists() else ""
             ids = re.search(r"^_LICENSE=(.*)$", catalog, re.M)
             entry["license"] = ids.group(1).strip() if ids else None
+            # Ports say how several licenses combine: "dual" offers a
+            # choice, "multi" means every one applies.
+            comb = re.search(r"^_LICENSE_COMB=(.*)$", catalog, re.M)
+            entry["all"] = bool(comb) and comb.group(1).strip() == "multi"
             entry["texts"] = [
                 (f.name, f.read_text(errors="replace").strip())
                 for f in sorted(folder.iterdir())
@@ -382,11 +386,17 @@ def main() -> int:
         if not p.get("license") or not license_ids(p["license"]) & allowed
     ]
     libraries = third_party(args.third_party, args.third_party_licenses) if args.third_party else []
-    problems += [
-        f"{lib['name']} {lib['version']}: license {lib['license']!r} is not on the allow list"
-        for lib in libraries
-        if lib["license"] is not None and not license_ids(lib["license"]) & allowed
-    ]
+    for lib in libraries:
+        name = f"{lib['name']} {lib['version']}"
+        if lib["license"] is None:
+            # Only knowable from the staged license files.
+            if args.third_party_licenses:
+                problems.append(f"{name}: its license files don't say which license it is")
+            continue
+        ids = license_ids(lib["license"])
+        ok = ids <= allowed if lib["all"] else bool(ids & allowed)
+        if not ok:
+            problems.append(f"{name}: license {lib['license']!r} is not on the allow list")
     for problem in problems:
         print(f"notices: {problem}", file=sys.stderr)
 
