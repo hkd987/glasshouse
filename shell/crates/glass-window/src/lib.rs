@@ -26,10 +26,12 @@ use iced_core::keyboard::{self, Key, Location, Modifiers, key::Named};
 use iced_core::{Event, Point, Size, mouse};
 use rustix::event::{PollFd, PollFlags, poll};
 use wayland_client::protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm,
-    wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer,
+    wl_data_source, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
 };
-use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, delegate_noop};
+use wayland_client::{
+    Connection, Dispatch, QueueHandle, WEnum, delegate_noop, event_created_child,
+};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 pub use xkbcommon::xkb;
 
@@ -75,6 +77,17 @@ pub trait App {
     fn done(&self) -> bool {
         false
     }
+    /// Text to put on the clipboard, asked after the keys the app took
+    /// (Ctrl Shift C in a terminal; DK-2).
+    fn copied(&mut self) -> Option<String> {
+        None
+    }
+    /// Whether the app asked for the clipboard's text (Ctrl Shift V); it
+    /// comes to [`App::paste`], if there's text on the clipboard.
+    fn wants_paste(&mut self) -> bool {
+        false
+    }
+    fn paste(&mut self, _text: String) {}
 }
 
 /// Wakes the window's loop from another thread, such as a terminal's
@@ -144,6 +157,9 @@ pub fn run_on<A: App>(socket: &Path, mut app: A, mut wake: Wake) -> anyhow::Resu
     let _registry = connection.display().get_registry(&qh, ());
     let mut state = State::default();
     queue.roundtrip(&mut state).context("listing globals")?;
+    if let (Some(manager), Some(seat)) = (&state.data_manager, &state.seat) {
+        state.data_device = Some(manager.get_data_device(seat, &qh, ()));
+    }
     let (Some(compositor), Some(shm), Some(wm_base)) = (
         state.compositor.clone(),
         state.shm.clone(),
@@ -190,6 +206,15 @@ pub fn run_on<A: App>(socket: &Path, mut app: A, mut wake: Wake) -> anyhow::Resu
                 Input::Key(press) => ui_events.extend(press_events(&press)),
                 Input::Ui(event) => ui_events.push(event),
             }
+        }
+        if let Some(text) = app.copied() {
+            state.copy(text, &qh);
+        }
+        if app.wants_paste()
+            && let Some(text) = paste(&state, &connection)
+        {
+            app.paste(text);
+            dirty = true;
         }
         if !ui_events.is_empty() {
             let updated = screen.update(app.view(), &ui_events, state.pointer);
@@ -264,7 +289,14 @@ pub fn run_on<A: App>(socket: &Path, mut app: A, mut wake: Wake) -> anyhow::Resu
             (!fds[0].revents().is_empty(), !fds[1].revents().is_empty())
         };
         if ready.0 {
-            guard.read().context("reading from the compositor")?;
+            // Readable, but not a whole message yet (one carrying a file
+            // descriptor, as the clipboard's do): nothing to do until it is.
+            match guard.read() {
+                Ok(_) => {}
+                Err(wayland_client::backend::WaylandError::Io(e))
+                    if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(anyhow!("reading from the compositor: {e}")),
+            }
         } else {
             drop(guard);
         }
@@ -398,6 +430,17 @@ struct State {
     held: Option<(u32, KeyPress, Instant)>,
     /// Keys per second and the wait before the first repeat.
     repeat: Option<(i32, Duration)>,
+    /// The clipboard (copy and paste between apps, DK-2).
+    data_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
+    data_device: Option<wl_data_device::WlDataDevice>,
+    /// Offers the compositor announced, with the types each comes in.
+    offers: Vec<(wl_data_offer::WlDataOffer, Vec<String>)>,
+    /// What the clipboard holds, offered by whichever app copied it.
+    selection: Option<wl_data_offer::WlDataOffer>,
+    /// What this app copied, while the clipboard is still its.
+    own: Option<(wl_data_source::WlDataSource, String)>,
+    /// The last key's serial: copying names the input that asked for it.
+    serial: u32,
 }
 
 impl State {
@@ -412,6 +455,21 @@ impl State {
         modifiers.set(Modifiers::ALT, on(xkb::MOD_NAME_ALT));
         modifiers.set(Modifiers::LOGO, on(xkb::MOD_NAME_LOGO));
         modifiers
+    }
+
+    /// Puts `text` on the clipboard, for every app.
+    fn copy(&mut self, text: String, qh: &QueueHandle<Self>) {
+        let (Some(manager), Some(device)) = (&self.data_manager, &self.data_device) else {
+            return;
+        };
+        let source = manager.create_data_source(qh, ());
+        for kind in TEXT_TYPES {
+            source.offer(kind.into());
+        }
+        device.set_selection(Some(&source), self.serial);
+        if let Some((old, _)) = self.own.replace((source, text)) {
+            old.destroy();
+        }
     }
 
     fn repeat_at(&self) -> Option<Instant> {
@@ -455,6 +513,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
                 "xdg_wm_base" => state.wm_base = Some(registry.bind(name, 1, qh, ())),
                 "wl_seat" => state.seat = Some(registry.bind(name, version.min(5), qh, ())),
+                "wl_data_device_manager" => {
+                    state.data_manager = Some(registry.bind(name, version.min(3), qh, ()));
+                }
                 _ => {}
             }
         }
@@ -650,11 +711,14 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
             wl_keyboard::Event::RepeatInfo { rate, delay } => {
                 state.repeat = Some((rate, Duration::from_millis(delay.max(0) as u64)));
             }
+            wl_keyboard::Event::Enter { serial, .. } => state.serial = serial,
             wl_keyboard::Event::Key {
                 key,
                 state: pressed,
+                serial,
                 ..
             } => {
+                state.serial = serial;
                 let down = pressed == WEnum::Value(wl_keyboard::KeyState::Pressed);
                 if !down {
                     if state.held.as_ref().is_some_and(|(held, _, _)| *held == key) {
@@ -711,6 +775,129 @@ fn keymap(fd: OwnedFd, size: usize) -> Option<(xkb::Keymap, xkb::State)> {
 }
 
 delegate_noop!(State: wl_compositor::WlCompositor);
+delegate_noop!(State: ignore wl_data_device_manager::WlDataDeviceManager);
+
+/// The text types copied text is offered in, and pasted text is taken in,
+/// best first.
+const TEXT_TYPES: [&str; 3] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
+
+/// The most text a paste takes, and how long it waits for the app that
+/// copied it.
+const PASTE_MAX: usize = 1 << 20;
+const PASTE_WAIT: Duration = Duration::from_secs(1);
+
+/// The clipboard's text: this app's own copy, or read from the app that
+/// copied it, which writes it into a pipe.
+fn paste(state: &State, connection: &Connection) -> Option<String> {
+    if let Some((_, text)) = &state.own {
+        return Some(text.clone());
+    }
+    let offer = state.selection.as_ref()?;
+    let types = &state.offers.iter().find(|(o, _)| o == offer)?.1;
+    let kind = TEXT_TYPES.iter().find(|t| types.iter().any(|m| m == *t))?;
+    let (mut reader, writer) = std::io::pipe().ok()?;
+    offer.receive((*kind).into(), writer.as_fd());
+    drop(writer);
+    connection.flush().ok()?;
+    let mut text = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let end = Instant::now() + PASTE_WAIT;
+    while text.len() < PASTE_MAX {
+        let wait = end.saturating_duration_since(Instant::now());
+        let timeout = rustix::event::Timespec {
+            tv_sec: wait.as_secs() as _,
+            tv_nsec: wait.subsec_nanos() as _,
+        };
+        let mut fds = [PollFd::new(&reader, PollFlags::IN)];
+        if poll(&mut fds, Some(&timeout)).ok()? == 0 {
+            break;
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => text.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    text.truncate(PASTE_MAX);
+    Some(String::from_utf8_lossy(&text).into_owned())
+}
+
+impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_data_device::WlDataDevice,
+        event: wl_data_device::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_device::Event::DataOffer { id } => state.offers.push((id, Vec::new())),
+            // A new clipboard: the offers before it are done with.
+            wl_data_device::Event::Selection { id } => {
+                state.offers.retain(|(offer, _)| {
+                    let current = id.as_ref() == Some(offer);
+                    if !current {
+                        offer.destroy();
+                    }
+                    current
+                });
+                state.selection = id;
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(State, wl_data_device::WlDataDevice, [
+        wl_data_device::EVT_DATA_OFFER_OPCODE => (wl_data_offer::WlDataOffer, ()),
+    ]);
+}
+
+impl Dispatch<wl_data_offer::WlDataOffer, ()> for State {
+    fn event(
+        state: &mut Self,
+        offer: &wl_data_offer::WlDataOffer,
+        event: wl_data_offer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_data_offer::Event::Offer { mime_type } = event
+            && let Some((_, types)) = state.offers.iter_mut().find(|(o, _)| o == offer)
+        {
+            types.push(mime_type);
+        }
+    }
+}
+
+impl Dispatch<wl_data_source::WlDataSource, ()> for State {
+    fn event(
+        state: &mut Self,
+        source: &wl_data_source::WlDataSource,
+        event: wl_data_source::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            // An app pastes what this one copied.
+            wl_data_source::Event::Send { fd, .. } => {
+                if let Some((_, text)) = state.own.as_ref().filter(|(s, _)| s == source) {
+                    let _ = File::from(fd).write_all(text.as_bytes());
+                }
+            }
+            // Another app copied: the clipboard isn't this one's any more.
+            wl_data_source::Event::Cancelled => {
+                if state.own.as_ref().is_some_and(|(s, _)| s == source) {
+                    state.own = None;
+                }
+                source.destroy();
+            }
+            _ => {}
+        }
+    }
+}
 delegate_noop!(State: wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore wl_shm::WlShm);
 delegate_noop!(State: ignore wl_surface::WlSurface);

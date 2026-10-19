@@ -155,3 +155,153 @@ fn ui6_a_native_app_shows_its_view_and_takes_clicks_keys_and_close() {
     let seen = seen.lock().unwrap().clone();
     assert_eq!(seen, ["clicked 1", "key \"a\"", "key \"A\"", "close"]);
 }
+
+/// An app that copies its name on C and pastes on V (DK-2).
+struct Clipper {
+    name: &'static str,
+    size: (u32, u32),
+    seen: Seen,
+    copy: bool,
+    paste: bool,
+}
+
+impl App for Clipper {
+    type Message = Clicked;
+
+    fn title(&self) -> String {
+        self.name.into()
+    }
+    fn app_id(&self) -> String {
+        format!("test.{}", self.name.to_lowercase())
+    }
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+    fn background(&self) -> [u8; 4] {
+        [0x30, 0x20, 0x10, 0xFF]
+    }
+    fn view(&self) -> Element<'_, Clicked> {
+        container(text(self.name)).into()
+    }
+    fn update(&mut self, Clicked: Clicked) {}
+    fn key(&mut self, press: &KeyPress) -> bool {
+        match press.text.as_str() {
+            "c" => self.copy = true,
+            "v" => self.paste = true,
+            _ => {}
+        }
+        true
+    }
+    fn copied(&mut self) -> Option<String> {
+        let copied = std::mem::take(&mut self.copy).then(|| format!("from {}", self.name))?;
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("{} copied", self.name));
+        Some(copied)
+    }
+    fn wants_paste(&mut self) -> bool {
+        std::mem::take(&mut self.paste)
+    }
+    fn paste(&mut self, text: String) {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("{} pasted {text}", self.name));
+    }
+}
+
+#[test]
+fn dk2_copy_in_one_app_and_paste_in_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("wayland-test");
+    let mut compositor = Compositor::new(
+        socket.to_str().unwrap(),
+        (800, 600),
+        WorkArea {
+            top: 32,
+            bottom: 80,
+        },
+    )
+    .unwrap();
+    let seen = Seen::default();
+    let start = |name, size| {
+        let app = Clipper {
+            name,
+            size,
+            seen: seen.clone(),
+            copy: false,
+            paste: false,
+        };
+        let path = socket.clone();
+        std::thread::spawn(move || glass_window::run_on(&path, app, Wake::new().unwrap()))
+    };
+    let _a = start("A", (300, 150));
+    until(&mut compositor, "A's window", |c| c.windows().len() == 1);
+    let _b = start("B", (200, 100));
+    until(&mut compositor, "B's window", |c| {
+        c.windows().len() == 2 && c.windows()[1].focused
+    });
+    let a = compositor.windows()[0].area;
+    let click = |compositor: &mut Compositor, x: i32, y: i32| {
+        compositor.pointer_moved((f64::from(x), f64::from(y)));
+        compositor.pointer_button(BUTTON_LEFT, true);
+        compositor.pointer_button(BUTTON_LEFT, false);
+    };
+    // evdev KEY_C and KEY_V.
+    let press = |compositor: &mut Compositor, code: u32| {
+        compositor.key(code, true);
+        compositor.key(code, false);
+    };
+    let saw = |what: &'static str| {
+        let seen = seen.clone();
+        move |_: &mut Compositor| seen.lock().unwrap().iter().any(|s| s == what)
+    };
+    // The app sends its copy right after it records it; the compositor
+    // takes it from the app with the keyboard only, so it's let in before
+    // the focus moves on.
+    let settle = |compositor: &mut Compositor| {
+        let end = Instant::now() + Duration::from_millis(100);
+        until(compositor, "a moment", |_| Instant::now() >= end);
+    };
+
+    // B copies; A, clicked (its left edge, beside B), pastes it.
+    press(&mut compositor, 46);
+    until(&mut compositor, "B's copy", saw("B copied"));
+    settle(&mut compositor);
+    click(&mut compositor, a.x + 20, a.y + 20);
+    until(&mut compositor, "A in front", |c| {
+        c.windows()[1].title == "A"
+    });
+    press(&mut compositor, 47);
+    until(&mut compositor, "A's paste", saw("A pasted from B"));
+    // A copies and pastes its own (no round trip, so no waiting on
+    // itself); B, brought back (Alt Tab: A covers it now), pastes A's.
+    press(&mut compositor, 46);
+    until(&mut compositor, "A's copy", saw("A copied"));
+    settle(&mut compositor);
+    press(&mut compositor, 47);
+    until(&mut compositor, "A's own paste", saw("A pasted from A"));
+    let b_id = compositor
+        .windows()
+        .iter()
+        .find(|w| w.title == "B")
+        .unwrap()
+        .id;
+    compositor.activate(b_id);
+    until(&mut compositor, "B in front", |c| {
+        c.windows()[1].title == "B"
+    });
+    press(&mut compositor, 47);
+    until(&mut compositor, "B's paste", saw("B pasted from A"));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            "B copied",
+            "A pasted from B",
+            "A copied",
+            "A pasted from A",
+            "B pasted from A"
+        ]
+    );
+}

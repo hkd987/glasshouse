@@ -47,7 +47,9 @@ use smithay::reexports::wayland_server::backend::{ClientData, ClientId, Disconne
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::{Client, Display, ListeningSocket};
+use smithay::reexports::wayland_server::{
+    Client, Display, DisplayHandle, ListeningSocket, Resource,
+};
 use smithay::utils::{
     Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Scale, Serial, Size, Transform,
 };
@@ -59,6 +61,7 @@ use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+    set_data_device_focus,
 };
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
@@ -187,6 +190,7 @@ impl Compositor {
             shm_state: ShmState::new::<State>(&dh, vec![]),
             output_manager_state: OutputManagerState::new_with_xdg_output::<State>(&dh),
             data_device_state: DataDeviceState::new::<State>(&dh),
+            dh: dh.clone(),
             seat_state,
             seat,
             space,
@@ -605,6 +609,8 @@ struct State {
     #[allow(dead_code)] // Keeps `wl_output` and `xdg_output` advertised.
     output_manager_state: OutputManagerState,
     data_device_state: DataDeviceState,
+    /// For handing the clipboard to the app with the keyboard.
+    dh: DisplayHandle,
     seat_state: SeatState<State>,
     seat: Seat<State>,
     space: Space<Window>,
@@ -861,7 +867,12 @@ impl SeatHandler for State {
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    /// The app with the keyboard gets the clipboard: its data device
+    /// hears of the selection, and may set it (copy and paste, DK-2).
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let client = focused.and_then(|surface| self.dh.get_client(surface.id()).ok());
+        set_data_device_focus(&self.dh, seat, client);
+    }
 }
 
 impl SelectionHandler for State {
