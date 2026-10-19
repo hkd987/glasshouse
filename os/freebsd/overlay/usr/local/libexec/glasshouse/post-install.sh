@@ -12,9 +12,25 @@ set -eu
 install -d -o root -g wheel -m 0700 /var/db/glasshouse
 install -d -o root -g wheel -m 0755 /var/run/glasshouse
 
-sysrc -q glassd_enable=YES >/dev/null
+# setconf <file> <name>=<value>...: set what isn't set already. sysrc
+# takes about a second a variable on an emulated machine, so values it
+# would leave as they are aren't handed to it.
+setconf() {
+	file=$1
+	shift
+	for setting; do
+		grep -qxF "${setting%%=*}=\"${setting#*=}\"" "$file" 2>/dev/null ||
+			sysrc -q -f "$file" "$setting" >/dev/null
+	done
+}
+# getconf <name>: its value in /etc/rc.conf (the last one wins, as there).
+getconf() {
+	sed -n "s/^$1=\"\(.*\)\"\$/\1/p" /etc/rc.conf | tail -1
+}
+
+setconf /etc/rc.conf glassd_enable=YES
 # The machine boots into the sign-in screen (ADR 0019).
-sysrc -q glasshouse_greeter_enable=YES >/dev/null
+setconf /etc/rc.conf glasshouse_greeter_enable=YES
 
 # loader_tunable <name> <value>: a dotted loader tunable, which sysrc can't name.
 loader_tunable() {
@@ -27,12 +43,12 @@ loader_tunable() {
 # BR-1. The identity comes from rc.d/glasshouse_identity and the login
 # message from our branding; the base writers they replace are turned off.
 branding=/usr/local/share/glasshouse/branding
-sysrc -q osrelease_enable=NO update_motd=NO glasshouse_identity_enable=YES >/dev/null
+setconf /etc/rc.conf osrelease_enable=NO update_motd=NO glasshouse_identity_enable=YES
 if [ "$(readlink /etc/motd)" != "$branding/motd" ]; then
 	ln -sfh "$branding/motd" /etc/motd
 fi
-if [ "$(sysrc -n hostname 2>/dev/null)" = freebsd ]; then
-	sysrc -q hostname=glasshouse >/dev/null
+if [ "$(getconf hostname)" = freebsd ]; then
+	setconf /etc/rc.conf hostname=glasshouse
 fi
 # Boot: our brand and logo on the menu (the art comes from
 # tools/branding/art.py), then a quiet kernel and rc behind our splash. The
@@ -45,11 +61,11 @@ install -C -o root -g wheel -m 0444 "$branding/splash.png" /boot/images/glasshou
 install -C -o root -g wheel -m 0444 "$branding/logo.png" /boot/images/glasshouse-logo.png
 # (rc.d/glasshouse_identity sets the console for this machine's firmware.)
 # The framebuffer console runs at the screen size the shell draws for (ADR 0016).
-sysrc -q -f /boot/loader.conf loader_brand=glasshouse loader_logo=glasshouse \
+setconf /boot/loader.conf loader_brand=glasshouse loader_logo=glasshouse \
 	loader_menu_title="Welcome to Glasshouse" autoboot_delay=0 beastie_disable=NO \
 	boot_mute=YES efi_max_resolution=1280x800 vbe_max_resolution=1280x800 \
 	splash=/boot/images/glasshouse-splash.png \
-	shutdown_splash=/boot/images/glasshouse-splash.png >/dev/null
+	shutdown_splash=/boot/images/glasshouse-splash.png
 # A fast boot (docs/dev/performance.md, "Boot"): the root file system is on
 # an internal disk, so don't wait for USB to finish probing before mounting
 # it (a USB-booted copy still finds its root: the kernel keeps trying for
@@ -60,11 +76,11 @@ sysrc -q -f /boot/loader.conf loader_brand=glasshouse loader_logo=glasshouse \
 # disk (ADR 0021).
 loader_tunable hw.usb.no_boot_wait 1
 loader_tunable vfs.mountroot.timeout 10
-sysrc -q devd_flags="-n" defaultroute_delay=0 >/dev/null
-case $(sysrc -n ifconfig_DEFAULT 2>/dev/null) in
-*SYNCDHCP*) sysrc -q ifconfig_DEFAULT="$(sysrc -n ifconfig_DEFAULT | sed 's/SYNCDHCP/DHCP/')" >/dev/null ;;
+setconf /etc/rc.conf devd_flags="-n" defaultroute_delay=0
+case $(getconf ifconfig_DEFAULT) in
+*SYNCDHCP*) setconf /etc/rc.conf ifconfig_DEFAULT="$(getconf ifconfig_DEFAULT | sed 's/SYNCDHCP/DHCP/')" ;;
 esac
-sysrc -q rc_startmsgs=NO >/dev/null
+setconf /etc/rc.conf rc_startmsgs=NO
 service glasshouse_identity start >/dev/null
 # Space ZFS frees goes back to the disk as it's freed: SSDs keep their write
 # speed, and a VM's sparse disk doesn't grow with every file rewritten (busy
