@@ -368,6 +368,10 @@ impl Sandbox for JailSandbox {
         }
         Ok(cleaned)
     }
+
+    fn run_tool(&self, run: &super::ToolRun) -> Result<super::ToolOutput> {
+        super::tool::run_jailed(run)
+    }
 }
 
 fn strip_root(path: &Path) -> Result<&Path> {

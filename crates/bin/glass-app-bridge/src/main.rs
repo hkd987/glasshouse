@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use glass_api::{AppCallResult, AppManifest, AppSession, AppStatus, app_methods};
+use glass_api::{AppCallResult, AppFiles, AppManifest, AppSession, AppStatus, app_methods};
 use glass_rpc::{Client, ClientError, codes};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -124,6 +124,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         port,
         apps,
         sessions: Mutex::new(BTreeMap::new()),
+        own: Mutex::new(BTreeMap::new()),
     });
     let only = args.session.then_some(uid);
     loop {
@@ -193,6 +194,9 @@ struct Bridge {
     apps: BTreeMap<String, PathBuf>,
     /// One session per app, opened on first use.
     sessions: Mutex<BTreeMap<String, Arc<Open>>>,
+    /// The person's own apps' files (ADR 0032), from glassd: asked for
+    /// again with each page, so a new version shows on reload.
+    own: Mutex<BTreeMap<String, Arc<AppFiles>>>,
 }
 
 struct Open {
@@ -242,6 +246,7 @@ impl Bridge {
         let Some(app) = app_for_host(request.header("host"), self.port, &self.apps) else {
             return Response::text(421, "no app is served at this address");
         };
+        let app = app.as_str();
         if let Some(endpoint) = request.path.strip_prefix("/_bridge/") {
             if let Err((status, why)) = check_call(request, app, self.port) {
                 return Response::text(status, why);
@@ -265,7 +270,9 @@ impl Bridge {
         let Some(rel) = static_path(path) else {
             return Response::text(404, "not found");
         };
-        let root = &self.apps[app];
+        let Some(root) = self.apps.get(app) else {
+            return self.own_file(app, &rel).await;
+        };
         let file = root.join(&rel);
         // Built files only: nothing a link inside dist/ points at elsewhere.
         let inside = match (
@@ -282,14 +289,45 @@ impl Bridge {
         let Some(body) = body else {
             return Response::text(404, "not found (build the apps with make apps-build)");
         };
-        let mut response =
-            Response::new(200, content_type(&rel), body).with("Cache-Control", "no-cache");
-        if rel.ends_with(".html") {
-            response = response
-                .with("Content-Security-Policy", CSP)
-                .with("Cross-Origin-Opener-Policy", "same-origin");
+        page(&rel, body)
+    }
+
+    /// A file of one of the person's own apps (ADR 0032): what glassd built
+    /// from the version they chose, never a folder they could change.
+    async fn own_file(&self, app: &str, rel: &str) -> Response {
+        let cached = self.own.lock().await.get(app).cloned();
+        let files = match cached {
+            Some(files) if rel != "index.html" => files,
+            _ => match self.own_files(app).await {
+                Ok(files) => files,
+                Err(Relay::Down) => {
+                    return Response::text(503, "the system isn't answering right now");
+                }
+                Err(Relay::Refused(_)) => {
+                    return Response::text(421, "no app is served at this address");
+                }
+            },
+        };
+        match files.files.get(rel) {
+            Some(text) => page(rel, text.clone().into_bytes()),
+            None => Response::text(404, "not found"),
         }
-        response
+    }
+
+    async fn own_files(&self, app: &str) -> Result<Arc<AppFiles>, Relay> {
+        let client = Client::connect(&self.socket)
+            .await
+            .map_err(|_| Relay::Down)?;
+        let files: AppFiles = client
+            .call(app_methods::APP_FILES, json!({ "app": app }))
+            .await
+            .map_err(relay_error)?;
+        let files = Arc::new(files);
+        self.own
+            .lock()
+            .await
+            .insert(app.to_owned(), Arc::clone(&files));
+        Ok(files)
     }
 
     async fn api(&self, app: &str, endpoint: &str, body: &[u8]) -> Result<Value, Relay> {
@@ -372,6 +410,19 @@ impl Bridge {
     }
 }
 
+/// A file as the bridge serves it: pages with the CSP that keeps them to
+/// their own files and bridge.
+fn page(rel: &str, body: Vec<u8>) -> Response {
+    let mut response =
+        Response::new(200, content_type(rel), body).with("Cache-Control", "no-cache");
+    if rel.ends_with(".html") {
+        response = response
+            .with("Content-Security-Policy", CSP)
+            .with("Cross-Origin-Opener-Policy", "same-origin");
+    }
+    response
+}
+
 fn relay_error(e: ClientError) -> Relay {
     match e {
         ClientError::Rpc(e) => Relay::Refused(e.message),
@@ -380,16 +431,16 @@ fn relay_error(e: ClientError) -> Relay {
 }
 
 /// The app this request is for: its own origin, `<app>.localhost:<port>`,
-/// exactly. Any other Host (another name pointed at loopback, a bare IP)
-/// is refused, which also keeps DNS rebinding out.
-fn app_for_host<'a>(
-    host: Option<&str>,
-    port: u16,
-    apps: &'a BTreeMap<String, PathBuf>,
-) -> Option<&'a str> {
+/// exactly, for an installed app or one of the person's own (`my-…`, which
+/// glassd says whether they have). Any other Host (another name pointed at
+/// loopback, a bare IP) is refused, which also keeps DNS rebinding out.
+fn app_for_host(host: Option<&str>, port: u16, apps: &BTreeMap<String, PathBuf>) -> Option<String> {
     let host = host?.to_ascii_lowercase();
     let name = host.strip_suffix(&format!(".localhost:{port}"))?;
-    apps.get_key_value(name).map(|(id, _)| id.as_str())
+    let own = name
+        .parse::<glass_types::AgentId>()
+        .is_ok_and(|id| id.is_personal());
+    (apps.contains_key(name) || own).then(|| name.to_owned())
 }
 
 /// A call must come from the app's own page: a JSON POST (which a page on
@@ -484,19 +535,22 @@ mod tests {
     #[test]
     fn ui5_each_app_is_its_own_origin() {
         let apps = apps();
+        let named = |host| app_for_host(Some(host), 7300, &apps);
+        assert_eq!(named("mail.localhost:7300").as_deref(), Some("mail"));
         assert_eq!(
-            app_for_host(Some("mail.localhost:7300"), 7300, &apps),
-            Some("mail")
-        );
-        assert_eq!(
-            app_for_host(Some("Calendar.LOCALHOST:7300"), 7300, &apps),
+            named("Calendar.LOCALHOST:7300").as_deref(),
             Some("calendar")
         );
+        // A person's own app: glassd says whether it's theirs (ADR 0032).
+        assert_eq!(named("my-mail.localhost:7300").as_deref(), Some("my-mail"));
         for host in [
             "mail.localhost:7301",
             "127.0.0.1:7300",
             "localhost:7300",
             "notes.localhost:7300",
+            "my-.localhost:7300",
+            "my_mail.localhost:7300",
+            "a.my-mail.localhost:7300",
             "mail.localhost.evil.example:7300",
             "evil.example:7300",
         ] {

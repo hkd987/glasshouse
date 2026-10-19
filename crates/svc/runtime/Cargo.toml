@@ -11,6 +11,7 @@ publish.workspace = true
 glass-actions.workspace = true
 glass-api.workspace = true
 glass-app-settings.workspace = true
+glass-app-studio.workspace = true
 glass-audit.workspace = true
 glass-broker.workspace = true
 glass-gateway.workspace = true

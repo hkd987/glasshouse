@@ -23,6 +23,7 @@ mod harness;
 mod models;
 mod perf;
 mod scenarios;
+mod studio;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -48,9 +49,9 @@ const PARALLEL: &[&str] = &[
     "harness",
 ];
 /// Run after the parallel ones, one at a time: `invoices` sends mail,
-/// `tailor` changes the invoice agent's layer, and `perf` and `load` must
-/// run alone.
-const SERIAL: &[&str] = &["invoices", "tailor", "perf", "load"];
+/// `tailor` changes the invoice agent's layer, `studio` times a bundle, and
+/// `perf` and `load` must run alone.
+const SERIAL: &[&str] = &["invoices", "tailor", "studio", "perf", "load"];
 /// Live tasks one user may have is 8 (glassd.toml); stay under it.
 const AT_ONCE: usize = 6;
 
@@ -187,6 +188,7 @@ async fn scenario(name: &str, h: &Harness) -> anyhow::Result<()> {
         "harness" => scenarios::harness(h).await,
         "perf" => perf::perf(h).await,
         "models" => models::models(h).await,
+        "studio" => studio::studio(h).await,
         "load" => perf::under_load(h).await,
         other => Err(anyhow::anyhow!("unknown scenario {other}")),
     }

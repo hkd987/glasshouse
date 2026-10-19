@@ -1,7 +1,7 @@
 # 0032. Remix and share: every app is source, every change is checked, the store is the only way between people
 
 Status: **Proposed** (2026-10-19), for the owner's review. Slice R1 is
-being built. PRD GA-1 to GA-11, TL-3, TL-4, TL-10, TL-20 to TL-22, DV-2
+built (below, "What R1 built"). PRD GA-1 to GA-11, TL-3, TL-4, TL-10, TL-20 to TL-22, DV-2
 to DV-4, DV-10, UX-40. The owner asked (2026-10-19) that every piece of
 software on the computer be hackable and customizable, that people share
 what they make, that it never become shadow IT because it goes back into
@@ -66,9 +66,12 @@ Builds on ADRs 0013, 0014, 0023, 0024 and 0026.
        or raw network APIs. Action names are literal, and every action
        called is declared. Declared but never called is reported.
      - Limits on files, sizes and total source.
-     - The bundle: esbuild (MIT, from the base system's packages, added
-       to the image's third-party list) as an unprivileged process with
-       no network and a time limit.
+     - The bundle: esbuild (MIT), the version and checksum the apps'
+       lockfile pins, so the computer builds people's apps as we build
+       ours. It runs once per save in a jail of its own: the build
+       folder is its whole filesystem, with esbuild's folder mounted
+       read-only, no devices, no addresses, as nobody, for a minute at
+       most, gone with its mount when esbuild exits.
    - Versions live in `<state>/apps/<login>/<id>/<n>/`, root-only. The
      person's bridge gets their apps' files from glassd over the app
      socket, so what runs is what was checked.
@@ -138,6 +141,45 @@ Builds on ADRs 0013, 0014, 0023, 0024 and 0026.
 
    The console lists popular remixes, so IT can adopt one as supported
    (GA-11).
+
+## What R1 built
+- `glass-app-studio` (`crates/apps/studio`):
+  - the checks (`checks.rs`), read from tokens, not text, with
+    comments skipped and regular expressions read whole;
+  - the store (`store.rs`);
+  - the bundler (`bundle.rs`);
+  - the six actions.
+- `Sandbox::run_tool` (`glass-platform`): the jail above, or a plain
+  process on the development host.
+- The runtime:
+  - lists a person's apps after the org's;
+  - opens one only for its maker, and a remix only while the app it
+    remixes is in their profile;
+  - closes one when IT takes that app away;
+  - answers `app.files`.
+- Policy never gives an `my-` id an `[[app]]`'s rules and refuses to
+  name one. So do catalog releases and installed apps.
+- The bridge serves `my-` origins from `app.files`, asking again with
+  each page.
+- Images carry each app's `src/`, the SDK with its template, and
+  esbuild.
+- Every computer's report lists what was made there. The console's
+  Devices page shows it as "Apps people made".
+- Tests:
+  - the studio's own tests;
+  - the runtime's `tests/studio.rs`;
+  - the console's `ga10_…`;
+  - `apps/e2e/studio.spec.ts`, where Claude Code remixes Mail over MCP
+    and it runs on its own origin;
+  - the VM scenario `studio`: a jailed bundle in 2.0 s, nothing left
+    behind;
+  - the probe's new check that agents can't open the store.
+- Not yet:
+  - the store's memory limit for the bundler (rctl, as tasks have);
+  - policy's say over who may build (GA-10; everyone may);
+  - Meet can't be remixed until workers are allowed;
+  - the Store's Yours shelf;
+  - the remix's own window title, which comes from its source.
 
 ## Slices
 - **R1, remix on the computer:**

@@ -12,6 +12,7 @@ anyhow.workspace = true
 clap.workspace = true
 glass-actions.workspace = true
 glass-app-catalog.workspace = true
+glass-app-studio.workspace = true
 glass-app-system.workspace = true
 glass-first-party.workspace = true
 glass-gateway.workspace = true

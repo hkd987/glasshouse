@@ -223,6 +223,13 @@ impl CatalogRelease {
             if item.name.trim().is_empty() || item.name.chars().any(char::is_control) {
                 return Err(format!("{}: the name must be one line", item.id));
             }
+            if item.id.is_personal() {
+                return Err(format!(
+                    "{}: ids that start {} are people's own apps; a catalog item needs its own",
+                    item.id,
+                    glass_types::PERSONAL_PREFIX
+                ));
+            }
         }
         Ok(())
     }
@@ -324,6 +331,12 @@ fn fold(word: &str) -> String {
 fn same(a: &str, b: &str) -> bool {
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     short == long || (short.chars().count() >= 4 && long.starts_with(short))
+}
+
+/// How many of `need`'s words `text` has, as search scores them: for
+/// ranking other things people may start from (GA-12).
+pub fn relevance(need: &str, text: &str) -> u32 {
+    hits(&words(need), text)
 }
 
 fn hits(need: &[String], text: &str) -> u32 {
@@ -510,6 +523,11 @@ mod tests {
         let err = release.check().unwrap_err();
         assert!(err.contains("one id namespace"), "{err}");
         assert!(serde_json::from_str::<CatalogItem>(r#"{"id":"Bad Id"}"#).is_err());
+        // A person's own app's id is theirs (ADR 0032).
+        let mine = CatalogRelease {
+            items: vec![item("my-mail", "My Mail", "", &[])],
+        };
+        assert!(mine.check().unwrap_err().contains("people's own apps"));
     }
 
     #[test]

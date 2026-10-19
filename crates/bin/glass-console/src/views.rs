@@ -384,6 +384,9 @@ pub fn fleet(state: &State, directory: &dyn Directory, console_url: &str) -> Val
     let now = Timestamp::now().unix_seconds();
     let mut totals = (0usize, 0usize, 0usize, 0u64);
     let mut users = BTreeSet::new();
+    // Every app people made, on every computer (GA-10, ADR 0032): who made
+    // it, from what, and what it does beyond that.
+    let mut made: Vec<Value> = Vec::new();
     // Most recently heard from first: the devices IT is looking at now.
     let mut sorted: Vec<_> = state.fleet.devices.values().collect();
     sorted.sort_by(|a, b| {
@@ -406,6 +409,19 @@ pub fn fleet(state: &State, directory: &dyn Directory, console_url: &str) -> Val
             totals.3 += u64::from(blocked);
             if let Some(r) = r {
                 users.extend(r.users.iter().cloned());
+                made.extend(r.made_here.iter().map(|m| {
+                    json!({
+                        "app": m.app,
+                        "name": m.name,
+                        "owner": directory.display_name(&m.owner),
+                        "device": r.name,
+                        "version": m.version,
+                        "based_on": m.based_on,
+                        "actions": m.actions,
+                        "beyond_base": m.beyond_base,
+                        "saved_at": m.saved_at,
+                    })
+                }));
             }
             json!({
                 "id": d.id,
@@ -457,6 +473,7 @@ pub fn fleet(state: &State, directory: &dyn Directory, console_url: &str) -> Val
         "rings": rings,
         "catalog_version": state.catalog.released.as_ref().map(|s| s.version),
         "devices": devices,
+        "made": made,
         "enroll": {
             "url": console_url,
             "org": state.org.id,

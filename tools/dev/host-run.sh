@@ -54,6 +54,11 @@ agent_dirs = ["$bin"]
 [snapshots]
 backend = "copy"
 
+# Remixing and making apps (ADR 0032): the apps workspace's esbuild and SDK.
+[studio]
+bundler = "$repo/apps/node_modules/@esbuild/linux-x64/bin/esbuild"
+sdk = "$repo/apps/sdk"
+
 [[agent]]
 id = "invoice-demo"
 name = "Invoice demo"

@@ -174,12 +174,14 @@ allowed_actions = ["files.*", "mail.*"]
 # The user's own Claude Code, connected through glass-mcp (HX-1): Take over on
 # an ended task carries on there. It reads the person's chat quietly and asks
 # before it posts (CF-91). Before it builds something it checks the
-# org's catalog for an approved app that already does it (GA-2). Its calls go
+# org's catalog for an approved app that already does it (GA-2), then the
+# apps the person can remix, and it makes an app of theirs only after both
+# (apps.*, ADR 0032: checked and kept by glassd, theirs alone). Its calls go
 # through the same tiers, audit and undo as any agent's. Confidential data
 # stays out of harnesses that send model traffic to their own provider (HX-7).
 [[agent]]
 id = "claude-code"
-allowed_actions = ["files.*", "mail.*", "calendar.*", "catalog.search", "people.search", "settings.list", "chat.list", "chat.read", "chat.post"]
+allowed_actions = ["files.*", "mail.*", "calendar.*", "catalog.search", "people.search", "settings.list", "chat.list", "chat.read", "chat.post", "apps.*"]
 max_label = "internal"
 
 # Diagnostics agent that tries to break out of its sandbox and reports what it

@@ -114,6 +114,10 @@ impl Handler for AppApi {
                 }
                 Ok(Value::Null)
             }
+            app_methods::APP_FILES => {
+                let open: AppOpen = parse_params(params)?;
+                to_result(&blocking(|| rt.app_files(&caller, &open.app))?)
+            }
             other => Err(RpcError::method_not_found(other)),
         }
     }

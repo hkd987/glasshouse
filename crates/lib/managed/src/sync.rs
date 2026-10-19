@@ -169,5 +169,27 @@ pub struct DeviceReport {
     /// Why the last release was refused or the last sync failed, if it was.
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Every app people made on this computer (GA-10, ADR 0032): nothing
+    /// they make is hidden from IT.
+    #[serde(default)]
+    pub made_here: Vec<MadeApp>,
     pub reported_at: Timestamp,
+}
+
+/// An app someone made on a computer, at its latest version: what IT's
+/// inventory shows (GA-9, GA-10). What it declares, never its data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MadeApp {
+    pub app: String,
+    pub name: String,
+    pub owner: String,
+    pub version: u32,
+    /// The app it remixes (`mail@0.1.0`); none for one built new.
+    #[serde(default)]
+    pub based_on: Option<String>,
+    /// The actions it declares, and those beyond what it remixes.
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub beyond_base: Vec<String>,
+    pub saved_at: Timestamp,
 }

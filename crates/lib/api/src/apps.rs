@@ -43,6 +43,10 @@ pub mod app_methods {
     pub const APP_STATUS: &str = "app.status";
     /// [`crate::AppSessionRef`] → `()`.
     pub const APP_CLOSE: &str = "app.close";
+    /// [`crate::AppOpen`] → [`crate::AppFiles`]: what one of the caller's
+    /// own apps serves now (ADR 0032). The bridge serves those from here,
+    /// never from a folder.
+    pub const APP_FILES: &str = "app.files";
 }
 
 /// An app in the caller's profile (`apps.list`), which is what the
@@ -180,6 +184,15 @@ impl AppManifest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppOpen {
     pub app: AgentId,
+}
+
+/// What one of a person's own apps serves (ADR 0032): the files glassd
+/// built from the version they chose, by name (`index.html`, `app.js`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppFiles {
+    pub app: AgentId,
+    pub version: u32,
+    pub files: std::collections::BTreeMap<String, String>,
 }
 
 /// An open app, for one user.

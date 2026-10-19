@@ -56,6 +56,7 @@ fails when one goes over:
 | Meet, memory (before joining) | 150 MB | UI-7 | 100 MB |
 | Joining a meeting: Join to the other person on screen, through the computer, the console and the relay | 2 s | UI-7, CF-21 | 1427 ms (`meetings.e2e.ts`); 1311 ms page to relay alone (`meet.e2e.ts`) |
 | A page in a two-person call | 250 MB | UI-7, CF-21 | 169 MB |
+| Saving an app someone remixed: the checks, a bundle in a jail of its own, the version kept | 10 s | GA-4, ADR 0032 | 2.0 s for Mail on the VM (scenario `studio`) |
 
 *Cold launch* is a fresh browser context (no cache, no service worker, no
 stored data), from navigation to the app drawn with its data (the
@@ -262,6 +263,7 @@ fails when one goes over:
 | Meet, memory (before joining) | 150 MB | UI-7 | 100 MB |
 | Joining a meeting: Join to the other person on screen, through the computer, the console and the relay | 2 s | UI-7, CF-21 | 1427 ms (`meetings.e2e.ts`); 1311 ms page to relay alone (`meet.e2e.ts`) |
 | A page in a two-person call | 250 MB | UI-7, CF-21 | 169 MB |
+| Saving an app someone remixed: the checks, a bundle in a jail of its own, the version kept | 10 s | GA-4, ADR 0032 | 2.0 s for Mail on the VM (scenario `studio`) |
 
 *Cold launch* is a fresh browser context (no cache, no service worker, no
 stored data), from navigation to the app drawn with its data (the

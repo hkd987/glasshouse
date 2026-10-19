@@ -78,6 +78,10 @@ impl Sandbox for HostSandbox {
     fn cleanup_stale(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
+
+    fn run_tool(&self, run: &super::ToolRun) -> Result<super::ToolOutput> {
+        super::tool::run_unconfined(run)
+    }
 }
 
 #[cfg(test)]

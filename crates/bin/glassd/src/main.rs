@@ -175,16 +175,26 @@ pub(crate) struct OrgData {
     /// How meetings reach the console's meeting routes (CF-21). Meetings
     /// are conversations in `chat`'s store; the media key is never kept.
     pub(crate) meet: glass_first_party::MeetHandle,
+    /// The apps people make (ADR 0032), kept root only in the state
+    /// directory; bundled in jails once the sandbox is up.
+    pub(crate) studio: glass_first_party::Studio,
 }
 
 impl OrgData {
-    pub(crate) fn new(state_dir: &std::path::Path) -> Self {
+    pub(crate) fn new(config: &Config) -> Self {
+        let state_dir = &config.state_dir;
         Self {
             catalog: CatalogHandle::new(),
             directory: glass_managed::DirectoryHandle::new(),
             settings: glass_runtime::SettingsHandle::new(state_dir.join("settings")),
             chat: glass_first_party::ChatHandle::new(state_dir.join("chat")),
             meet: glass_first_party::MeetHandle::new(),
+            studio: glass_first_party::Studio::new(glass_app_studio::StudioPaths {
+                store: state_dir.join("apps"),
+                installed: config.apps_dir.clone(),
+                sdk: config.studio.sdk.clone(),
+                bundler: config.studio.bundler.clone(),
+            }),
         }
     }
 }
@@ -206,7 +216,7 @@ fn prepare(args: &Args) -> anyhow::Result<Prepared> {
             ));
         }
     }
-    let org = OrgData::new(&config.state_dir);
+    let org = OrgData::new(&config);
     let registry = registry(&config, &loaded.policy, &org)?;
     for warning in loaded.policy.lint(&registry.lint_info()) {
         tracing::warn!("policy: {warning}");
@@ -255,6 +265,23 @@ impl glass_runtime::CatalogGate for OrgCatalog {
     }
 }
 
+/// What the org's catalog offers someone in `groups` for `need` (GA-2),
+/// for the studio to suggest before anything is built (GA-12).
+fn studio_offers(
+    catalog: &CatalogHandle,
+    groups: &[String],
+    need: &str,
+) -> Vec<(glass_types::AgentId, String)> {
+    let Some(applied) = catalog.current() else {
+        return Vec::new();
+    };
+    glass_managed::catalog::search(&applied.release.items, groups, need, None, 5)
+        .into_iter()
+        .filter(|m| m.score > 0)
+        .map(|m| (m.item.id.clone(), m.item.name.clone()))
+        .collect()
+}
+
 fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<Registry> {
     Ok(glass_first_party::registry(glass_first_party::Setup {
         // IT's fix list decides what the IT agent may restart (AE-4).
@@ -270,6 +297,7 @@ fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<R
         chat: org.chat.clone(),
         meet: org.meet.clone(),
         managed: config.managed.is_some(),
+        studio: org.studio.clone(),
     })?)
 }
 
@@ -398,6 +426,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             console_url: config.managed.as_ref().map(|m| m.url.clone()),
             dev_home: config.dev_home.clone(),
             org_catalog: Arc::new(OrgCatalog(org.catalog.clone())),
+            personal: Arc::new(org.studio.clone()),
         },
         policy: loaded.policy.clone(),
         policy_source: policy_source.clone(),
@@ -408,6 +437,18 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         gateway: models.gateway,
         settings: org.settings.clone(),
     });
+
+    // Apps people make are bundled in jails like agents' (ADR 0032), and
+    // checked against the policy in force and the org's catalog.
+    org.studio.set_sandbox(Arc::clone(&sandbox));
+    {
+        let catalog = org.catalog.clone();
+        org.studio
+            .set_surroundings(Arc::new(glass_runtime::StudioSurroundings::new(
+                &runtime,
+                move |groups, need| studio_offers(&catalog, groups, need),
+            )));
+    }
 
     // A new agent version re-checks every layer on it (TL-13).
     runtime.recheck_layers();

@@ -20,6 +20,7 @@
 
 mod host;
 mod jail;
+mod tool;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,7 @@ use serde::{Deserialize, Serialize};
 
 pub use host::HostSandbox;
 pub use jail::{JailConfig, JailSandbox};
+pub use tool::{ToolOutput, ToolRun};
 
 use crate::Result;
 
@@ -162,6 +164,11 @@ pub trait Sandbox: Send + Sync + fmt::Debug {
 
     /// Destroys sandboxes left behind by an earlier daemon run.
     fn cleanup_stale(&self) -> Result<Vec<String>>;
+
+    /// Runs a tool once on files in its folder, as tightly confined as
+    /// this backend can: glassd bundles the apps people make this way
+    /// (ADR 0032).
+    fn run_tool(&self, run: &ToolRun) -> Result<ToolOutput>;
 }
 
 /// Validates a sandbox name: it doubles as a jail name and a file name.

@@ -21,6 +21,7 @@ use glass_app_mail::MailProvider;
 use glass_app_meet::{MeetHandle, MeetProvider};
 use glass_app_people::PeopleProvider;
 use glass_app_settings::{SettingsHandle, SettingsProvider};
+use glass_app_studio::{Studio, StudioPaths, StudioProvider};
 use glass_app_system::{SystemOps, SystemProvider};
 use glass_audit::{AuditLog, Durability};
 use glass_gateway::{Gateway, ModelAction, ProviderError, ScriptedProvider};
@@ -56,6 +57,8 @@ pub struct Harness {
     /// How meetings reach the console (CF-21); unconnected until a test
     /// connects it.
     pub meet: MeetHandle,
+    /// The apps people make (ADR 0032), bundled by a stand-in for esbuild.
+    pub studio: Studio,
 }
 
 impl Harness {
@@ -82,6 +85,7 @@ impl Harness {
             &self.settings,
             &self.chat,
             &self.meet,
+            &self.studio,
             &policy,
         );
         self.rt.apply_policy(policy, registry, "test");
@@ -100,6 +104,7 @@ impl Harness {
             &self.settings,
             &self.chat,
             &self.meet,
+            &self.studio,
             &policy,
         );
         self.rt.apply_policy(policy, registry, source);
@@ -215,6 +220,7 @@ fn test_registry(
     settings: &SettingsHandle,
     chat: &ChatHandle,
     meet: &MeetHandle,
+    studio: &Studio,
     policy: &Policy,
 ) -> Registry {
     let mut registry = Registry::new();
@@ -258,6 +264,9 @@ fn test_registry(
         .unwrap();
     registry.register(Arc::new(chat)).unwrap();
     registry
+        .register(Arc::new(StudioProvider::new(studio.clone())))
+        .unwrap();
+    registry
 }
 
 /// A harness whose policy is the default plus `policy_extra`, in which
@@ -287,6 +296,14 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     let settings = SettingsHandle::new(dir.path().join("state/settings"));
     let chat = ChatHandle::new(dir.path().join("state/chat"));
     let meet = MeetHandle::new();
+    let apps_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps");
+    let studio = Studio::new(StudioPaths {
+        store: dir.path().join("state/apps"),
+        installed: apps_dir.clone(),
+        sdk: apps_dir.join("sdk"),
+        bundler: "/nonexistent".into(),
+    });
+    studio.set_sandbox(Arc::new(glass_app_studio::testing::FakeBundler::default()));
     let registry = test_registry(
         dir.path(),
         &machine,
@@ -295,6 +312,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         &settings,
         &chat,
         &meet,
+        &studio,
         &policy,
     );
     // Policy names these providers; `down` is always rate limited (MP-8).
@@ -327,6 +345,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
             console_url: None,
             dev_home: Some(home.clone()),
             org_catalog: Arc::new(OrgCatalog(catalog.clone())),
+            personal: Arc::new(studio.clone()),
         },
         policy,
         policy_source: "test".into(),
@@ -339,6 +358,10 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         gateway: Arc::new(gateway),
         settings: settings.clone(),
     });
+    studio.set_surroundings(Arc::new(glass_runtime::StudioSurroundings::new(
+        &rt,
+        |_groups, _need| Vec::new(),
+    )));
     // News in chat wakes the person's Chat, as glassd wires it.
     {
         let rt = Arc::downgrade(&rt);
@@ -367,6 +390,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         settings,
         chat,
         meet,
+        studio,
     }
 }
 
@@ -406,6 +430,7 @@ pub fn rebuild_with(h: &Harness, policy: &str, catalog: Vec<CatalogEntry>) -> Ar
             console_url: None,
             dev_home: None,
             org_catalog: Arc::new(glass_runtime::OpenCatalog),
+            personal: Arc::new(glass_runtime::NoPersonalApps),
         },
         policy: Policy::from_toml(policy).unwrap(),
         policy_source: "test".into(),

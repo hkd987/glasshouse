@@ -255,7 +255,15 @@ impl Runtime {
         for task in apps {
             if let Some(manifest) = &task.app {
                 // Taken out of the person's profile: the open app closes.
-                if !policy.apps_for(&task.user.name).contains(&manifest.id) {
+                // Their own app goes with the app it remixes (ADR 0032).
+                let kept = if manifest.id.is_personal() {
+                    self.own_apps(&task.user)
+                        .iter()
+                        .any(|own| own.manifest.id == manifest.id)
+                } else {
+                    policy.apps_for(&task.user.name).contains(&manifest.id)
+                };
+                if !kept {
                     if task.lock().tile.is_live() {
                         self.end_task(
                             &task,

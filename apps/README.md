@@ -21,6 +21,8 @@ apps/
   chat/       the org's chat (CF-91, ADR 0030): glassd seals and opens it; the
               page keeps nothing (bridge.call only, no offline permission) and
               hears of news from app.status waits, ids only
+  sdk/template/ where a new app starts (ADR 0032): a manifest without an
+              id and a small src/; apps.source {"template": true} hands it out
   console/    the admin console's web app (ADR 0023): a site glass-console serves,
               not a device app (no manifest, no service worker)
   e2e/        Playwright: the apps against dev-host glassd and the bridge;
@@ -29,6 +31,20 @@ apps/
               (crates/apps/chat/examples/colleague.rs)
   build.mjs   esbuild: each app into <app>/dist (app.js, app.css, sw.js)
 ```
+
+## Apps people make (ADR 0032)
+
+Every app here ships its `src/` in images, and people remix it, usually by
+asking their agent: `apps.bases` lists what they can start from,
+`apps.source` hands out an app's files, `apps.save` checks, bundles and
+keeps their version (`crates/apps/studio`). Their app's id starts `my-`,
+it has its own origin, the bridge serves it from glassd (`app.files`), and
+it does only what its maker's policy allows, never with its base's own
+rules. So keep our apps' source readable: it is what customers start from,
+and `glass-app-studio`'s `tl5_first_party_apps_pass_their_own_checks`
+fails when one stops passing the checks a remix of it gets (no `innerHTML`,
+`fetch`, storage of its own, workers or action names it doesn't declare;
+Meet's worker is the known exception).
 
 ## Running them
 

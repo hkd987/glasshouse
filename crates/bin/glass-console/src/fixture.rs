@@ -367,6 +367,7 @@ pub fn fill(
                     agents: running,
                     blocked_24h: blocked,
                     last_error: None,
+                    made_here: Vec::new(),
                     reported_at: now,
                 }),
             },

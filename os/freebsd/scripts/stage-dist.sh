@@ -68,12 +68,35 @@ done
 
 # The web apps (UI-5): each one's manifest, which glassd installs it from, and its built files,
 # which the person's app bridge serves (make apps-build). The admin console isn't a device app.
+# Each ships its source beside them, which people remix into their own (ADR 0032).
 for manifest in "$REPO_ROOT"/apps/*/manifest.json; do
 	app=$(basename "$(dirname "$manifest")")
 	[[ -f $REPO_ROOT/apps/$app/dist/app.js ]] || die "apps/$app isn't built (make apps-build)"
 	install -D -m 0644 "$manifest" "$DIST_DIR/usr/local/share/glasshouse/apps/$app/manifest.json"
 	cp -Rp "$REPO_ROOT/apps/$app/dist" "$DIST_DIR/usr/local/share/glasshouse/apps/$app/dist"
+	cp -Rp "$REPO_ROOT/apps/$app/src" "$DIST_DIR/usr/local/share/glasshouse/apps/$app/src"
 done
+# The SDK every remix builds on, and the template a new app starts from.
+sdk=$DIST_DIR/usr/local/share/glasshouse/sdk
+install -D -m 0644 "$REPO_ROOT/apps/sdk/package.json" "$sdk/package.json"
+cp -Rp "$REPO_ROOT/apps/sdk/src" "$REPO_ROOT/apps/sdk/template" "$sdk/"
+# The bundler glassd builds them with, in a jail: esbuild for this platform, the version and
+# checksum the apps' lockfile pins, so the computer builds people's apps as we build ours. Alone
+# in its folder, which the jail mounts; its license goes in the notices.
+mapfile -t pin < <(python3 "$REPO_ROOT/tools/studio/esbuild-pin.py" "$REPO_ROOT/apps/package-lock.json" freebsd-x64) ||
+	die "no esbuild pinned for this platform in apps/package-lock.json"
+esbuild_dir=$CACHE_DIR/esbuild-${pin[0]}
+if [[ ! -x $esbuild_dir/esbuild ]]; then
+	mkdir -p "$esbuild_dir"
+	curl -fsSL "${pin[1]}" -o "$esbuild_dir/package.tgz.part"
+	[[ $(sha512sum <"$esbuild_dir/package.tgz.part") == "${pin[2]}  -" ]] ||
+		die "esbuild ${pin[0]} doesn't match the lockfile's checksum"
+	tar -xzf "$esbuild_dir/package.tgz.part" -C "$esbuild_dir" --strip-components=2 package/bin/esbuild
+	rm "$esbuild_dir/package.tgz.part"
+fi
+install -D -m 0755 "$esbuild_dir/esbuild" "$DIST_DIR/usr/local/lib/glasshouse/bundler/esbuild"
+esbuild_license=$BUILD_DIR/legal/esbuild
+install -D -m 0644 "$REPO_ROOT/apps/node_modules/esbuild/LICENSE.md" "$esbuild_license/LICENSE-esbuild.md"
 # The desktop's fonts, for the browser engine too (os/freebsd/overlay/usr/local/etc/fonts).
 install -d "$DIST_DIR/usr/local/share/fonts/glasshouse"
 install -p -m 0644 "$REPO_ROOT"/shell/assets/fonts/*.ttf "$DIST_DIR/usr/local/share/fonts/glasshouse/"
@@ -85,6 +108,7 @@ for name in "${shipped[@]}"; do notice_args+=(--package "$name"); done
 # The shell's crates, and the fonts it embeds.
 for name in "${shell_shipped[@]}"; do notice_args+=(--shell-package "$name"); done
 if ((${#shell_shipped[@]})); then notice_args+=(--assets "$REPO_ROOT/shell/assets/fonts"); fi
+notice_args+=(--assets "$esbuild_license")
 # An image built from base packages (STAGE_FOR=pkgbase, make image-pkgbase) offers the source
 # packages of the catalog it's built from, not the release's src.txz (BR-3).
 if [[ ${STAGE_FOR:-} == pkgbase ]]; then

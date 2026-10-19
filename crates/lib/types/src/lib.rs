@@ -12,7 +12,9 @@ mod tier;
 mod timestamp;
 
 pub use action::{ActionName, InvalidActionName, SideEffect};
-pub use ids::{AgentId, ApprovalId, InvalidAgentId, InvalidId, SnapshotId, TaskId};
+pub use ids::{
+    AgentId, ApprovalId, InvalidAgentId, InvalidId, PERSONAL_PREFIX, SnapshotId, TaskId,
+};
 pub use label::Label;
 pub use principal::{AgentPrincipal, UserRef};
 pub use tier::Tier;

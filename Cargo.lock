@@ -583,6 +583,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-app-studio"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-managed",
+ "glass-platform",
+ "glass-types",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "glass-app-system"
 version = "0.1.0"
 dependencies = [
@@ -695,6 +711,7 @@ dependencies = [
  "glass-app-meet",
  "glass-app-people",
  "glass-app-settings",
+ "glass-app-studio",
  "glass-app-system",
  "glass-gateway",
  "glass-managed",
@@ -851,6 +868,7 @@ dependencies = [
  "glass-app-meet",
  "glass-app-people",
  "glass-app-settings",
+ "glass-app-studio",
  "glass-app-system",
  "glass-audit",
  "glass-broker",
@@ -932,6 +950,7 @@ dependencies = [
  "glass-actions",
  "glass-api",
  "glass-app-catalog",
+ "glass-app-studio",
  "glass-app-system",
  "glass-audit",
  "glass-first-party",

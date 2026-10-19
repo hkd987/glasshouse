@@ -31,6 +31,7 @@ mod labels;
 mod model;
 mod runtime;
 mod seat;
+mod studio;
 mod supervise;
 mod tailor;
 mod task;
@@ -41,11 +42,15 @@ mod written;
 pub use app_api::AppApi;
 pub use apps::MAX_OPEN_APPS_PER_USER;
 pub use caller::Caller;
-pub use config::{CatalogEntry, CatalogGate, OpenCatalog, RuntimeConfig};
+pub use config::{
+    CatalogEntry, CatalogGate, NoPersonalApps, OpenCatalog, PersonalApp, PersonalApps,
+    RuntimeConfig,
+};
 pub use control_api::ControlApi;
 pub use error::RuntimeError;
 pub use runtime::{RunningAgent, Runtime, RuntimeParts, SettingsHandle};
 pub use seat::WAKE_WAIT;
+pub use studio::StudioSurroundings;
 
 /// The built-in tool every agent has for keeping its tile caption and
 /// progress current (AW-4). It has no side effects and needs no policy.

@@ -27,9 +27,9 @@ pub use approval::{
     AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalState, ApprovalView, AskLabels,
 };
 pub use apps::{
-    APP_SOCKET_ENV, APP_STATUS_MAX_WAIT_SECS, AppAction, AppCall, AppCallResult, AppManifest,
-    AppOpen, AppPermission, AppSession, AppSessionRef, AppStatus, AppStatusRequest, AppWaiting,
-    DEFAULT_APP_SOCKET, ProfileApp, ProfileAppKind, app_bridge_port, app_methods,
+    APP_SOCKET_ENV, APP_STATUS_MAX_WAIT_SECS, AppAction, AppCall, AppCallResult, AppFiles,
+    AppManifest, AppOpen, AppPermission, AppSession, AppSessionRef, AppStatus, AppStatusRequest,
+    AppWaiting, DEFAULT_APP_SOCKET, ProfileApp, ProfileAppKind, app_bridge_port, app_methods,
 };
 pub use tailoring::{
     CheckResult, CustomizationPoint, LayerChange, LayerCheck, LayerLine, LayerRef, LayerRevert,

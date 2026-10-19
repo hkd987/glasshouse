@@ -502,6 +502,22 @@ impl Managed {
             approvals_pending: u32::try_from(status.approvals_pending).unwrap_or(u32::MAX),
             blocked_24h: blocked_last_day(&self.config.audit_log()),
             last_error: self.last_error.clone(),
+            made_here: self
+                .org
+                .studio
+                .inventory()
+                .into_iter()
+                .map(|(record, manifest)| glass_managed::MadeApp {
+                    app: record.app.to_string(),
+                    name: record.name,
+                    owner: record.owner,
+                    version: record.version,
+                    based_on: record.based_on.map(|b| format!("{}@{}", b.id, b.version)),
+                    actions: manifest.actions.iter().map(ToString::to_string).collect(),
+                    beyond_base: record.beyond_base.iter().map(ToString::to_string).collect(),
+                    saved_at: record.saved_at,
+                })
+                .collect(),
             reported_at: Timestamp::now(),
         }
     }
@@ -660,7 +676,7 @@ mod tests {
         let config = Config::load(&path).unwrap();
         std::fs::write(&config.policy, glass_policy::DEFAULT_POLICY).unwrap();
         let policy = Policy::from_toml(glass_policy::DEFAULT_POLICY).unwrap();
-        let org = OrgData::new(&config.state_dir);
+        let org = OrgData::new(&config);
         let registry = crate::registry(&config, &policy, &org).unwrap();
         let runtime = Runtime::new(RuntimeParts {
             config: RuntimeConfig {
@@ -674,6 +690,7 @@ mod tests {
                 console_url: Some("http://127.0.0.1:9".into()),
                 dev_home: None,
                 org_catalog: Arc::new(crate::OrgCatalog(org.catalog.clone())),
+                personal: Arc::new(org.studio.clone()),
             },
             policy,
             policy_source: "policy file".into(),
@@ -858,7 +875,7 @@ mod tests {
 
         // A restart with no console: the catalog comes back from disk,
         // checked again.
-        let fresh = OrgData::new(&d.config.state_dir);
+        let fresh = OrgData::new(&d.config);
         let again = Managed::start(&d.config, Arc::clone(&d.runtime), fresh.clone()).unwrap();
         assert_eq!(fresh.catalog.current().unwrap().version, 5);
         assert_eq!(again.catalog_version, Some(5));
@@ -881,7 +898,7 @@ mod tests {
         assert_eq!(m.report().directory_version, Some(2));
 
         // A restart with no console: the directory comes back from disk.
-        let fresh = OrgData::new(&d.config.state_dir);
+        let fresh = OrgData::new(&d.config);
         let again = Managed::start(&d.config, Arc::clone(&d.runtime), fresh.clone()).unwrap();
         assert_eq!(fresh.directory.current().unwrap().version, 2);
         assert_eq!(again.directory_version, Some(2));

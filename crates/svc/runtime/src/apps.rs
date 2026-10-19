@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use glass_actions::TaskContext;
 use glass_api::{
-    APP_STATUS_MAX_WAIT_SECS, ActivityKind, AgentMode, AppAction, AppCall, AppCallResult,
+    APP_STATUS_MAX_WAIT_SECS, ActivityKind, AgentMode, AppAction, AppCall, AppCallResult, AppFiles,
     AppManifest, AppSession, AppStatus, AppStatusRequest, AppWaiting, DisplaySafe, ProfileApp,
     ProfileAppKind, ScopeRequest, TileState,
 };
@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 
 use crate::error::Result;
 use crate::task::{NewTask, Task};
-use crate::{Caller, CatalogEntry, Runtime, RuntimeError};
+use crate::{Caller, CatalogEntry, PersonalApp, Runtime, RuntimeError};
 
 /// When each person's data in each app last changed: a counter across
 /// the device, and per login and app the count at its last change.
@@ -62,13 +62,56 @@ impl Runtime {
             .map(|m| Arc::new(m.clone()))
     }
 
+    /// `caller`'s own apps they may open now (ADR 0032): a remix while the
+    /// app it remixes is in their profile; an app built from the template
+    /// always.
+    pub(crate) fn own_apps(&self, caller: &Caller) -> Vec<PersonalApp> {
+        let policy = self.policy();
+        let profile = policy.apps_for(&caller.name);
+        let reaches = self.catalog_reach(caller);
+        self.config
+            .personal
+            .apps(&caller.name, &caller.home)
+            .into_iter()
+            .filter(|own| own.manifest.id.is_personal())
+            .filter(|own| {
+                own.based_on
+                    .as_ref()
+                    .is_none_or(|base| profile.contains(base) && reaches(base))
+            })
+            .collect()
+    }
+
+    /// What `caller`'s own `app` serves now (`app.files`): the bridge gets
+    /// a person's apps from glassd, never from a folder they could change.
+    pub fn app_files(&self, caller: &Caller, app: &AgentId) -> Result<AppFiles> {
+        let not_found = || RuntimeError::NotFound(format!("no app {app} of yours"));
+        if !self
+            .own_apps(caller)
+            .iter()
+            .any(|own| &own.manifest.id == app)
+        {
+            return Err(not_found());
+        }
+        let (version, files) = self
+            .config
+            .personal
+            .files(&caller.name, &caller.home, app)
+            .ok_or_else(not_found)?;
+        Ok(AppFiles {
+            app: app.clone(),
+            version,
+            files,
+        })
+    }
+
     /// The apps in `caller`'s profile, as the launcher offers them: web
     /// apps installed here, native apps, and the admin console when this
     /// device is managed. Policy decides the profile per group (AD-7).
     pub fn profile_apps(&self, caller: &Caller) -> Vec<ProfileApp> {
         let policy = self.policy();
         let reaches = self.catalog_reach(caller);
-        policy
+        let mut apps: Vec<ProfileApp> = policy
             .apps_for(&caller.name)
             .into_iter()
             .filter(|id| reaches(id))
@@ -103,18 +146,43 @@ impl Runtime {
                     url: None,
                 })
             })
-            .collect()
+            .collect();
+        // Their own apps, after the org's (ADR 0032).
+        apps.extend(self.own_apps(caller).into_iter().map(|own| ProfileApp {
+            id: own.manifest.id,
+            name: own.manifest.name,
+            kind: ProfileAppKind::Web,
+            url: None,
+        }));
+        apps
     }
 
     /// Opens `app` for `caller` (`app.open`): a new session, whose calls
     /// act for them. Blocking: it prepares the app's data folders.
     pub fn open_app(self: &Arc<Self>, caller: &Caller, app: &AgentId) -> Result<AppSession> {
-        let manifest = self
-            .installed_app(app)
-            .ok_or_else(|| RuntimeError::NotFound(format!("no app {app} is installed")))?;
-        // Role-based delivery: only apps in the caller's profile open, and
-        // one the org's catalog makes available only once installed.
-        if !self.policy().apps_for(&caller.name).contains(app) || !self.catalog_reach(caller)(app) {
+        let (manifest, allowed) = if app.is_personal() {
+            // Their own app (ADR 0032): only they open it, and a remix only
+            // while the app it remixes is theirs to open.
+            let own = self
+                .config
+                .personal
+                .apps(&caller.name, &caller.home)
+                .into_iter()
+                .find(|own| &own.manifest.id == app)
+                .ok_or_else(|| RuntimeError::NotFound(format!("no app {app} of yours")))?;
+            let allowed = self.own_apps(caller).iter().any(|o| &o.manifest.id == app);
+            (Arc::new(own.manifest), allowed)
+        } else {
+            let manifest = self
+                .installed_app(app)
+                .ok_or_else(|| RuntimeError::NotFound(format!("no app {app} is installed")))?;
+            // Role-based delivery: only apps in the caller's profile open,
+            // and one the org's catalog makes available only once installed.
+            let allowed = self.policy().apps_for(&caller.name).contains(app)
+                && self.catalog_reach(caller)(app);
+            (manifest, allowed)
+        };
+        if !allowed {
             let mut event = AuditEvent::new(
                 EventKind::AppRefused,
                 format!("{} isn't in {}'s profile", manifest.name, caller.name),

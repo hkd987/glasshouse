@@ -65,8 +65,42 @@ pub struct Config {
     /// Unset: the device isn't managed and enforces its policy file only.
     #[serde(default)]
     pub managed: Option<ManagedConfig>,
+    #[serde(default)]
+    pub studio: StudioConfig,
     #[serde(default, rename = "agent")]
     pub agents: Vec<CatalogEntry>,
+}
+
+/// `[studio]`: what remixing and making apps needs (ADR 0032). The apps'
+/// source comes with each installed app in `apps_dir`; glassd keeps the
+/// apps people make in `<state_dir>/apps`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StudioConfig {
+    /// esbuild: one statically linked program, alone in its folder, which
+    /// a jail mounts read-only to bundle in.
+    #[serde(default = "default_bundler")]
+    pub bundler: PathBuf,
+    /// The SDK's installed copy: `package.json`, `src/` and the template.
+    #[serde(default = "default_sdk")]
+    pub sdk: PathBuf,
+}
+
+impl Default for StudioConfig {
+    fn default() -> Self {
+        Self {
+            bundler: default_bundler(),
+            sdk: default_sdk(),
+        }
+    }
+}
+
+fn default_bundler() -> PathBuf {
+    "/usr/local/lib/glasshouse/bundler/esbuild".into()
+}
+
+fn default_sdk() -> PathBuf {
+    "/usr/local/share/glasshouse/sdk".into()
 }
 
 /// `[managed]`: where this device gets its org's policy and catalog, and
@@ -306,6 +340,13 @@ impl Config {
             bail!(
                 "the app's folder must be named after its id, {}",
                 manifest.id
+            );
+        }
+        if manifest.id.is_personal() {
+            bail!(
+                "{}: ids that start {} are people's own apps, kept by glassd, never installed",
+                manifest.id,
+                glass_types::PERSONAL_PREFIX
             );
         }
         // Apps and agents share one namespace: both act "by [id] for [user]".

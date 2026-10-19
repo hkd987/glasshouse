@@ -150,6 +150,19 @@ export interface DeviceRow {
   last_error: string | null;
 }
 
+/** An app someone made on a computer (GA-10, ADR 0032). */
+export interface MadeApp {
+  app: string;
+  name: string;
+  owner: string;
+  device: string;
+  version: number;
+  based_on: string | null;
+  actions: string[];
+  beyond_base: string[];
+  saved_at: string;
+}
+
 export interface FleetPage {
   /** The kinds a device can be given: those support roles reach unattended. */
   kinds: string[];
@@ -157,6 +170,7 @@ export interface FleetPage {
   rings: { ring: Ring; devices: number; policy_version: number | null }[];
   catalog_version: number | null;
   devices: DeviceRow[];
+  made: MadeApp[];
   enroll: { url: string; org: string; org_key: string; admins: number };
 }
 

@@ -99,9 +99,19 @@ pub struct InvalidAgentId(String);
 #[serde(try_from = "String", into = "String")]
 pub struct AgentId(String);
 
+/// Ids of the apps people make for themselves start with this (ADR 0032):
+/// nothing IT publishes, installs or names in policy may, so a person's app
+/// never takes on another's identity or its rules.
+pub const PERSONAL_PREFIX: &str = "my-";
+
 impl AgentId {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// One person's own app (ADR 0032), not the org's.
+    pub fn is_personal(&self) -> bool {
+        self.0.starts_with(PERSONAL_PREFIX)
     }
 }
 

@@ -1,0 +1,7 @@
+{
+  "name": "New app",
+  "description": "Finds people in your organization. Change it into what you need.",
+  "actions": ["people.search"],
+  "permissions": [],
+  "labels": ["internal"]
+}

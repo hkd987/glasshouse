@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -99,6 +100,9 @@ pub struct RuntimeConfig {
     /// an item it makes *available* only once they install it. glassd's is
     /// the catalog app's; [`OpenCatalog`] lets everything through.
     pub org_catalog: Arc<dyn CatalogGate>,
+    /// The apps people made for themselves (ADR 0032); glassd's are the
+    /// studio's.
+    pub personal: Arc<dyn PersonalApps>,
 }
 
 /// Whether the org's catalog lets an agent or app reach a person, asked
@@ -107,6 +111,49 @@ pub struct RuntimeConfig {
 pub trait CatalogGate: Send + Sync + std::fmt::Debug {
     /// For someone in `groups` whose home is `home`.
     fn reaches(&self, groups: &[String], home: &Path, id: &AgentId) -> bool;
+}
+
+/// The apps people make for themselves (ADR 0032), which glassd keeps:
+/// each person sees and opens only their own.
+pub trait PersonalApps: Send + Sync + std::fmt::Debug {
+    /// `login`'s own apps at the versions they chose (in `home`).
+    fn apps(&self, login: &str, home: &Path) -> Vec<PersonalApp>;
+    /// What `login`'s `app` serves now: its version and files by name.
+    fn files(
+        &self,
+        login: &str,
+        home: &Path,
+        app: &AgentId,
+    ) -> Option<(u32, BTreeMap<String, String>)>;
+}
+
+/// One of a person's own apps, as they use it now.
+#[derive(Debug, Clone)]
+pub struct PersonalApp {
+    /// Checked as it was saved; its id starts `my-`.
+    pub manifest: AppManifest,
+    /// The installed app it remixes. It opens only while that one is in
+    /// the person's profile.
+    pub based_on: Option<AgentId>,
+}
+
+/// Nobody has made any apps here.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoPersonalApps;
+
+impl PersonalApps for NoPersonalApps {
+    fn apps(&self, _login: &str, _home: &Path) -> Vec<PersonalApp> {
+        Vec::new()
+    }
+
+    fn files(
+        &self,
+        _login: &str,
+        _home: &Path,
+        _app: &AgentId,
+    ) -> Option<(u32, BTreeMap<String, String>)> {
+        None
+    }
 }
 
 /// No catalog: policy alone decides.

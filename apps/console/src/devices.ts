@@ -128,6 +128,7 @@ function render(
             ),
           ),
         ),
+        made(page),
       ),
       h(
         "aside",
@@ -141,5 +142,45 @@ function render(
         ),
       ),
     ),
+  );
+}
+
+/** Every app people made on the org's computers (GA-10, ADR 0032): each
+ * one is theirs alone until they share it through the store, and none is
+ * hidden from IT. What each does beyond the app it remixes is the part to
+ * look at. */
+function made(page: FleetPage): HTMLElement {
+  return card(
+    "Apps people made",
+    page.made.length
+      ? `${plural(page.made.length, "app")}, each its maker's alone until it's shared through the catalog.`
+      : "Nobody has made or remixed an app yet. Each one shows here, whoever made it.",
+    page.made.length
+      ? h(
+          "table",
+          { class: "list made", "data-test": "made" },
+          h(
+            "thead",
+            {},
+            h("tr", {}, ...["App", "Made by", "Based on", "Version", "Beyond its base", "Computer"].map((x) => h("th", {}, x))),
+          ),
+          h(
+            "tbody",
+            {},
+            ...page.made.map((m) =>
+              h(
+                "tr",
+                { "data-app": m.app },
+                h("td", {}, m.name, " ", mono(m.app)),
+                h("td", {}, m.owner),
+                h("td", {}, m.based_on ? mono(m.based_on) : "new"),
+                h("td", {}, mono(`v${m.version}`)),
+                h("td", {}, m.beyond_base.length ? chip(m.beyond_base.join(", "), "wait") : m.based_on ? "nothing" : `${plural(m.actions.length, "action")}`),
+                h("td", {}, mono(m.device)),
+              ),
+            ),
+          ),
+        )
+      : null,
   );
 }

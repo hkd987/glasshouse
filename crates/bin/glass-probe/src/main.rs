@@ -229,6 +229,14 @@ async fn main() -> ExitCode {
             ),
         ),
         attempt(
+            "files: open the apps people made",
+            Want::Denied,
+            io(
+                std::fs::read_dir("/var/db/glasshouse/apps").map(drop),
+                |()| "opened /var/db/glasshouse/apps".into(),
+            ),
+        ),
+        attempt(
             "files: read daemon config",
             Want::Denied,
             read_file("/usr/local/etc/glasshouse/glassd.toml"),

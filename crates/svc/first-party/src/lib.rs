@@ -20,6 +20,8 @@ use glass_app_meet::MeetProvider;
 use glass_app_people::PeopleProvider;
 pub use glass_app_settings::SettingsHandle;
 use glass_app_settings::SettingsProvider;
+pub use glass_app_studio::Studio;
+use glass_app_studio::StudioProvider;
 use glass_app_system::{HostSystem, SystemOps, SystemProvider};
 use glass_gateway::ModelAction;
 use glass_managed::DirectoryHandle;
@@ -54,6 +56,8 @@ pub struct Setup {
     /// This device is managed by an org, so a catalog is coming if none
     /// has arrived (the Store says which).
     pub managed: bool,
+    /// The apps people make (ADR 0032): their source, checks and versions.
+    pub studio: Studio,
 }
 
 impl Setup {
@@ -70,6 +74,7 @@ impl Setup {
             chat: ChatHandle::new("/nonexistent"),
             meet: MeetHandle::new(),
             managed: false,
+            studio: Studio::offline(),
         }
     }
 }
@@ -106,6 +111,7 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
         setup.directory,
     )))?;
     registry.register(Arc::new(chat))?;
+    registry.register(Arc::new(StudioProvider::new(setup.studio)))?;
     registry.register(Arc::new(ModelAction))?;
     Ok(registry)
 }
@@ -137,6 +143,9 @@ mod tests {
             "meet.join",
             "meet.keys",
             "meet.leave",
+            "apps.source",
+            "apps.save",
+            "apps.create",
         ] {
             assert!(names.iter().any(|n| n == expected), "{expected}");
         }

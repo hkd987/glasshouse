@@ -45,6 +45,7 @@ glass-managed = { path = "crates/lib/managed" }
 glass-http = { path = "crates/lib/http" }
 glass-crypto = { path = "crates/lib/crypto" }
 glass-app-catalog = { path = "crates/apps/catalog" }
+glass-app-studio = { path = "crates/apps/studio" }
 glass-app-people = { path = "crates/apps/people" }
 glass-app-settings = { path = "crates/apps/settings" }
 glass-app-chat = { path = "crates/apps/chat" }

@@ -1290,6 +1290,49 @@ mod tests {
         assert_eq!(fleet["kinds"], json!(["kiosk"]));
     }
 
+    /// GA-10, ADR 0032: every app someone made on a computer is in its
+    /// report, and IT sees each with its maker, what it remixes and what it
+    /// does beyond that.
+    #[tokio::test]
+    async fn ga10_it_sees_every_app_people_made() {
+        let t = console().await;
+        t.sync("dev-1", None, 0).await;
+        let report = json!({
+            "device": "dev-1",
+            "name": "dev-1",
+            "os_version": "Glasshouse 0.1.0",
+            "made_here": [{
+                "app": "my-mail",
+                "name": "My Mail",
+                "owner": "dana",
+                "version": 2,
+                "based_on": "mail@0.1.0",
+                "actions": ["mail.list", "mail.send", "files.read"],
+                "beyond_base": ["files.read"],
+                "saved_at": "2026-10-19T23:00:00Z",
+            }],
+            "reported_at": "2026-10-19T23:00:00Z",
+        });
+        let auth = format!("Bearer {}", t.token);
+        let r = t
+            .console
+            .handle(&request(
+                "POST",
+                "/device/v1/report",
+                &report,
+                &[("authorization", &auth)],
+            ))
+            .await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let (_, fleet) = t.call("GET", "/api/fleet", Value::Null).await;
+        let made = &fleet["made"][0];
+        assert_eq!(made["name"], "My Mail");
+        assert_eq!(made["based_on"], "mail@0.1.0");
+        assert_eq!(made["beyond_base"], json!(["files.read"]));
+        assert_eq!(made["device"], "dev-1");
+        assert_ne!(made["owner"], "", "{made}");
+    }
+
     #[tokio::test]
     async fn ux1_settings_set_per_group_are_previewed_published_and_resolved_per_person() {
         let t = console().await;

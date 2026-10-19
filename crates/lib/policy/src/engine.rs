@@ -82,6 +82,25 @@ impl Policy {
                 ));
             }
         }
+        // Ids that start my- are the apps people make for themselves (ADR
+        // 0032): policy names none, so none takes on another's rules.
+        let personal = doc
+            .apps
+            .iter()
+            .map(|a| &a.id)
+            .chain(doc.agents.iter().map(|a| &a.id))
+            .chain(
+                doc.groups
+                    .iter()
+                    .flat_map(|g| g.apps.iter().chain(&g.agents)),
+            )
+            .filter(|id| id.is_personal());
+        for id in personal {
+            errors.push(format!(
+                "{id:?}: ids that start {:?} are people's own apps, which policy doesn't name",
+                glass_types::PERSONAL_PREFIX
+            ));
+        }
         // Meetings are for people (CF-21, ADR 0030): no rule that reaches
         // agents may name them. The org's baseline and an app's own
         // [[app]] tiers may.
@@ -231,11 +250,14 @@ impl Policy {
                 .iter()
                 .filter_map(|name| name.as_str().parse().ok())
                 .collect(),
+            // An app a person made never has the rules policy gives the
+            // app it remixes, or any other (ADR 0032): it asks where they
+            // would be asked.
             tiers: self
                 .doc
                 .apps
                 .iter()
-                .find(|a| &a.id == app)
+                .find(|a| &a.id == app && !app.is_personal())
                 .map(|a| a.tiers.clone())
                 .unwrap_or_default(),
             max_label: Some(max_label),
@@ -768,6 +790,31 @@ mod tests {
         assert!(Policy::from_toml(&twice).is_err());
         let agent = format!("{}\n[[app]]\nid = \"claude-code\"\n", crate::DEFAULT_POLICY);
         assert!(Policy::from_toml(&agent).is_err());
+    }
+
+    /// ADR 0032: a person's own app never gets an app's rules, and policy
+    /// can't name one to give it some.
+    #[test]
+    fn tl5_a_persons_app_has_no_apps_rules_and_policy_names_none() {
+        let policy = Policy::from_toml(crate::DEFAULT_POLICY).unwrap();
+        let declares = [name("chat.post")];
+        let tier = |app: &str| {
+            policy
+                .for_app("demo", &app.parse().unwrap(), &declares, Label::Internal)
+                .tier_for(&name("chat.post"), Tier::Ask)
+                .tier
+        };
+        assert_eq!(tier("chat"), Tier::Auto);
+        assert_eq!(tier("my-chat"), Tier::Ask);
+        for extra in [
+            "[[app]]\nid = \"my-chat\"\ntiers = { \"chat.post\" = \"auto\" }\n",
+            "[[group]]\nname = \"sales\"\nmembers = [\"dana\"]\napps = [\"my-chat\"]\n",
+        ] {
+            let Err(PolicyError::Invalid(errors)) = with_default(extra) else {
+                panic!("{extra} must not validate");
+            };
+            assert!(errors[0].contains("people's own apps"), "{errors:?}");
+        }
     }
 
     fn with_default(extra: &str) -> Result<Policy, PolicyError> {
