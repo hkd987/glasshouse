@@ -10,7 +10,7 @@ import { createConnection } from "node:net";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
-import { BIN, DEV, PORT, REPO, RUN, glassctl, glassctlJson, sleep } from "./env.ts";
+import { BIN, DEV, PORT, REPO, RUN, glassctl, glassctlJson, mcp, sleep } from "./env.ts";
 
 async function until(what: string, check: () => boolean | Promise<boolean>, ms = 20_000): Promise<void> {
   const deadline = Date.now() + ms;
@@ -106,42 +106,6 @@ function seedCalendar(home: string, user: string): void {
   write("design-lunch", "Lunch with design", weekday(2, 12, 30), weekday(2, 13, 30));
   write("offsite", "Offsite planning", weekday(3, 14), weekday(3, 15, 30), { location: "Room 2A" });
   write("wrap-up", "Week wrap-up", weekday(4, 16), weekday(4, 16, 30));
-}
-
-/** One MCP session on a task socket, as a harness speaks it (ADR 0004). */
-async function mcp(socket: string, calls: { name: string; arguments: unknown }[]): Promise<unknown[]> {
-  const conn = createConnection(socket);
-  await new Promise<void>((resolve, reject) => conn.once("connect", resolve).once("error", reject));
-  let buffer = "";
-  const waiting = new Map<number, (value: unknown) => void>();
-  conn.on("data", (chunk) => {
-    buffer += chunk.toString();
-    let newline: number;
-    while ((newline = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
-      if (!line.trim()) continue;
-      const message = JSON.parse(line) as { id?: number; result?: unknown; error?: unknown };
-      if (message.id !== undefined) waiting.get(message.id)?.(message.error ? { error: message.error } : message.result);
-    }
-  });
-  let id = 0;
-  const request = (method: string, params: unknown) =>
-    new Promise<unknown>((resolve) => {
-      id += 1;
-      waiting.set(id, resolve);
-      conn.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
-    });
-  await request("initialize", {
-    protocolVersion: "2025-06-18",
-    capabilities: {},
-    clientInfo: { name: "apps-e2e", version: "0" },
-  });
-  conn.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
-  const results = [];
-  for (const call of calls) results.push(await request("tools/call", call));
-  conn.end();
-  return results;
 }
 
 export default async function globalSetup(): Promise<() => Promise<void>> {

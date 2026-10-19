@@ -357,10 +357,16 @@ pub fn fleet(state: &State, directory: &dyn Directory, console_url: &str) -> Val
     let now = Timestamp::now().unix_seconds();
     let mut totals = (0usize, 0usize, 0usize, 0u64);
     let mut users = BTreeSet::new();
-    let devices: Vec<Value> = state
-        .fleet
-        .devices
-        .values()
+    // Most recently heard from first: the devices IT is looking at now.
+    let mut sorted: Vec<_> = state.fleet.devices.values().collect();
+    sorted.sort_by(|a, b| {
+        b.last_seen
+            .unix_seconds()
+            .cmp(&a.last_seen.unix_seconds())
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let devices: Vec<Value> = sorted
+        .into_iter()
         .map(|d| {
             let online = now - d.last_seen.unix_seconds() <= ONLINE_SECS;
             let r = d.report.as_ref();

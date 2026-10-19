@@ -199,6 +199,15 @@ fn agent_lines(
     }
 }
 
+/// The agents `user` may run under `doc`, by any of their groups.
+fn agents_for(doc: &PolicyDocument, directory: &dyn Directory, user: &str) -> Vec<String> {
+    doc.groups
+        .iter()
+        .filter(|g| g.name == EVERYONE || directory.members(&g.name).contains(&user))
+        .flat_map(|g| g.agents.iter().map(ToString::to_string))
+        .collect()
+}
+
 /// What publishing `draft` would change compared with `base`.
 pub fn preview(
     base: Option<(u64, &PolicyDocument)>,
@@ -300,8 +309,9 @@ pub fn preview(
     }
 
     // Who it reaches: everyone for an org-wide change; otherwise the
-    // members of changed groups, and whoever may run an agent whose own
-    // rules changed.
+    // members of changed groups. And what: the agents those people may
+    // run, when their rules changed (not just their profile), and every
+    // agent whose own rules changed, with whoever may run it.
     let mut users: BTreeSet<&str> = BTreeSet::new();
     let mut agents = rules_changed.clone();
     if org_wide || changed_groups.contains(&EVERYONE) {
@@ -311,10 +321,24 @@ pub fn preview(
         agents.extend(draft.agents.iter().map(|a| a.id.to_string()));
     }
     for g in &changed_groups {
-        users.extend(directory.members(g));
-        for doc in [old, draft] {
-            if let Some(group) = doc.groups.iter().find(|x| x.name == *g) {
-                agents.extend(group.agents.iter().map(ToString::to_string));
+        let members = directory.members(g);
+        users.extend(members.iter().copied());
+        let rules = |doc: &PolicyDocument| {
+            doc.groups
+                .iter()
+                .find(|x| x.name == *g)
+                .map(|x| GroupPolicy {
+                    members: Vec::new(),
+                    apps: Vec::new(),
+                    ..x.clone()
+                })
+        };
+        let profile_only = rules(old) == rules(draft);
+        if !profile_only {
+            for member in members {
+                for doc in [old, draft] {
+                    agents.extend(agents_for(doc, directory, member));
+                }
             }
         }
     }
@@ -371,7 +395,16 @@ mod tests {
         let impact = preview(Some((4, &base)), &draft, &dir, &titles);
         assert_eq!(impact.base_version, Some(4));
         assert_eq!(impact.users, 2, "dana and sam");
-        assert_eq!(impact.agent_ids, ["invoice-demo"]);
+        assert_eq!(
+            impact.agent_ids,
+            [
+                "claude-code",
+                "containment-probe",
+                "invoice-demo",
+                "it-agent"
+            ],
+            "every agent AP's people may run, by any of their groups"
+        );
         assert_eq!(impact.groups, ["AP Operations"]);
         assert!(!impact.org_wide);
         assert_eq!(impact.changes.len(), 1, "{:?}", impact.changes);

@@ -11,6 +11,9 @@
 # GLASS_DEV_DIR puts the state elsewhere (the apps' e2e suite uses its own),
 # GLASS_DEV_RUN the sockets (a Unix socket's path must stay under 104 bytes);
 # GLASS_DEV_SKIP_BUILD=1 runs what is already built.
+# GLASS_DEV_ENROLL=build/console/enrollment.json enrolls this glassd with a
+# development admin console (make console-dev, ADR 0023) as device
+# GLASS_DEV_DEVICE (default dev-host).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -70,6 +73,22 @@ name = "Containment probe"
 description = "Tries to escape its sandbox. Expected to FAIL on the host backend."
 program = "$bin/glass-probe"
 TOML
+
+# Managed by a development admin console: its address, org, key and token.
+if [ -n "${GLASS_DEV_ENROLL:-}" ]; then
+	enroll() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$GLASS_DEV_ENROLL" "$1"; }
+	(umask 077 && enroll token >"$dev/enrollment.token")
+	cat >>"$dev/glassd.toml" <<TOML
+
+[managed]
+url = "$(enroll url)"
+org = "$(enroll org)"
+org_keys = ["$(enroll org_key)"]
+token_file = "$dev/enrollment.token"
+device = "${GLASS_DEV_DEVICE:-dev-host}"
+allow_insecure_http = true
+TOML
+fi
 
 # The default policy labels /home/*/Finance; label the dev home's too.
 {

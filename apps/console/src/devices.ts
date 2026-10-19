@@ -112,8 +112,8 @@ function render(page: FleetPage, message: string | null, setRing: (device: strin
         card(
           "Enroll a device",
           "Zero-touch enrollment isn't built yet (AD-10). A device enrolls with these in its system settings and the org's enrollment token.",
-          h("div", { class: "kv" }, h("span", {}, "Console"), mono(page.enroll.url)),
-          h("div", { class: "kv" }, h("span", {}, "Org"), mono(page.enroll.org)),
+          h("div", { class: "kv stack" }, h("span", {}, "Console"), mono(page.enroll.url)),
+          h("div", { class: "kv stack" }, h("span", {}, "Org"), mono(page.enroll.org)),
           h("div", { class: "kv stack" }, h("span", {}, "Org key"), mono(page.enroll.org_key)),
         ),
       ),

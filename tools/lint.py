@@ -21,6 +21,8 @@ and untracked files. Each check runs only when its inputs changed:
   python       the changed .py files compile
   apps         `make apps-lint` (types, manifests, npm licenses) when anything
                under apps/ or tools/legal/npm_licenses.py changed
+  console      `make console-lint` (clippy, types, BR-1) when the admin
+               console's server or web app changed
 
 Nothing changed: done in well under a second.
 """
@@ -44,6 +46,8 @@ RUST_GLOBAL = {
 }
 FMT_GLOBAL = {"rustfmt.toml", "rust-toolchain.toml"}
 ART_INPUTS = ("tools/branding/", "os/freebsd/overlay/usr/local/share/glasshouse/branding/")
+# The admin console (ADR 0023): its server and its web app.
+CONSOLE = ("crates/bin/glass-console/", "apps/console/")
 # Third-party code kept as upstream wrote it, apart from marked patches.
 VENDORED = ("shell/vendor/",)
 
@@ -124,6 +128,9 @@ def plan(files: set[str], everything: bool) -> list[tuple[str, list[str]]]:
 
     if everything or any(f.startswith("apps/") or f == "tools/legal/npm_licenses.py" for f in files):
         steps.append(("apps", ["make", "--no-print-directory", "apps-lint"]))
+
+    if everything or any(f.startswith(CONSOLE) for f in files):
+        steps.append(("console", ["make", "--no-print-directory", "console-lint"]))
 
     python = sorted(f for f in existing if f.endswith(".py"))
     if python:
