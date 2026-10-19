@@ -73,7 +73,10 @@ mapfile -t stale < <(find target/*/deps target/*/*/deps shell/target/*/deps shel
 	-printf '%T@ %p\n' 2>/dev/null |
 	sort -rn | awk '{ key = $2; sub(/-[0-9a-f]+$/, "", key); if (seen[key]++) print $2 }')
 ((${#stale[@]})) && gone "${stale[@]}"
-for d in build/dist build/logs; do [[ -e $d ]] && gone "$d"; done
+# An image build deploys build/dist while its bake VM runs: leave it until then.
+bake_running() { [[ -f build/vm/bake/qemu.pid ]] && kill -0 "$(cat build/vm/bake/qemu.pid)" 2>/dev/null; }
+if bake_running; then echo "an image build is running: build/dist kept"; else [[ -e build/dist ]] && gone build/dist; fi
+[[ -e build/logs ]] && gone build/logs
 
 echo "== VMs"
 running() { [[ -f $1/qemu.pid ]] && kill -0 "$(cat "$1/qemu.pid")" 2>/dev/null; }
@@ -91,7 +94,7 @@ done
 echo "== images and downloads"
 size build/images build/cache/freebsd/* 2>/dev/null || true
 # A root an interrupted package-list build left half made; none while a bake VM runs.
-if ! running build/vm/bake; then
+if ! bake_running; then
 	mapfile -t partial < <(find build/images -maxdepth 1 -name '.*.part' 2>/dev/null)
 	((${#partial[@]})) && gone "${partial[@]}"
 fi
