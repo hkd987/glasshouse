@@ -82,6 +82,30 @@ impl Policy {
                 ));
             }
         }
+        // Meetings are for people (CF-21, ADR 0030): no rule that reaches
+        // agents may name them. The org's baseline and an app's own
+        // [[app]] tiers may.
+        for group in &doc.groups {
+            for pattern in group.tiers.keys().filter(|p| names_people_only(p)) {
+                errors.push(format!(
+                    "group {:?} has a rule for {pattern}: {PEOPLE_ONLY_WHY}",
+                    group.name
+                ));
+            }
+        }
+        for agent in &doc.agents {
+            let named = agent
+                .allowed_actions
+                .iter()
+                .chain(agent.tiers.keys())
+                .filter(|p| names_people_only(p));
+            for pattern in named {
+                errors.push(format!(
+                    "agent {} names {pattern}: {PEOPLE_ONLY_WHY}",
+                    agent.id
+                ));
+            }
+        }
         let mut seen_agents = std::collections::BTreeSet::new();
         for agent in &doc.agents {
             if !seen_agents.insert(&agent.id) {
@@ -218,7 +242,9 @@ impl Policy {
             egress: Vec::new(),
             models: Some(Vec::new()),
         };
-        self.build(user, &groups, &declared)
+        let mut effective = self.build(user, &groups, &declared);
+        effective.app = true;
+        effective
     }
 
     fn build(&self, user: &str, groups: &[&GroupPolicy], agent: &AgentPolicy) -> EffectivePolicy {
@@ -245,6 +271,7 @@ impl Policy {
             restrictions: Vec::new(),
             names: self.doc.names.clone(),
             models: ModelRules::new(&self.doc.models, groups, agent.models.as_deref()),
+            app: false,
         }
     }
 
@@ -290,6 +317,31 @@ impl Policy {
     }
 }
 
+/// Apps whose actions only people take, in their own apps (CF-21): an
+/// agent's call is Never, whatever its rules say.
+pub const PEOPLE_ONLY: &[&str] = &["meet"];
+
+const PEOPLE_ONLY_WHY: &str = "meetings are for people, never agents (ADR 0030); \
+     the Meet and Calendar apps' own [[app]] tiers say what the person does there";
+
+fn in_people_only_app(name: &str) -> bool {
+    PEOPLE_ONLY.iter().any(|app| {
+        name.strip_prefix(app)
+            .is_some_and(|rest| rest.starts_with('.'))
+    })
+}
+
+/// Whether `action` is one only people take ([`PEOPLE_ONLY`]).
+pub fn people_only(action: &ActionName) -> bool {
+    in_people_only_app(action.as_str())
+}
+
+/// Whether `pattern` names a people-only app's actions: `meet.*` or one of
+/// them. `*` names no app.
+fn names_people_only(pattern: &ActionPattern) -> bool {
+    in_people_only_app(pattern.as_str())
+}
+
 /// Where a tier decision came from, recorded in the audit log so auditors can
 /// see which rule allowed an action (AU-1, principle 8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,6 +365,8 @@ pub enum RuleSource {
     Restriction {
         pattern: String,
     },
+    /// Only people do this, in their own apps; never an agent (CF-21).
+    PeopleOnly,
 }
 
 impl fmt::Display for RuleSource {
@@ -324,6 +378,7 @@ impl fmt::Display for RuleSource {
             RuleSource::Group { group, pattern } => write!(f, "group {group} rule {pattern}"),
             RuleSource::Agent { pattern } => write!(f, "agent rule {pattern}"),
             RuleSource::Restriction { pattern } => write!(f, "task restriction {pattern}"),
+            RuleSource::PeopleOnly => f.write_str("meetings are for people, never agents"),
         }
     }
 }
@@ -362,6 +417,8 @@ pub struct EffectivePolicy {
     restrictions: Vec<(ActionPattern, Tier)>,
     names: BTreeMap<ActionPattern, String>,
     models: ModelRules,
+    /// An app's session (the person in that app's window), not an agent.
+    app: bool,
 }
 
 impl EffectivePolicy {
@@ -409,6 +466,14 @@ impl EffectivePolicy {
     /// both IT overrides of the baseline and combine by taking the stricter;
     /// finally task restrictions, which can only tighten.
     pub fn tier_for(&self, action: &ActionName, app_default: Tier) -> TierDecision {
+        // Whatever a pattern such as `*` allows, an agent never joins a
+        // meeting (CF-21, ADR 0030).
+        if !self.app && people_only(action) {
+            return TierDecision {
+                tier: Tier::Never,
+                source: RuleSource::PeopleOnly,
+            };
+        }
         if !self
             .agent_rules
             .allowed_actions
@@ -703,6 +768,87 @@ mod tests {
         assert!(Policy::from_toml(&twice).is_err());
         let agent = format!("{}\n[[app]]\nid = \"claude-code\"\n", crate::DEFAULT_POLICY);
         assert!(Policy::from_toml(&agent).is_err());
+    }
+
+    fn with_default(extra: &str) -> Result<Policy, PolicyError> {
+        Policy::from_toml(&format!("{}\n{extra}", crate::DEFAULT_POLICY))
+    }
+
+    #[test]
+    fn cf21_a_group_or_agent_rule_naming_meetings_fails_validation() {
+        let group = "[[group]]\nname = \"sales\"\nmembers = [\"dana\"]\n\
+                     [group.tiers]\n\"meet.join\" = \"auto\"\n";
+        let Err(PolicyError::Invalid(errors)) = with_default(group) else {
+            panic!("a group rule naming meet.join must not validate");
+        };
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("group \"sales\" has a rule for meet.join")
+                && errors[0].contains("never agents"),
+            "{errors:?}"
+        );
+        for agent in [
+            "allowed_actions = [\"files.read\", \"meet.*\"]",
+            "allowed_actions = [\"files.read\"]\n[agent.tiers]\n\"meet.keys\" = \"never\"",
+        ] {
+            let text = format!("[[agent]]\nid = \"note-taker\"\n{agent}\n");
+            let err = with_default(&text).unwrap_err().to_string();
+            assert!(err.contains("agent note-taker names meet."), "{err}");
+        }
+        // `*` names no app, and "meeting.*" isn't meetings.
+        with_default("[[agent]]\nid = \"anything\"\nallowed_actions = [\"*\", \"meeting.*\"]\n")
+            .unwrap();
+    }
+
+    #[test]
+    fn cf21_agents_never_join_meetings_whatever_their_rules_allow() {
+        let everything = "[[agent]]\nid = \"anything\"\nallowed_actions = [\"*\"]\n\
+                          [[group]]\nname = \"all\"\nmembers = [\"dana\"]\nagents = [\"anything\"]\n\
+                          [group.tiers]\n\"*\" = \"auto\"\n";
+        let policy = with_default(everything).unwrap();
+        let agent = policy
+            .effective("dana", &"anything".parse().unwrap())
+            .unwrap();
+        let join = agent.tier_for(&name("meet.join"), Tier::Auto);
+        assert_eq!(
+            join,
+            TierDecision {
+                tier: Tier::Never,
+                source: RuleSource::PeopleOnly
+            }
+        );
+        assert_eq!(
+            join.source.to_string(),
+            "meetings are for people, never agents"
+        );
+        assert_eq!(
+            agent.tier_for(&name("files.read"), Tier::Ask).tier,
+            Tier::Auto,
+            "the group's * reaches everything else"
+        );
+
+        // The person joins in Meet and sees their meetings in Calendar; any
+        // other app declaring them gets the org's Never.
+        let policy = Policy::from_toml(crate::DEFAULT_POLICY).unwrap();
+        let declared = [name("meet.list"), name("meet.join")];
+        let tier = |app: &str, action: &str| {
+            policy
+                .for_app("dana", &app.parse().unwrap(), &declared, Label::Internal)
+                .tier_for(&name(action), Tier::Ask)
+                .tier
+        };
+        assert_eq!(tier("meet", "meet.join"), Tier::Auto);
+        assert_eq!(tier("calendar", "meet.list"), Tier::Auto);
+        assert_eq!(tier("calendar", "meet.join"), Tier::Never);
+        assert_eq!(tier("mail", "meet.list"), Tier::Never);
+        // Claude Code's calendar.* doesn't reach them either.
+        let claude = policy
+            .effective("dana", &"claude-code".parse().unwrap())
+            .unwrap();
+        assert_eq!(
+            claude.tier_for(&name("meet.list"), Tier::Auto).tier,
+            Tier::Never
+        );
     }
 
     #[test]
