@@ -69,6 +69,11 @@ approval_timeout_secs = 900
 "chat.read" = "auto"
 "chat.post" = "ask"
 "chat.create" = "ask"
+# Glasshouse meetings (CF-21, ADR 0030) are for people: no agent joins one or
+# lists them, whatever its rules allow, and a group or agent rule that names
+# them doesn't validate. The person joins in Meet and sees their meetings in
+# Calendar, by those apps' own [[app]] tiers below.
+"meet.*" = "never"
 "security.*" = "never"
 "vendors.bank_details.*" = "never"
 "data.export_bulk" = "never"
@@ -79,6 +84,7 @@ approval_timeout_secs = 900
 "security.*" = "Security settings"
 "vendors.bank_details.*" = "Vendor bank details"
 "data.export_bulk" = "Exporting data in bulk"
+"meet.*" = "Glasshouse meetings"
 "payments.*" = "Payments"
 "records.submit" = "Posting or submitting records"
 
@@ -126,7 +132,7 @@ services = ["cron", "ntpd", "openvpn", "cupsd"]
 [[group]]
 name = "everyone"
 agents = ["it-agent", "invoice-demo", "containment-probe", "claude-code"]
-apps = ["browser", "mail", "calendar", "chat", "store", "settings", "activity-monitor", "terminal"]
+apps = ["browser", "mail", "calendar", "chat", "meet", "store", "settings", "activity-monitor", "terminal"]
 
 [[group]]
 name = "it-admins"
@@ -140,6 +146,17 @@ apps = ["console"]
 [[app]]
 id = "chat"
 tiers = { "chat.post" = "auto", "chat.create" = "auto" }
+
+# The person joins a meeting in Meet, which fetches its media keys and
+# leaves (CF-21); Calendar lists the meetings they're in, with Join. The
+# org's "meet.*" = "never" holds for every other app.
+[[app]]
+id = "meet"
+tiers = { "meet.list" = "auto", "meet.join" = "auto", "meet.keys" = "auto", "meet.leave" = "auto" }
+
+[[app]]
+id = "calendar"
+tiers = { "meet.list" = "auto" }
 
 # IT self-service (AE-4): diagnoses this computer and fixes what's on IT's
 # list. The only agent allowed the system actions, which glassd runs with its

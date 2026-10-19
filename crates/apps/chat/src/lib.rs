@@ -7,6 +7,11 @@
 //! them. What an agent posts carries "by <agent> for <person>" inside the
 //! seal, from the task's principal, never from the request (AU-10).
 //! Previews and audit records name conversations, never message text.
+//!
+//! A meeting (CF-21) is a conversation too, of kind `meeting`, kept in the
+//! same store. Chat's actions leave meetings out; Calendar and Meet reach
+//! them through [`glass_managed::meet::Meetings`], which the provider
+//! implements.
 
 mod store;
 
@@ -21,9 +26,10 @@ use glass_crypto::EpochKey;
 use glass_managed::DirectoryHandle;
 use glass_managed::chat::{
     Body, Conversation, ConversationKind, CreateConversation, Epoch, Header, LookupKeys,
-    MAX_MEMBERS, MAX_TEXT_CHARS, Message, PostMessage, is_conversation_id, is_message_id,
-    new_conversation_id, new_message_id, seal_name,
+    MAX_MEMBERS, MAX_TEXT_CHARS, MemberKey, MemberSecret, Message, PostMessage, is_conversation_id,
+    is_message_id, new_conversation_id, new_message_id, seal_name,
 };
+use glass_managed::meet::{MeetingDetails, MeetingInfo, Meetings};
 use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -141,6 +147,11 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Whether Chat shows `c`: meetings are Calendar's and Meet's (CF-21).
+fn in_chat(c: &Conversation) -> bool {
+    c.kind != ConversationKind::Meeting
+}
+
 /// `me` and `people`, each once, sorted: a conversation's members.
 fn members(me: &str, people: &[String]) -> Vec<String> {
     let mut all: Vec<String> = people.iter().cloned().chain([me.to_owned()]).collect();
@@ -243,7 +254,7 @@ impl ChatProvider {
             return store
                 .conversations
                 .get(id)
-                .filter(|c| c.members.iter().any(|m| m == me))
+                .filter(|c| in_chat(c) && c.members.iter().any(|m| m == me))
                 .cloned()
                 .map(Target::Existing)
                 .ok_or_else(|| {
@@ -256,7 +267,10 @@ impl ChatProvider {
         Ok(store
             .conversations
             .values()
-            .find(|c| c.kind != ConversationKind::Channel && c.members == want)
+            .find(|c| {
+                matches!(c.kind, ConversationKind::Direct | ConversationKind::Group)
+                    && c.members == want
+            })
             .cloned()
             .map_or(Target::New(want), Target::Existing))
     }
@@ -276,6 +290,8 @@ impl ChatProvider {
 
     /// A new conversation of `members`, its first epoch sealed to each of
     /// their computers and to IT, registered with the console and kept.
+    /// `id` when the conversation's id was chosen already, as a meeting's
+    /// is when Calendar makes the event.
     #[allow(clippy::too_many_arguments)]
     fn open_conversation(
         &self,
@@ -286,6 +302,7 @@ impl ChatProvider {
         members: Vec<String>,
         kind: ConversationKind,
         name: Option<&str>,
+        id: Option<&str>,
     ) -> Result<Conversation, ChatFailure> {
         let found = connection
             .link
@@ -311,8 +328,14 @@ impl ChatProvider {
             .map(|login| self.name(login))
             .collect();
         if !missing.is_empty() {
+            // Calendar makes the person's keys too, for meetings.
+            let app = if kind == ConversationKind::Meeting {
+                "Calendar or Chat"
+            } else {
+                "Chat"
+            };
             return Err(ChatFailure::Local(format!(
-                "{} {} opened Chat yet, so there's no key to seal to; ask them to open Chat once",
+                "{} {} opened {app} yet, so there's no key to seal to; ask them to open {app} once",
                 missing.join(", "),
                 if missing.len() == 1 {
                     "hasn't"
@@ -326,7 +349,10 @@ impl ChatProvider {
                 "this computer's chat key isn't registered with your organization's server".into(),
             ));
         }
-        let id = new_conversation_id()?;
+        let id = match id {
+            Some(id) => id.to_owned(),
+            None => new_conversation_id()?,
+        };
         let epoch_key = EpochKey::generate()?;
         let epoch = Epoch::make(
             &id,
@@ -390,7 +416,9 @@ impl ChatProvider {
                 } else {
                     ConversationKind::Group
                 };
-                self.open_conversation(connection, compliance, member, me, members, kind, None)?
+                self.open_conversation(
+                    connection, compliance, member, me, members, kind, None, None,
+                )?
             }
         };
         let store = self.handle.load(me);
@@ -464,7 +492,7 @@ impl ChatProvider {
         let mut rows: Vec<(u64, Value, String)> = store
             .conversations
             .values()
-            .filter(|c| c.members.iter().any(|m| m == me))
+            .filter(|c| in_chat(c) && c.members.iter().any(|m| m == me))
             .map(|c| {
                 let messages = store.messages.get(&c.id).map_or(&[][..], Vec::as_slice);
                 let seen = store.seen.get(&c.id).copied().unwrap_or(0);
@@ -527,7 +555,7 @@ impl ChatProvider {
         let conversation = store
             .conversations
             .get(&input.conversation)
-            .filter(|c| c.members.iter().any(|m| m == me))
+            .filter(|c| in_chat(c) && c.members.iter().any(|m| m == me))
             .ok_or_else(|| {
                 ActionError::NotFound(format!(
                     "you aren't in a conversation {}; chat.list shows yours",
@@ -710,6 +738,7 @@ impl ChatProvider {
                 members(me, &input.people),
                 ConversationKind::Channel,
                 Some(name),
+                None,
             )
             .map_err(|e| ActionError::Failed(format!("Not created: {e}.")))?;
         let title = display_line(&format!("#{name}")).into_owned();
@@ -737,6 +766,106 @@ impl ChatProvider {
         }
         self.check_people(me, &input.people)?;
         Ok(name.to_owned())
+    }
+}
+
+/// Meetings (CF-21) are conversations in chat's store: Calendar and Meet
+/// reach them through this, so neither depends on Chat (ADR 0013).
+impl Meetings for ChatProvider {
+    fn ready(&self) -> Result<(), ChatFailure> {
+        self.handle.compliance().map(|_| ())
+    }
+
+    fn member(
+        &self,
+        login: &str,
+        make: bool,
+    ) -> Result<Option<(MemberKey, MemberSecret)>, ChatFailure> {
+        let member = if make {
+            Some(self.handle.member(login)?)
+        } else {
+            self.handle.connection()?;
+            self.handle.existing(login)
+        };
+        Ok(member.map(|m| (m.key, m.secret)))
+    }
+
+    fn meetings(&self, login: &str) -> Vec<MeetingInfo> {
+        let Some(member) = self.handle.existing(login) else {
+            return Vec::new();
+        };
+        let store = self.handle.load(login);
+        store
+            .conversations
+            .values()
+            .filter(|c| c.kind == ConversationKind::Meeting && c.members.iter().any(|m| m == login))
+            .map(|c| MeetingInfo {
+                id: c.id.clone(),
+                organizer: c.created_by.clone(),
+                members: c.members.clone(),
+                details: store.meeting(&member, c),
+            })
+            .collect()
+    }
+
+    fn create(
+        &self,
+        organizer: &str,
+        make: bool,
+        id: &str,
+        people: &[String],
+        details: &MeetingDetails,
+    ) -> Result<(), ChatFailure> {
+        let everyone = members(organizer, people);
+        if !is_conversation_id(id) {
+            return Err(ChatFailure::Local(format!("{id:?} is not a meeting's id")));
+        }
+        if let Some(login) = everyone.iter().find(|l| !plain_login(l)) {
+            return Err(ChatFailure::Local(format!("{login:?} is not a login")));
+        }
+        if everyone.len() < 2 || everyone.len() > glass_managed::meet::MAX_PEOPLE {
+            return Err(ChatFailure::Local(format!(
+                "a meeting is for 2 to {} people",
+                glass_managed::meet::MAX_PEOPLE
+            )));
+        }
+        let connection = self.handle.connection()?;
+        let compliance = self.handle.compliance()?;
+        let member = if make {
+            self.handle.member(organizer)?
+        } else {
+            self.handle.existing(organizer).ok_or_else(|| {
+                ChatFailure::NotSetUp(format!(
+                    "{organizer} hasn't opened Calendar or Chat on this computer yet; it makes their keys the first time it opens"
+                ))
+            })?
+        };
+        self.open_conversation(
+            &connection,
+            &compliance,
+            &member,
+            organizer,
+            everyone,
+            ConversationKind::Meeting,
+            Some(&details.to_name()),
+            Some(id),
+        )?;
+        Ok(())
+    }
+
+    fn lookup(&self, logins: &[String]) -> Result<Vec<MemberKey>, ChatFailure> {
+        let connection = self.handle.connection()?;
+        let found = connection
+            .link
+            .lookup(&LookupKeys {
+                logins: logins.to_vec(),
+            })
+            .map_err(ChatFailure::Link)?;
+        Ok(found
+            .keys
+            .into_iter()
+            .filter(|k| logins.contains(&k.login) && k.keys().is_ok())
+            .collect())
     }
 }
 
@@ -860,7 +989,7 @@ impl ActionProvider for ChatProvider {
                 let conversation = store
                     .conversations
                     .get(&input.conversation)
-                    .filter(|c| c.members.iter().any(|m| m == me))
+                    .filter(|c| in_chat(c) && c.members.iter().any(|m| m == me))
                     .ok_or_else(|| {
                         ActionError::NotFound(format!(
                             "you aren't in a conversation {}; chat.list shows yours",
@@ -1251,6 +1380,75 @@ mod tests {
             a.call("dana", READ, json!({ "conversation": "cv-nope" }))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn cf21_chat_leaves_meetings_to_calendar_and_meet() {
+        let org = org();
+        let (a, b) = (org.computer("dev-a"), org.computer("dev-b"));
+        b.call("priya", LIST, json!({})).unwrap();
+        let id = new_conversation_id().unwrap();
+        let details = MeetingDetails {
+            title: "Northwind renewal".into(),
+            start: "2026-10-20T14:00".into(),
+            end: "2026-10-20T15:00".into(),
+        };
+        // An agent's call never makes the organizer's keys.
+        let meetings: &dyn Meetings = &a.provider;
+        let refused = meetings
+            .create("dana", false, &id, &["priya".into()], &details)
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("hasn't opened Calendar or Chat")
+        );
+        meetings
+            .create("dana", true, &id, &["priya".into()], &details)
+            .unwrap();
+        let (made, epochs) = org.link.conversations().pop().unwrap();
+        assert_eq!(made.kind, ConversationKind::Meeting);
+        assert_eq!(made.members, ["dana", "priya"]);
+        // Its title is sealed, and IT's key opens it like any name.
+        let sealed = made.name.clone().unwrap();
+        assert!(!sealed.contains(&hex::encode("Northwind")));
+        let key = epochs[0].open(COMPLIANCE, &org.it).unwrap();
+        assert_eq!(MeetingDetails::open(&key, &id, &sealed).unwrap(), details);
+
+        // Chat doesn't list it, read it, or post into it.
+        let list = a.call("dana", LIST, json!({})).unwrap();
+        assert!(list.text.starts_with("0 conversations"), "{}", list.text);
+        assert!(a.call("dana", READ, json!({ "conversation": id })).is_err());
+        assert!(
+            a.call(
+                "dana",
+                POST,
+                json!({ "posts": [{ "conversation": id, "text": "hi" }] })
+            )
+            .is_err()
+        );
+        // A message to the same people opens a direct conversation.
+        a.call(
+            "dana",
+            POST,
+            json!({ "posts": [{ "to": ["priya"], "text": "hi" }] }),
+        )
+        .unwrap();
+        let kinds: Vec<ConversationKind> = org
+            .link
+            .conversations()
+            .iter()
+            .map(|(c, _)| c.kind)
+            .collect();
+        assert_eq!(kinds, [ConversationKind::Meeting, ConversationKind::Direct]);
+
+        // The invitee's computer opens it after a sync, for Calendar.
+        b.handle.sync_once(0).unwrap();
+        let theirs = b.provider.meetings("priya");
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs[0].organizer, "dana");
+        assert_eq!(theirs[0].details.as_ref(), Some(&details));
+        assert!(b.provider.meetings("sam").is_empty());
     }
 
     #[test]

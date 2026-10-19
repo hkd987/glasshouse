@@ -172,6 +172,9 @@ pub(crate) struct OrgData {
     /// The org's chat: member keys and the sealed store, root only in the
     /// state directory (CF-91, ADR 0030). Connected once managed sync runs.
     pub(crate) chat: glass_first_party::ChatHandle,
+    /// How meetings reach the console's meeting routes (CF-21). Meetings
+    /// are conversations in `chat`'s store; the media key is never kept.
+    pub(crate) meet: glass_first_party::MeetHandle,
 }
 
 impl OrgData {
@@ -181,6 +184,7 @@ impl OrgData {
             directory: glass_managed::DirectoryHandle::new(),
             settings: glass_runtime::SettingsHandle::new(state_dir.join("settings")),
             chat: glass_first_party::ChatHandle::new(state_dir.join("chat")),
+            meet: glass_first_party::MeetHandle::new(),
         }
     }
 }
@@ -264,6 +268,7 @@ fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<R
         mail: policy.mail().cloned(),
         settings: org.settings.clone(),
         chat: org.chat.clone(),
+        meet: org.meet.clone(),
         managed: config.managed.is_some(),
     })?)
 }

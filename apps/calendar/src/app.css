@@ -307,3 +307,67 @@
   gap: 10px;
   margin-top: 4px;
 }
+
+/* Glasshouse meetings (CF-21): video with people in the org. */
+.event.meeting {
+  border-left-color: var(--ok);
+}
+
+.event-form .toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.event-form .toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+}
+
+.meetings {
+  margin: 4px 0 16px;
+}
+
+.meetings h2 {
+  margin-bottom: 8px;
+}
+
+.meeting-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--divider);
+  border-left: 3px solid var(--ok);
+  border-radius: var(--radius);
+  background: var(--window);
+}
+
+.meeting-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.meeting-text strong,
+.meeting-text span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.join {
+  flex: none;
+  text-decoration: none;
+}
+
+.detail-join {
+  padding: 12px 0;
+  border-top: 1px solid var(--divider);
+}
