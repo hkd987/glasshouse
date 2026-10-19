@@ -47,7 +47,7 @@ pub fn start(screen: (u32, u32)) -> (mpsc::UnboundedReceiver<Input>, usize) {
         thread::spawn(move || {
             let mut batch = Batch::new(axes, screen);
             while let Ok(events) = device.read() {
-                for input in events.iter().filter_map(|e| batch.push(*e)) {
+                for input in events.iter().flat_map(|e| batch.push(*e)) {
                     if tx.send(input).is_err() {
                         return;
                     }
@@ -60,13 +60,20 @@ pub fn start(screen: (u32, u32)) -> (mpsc::UnboundedReceiver<Input>, usize) {
 
 type Axes = (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>);
 
-/// One device's events between two `SYN_REPORT`s: an absolute X and Y, or
-/// relative motion, arrive separately and count as one move.
+/// One device's events between two `SYN_REPORT`s. A tablet reports only
+/// the axes that changed, so its last X and Y are kept; a mouse's motion
+/// adds up. Buttons and the wheel wait for the report's end, so a click
+/// that came with a move acts where the move put the pointer.
 struct Batch {
     axes: Option<Axes>,
     screen: (u32, u32),
+    /// The tablet's position, as it last reported each axis.
     at: (Option<i32>, Option<i32>),
+    /// The tablet moved in this report.
+    moved: bool,
     by: (i32, i32),
+    /// Buttons and wheel turns in this report, in order.
+    waiting: Vec<Input>,
 }
 
 impl Batch {
@@ -75,42 +82,55 @@ impl Batch {
             axes,
             screen,
             at: (None, None),
+            moved: false,
             by: (0, 0),
+            waiting: Vec::new(),
         }
     }
 
-    fn push(&mut self, event: RawEvent) -> Option<Input> {
+    /// What the event makes happen: nothing until the report ends, except
+    /// keys, which stand alone.
+    fn push(&mut self, event: RawEvent) -> Vec<Input> {
         match (event.kind, event.code) {
-            (codes::EV_ABS, codes::ABS_X) => self.at.0 = Some(event.value),
-            (codes::EV_ABS, codes::ABS_Y) => self.at.1 = Some(event.value),
+            (codes::EV_ABS, codes::ABS_X) => (self.at.0, self.moved) = (Some(event.value), true),
+            (codes::EV_ABS, codes::ABS_Y) => (self.at.1, self.moved) = (Some(event.value), true),
             (codes::EV_REL, codes::REL_X) => self.by.0 += event.value,
             (codes::EV_REL, codes::REL_Y) => self.by.1 += event.value,
-            (codes::EV_REL, codes::REL_WHEEL) => return Some(Input::Wheel(event.value as f32)),
+            (codes::EV_REL, codes::REL_WHEEL) => {
+                self.waiting.push(Input::Wheel(event.value as f32));
+            }
             (codes::EV_KEY, code) => {
                 let button = match code {
                     codes::BTN_LEFT => iced_core::mouse::Button::Left,
                     codes::BTN_RIGHT => iced_core::mouse::Button::Right,
                     codes::BTN_MIDDLE => iced_core::mouse::Button::Middle,
-                    _ => return Some(Input::Key(code, event.value)),
+                    _ => return vec![Input::Key(code, event.value)],
                 };
-                return (event.value != 2).then_some(Input::Button(button, event.value == 1));
+                if event.value != 2 {
+                    self.waiting.push(Input::Button(button, event.value == 1));
+                }
             }
             (codes::EV_SYN, codes::SYN_REPORT) => return self.flush(),
             _ => {}
         }
-        None
+        Vec::new()
     }
 
-    fn flush(&mut self) -> Option<Input> {
+    /// The report's move first, then its buttons.
+    fn flush(&mut self) -> Vec<Input> {
         let by = std::mem::take(&mut self.by);
-        let at = std::mem::take(&mut self.at);
-        if let (Some((xs, ys)), (Some(x), Some(y))) = (&self.axes, at) {
-            return Some(Input::MovedTo(
+        let moved = std::mem::take(&mut self.moved);
+        let mut inputs = Vec::with_capacity(1 + self.waiting.len());
+        if let (true, Some((xs, ys)), (Some(x), Some(y))) = (moved, &self.axes, self.at) {
+            inputs.push(Input::MovedTo(
                 scale(x, xs, self.screen.0),
                 scale(y, ys, self.screen.1),
             ));
+        } else if by != (0, 0) {
+            inputs.push(Input::MovedBy(by.0 as f32, by.1 as f32));
         }
-        (by != (0, 0)).then_some(Input::MovedBy(by.0 as f32, by.1 as f32))
+        inputs.append(&mut self.waiting);
+        inputs
     }
 }
 
@@ -132,18 +152,60 @@ mod tests {
     #[test]
     fn a_tablets_x_and_y_make_one_move_in_screen_pixels() {
         let mut batch = Batch::new(Some((0..=32767, 0..=32767)), (1281, 801));
-        assert_eq!(batch.push(ev(codes::EV_ABS, codes::ABS_X, 16_384)), None);
-        assert_eq!(batch.push(ev(codes::EV_ABS, codes::ABS_Y, 32_767)), None);
+        assert!(
+            batch
+                .push(ev(codes::EV_ABS, codes::ABS_X, 16_384))
+                .is_empty()
+        );
+        assert!(
+            batch
+                .push(ev(codes::EV_ABS, codes::ABS_Y, 32_767))
+                .is_empty()
+        );
         let moved = batch.push(ev(codes::EV_SYN, codes::SYN_REPORT, 0));
         assert!(
-            matches!(moved, Some(Input::MovedTo(x, y)) if (x - 640.0).abs() < 0.1 && y == 800.0)
+            matches!(moved[..], [Input::MovedTo(x, y)] if (x - 640.0).abs() < 0.1 && y == 800.0)
         );
         // A button alone moves nothing.
+        assert!(batch.push(ev(codes::EV_KEY, codes::BTN_LEFT, 1)).is_empty());
         assert_eq!(
-            batch.push(ev(codes::EV_KEY, codes::BTN_LEFT, 1)),
-            Some(Input::Button(iced_core::mouse::Button::Left, true))
+            batch.push(ev(codes::EV_SYN, codes::SYN_REPORT, 0)),
+            [Input::Button(iced_core::mouse::Button::Left, true)]
         );
-        assert_eq!(batch.push(ev(codes::EV_SYN, codes::SYN_REPORT, 0)), None);
+    }
+
+    #[test]
+    fn a_tablet_moving_along_one_axis_still_moves() {
+        let mut batch = Batch::new(Some((0..=32767, 0..=32767)), (1281, 801));
+        batch.push(ev(codes::EV_ABS, codes::ABS_X, 0));
+        batch.push(ev(codes::EV_ABS, codes::ABS_Y, 0));
+        batch.push(ev(codes::EV_SYN, codes::SYN_REPORT, 0));
+        // Only X changed: the report has no Y.
+        batch.push(ev(codes::EV_ABS, codes::ABS_X, 32_767));
+        assert_eq!(
+            batch.push(ev(codes::EV_SYN, codes::SYN_REPORT, 0)),
+            [Input::MovedTo(1280.0, 0.0)]
+        );
+    }
+
+    #[test]
+    fn a_click_that_comes_with_a_move_lands_where_the_move_went() {
+        let mut batch = Batch::new(Some((0..=32767, 0..=32767)), (1281, 801));
+        batch.push(ev(codes::EV_ABS, codes::ABS_X, 0));
+        batch.push(ev(codes::EV_ABS, codes::ABS_Y, 0));
+        batch.push(ev(codes::EV_SYN, codes::SYN_REPORT, 0));
+        // The button can come before the axes in one report.
+        batch.push(ev(codes::EV_KEY, codes::BTN_LEFT, 1));
+        batch.push(ev(codes::EV_ABS, codes::ABS_X, 16_384));
+        batch.push(ev(codes::EV_ABS, codes::ABS_Y, 16_384));
+        let report = batch.push(ev(codes::EV_SYN, codes::SYN_REPORT, 0));
+        assert!(matches!(
+            report[..],
+            [
+                Input::MovedTo(x, y),
+                Input::Button(iced_core::mouse::Button::Left, true)
+            ] if (x - 640.0).abs() < 0.1 && (y - 400.0).abs() < 0.1
+        ));
     }
 
     #[test]
@@ -153,11 +215,8 @@ mod tests {
         batch.push(ev(codes::EV_REL, codes::REL_X, 2));
         assert_eq!(
             batch.push(ev(codes::EV_SYN, codes::SYN_REPORT, 0)),
-            Some(Input::MovedBy(5.0, 0.0))
+            [Input::MovedBy(5.0, 0.0)]
         );
-        assert_eq!(
-            batch.push(ev(codes::EV_KEY, 30, 1)),
-            Some(Input::Key(30, 1))
-        );
+        assert_eq!(batch.push(ev(codes::EV_KEY, 30, 1)), [Input::Key(30, 1)]);
     }
 }
