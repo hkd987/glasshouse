@@ -77,13 +77,15 @@ impl Runtime {
                         url: Some(url.clone()),
                     });
                 }
-                let name = NATIVE_APPS
+                // A first-party native app; anything else the profile names
+                // isn't on this device (a web app not installed here), so
+                // it isn't offered.
+                let (_, name) = NATIVE_APPS
                     .iter()
-                    .find(|(native, _)| *native == id.as_str())
-                    .map_or_else(|| id.to_string(), |(_, name)| (*name).to_owned());
+                    .find(|(native, _)| *native == id.as_str())?;
                 Some(ProfileApp {
                     id: id.clone(),
-                    name,
+                    name: (*name).to_owned(),
                     kind: ProfileAppKind::Native,
                     url: None,
                 })

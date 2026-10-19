@@ -226,6 +226,12 @@ impl Live {
         self
     }
 
+    /// The apps the launcher offers from now on: the person's profile
+    /// changed, or glassd answered again.
+    pub fn set_apps(&mut self, apps: Vec<AppEntry>) {
+        self.apps = apps;
+    }
+
     /// Whether the screen is locked.
     pub fn is_locked(&self) -> bool {
         self.locked.is_some()

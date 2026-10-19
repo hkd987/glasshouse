@@ -25,13 +25,15 @@ fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
     assert_eq!(
         ids(&h),
         [
+            ("activity-monitor".into(), ProfileAppKind::Native),
             ("calendar".into(), ProfileAppKind::Web),
-            ("mail".into(), ProfileAppKind::Web)
+            ("mail".into(), ProfileAppKind::Web),
+            ("terminal".into(), ProfileAppKind::Native),
         ]
     );
 
-    // Given IT's role, the tools for managing a computer join the profile.
-    // The admin console needs a managed device to open, so it isn't here.
+    // IT's role adds the tools for managing computers: the admin console,
+    // which needs a managed device to open, so it isn't offered here.
     h.apply_policy_replacing(
         "name = \"it-admins\"\n",
         "name = \"it-admins\"\nmembers = [\"{me}\"]\n",
@@ -43,13 +45,17 @@ fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
             .map(|a| a.name)
             .collect();
     assert_eq!(names, ["Activity Monitor", "Calendar", "Mail", "Terminal"]);
+
+    // An app the profile names that isn't on this device isn't offered.
+    h.apply_policy_replacing("\"terminal\"]", "\"terminal\", \"notes\"]", "");
+    assert!(!ids(&h).iter().any(|(id, _)| id == "notes"));
 }
 
 #[tokio::test]
 async fn ad7_an_app_outside_the_profile_doesnt_open_and_the_refusal_is_audited() {
     let h = harness();
-    h.apply_policy_replacing("apps = [\"mail\", \"calendar\"]", "apps = [\"mail\"]", "");
-    assert_eq!(ids(&h), [("mail".into(), ProfileAppKind::Web)]);
+    h.apply_policy_replacing("\"mail\", \"calendar\", ", "\"mail\", ", "");
+    assert!(!ids(&h).iter().any(|(id, _)| id == "calendar"));
     let err =
         h.rt.open_app(&h.me, &"calendar".parse().unwrap())
             .unwrap_err();

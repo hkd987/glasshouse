@@ -118,11 +118,13 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
     let started = Instant::now();
     // The desktop comes up whether or not glassd answers yet (it may still
     // be starting, or restarting); its tiles arrive when it does.
-    let (mut client, tasks) = match attach(&args.socket).await {
-        Ok((client, tasks)) => (Some(client), tasks),
+    // Without glassd there's no profile, so the launcher offers nothing
+    // until it answers (AD-7).
+    let (mut client, tasks, profile) = match attach(&args.socket).await {
+        Ok((client, tasks, profile)) => (Some(client), tasks, profile),
         Err(e) => {
             eprintln!("glassd: {e:#}; trying again");
-            (None, Vec::new())
+            (None, Vec::new(), Vec::new())
         }
     };
 
@@ -131,7 +133,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
         .without_wallpaper()
         .signed_in_as(signed_in_as())
         .about(about())
-        .with_apps(installed_apps());
+        .with_apps(glass_shell::apps::offered(&installed_apps(), &profile));
     // The sign-in screen started this session, so it can check the
     // password that unlocks the screen (`session`).
     if args.from_sign_in {
@@ -202,11 +204,12 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 redraw = true;
             }
             () = reconnect => {
-                let Ok((back, tasks)) = attach(&args.socket).await else {
+                let Ok((back, tasks, profile)) = attach(&args.socket).await else {
                     continue;
                 };
                 eprintln!("glassd: connected again, {} tiles", tasks.len());
                 client = Some(back);
+                shell.live.set_apps(glass_shell::apps::offered(&installed_apps(), &profile));
                 let effects = Vec::from_iter(shell.live.reload(tasks));
                 shell.carry_out_all(client.as_ref(), effects).await;
                 redraw = true;
@@ -286,8 +289,9 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
 }
 
 /// Connects to glassd, subscribes to its events and lists the caller's
-/// tasks: subscribing first, so no change falls between the two.
-async fn attach(socket: &std::path::Path) -> anyhow::Result<(Client, Vec<TaskView>)> {
+/// tasks (subscribing first, so no change falls between the two) and the
+/// apps in their profile.
+async fn attach(socket: &std::path::Path) -> anyhow::Result<(Client, Vec<TaskView>, Vec<String>)> {
     let client = Client::connect(socket)
         .await
         .with_context(|| format!("connecting to {}", socket.display()))?;
@@ -299,7 +303,15 @@ async fn attach(socket: &std::path::Path) -> anyhow::Result<(Client, Vec<TaskVie
         .call(methods::TASK_LIST, ())
         .await
         .map_err(|e| anyhow!("task.list: {e}"))?;
-    Ok((client, tasks))
+    let profile: Vec<glass_api::ProfileApp> = client
+        .call(methods::APPS_LIST, ())
+        .await
+        .map_err(|e| anyhow!("apps.list: {e}"))?;
+    Ok((
+        client,
+        tasks,
+        profile.into_iter().map(|a| a.id.to_string()).collect(),
+    ))
 }
 
 /// glassd's next notification; `None` when the connection closed, and

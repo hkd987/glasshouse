@@ -88,7 +88,10 @@ mod tests {
                 .map(|a| a.to_string())
                 .collect()
         };
-        assert_eq!(ids("anyone"), ["calendar", "mail"]);
+        assert_eq!(
+            ids("anyone"),
+            ["activity-monitor", "calendar", "mail", "terminal"]
+        );
         let with_role = DEFAULT_POLICY.replace(
             "name = \"it-admins\"\n",
             "name = \"it-admins\"\nmembers = [\"pat\"]\n",
@@ -114,10 +117,7 @@ mod tests {
     #[test]
     fn an_app_in_a_profile_cant_be_an_agent() {
         // Apps and agents share one namespace (ADR 0024).
-        let bad = DEFAULT_POLICY.replace(
-            "apps = [\"mail\", \"calendar\"]",
-            "apps = [\"mail\", \"claude-code\"]",
-        );
+        let bad = DEFAULT_POLICY.replace("\"mail\", \"calendar\"", "\"mail\", \"claude-code\"");
         let err = Policy::from_toml(&bad).unwrap_err().to_string();
         assert!(err.contains("one namespace"), "{err}");
     }
