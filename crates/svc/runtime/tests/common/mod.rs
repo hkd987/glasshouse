@@ -206,6 +206,7 @@ fn test_policy(home: &Path, me: &str, extra: &str) -> Policy {
 }
 
 /// The apps' actions as glassd registers them, on fakes.
+#[allow(clippy::too_many_arguments)]
 fn test_registry(
     dir: &Path,
     machine: &Arc<FakeMachine>,
@@ -597,13 +598,13 @@ pub fn chat_app() -> AppManifest {
     .unwrap()
 }
 
-/// Meet as the computer side needs it (CF-21): its own manifest, with
-/// the `media` permission, is the Meet app's to add.
+/// Meet as ADR 0030 declares it (CF-21): the four meeting actions, and the
+/// camera and microphone (`media`), which only a meeting app may have.
 pub fn meet_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "meet", "name": "Meet", "version": "0.1.0",
         "actions": ["meet.list", "meet.join", "meet.keys", "meet.leave"],
-        "permissions": [], "labels": ["public", "internal"]
+        "permissions": ["media"], "labels": ["public", "internal"]
     }))
     .unwrap()
 }

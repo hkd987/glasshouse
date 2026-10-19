@@ -1012,31 +1012,30 @@ impl ActionProvider for CalendarProvider {
                 // A meeting's conversation first: if it can't be made,
                 // nobody is invited (CF-21).
                 let mut made = None;
-                if let Some((meetings, meeting, logins, new)) =
+                // `true`: its conversation is still to be made.
+                if let Some((meetings, meeting, logins, true)) =
                     self.meeting_invitees(ctx, &event, &to)?
                 {
-                    if new {
-                        let details = MeetingDetails {
-                            title: event.title.clone(),
-                            start: event.start.clone(),
-                            end: event.end.clone(),
-                        };
-                        meetings
-                            .create(
-                                &ctx.principal.on_behalf_of.name,
-                                ctx.principal.agent.as_str() == APP,
-                                &meeting.id,
-                                &logins,
-                                &details,
-                            )
-                            .map_err(|e| {
-                                ActionError::Failed(format!(
-                                    "Not sent: {}.",
-                                    e.to_string().trim_end_matches('.')
-                                ))
-                            })?;
-                        made = Some(logins.len() + 1);
-                    }
+                    let details = MeetingDetails {
+                        title: event.title.clone(),
+                        start: event.start.clone(),
+                        end: event.end.clone(),
+                    };
+                    meetings
+                        .create(
+                            &ctx.principal.on_behalf_of.name,
+                            ctx.principal.agent.as_str() == APP,
+                            &meeting.id,
+                            &logins,
+                            &details,
+                        )
+                        .map_err(|e| {
+                            ActionError::Failed(format!(
+                                "Not sent: {}.",
+                                e.to_string().trim_end_matches('.')
+                            ))
+                        })?;
+                    made = Some(logins.len() + 1);
                 }
                 let text = self.invitation(ctx, &event, &to);
                 let stamp = Timestamp::now().unix_seconds();
