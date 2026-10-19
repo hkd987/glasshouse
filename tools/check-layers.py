@@ -17,7 +17,8 @@ no `target_os = "freebsd"` anywhere else, in this workspace or the shell's.
 
 OpenSSL is used directly by two crates only: glass-gateway-providers for
 TLS, the one way off the machine (ADR 0018), and glass-crypto for sealing
-(ADR 0030).
+(ADR 0030). The meetings relay's WebRTC stack, str0m, runs its DTLS on
+OpenSSL too; only glass-media-relay, on our servers, may use it.
 
 See docs/repo-layout.md. Run via `make check-layers` (part of `make lint`).
 """
@@ -28,11 +29,12 @@ import sys
 import tomllib
 from pathlib import Path
 
-# Who may depend on OpenSSL directly, and on the TLS stack over it.
+# Who may depend on OpenSSL directly, and on the TLS and WebRTC stacks over it.
 OPENSSL = {
     "openssl": {"glass-crypto", "glass-gateway-providers"},
     "openssl-sys": {"glass-crypto", "glass-gateway-providers"},
     "native-tls": {"glass-gateway-providers"},
+    "str0m": {"glass-media-relay"},
 }
 
 ALLOWED = {

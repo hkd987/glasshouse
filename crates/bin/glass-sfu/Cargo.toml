@@ -1,0 +1,19 @@
+[package]
+name = "glass-sfu"
+description = "The meetings relay's daemon (ADR 0030): one UDP port for everyone's media, a private API for the admin console. Runs on our servers, never on a device."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+glass-media-relay.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

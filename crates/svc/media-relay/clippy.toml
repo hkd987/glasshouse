@@ -1,0 +1,28 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# The relay never records (CF-21, ADR 0030): it has no code that writes a
+# file. clippy reads this file instead of the workspace's, so it repeats the
+# settings above. `cf21_the_relay_never_writes_media` checks both.
+disallowed-methods = [
+    { path = "std::fs::write", reason = "the relay never writes media (CF-21)" },
+    { path = "std::fs::copy", reason = "the relay never writes media (CF-21)" },
+    { path = "std::fs::rename", reason = "the relay never writes media (CF-21)" },
+    { path = "std::fs::hard_link", reason = "the relay never writes media (CF-21)" },
+    { path = "std::fs::create_dir", reason = "the relay never writes media (CF-21)" },
+    { path = "std::fs::create_dir_all", reason = "the relay never writes media (CF-21)" },
+    { path = "std::fs::File::create", reason = "the relay never writes media (CF-21)" },
+    { path = "std::fs::File::create_new", reason = "the relay never writes media (CF-21)" },
+    { path = "std::fs::File::options", reason = "the relay never writes media (CF-21)" },
+    { path = "std::fs::OpenOptions::open", reason = "the relay never writes media (CF-21)" },
+    { path = "tokio::fs::write", reason = "the relay never writes media (CF-21)" },
+    { path = "tokio::fs::copy", reason = "the relay never writes media (CF-21)" },
+    { path = "tokio::fs::rename", reason = "the relay never writes media (CF-21)" },
+    { path = "tokio::fs::hard_link", reason = "the relay never writes media (CF-21)" },
+    { path = "tokio::fs::create_dir", reason = "the relay never writes media (CF-21)" },
+    { path = "tokio::fs::create_dir_all", reason = "the relay never writes media (CF-21)" },
+    { path = "tokio::fs::File::create", reason = "the relay never writes media (CF-21)" },
+    { path = "tokio::fs::File::create_new", reason = "the relay never writes media (CF-21)" },
+    { path = "tokio::fs::File::options", reason = "the relay never writes media (CF-21)" },
+    { path = "tokio::fs::OpenOptions::open", reason = "the relay never writes media (CF-21)" },
+]

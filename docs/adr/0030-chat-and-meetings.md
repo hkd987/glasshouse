@@ -398,7 +398,7 @@ A new app crate, `glass-app-chat` (`crates/apps/chat`), is registered in `glass-
 - **The relay library is str0m 0.24.1** (MIT OR Apache-2.0), with `default-features = false, features = ["openssl"]`.
   - So the relay uses OpenSSL, like everything else.
   - str0m is a WebRTC library, not an SFU. These parts are ours to write: rooms, forwarding, layer choice, the 25-seat limit, and the console's private API.
-  - They live in `crates/bin/glass-sfu`, which runs on our servers and is never in the image.
+  - They live in `crates/svc/media-relay` (`glass-media-relay`), run by `crates/bin/glass-sfu`, which runs on our servers and is never in the image.
   - str0m's own README says a production SFU is significant work.
 - **The other libraries considered:**
   - webrtc-rs (MIT or Apache-2.0): a full async peer-connection stack, heavier than a relay needs.
