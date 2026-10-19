@@ -10,6 +10,7 @@
 //! the reason also goes to the system console, where it shows at boot.
 
 mod config;
+mod managed;
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -215,7 +216,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         registry,
         models,
         apps,
-        catalog: _,
+        catalog,
     } = prepared;
     let policy_source = loaded.origin.to_string();
     let run_dir = config
@@ -322,7 +323,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             harness: config.harness.clone(),
             attended_dir: run_dir.join("attended"),
             apps: apps.clone(),
-            console_url: None,
+            console_url: config.managed.as_ref().map(|m| m.url.clone()),
             dev_home: config.dev_home.clone(),
         },
         policy: loaded.policy.clone(),
@@ -353,11 +354,20 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     READY.store(true, Ordering::SeqCst);
 
     // The policy now in force is the one to fall back on next time. That
-    // writes and syncs files, so it happens off the start path.
-    tokio::task::spawn_blocking(move || match store.remember(&loaded) {
-        Ok(true) => tracing::info!("recorded the policy in force as the last good policy"),
-        Ok(false) => {}
-        Err(e) => tracing::warn!("couldn't record the last good policy: {e}"),
+    // writes and syncs files, so it happens off the start path. Then, on a
+    // managed device, the catalog it last applied goes back in force and
+    // syncing with the console starts (ADR 0023), never before glassd is up.
+    let managed_runtime = Arc::clone(&runtime);
+    let managed_config = config.clone();
+    std::thread::spawn(move || {
+        match store.remember(&loaded) {
+            Ok(true) => tracing::info!("recorded the policy in force as the last good policy"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("couldn't record the last good policy: {e}"),
+        }
+        if let Some(managed) = managed::Managed::start(&managed_config, managed_runtime, catalog) {
+            managed.run();
+        }
     });
 
     let mut terminate = signal(SignalKind::terminate())?;

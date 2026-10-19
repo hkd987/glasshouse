@@ -56,8 +56,34 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub snapshots: SnapshotConfig,
+    /// The org's admin console, once the device is enrolled (ADR 0023).
+    /// Unset: the device isn't managed and enforces its policy file only.
+    #[serde(default)]
+    pub managed: Option<ManagedConfig>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<CatalogEntry>,
+}
+
+/// `[managed]`: where this device gets its org's policy and catalog, and
+/// whose signatures it accepts (ADR 0023). Written at enrollment.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedConfig {
+    /// The console's address, `https://...`.
+    pub url: String,
+    /// The org's id; a release for another org is refused.
+    pub org: String,
+    /// The org's public keys (`ed25519:<hex>`). Releases signed by any
+    /// other key are refused; several allow a key rotation (EP-12).
+    pub org_keys: Vec<glass_managed::PublicKey>,
+    /// The enrollment token, in a file only glassd's user can read.
+    pub token_file: PathBuf,
+    /// This device's id in the fleet. Defaults to the machine's name.
+    #[serde(default)]
+    pub device: Option<String>,
+    /// Plain HTTP to a loopback console, for development and tests only.
+    #[serde(default)]
+    pub allow_insecure_http: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -309,6 +335,17 @@ impl Config {
         if self.app_socket == self.control_socket {
             bail!("app_socket and control_socket must be different sockets");
         }
+        if let Some(managed) = &self.managed {
+            if managed.org_keys.is_empty() {
+                bail!("managed.org_keys: a managed device needs its org's public key");
+            }
+            if managed.org.trim().is_empty() {
+                bail!("managed.org: name the org this device is enrolled in");
+            }
+            if managed.allow_insecure_http && self.sandbox.backend != SandboxBackend::HostInsecure {
+                bail!("managed.allow_insecure_http is for the development host backend only");
+            }
+        }
         self.sandbox.limits.validate()?;
         for agent in &self.agents {
             agent
@@ -487,12 +524,7 @@ mod tests {
     }
 
     fn registry() -> Registry {
-        glass_first_party::registry(glass_first_party::Setup {
-            restartable_services: Vec::new(),
-            helpdesk_outbox: "/nonexistent".into(),
-            system: std::sync::Arc::new(glass_app_system::HostSystem),
-        })
-        .unwrap()
+        glass_first_party::registry(glass_first_party::Setup::offline()).unwrap()
     }
 
     #[test]

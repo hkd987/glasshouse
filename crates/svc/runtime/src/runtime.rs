@@ -81,6 +81,15 @@ struct Settings {
     registry: Arc<Registry>,
 }
 
+/// A running agent, as a managed device reports it (AD-4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningAgent {
+    pub agent: glass_types::AgentId,
+    pub user: String,
+    /// Waiting on a person: an open ask.
+    pub waiting: bool,
+}
+
 /// What planning works out, shared by `plan` and `start`.
 struct Prepared {
     entry: CatalogEntry,
@@ -291,6 +300,31 @@ impl Runtime {
                 .count(),
             approvals_pending: self.desk.pending(None).len(),
         }
+    }
+
+    /// The agents running now, for whom, and whether each waits on a
+    /// person: what a managed device reports for the fleet view (AD-4).
+    /// Ids and login names only, never task text or paths.
+    pub fn running_agents(&self) -> Vec<RunningAgent> {
+        self.tasks()
+            .values()
+            .filter(|t| !t.is_app())
+            .filter_map(|t| {
+                let tile = t.lock().tile;
+                tile.is_live().then(|| RunningAgent {
+                    agent: t.entry.id.clone(),
+                    user: t.user.name.clone(),
+                    waiting: tile == TileState::NeedsYou,
+                })
+            })
+            .collect()
+    }
+
+    /// Everyone who ran an agent or opened an app since glassd started.
+    pub fn users_seen(&self) -> Vec<String> {
+        let users: std::collections::BTreeSet<String> =
+            self.tasks().values().map(|t| t.user.name.clone()).collect();
+        users.into_iter().collect()
     }
 
     pub fn agents_for(&self, caller: &Caller) -> Vec<AgentSummary> {

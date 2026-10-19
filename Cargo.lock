@@ -726,6 +726,7 @@ dependencies = [
  "glass-first-party",
  "glass-gateway",
  "glass-gateway-providers",
+ "glass-managed",
  "glass-platform",
  "glass-policy",
  "glass-rpc",

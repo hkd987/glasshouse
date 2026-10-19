@@ -77,7 +77,6 @@ impl ConsoleClient {
                 ProviderError::Unavailable(m)
                 | ProviderError::NotConfigured(m)
                 | ProviderError::Rejected(m) => m,
-                other => other.to_string(),
             })?;
         match reply.status {
             200 => Ok(reply.body),
