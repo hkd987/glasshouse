@@ -293,27 +293,36 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
 /// tasks (subscribing first, so no change falls between the two) and the
 /// apps in their profile.
 async fn attach(socket: &std::path::Path) -> anyhow::Result<(Client, Vec<TaskView>, Vec<String>)> {
-    let client = Client::connect(socket)
-        .await
-        .with_context(|| format!("connecting to {}", socket.display()))?;
-    let _: serde_json::Value = client
-        .call(methods::EVENTS_SUBSCRIBE, ())
-        .await
-        .map_err(|e| anyhow!("events.subscribe: {e}"))?;
-    let tasks: Vec<TaskView> = client
-        .call(methods::TASK_LIST, ())
-        .await
-        .map_err(|e| anyhow!("task.list: {e}"))?;
-    let profile: Vec<glass_api::ProfileApp> = client
-        .call(methods::APPS_LIST, ())
-        .await
-        .map_err(|e| anyhow!("apps.list: {e}"))?;
-    Ok((
-        client,
-        tasks,
-        profile.into_iter().map(|a| a.id.to_string()).collect(),
-    ))
+    // A glassd that takes the connection and never answers mustn't hold
+    // up the desktop: it comes up without, and tries again.
+    tokio::time::timeout(ATTACH_WITHIN, async {
+        let client = Client::connect(socket)
+            .await
+            .with_context(|| format!("connecting to {}", socket.display()))?;
+        // Subscribed before the list, so no update falls in between; the
+        // list and the profile are asked for together.
+        let _: serde_json::Value = client
+            .call(methods::EVENTS_SUBSCRIBE, ())
+            .await
+            .map_err(|e| anyhow!("events.subscribe: {e}"))?;
+        let (tasks, profile) = tokio::join!(
+            client.call::<Vec<TaskView>>(methods::TASK_LIST, ()),
+            client.call::<Vec<glass_api::ProfileApp>>(methods::APPS_LIST, ()),
+        );
+        let tasks = tasks.map_err(|e| anyhow!("task.list: {e}"))?;
+        let profile = profile.map_err(|e| anyhow!("apps.list: {e}"))?;
+        Ok((
+            client,
+            tasks,
+            profile.into_iter().map(|a| a.id.to_string()).collect(),
+        ))
+    })
+    .await
+    .map_err(|_| anyhow!("glassd didn't answer in {} s", ATTACH_WITHIN.as_secs()))?
 }
+
+/// How long the desktop waits for glassd before coming up without it.
+const ATTACH_WITHIN: Duration = Duration::from_secs(3);
 
 /// glassd's next notification; `None` when the connection closed, and
 /// never while there's no connection.
