@@ -197,6 +197,44 @@ agents = []
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn ad3_dv3_a_policy_it_publishes_reaches_an_app_already_open() {
+    // Calendar is open, as it stays all day; IT then makes adding events
+    // Never for this person's group. The open app's next call is refused,
+    // with no reopening (ADR 0023, amended).
+    let h = harness();
+    let apps = Client::connect(h.serve_apps()).await.unwrap();
+    let calendar = open(&apps, "calendar").await;
+    let standup =
+        json!({ "title": "Standup", "start": "2026-10-20T09:00", "end": "2026-10-20T09:15" });
+    let before = call(&apps, calendar.session, "calendar.create", standup.clone()).await;
+    assert!(before.ok, "{}", before.text);
+
+    h.apply_policy(
+        r#"
+[[group]]
+name = "frontdesk"
+members = ["{me}"]
+agents = []
+[group.tiers]
+"calendar.create" = "never"
+"#,
+        "managed v2",
+    );
+    let after = call(&apps, calendar.session, "calendar.create", standup.clone()).await;
+    assert!(!after.ok);
+    assert!(
+        after.text.starts_with("Blocked by policy"),
+        "{}",
+        after.text
+    );
+
+    // And back: IT lifts it, and the same window can add events again.
+    h.apply_policy("", "managed v3");
+    let again = call(&apps, calendar.session, "calendar.create", standup).await;
+    assert!(again.ok, "{}", again.text);
+}
+
 #[tokio::test]
 async fn ui5_an_apps_ask_waits_on_the_desktop_and_the_app_cannot_answer_it() {
     let h = harness();

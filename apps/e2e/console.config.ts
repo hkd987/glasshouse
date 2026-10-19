@@ -20,7 +20,7 @@ export default defineConfig({
   testDir: ".",
   // Chat's tests need only what the setup brings up: the org's first policy
   // and its Chat release.
-  testMatch: ["console.e2e.ts", "chat.e2e.ts"],
+  testMatch: ["console.e2e.ts", "chat.e2e.ts", "meetings.e2e.ts"],
   globalSetup: "./console-setup.ts",
   outputDir: "results/console-artifacts",
   workers: 1,
@@ -35,7 +35,14 @@ export default defineConfig({
     deviceScaleFactor: 1,
     locale: "en-US",
     launchOptions: {
-      args: ["--no-proxy-server"],
+      args: [
+        "--no-proxy-server",
+        // Meetings (CF-21): the engine's test camera and microphone, with
+        // no prompt, and the relay on loopback.
+        "--use-fake-device-for-media-stream",
+        "--use-fake-ui-for-media-stream",
+        "--allow-loopback-in-peer-connection",
+      ],
       ...(process.env.PW_CHROMIUM ? { executablePath: process.env.PW_CHROMIUM } : {}),
     },
   },

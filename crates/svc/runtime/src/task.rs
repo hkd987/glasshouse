@@ -41,7 +41,10 @@ pub(crate) struct Task {
     /// The scope the user set on the handoff card, kept for Retry.
     pub scope: ScopeRequest,
     pub plan: Vec<String>,
-    pub policy: EffectivePolicy,
+    /// What policy lets this task do. An agent's task keeps the one it
+    /// started with (ADR 0021); an app session follows the policy in
+    /// force (ADR 0023, amended).
+    policy: std::sync::RwLock<Arc<EffectivePolicy>>,
     pub ctx: TaskContext,
     pub sandbox: SandboxSpec,
     pub cant_touch: Vec<String>,
@@ -146,6 +149,24 @@ impl Task {
         self.app.is_some()
     }
 
+    /// The effective policy in force for this task now.
+    pub fn policy(&self) -> Arc<EffectivePolicy> {
+        Arc::clone(
+            &self
+                .policy
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Puts `policy` in force for this task's next calls.
+    pub(crate) fn follow_policy(&self, policy: EffectivePolicy) {
+        *self
+            .policy
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(policy);
+    }
+
     pub fn new(new: NewTask) -> Self {
         let now = Timestamp::now();
         Self {
@@ -155,7 +176,7 @@ impl Task {
             prompt: new.prompt,
             scope: new.scope,
             plan: new.plan,
-            policy: new.policy,
+            policy: std::sync::RwLock::new(Arc::new(new.policy)),
             ctx: new.ctx,
             sandbox: new.sandbox,
             cant_touch: new.cant_touch,

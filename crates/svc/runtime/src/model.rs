@@ -36,7 +36,8 @@ impl Runtime {
             reason: e.to_string(),
             rule: "models.input".into(),
         })?;
-        let rules = task.policy.models();
+        let policy = task.policy();
+        let rules = policy.models();
         if input.max_tokens > rules.max_output_tokens() {
             return Err(ModelRefusal {
                 reason: format!(
@@ -154,7 +155,7 @@ impl Runtime {
 /// read so far (DP-11), and never less than policy's label for unlabeled
 /// content.
 pub(crate) fn call_label(task: &Task) -> Label {
-    let unlabeled = task.policy.models().unlabeled();
+    let unlabeled = task.policy().models().unlabeled();
     task.lock()
         .data_label
         .map_or(unlabeled, |read| read.max(unlabeled))

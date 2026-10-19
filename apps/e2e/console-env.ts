@@ -19,6 +19,10 @@ export const CALENDAR_URL = `http://calendar.localhost:${STORE_PORT}/`;
 export const SETTINGS_URL = `http://settings.localhost:${STORE_PORT}/`;
 /** Chat on the same bridge: the org's chat, sealed end to end (CF-91). */
 export const CHAT_URL = `http://chat.localhost:${STORE_PORT}/`;
+/** Meet on the computer (CF-21). */
+export const MEET_URL = `http://meet.localhost:${STORE_PORT}/`;
+/** The meeting relay's private API, beside the console (ADR 0030 §6). */
+export const RELAY_API = `127.0.0.1:${Number(process.env.GLASS_CONSOLE_E2E_RELAY_PORT ?? 7412)}`;
 /** The fixture: devices, catalog items. */
 export const FIXTURE = [500, 50] as const;
 /** This device's id in the fleet. */

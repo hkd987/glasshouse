@@ -155,7 +155,7 @@ apps-dev: apps-build ## Serve the apps from make dev-host's glassd: http://mail.
 # The org's admin console (ADR 0023): glass-console serves the web app in
 # apps/console and the API devices sync signed policy and catalog from. It
 # runs on our web servers, never on a device. See apps/README.md.
-CONSOLE_BINS := -p glass-console -p glassd -p glassctl -p glass-app-bridge -p glass-demo-agent -p glass-probe -p glass-mcp
+CONSOLE_BINS := -p glass-console -p glassd -p glassctl -p glass-app-bridge -p glass-demo-agent -p glass-probe -p glass-mcp -p glass-sfu
 
 console-dev: apps-build ## The admin console on http://127.0.0.1:7400 (FIXTURE=500,50 fills it); enroll make dev-host with GLASS_DEV_ENROLL=build/console/enrollment.json
 	cargo build -p glass-console
@@ -165,6 +165,7 @@ console-test: apps-build ## Admin console: Rust tests, then Playwright on a 500-
 	cargo test -p glass-console -p glass-managed -p glass-app-catalog
 	cargo build $(CONSOLE_BINS)
 	cargo build -p glass-app-chat --example colleague
+	cargo build -p glass-app-meet --example attendee
 	cd apps && PLAYWRIGHT_BROWSERS_PATH=$(APPS_BROWSERS) npx playwright test -c e2e/console.config.ts
 
 meet-test: apps-build ## Meetings' media path (CF-21, M1): two pages with the engine's fake camera, sealed with SFrame, through glass-sfu

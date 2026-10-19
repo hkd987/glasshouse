@@ -5,11 +5,11 @@
 // first sync to put the org's policy in force. Returns the teardown.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readFileSync, rmSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
-import { CONSOLE_PORT, CONSOLE_STATE, DEVICE, FIXTURE, STORE_PORT } from "./console-env.ts";
+import { CONSOLE_PORT, CONSOLE_STATE, DEVICE, FIXTURE, RELAY_API, STORE_PORT } from "./console-env.ts";
 import { BIN, DEV, REPO, RUN, glassctlJson, sleep } from "./env.ts";
 
 const LOGS = join(DEV, "..");
@@ -49,8 +49,13 @@ export default async function consoleSetup(): Promise<() => Promise<void>> {
   }
   const started: ChildProcess[] = [];
   try {
+    // The meeting relay, which the console admits people to (ADR 0030 §6).
+    started.push(start("relay", join(BIN, "glass-sfu"), ["--udp", "127.0.0.1:0", "--api", RELAY_API]));
+    await until("the relay", () => readFileSync(join(LOGS, "relay.log"), "utf8").includes("glass-sfu ready"));
     started.push(
       start("console", join(BIN, "glass-console"), [
+        "--relay",
+        RELAY_API,
         "--dev",
         "--listen",
         `127.0.0.1:${CONSOLE_PORT}`,

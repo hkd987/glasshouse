@@ -95,13 +95,14 @@ impl Runtime {
         };
 
         let home = task.user.home.clone();
-        let label_of = |path: &std::path::Path| labels::label_of(&task.policy, &home, path);
+        let policy = task.policy();
+        let label_of = |path: &std::path::Path| labels::label_of(&policy, &home, path);
         let paths = preview
             .reads
             .iter()
             .chain(&preview.writes)
             .map(PathBuf::as_path);
-        let verdict = decide(&task.policy, &def.name, def.default_tier, paths, &label_of);
+        let verdict = decide(&policy, &def.name, def.default_tier, paths, &label_of);
         // What the call reads, so a successful one raises the task's label
         // (DP-11).
         let read_label = preview
@@ -253,7 +254,7 @@ impl Runtime {
         let (result, seen, sent) = if let Some(call) = routed {
             let (rt, task) = (Arc::clone(self), Arc::clone(task));
             let sent = tokio::task::spawn_blocking(move || {
-                Runtime::send_model(&rt.gateway, &task.policy, &call)
+                Runtime::send_model(&rt.gateway, &task.policy(), &call)
             })
             .await;
             match sent {
@@ -386,7 +387,7 @@ impl Runtime {
         verdict: &Verdict,
         started: Instant,
     ) -> Result<ApprovalRef, CallToolResult> {
-        let timeout = task.policy.approval_timeout_secs();
+        let timeout = task.policy().approval_timeout_secs();
         let items = if preview.items.is_empty() {
             preview.targets.clone()
         } else {

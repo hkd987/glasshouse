@@ -6,8 +6,10 @@ to 25; the design below carries it out. Two choices in it are proposed
 defaults the owner can still change (end of this ADR). Slice C1 is built,
 on the development host and the VM: `glass-crypto`, the console's relay,
 on computers the member keys, store, sync and the four chat actions with
-`[[app]]` tiers, `app.status` waits, and the Chat app. Slice M1's
-computer side is built on the development host: meetings as conversations
+`[[app]]` tiers, `app.status` waits, and the Chat app. Slice M1 works end to end on the development host, two people from a
+Calendar invitation to seeing and hearing each other (the console's room
+routes, `--relay`, and `ConsoleClient` as `MeetLink`, 2026-10-19). Its
+computer side: meetings as conversations
 of kind `meeting`, Calendar's meeting flag, invitations and Join,
 `glass-app-meet` (`meet.list`, `meet.join`, `meet.keys`, `meet.leave`) over
 the `MeetLink` trait in `glass-managed::meet`, and policy that refuses

@@ -548,6 +548,7 @@ dependencies = [
  "glass-api",
  "glass-app-chat",
  "glass-crypto",
+ "glass-gateway-providers",
  "glass-managed",
  "glass-types",
  "hex",

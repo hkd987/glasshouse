@@ -109,7 +109,7 @@ impl AgentApi {
             }),
         }];
         for def in self.rt.registry().defs() {
-            let tier = task.policy.tier_for(&def.name, def.default_tier).tier;
+            let tier = task.policy().tier_for(&def.name, def.default_tier).tier;
             let note = match tier {
                 Tier::Never => continue,
                 Tier::Ask => " The user is asked first; the call waits for their answer.",
@@ -177,7 +177,7 @@ fn instructions(rt: &Runtime, task: &Task) -> String {
     let gateway = registry
         .get(&glass_gateway::MODEL_COMPLETE.parse().expect("static name"))
         .map(|(def, _)| def)
-        .filter(|def| task.policy.tier_for(&def.name, def.default_tier).tier != Tier::Never);
+        .filter(|def| task.policy().tier_for(&def.name, def.default_tier).tier != Tier::Never);
     if let Some(def) = gateway {
         text.push_str(&format!(
             "\nWhen you need an AI model, call {}. There is no other network: the OS picks a model IT approved \

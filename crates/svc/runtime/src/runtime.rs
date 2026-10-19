@@ -229,8 +229,11 @@ impl Runtime {
 
     /// Puts a new policy, and the registry built from it, in force at once
     /// (ADR 0021, ADR 0023). The caller validated and linted it first.
-    /// Tasks and app sessions started from now on use it; running ones keep
-    /// the effective policy they started with.
+    /// Tasks started from now on use it; running agents' tasks keep the
+    /// effective policy they started with, the scope the person agreed
+    /// to. Open app sessions follow it from their next call: an app has
+    /// no handoff card, and stays open as long as the person is signed
+    /// in, so a stricter policy has to reach it.
     pub fn apply_policy(&self, policy: Policy, registry: Registry, source: impl Into<String>) {
         // Device settings follow at once; desktops hear if theirs changed.
         self.device_settings.set_policy(&policy);
@@ -242,6 +245,23 @@ impl Runtime {
             registry: Arc::new(registry),
         });
         self.set_policy_source(source);
+        let policy = self.policy();
+        let apps: Vec<Arc<Task>> = self
+            .tasks()
+            .values()
+            .filter(|t| t.is_app())
+            .cloned()
+            .collect();
+        for task in apps {
+            if let Some(manifest) = &task.app {
+                task.follow_policy(policy.for_app(
+                    &task.user.name,
+                    &manifest.id,
+                    &manifest.actions,
+                    manifest.max_label(),
+                ));
+            }
+        }
     }
 
     /// What `system.status` says about where the policy came from, such as

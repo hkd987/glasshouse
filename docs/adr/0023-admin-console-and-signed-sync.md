@@ -112,7 +112,14 @@ between (DV-1, EP-12), keep booting from disk and keep working offline
   swapped into the runtime with its registry in one step
   (`Runtime::apply_policy`). Tasks and app sessions started after use it;
   running ones keep the effective policy they started with (they do use
-  the new registry, which differs only in the IT agent's fix list). The
+  the new registry, which differs only in the IT agent's fix list).
+  **Amended 2026-10-19 for app sessions:** an open app session follows
+  the policy in force from its next call. An agent's task keeps its
+  policy because the person agreed to its scope on the handoff card; an
+  app has no handoff card, and the app bridge keeps one session per app
+  for as long as the person is signed in, so a policy IT tightened would
+  otherwise never reach an open Mail or Calendar
+  (`apps.rs` `ad3_dv3_a_policy_it_publishes_reaches_an_app_already_open`). The
   model gateway is built at start only: a release that changes model
   providers takes effect at the next restart. Every apply and refusal is
   audited (`PolicyLoaded` with `source: managed`, `CatalogLoaded`,
