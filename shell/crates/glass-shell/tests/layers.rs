@@ -99,3 +99,41 @@ fn ui1_hiding_windows_leaves_none_of_their_pixels_even_where_the_ui_is_unchanged
     screen.render_over(ui(), None, Some(&windows(RED)));
     assert_eq!(pixel(&screen, 25, 75), RED);
 }
+
+#[test]
+fn dk1_a_title_bar_has_the_controls_on_the_left_and_round_top_corners() {
+    use glass_shell::screens::window::{Controls, title_bar};
+    let controls = Controls {
+        first: 16.0,
+        step: 20.0,
+        radius: 6.0,
+    };
+    let theme = glass_shell::Theme::glass();
+    let size = Size::new(300.0, 28.0);
+    let draw = |focused| {
+        glass_shell::render::layer(
+            title_bar(&theme, "Notes", focused, (300.0, 28.0), controls),
+            size,
+        )
+    };
+    let at = |bar: &[u8], x: usize, y: usize| -> [u8; 4] {
+        bar[(y * 300 + x) * 4..(y * 300 + x) * 4 + 4]
+            .try_into()
+            .unwrap()
+    };
+    let focused = draw(true);
+    // Close, minimize and zoom where the compositor hit-tests them.
+    assert_eq!(
+        at(&focused, 16, 14),
+        [0x57, 0x5F, 0xFF, 0xFF],
+        "close is red"
+    );
+    assert_eq!(at(&focused, 36, 14), [0x2E, 0xBC, 0xFE, 0xFF], "minimize");
+    assert_eq!(at(&focused, 56, 14), [0x40, 0xC8, 0x28, 0xFF], "zoom");
+    // Round top corners show what's behind; the bar itself is opaque.
+    assert_eq!(at(&focused, 0, 0)[3], 0);
+    assert_eq!(at(&focused, 150, 27)[3], 0xFF);
+    // Without the keyboard the controls are grey.
+    let unfocused = draw(false);
+    assert_ne!(at(&unfocused, 16, 14), at(&focused, 16, 14));
+}

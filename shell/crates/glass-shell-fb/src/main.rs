@@ -31,11 +31,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
 use glass_api::{Event, TaskDetail, TaskRef, TaskView, UndoReport, methods};
-use glass_compositor::{Compositor, WorkArea};
+use glass_compositor::{CONTROL_RADIUS, CONTROLS, Compositor, TITLE_BAR, WorkArea};
 use glass_rpc::{Client, ClientError};
 use glass_shell::live::{Effect, Live};
 use glass_shell::screens::desktop::{DOCK_ROOM, MENU_BAR_HEIGHT};
 use glass_shell::screens::system;
+use glass_shell::screens::window::Controls;
 use glass_shell::session::Password;
 use glass_shell::{Message, Power, Theme, session, wallpaper};
 use glass_shell_fb::display::{AppInput, Display, Route};
@@ -44,6 +45,14 @@ use std::os::fd::OwnedFd;
 use time::{OffsetDateTime, UtcOffset};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
+
+/// Where the compositor hit-tests a title bar's controls, for drawing them
+/// there.
+const CONTROL_LAYOUT: Controls = Controls {
+    first: CONTROLS[0] as f32,
+    step: (CONTROLS[1] - CONTROLS[0]) as f32,
+    radius: CONTROL_RADIUS as f32,
+};
 
 /// Changes that arrive this close together make one redraw.
 const SETTLE: Duration = Duration::from_millis(50);
@@ -459,6 +468,8 @@ struct Shell {
     apps: Option<Compositor>,
     /// The windows' titles, as last logged.
     app_titles: Vec<String>,
+    /// Each window's title bar as last drawn: id, title, focus, width.
+    bars: Vec<(u64, String, bool, i32)>,
 }
 
 impl Shell {
@@ -476,6 +487,7 @@ impl Shell {
             dirty: false,
             apps,
             app_titles: Vec::new(),
+            bars: Vec::new(),
         })
     }
 
@@ -487,11 +499,34 @@ impl Shell {
         if let Err(e) = apps.dispatch() {
             eprintln!("apps: {e:#}");
         }
+        let windows = apps.windows();
         // Windows coming and going, for the log.
-        let titles: Vec<String> = apps.windows().into_iter().map(|w| w.title).collect();
+        let titles: Vec<String> = windows.iter().map(|w| w.title.clone()).collect();
         if titles != self.app_titles {
             eprintln!("apps: {} windows: {}", titles.len(), titles.join(", "));
             self.app_titles = titles;
+        }
+        // Title bars drawn again where a title, width or focus changed.
+        self.bars.retain(|b| windows.iter().any(|w| w.id == b.0));
+        for w in &windows {
+            let look = (w.id, w.title.clone(), w.focused, w.area.width);
+            if self.bars.contains(&look) {
+                continue;
+            }
+            let bar = glass_shell::screens::window::title_bar(
+                &self.theme,
+                &w.title,
+                w.focused,
+                (w.area.width as f32, TITLE_BAR as f32),
+                CONTROL_LAYOUT,
+            );
+            let pixels = glass_shell::render::layer(
+                bar,
+                glass_shell::Size::new(w.area.width as f32, TITLE_BAR as f32),
+            );
+            apps.set_title_bar(w.id, &pixels, w.area.width);
+            self.bars.retain(|b| b.0 != w.id);
+            self.bars.push(look);
         }
         let areas = match apps.render() {
             Ok(areas) => areas,

@@ -14,6 +14,7 @@
 #   screendump <out.png>     save what the VM's display shows right now (boot screens, splash)
 #   point <x> <y>            move the pointer to screen pixel (x, y) (the USB tablet)
 #   click <x> <y>            ... and click there
+#   drag <x> <y> <x2> <y2>   press at (x, y), move to (x2, y2) in steps, release there
 #   key <key>...             press keys, QEMU names: ctrl-spc, ret, esc, a, shift-a
 #   type <text>              type text on the USB keyboard (letters, digits, space, . , - /)
 # Env knobs: VM_DIR VM_SSH_PORT VM_CPUS VM_CPU_MODEL VM_ACCEL VM_MEM VM_DISK_SIZE VM_BOOT_TIMEOUT VM_BASE_IMAGE
@@ -185,6 +186,26 @@ cmd_click() {
 	qmp_input "[$at,{\"type\":\"btn\",\"data\":{\"down\":false,\"button\":\"left\"}}]"
 }
 
+cmd_drag() {
+	(($# == 4)) || die "usage: vm.sh drag <x> <y> <x2> <y2>"
+	local from to step x y
+	from=$(abs_events "$1" "$2")
+	to=$(abs_events "$3" "$4")
+	qmp_input "[$from]"
+	sleep 0.1
+	qmp_input "[$from,{\"type\":\"btn\",\"data\":{\"down\":true,\"button\":\"left\"}}]"
+	# Steps on the way, as a hand would move it.
+	for step in 1 2 3 4; do
+		x=$(($1 + ($3 - $1) * step / 5)) y=$(($2 + ($4 - $2) * step / 5))
+		sleep 0.1
+		qmp_input "[$(abs_events "$x" "$y")]"
+	done
+	sleep 0.1
+	qmp_input "[$to]"
+	sleep 0.1
+	qmp_input "[$to,{\"type\":\"btn\",\"data\":{\"down\":false,\"button\":\"left\"}}]"
+}
+
 # monitor <command>: one human-monitor command.
 monitor() {
 	vm_running || die "VM is not running"
@@ -283,6 +304,7 @@ exec) cmd_exec "$@" ;;
 screendump) cmd_screendump "$@" ;;
 point) cmd_point "$@" ;;
 click) cmd_click "$@" ;;
+drag) cmd_drag "$@" ;;
 key) cmd_key "$@" ;;
 type) cmd_type "$@" ;;
 reset) cmd_reset ;;

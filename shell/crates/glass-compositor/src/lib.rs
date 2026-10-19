@@ -13,7 +13,11 @@
 //! through them, UI-5).
 //!
 //! New windows open centered in the work area, between the menu bar and the
-//! dock; a click raises a window and gives it the keyboard.
+//! dock; a click raises a window and gives it the keyboard. Each window has
+//! a title bar above it with the controls on the left, as on a Mac (DK-1):
+//! the compositor stacks and hit-tests it with the window, and the desktop
+//! draws it in its own style ([`Compositor::set_title_bar`]). Dragging the
+//! bar moves the window; its close control asks the app to close.
 
 use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
@@ -22,11 +26,15 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, anyhow};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+use smithay::backend::renderer::element::memory::{
+    MemoryRenderBuffer, MemoryRenderBufferRenderElement,
+};
+use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+use smithay::backend::renderer::element::{AsRenderElements, Kind};
 use smithay::backend::renderer::pixman::PixmanRenderer;
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::backend::renderer::{Bind, Color32F, ExportMem};
-use smithay::desktop::space::render_output;
+use smithay::desktop::space::SpaceElement;
 use smithay::desktop::{PopupManager, Space, Window, WindowSurfaceType};
 use smithay::input::keyboard::{FilterResult, Keycode};
 use smithay::input::pointer::{ButtonEvent, CursorImageStatus, MotionEvent};
@@ -40,7 +48,7 @@ use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Display, ListeningSocket};
 use smithay::utils::{
-    Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Serial, Size, Transform,
+    Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Scale, Serial, Size, Transform,
 };
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
@@ -65,6 +73,20 @@ pub mod client;
 /// The left mouse button's evdev code (`BTN_LEFT`).
 pub const BUTTON_LEFT: u32 = 0x110;
 
+/// The title bar's height above each window, in pixels (DK-1).
+pub const TITLE_BAR: i32 = 28;
+/// The window controls on the title bar's left, close first, as on a Mac
+/// (DK-1): their centers from the bar's left edge, and their radius.
+pub const CONTROLS: [i32; 3] = [16, 36, 56];
+pub const CONTROL_RADIUS: i32 = 6;
+
+smithay::backend::renderer::element::render_elements! {
+    /// What the output is composed of: apps' surfaces and their title bars.
+    AppElement<=PixmanRenderer>;
+    Surface=WaylandSurfaceRenderElement<PixmanRenderer>,
+    Bar=MemoryRenderBufferRenderElement<PixmanRenderer>,
+}
+
 /// Where windows may go: the screen less the desktop's own bars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkArea {
@@ -77,9 +99,12 @@ pub struct WorkArea {
 /// A window, as the desktop shows it: its app, title and place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowInfo {
+    /// Stays the same while the window is open ([`Compositor::set_title_bar`]).
+    pub id: u64,
     pub app_id: String,
     pub title: String,
-    /// On the screen, in pixels.
+    /// The app's part on the screen, in pixels; its title bar is the
+    /// [`TITLE_BAR`] pixels above.
     pub area: Rect,
     /// It has the keyboard.
     pub focused: bool,
@@ -170,6 +195,10 @@ impl Compositor {
             size: (width, height),
             unplaced: Vec::new(),
             pointer: (0.0, 0.0).into(),
+            frames: Vec::new(),
+            next_id: 0,
+            grab: None,
+            refocus: false,
         };
         let target = pixman::Image::new(
             pixman::FormatCode::A8R8G8B8,
@@ -208,6 +237,12 @@ impl Compositor {
             .context("dispatching clients")?;
         self.state.space.refresh();
         self.state.popups.cleanup();
+        // The window with the keyboard closed: the one now in front takes
+        // it, as on a Mac.
+        if std::mem::take(&mut self.state.refocus) {
+            let front = self.state.space.elements().last().cloned();
+            self.state.focus(front, SERIAL_COUNTER.next_serial());
+        }
         self.display.flush_clients().context("flushing clients")?;
         Ok(())
     }
@@ -217,23 +252,22 @@ impl Compositor {
     /// nothing did). Windows are told the frame is done, so they draw the
     /// next one.
     pub fn render(&mut self) -> anyhow::Result<Vec<Rect>> {
+        let elements = self.elements()?;
         let changed = {
             let mut framebuffer = self
                 .renderer
                 .bind(&mut self.target)
                 .context("binding the output")?;
-            let result = render_output::<_, SolidColorRenderElement, _, _>(
-                &self.state.output,
-                &mut self.renderer,
-                &mut framebuffer,
-                1.0,
-                usize::from(self.composed),
-                [&self.state.space],
-                &[],
-                &mut self.damage,
-                Color32F::TRANSPARENT,
-            )
-            .map_err(|e| anyhow!("composing the output: {e:?}"))?;
+            let result = self
+                .damage
+                .render_output(
+                    &mut self.renderer,
+                    &mut framebuffer,
+                    usize::from(self.composed),
+                    &elements,
+                    Color32F::TRANSPARENT,
+                )
+                .map_err(|e| anyhow!("composing the output: {e:?}"))?;
             let damage: Vec<Rectangle<i32, Physical>> = result.damage.cloned().unwrap_or_default();
             let mut changed = Vec::new();
             for area in damage {
@@ -279,6 +313,63 @@ impl Compositor {
         Ok(changed)
     }
 
+    /// What's on the output, front to back: each window above the ones
+    /// under it, its title bar with it.
+    fn elements(&mut self) -> anyhow::Result<Vec<AppElement>> {
+        let mut elements = Vec::new();
+        for window in self.state.space.elements().rev() {
+            let Some(at) = self.state.space.element_location(window) else {
+                continue;
+            };
+            let surfaces: Vec<AppElement> = window.render_elements(
+                &mut self.renderer,
+                (at - window.geometry().loc).to_physical(1),
+                Scale::from(1.0),
+                1.0,
+            );
+            elements.extend(surfaces);
+            let bar = self
+                .state
+                .frames
+                .iter()
+                .find(|f| &f.window == window)
+                .and_then(|f| f.bar.as_ref());
+            if let Some(bar) = bar {
+                let element = MemoryRenderBufferRenderElement::from_buffer(
+                    &mut self.renderer,
+                    (f64::from(at.x), f64::from(at.y - TITLE_BAR)),
+                    bar,
+                    None,
+                    None,
+                    None,
+                    Kind::Unspecified,
+                )
+                .map_err(|e| anyhow!("a title bar: {e:?}"))?;
+                elements.push(AppElement::Bar(element));
+            }
+        }
+        Ok(elements)
+    }
+
+    /// Gives window `id` its title bar: `bgra` is `width` by [`TITLE_BAR`]
+    /// pixels, premultiplied, drawn by the desktop in its style for the
+    /// window's title, width and focus (and drawn again when one changes).
+    pub fn set_title_bar(&mut self, id: u64, bgra: &[u8], width: i32) {
+        if bgra.len() != (width * TITLE_BAR * 4) as usize {
+            return;
+        }
+        if let Some(frame) = self.state.frames.iter_mut().find(|f| f.id == id) {
+            frame.bar = Some(MemoryRenderBuffer::from_slice(
+                bgra,
+                Fourcc::Argb8888,
+                (width, TITLE_BAR),
+                1,
+                Transform::Normal,
+                None,
+            ));
+        }
+    }
+
     /// The composed screen: BGRA, `width * 4` bytes a row. Where no window
     /// is, it's transparent, for the desktop behind to show through.
     pub fn pixels(&self) -> &[u8] {
@@ -295,9 +386,9 @@ impl Compositor {
         ])
     }
 
-    /// Whether a window is at `at` (pixels on the screen).
+    /// Whether a window or its title bar is at `at` (pixels on the screen).
     pub fn window_at(&self, at: (f64, f64)) -> bool {
-        self.state.space.element_under(at).is_some()
+        self.state.under(at.into()).is_some()
     }
 
     /// Whether a window has the keyboard.
@@ -323,7 +414,9 @@ impl Compositor {
                 let at = self.state.space.element_location(window)?;
                 let size = window.geometry().size;
                 let (app_id, title) = toplevel_names(toplevel);
+                let id = self.state.frames.iter().find(|f| &f.window == window)?.id;
                 Some(WindowInfo {
+                    id,
                     app_id,
                     title,
                     area: Rect {
@@ -341,6 +434,16 @@ impl Compositor {
     /// The pointer moved to `at` (pixels on the screen).
     pub fn pointer_moved(&mut self, at: (f64, f64)) {
         self.state.pointer = at.into();
+        // Dragging a title bar moves its window; the app hears nothing.
+        if let Some(grab) = &self.state.grab {
+            let to = self.state.pointer - grab.offset;
+            let top = f64::from(self.state.work_area.top + TITLE_BAR);
+            let window = grab.window.clone();
+            self.state
+                .space
+                .map_element(window, (to.x as i32, to.y.max(top) as i32), false);
+            return;
+        }
         let under = self.state.surface_under(self.state.pointer);
         let Some(pointer) = self.state.seat.get_pointer() else {
             return;
@@ -359,8 +462,35 @@ impl Compositor {
     /// keyboard.
     pub fn pointer_button(&mut self, button: u32, pressed: bool) {
         let serial = SERIAL_COUNTER.next_serial();
+        if !pressed && self.state.grab.take().is_some() {
+            return;
+        }
         if pressed {
-            self.state.focus_at(self.state.pointer, serial);
+            let under = self.state.under(self.state.pointer);
+            self.state
+                .focus(under.as_ref().map(|(w, _)| w.clone()), serial);
+            match under {
+                Some((window, Part::Bar)) if button == BUTTON_LEFT => {
+                    let at = self
+                        .state
+                        .space
+                        .element_location(&window)
+                        .unwrap_or_default();
+                    self.state.grab = Some(Grab {
+                        offset: self.state.pointer - at.to_f64(),
+                        window,
+                    });
+                    return;
+                }
+                Some((window, Part::Close)) => {
+                    if let Some(toplevel) = window.toplevel() {
+                        toplevel.send_close();
+                    }
+                    return;
+                }
+                Some((_, Part::Bar)) => return,
+                _ => {}
+            }
         }
         let Some(pointer) = self.state.seat.get_pointer() else {
             return;
@@ -453,9 +583,65 @@ struct State {
     /// gives them a size.
     unplaced: Vec<Window>,
     pointer: Point<f64, Logical>,
+    /// Every toplevel's id and title bar.
+    frames: Vec<Frame>,
+    next_id: u64,
+    /// A title bar being dragged.
+    grab: Option<Grab>,
+    /// The window with the keyboard closed; the next one in front gets it.
+    refocus: bool,
+}
+
+/// A window's id and the title bar the desktop drew for it.
+struct Frame {
+    window: Window,
+    id: u64,
+    bar: Option<MemoryRenderBuffer>,
+}
+
+/// A window moving with the pointer: where on it the pointer took hold.
+struct Grab {
+    window: Window,
+    offset: Point<f64, Logical>,
+}
+
+/// What part of a window is under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Content,
+    Bar,
+    Close,
 }
 
 impl State {
+    /// The window (and which part of it) at `at`: the topmost whose
+    /// content or title bar is there.
+    fn under(&self, at: Point<f64, Logical>) -> Option<(Window, Part)> {
+        for window in self.space.elements().rev() {
+            let Some(loc) = self.space.element_location(window) else {
+                continue;
+            };
+            let width = window.geometry().size.w;
+            let (x, y) = (at.x - f64::from(loc.x), at.y - f64::from(loc.y));
+            if (0.0..f64::from(width)).contains(&x) && (-f64::from(TITLE_BAR)..0.0).contains(&y) {
+                let (cx, cy) = (f64::from(CONTROLS[0]), -f64::from(TITLE_BAR) / 2.0);
+                let reach = f64::from(CONTROL_RADIUS + 2);
+                let part = if (x - cx).powi(2) + (y - cy).powi(2) <= reach * reach {
+                    Part::Close
+                } else {
+                    Part::Bar
+                };
+                return Some((window.clone(), part));
+            }
+            let bbox = window.bbox();
+            let inside = at - loc.to_f64() + window.geometry().loc.to_f64();
+            if bbox.to_f64().contains(inside) && window.is_in_input_region(&inside) {
+                return Some((window.clone(), Part::Content));
+            }
+        }
+        None
+    }
+
     /// The surface under `at` and where it sits on the screen.
     fn surface_under(&self, at: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
         let (window, location) = self.space.element_under(at)?;
@@ -464,10 +650,9 @@ impl State {
             .map(|(surface, offset)| (surface, (offset + location).to_f64()))
     }
 
-    /// Raises the window under `at` and gives it the keyboard; a click on
-    /// no window takes the keyboard from all of them.
-    fn focus_at(&mut self, at: Point<f64, Logical>, serial: Serial) {
-        let window = self.space.element_under(at).map(|(w, _)| w.clone());
+    /// Raises `window` and gives it the keyboard; none takes the keyboard
+    /// from all of them.
+    fn focus(&mut self, window: Option<Window>, serial: Serial) {
         if let Some(window) = &window {
             self.space.raise_element(window, true);
         }
@@ -504,21 +689,12 @@ impl State {
             return;
         }
         let window = self.unplaced.remove(index);
+        // The window with its title bar, centered in the work area.
         let area_height = self.size.1 - self.work_area.top - self.work_area.bottom;
         let x = ((self.size.0 - size.w) / 2).max(0);
-        let y = self.work_area.top + ((area_height - size.h) / 2).max(0);
+        let y = self.work_area.top + TITLE_BAR + ((area_height - TITLE_BAR - size.h) / 2).max(0);
         self.space.map_element(window.clone(), (x, y), true);
-        self.focus_window(&window);
-    }
-
-    fn focus_window(&mut self, window: &Window) {
-        let at = self
-            .space
-            .element_location(window)
-            .unwrap_or_default()
-            .to_f64()
-            + Point::<f64, Logical>::from((1.0, 1.0));
-        self.focus_at(at, SERIAL_COUNTER.next_serial());
+        self.focus(Some(window), SERIAL_COUNTER.next_serial());
     }
 }
 
@@ -587,7 +763,14 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        self.unplaced.push(Window::new_wayland_window(surface));
+        let window = Window::new_wayland_window(surface);
+        self.next_id += 1;
+        self.frames.push(Frame {
+            window: window.clone(),
+            id: self.next_id,
+            bar: None,
+        });
+        self.unplaced.push(window);
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
@@ -612,8 +795,14 @@ impl XdgShellHandler for State {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        self.unplaced
-            .retain(|w| w.toplevel().is_some_and(|t| t != &surface));
+        let focused = self.seat.get_keyboard().and_then(|k| k.current_focus());
+        self.refocus |= focused.as_ref() == Some(surface.wl_surface());
+        let gone = |w: &Window| w.toplevel().is_some_and(|t| t == &surface);
+        self.unplaced.retain(|w| !gone(w));
+        self.frames.retain(|f| !gone(&f.window));
+        if self.grab.as_ref().is_some_and(|g| gone(&g.window)) {
+            self.grab = None;
+        }
     }
 }
 

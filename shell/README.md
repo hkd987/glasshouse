@@ -170,9 +170,15 @@ font licenses land in the image's notices next to the crates'.
    window where the UI draws nothing, and keys while a window has the
    keyboard, go to the apps; shortcuts and anything while a menu or the
    lock screen is up stay the shell's. `glass-hello` is a one-window demo
-   app (`desk.sh app /usr/local/libexec/glasshouse/glass-hello`). Next:
-   window frames with the controls on the left (DK-1), moving windows,
-   the focused app in the menu bar, then our browser engine as a client.
+   app (`desk.sh app /usr/local/libexec/glasshouse/glass-hello`). Each
+   window has a title bar with the controls on the left (DK-1): the
+   compositor stacks and hit-tests it with its window, so a window behind
+   never paints its bar over one in front, and the desktop draws it in its
+   style (`screens::window::title_bar`, drawn again when the title, width
+   or focus changes). Dragging the bar moves the window (never up under the
+   menu bar); the red control asks the app to close. Next: minimize and
+   zoom, the focused app in the menu bar, then our browser engine as a
+   client.
 2. **Live state.** Done in `glass-shell-fb`: it subscribes to
    `events.subscribe` and redraws tiles, the agents pill and the clock as
    they change.

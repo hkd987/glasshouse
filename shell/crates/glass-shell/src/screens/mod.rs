@@ -6,3 +6,4 @@ pub mod desktop;
 pub mod expanded;
 pub mod login;
 pub mod system;
+pub mod window;

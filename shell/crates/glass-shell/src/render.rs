@@ -30,6 +30,17 @@ pub fn frame<Message>(view: Element<'_, Message>, size: Size, scale: f32) -> Fra
     screen.frame()
 }
 
+/// `view` drawn once over nothing: B, G, R, A bytes, premultiplied, and
+/// transparent where it draws nothing (a layer for something else to
+/// compose, such as a window's title bar for the compositor).
+pub fn layer<Message>(view: Element<'_, Message>, size: Size) -> Vec<u8> {
+    let mut screen = Screen::new(size, 1.0);
+    let (width, height) = screen.physical_size();
+    screen.set_backdrop(vec![0; width as usize * height as usize * 4]);
+    screen.render(view, None);
+    screen.pixels
+}
+
 /// A screen whose UI keeps its state between frames (what has the keyboard
 /// focus, which button is held down) and whose pixels stay drawn: each
 /// frame redraws only the parts whose content changed, such as a tile or

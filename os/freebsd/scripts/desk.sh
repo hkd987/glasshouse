@@ -9,6 +9,7 @@
 #   desk.sh signout                 Shift Super Q, wait for the sign-in screen
 #   desk.sh restart                 restart the sign-in service on its binaries, wait for it
 #   desk.sh click <x> <y>           click, and wait for the screen to redraw (if it does)
+#   desk.sh drag <x> <y> <x2> <y2>  drag from one point to the other, and wait for the redraw
 #   desk.sh key <keys>              press keys (vm.sh key names: ret, ctrl-spc, alt-meta_l-esc),
 #                                   and wait for the redraw
 #   desk.sh point <x> <y>           move the pointer there, and wait for any redraw (hover)
@@ -85,7 +86,7 @@ restart)
 	wait_for "$n" "sign-in screen: drawn" 60 >/dev/null
 	echo "sign-in screen up"
 	;;
-click | key | point)
+click | key | point | drag)
 	n=$(lines)
 	"$vm" "$cmd" "$@" >/dev/null
 	# Whatever it changed is drawn within a few seconds even in the emulated VM (a redraw that
