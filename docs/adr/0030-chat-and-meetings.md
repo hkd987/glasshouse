@@ -84,7 +84,7 @@ device key       one per computer, P-256: signs the computer's requests to the c
 - **Member keys are per person per computer.**
   - Why not one key per person: it would have to be copied between computers, or kept by us.
   - Per computer, nothing secret leaves a computer except sealed to another member key. A lost laptop is cut off on its own.
-  - glassd makes the pair the first time the person opens Chat on that computer. An agent's call never makes it: until then an agent's `chat.list` says the person hasn't opened Chat, and its posts are refused. It lives in `/var/db/glasshouse/chat/<login>/member.key`, mode 0600.
+  - glassd makes the pair the first time the person opens Chat on that computer, or Calendar or Meet, for meetings. An agent's call never makes it: until then an agent's `chat.list` says the person hasn't opened Chat, and its posts are refused. It lives in `/var/db/glasshouse/chat/<login>/member.key`, mode 0600.
   - glassd registers the public halves with the console, signed by the device key.
   - A member key's id is `mk-` plus the first 16 hex digits of the SHA-256 of both public halves.
 - **Epoch keys are chained backward.**
