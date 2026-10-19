@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use glass_actions::TaskContext;
 use glass_api::{
-    ActivityEntry, ActivityKind, ApprovalView, ChangeEntry, DisplaySafe, FeedLine, Progress,
-    Receipt, ScopeRequest, SnapshotMarker, TaskDetail, TaskView, TileState, display_line,
+    ActivityEntry, ActivityKind, AppManifest, ApprovalView, ChangeEntry, DisplaySafe, FeedLine,
+    Progress, Receipt, ScopeRequest, SnapshotMarker, TaskDetail, TaskView, TileState, display_line,
 };
 use glass_platform::sandbox::SandboxSpec;
 use glass_platform::snapshot::SnapshotHandle;
@@ -53,6 +53,9 @@ pub(crate) struct Task {
     pub driver_socket: Option<PathBuf>,
     /// The ended task this one carries on from (`task.continue`).
     pub continues: Option<Continued>,
+    /// For an app session (ADR 0024): the app, as its manifest declares
+    /// it. The task's principal is the app, acting for the user.
+    pub app: Option<Arc<AppManifest>>,
     pub started_at: Timestamp,
     pub gate: watch::Sender<Gate>,
     /// Fires once to make the supervisor kill the agent.
@@ -115,6 +118,7 @@ pub(crate) struct NewTask {
     pub layer: Option<u32>,
     pub driver_socket: Option<PathBuf>,
     pub continues: Option<Continued>,
+    pub app: Option<Arc<AppManifest>>,
     pub title: String,
     /// The request gave the title, so the agent can't rename the task.
     pub title_fixed: bool,
@@ -136,6 +140,12 @@ pub(crate) struct Continued {
 }
 
 impl Task {
+    /// Whether this is an app session (ADR 0024) rather than an agent's
+    /// task.
+    pub fn is_app(&self) -> bool {
+        self.app.is_some()
+    }
+
     pub fn new(new: NewTask) -> Self {
         let now = Timestamp::now();
         Self {
@@ -153,6 +163,7 @@ impl Task {
             layer: new.layer,
             driver_socket: new.driver_socket,
             continues: new.continues,
+            app: new.app,
             started_at: now,
             gate: watch::Sender::new(Gate::Run),
             stop: Mutex::new(Some(new.stop)),

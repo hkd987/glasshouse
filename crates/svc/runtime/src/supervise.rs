@@ -44,6 +44,8 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
     task.gate.send_replace(Gate::Ended);
     rt.desk.end_task(task.id);
     let teardown_error = match &task.driver_socket {
+        // An app session has neither: its calls came over the app socket.
+        _ if task.is_app() => None,
         // An attended task has no sandbox, only its socket.
         Some(socket) => match fs::remove_file(socket) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Some(e.to_string()),
@@ -87,6 +89,7 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
             state.note(ActivityKind::Notice, format!("Sandbox cleanup failed: {e}"));
         }
         let line = match state.tile {
+            TileState::Done if task.is_app() => "Closed".to_owned(),
             TileState::Done => "Finished".to_owned(),
             TileState::Stopped => "Stopped".to_owned(),
             _ => format!("Failed: {}", state.failure.as_deref().unwrap_or("unknown")),
@@ -106,6 +109,7 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
     });
     rt.audit(event);
     rt.publish(&task);
+    rt.forget_if_unchanged(&task);
 }
 
 async fn setup_and_wait(
@@ -115,6 +119,11 @@ async fn setup_and_wait(
     server: &mut Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     stop: oneshot::Receiver<()>,
 ) -> Result<Exit, String> {
+    // An app session was prepared as it opened, so its first call finds
+    // the app's folders, and it has no grants to snapshot.
+    if task.is_app() {
+        return drive_app(rt, task, stop).await;
+    }
     // App state (mail folders and the like) must exist before snapshots.
     let providers = rt.registry.providers();
     let ctx = task.ctx.clone();
@@ -248,6 +257,26 @@ async fn drive_attended(
                 socket.display()
             ),
         );
+    }
+    rt.publish(task);
+    let _ = stop.await;
+    Ok(Exit::Stopped)
+}
+
+/// An app session (ADR 0024): no sandbox, no program and no socket of its
+/// own. The app's calls arrive on the app socket, and the session lasts
+/// until the app closes it, its connection drops, or the user stops it.
+async fn drive_app(
+    rt: &Arc<Runtime>,
+    task: &Arc<Task>,
+    stop: oneshot::Receiver<()>,
+) -> Result<Exit, String> {
+    {
+        let mut state = task.lock();
+        if state.tile == TileState::Starting {
+            state.tile = TileState::Working;
+            state.caption = "Open".into();
+        }
     }
     rt.publish(task);
     let _ = stop.await;

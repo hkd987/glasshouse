@@ -1,0 +1,9 @@
+{
+  "id": "calendar",
+  "name": "Calendar",
+  "version": "0.1.0",
+  "description": "Your week, the events and holds in it, and new events on your own calendar.",
+  "actions": ["calendar.list", "calendar.read", "calendar.create", "calendar.update"],
+  "permissions": ["offline"],
+  "labels": ["public", "internal"]
+}

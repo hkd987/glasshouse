@@ -34,7 +34,9 @@ impl Handler for ControlApi {
         method: String,
         params: Value,
     ) -> Result<Value, RpcError> {
-        let caller = Caller::from_uid(conn.peer().uid)
+        let caller = self
+            .rt
+            .caller(conn.peer().uid)
             .ok_or_else(|| RpcError::permission_denied("unknown user"))?;
         let rt = &self.rt;
         // Reads stay in memory (task.list, task.get); calls that read or

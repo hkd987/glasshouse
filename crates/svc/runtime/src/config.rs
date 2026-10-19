@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use glass_api::{AgentMode, AgentSummary, CustomizationPoint};
+use glass_api::{AgentMode, AgentSummary, AppManifest, CustomizationPoint};
 use glass_types::AgentId;
 use serde::Deserialize;
 
@@ -84,4 +84,11 @@ pub struct RuntimeConfig {
     /// Where attended tasks' sockets live: a root-owned directory users can
     /// traverse; each socket is its user's alone.
     pub attended_dir: PathBuf,
+    /// The apps installed on this machine, as their manifests declare them
+    /// (UI-5, ADR 0024). Checked by glassd before they get here.
+    pub apps: Vec<AppManifest>,
+    /// Development only (the insecure host backend): every caller's home,
+    /// where first-party apps keep their data, is this folder instead of
+    /// the one their account names.
+    pub dev_home: Option<PathBuf>,
 }

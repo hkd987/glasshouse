@@ -121,8 +121,7 @@ impl Runtime {
             }
         };
         for (uid, agent) in stored {
-            let (Some(caller), Some(entry)) = (Caller::from_uid(uid), self.catalog_entry(&agent))
-            else {
+            let (Some(caller), Some(entry)) = (self.caller(uid), self.catalog_entry(&agent)) else {
                 continue;
             };
             if let Err(e) = self.current_layer(&caller, entry) {

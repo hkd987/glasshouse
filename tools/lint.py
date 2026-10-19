@@ -19,6 +19,8 @@ and untracked files. Each check runs only when its inputs changed:
                changed
   shellcheck   the changed shell scripts
   python       the changed .py files compile
+  apps         `make apps-lint` (types, manifests, npm licenses) when anything
+               under apps/ or tools/legal/npm_licenses.py changed
 
 Nothing changed: done in well under a second.
 """
@@ -119,6 +121,9 @@ def plan(files: set[str], everything: bool) -> list[tuple[str, list[str]]]:
     shell = sorted(f for f in existing if is_shell(f))
     if shell:
         steps.append(("shellcheck", ["shellcheck", "--external-sources", *shell]))
+
+    if everything or any(f.startswith("apps/") or f == "tools/legal/npm_licenses.py" for f in files):
+        steps.append(("apps", ["make", "--no-print-directory", "apps-lint"]))
 
     python = sorted(f for f in existing if f.endswith(".py"))
     if python:

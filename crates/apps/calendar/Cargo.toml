@@ -1,0 +1,23 @@
+[package]
+name = "glass-app-calendar"
+description = "The calendar app: events and holds on the user's own calendar, and invitations, from the first-party calendar store."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-actions.workspace = true
+glass-api.workspace = true
+glass-platform.workspace = true
+glass-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

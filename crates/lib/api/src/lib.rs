@@ -15,6 +15,7 @@
 //! through the same function.
 
 mod approval;
+mod apps;
 mod tailoring;
 mod task;
 mod text;
@@ -23,6 +24,10 @@ use serde::{Deserialize, Serialize};
 
 pub use approval::{
     AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalState, ApprovalView, AskLabels,
+};
+pub use apps::{
+    APP_SOCKET_ENV, AppAction, AppCall, AppCallResult, AppManifest, AppOpen, AppPermission,
+    AppSession, AppSessionRef, AppStatus, AppWaiting, DEFAULT_APP_SOCKET, app_methods,
 };
 pub use tailoring::{
     CheckResult, CustomizationPoint, LayerChange, LayerCheck, LayerLine, LayerRef, LayerRevert,

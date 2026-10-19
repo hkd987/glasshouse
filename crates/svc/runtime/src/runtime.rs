@@ -139,7 +139,7 @@ impl Runtime {
         }
     }
 
-    fn tasks(&self) -> std::sync::MutexGuard<'_, BTreeMap<TaskId, Arc<Task>>> {
+    pub(crate) fn tasks(&self) -> std::sync::MutexGuard<'_, BTreeMap<TaskId, Arc<Task>>> {
         self.tasks.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -186,14 +186,31 @@ impl Runtime {
     }
 
     /// Tells subscribers the task's tile changed.
+    ///
+    /// An app session is a tile only while it needs the user (ADR 0024):
+    /// its ask shows and is answered on the desktop like an agent's, and
+    /// the rest of the time the app is just a window, so subscribers hear
+    /// it removed.
     pub(crate) fn publish(&self, task: &Task) {
         let view = task.view(self.desk.pending_for_task(task.id));
-        let _ = self.events.send((
-            task.user.uid,
+        let event = if task.is_app() && view.state != TileState::NeedsYou {
+            Event::TaskRemoved { task: task.id }
+        } else {
             Event::TaskUpdated {
                 task: Box::new(view),
-            },
-        ));
+            }
+        };
+        let _ = self.events.send((task.user.uid, event));
+    }
+
+    /// Who `uid` is, for an API call. On a development host with
+    /// `dev_home` set, everyone's app data lives there instead.
+    pub fn caller(&self, uid: u32) -> Option<Caller> {
+        let mut caller = Caller::from_uid(uid)?;
+        if let Some(home) = &self.config.dev_home {
+            caller.home.clone_from(home);
+        }
+        Some(caller)
     }
 
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<OwnedEvent> {
@@ -209,7 +226,10 @@ impl Runtime {
             sandbox: self.sandbox.kind().into(),
             contained: self.sandbox.is_security_boundary(),
             policy: self.policy_source.clone(),
-            tasks_running: tasks.values().filter(|t| t.lock().tile.is_live()).count(),
+            tasks_running: tasks
+                .values()
+                .filter(|t| !t.is_app() && t.lock().tile.is_live())
+                .count(),
             approvals_pending: self.desk.pending(None).len(),
         }
     }
@@ -224,12 +244,16 @@ impl Runtime {
             .collect()
     }
 
+    /// One view per tile. App sessions are tiles only while they need the
+    /// user (see [`Runtime::publish`]).
     pub fn list(&self, caller: &Caller) -> Vec<TaskView> {
         let tasks: Vec<Arc<Task>> = self.tasks().values().cloned().collect();
         tasks
             .iter()
             .filter(|t| caller.is_admin() || t.user.uid == caller.uid)
-            .map(|t| t.view(self.desk.pending_for_task(t.id)))
+            .map(|t| (t.is_app(), t.view(self.desk.pending_for_task(t.id))))
+            .filter(|(app, view)| !app || view.state == TileState::NeedsYou)
+            .map(|(_, view)| view)
             .collect()
     }
 
@@ -371,6 +395,11 @@ impl Runtime {
                 task.user.name
             )));
         }
+        if task.is_app() {
+            return Err(RuntimeError::Conflict(
+                "that was an app; open the app again instead".into(),
+            ));
+        }
         if task.lock().tile.is_live() {
             return Err(RuntimeError::Conflict(
                 "that task is still running; stop it first".into(),
@@ -395,7 +424,7 @@ impl Runtime {
         let live = self
             .tasks()
             .values()
-            .filter(|t| t.user.uid == caller.uid && t.lock().tile.is_live())
+            .filter(|t| t.user.uid == caller.uid && !t.is_app() && t.lock().tile.is_live())
             .count();
         if live >= self.config.max_live_tasks_per_user {
             return Err(RuntimeError::Conflict(format!(
@@ -464,6 +493,7 @@ impl Runtime {
             layer: prepared.layer,
             driver_socket,
             continues,
+            app: None,
             title: prepared.title.clone(),
             title_fixed: request.title.is_some(),
             stop: stop_tx,
@@ -513,12 +543,17 @@ impl Runtime {
             }
         }
         self.publish(&task);
+        self.supervise(&task, stop_rx);
+        Ok(task.view(None))
+    }
 
-        let handle = tokio::spawn(supervise::run(Arc::clone(self), Arc::clone(&task), stop_rx));
+    /// Adds a new task and runs its supervisor, which sets it up and always
+    /// tears it down.
+    pub(crate) fn supervise(self: &Arc<Self>, task: &Arc<Task>, stop: oneshot::Receiver<()>) {
+        let handle = tokio::spawn(supervise::run(Arc::clone(self), Arc::clone(task), stop));
         let mut supervisors = self.supervisors.lock().unwrap_or_else(|p| p.into_inner());
         supervisors.retain(|h| !h.is_finished());
         supervisors.push(handle);
-        Ok(task.view(None))
     }
 
     // ---- lifecycle -------------------------------------------------------
@@ -591,6 +626,11 @@ impl Runtime {
                 "you're already driving this task in your harness".into(),
             ));
         }
+        if task.is_app() {
+            return Err(RuntimeError::Conflict(
+                "that's an app you're using; there's no agent to take over from".into(),
+            ));
+        }
         self.hold(&task, TileState::YouAreDriving, "You took over");
         let roots: Vec<PathBuf> = task
             .ctx
@@ -653,10 +693,15 @@ impl Runtime {
         Ok(task.view(None))
     }
 
-    fn stop_task(&self, task: &Task, note: &str) {
+    pub(crate) fn stop_task(&self, task: &Task, note: &str) {
+        self.end_task(task, TileState::Stopped, note);
+    }
+
+    /// Ends a live task now, showing `tile`: the supervisor tears it down.
+    pub(crate) fn end_task(&self, task: &Task, tile: TileState, note: &str) {
         {
             let mut state = task.lock();
-            state.tile = TileState::Stopped;
+            state.tile = tile;
             state.note(ActivityKind::State, note);
         }
         task.gate.send_replace(Gate::Ended);

@@ -23,9 +23,19 @@ approval_timeout_secs = 900
 "files.write" = "notify"
 "files.move" = "notify"
 "files.delete" = "ask"
+"mail.list" = "auto"
+"mail.read" = "auto"
 "mail.draft" = "auto"
 "mail.send" = "ask"
+# Calendar (NV-3): reading is quiet; holds and events on the user's own
+# calendar run and stay undoable; deleting one and sending invitations ask.
+"calendar.list" = "auto"
+"calendar.read" = "auto"
 "calendar.hold" = "notify"
+"calendar.create" = "notify"
+"calendar.update" = "notify"
+"calendar.delete" = "ask"
+"calendar.invite" = "ask"
 "records.save_draft" = "notify"
 "records.submit" = "ask"
 "payments.*" = "ask"
@@ -107,7 +117,7 @@ allowed_actions = ["files.*", "mail.*"]
 # model traffic to their own provider (HX-7).
 [[agent]]
 id = "claude-code"
-allowed_actions = ["files.*", "mail.*"]
+allowed_actions = ["files.*", "mail.*", "calendar.*"]
 max_label = "internal"
 
 # Diagnostics agent that tries to break out of its sandbox and reports what it

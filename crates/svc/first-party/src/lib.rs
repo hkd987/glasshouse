@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use glass_actions::{Registry, RegistryError};
+use glass_app_calendar::CalendarProvider;
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
@@ -41,6 +42,7 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
     let mut registry = Registry::new();
     registry.register(Arc::new(FilesProvider))?;
     registry.register(Arc::new(MailProvider))?;
+    registry.register(Arc::new(CalendarProvider))?;
     registry.register(Arc::new(SystemProvider::new(
         setup.system,
         setup.restartable_services,
@@ -65,6 +67,8 @@ mod tests {
         for expected in [
             "files.read",
             "mail.send",
+            "calendar.hold",
+            "calendar.invite",
             "system.network.check",
             "helpdesk.ticket.create",
             "model.complete",

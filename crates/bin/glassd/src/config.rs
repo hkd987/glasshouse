@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use glass_actions::Registry;
+use glass_api::AppManifest;
 use glass_platform::sandbox::ResourceLimits;
 use glass_runtime::CatalogEntry;
 use glass_types::AgentId;
@@ -16,6 +18,19 @@ pub const DEFAULT_CONFIG: &str = "/usr/local/etc/glasshouse/glassd.toml";
 pub struct Config {
     #[serde(default = "default_control_socket")]
     pub control_socket: PathBuf,
+    /// Where app runtimes reach glassd (UI-5, ADR 0024). Authorized by uid,
+    /// like the control socket, and carrying only the app methods.
+    #[serde(default = "default_app_socket")]
+    pub app_socket: PathBuf,
+    /// Installed apps, one folder each, with the `manifest.json` glassd
+    /// enforces (DV-3). Read-only system files: an app never writes its
+    /// own manifest.
+    #[serde(default = "default_apps_dir")]
+    pub apps_dir: PathBuf,
+    /// Development only, with the host backend: every user's app data
+    /// (`~/Mail`, `~/Calendar`) lives in this folder instead of their home.
+    #[serde(default)]
+    pub dev_home: Option<PathBuf>,
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
     /// Defaults to `<state_dir>/audit/audit.log`.
@@ -179,6 +194,14 @@ fn default_control_socket() -> PathBuf {
     glass_api::DEFAULT_CONTROL_SOCKET.into()
 }
 
+fn default_app_socket() -> PathBuf {
+    glass_api::DEFAULT_APP_SOCKET.into()
+}
+
+fn default_apps_dir() -> PathBuf {
+    "/usr/local/share/glasshouse/apps".into()
+}
+
 fn default_state_dir() -> PathBuf {
     "/var/db/glasshouse".into()
 }
@@ -209,6 +232,61 @@ impl Config {
         Ok(config)
     }
 
+    /// The installed apps whose manifests check out (UI-5, DV-3), and why
+    /// any other wasn't installed. One bad app never stops glassd: it just
+    /// isn't available.
+    pub fn load_apps(&self, registry: &Registry) -> (Vec<AppManifest>, Vec<String>) {
+        let mut apps = Vec::new();
+        let mut skipped = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.apps_dir) else {
+            return (apps, skipped);
+        };
+        let mut dirs: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.join("manifest.json").is_file())
+            .collect();
+        dirs.sort();
+        for dir in dirs {
+            match self.load_app(&dir, registry) {
+                Ok(manifest) if apps.iter().any(|a: &AppManifest| a.id == manifest.id) => {
+                    skipped.push(format!(
+                        "{}: app {} is installed twice",
+                        dir.display(),
+                        manifest.id
+                    ));
+                }
+                Ok(manifest) => apps.push(manifest),
+                Err(e) => skipped.push(format!("{}: {e:#}", dir.display())),
+            }
+        }
+        (apps, skipped)
+    }
+
+    fn load_app(&self, dir: &Path, registry: &Registry) -> anyhow::Result<AppManifest> {
+        let path = dir.join("manifest.json");
+        let meta = std::fs::metadata(&path)?;
+        if meta.len() > 64 * 1024 {
+            bail!("manifest.json is larger than 64 KiB");
+        }
+        let manifest: AppManifest = serde_json::from_str(&std::fs::read_to_string(&path)?)
+            .context("manifest.json doesn't parse")?;
+        manifest.check().map_err(anyhow::Error::msg)?;
+        if dir.file_name().and_then(|n| n.to_str()) != Some(manifest.id.as_str()) {
+            bail!(
+                "the app's folder must be named after its id, {}",
+                manifest.id
+            );
+        }
+        // Apps and agents share one namespace: both act "by [id] for [user]".
+        if self.agents.iter().any(|a| a.id == manifest.id) {
+            bail!("{} is already an agent's id", manifest.id);
+        }
+        if let Some(unknown) = manifest.actions.iter().find(|a| registry.get(a).is_none()) {
+            bail!("declares {unknown}, which no installed provider offers");
+        }
+        Ok(manifest)
+    }
+
     pub fn audit_log(&self) -> PathBuf {
         self.audit_log
             .clone()
@@ -221,6 +299,15 @@ impl Config {
                 "sandbox.backend = \"host-insecure\" runs agents with no containment; \
                  set sandbox.allow_insecure = true to use it for development"
             );
+        }
+        if self.dev_home.is_some() && self.sandbox.backend != SandboxBackend::HostInsecure {
+            bail!(
+                "dev_home moves every user's app data to one folder; it is for the \
+                 development host backend only"
+            );
+        }
+        if self.app_socket == self.control_socket {
+            bail!("app_socket and control_socket must be different sockets");
         }
         self.sandbox.limits.validate()?;
         for agent in &self.agents {
@@ -386,6 +473,87 @@ mod tests {
             off.sandbox.limits.resolve(4, 1 << 30),
             ResourceLimits::default()
         );
+    }
+
+    #[test]
+    fn dev_home_is_for_the_development_backend_only() {
+        let config: Config = toml::from_str("dev_home = \"/tmp/home\"\n").unwrap();
+        assert!(config.validate().is_err(), "not with jails");
+        let config: Config = toml::from_str(
+            "dev_home = \"/tmp/home\"\n[sandbox]\nbackend = \"host-insecure\"\nallow_insecure = true\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+    }
+
+    fn registry() -> Registry {
+        glass_first_party::registry(glass_first_party::Setup {
+            restartable_services: Vec::new(),
+            helpdesk_outbox: "/nonexistent".into(),
+            system: std::sync::Arc::new(glass_app_system::HostSystem),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn dv3_apps_install_only_with_a_manifest_that_checks_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |dir: &str, manifest: &str| {
+            std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+            std::fs::write(tmp.path().join(dir).join("manifest.json"), manifest).unwrap();
+        };
+        let mail = r#"{"id": "mail", "name": "Mail", "version": "0.1.0",
+            "actions": ["mail.list", "mail.send"], "labels": ["internal"]}"#;
+        write("mail", mail);
+        write("misnamed", mail);
+        write(
+            "calendar",
+            r#"{"id": "calendar", "name": "Calendar", "version": "1",
+            "actions": ["calendar.list", "payments.send"], "labels": ["internal"]}"#,
+        );
+        write(
+            "notes",
+            r#"{"id": "notes", "name": "Notes", "version": "1",
+            "actions": ["files.read"], "labels": ["restricted"]}"#,
+        );
+        write(
+            "invoice-demo",
+            r#"{"id": "invoice-demo", "name": "Invoices", "version": "1",
+            "actions": ["files.read"], "labels": ["internal"]}"#,
+        );
+        write("broken", "{");
+        let mut config: Config = toml::from_str(
+            "[[agent]]\nid = \"invoice-demo\"\nname = \"Invoice demo\"\nattended = true\n",
+        )
+        .unwrap();
+        config.apps_dir = tmp.path().to_owned();
+        let (apps, skipped) = config.load_apps(&registry());
+        let ids: Vec<&str> = apps.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["mail"]);
+        let why = skipped.join("\n");
+        for reason in [
+            "no installed provider offers",
+            "named after its id",
+            "restricted",
+            "already an agent's id",
+            "doesn't parse",
+        ] {
+            assert!(why.contains(reason), "{reason}: {why}");
+        }
+        // No apps folder, no apps, and glassd still starts.
+        config.apps_dir = tmp.path().join("missing");
+        assert!(config.load_apps(&registry()).0.is_empty());
+    }
+
+    #[test]
+    fn the_first_party_apps_manifests_install() {
+        // apps/<id>/manifest.json, as the image installs them.
+        let mut config: Config = toml::from_str("").unwrap();
+        config.apps_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps");
+        let (apps, skipped) = config.load_apps(&registry());
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let ids: Vec<&str> = apps.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["calendar", "mail"]);
     }
 
     #[test]

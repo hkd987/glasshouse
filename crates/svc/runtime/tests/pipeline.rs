@@ -1162,3 +1162,93 @@ async fn only_the_it_agent_reaches_the_system_and_its_fixes_stay_undoable() {
     assert!(!restart.await.unwrap().is_error);
     assert_eq!(*h.machine.restarted.lock().unwrap(), ["ntpd"]);
 }
+
+/// The user's own Claude Code (attended, ADR 0015), connected and
+/// initialized, on a task with no folders: calendar actions need none.
+async fn harness_agent(h: &Harness) -> (glass_types::TaskId, Arc<glass_rpc::Client>) {
+    let mut request = h.request(&[], &[]);
+    request.agent = "claude-code".parse().unwrap();
+    let view = h.rt.start(&h.me, request).unwrap();
+    let socket = view.driver_socket.unwrap();
+    eventually(|| socket.exists()).await;
+    let client = glass_rpc::Client::connect(&socket).await.unwrap();
+    let _: Value = client
+        .call("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}))
+        .await
+        .unwrap();
+    (view.id, Arc::new(client))
+}
+
+#[tokio::test]
+async fn nv3_calendar_holds_notify_invitations_ask_and_undo_takes_the_hold_back() {
+    let h = harness();
+    let (task, agent) = harness_agent(&h).await;
+
+    // A hold runs without asking and shows in the feed (Notify), after a
+    // snapshot that makes it undoable.
+    let held = tool(
+        &agent,
+        "calendar_hold",
+        json!({ "title": "Prep for Northwind", "start": "2026-10-20T14:00", "end": "2026-10-20T15:00" }),
+    )
+    .await;
+    assert!(!held.is_error, "{}", held.text());
+    let id = held.structured_content.as_ref().unwrap()["event"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let file = h.home().join(format!("Calendar/Events/{id}.json"));
+    assert!(file.exists());
+    assert!(h.rt.approvals(&h.me).is_empty());
+    let detail = h.rt.get(&h.me, task).unwrap();
+    assert_eq!(detail.view.feed.last().unwrap().verb, "hold");
+    let records = glass_audit::read(&h.audit_path(), |r| {
+        r.event.action.as_ref().map(|a| a.as_str()) == Some("calendar.hold")
+    })
+    .unwrap();
+    let decision = records[0].event.decision.as_ref().unwrap();
+    assert_eq!(decision.tier, Tier::Notify);
+    assert!(records[0].event.snapshot.is_some());
+
+    // Invitations leave the machine: one ask with its own words, and a
+    // decline sends nothing.
+    let invite = {
+        let agent = Arc::clone(&agent);
+        let input = json!({ "id": id, "to": ["dana@northwind.example"] });
+        tokio::spawn(async move { tool(&agent, "calendar_invite", input).await })
+    };
+    eventually(|| !h.rt.approvals(&h.me).is_empty()).await;
+    let ask = h.rt.approvals(&h.me).remove(0);
+    assert_eq!(ask.summary, "Send 1 invitation: Prep for Northwind");
+    assert_eq!(ask.labels.approve, "Approve and send");
+    h.rt.answer(
+        &h.me,
+        AnswerApproval {
+            approval: ask.id,
+            answer: ApprovalAnswer::Deny,
+        },
+    )
+    .unwrap();
+    assert!(invite.await.unwrap().is_error);
+    assert_eq!(
+        fs::read_dir(h.home().join("Calendar/Sent"))
+            .unwrap()
+            .count(),
+        0
+    );
+
+    // Undo takes the hold back off the calendar (AU-21).
+    let report =
+        h.rt.undo(
+            &h.me,
+            UndoRequest {
+                task,
+                to: None,
+                changes: vec![],
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!file.exists(), "{report:?}");
+}

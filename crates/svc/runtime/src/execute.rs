@@ -46,6 +46,30 @@ impl Runtime {
             return Err(RpcError::invalid_params(format!("unknown tool {tool:?}")));
         };
         let (def, provider) = (def.clone(), Arc::clone(provider));
+        Ok(self.run_action(task, def, provider, args).await)
+    }
+
+    /// Runs one action for the task's principal, an agent or an app,
+    /// through every step of the pipeline. Refusals are results.
+    pub(crate) async fn run_action(
+        self: &Arc<Self>,
+        task: &Arc<Task>,
+        def: ActionDef,
+        provider: Arc<dyn ActionProvider>,
+        args: Value,
+    ) -> CallToolResult {
+        match self.pipeline(task, def, provider, args).await {
+            Ok(result) | Err(result) => result,
+        }
+    }
+
+    async fn pipeline(
+        self: &Arc<Self>,
+        task: &Arc<Task>,
+        def: ActionDef,
+        provider: Arc<dyn ActionProvider>,
+        args: Value,
+    ) -> Result<CallToolResult, CallToolResult> {
         let started = Instant::now();
 
         if task.wait_runnable().await.is_err() {
@@ -140,6 +164,8 @@ impl Runtime {
                 self.publish(task);
                 return Ok(CallToolResult::error(if let Some(hint) = hint {
                     format!("Not sent: {reason}.{hint}")
+                } else if task.is_app() {
+                    format!("Blocked by policy: {reason}.")
                 } else {
                     format!(
                         "Blocked by policy: {reason}. This is listed under \"Can't touch\" for this task; continue without it."
@@ -450,8 +476,40 @@ impl Runtime {
                     None,
                 );
                 self.publish(task);
+                Err(CallToolResult::error(if task.is_app() {
+                    format!(
+                        "Declined on the desktop, so this wasn't done: {}.",
+                        preview.summary
+                    )
+                } else {
+                    format!(
+                        "The user declined: {}. Don't retry it; continue without it or finish.",
+                        preview.summary
+                    )
+                }))
+            }
+            Outcome::TimedOut if task.is_app() => {
+                // An app isn't paused: the person is right there, and its
+                // next call should work. The call just didn't happen.
+                back_to_work(format!(
+                    "No answer in {} min: {}",
+                    timeout.div_ceil(60),
+                    preview.summary
+                ));
+                self.record(
+                    task,
+                    def,
+                    preview,
+                    verdict,
+                    None,
+                    None,
+                    AuditOutcome::TimedOut,
+                    started,
+                    None,
+                );
+                self.publish(task);
                 Err(CallToolResult::error(format!(
-                    "The user declined: {}. Don't retry it; continue without it or finish.",
+                    "Nobody answered on the desktop in time, so this wasn't done: {}.",
                     preview.summary
                 )))
             }

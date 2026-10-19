@@ -133,6 +133,33 @@ impl Policy {
         Some(self.build(user, &groups, agent_policy))
     }
 
+    /// The effective rules for an app acting for `user` (UI-5, ADR 0024):
+    /// declaration ∩ policy (DV-3, ADR 0008). The app may call only the
+    /// actions it `declares`, each at the tier org and group rules give
+    /// it; it opens nothing above `max_label` or the user's groups' limits;
+    /// it has no network and no models.
+    pub fn for_app(
+        &self,
+        user: &str,
+        app: &AgentId,
+        declares: &[ActionName],
+        max_label: Label,
+    ) -> EffectivePolicy {
+        let groups: Vec<&GroupPolicy> = self.groups_of(user).collect();
+        let declared = AgentPolicy {
+            id: app.clone(),
+            allowed_actions: declares
+                .iter()
+                .filter_map(|name| name.as_str().parse().ok())
+                .collect(),
+            tiers: BTreeMap::new(),
+            max_label: Some(max_label),
+            egress: Vec::new(),
+            models: Some(Vec::new()),
+        };
+        self.build(user, &groups, &declared)
+    }
+
     fn build(&self, user: &str, groups: &[&GroupPolicy], agent: &AgentPolicy) -> EffectivePolicy {
         let max_label = groups
             .iter()
@@ -555,6 +582,29 @@ mod tests {
             .unwrap()
             .effective("demo", &"invoice-agent".parse().unwrap())
             .unwrap()
+    }
+
+    #[test]
+    fn dv3_apps_get_what_they_declare_at_policys_tiers() {
+        let policy = Policy::from_toml(POLICY).unwrap();
+        let app: AgentId = "mail".parse().unwrap();
+        let declared = [name("mail.send"), name("files.delete")];
+        let eff = policy.for_app("demo", &app, &declared, Label::Confidential);
+        // Org baseline, then the user's groups, stricter wins.
+        assert_eq!(eff.tier_for(&name("mail.send"), Tier::Auto).tier, Tier::Ask);
+        assert_eq!(
+            eff.tier_for(&name("files.delete"), Tier::Auto).tier,
+            Tier::Never
+        );
+        // Anything undeclared is out, whatever its default.
+        let undeclared = eff.tier_for(&name("mail.draft"), Tier::Auto);
+        assert_eq!(undeclared.tier, Tier::Never);
+        assert_eq!(undeclared.source, RuleSource::NotAllowed);
+        // The groups' label limit still applies to an app that declares more.
+        assert_eq!(eff.max_label(), Label::Internal);
+        assert_eq!(eff.models().allowed().count(), 0, "apps call no models");
+        let stranger = policy.for_app("stranger", &app, &declared, Label::Public);
+        assert_eq!(stranger.max_label(), Label::Public);
     }
 
     #[test]

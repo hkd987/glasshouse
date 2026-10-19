@@ -38,6 +38,27 @@ Action times come from the audit trail: every action record carries
 (`crates/svc/runtime/src/execute.rs`). For an Ask it includes the person's
 decision, so the perf scenario leaves Asks out.
 
+### Apps (UI-7)
+
+`make apps-test` holds each first-party web app to the PRD's budgets in
+headless Chromium on the development host (`apps/e2e/perf.spec.ts`) and
+fails when one goes over:
+
+| What the person waits for | Budget | Source | Dev host today |
+|---|---|---|---|
+| Mail, cold launch | 1 s | UI-7 | 176 ms (median of 3: 197, 176, 173) |
+| Calendar, cold launch | 1 s | UI-7 | 184 ms (178, 184, 185) |
+| Mail, memory | 150 MB | UI-7 | 116 MB |
+| Calendar, memory | 150 MB | UI-7 | 117 MB |
+
+*Cold launch* is a fresh browser context (no cache, no service worker, no
+stored data), from navigation to the app drawn with its data (the
+`glass:ready` mark), through the bridge and glassd. *Memory* is the resident
+memory of the app's renderer process (its page and its service worker)
+after it has loaded and been used; the browser and GPU processes are shared
+by every app, so they aren't counted. Each app is one script of about 13 KB
+and one stylesheet of about 6 KB.
+
 ## Where the time goes
 
 - **Snapshots.** Every write takes a ZFS snapshot first (AU-20), and so do
@@ -127,7 +148,28 @@ scripts, a little before the serial console's login prompt the tool times.
 One cold boot with it on came out at 57.6 s to the login prompt (glassd
 ready at 56.3 s), no slower than the runs above.
 
-### Where the time goes, and what we changed
+#### Apps (UI-7)
+
+`make apps-test` holds each first-party web app to the PRD's budgets in
+headless Chromium on the development host (`apps/e2e/perf.spec.ts`) and
+fails when one goes over:
+
+| What the person waits for | Budget | Source | Dev host today |
+|---|---|---|---|
+| Mail, cold launch | 1 s | UI-7 | 176 ms (median of 3: 197, 176, 173) |
+| Calendar, cold launch | 1 s | UI-7 | 184 ms (178, 184, 185) |
+| Mail, memory | 150 MB | UI-7 | 116 MB |
+| Calendar, memory | 150 MB | UI-7 | 117 MB |
+
+*Cold launch* is a fresh browser context (no cache, no service worker, no
+stored data), from navigation to the app drawn with its data (the
+`glass:ready` mark), through the bridge and glassd. *Memory* is the resident
+memory of the app's renderer process (its page and its service worker)
+after it has loaded and been used; the browser and GPU processes are shared
+by every app, so they aren't counted. Each app is one script of about 13 KB
+and one stylesheet of about 6 KB.
+
+## Where the time goes, and what we changed
 
 - **The boot menu waited two seconds on every boot** (1.6 s measured).
   `autoboot_delay=0`: the menu is still ours (brand, logo, title) and still

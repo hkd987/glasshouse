@@ -365,6 +365,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-app-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "glass-api",
+ "glass-rpc",
+ "glass-types",
+ "httparse",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "glass-app-calendar"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-platform",
+ "glass-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "glass-app-files"
 version = "0.1.0"
 dependencies = [
@@ -472,6 +503,7 @@ name = "glass-first-party"
 version = "0.1.0"
 dependencies = [
  "glass-actions",
+ "glass-app-calendar",
  "glass-app-files",
  "glass-app-helpdesk",
  "glass-app-mail",
@@ -581,6 +613,7 @@ version = "0.1.0"
 dependencies = [
  "glass-actions",
  "glass-api",
+ "glass-app-calendar",
  "glass-app-files",
  "glass-app-helpdesk",
  "glass-app-mail",

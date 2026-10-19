@@ -23,7 +23,7 @@ Tests: *unit* = crate unit tests, *pipeline* =
 
 | Id | Status | Where | Verified by |
 |---|---|---|---|
-| PA-1 No grants → no files, network, processes | **Done** | `platform/sandbox/jail.rs` | e2e `containment` (20/20 probe checks in a real jail, including the resource limits) |
+| PA-1 No grants → no files, network, processes | **Done** | `platform/sandbox/jail.rs` | e2e `containment` (21/21 probe checks in a real jail, including the resource limits) |
 | PA-2 Grants per task, expire at end | **Done** | `runtime/supervise.rs`, `broker/desk.rs`; the jail's resource limits go with it (`exec.poststop`, `platform/sandbox/jail.rs`) | e2e `stop`, crash recovery (orphaned jail and its limits removed); pipeline `stopping_tears_down…`; e2e root checks: no jails, mounts or limits left behind |
 | PA-3 Escapes are P0 bugs, bounty | Process | — | — |
 | PA-4 On-behalf-of tokens downstream | Not started | — | needs identity federation |
@@ -90,7 +90,7 @@ thumbnails are not started.
 |---|---|---|
 | NV-1 Action registry (name, inputs, side effects, default tier) | **Done** | `glass-actions`; typed *outputs* not yet declared |
 | NV-2 Registry speaks MCP | **Done** | ADR 0004 |
-| NV-3 Full first-party coverage: files, mail, calendar, browser, settings | Partial | files, mail (mock store); calendar, browser, settings not started. No document or spreadsheet editors of our own: agents use Microsoft 365 and Google Workspace through their APIs |
+| NV-3 Full first-party coverage: files, mail, calendar, browser, settings | Partial | files; mail (mock store: list, read, draft, send); calendar (`glass-app-calendar`: list, read, hold, create, update, delete, invite; pipeline `calendar_…`). Mail and Calendar also ship as apps (UI-5). Browser and settings not started. No document or spreadsheet editors of our own: agents use Microsoft 365 and Google Workspace through their APIs |
 | NV-10 Toolkit requires role + label | Not started | shell |
 | NV-11 A11y tree through the broker | Not started | |
 | NV-20 Screen agents on their own display | Not started | |
@@ -184,8 +184,10 @@ thumbnails are not started.
 | Id | Status | Notes |
 |---|---|---|
 | UI-4 Shell in Rust with iced and AccessKit | Partial | `shell/` (its own workspace): boot, sign-in, desktop and command-bar screens match the mockups, from `glass_api` data. `glass-shell-fb` draws the desktop on the VM's screen (console framebuffer) with live tiles from `events.subscribe` (`make shell-vm`), keyboard and pointer from evdev, and redraws only what changed. `glass-greeter` signs people in on that screen through PAM and starts their desktop, and checks the password that unlocks its lock screen (ADR 0019, `make greeter-vm`). Missing: the compositor (ADR 0016), AccessKit |
-| UI-1 … UI-3 Wayland compositor on Smithay, isolation, agent displays | Partial | `shell/crates/glass-compositor` (UI-1): Wayland for apps, windows centered in the work area, focus and input routing, software composition (pixman) redrawing only what changed; tests with real clients (`ui1_*`). The desktop hosts it on the VM's screen: windows between the wallpaper and the shell's UI, hidden behind the lock screen, input routed to the window under the pointer or in focus (`tests/layers.rs`, `live::ui1_*`). Window frames and moving windows next; isolation (UI-2) and agent displays (UI-3) not started |
-| UI-5, UI-6 Web apps and native apps with manifests | Partial | Native (UI-6): `glass-window` puts an iced view in a Wayland window with pointer and keys (ADR 0025, `ui6_*`); Terminal and Activity Monitor build on it. Accessibility tree and action manifests owed. Web apps (UI-5): ADR 0009 |
+| UI-1 … UI-3 Wayland compositor on Smithay, isolation, agent displays | Partial | `shell/crates/glass-compositor` (UI-1): Wayland for apps, windows centered in the work area, focus and input routing, software composition (pixman) redrawing only what changed; tests with real clients (`ui1_*`). The desktop hosts it on the VM's screen: windows between the wallpaper and the shell's UI, hidden behind the lock screen, input routed to the window under the pointer or in focus (`tests/layers.rs`, `live::ui1_*`). Title bars, moving and closing windows (DK-1); isolation (UI-2) and agent displays (UI-3) not started |
+| UI-5 Web apps with manifests, reaching the system only through the brokers, offline | Partial | ADR 0024: glassd's app socket runs an app's calls through the pipeline as "by [app] for [user]", refusing undeclared actions (DV-3); `glass-app-bridge` (loopback dev mode); `apps/` (SDK, Mail, Calendar; reads offline). Runtime `apps.rs` tests, glassd `dv3_apps_install_only…`, `make apps-test` (Playwright). Missing: our Chromium build as the app runtime, the OS-side app identity, install through the catalog, packaging into the image |
+| UI-6 Native apps with manifests | Partial | `glass-window` puts an iced view in a Wayland window with pointer and keys (ADR 0025, `ui6_*`); Terminal and Activity Monitor build on it. Owed: the accessibility tree, and action manifests on the app socket (ADR 0024) |
+| UI-7 Web app budgets: cold launch under 1 s, under 150 MB | **Done** (dev host) | `apps/e2e/perf.spec.ts` fails over budget; Mail and Calendar launch cold in about 0.18 s and use about 115 MB (renderer RSS), `docs/dev/performance.md` |
 | Terminal (product request 2026-10-19, pending PRD) | Partial | `glass-terminal`: the person's login shell in a window (alacritty's terminal state and pty, xterm keys, 256 colors, scrollback on the wheel), shown on the VM's desktop. Opens from the launcher. Not yet: copy and paste, resizing with the window, the accessibility tree. Native, ADR 0025; `docs/prd/proposals.md` |
 | Activity Monitor (product request 2026-10-19, pending PRD) | Not started | native, ADR 0025; `docs/prd/proposals.md` |
 
