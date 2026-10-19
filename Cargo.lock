@@ -553,6 +553,7 @@ name = "glass-gateway-providers"
 version = "0.1.0"
 dependencies = [
  "glass-gateway",
+ "glass-managed",
  "glass-policy",
  "hex",
  "httparse",
