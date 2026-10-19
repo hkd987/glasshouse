@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use glass_api::{AppManifest, AppPermission};
+use glass_platform::fs::ConfinedDir;
 use glass_platform::sandbox::{Sandbox, ToolRun};
 
 use crate::checks::{self, Findings};
@@ -83,7 +84,16 @@ impl Bundler {
             refusals: vec![format!("couldn't build here ({what}: {e})")],
             notes: Vec::new(),
         };
+        // The build folders' folder is root's alone: nobody can't rename a
+        // build folder or reach one from outside its jail.
         std::fs::create_dir_all(dir.join("out")).map_err(|e| failed("build folder", e))?;
+        for private in [self.work.parent(), Some(self.work.as_path())]
+            .into_iter()
+            .flatten()
+        {
+            std::fs::set_permissions(private, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+                .map_err(|e| failed("build folder", e))?;
+        }
         for (path, text) in source {
             let file = dir.join(APP_DIR).join(path);
             if let Some(parent) = file.parent() {
@@ -208,13 +218,16 @@ fn give(dir: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-/// A built file, as text, if it is there and not too big.
+/// A built file, as text, if it is there and not too big. The bundler
+/// (nobody, on input an agent wrote) could leave anything in the folder,
+/// a link to another person's file included, so glassd reads it confined
+/// to the folder, whose own path only root can change.
 fn read(dir: &Path, rel: &str) -> Option<String> {
-    use std::io::Read;
-    let file = std::fs::File::open(dir.join(rel)).ok()?;
-    let mut text = String::new();
-    file.take(MAX_BUILT_BYTES).read_to_string(&mut text).ok()?;
-    Some(text)
+    let bytes = ConfinedDir::open(dir)
+        .ok()?
+        .read(Path::new(rel), MAX_BUILT_BYTES)
+        .ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 /// The bundler's errors as findings: its own words, a line each, with the

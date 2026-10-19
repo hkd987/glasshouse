@@ -215,6 +215,7 @@ fn ga4_undeclared_calls_markup_and_outside_code_are_refused() {
         World::default(),
         Arc::new(FakeBundler {
             extra: Some("../etc/passwd".into()),
+            ..FakeBundler::default()
         }),
         "/nonexistent".into(),
     );
@@ -226,6 +227,29 @@ fn ga4_undeclared_calls_markup_and_outside_code_are_refused() {
             .versions("demo", &"my-mail".parse().unwrap())
             .is_empty()
     );
+}
+
+/// glassd (root) reads what the bundler (nobody) left confined to the
+/// build folder: a link it leaves to someone's file serves nothing.
+#[test]
+fn ga5_a_link_the_bundler_leaves_is_never_followed() {
+    let secret = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(secret.path(), "alice's private notes").unwrap();
+    let f = fixture_with(
+        World::default(),
+        Arc::new(FakeBundler {
+            link: Some(secret.path().to_owned()),
+            ..FakeBundler::default()
+        }),
+        "/nonexistent".into(),
+    );
+    f.call(SAVE, mail_remix(&f)).unwrap();
+    let (_, files) = f
+        .studio
+        .served("demo", &f.ctx.home, &"my-mail".parse().unwrap())
+        .unwrap();
+    assert!(!files.contains_key("app.css"), "{files:?}");
+    assert!(!files.values().any(|t| t.contains("private notes")));
 }
 
 #[test]
@@ -315,12 +339,15 @@ fn the_inventory_lists_every_app_made_here() {
 }
 
 /// The real bundler, when the apps workspace has it (`npm ci` in apps/):
-/// Mail's own source, remixed, builds.
+/// Mail's own source, remixed, builds. Without it this proves nothing;
+/// `apps/e2e/studio.spec.ts` and the VM scenario `studio` always bundle.
 #[test]
 fn ga4_mail_remixed_builds_with_esbuild() {
     let esbuild = apps().join("node_modules/@esbuild/linux-x64/bin/esbuild");
     if !esbuild.exists() {
-        eprintln!("skipped: no esbuild in apps/node_modules (npm ci in apps/)");
+        eprintln!(
+            "skipped: no esbuild in apps/node_modules (npm ci in apps/); the e2e suites bundle"
+        );
         return;
     }
     let f = fixture_with(

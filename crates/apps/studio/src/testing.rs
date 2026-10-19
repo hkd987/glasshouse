@@ -15,6 +15,9 @@ use crate::store;
 pub struct FakeBundler {
     /// An input it also reports, as if the source had reached it.
     pub extra: Option<String>,
+    /// Leaves its stylesheet as a link to this file, as a bundler gone
+    /// wrong might.
+    pub link: Option<PathBuf>,
 }
 
 impl Sandbox for FakeBundler {
@@ -59,6 +62,10 @@ impl Sandbox for FakeBundler {
             ("app.css", "body{}".to_owned()),
         ] {
             std::fs::write(out.join(name), text).map_err(failed)?;
+        }
+        if let Some(target) = &self.link {
+            std::fs::remove_file(out.join("app.css")).map_err(failed)?;
+            std::os::unix::fs::symlink(target, out.join("app.css")).map_err(failed)?;
         }
         Ok(ToolOutput {
             success: true,
