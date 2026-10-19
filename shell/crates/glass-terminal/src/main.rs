@@ -14,7 +14,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use alacritty_terminal::event::{Event as TermEvent, EventListener, Notify, WindowSize};
+use alacritty_terminal::event::{Event as TermEvent, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Notifier};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column as GridColumn, Line, Point as GridPoint, Side};
@@ -35,6 +35,7 @@ use xkb::Keysym;
 
 use glass_window::xkb;
 
+/// The size it opens at; zoomed, it fills the window it's given.
 const COLUMNS: usize = 80;
 const LINES: usize = 24;
 const FONT_SIZE: f32 = 13.0;
@@ -128,17 +129,45 @@ impl EventListener for Proxy {
     }
 }
 
-struct Size;
+/// The grid's size, in cells.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Size {
+    columns: usize,
+    lines: usize,
+}
+
+impl Size {
+    /// The cells a window of this many pixels holds.
+    fn fitting((width, height): (u32, u32)) -> Self {
+        let cells = |pixels: u32, cell: f32| {
+            ((pixels as f32 - PADDING * 2.0) / cell).floor().max(2.0) as usize
+        };
+        Self {
+            columns: cells(width, CELL_WIDTH),
+            lines: cells(height, CELL_HEIGHT),
+        }
+    }
+
+    /// What the shell's pseudo-terminal is told.
+    fn window(self) -> WindowSize {
+        WindowSize {
+            num_lines: self.lines as u16,
+            num_cols: self.columns as u16,
+            cell_width: CELL_WIDTH as u16,
+            cell_height: CELL_HEIGHT as u16,
+        }
+    }
+}
 
 impl Dimensions for Size {
     fn total_lines(&self) -> usize {
-        LINES
+        self.lines
     }
     fn screen_lines(&self) -> usize {
-        LINES
+        self.lines
     }
     fn columns(&self) -> usize {
-        COLUMNS
+        self.columns
     }
 }
 
@@ -155,6 +184,8 @@ struct Terminal {
     /// Text to put on the clipboard, and a paste asked for (DK-2).
     copy: Option<String>,
     paste: bool,
+    /// The grid's size: the window's, less the padding.
+    size: Size,
 }
 
 #[derive(Debug, Clone)]
@@ -187,13 +218,11 @@ impl Terminal {
                 ("COLORTERM".into(), "truecolor".into()),
             ]),
         };
-        let size = WindowSize {
-            num_lines: LINES as u16,
-            num_cols: COLUMNS as u16,
-            cell_width: CELL_WIDTH as u16,
-            cell_height: CELL_HEIGHT as u16,
+        let size = Size {
+            columns: COLUMNS,
+            lines: LINES,
         };
-        let pty = tty::new(&options, size, 0).context("opening a pseudo-terminal")?;
+        let pty = tty::new(&options, size.window(), 0).context("opening a pseudo-terminal")?;
         let events = Arc::new(Mutex::new(Vec::new()));
         let proxy = Proxy {
             waker: Arc::new(waker),
@@ -201,7 +230,7 @@ impl Terminal {
         };
         let term = Arc::new(FairMutex::new(Term::new(
             term::Config::default(),
-            &Size,
+            &size,
             proxy.clone(),
         )));
         let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)
@@ -219,6 +248,7 @@ impl Terminal {
             selecting: false,
             copy: None,
             paste: false,
+            size,
         })
     }
 }
@@ -236,8 +266,8 @@ impl App for Terminal {
 
     fn size(&self) -> (u32, u32) {
         (
-            (COLUMNS as f32 * CELL_WIDTH + PADDING * 2.0).ceil() as u32,
-            (LINES as f32 * CELL_HEIGHT + PADDING * 2.0).ceil() as u32,
+            (self.size.columns as f32 * CELL_WIDTH + PADDING * 2.0).ceil() as u32,
+            (self.size.lines as f32 * CELL_HEIGHT + PADDING * 2.0).ceil() as u32,
         )
     }
 
@@ -373,6 +403,18 @@ impl App for Terminal {
         self.copy.take()
     }
 
+    /// Zoomed (or back): as many cells as the window holds, and the shell
+    /// is told (its programs lay out again).
+    fn resize(&mut self, pixels: (u32, u32)) -> bool {
+        let size = Size::fitting(pixels);
+        if size != self.size {
+            self.size = size;
+            self.term.lock().resize(size);
+            self.notifier.on_resize(size.window());
+        }
+        true
+    }
+
     fn wants_paste(&mut self) -> bool {
         std::mem::take(&mut self.paste)
     }
@@ -425,7 +467,7 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 
 /// The cell under a point of the text (the window's pixels), and which
 /// half of it: a column, a row on the screen and the side.
-fn cell_at(at: Point) -> (usize, usize, Side) {
+fn cell_at(at: Point, size: Size) -> (usize, usize, Side) {
     let x = ((at.x - PADDING) / CELL_WIDTH).max(0.0);
     let y = ((at.y - PADDING) / CELL_HEIGHT).max(0.0);
     let side = if x.fract() < 0.5 {
@@ -434,15 +476,19 @@ fn cell_at(at: Point) -> (usize, usize, Side) {
         Side::Right
     };
     (
-        (x as usize).min(COLUMNS - 1),
-        (y as usize).min(LINES - 1),
+        (x as usize).min(size.columns - 1),
+        (y as usize).min(size.lines - 1),
         side,
     )
 }
 
 /// The grid's point under a point of the text, scrolled back as shown.
 fn grid_point<T>(term: &Term<T>, at: Point) -> (GridPoint, Side) {
-    let (column, row, side) = cell_at(at);
+    let size = Size {
+        columns: term.columns(),
+        lines: term.screen_lines(),
+    };
+    let (column, row, side) = cell_at(at, size);
     let line = Line(row as i32 - term.grid().display_offset() as i32);
     (GridPoint::new(line, GridColumn(column)), side)
 }
@@ -477,7 +523,7 @@ impl Terminal {
         let cursor = content.cursor;
         let selection = content.selection;
         let offset = content.display_offset as i32;
-        let mut rows: Vec<Vec<Run>> = (0..LINES).map(|_| Vec::new()).collect();
+        let mut rows: Vec<Vec<Run>> = (0..self.size.lines).map(|_| Vec::new()).collect();
         for indexed_cell in content.display_iter {
             let line = indexed_cell.point.line.0 + offset;
             let Some(row) = usize::try_from(line).ok().and_then(|l| rows.get_mut(l)) else {
@@ -675,17 +721,43 @@ mod tests {
 
     #[test]
     fn dk2_a_point_of_the_window_is_a_cell_and_its_half() {
+        let size = Size {
+            columns: COLUMNS,
+            lines: LINES,
+        };
         let at = |col: f32, row: f32| {
             Point::new(PADDING + col * CELL_WIDTH, PADDING + row * CELL_HEIGHT)
         };
-        assert_eq!(cell_at(at(0.2, 0.5)), (0, 0, Side::Left));
-        assert_eq!(cell_at(at(3.7, 2.5)), (3, 2, Side::Right));
+        assert_eq!(cell_at(at(0.2, 0.5), size), (0, 0, Side::Left));
+        assert_eq!(cell_at(at(3.7, 2.5), size), (3, 2, Side::Right));
         assert_eq!(
-            cell_at(Point::ORIGIN),
+            cell_at(Point::ORIGIN, size),
             (0, 0, Side::Left),
             "the padding is the first cell's"
         );
-        assert_eq!(cell_at(at(500.0, 500.0)).0, COLUMNS - 1);
+        assert_eq!(cell_at(at(500.0, 500.0), size).0, COLUMNS - 1);
+    }
+
+    #[test]
+    fn dk1_zoomed_the_grid_fills_the_window() {
+        let opened = Size {
+            columns: COLUMNS,
+            lines: LINES,
+        };
+        let pixels = (
+            (COLUMNS as f32 * CELL_WIDTH + PADDING * 2.0).ceil() as u32,
+            (LINES as f32 * CELL_HEIGHT + PADDING * 2.0).ceil() as u32,
+        );
+        assert_eq!(Size::fitting(pixels), opened, "its own size fits itself");
+        let wide = Size::fitting((1280, 640));
+        assert_eq!((wide.columns, wide.lines), (161, 36));
+        assert_eq!(
+            Size::fitting((1, 1)),
+            Size {
+                columns: 2,
+                lines: 2
+            }
+        );
     }
 
     #[test]

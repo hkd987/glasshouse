@@ -305,3 +305,88 @@ fn dk2_copy_in_one_app_and_paste_in_another() {
         ]
     );
 }
+
+/// An app that takes whatever size it's asked for (DK-1's zoom).
+struct Sizer {
+    size: (u32, u32),
+    seen: Seen,
+}
+
+impl App for Sizer {
+    type Message = Clicked;
+
+    fn title(&self) -> String {
+        "Sizer".into()
+    }
+    fn app_id(&self) -> String {
+        "test.sizer".into()
+    }
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+    fn background(&self) -> [u8; 4] {
+        [0x30, 0x20, 0x10, 0xFF]
+    }
+    fn view(&self) -> Element<'_, Clicked> {
+        container(text("sized")).into()
+    }
+    fn update(&mut self, Clicked: Clicked) {}
+    fn resize(&mut self, size: (u32, u32)) -> bool {
+        self.size = size;
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("{}x{}", size.0, size.1));
+        true
+    }
+}
+
+#[test]
+fn dk1_zoom_fills_the_work_area_and_again_puts_it_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("wayland-test");
+    let work = WorkArea {
+        top: 32,
+        bottom: 80,
+    };
+    let mut compositor = Compositor::new(socket.to_str().unwrap(), (800, 600), work).unwrap();
+    let seen = Seen::default();
+    let app = Sizer {
+        size: (200, 100),
+        seen: seen.clone(),
+    };
+    let path = socket.clone();
+    std::thread::spawn(move || glass_window::run_on(&path, app, Wake::new().unwrap()));
+    until(&mut compositor, "the window", |c| {
+        c.windows().first().is_some_and(|w| w.area.width == 200)
+    });
+    let before = compositor.windows()[0].area;
+    let zoom = |compositor: &mut Compositor, area: glass_compositor::Rect| {
+        compositor.pointer_moved((
+            f64::from(area.x + CONTROLS[2]),
+            f64::from(area.y - TITLE_BAR / 2),
+        ));
+        compositor.pointer_button(BUTTON_LEFT, true);
+        compositor.pointer_button(BUTTON_LEFT, false);
+    };
+    zoom(&mut compositor, before);
+    let height = 600 - work.top - TITLE_BAR - work.bottom;
+    until(&mut compositor, "the window zoomed", |c| {
+        c.windows()[0].area
+            == glass_compositor::Rect {
+                x: 0,
+                y: work.top + TITLE_BAR,
+                width: 800,
+                height,
+            }
+    });
+    let zoomed = compositor.windows()[0].area;
+    zoom(&mut compositor, zoomed);
+    until(&mut compositor, "the window back", |c| {
+        c.windows()[0].area == before
+    });
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [format!("800x{height}"), "200x100".into()]
+    );
+}

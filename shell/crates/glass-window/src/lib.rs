@@ -77,6 +77,11 @@ pub trait App {
     fn done(&self) -> bool {
         false
     }
+    /// The compositor asks for this size (zoom, DK-1): true if the app
+    /// takes it, and its view lays out at it from now on.
+    fn resize(&mut self, _size: (u32, u32)) -> bool {
+        false
+    }
     /// Text to put on the clipboard, asked after the keys the app took
     /// (Ctrl Shift C in a terminal; DK-2).
     fn copied(&mut self) -> Option<String> {
@@ -170,7 +175,7 @@ pub fn run_on<A: App>(socket: &Path, mut app: A, mut wake: Wake) -> anyhow::Resu
         ));
     };
 
-    let (width, height) = app.size();
+    let (mut width, mut height) = app.size();
     let surface = compositor.create_surface(&qh, ());
     let xdg = wm_base.get_xdg_surface(&surface, &qh, ());
     let toplevel = xdg.get_toplevel(&qh, ());
@@ -237,6 +242,22 @@ pub fn run_on<A: App>(socket: &Path, mut app: A, mut wake: Wake) -> anyhow::Resu
         }
         if state.frame_done {
             state.frame_done = false;
+            frame_pending = false;
+        }
+        // A new size asked for (zoom): new buffers and a new screen for it,
+        // if the app takes it.
+        if let Some(size) = state.asked_size.take()
+            && size != (width, height)
+            && app.resize(size)
+        {
+            (width, height) = size;
+            for buffer in &buffers.wl {
+                buffer.destroy();
+            }
+            buffers = Buffers::new(&shm, &qh, size)?;
+            screen = Screen::new(Size::new(width as f32, height as f32), 1.0);
+            screen.set_backdrop(app.background().repeat(width as usize * height as usize));
+            dirty = true;
             frame_pending = false;
         }
         if app.title() != title {
@@ -441,6 +462,8 @@ struct State {
     own: Option<(wl_data_source::WlDataSource, String)>,
     /// The last key's serial: copying names the input that asked for it.
     serial: u32,
+    /// A size the compositor asked for, not yet taken.
+    asked_size: Option<(u32, u32)>,
 }
 
 impl State {
@@ -562,8 +585,13 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let xdg_toplevel::Event::Close = event {
-            state.close_asked = true;
+        match event {
+            xdg_toplevel::Event::Close => state.close_asked = true,
+            // 0 by 0: the app's own choice.
+            xdg_toplevel::Event::Configure { width, height, .. } if width > 0 && height > 0 => {
+                state.asked_size = Some((width as u32, height as u32));
+            }
+            _ => {}
         }
     }
 }

@@ -208,6 +208,7 @@ impl Compositor {
             grab: None,
             refocus: false,
             minimized: Vec::new(),
+            zoomed: Vec::new(),
         };
         let target = pixman::Image::new(
             pixman::FormatCode::A8R8G8B8,
@@ -508,7 +509,11 @@ impl Compositor {
                     }
                     return;
                 }
-                Some((_, Part::Bar | Part::Control)) => return,
+                Some((window, Part::Zoom)) => {
+                    self.state.zoom(&window);
+                    return;
+                }
+                Some((_, Part::Bar)) => return,
                 _ => {}
             }
         }
@@ -651,6 +656,15 @@ struct State {
     refocus: bool,
     /// Windows minimized, oldest first, and where each was.
     minimized: Vec<(Window, Point<i32, Logical>)>,
+    /// Windows zoomed to the work area.
+    zoomed: Vec<Zoomed>,
+}
+
+/// A window zoomed to the work area, and where and how big it was.
+struct Zoomed {
+    window: Window,
+    at: Point<i32, Logical>,
+    size: Size<i32, Logical>,
 }
 
 /// A window's id and the title bar the desktop drew for it.
@@ -674,9 +688,8 @@ enum Part {
     /// The minimize control (the middle one).
     Minimize,
     Close,
-    /// Minimize or zoom: not built yet, so a click there does nothing
-    /// (rather than starting a drag).
-    Control,
+    /// The zoom control (the right one).
+    Zoom,
 }
 
 impl State {
@@ -698,7 +711,7 @@ impl State {
                 } else if on(CONTROLS[1]) {
                     Part::Minimize
                 } else if on(CONTROLS[2]) {
-                    Part::Control
+                    Part::Zoom
                 } else {
                     Part::Bar
                 };
@@ -719,6 +732,43 @@ impl State {
         window
             .surface_under(at - location.to_f64(), WindowSurfaceType::ALL)
             .map(|(surface, offset)| (surface, (offset + location).to_f64()))
+    }
+
+    /// Fills the work area with `window`, or puts a zoomed one back where
+    /// and as big as it was (DK-1). The app draws at the size it's asked
+    /// for, if it can; one that can't stays as it is, moved.
+    fn zoom(&mut self, window: &Window) {
+        let Some(toplevel) = window.toplevel() else {
+            return;
+        };
+        let (at, size, maximized) =
+            if let Some(index) = self.zoomed.iter().position(|z| &z.window == window) {
+                let was = self.zoomed.remove(index);
+                (was.at, was.size, false)
+            } else {
+                let Some(at) = self.space.element_location(window) else {
+                    return;
+                };
+                self.zoomed.push(Zoomed {
+                    window: window.clone(),
+                    at,
+                    size: window.geometry().size,
+                });
+                let top = self.work_area.top + TITLE_BAR;
+                let size = (self.size.0, self.size.1 - top - self.work_area.bottom).into();
+                ((0, top).into(), size, true)
+            };
+        toplevel.with_pending_state(|state| {
+            state.size = Some(size);
+            if maximized {
+                state.states.set(xdg_toplevel::State::Maximized);
+            } else {
+                state.states.unset(xdg_toplevel::State::Maximized);
+            }
+        });
+        toplevel.send_pending_configure();
+        self.space.map_element(window.clone(), at, true);
+        self.focus(Some(window.clone()), SERIAL_COUNTER.next_serial());
     }
 
     /// Hides `window` until it's activated again; the one in front of the
@@ -892,6 +942,7 @@ impl XdgShellHandler for State {
         let gone = |w: &Window| w.toplevel().is_some_and(|t| t == &surface);
         self.unplaced.retain(|w| !gone(w));
         self.minimized.retain(|(w, _)| !gone(w));
+        self.zoomed.retain(|z| !gone(&z.window));
         self.frames.retain(|f| !gone(&f.window));
         if self.grab.as_ref().is_some_and(|g| gone(&g.window)) {
             self.grab = None;
