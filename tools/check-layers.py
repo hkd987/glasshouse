@@ -15,6 +15,10 @@ Every workspace crate must also inherit the workspace lints, license and
 FreeBSD-specific code lives only in glass-platform (PL-1, PL-2, ADR 0022):
 no `target_os = "freebsd"` anywhere else, in this workspace or the shell's.
 
+OpenSSL is used directly by two crates only: glass-gateway-providers for
+TLS, the one way off the machine (ADR 0018), and glass-crypto for sealing
+(ADR 0030).
+
 See docs/repo-layout.md. Run via `make check-layers` (part of `make lint`).
 """
 
@@ -23,6 +27,13 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+# Who may depend on OpenSSL directly, and on the TLS stack over it.
+OPENSSL = {
+    "openssl": {"glass-crypto", "glass-gateway-providers"},
+    "openssl-sys": {"glass-crypto", "glass-gateway-providers"},
+    "native-tls": {"glass-gateway-providers"},
+}
 
 ALLOWED = {
     "lib": {"lib"},
@@ -58,6 +69,10 @@ def main() -> int:
             continue
         for dep in package["dependencies"]:
             target = dep["name"]
+            if target in OPENSSL and name not in OPENSSL[target]:
+                problems.append(
+                    f"{name} depends on {target}: only {', '.join(sorted(OPENSSL[target]))} may (ADR 0018, 0030)"
+                )
             if target not in layers or dep["kind"] == "dev":
                 continue
             if layers[target] not in ALLOWED[layer]:

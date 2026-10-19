@@ -1,0 +1,22 @@
+[package]
+name = "glass-crypto"
+description = "Sealing for chat and meetings (ADR 0030): HPKE to a computer's or IT's key, ECDSA signatures, sealed messages and epoch chains, on the base system's OpenSSL."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+# With glass-gateway-providers, the only crate that may use OpenSSL: this
+# one for cryptography, that one for TLS. Neither leaves the machine but
+# through the gateway's crate.
+[dependencies]
+openssl.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

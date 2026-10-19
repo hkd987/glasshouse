@@ -43,6 +43,7 @@ glass-app-system = { path = "crates/apps/system" }
 glass-runtime = { path = "crates/svc/runtime" }
 glass-managed = { path = "crates/lib/managed" }
 glass-http = { path = "crates/lib/http" }
+glass-crypto = { path = "crates/lib/crypto" }
 glass-app-catalog = { path = "crates/apps/catalog" }
 glass-app-people = { path = "crates/apps/people" }
 glass-app-settings = { path = "crates/apps/settings" }
@@ -60,9 +61,12 @@ hex = "0.4.3"
 # trust store through native-tls. Only glass-gateway-providers may use them
 # to leave the machine; httparse also reads requests to our small servers
 # (glass-http: the app bridge in development, ADR 0024, and the console).
+# OpenSSL itself is for glass-crypto's sealing too (ADR 0030), and for no
+# other crate: tools/check-layers.py enforces both.
 httparse = "1.10.1"
 libc = "0.2.191"
 native-tls = "0.2.18"
+openssl = "0.10.81"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 sha2 = "0.11.1"

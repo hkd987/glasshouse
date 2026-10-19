@@ -8,7 +8,8 @@ license-file.workspace = true
 publish.workspace = true
 
 # The only crate with an HTTP and TLS stack (ADR 0018). Keep it that way:
-# nothing else in the workspace may depend on native-tls or OpenSSL.
+# nothing else may depend on native-tls, and only glass-crypto, for sealing
+# (ADR 0030), on OpenSSL itself (tools/check-layers.py).
 [dependencies]
 glass-gateway.workspace = true
 glass-managed.workspace = true
