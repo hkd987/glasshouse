@@ -42,7 +42,8 @@ impl Runtime {
         if tool == REPORT_PROGRESS_TOOL {
             return self.report_progress(task, args);
         }
-        let Some((def, provider)) = self.registry.by_mcp_name(tool) else {
+        let registry = self.registry();
+        let Some((def, provider)) = registry.by_mcp_name(tool) else {
             return Err(RpcError::invalid_params(format!("unknown tool {tool:?}")));
         };
         let (def, provider) = (def.clone(), Arc::clone(provider));

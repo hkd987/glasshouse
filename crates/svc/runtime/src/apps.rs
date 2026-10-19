@@ -61,7 +61,7 @@ impl Runtime {
         // the tiers org and group rules give them, and no more than its
         // most sensitive label.
         let policy =
-            self.policy
+            self.policy()
                 .for_app(&caller.name, app, &manifest.actions, manifest.max_label());
         let id = TaskId::new();
         let ctx = TaskContext {
@@ -79,12 +79,13 @@ impl Runtime {
             },
             home: caller.home.clone(),
             grants: Vec::new(),
+            groups: policy.groups().map(str::to_owned).collect(),
         };
         // The app's data folders (~/Mail, ~/Calendar) exist before its
         // first call, as they do before an agent's.
         let mut providers = Vec::new();
         for action in &manifest.actions {
-            if let Some((_, provider)) = self.registry.get(action)
+            if let Some((_, provider)) = self.registry().get(action)
                 && !providers.iter().any(|p| Arc::ptr_eq(p, provider))
             {
                 providers.push(Arc::clone(provider));
@@ -119,10 +120,11 @@ impl Runtime {
             uid: caller.uid,
             gid: caller.gid,
         };
+        let registry = self.registry();
         let actions: Vec<AppAction> = manifest
             .actions
             .iter()
-            .filter_map(|name| self.registry.get(name))
+            .filter_map(|name| registry.get(name))
             .map(|(def, _)| AppAction {
                 name: def.name.clone(),
                 title: def.title.clone(),
@@ -200,7 +202,8 @@ impl Runtime {
         if !manifest.declares(&call.action) {
             return Ok(self.refuse_undeclared(&task, &manifest, &call.action));
         }
-        let Some((def, provider)) = self.registry.get(&call.action) else {
+        let registry = self.registry();
+        let Some((def, provider)) = registry.get(&call.action) else {
             return Ok(self.refuse_undeclared(&task, &manifest, &call.action));
         };
         let (def, provider) = (def.clone(), Arc::clone(provider));

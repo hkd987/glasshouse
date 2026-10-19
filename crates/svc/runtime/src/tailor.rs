@@ -167,7 +167,7 @@ impl Runtime {
         let entry = self
             .catalog_entry(agent)
             .ok_or_else(|| RuntimeError::NotFound(format!("no agent {agent} in the catalog")))?;
-        if self.policy.effective(&caller.name, agent).is_none() {
+        if self.policy().effective(&caller.name, agent).is_none() {
             return Err(RuntimeError::PermissionDenied(format!(
                 "your groups are not allowed to run {agent}"
             )));
@@ -238,10 +238,10 @@ impl Runtime {
         entry: &CatalogEntry,
         version: &Version,
     ) -> LayerCheck {
-        let Some(mut policy) = self.policy.effective(&caller.name, &entry.id) else {
+        let Some(mut policy) = self.policy().effective(&caller.name, &entry.id) else {
             return failed(NARROWS, "your groups are not allowed to run this agent");
         };
-        let known = self.registry.known_tiers();
+        let known = self.registry().known_tiers();
         let problems: Vec<String> = version
             .restrict
             .iter()
@@ -266,12 +266,13 @@ impl Runtime {
     }
 
     fn summary(&self, entry: &CatalogEntry, version: &Version) -> Vec<String> {
+        let registry = self.registry();
         let mut lines = glass_tailoring::describe(&entry.customize, &version.settings);
         lines.extend(version.restrict.iter().map(|(pattern, tier)| {
             let title = pattern
                 .parse()
                 .ok()
-                .and_then(|name| self.registry.get(&name))
+                .and_then(|name| registry.get(&name))
                 .map_or_else(|| pattern.clone(), |(def, _)| def.title.clone());
             format!("{title}: {tier}")
         }));

@@ -171,3 +171,43 @@ async fn ga2_an_agent_policy_doesnt_allow_never_sees_catalog_search() {
         refused.text()
     );
 }
+
+#[tokio::test]
+async fn adr0023_a_policy_applied_live_reaches_new_tasks_and_spares_running_ones() {
+    // AD-3, ADR 0021: managed settings swap policy and registry whole;
+    // tasks started after use the new policy, running ones keep theirs.
+    let h = harness();
+    publish(&h);
+    let (_running, client) = harness_task(&h).await;
+    h.apply_policy(
+        r#"
+[[group]]
+name = "catalog-off"
+members = ["{me}"]
+tiers = { "catalog.search" = "never" }
+"#,
+        "managed v2",
+    );
+    assert_eq!(h.rt.status().policy, "managed v2");
+
+    let still = tool(
+        &client,
+        "catalog_search",
+        json!({"need": "vendor disputes"}),
+    )
+    .await;
+    assert!(
+        !still.is_error,
+        "the running task keeps its policy: {}",
+        still.text()
+    );
+
+    let (_new, fresh) = harness_task(&h).await;
+    let tools: ListToolsResult = fresh.call("tools/list", json!({})).await.unwrap();
+    assert!(
+        !tools.tools.iter().any(|t| t.name == "catalog_search"),
+        "a task started after the change gets the new policy"
+    );
+    let refused = tool(&fresh, "catalog_search", json!({"need": "vendor disputes"})).await;
+    assert!(refused.is_error, "{}", refused.text());
+}

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use glass_actions::{Grant, Registry, TaskContext};
 use glass_api::{
@@ -49,9 +49,9 @@ pub(crate) type OwnedEvent = (u32, Event);
 
 pub struct Runtime {
     pub(crate) config: RuntimeConfig,
-    pub(crate) policy: Policy,
-    policy_source: String,
-    pub(crate) registry: Registry,
+    /// Swapped whole when managed settings apply a new policy.
+    settings: RwLock<Arc<Settings>>,
+    policy_source: Mutex<String>,
     pub(crate) desk: ApprovalDesk,
     pub(crate) sandbox: Arc<dyn Sandbox>,
     pub(crate) snapshots: Arc<dyn Snapshotter>,
@@ -71,6 +71,14 @@ impl std::fmt::Debug for Runtime {
             .field("sandbox", &self.sandbox.kind())
             .finish_non_exhaustive()
     }
+}
+
+/// The policy in force and the action registry built from it, which
+/// managed settings replace together (ADR 0021, ADR 0023). Each operation
+/// reads them once; tasks keep the effective policy they started with.
+struct Settings {
+    policy: Arc<Policy>,
+    registry: Arc<Registry>,
 }
 
 /// What planning works out, shared by `plan` and `start`.
@@ -100,9 +108,11 @@ impl Runtime {
         Arc::new(Self {
             layers: LayerStore::new(parts.config.state_dir.join("layers")),
             config: parts.config,
-            policy: parts.policy,
-            policy_source: parts.policy_source,
-            registry: parts.registry,
+            settings: RwLock::new(Arc::new(Settings {
+                policy: Arc::new(parts.policy),
+                registry: Arc::new(parts.registry),
+            })),
+            policy_source: Mutex::new(parts.policy_source),
             desk: ApprovalDesk::new(),
             sandbox: parts.sandbox,
             snapshots: parts.snapshots,
@@ -137,6 +147,51 @@ impl Runtime {
                 tracing::warn!("a task did not finish tearing down in time");
             }
         }
+    }
+
+    fn settings(&self) -> Arc<Settings> {
+        Arc::clone(&self.settings.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// The policy in force for tasks starting now.
+    pub(crate) fn policy(&self) -> Arc<Policy> {
+        Arc::clone(&self.settings().policy)
+    }
+
+    /// The actions this machine offers, built from the policy in force.
+    pub(crate) fn registry(&self) -> Arc<Registry> {
+        Arc::clone(&self.settings().registry)
+    }
+
+    /// Puts a new policy, and the registry built from it, in force at once
+    /// (ADR 0021, ADR 0023). The caller validated and linted it first.
+    /// Tasks and app sessions started from now on use it; running ones keep
+    /// the effective policy they started with.
+    pub fn apply_policy(&self, policy: Policy, registry: Registry, source: impl Into<String>) {
+        *self
+            .settings
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(Settings {
+            policy: Arc::new(policy),
+            registry: Arc::new(registry),
+        });
+        self.set_policy_source(source);
+    }
+
+    /// What `system.status` says about where the policy came from, such as
+    /// a managed version and whether the console can be reached.
+    pub fn set_policy_source(&self, source: impl Into<String>) {
+        *self
+            .policy_source
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = source.into();
+    }
+
+    /// Appends a record from outside the action pipeline, such as managed
+    /// settings applied or refused. A failed append fails closed, as for
+    /// the pipeline's own records.
+    pub fn append_audit(&self, event: AuditEvent) {
+        self.audit(event);
     }
 
     pub(crate) fn tasks(&self) -> std::sync::MutexGuard<'_, BTreeMap<TaskId, Arc<Task>>> {
@@ -225,7 +280,11 @@ impl Runtime {
             version: env!("CARGO_PKG_VERSION").into(),
             sandbox: self.sandbox.kind().into(),
             contained: self.sandbox.is_security_boundary(),
-            policy: self.policy_source.clone(),
+            policy: self
+                .policy_source
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
             tasks_running: tasks
                 .values()
                 .filter(|t| !t.is_app() && t.lock().tile.is_live())
@@ -235,7 +294,8 @@ impl Runtime {
     }
 
     pub fn agents_for(&self, caller: &Caller) -> Vec<AgentSummary> {
-        let allowed = self.policy.agents_for(&caller.name);
+        let policy = self.policy();
+        let allowed = policy.agents_for(&caller.name);
         self.config
             .catalog
             .iter()
@@ -289,7 +349,7 @@ impl Runtime {
                 RuntimeError::NotFound(format!("no agent {} in the catalog", request.agent))
             })?;
         let mut policy = self
-            .policy
+            .policy()
             .effective(&caller.name, &entry.id)
             .ok_or_else(|| {
                 RuntimeError::PermissionDenied(format!(
@@ -298,7 +358,7 @@ impl Runtime {
                 ))
             })?;
 
-        let known = self.registry.known_tiers();
+        let known = self.registry().known_tiers();
         // The user's layer narrows before the card's own limits (TL-10).
         let layer = self.layer_for_task(caller, &entry)?;
         let in_use = layer.as_ref().and_then(|l| l.version.as_ref());
@@ -324,7 +384,7 @@ impl Runtime {
 
         let mut asks_before = Vec::new();
         let mut notifies = Vec::new();
-        for def in self.registry.defs() {
+        for def in self.registry().defs() {
             let line = def.title.clone();
             match policy.tier_for(&def.name, def.default_tier).tier {
                 Tier::Ask => asks_before.push(line),
@@ -359,7 +419,7 @@ impl Runtime {
             asks_before,
             notifies,
             cant_touch: policy.cant_touch(&known, |name| {
-                self.registry
+                self.registry()
                     .get(name)
                     .map_or_else(|| name.to_string(), |(def, _)| def.title.clone())
             }),

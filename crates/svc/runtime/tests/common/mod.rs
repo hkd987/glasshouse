@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,6 +44,15 @@ pub struct Harness {
 impl Harness {
     pub fn home(&self) -> PathBuf {
         self.me.home.clone()
+    }
+
+    /// Puts the default policy plus `extra` in force on the running
+    /// runtime, with a new registry, as managed settings do (ADR 0023).
+    #[allow(dead_code)]
+    pub fn apply_policy(&self, extra: &str, source: &str) {
+        let policy = test_policy(&self.me.home, &self.me.name, extra);
+        let registry = test_registry(self.dir.path(), &self.machine, &self.catalog);
+        self.rt.apply_policy(policy, registry, source);
     }
 
     pub fn audit_path(&self) -> PathBuf {
@@ -121,6 +130,40 @@ pub async fn eventually(mut check: impl FnMut() -> bool) {
     panic!("condition never became true");
 }
 
+/// The default policy, the test home's Finance folder labeled confidential,
+/// and `extra`, in which `{me}` is `me` and `{home}` is `home`.
+fn test_policy(home: &Path, me: &str, extra: &str) -> Policy {
+    let text = format!(
+        "{}\n[[label]]\npath = \"{}/Finance\"\nlabel = \"confidential\"\n{}",
+        glass_policy::DEFAULT_POLICY,
+        home.display(),
+        extra
+            .replace("{me}", me)
+            .replace("{home}", &home.display().to_string())
+    );
+    Policy::from_toml(&text).unwrap()
+}
+
+/// The apps' actions as glassd registers them, on fakes.
+fn test_registry(dir: &Path, machine: &Arc<FakeMachine>, catalog: &CatalogHandle) -> Registry {
+    let mut registry = Registry::new();
+    registry.register(Arc::new(FilesProvider)).unwrap();
+    registry.register(Arc::new(MailProvider)).unwrap();
+    registry.register(Arc::new(CalendarProvider)).unwrap();
+    let ops: Arc<dyn SystemOps> = machine.clone();
+    registry
+        .register(Arc::new(SystemProvider::new(ops, vec!["ntpd".into()])))
+        .unwrap();
+    registry
+        .register(Arc::new(HelpdeskProvider::new(dir.join("outbox"))))
+        .unwrap();
+    registry.register(Arc::new(ModelAction)).unwrap();
+    registry
+        .register(Arc::new(CatalogProvider::new(catalog.clone())))
+        .unwrap();
+    registry
+}
+
 /// A harness whose policy is the default plus `policy_extra`, in which
 /// `{me}` stands for the test user's login name and `{home}` for their home.
 pub fn harness_with(policy_extra: &str) -> Harness {
@@ -141,32 +184,10 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     fs::write(home.join("Reports/existing.txt"), "original report\n").unwrap();
     fs::write(home.join("Finance/q3.csv"), "secret numbers\n").unwrap();
 
-    let policy_text = format!(
-        "{}\n[[label]]\npath = \"{}/Finance\"\nlabel = \"confidential\"\n{}",
-        glass_policy::DEFAULT_POLICY,
-        home.display(),
-        policy_extra
-            .replace("{me}", &account.name)
-            .replace("{home}", &home.display().to_string())
-    );
-    let policy = Policy::from_toml(&policy_text).unwrap();
-    let mut registry = Registry::new();
-    registry.register(Arc::new(FilesProvider)).unwrap();
-    registry.register(Arc::new(MailProvider)).unwrap();
-    registry.register(Arc::new(CalendarProvider)).unwrap();
+    let policy = test_policy(&home, &account.name, policy_extra);
     let machine = Arc::new(FakeMachine::default());
-    let ops: Arc<dyn SystemOps> = machine.clone();
-    registry
-        .register(Arc::new(SystemProvider::new(ops, vec!["ntpd".into()])))
-        .unwrap();
-    registry
-        .register(Arc::new(HelpdeskProvider::new(dir.path().join("outbox"))))
-        .unwrap();
-    registry.register(Arc::new(ModelAction)).unwrap();
     let catalog = CatalogHandle::new();
-    registry
-        .register(Arc::new(CatalogProvider::new(catalog.clone())))
-        .unwrap();
+    let registry = test_registry(dir.path(), &machine, &catalog);
     // Policy names these providers; `down` is always rate limited (MP-8).
     let model = Arc::new(ScriptedProvider::echo());
     let gateway = Gateway::new().with("scripted", model.clone()).with(
