@@ -197,6 +197,10 @@ pub enum Effect {
     /// Raise the app window with this id and give it the keyboard (Alt
     /// Tab, DK-2).
     Activate(u64),
+    /// Ask for the person's apps again (`apps.list`) and hand them to
+    /// [`Live::set_apps`]: the launcher shows what they installed from the
+    /// Store since it last opened (DV-11).
+    ListApps,
 }
 
 impl Effect {
@@ -281,9 +285,11 @@ impl Live {
     }
 
     /// The apps the launcher offers from now on: the person's profile
-    /// changed, or glassd answered again.
-    pub fn set_apps(&mut self, apps: Vec<AppEntry>) {
+    /// changed, or glassd answered again. Whether they differ from before.
+    pub fn set_apps(&mut self, apps: Vec<AppEntry>) -> bool {
+        let changed = self.apps != apps;
         self.apps = apps;
+        changed
     }
 
     /// The apps' windows now, the one last used first. A window the
@@ -641,7 +647,7 @@ impl Live {
                     self.system_menu = false;
                     self.command = None;
                 }
-                None
+                self.launcher.then_some(Effect::ListApps)
             }
             Message::Select(step) => {
                 let list = self.list()?;

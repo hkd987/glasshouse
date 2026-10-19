@@ -662,6 +662,26 @@ fn ui1_apps_windows_hide_behind_the_lock_screen_and_menus_take_the_input() {
 }
 
 #[test]
+fn dv11_opening_the_launcher_asks_for_the_apps_again() {
+    let natives = glass_shell::apps::natives();
+    let mut live = Live::new(fixtures::tasks()).with_apps(natives[..1].to_vec());
+    // Opening it asks for the person's apps; closing it doesn't.
+    assert_eq!(live.update(Message::ToggleLauncher), Some(Effect::ListApps));
+    assert_eq!(live.update(Message::ToggleLauncher), None);
+    // One installed from the Store since is offered; the same list again
+    // changes nothing to draw.
+    let added = natives.last().expect("a second native app").clone();
+    assert_eq!(live.update(Message::Launch(added.id.clone())), None);
+    assert!(live.set_apps(natives.clone()));
+    assert!(!live.set_apps(natives));
+    live.update(Message::ToggleLauncher);
+    assert_eq!(
+        live.update(Message::Launch(added.id.clone())),
+        Some(Effect::Launch(added))
+    );
+}
+
+#[test]
 fn dk2_the_launcher_offers_the_installed_apps_and_starts_one() {
     let mut live = Live::new(fixtures::tasks()).with_apps(glass_shell::apps::natives());
     let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);

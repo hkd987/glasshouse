@@ -889,6 +889,15 @@ impl Shell {
             | Effect::Power(_)
             | Effect::Unlock(_)
             | Effect::Launch(_) => Vec::new(),
+            Effect::ListApps => {
+                let result: Result<Vec<glass_api::ProfileApp>, _> =
+                    client.call(methods::APPS_LIST, ()).await;
+                match result {
+                    Ok(profile) => self.dirty |= self.live.set_apps(offered(&profile)),
+                    Err(e) => eprintln!("apps.list: {e}"),
+                }
+                Vec::new()
+            }
             Effect::Get(task) => {
                 let started = Instant::now();
                 let result: Result<TaskDetail, _> =

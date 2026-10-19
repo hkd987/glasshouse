@@ -108,8 +108,8 @@ include GPL-3.0. What the engine actually links is much less.
   is fetched again and the lists bumped (`ALLOW_REBUILT_PACKAGES=1`
   overrides).
 - Not done: our own build (CF-15); enterprise policies and extensions from
-  the console; GPU; other languages; the Store (installing from the
-  catalog); a compatibility suite (CF-17).
+  the console; GPU; other languages; a compatibility suite (CF-17). The
+  Store (`apps/store`, DV-11) is a web app like Mail and runs the same way.
 
 ## Open questions (owner)
 1. LGPL, MPL and GPL-2.0 libraries under the source offer: acceptable?
