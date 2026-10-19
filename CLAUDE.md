@@ -18,6 +18,7 @@ details this file leaves out.
 | `add-action` | Giving agents a new capability (an app action) |
 | `add-agent` | Building or onboarding an agent |
 | `prd-sync` | The user says the PRD or mockups changed, or before planning against a requirement |
+| `cleanup` | Under 8 GB free, after merging an agent's branch, a build dies with "No space left", a VM stops answering, or before ending a session |
 
 ## Commands
 
@@ -35,6 +36,21 @@ details this file leaves out.
   the sign-in screen before it (the user likes seeing them).
 - Anything a person waits on has a latency budget in `glass-e2e perf`
   (`docs/dev/performance.md`).
+
+## Saving time and tokens
+
+- Run long, chatty commands through `tools/quiet` (`tools/quiet make test
+  lint`, `tools/quiet make e2e-vm`): it prints the summary and, on failure,
+  the failures; the whole output is in `build/logs/`. Read the log only
+  when that isn't enough.
+- Drive the VM's screen with `os/freebsd/scripts/desk.sh` (`signin`,
+  `signout`, `click`, `key`, `point`, `shot`, `wait`, `log`): each step waits
+  for the screen to have drawn, so there are no sleep loops to write.
+- If you type the same multi-step sequence a second time, make it a
+  script or a `desk.sh`/`vm.sh` command (and note it here or in the skill
+  it belongs to) instead of a third time.
+- Clean up as you go (`cleanup` skill, `tools/cleanup.sh`): disk is small,
+  and a full disk pauses VMs and kills links.
 
 ## Sources of truth
 

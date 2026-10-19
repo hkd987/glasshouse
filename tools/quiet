@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Usage: tools/quiet <command> [args...]
+# Runs a long, chatty command (make test lint, make e2e-vm, a cargo build) with its whole output in
+# build/logs/<name>.log, and prints only what's worth reading: the summary lines and, if it failed,
+# the failures with a little context, then the log's path. A green `make test lint` prints a few
+# lines instead of thousands; read the log only when this isn't enough (CLAUDE.md).
+set -uo pipefail
+
+(($# > 0)) || { echo "usage: tools/quiet <command> [args...]" >&2; exit 2; }
+root=$(cd "$(dirname "$0")/.." && pwd)
+mkdir -p "$root/build/logs"
+name=$(printf '%s' "$*" | tr -cs 'A-Za-z0-9' '-' | cut -c1-60 | sed 's/-*$//')
+log=$root/build/logs/${name:-run}.log
+
+start=$(date +%s)
+"$@" >"$log" 2>&1
+status=$?
+took=$(($(date +%s) - start))
+
+# Summaries: cargo's test totals (failures only, plus a count of the rest), lint's lines, e2e's
+# sections and verdicts.
+passed=$(grep -c '^test result: ok' "$log")
+grep -E '^test result: FAILED|^lint: |^  (ok|FAIL) |^== |^PASS |^FAIL|PENDING|checks passed|scenarios passed|layering ok' "$log" |
+	grep -v '^PASS ' | tail -n 40
+((passed > 0)) && echo "($passed test binaries passed)"
+if ((status != 0)); then
+	echo "--- failures"
+	grep -n -E -A6 '^error(\[|:)|panicked at|^---- .* stdout ----|^failures:|FAILED|^FAIL|No space left' "$log" |
+		head -n 80
+fi
+echo "exit $status after ${took}s; full log: ${log#"$root"/}"
+exit "$status"
