@@ -14,7 +14,7 @@ FREEBSD_TARGET := x86_64-unknown-freebsd
 # Binaries shipped in the OS image (see os/freebsd/dist.manifest).
 SHIPPED := glassd glassctl glass-mcp glass-demo-agent glass-it-agent glass-probe
 # The sign-in screen and the desktop, from the shell workspace (shell/).
-SHIPPED_SHELL := glass-greeter glass-shell-fb glass-compositor
+SHIPPED_SHELL := glass-greeter glass-shell-fb glass-compositor glass-terminal
 # Cargo profile for FreeBSD builds. `vm` rebuilds in seconds for the VM loop;
 # shippable images use `release` (make image-release). See
 # docs/dev/build-performance.md.

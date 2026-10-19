@@ -18,6 +18,7 @@ glass-shell = { path = "crates/glass-shell" }
 glass-shell-fb = { path = "crates/glass-shell-fb" }
 glass-compositor = { path = "crates/glass-compositor" }
 glass-window = { path = "crates/glass-window" }
+glass-terminal = { path = "crates/glass-terminal" }
 # The control API contract, shared with glassd and glassctl.
 glass-api = { path = "../crates/lib/api" }
 glass-rpc = { path = "../crates/lib/rpc" }
@@ -49,6 +50,8 @@ smithay = { version = "0.7.0", default-features = false, features = ["wayland_fr
 wayland-client = "0.31.10"
 wayland-protocols = { version = "0.32.8", features = ["client"] }
 tempfile = "3.27.0"
+# Terminal's screen and pseudo-terminal (ADR 0025).
+alacritty_terminal = "0.26.0"
 # Keymaps for native apps' keys (already built for Smithay; libxkbcommon).
 xkbcommon = "0.8.0"
 # poll(2) on the compositor's sockets, safely (already built for Smithay).

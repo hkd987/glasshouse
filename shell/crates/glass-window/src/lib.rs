@@ -31,7 +31,7 @@ use wayland_client::protocol::{
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, delegate_noop};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
-use xkbcommon::xkb;
+pub use xkbcommon::xkb;
 
 /// A key as the app gets it, before the UI does.
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +70,10 @@ pub trait App {
     /// The window should close (its close control): true to let it.
     fn close(&mut self) -> bool {
         true
+    }
+    /// The app is finished (a terminal's shell exited): the window closes.
+    fn done(&self) -> bool {
+        false
     }
 }
 
@@ -202,6 +206,9 @@ pub fn run_on<A: App>(socket: &Path, mut app: A, mut wake: Wake) -> anyhow::Resu
                 break;
             }
             state.close_asked = false;
+        }
+        if app.done() {
+            break;
         }
         if state.frame_done {
             state.frame_done = false;

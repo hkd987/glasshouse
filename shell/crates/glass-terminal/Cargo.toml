@@ -1,0 +1,19 @@
+[package]
+name = "glass-terminal"
+description = "Terminal: the person's shell in a window (native app, ADR 0025)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-shell.workspace = true
+glass-window.workspace = true
+iced_core.workspace = true
+iced_widget.workspace = true
+anyhow.workspace = true
+alacritty_terminal.workspace = true
+
+[lints]
+workspace = true
