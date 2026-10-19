@@ -90,6 +90,7 @@ impl Policy {
         models::validate(&doc, &mut errors);
         crate::mail::validate(&doc, &mut errors);
         crate::support::validate(&doc, &mut errors);
+        crate::settings::validate(&doc, &mut errors);
         for service in &doc.fixes.services {
             let plain = !service.is_empty()
                 && service
@@ -113,6 +114,17 @@ impl Policy {
     /// IT's approved fix list for the IT self-service agent (AE-4).
     pub fn fixes(&self) -> &Fixes {
         &self.doc.fixes
+    }
+
+    /// `user`'s device settings (UX-1): each from their first group that
+    /// sets it, then everyone, then the computer's default.
+    pub fn settings_for(&self, user: &str) -> Vec<crate::settings::Resolved> {
+        crate::settings::resolve(&self.doc, user)
+    }
+
+    /// The computer's own settings, such as the browser's (UX-1).
+    pub fn device_settings(&self) -> Vec<crate::settings::Resolved> {
+        crate::settings::device(&self.doc)
     }
 
     /// Remote help's roles (CF-81, ADR 0028).

@@ -4,7 +4,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use glass_policy::document::{AgentPolicy, GroupPolicy, PolicyDocument, Support, SupportRole};
+use glass_policy::document::{
+    AgentPolicy, GroupPolicy, Managed, PolicyDocument, Support, SupportRole,
+};
+use glass_policy::settings;
 use glass_policy::{ActionPattern, Policy};
 use glass_types::{ActionName, SideEffect, Tier};
 use serde::Serialize;
@@ -131,6 +134,7 @@ fn group_lines(
         max_label: None,
         tiers: BTreeMap::new(),
         models: None,
+        settings: BTreeMap::new(),
     };
     let (o, n) = (old.unwrap_or(&empty), new.unwrap_or(&empty));
     tier_lines(name, &o.tiers, &n.tiers, draft, titles, out);
@@ -150,6 +154,71 @@ fn group_lines(
                 .as_ref()
                 .map_or_else(|| "the org's list".to_owned(), |m| m.join(", "))
         ));
+    }
+    setting_lines(name, &o.settings, &n.settings, out);
+}
+
+/// A group's device settings (UX-1), in words.
+fn setting_lines(
+    name: &str,
+    old: &BTreeMap<String, Managed>,
+    new: &BTreeMap<String, Managed>,
+    out: &mut Vec<String>,
+) {
+    for def in settings::table() {
+        match (old.get(def.id), new.get(def.id)) {
+            (o, Some(n)) if o != Some(n) => out.push(format!(
+                "{name}: {} {} ({})",
+                def.title,
+                settings::describe(def, &n.value),
+                if n.locked {
+                    "locked"
+                } else {
+                    "people can change it"
+                }
+            )),
+            (Some(_), None) => out.push(format!("{name}: {} no longer set", def.title)),
+            _ => {}
+        }
+    }
+}
+
+/// People two of whose groups set a setting differently: the group higher
+/// in the policy wins, and IT should know.
+fn setting_overlaps(draft: &PolicyDocument, directory: &dyn Directory, out: &mut Vec<String>) {
+    let groups: Vec<&GroupPolicy> = draft.groups.iter().filter(|g| g.name != EVERYONE).collect();
+    for def in settings::table()
+        .iter()
+        .filter(|d| d.scope == settings::Scope::Person)
+    {
+        let setters: Vec<(&GroupPolicy, &Managed)> = groups
+            .iter()
+            .filter_map(|g| g.settings.get(def.id).map(|m| (*g, m)))
+            .collect();
+        for (i, (first, a)) in setters.iter().enumerate() {
+            for (later, b) in &setters[i + 1..] {
+                if a == b {
+                    continue;
+                }
+                let theirs: BTreeSet<&str> = directory.members(&later.name).into_iter().collect();
+                let both = directory
+                    .members(&first.name)
+                    .into_iter()
+                    .filter(|u| theirs.contains(u))
+                    .count();
+                if both > 0 {
+                    out.push(format!(
+                        "{}: {both} {} in both {} and {}; {} is higher, so they get {}",
+                        def.title,
+                        if both == 1 { "person is" } else { "people are" },
+                        directory.group_display(&first.name),
+                        directory.group_display(&later.name),
+                        directory.group_display(&first.name),
+                        settings::describe(def, &a.value)
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -348,6 +417,8 @@ pub fn preview(
     for g in &changed_groups {
         let members = directory.members(g);
         users.extend(members.iter().copied());
+        // What decides agents' work: not members, profiles or device
+        // settings. A group not in a policy has no rules.
         let rules = |doc: &PolicyDocument| {
             doc.groups
                 .iter()
@@ -355,7 +426,14 @@ pub fn preview(
                 .map(|x| GroupPolicy {
                     members: Vec::new(),
                     apps: Vec::new(),
+                    settings: BTreeMap::new(),
                     ..x.clone()
+                })
+                .filter(|x| {
+                    !x.agents.is_empty()
+                        || !x.tiers.is_empty()
+                        || x.max_label.is_some()
+                        || x.models.is_some()
                 })
         };
         let profile_only = rules(old) == rules(draft);
@@ -387,6 +465,7 @@ pub fn preview(
     let mut warnings = Policy::from_document(draft.clone())
         .map(|p| p.lint(&titles.lint_info))
         .unwrap_or_default();
+    setting_overlaps(draft, directory, &mut warnings);
     for role in draft
         .support
         .roles
@@ -585,6 +664,31 @@ mod tests {
             "{:?}",
             impact.changes
         );
+    }
+
+    #[test]
+    fn ux1_people_in_two_groups_that_disagree_get_the_higher_groups_setting() {
+        let mut dir = LocalDirectory::starter("root");
+        dir.groups
+            .iter_mut()
+            .find(|g| g.name == "legal-ops")
+            .unwrap()
+            .members
+            .push("dana".into());
+        let titles = Titles::first_party();
+        let base = doc(glass_policy::DEFAULT_POLICY);
+        let draft = doc(&format!(
+            "{}\n[[group]]\nname = \"ap-ops\"\n[group.settings]\n\"lock.after_minutes\" = {{ value = 5, locked = true }}\n\n[[group]]\nname = \"legal-ops\"\n[group.settings]\n\"lock.after_minutes\" = {{ value = 30 }}\n",
+            glass_policy::DEFAULT_POLICY
+        ));
+        let impact = preview(Some((1, &base)), &draft, &dir, &titles);
+        assert!(
+            impact.warnings.iter().any(|w| w
+                == "Lock after: 1 person is in both AP Operations and Legal Operations; AP Operations is higher, so they get 5 minutes"),
+            "{:?}",
+            impact.warnings
+        );
+        assert_eq!(impact.agents, 0, "settings reach no agent");
     }
 
     #[test]

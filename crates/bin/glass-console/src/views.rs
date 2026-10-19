@@ -596,3 +596,86 @@ pub fn roles(state: &State, directory: &dyn Directory) -> anyhow::Result<Value> 
         "groups": groups,
     }))
 }
+
+/// The Settings page (UX-1): every device setting, what `group` sets in
+/// the draft, what it would get otherwise, and what the pilot ring runs.
+/// Groups higher in `order` win for people in two that disagree.
+pub fn settings(state: &State, directory: &dyn Directory, group: &str) -> anyhow::Result<Value> {
+    let draft = state.draft()?;
+    let pilot = state
+        .in_force(Ring::Pilot)
+        .and_then(|v| toml::from_str::<PolicyDocument>(&v.text).ok());
+    let of = |doc: &PolicyDocument, name: &str| {
+        doc.groups
+            .iter()
+            .find(|g| g.name == name)
+            .map(|g| g.settings.clone())
+            .unwrap_or_default()
+    };
+    let mine = of(&draft, group);
+    let everyone = of(&draft, EVERYONE);
+    let in_pilot = pilot.as_ref().map(|d| of(d, group)).unwrap_or_default();
+    let defs: Vec<Value> = glass_policy::settings::table()
+        .iter()
+        .map(|def| {
+            json!({
+                "id": def.id,
+                "section": def.section,
+                "title": def.title,
+                "help": def.help,
+                "kind": def.kind,
+                "scope": def.scope,
+                "default": def.default,
+                "set": mine.get(def.id),
+                "everyone": (group != EVERYONE).then(|| everyone.get(def.id)).flatten(),
+                "pilot": in_pilot.get(def.id),
+            })
+        })
+        .collect();
+    let order: Vec<&str> = draft
+        .groups
+        .iter()
+        .map(|g| g.name.as_str())
+        .filter(|n| *n != EVERYONE)
+        .collect();
+    // Everyone, then the policy's groups in order, then the directory's
+    // other groups (setting one adds it to the policy, last).
+    let mut names: Vec<&str> = vec![EVERYONE];
+    names.extend(order.iter().copied());
+    names.extend(
+        directory
+            .groups()
+            .iter()
+            .map(|g| g.name.as_str())
+            .filter(|n| !names.contains(n) && *n != EVERYONE)
+            .collect::<Vec<_>>(),
+    );
+    let groups: Vec<Value> = names
+        .iter()
+        .map(|n| {
+            json!({
+                "name": n,
+                "display": directory.group_display(n),
+                "people": directory.members(n).len(),
+                "sets": of(&draft, n).len(),
+            })
+        })
+        .collect();
+    let changed = pilot.as_ref().is_none_or(|p| {
+        let all = |d: &PolicyDocument| {
+            d.groups
+                .iter()
+                .map(|g| (g.name.clone(), g.settings.clone()))
+                .collect::<Vec<_>>()
+        };
+        all(p) != all(&draft)
+    });
+    Ok(json!({
+        "group": { "name": group, "display": directory.group_display(group), "people": directory.members(group).len() },
+        "groups": groups,
+        "order": order,
+        "settings": defs,
+        "changed": changed,
+        "pilot_version": state.in_force(Ring::Pilot).map(|v| v.version),
+    }))
+}

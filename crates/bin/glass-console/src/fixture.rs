@@ -302,6 +302,7 @@ pub fn fill(
             max_label: None,
             tiers: Default::default(),
             models: None,
+            settings: Default::default(),
         });
     }
     state

@@ -215,3 +215,40 @@ export interface RolesPage {
   tools: { id: SupportTool; title: string }[];
   groups: { name: string; display: string }[];
 }
+
+/** A device setting's value (UX-1). */
+export type SettingValue = boolean | number | string | string[];
+
+/** A setting as IT set it for a group: a default people can change, or locked. */
+export interface Managed {
+  value: SettingValue;
+  locked?: boolean;
+}
+
+export interface SettingRow {
+  id: string;
+  section: string;
+  title: string;
+  help: string;
+  kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" };
+  /** A person's own, or the whole computer's (set for everyone only). */
+  scope: "person" | "device";
+  default: SettingValue;
+  /** What this group sets in the draft. */
+  set: Managed | null;
+  /** What everyone gets, for a group that doesn't set it. */
+  everyone: Managed | null;
+  /** What this group's pilot computers run. */
+  pilot: Managed | null;
+}
+
+/** The Settings page (UX-1). */
+export interface SettingsPage {
+  group: { name: string; display: string; people: number };
+  groups: { name: string; display: string; people: number; sets: number }[];
+  /** The policy's groups, higher first: who wins when groups disagree. */
+  order: string[];
+  settings: SettingRow[];
+  changed: boolean;
+  pilot_version: number | null;
+}

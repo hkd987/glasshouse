@@ -13,6 +13,7 @@
 //! GET  /api/fleet                     the fleet page
 //! POST /api/fleet/<device>/ring       move a device to another ring
 //! POST /api/fleet/<device>/kind       say what kind of computer it is
+//! GET  /api/settings?group=<g>        device settings for a group (UX-1)
 //! GET  /api/roles                     remote help's roles (CF-81)
 //! GET  /api/support                   support staff's page (CF-80)
 //! POST /device/v1/sync                a device's long poll (bearer token)
@@ -382,6 +383,16 @@ impl Console {
         }
         match (request.method.as_str(), segments.as_slice()) {
             ("GET", ["support"]) => ok(views::support(&self.state(), directory, &access)),
+            ("GET", ["settings"]) => {
+                let group = query(request, "group").unwrap_or(crate::directory::EVERYONE);
+                if group != crate::directory::EVERYONE && directory.group(group).is_none() {
+                    return error(404, &format!("no group {group}"));
+                }
+                match views::settings(&self.state(), directory, group) {
+                    Ok(v) => ok(v),
+                    Err(e) => error(500, &format!("{e:#}")),
+                }
+            }
             ("GET", ["roles"]) => match views::roles(&self.state(), directory) {
                 Ok(v) => ok(v),
                 Err(e) => error(500, &format!("{e:#}")),
@@ -916,6 +927,7 @@ mod tests {
             ("POST", "/api/fleet/d/kind", json!({ "kind": "kiosk" })),
             ("GET", "/api/mail", Value::Null),
             ("GET", "/api/roles", Value::Null),
+            ("GET", "/api/settings", Value::Null),
             ("GET", "/api/a-route-nobody-wrote-yet", Value::Null),
         ] {
             let (status, _) = t.call_as(&jordan, method, path, body).await;
@@ -1068,6 +1080,119 @@ mod tests {
         assert_eq!(unattended(&page), true);
         let (_, fleet) = t.call("GET", "/api/fleet", Value::Null).await;
         assert_eq!(fleet["kinds"], json!(["kiosk"]));
+    }
+
+    #[tokio::test]
+    async fn ux1_settings_set_per_group_are_previewed_published_and_resolved_per_person() {
+        let t = console().await;
+        let set = |group: &str, settings: Value| json!({ "edit": "settings", "group": group, "settings": settings });
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/policy/edit",
+                set(
+                    "ap-ops",
+                    json!({ "lock.after_minutes": { "value": 5, "locked": true } }),
+                ),
+            )
+            .await;
+        assert_eq!(status, 200);
+        // Legal Operations sets it differently; nobody is in both, so the
+        // preview has no warning about it (impact.rs tests one).
+        t.call(
+            "POST",
+            "/api/policy/edit",
+            set(
+                "legal-ops",
+                json!({ "lock.after_minutes": { "value": 30 }, "clock.hour24": { "value": true } }),
+            ),
+        )
+        .await;
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/policy/edit",
+                set(
+                    "ap-ops",
+                    json!({ "browser.home_page": { "value": "https://intranet.acme.example" } }),
+                ),
+            )
+            .await;
+        assert_eq!(status, 400, "the browser is the whole computer's");
+        t.call(
+            "POST",
+            "/api/policy/edit",
+            set(
+                "everyone",
+                json!({ "browser.home_page": { "value": "https://intranet.acme.example", "locked": true } }),
+            ),
+        )
+        .await;
+
+        let (_, impact) = t.call("POST", "/api/policy/preview", json!({})).await;
+        let changes = impact["changes"].to_string();
+        assert!(
+            changes.contains("AP Operations: Lock after 5 minutes (locked)"),
+            "{changes}"
+        );
+        assert!(
+            changes.contains("Everyone: Home page https://intranet.acme.example (locked)"),
+            "{changes}"
+        );
+        assert!(
+            changes.contains("Legal Operations: 24-hour clock on (people can change it)"),
+            "{changes}"
+        );
+        assert!(!impact["warnings"].to_string().contains("in both"));
+
+        let (_, page) = t
+            .call("GET", "/api/settings?group=ap-ops", Value::Null)
+            .await;
+        assert_eq!(page["changed"], true);
+        assert_eq!(page["order"], json!(["it-admins", "ap-ops", "legal-ops"]));
+        let lock = page["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "lock.after_minutes")
+            .unwrap()
+            .clone();
+        assert_eq!(lock["set"], json!({ "value": 5, "locked": true }));
+        assert!(lock["pilot"].is_null());
+
+        let (status, _) = t.call("POST", "/api/policy/publish", json!({})).await;
+        assert_eq!(status, 200);
+        t.sync("d", None, 0).await;
+        t.call("POST", "/api/fleet/d/ring", json!({ "ring": "pilot" }))
+            .await;
+        let got = t.sync("d", None, 0).await.policy.unwrap();
+        let release: PolicyRelease = got.open(DocKind::Policy, "acme", &[t.key], None).unwrap();
+        let policy = glass_policy::Policy::from_toml(&release.policy).unwrap();
+        let get = |user: &str, id: &str| {
+            policy
+                .settings_for(user)
+                .into_iter()
+                .find(|r| r.id == id)
+                .unwrap()
+        };
+        let dana = get("dana", "lock.after_minutes");
+        assert_eq!(
+            (dana.value, dana.locked),
+            (glass_policy::document::SettingValue::Number(5), true)
+        );
+        assert_eq!(
+            get("priya", "lock.after_minutes").value,
+            glass_policy::document::SettingValue::Number(30)
+        );
+        assert_eq!(
+            policy
+                .device_settings()
+                .into_iter()
+                .find(|r| r.id == "browser.home_page")
+                .unwrap()
+                .value,
+            glass_policy::document::SettingValue::Text("https://intranet.acme.example".into())
+        );
     }
 
     #[tokio::test]

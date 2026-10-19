@@ -561,3 +561,65 @@ input.text {
   padding: 2px 10px 2px 0;
   gap: 6px;
 }
+
+/* Settings (UX-1): a setting's words on the left, how it's set and its value on the right. */
+.setting {
+  display: grid;
+  grid-template-columns: 1fr minmax(260px, 340px);
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.setting:last-child {
+  border-bottom: none;
+}
+
+.setting-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.segmented.three {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+input.text.short {
+  width: 80px;
+}
+
+textarea.text {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  resize: vertical;
+}
+
+.group-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.group-row.current a {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.icon-button {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 6px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+}
+
+.group-row a {
+  color: var(--muted);
+  text-decoration: none;
+}

@@ -426,6 +426,30 @@ pub struct GroupPolicy {
     /// handles confidential data (MP-6). Unset means the org's list.
     #[serde(default)]
     pub models: Option<Vec<String>>,
+    /// Device settings for members (UX-1), by id from
+    /// [`crate::settings::table`]: a default they may change, or locked.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, Managed>,
+}
+
+/// A setting IT set for a group (UX-1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Managed {
+    pub value: SettingValue,
+    /// The person can't change it; otherwise it is their default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
+}
+
+/// A setting's value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SettingValue {
+    Bool(bool),
+    Number(i64),
+    Text(String),
+    List(Vec<String>),
 }
 
 /// Rules for one catalog agent (AD-2).

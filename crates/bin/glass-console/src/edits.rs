@@ -3,7 +3,9 @@
 //! result as a device would before keeping it.
 
 use glass_policy::ActionPattern;
-use glass_policy::document::{GroupPolicy, MailSettings, PolicyDocument, SupportRole};
+use std::collections::BTreeMap;
+
+use glass_policy::document::{GroupPolicy, MailSettings, Managed, PolicyDocument, SupportRole};
 use glass_types::{AgentId, Label, Tier};
 use serde::Deserialize;
 
@@ -39,6 +41,15 @@ pub enum Edit {
     },
     /// The org's mail service (NV-3); `None` takes it out.
     Mail { mail: Option<MailSettings> },
+    /// A group's device settings (UX-1), by id: each set as a default or
+    /// locked, or `None` to leave it to the next group.
+    Settings {
+        group: String,
+        settings: BTreeMap<String, Option<Managed>>,
+    },
+    /// Which of the org's groups win when a person's groups set a setting
+    /// differently: higher first. Every group but `everyone`, once.
+    GroupOrder { order: Vec<String> },
     /// A remote help role (CF-81), added or replaced by its id; `None`
     /// takes it out.
     SupportRole {
@@ -59,6 +70,7 @@ fn group<'a>(doc: &'a mut PolicyDocument, name: &str) -> &'a mut GroupPolicy {
         max_label: None,
         tiers: Default::default(),
         models: None,
+        settings: Default::default(),
     });
     doc.groups.last_mut().expect("just pushed")
 }
@@ -68,6 +80,42 @@ pub fn apply(doc: &mut PolicyDocument, edit: Edit) -> Result<(), String> {
     match edit {
         Edit::Mail { mail } => {
             doc.mail = mail;
+        }
+        Edit::Settings {
+            group: name,
+            settings,
+        } => {
+            let g = group(doc, &name);
+            for (id, managed) in settings {
+                match managed {
+                    Some(m) => {
+                        g.settings.insert(id, m);
+                    }
+                    None => {
+                        g.settings.remove(&id);
+                    }
+                }
+            }
+        }
+        Edit::GroupOrder { order } => {
+            let mut now: Vec<&str> = doc
+                .groups
+                .iter()
+                .map(|g| g.name.as_str())
+                .filter(|n| *n != crate::directory::EVERYONE)
+                .collect();
+            let mut asked: Vec<&str> = order.iter().map(String::as_str).collect();
+            now.sort_unstable();
+            asked.sort_unstable();
+            if now != asked {
+                return Err("list every group once, everyone left out".into());
+            }
+            doc.groups.sort_by_key(|g| {
+                order
+                    .iter()
+                    .position(|n| *n == g.name)
+                    .map_or(0, |at| at + 1)
+            });
         }
         Edit::SupportRole { id, role } => {
             let at = doc.support.roles.iter().position(|r| r.id == id);
@@ -241,6 +289,59 @@ mod tests {
         )
         .unwrap();
         glass_policy::Policy::from_document(d).unwrap();
+    }
+
+    #[test]
+    fn ux1_settings_per_group_and_the_order_groups_win_in() {
+        let mut d = doc();
+        let edit: Edit = serde_json::from_str(
+            r#"{"edit":"settings","group":"ap-ops","settings":{"lock.after_minutes":{"value":5,"locked":true},"clock.hour24":{"value":true}}}"#,
+        )
+        .unwrap();
+        apply(&mut d, edit).unwrap();
+        let ap = d.groups.iter().find(|g| g.name == "ap-ops").unwrap();
+        assert!(ap.settings["lock.after_minutes"].locked);
+        assert!(!ap.settings["clock.hour24"].locked);
+        apply(
+            &mut d,
+            Edit::Settings {
+                group: "ap-ops".into(),
+                settings: [("clock.hour24".to_owned(), None)].into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            d.groups
+                .iter()
+                .find(|g| g.name == "ap-ops")
+                .unwrap()
+                .settings
+                .len(),
+            1
+        );
+        glass_policy::Policy::from_document(d.clone()).unwrap();
+
+        let names =
+            |d: &PolicyDocument| d.groups.iter().map(|g| g.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&d), ["everyone", "it-admins", "ap-ops"]);
+        apply(
+            &mut d,
+            Edit::GroupOrder {
+                order: vec!["ap-ops".into(), "it-admins".into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(names(&d), ["everyone", "ap-ops", "it-admins"]);
+        assert!(
+            apply(
+                &mut d,
+                Edit::GroupOrder {
+                    order: vec!["ap-ops".into()]
+                }
+            )
+            .is_err(),
+            "every group, once"
+        );
     }
 
     #[test]

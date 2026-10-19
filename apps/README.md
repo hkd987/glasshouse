@@ -75,7 +75,8 @@ catalog releases from. Pages: Policies (per group: tiers by action class,
 allowed agents, apps in profiles, labels and models, versions and rings,
 preview impact, publish, promote, roll back, live numbers), Catalog (what
 an item declares; approve per group as required, available or blocked;
-block), Mail (the org's mail service), Remote help (support tiers: who
+block), Settings (device settings per group, a default or locked, and
+the order groups win in), Mail (the org's mail service), Remote help (support tiers: who
 holds each and its tools) and Devices (reports, rings, enrollment). Support
 staff, the members of the groups a support role names, see only Support:
 their tools and the computers their role reaches (ADR 0028).

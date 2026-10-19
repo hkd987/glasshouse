@@ -16,6 +16,7 @@ mod labels;
 pub mod mail;
 mod models;
 mod pattern;
+pub mod settings;
 pub mod store;
 mod support;
 

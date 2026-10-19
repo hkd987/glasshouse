@@ -2,7 +2,8 @@
 // own servers, where IT signs in and sets agent policy, approves catalog
 // items and sees the fleet. It reads everything from the console's API,
 // never from the device it's opened on. Pages: #/policy/<group>,
-// #/catalog, #/catalog/<item>, #/mail, #/remote-help, #/devices for IT's
+// #/catalog, #/catalog/<item>, #/settings/<group>, #/mail, #/remote-help,
+// #/devices for IT's
 // admins; #/support for support staff (ADR 0028). The pages someone sees
 // follow from their session; the console refuses the rest anyway.
 
@@ -14,6 +15,7 @@ import { devicesPage } from "./devices.ts";
 import { mailPage } from "./mail.ts";
 import { policyPage } from "./policy.ts";
 import { rolesPage } from "./roles.ts";
+import { settingsPage } from "./settings.ts";
 import { supportPage } from "./support.ts";
 import { notice } from "./ui.ts";
 
@@ -23,6 +25,7 @@ let session: Session | null = null;
 const ADMIN_NAV: [string, string][] = [
   ["policy", "Policies"],
   ["catalog", "Catalog"],
+  ["settings", "Settings"],
   ["mail", "Mail"],
   ["remote-help", "Remote help"],
   ["devices", "Devices"],
@@ -113,6 +116,7 @@ async function route(): Promise<void> {
     show(app, layout(section, content));
     if (section === "support") await supportPage(content);
     else if (section === "remote-help") await rolesPage(content);
+    else if (section === "settings") await settingsPage(content, arg ? decodeURIComponent(arg) : "everyone");
     else if (section === "catalog" && arg) await itemPage(content, decodeURIComponent(arg));
     else if (section === "catalog") await catalogPage(content);
     else if (section === "devices") await devicesPage(content);

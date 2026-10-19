@@ -72,6 +72,7 @@ test("ad4 every page is interactive in under 1 s with 500 devices and 50 items",
     ["catalog", "#/catalog", "catalog"],
     ["item", "#/catalog/contract-review", "catalog"],
     ["devices", "#/devices", "devices"],
+    ["settings", "#/settings/ap-ops", "settings"],
   ];
   for (const [name, hash, section] of pages) {
     const runs: number[] = [];
@@ -278,6 +279,24 @@ test("nv3 ad2 the mail service IT sets in the console shows in Mail on the devic
   const call = audit().find((r) => r.event.action === "mail.account" && r.event.agent === "mail");
   expect(call?.event.decision?.tier).toBe("auto");
   await mail.close();
+});
+
+test("ux1 IT locks a setting for a group, previews and publishes it", async ({ browser }) => {
+  const { page, close } = await session(browser);
+  await open(page, "#/settings/ap-ops", "settings");
+  const lock = page.locator('[data-setting="lock.after_minutes"]');
+  await lock.locator('[data-state="locked"]').click();
+  await lock.locator('input[name="lock.after_minutes"]').fill("5");
+  const home = page.locator('[data-setting="browser.home_page"]');
+  await expect(home).toContainText("set it for Everyone");
+  await page.click("[data-test=save-settings]");
+  await expect(page.locator("[data-test=impact]")).toContainText("AP Operations: Lock after 5 minutes (locked)");
+  await page.locator("h1").scrollIntoViewIfNeeded();
+  await page.evaluate(() => document.querySelector("main.content")?.scrollTo(0, 0));
+  await shot(page, "settings-locked-for-a-group");
+  await page.click("[data-test=publish]");
+  await expect(page.locator(".notice")).toContainText("Published");
+  await close();
 });
 
 /** Signs a support person in, in a context of their own. */
