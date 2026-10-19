@@ -67,7 +67,13 @@ of a sequence of commands (host or VM, as any user) as a PNG. The
 ## Rules
 
 - A change to containment, the broker or the audit log needs an e2e run.
-- The probe must stay honest: it ends Failed on the host backend (11/20) and
+- The probe must stay honest: it ends Failed on the host backend (12/21) and
   Done in a jail (21/21). If you add a sandbox surface, add a probe check.
+  The two socket checks ("reach the control socket", "reach the app
+  socket") look where an image keeps glassd's sockets
+  (`/var/run/glasshouse`), so on the host backend, whose sockets are in
+  `build/dev/run`, they pass without proving anything; they count only in
+  a jail on an image. Making them real everywhere needs glassd to tell
+  the probe where its sockets are (an agent environment variable).
 - No test may depend on wall-clock luck: poll with a deadline, never sleep
   and hope.
