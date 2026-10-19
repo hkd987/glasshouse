@@ -68,6 +68,8 @@ pub struct Live {
     /// Apps' windows, the one last used first (the compositor's stack, top
     /// down).
     windows: Vec<AppWindow>,
+    /// The pointer brought the dock up over the windows (DK-1).
+    dock_raised: bool,
     /// Alt Tab's switcher is open, on the window with this id.
     switching: Option<u64>,
     /// What the keyboard has selected in the open menu or the launcher
@@ -248,6 +250,7 @@ impl Live {
             launcher: false,
             apps: Vec::new(),
             windows: Vec::new(),
+            dock_raised: false,
             switching: None,
             selected: None,
         };
@@ -311,6 +314,30 @@ impl Live {
     /// Whether the screen is locked.
     pub fn is_locked(&self) -> bool {
         self.locked.is_some()
+    }
+
+    /// Whether the dock is up (DK-1). It steps aside while an app's window
+    /// is on the screen, so windows have all of it under the menu bar, and
+    /// is up when none is, with the launcher, or when the pointer brought
+    /// it up at the screen's bottom edge ([`Live::pointer_at`]).
+    pub fn shows_dock(&self) -> bool {
+        self.dock_raised || self.launcher || self.windows.iter().all(|w| w.minimized)
+    }
+
+    /// Where the pointer is now, `y` pixels down a screen `height` tall: at
+    /// its bottom edge the dock comes up over the windows, and above the
+    /// dock's room it goes again. Whether that changed what's drawn.
+    pub fn pointer_at(&mut self, y: f32, height: f32) -> bool {
+        let raised = if y >= height - desktop::DOCK_EDGE {
+            true
+        } else if y < height - desktop::DOCK_ROOM {
+            false
+        } else {
+            self.dock_raised
+        };
+        let was = self.shows_dock();
+        self.dock_raised = raised;
+        was != self.shows_dock()
     }
 
     /// Whether the shell takes all input, so none reaches apps' windows: a
@@ -1153,6 +1180,8 @@ impl Live {
                 .filter(|app| self.windows.iter().any(|w| app.owns_window(&w.app_id)))
                 .map(|app| app.id.clone())
                 .collect(),
+            apps: self.apps.iter().map(|app| app.id.clone()).collect(),
+            dock: self.shows_dock(),
             ..Desktop::live(&self.tasks, now)
         };
         let mut overlays = Vec::new();

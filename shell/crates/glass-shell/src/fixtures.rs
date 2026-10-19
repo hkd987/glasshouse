@@ -357,6 +357,10 @@ pub fn desktop(tasks: &[TaskView]) -> Desktop<'_> {
         selected: None,
         // The artboard's Browser, open.
         open_apps: vec!["browser".into()],
+        apps: crate::screens::desktop::DOCK_APPS
+            .map(String::from)
+            .to_vec(),
+        dock: true,
     }
 }
 

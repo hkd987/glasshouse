@@ -48,6 +48,13 @@ pub struct Desktop<'a> {
     pub selected: Option<usize>,
     /// The apps with a window open, by id: the dock shows a dot under each.
     pub open_apps: Vec<String>,
+    /// The apps in the person's profile, by id: the dock shows only these
+    /// (AD-7).
+    pub apps: Vec<String>,
+    /// Whether the dock is up. It steps aside while windows are open, so
+    /// they have the whole screen under the menu bar, and comes back at the
+    /// screen's bottom edge (DK-1).
+    pub dock: bool,
 }
 
 /// Which agent tiles the desktop shows. They don't stay on screen: a change
@@ -87,6 +94,8 @@ impl<'a> Desktop<'a> {
             trash_full: false,
             selected: None,
             open_apps: Vec::new(),
+            apps: DOCK_APPS.map(String::from).to_vec(),
+            dock: true,
         }
     }
 }
@@ -213,18 +222,20 @@ pub fn view<'a>(
     layers.push(tiles);
     layers.push(overlay.unwrap_or_else(nothing));
     layers.push(menu_bar(theme, desktop));
-    layers.push(
-        container(dock(theme, desktop))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Horizontal::Center)
-            .align_y(Vertical::Bottom)
-            .padding(Padding {
-                bottom: 10.0,
-                ..Padding::ZERO
-            })
-            .into(),
-    );
+    if desktop.dock {
+        layers.push(
+            container(dock(theme, desktop))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Bottom)
+                .padding(Padding {
+                    bottom: 10.0,
+                    ..Padding::ZERO
+                })
+                .into(),
+        );
+    }
     iced_widget::Stack::with_children(layers)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -243,6 +254,12 @@ pub fn ordered(tasks: &[TaskView]) -> Vec<&TaskView> {
 const MENU_PADDING: f32 = 12.0;
 /// Room the menu leaves for the dock.
 pub const DOCK_ROOM: f32 = 96.0;
+/// How close to the screen's bottom edge the pointer brings the dock up
+/// over windows.
+pub const DOCK_EDGE: f32 = 2.0;
+/// The apps the dock keeps, in its order, when they're in the person's
+/// profile.
+pub const DOCK_APPS: [&str; 4] = ["mail", "calendar", "browser", "store"];
 
 /// The agents menu: every agent's tile, needs-you first, in a panel that
 /// scrolls when they don't fit.
@@ -683,6 +700,7 @@ fn dock<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
             open,
         )
     };
+    let has = |id: &str| desktop.apps.iter().any(|a| a == id);
     let needs = desktop
         .tasks
         .iter()
@@ -744,7 +762,7 @@ fn dock<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
     } else {
         &icons::TRASH
     };
-    let items = row![
+    let mut items = row![
         slot(
             app(hex(0x2F7BEA), glyph(&icons::FOLDER, white, 26.0)),
             false
@@ -760,23 +778,33 @@ fn dock<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
             .into(),
             false
         ),
-        opens("mail", app(hex(0x1E9BF0), glyph(&icons::MAIL, white, 26.0))),
-        opens("calendar", app(white, calendar.into())),
-        opens(
-            "browser",
-            app(hex(0x0E8A8A), glyph(&icons::GLOBE, white, 26.0))
-        ),
-        opens("store", app(hex(0x6E56E8), glyph(&icons::BAG, white, 26.0))),
-        slot(app(hex(0x5F6875), glyph(&icons::GEAR, white, 26.0)), false),
-        separator,
-        agents,
-        slot(
-            app(hexa(0xFFFFFF, 0.55), glyph(trash, hex(0x5F6875), 26.0)),
-            false
-        ),
     ]
     .spacing(10)
     .align_y(Vertical::Top);
+    let mut calendar = Some(calendar);
+    for id in DOCK_APPS.into_iter().filter(|id| has(id)) {
+        let tile = match id {
+            "mail" => app(hex(0x1E9BF0), glyph(&icons::MAIL, white, 26.0)),
+            "calendar" => match calendar.take() {
+                Some(calendar) => app(white, calendar.into()),
+                None => continue,
+            },
+            "browser" => app(hex(0x0E8A8A), glyph(&icons::GLOBE, white, 26.0)),
+            _ => app(hex(0x6E56E8), glyph(&icons::BAG, white, 26.0)),
+        };
+        items = items.push(opens(id, tile));
+    }
+    let items = items
+        .push(slot(
+            app(hex(0x5F6875), glyph(&icons::GEAR, white, 26.0)),
+            false,
+        ))
+        .push(separator)
+        .push(agents)
+        .push(slot(
+            app(hexa(0xFFFFFF, 0.55), glyph(trash, hex(0x5F6875), 26.0)),
+            false,
+        ));
     container(items)
         .padding(Padding {
             top: 10.0,

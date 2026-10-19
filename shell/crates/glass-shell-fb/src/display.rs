@@ -147,6 +147,11 @@ impl Display {
         self.alt_held
     }
 
+    /// Where the pointer is, in screen pixels.
+    pub fn pointer(&self) -> Point {
+        self.pointer
+    }
+
     /// The screen's size in pixels.
     pub fn pixels(&self) -> (u32, u32) {
         let g = self.fb.geometry();

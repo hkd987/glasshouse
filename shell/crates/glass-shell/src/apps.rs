@@ -135,6 +135,8 @@ pub struct AppWindow {
     /// The app id it carries.
     pub app_id: String,
     pub title: String,
+    /// Its minimize control hid it; Alt Tab still lists it.
+    pub minimized: bool,
 }
 
 #[cfg(test)]

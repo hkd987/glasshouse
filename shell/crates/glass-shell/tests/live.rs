@@ -661,6 +661,67 @@ fn ui1_apps_windows_hide_behind_the_lock_screen_and_menus_take_the_input() {
     assert!(live.shows_windows() && !live.takes_all_input());
 }
 
+fn window(id: u64, minimized: bool) -> glass_shell::apps::AppWindow {
+    glass_shell::apps::AppWindow {
+        id,
+        app_id: "glass.terminal".into(),
+        title: "Terminal".into(),
+        minimized,
+    }
+}
+
+#[test]
+fn dk1_the_dock_steps_aside_for_windows_and_comes_back_at_the_bottom_edge() {
+    let mut live = Live::new(fixtures::tasks()).with_apps(glass_shell::apps::natives());
+    assert!(live.shows_dock(), "with nothing open, the dock is up");
+    live.set_windows(vec![window(4, false)]);
+    assert!(!live.shows_dock(), "a window has the screen to itself");
+    assert!(
+        live.pointer_at(899.0, SIZE.1),
+        "the bottom edge brings it up"
+    );
+    assert!(live.shows_dock());
+    assert!(!live.pointer_at(850.0, SIZE.1), "on the dock it stays");
+    assert!(live.pointer_at(500.0, SIZE.1), "above it, it goes again");
+    assert!(!live.shows_dock());
+    live.update(Message::ToggleLauncher);
+    assert!(live.shows_dock(), "the launcher keeps it up");
+    live.update(Message::ToggleLauncher);
+    live.set_windows(vec![window(4, true)]);
+    assert!(
+        live.shows_dock(),
+        "minimized windows leave the screen to it"
+    );
+}
+
+#[test]
+fn ad7_the_dock_offers_only_the_apps_in_the_profile() {
+    use glass_shell::apps::{AppEntry, Start};
+    let web = |id: &str, name: &str| AppEntry {
+        id: id.into(),
+        name: name.into(),
+        start: Start::Web,
+    };
+    let launched = |live: &Live| {
+        let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+        let mut ids: Vec<String> = (300..1200)
+            .step_by(8)
+            .flat_map(|x| click(&mut screen, live, Point::new(x as f32, 860.0)))
+            .filter_map(|m| match m {
+                Message::Launch(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        ids.dedup();
+        ids
+    };
+    let live = Live::new(fixtures::tasks()).with_apps(vec![web("mail", "Mail")]);
+    assert_eq!(launched(&live), ["mail"]);
+    let live = Live::new(fixtures::tasks())
+        .with_apps(vec![web("calendar", "Calendar"), web("store", "Store")]);
+    assert_eq!(launched(&live), ["calendar", "store"]);
+}
+
 #[test]
 fn dv11_opening_the_launcher_asks_for_the_apps_again() {
     let natives = glass_shell::apps::natives();
@@ -794,6 +855,7 @@ fn windows(titles: &[(u64, &str)]) -> Vec<glass_shell::apps::AppWindow> {
             id,
             app_id: "glass.terminal".into(),
             title: title.into(),
+            minimized: false,
         })
         .collect()
 }
@@ -1108,11 +1170,13 @@ fn ui5_the_docks_mail_opens_mail_and_once_open_brings_it_forward() {
             id: 4,
             app_id: "glass.terminal".into(),
             title: "Terminal".into(),
+            minimized: false,
         },
         glass_shell::apps::AppWindow {
             id: 9,
             app_id: "chrome-mail.localhost__-Apps".into(),
             title: "Mail".into(),
+            minimized: false,
         },
     ]);
     assert_eq!(live.update(clicked), Some(Effect::Activate(9)));

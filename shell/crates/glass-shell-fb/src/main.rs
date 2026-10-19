@@ -35,7 +35,7 @@ use glass_compositor::{CONTROL_RADIUS, CONTROLS, Compositor, TITLE_BAR, WorkArea
 use glass_rpc::{Client, ClientError};
 use glass_shell::apps::{AppEntry, AppWindow, Start};
 use glass_shell::live::{Effect, Live};
-use glass_shell::screens::desktop::{DOCK_ROOM, MENU_BAR_HEIGHT};
+use glass_shell::screens::desktop::MENU_BAR_HEIGHT;
 use glass_shell::screens::login;
 use glass_shell::screens::system;
 use glass_shell::screens::window::Controls;
@@ -278,7 +278,12 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 if let Some(handled) = &apps_handled {
                     let _ = handled.send(());
                 }
-                continue;
+                // Only what apps drew, unless their windows changed the
+                // desktop around them (the dock).
+                if !shell.changed() {
+                    continue;
+                }
+                redraw = true;
             }
             () = banner_gone => redraw = shell.live.tick(Instant::now()),
             () = blink => {
@@ -616,8 +621,9 @@ fn bridge() -> u16 {
 }
 
 /// The compositor apps' windows open in, on `$XDG_RUNTIME_DIR/wayland-0`,
-/// with windows placed between the menu bar and the dock; none without a
-/// runtime directory (the sign-in screen sets one up for the session).
+/// with windows placed under the menu bar, down to the screen's bottom
+/// edge (the dock steps aside for them, DK-1); none without a runtime
+/// directory (the sign-in screen sets one up for the session).
 fn open_apps(size: (u32, u32)) -> Option<Compositor> {
     let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
         eprintln!("apps: no XDG_RUNTIME_DIR, so apps can't open windows");
@@ -628,7 +634,7 @@ fn open_apps(size: (u32, u32)) -> Option<Compositor> {
     let _ = std::fs::remove_file(&socket);
     let work_area = WorkArea {
         top: MENU_BAR_HEIGHT as i32,
-        bottom: DOCK_ROOM as i32,
+        bottom: 0,
     };
     match Compositor::new(&socket.to_string_lossy(), size, work_area) {
         Ok(apps) => {
@@ -840,11 +846,16 @@ impl Shell {
                 id: w.id,
                 app_id: w.app_id.clone(),
                 title: w.title.clone(),
+                minimized: w.minimized,
             })
             .collect();
         if listed != self.listed {
+            let dock = self.live.shows_dock();
             self.dirty |= self.live.is_switching();
             self.live.set_windows(listed.clone());
+            // The dock steps aside for the first window, and is back when
+            // the last one goes.
+            self.dirty |= dock != self.live.shows_dock();
             self.listed = listed;
         }
         // Title bars drawn again where a title, width or focus changed.
@@ -967,6 +978,12 @@ impl Shell {
                 Some(effect) => effects.push(effect),
                 None => {}
             }
+        }
+        // The dock comes up at the screen's bottom edge, and goes again
+        // when the pointer leaves it (DK-1).
+        let pointer = self.display.pointer();
+        if self.live.pointer_at(pointer.y, self.display.size().1) {
+            self.dirty = true;
         }
         // Alt let go of, at any point in the batch (even with the Tab that
         // opened the switcher): Alt Tab ends, raising the window chosen.
