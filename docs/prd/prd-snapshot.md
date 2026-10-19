@@ -493,6 +493,7 @@ These are the everyday basics enterprise buyers check before anything AI-related
 - CF-17. Every build passes a compatibility suite covering Teams, Zoom, Google Meet, Microsoft 365, Google Workspace, Salesforce, ServiceNow and Workday, including whether each service accepts our browser as supported.
 **Meetings**
 - CF-20. Teams, Zoom and Google Meet work fully in the browser: camera, microphone, noise suppression, background blur and screen sharing. Screen sharing is tested on every build and is a release gate.
+- CF-21. Glasshouse meetings: video meetings for up to 25 people in the org, scheduled from Calendar like any invite and joined from the event. Camera, microphone and screen sharing, end-to-end encrypted, never recorded. Guests from outside the org come later.
 **Laptop basics (release gates)**
 - CF-30. Sleep, wake and battery life meet the Power management requirements below (PM-1 to PM-10).
 - CF-32. Multiple monitors, docks and mixed-resolution scaling work without setup.
@@ -535,7 +536,7 @@ Sleep and battery life are the likeliest reasons a Glasshouse pilot fails, becau
 - CF-84. Any elevated rights last only for the session and expire automatically.
 **Working with people**
 - CF-90. Users can hand agent work to a colleague: send flagged items, delegate an approval to a manager or request a review. These arrive in Teams or Slack, so colleagues who aren't on Glasshouse can act.
-- CF-91. Glasshouse doesn't include its own messaging app. Teams and Slack integrate through CF-20, CF-71 and CF-90.
+- CF-91. Glasshouse includes its own chat app: channels and direct messages for people in the org. Messages are end-to-end encrypted between the org's computers, so our servers store only ciphertext. IT holds a compliance key, so retention, legal hold and eDiscovery (CF-61 to CF-64) still work. Agents read chat without asking and post only with the person's yes. Teams and Slack still integrate through CF-20, CF-71 and CF-90.
 
 ## Developer workspace
 Developers run unsigned code and Linux containers all day, which collides with signed-only software (EP-2) and a FreeBSD base. Glasshouse solves this the way macOS does with Docker Desktop: a managed Linux environment built into the OS, fenced off from corporate data and fully visible to security.
