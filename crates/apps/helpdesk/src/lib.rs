@@ -173,6 +173,7 @@ mod tests {
             },
             home: dir.path().into(),
             grants: Vec::new(),
+            groups: Vec::new(),
         };
         let action: ActionName = "helpdesk.ticket.create".parse().unwrap();
         let input = json!({

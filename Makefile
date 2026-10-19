@@ -24,7 +24,8 @@ export DIST_PROFILE := $(FREEBSD_PROFILE)
 
 .PHONY: help build check test lint lint-all fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
 	test-env image-release legal-base ci clean shell shell-test shell-lint shell-preview shell-vm greeter-vm \
-	apps-build apps-test apps-lint apps-dev freebsd-ports
+	apps-build apps-test apps-lint apps-dev freebsd-ports \
+	console-dev console-test console-lint
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -149,7 +150,27 @@ apps-dev: apps-build ## Serve the apps from make dev-host's glassd: http://mail.
 	cargo build -p glass-app-bridge
 	$${CARGO_TARGET_DIR:-target}/debug/glass-app-bridge --dev --apps apps --socket build/dev/run/apps.sock
 
-ci: lint-all test shell-lint shell-test apps-lint apps-test ## What CI runs on every change
+# The org's admin console (ADR 0023): glass-console serves the web app in
+# apps/console and the API devices sync signed policy and catalog from. It
+# runs on our web servers, never on a device. See apps/README.md.
+CONSOLE_BINS := -p glass-console -p glassd -p glassctl -p glass-demo-agent -p glass-probe -p glass-mcp
+
+console-dev: apps-build ## The admin console on http://127.0.0.1:7400 (FIXTURE=500,50 fills it); enroll make dev-host with GLASS_DEV_ENROLL=build/console/enrollment.json
+	cargo build -p glass-console
+	$${CARGO_TARGET_DIR:-target}/debug/glass-console --dev --state build/console --web apps/console/dist $(if $(FIXTURE),--fixture $(FIXTURE))
+
+console-test: apps-build ## Admin console: Rust tests, then Playwright on a 500-device fixture and an enrolled dev-host glassd (page and propagation budgets)
+	cargo test -p glass-console -p glass-managed -p glass-app-catalog
+	cargo build $(CONSOLE_BINS)
+	cd apps && PLAYWRIGHT_BROWSERS_PATH=$(APPS_BROWSERS) npx playwright test -c e2e/console.config.ts
+
+console-lint: apps/node_modules ## Admin console: clippy, types, and no base-system name in what IT sees (BR-1)
+	cargo clippy -p glass-console --all-targets -- -D warnings
+	cd apps && npx tsc -p tsconfig.json
+	@! grep -rIil freebsd apps/console/src apps/console/index.html crates/bin/glass-console/src || \
+		{ echo "console-lint: BR-1: the files above name the base system"; exit 1; }
+
+ci: lint-all test shell-lint shell-test apps-lint apps-test console-lint console-test ## What CI runs on every change
 
 clean: ## Remove build outputs (keeps downloaded FreeBSD images in build/cache)
 	cargo clean

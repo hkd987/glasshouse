@@ -87,6 +87,9 @@ pub struct RuntimeConfig {
     /// The apps installed on this machine, as their manifests declare them
     /// (UI-5, ADR 0024). Checked by glassd before they get here.
     pub apps: Vec<AppManifest>,
+    /// The admin console this device is managed from (ADR 0023), which
+    /// `console` in a profile opens; `None` when it isn't managed.
+    pub console_url: Option<String>,
     /// Development only (the insecure host backend): every caller's home,
     /// where first-party apps keep their data, is this folder instead of
     /// the one their account names.

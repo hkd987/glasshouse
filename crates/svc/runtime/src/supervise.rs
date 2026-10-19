@@ -125,7 +125,7 @@ async fn setup_and_wait(
         return drive_app(rt, task, stop).await;
     }
     // App state (mail folders and the like) must exist before snapshots.
-    let providers = rt.registry.providers();
+    let providers = rt.registry().providers();
     let ctx = task.ctx.clone();
     tokio::task::spawn_blocking(move || providers.iter().try_for_each(|p| p.prepare(&ctx)))
         .await

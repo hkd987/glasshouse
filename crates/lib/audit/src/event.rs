@@ -72,6 +72,14 @@ pub enum EventKind {
     /// A user saved, switched or turned off a layer on an agent, or a new
     /// agent version re-checked it (TL-2, TL-13).
     LayerChanged,
+    /// Someone asked to open an app that isn't in their profile, and glassd
+    /// refused (role-based delivery).
+    AppRefused,
+    /// A catalog release from the admin console was applied (ADR 0023).
+    CatalogLoaded,
+    /// A release from the admin console was refused; the device kept what
+    /// it had (ADR 0023).
+    ManagedRefused,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

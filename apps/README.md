@@ -12,7 +12,10 @@ apps/
               a text-only DOM builder, the offline service worker, base styles
   mail/       manifest.json, index.html, src/ (main.ts: the page; mail.ts: logic)
   calendar/   manifest.json, index.html, src/ (main.ts; week.ts: the week's logic)
-  e2e/        Playwright: the apps against dev-host glassd and the bridge
+  console/    the admin console's web app (ADR 0023): a site glass-console serves,
+              not a device app (no manifest, no service worker)
+  e2e/        Playwright: the apps against dev-host glassd and the bridge;
+              console.config.ts: the console against glass-console and glassd
   build.mjs   esbuild: each app into <app>/dist (app.js, app.css, sw.js)
 ```
 
@@ -47,6 +50,35 @@ never `playwright install`. If the installed Chromium doesn't match
 `@playwright/test`, set `PW_CHROMIUM=/opt/pw-browsers/chromium`.
 `SHOTS_DIR` keeps the suite's screenshots somewhere other than
 `e2e/results/shots`.
+
+## The admin console
+
+The org's admin console (AD-6, ADR 0023) is a web app on our servers, not
+on a device: `glass-console` (`crates/bin/glass-console`) serves
+`console/dist`, the admin API and the API devices sync signed policy and
+catalog releases from. Pages: Policies (per group: tiers by action class,
+allowed agents, apps in profiles, labels and models, versions and rings,
+preview impact, publish, promote, roll back, live numbers), Catalog (what
+an item declares; approve per group as required, available or blocked;
+block) and Devices (reports, rings, enrollment).
+
+```sh
+make console-dev FIXTURE=500,50       # http://127.0.0.1:7400, sign in as an IT admin
+GLASS_DEV_ENROLL=build/console/enrollment.json make dev-host   # glassd as device dev-host
+```
+
+`glass-console --dev` keeps its state in `build/console` (the org's key at
+mode 0600, `directory.toml` for people and groups, policy versions, the
+catalog, the fleet) and signs everyone in by picking one of the directory's
+`it-admins`; our web servers will add TLS, the org's SSO and a managed
+database. The page is served with a CSP that allows only its own files and
+API; changes are JSON POSTs from its own origin with a SameSite=Strict
+session cookie.
+
+| Command | What it does |
+|---|---|
+| `make console-test` | the console's Rust tests, then Playwright (`e2e/console.config.ts`) on a 500-device, 50-item fixture and a dev-host glassd enrolled with it: every page interactive in under 1 s, a published change in force on the device in under 5 s, an approved item found by `catalog.search` |
+| `make console-lint` | clippy on the server, types, and no base-system name in what IT sees (BR-1); the console's npm packages are the apps' (`make apps-lint` checks their licenses) |
 
 ## Rules
 

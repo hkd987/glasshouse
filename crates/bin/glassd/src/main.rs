@@ -10,6 +10,7 @@
 //! the reason also goes to the system console, where it shows at boot.
 
 mod config;
+mod managed;
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -22,6 +23,7 @@ use anyhow::{Context, bail};
 use clap::Parser;
 use glass_actions::Registry;
 use glass_api::AppManifest;
+use glass_app_catalog::CatalogHandle;
 use glass_audit::{AuditEvent, AuditLog, Durability, EventKind};
 use glass_gateway::{Gateway, Secrets};
 use glass_platform::sandbox::{HostSandbox, JailConfig, JailSandbox, Sandbox};
@@ -146,6 +148,8 @@ struct Prepared {
     models: Models,
     /// Installed apps whose manifests check out (UI-5, DV-3).
     apps: Vec<AppManifest>,
+    /// The org catalog `catalog.search` reads (GA-2).
+    catalog: CatalogHandle,
 }
 
 /// Reads and checks the config and policy, from local disk only.
@@ -165,7 +169,8 @@ fn prepare(args: &Args) -> anyhow::Result<Prepared> {
             ));
         }
     }
-    let registry = registry(&config, &loaded.policy)?;
+    let catalog = CatalogHandle::new();
+    let registry = registry(&config, &loaded.policy, &catalog)?;
     for warning in loaded.policy.lint(&registry.lint_info()) {
         tracing::warn!("policy: {warning}");
     }
@@ -181,6 +186,7 @@ fn prepare(args: &Args) -> anyhow::Result<Prepared> {
         registry,
         models,
         apps,
+        catalog,
     })
 }
 
@@ -192,12 +198,13 @@ fn console(message: &str) {
     }
 }
 
-fn registry(config: &Config, policy: &Policy) -> anyhow::Result<Registry> {
+fn registry(config: &Config, policy: &Policy, catalog: &CatalogHandle) -> anyhow::Result<Registry> {
     Ok(glass_first_party::registry(glass_first_party::Setup {
         // IT's fix list decides what the IT agent may restart (AE-4).
         restartable_services: policy.fixes().services.clone(),
         helpdesk_outbox: config.state_dir.join("helpdesk/outbox"),
         system: Arc::new(glass_app_system::HostSystem),
+        catalog: catalog.clone(),
     })?)
 }
 
@@ -209,6 +216,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         registry,
         models,
         apps,
+        catalog,
     } = prepared;
     let policy_source = loaded.origin.to_string();
     let run_dir = config
@@ -315,6 +323,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             harness: config.harness.clone(),
             attended_dir: run_dir.join("attended"),
             apps: apps.clone(),
+            console_url: config.managed.as_ref().map(|m| m.url.clone()),
             dev_home: config.dev_home.clone(),
         },
         policy: loaded.policy.clone(),
@@ -345,11 +354,20 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     READY.store(true, Ordering::SeqCst);
 
     // The policy now in force is the one to fall back on next time. That
-    // writes and syncs files, so it happens off the start path.
-    tokio::task::spawn_blocking(move || match store.remember(&loaded) {
-        Ok(true) => tracing::info!("recorded the policy in force as the last good policy"),
-        Ok(false) => {}
-        Err(e) => tracing::warn!("couldn't record the last good policy: {e}"),
+    // writes and syncs files, so it happens off the start path. Then, on a
+    // managed device, the catalog it last applied goes back in force and
+    // syncing with the console starts (ADR 0023), never before glassd is up.
+    let managed_runtime = Arc::clone(&runtime);
+    let managed_config = config.clone();
+    std::thread::spawn(move || {
+        match store.remember(&loaded) {
+            Ok(true) => tracing::info!("recorded the policy in force as the last good policy"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("couldn't record the last good policy: {e}"),
+        }
+        if let Some(managed) = managed::Managed::start(&managed_config, managed_runtime, catalog) {
+            managed.run();
+        }
     });
 
     let mut terminate = signal(SignalKind::terminate())?;

@@ -16,9 +16,9 @@ use std::sync::Arc;
 use glass_actions::TaskContext;
 use glass_api::{
     ActivityKind, AgentMode, AppAction, AppCall, AppCallResult, AppManifest, AppSession, AppStatus,
-    AppWaiting, DisplaySafe, ScopeRequest, TileState,
+    AppWaiting, DisplaySafe, ProfileApp, ProfileAppKind, ScopeRequest, TileState,
 };
-use glass_audit::{EventKind, Outcome as AuditOutcome, PolicyDecision};
+use glass_audit::{AuditEvent, EventKind, Outcome as AuditOutcome, PolicyDecision};
 use glass_platform::fs::Owner;
 use glass_platform::sandbox::SandboxSpec;
 use glass_types::{ActionName, AgentId, AgentPrincipal, TaskId, Tier, UserRef};
@@ -31,6 +31,16 @@ use crate::{Caller, CatalogEntry, Runtime, RuntimeError};
 /// Apps one user may have open at once. Each open window is a session.
 pub const MAX_OPEN_APPS_PER_USER: usize = 16;
 
+/// The admin console in a profile (ADR 0023). It is served from the
+/// console's own servers and reads from them, not from this device.
+pub const CONSOLE_APP: &str = "console";
+
+/// Native apps a profile may name (ADR 0025), with their names.
+const NATIVE_APPS: &[(&str, &str)] = &[
+    ("activity-monitor", "Activity Monitor"),
+    ("terminal", "Terminal"),
+];
+
 impl Runtime {
     /// The installed app with this id.
     fn installed_app(&self, id: &AgentId) -> Option<Arc<AppManifest>> {
@@ -41,12 +51,66 @@ impl Runtime {
             .map(|m| Arc::new(m.clone()))
     }
 
+    /// The apps in `caller`'s profile, as the launcher offers them: web
+    /// apps installed here, native apps, and the admin console when this
+    /// device is managed. Policy decides the profile per group (AD-7).
+    pub fn profile_apps(&self, caller: &Caller) -> Vec<ProfileApp> {
+        let policy = self.policy();
+        policy
+            .apps_for(&caller.name)
+            .into_iter()
+            .filter_map(|id| {
+                if let Some(manifest) = self.config.apps.iter().find(|m| &m.id == id) {
+                    return Some(ProfileApp {
+                        id: id.clone(),
+                        name: manifest.name.clone(),
+                        kind: ProfileAppKind::Web,
+                        url: None,
+                    });
+                }
+                if id.as_str() == CONSOLE_APP {
+                    // Only a managed device has a console to open.
+                    return self.config.console_url.as_ref().map(|url| ProfileApp {
+                        id: id.clone(),
+                        name: "Admin console".into(),
+                        kind: ProfileAppKind::Console,
+                        url: Some(url.clone()),
+                    });
+                }
+                let name = NATIVE_APPS
+                    .iter()
+                    .find(|(native, _)| *native == id.as_str())
+                    .map_or_else(|| id.to_string(), |(_, name)| (*name).to_owned());
+                Some(ProfileApp {
+                    id: id.clone(),
+                    name,
+                    kind: ProfileAppKind::Native,
+                    url: None,
+                })
+            })
+            .collect()
+    }
+
     /// Opens `app` for `caller` (`app.open`): a new session, whose calls
     /// act for them. Blocking: it prepares the app's data folders.
     pub fn open_app(self: &Arc<Self>, caller: &Caller, app: &AgentId) -> Result<AppSession> {
         let manifest = self
             .installed_app(app)
             .ok_or_else(|| RuntimeError::NotFound(format!("no app {app} is installed")))?;
+        // Role-based delivery: only apps in the caller's profile open.
+        if !self.policy().apps_for(&caller.name).contains(app) {
+            let mut event = AuditEvent::new(
+                EventKind::AppRefused,
+                format!("{} isn't in {}'s profile", manifest.name, caller.name),
+            );
+            event.user = Some(caller.name.clone());
+            event.agent = Some(app.clone());
+            self.audit(event);
+            return Err(RuntimeError::PermissionDenied(format!(
+                "{} isn't in your profile. IT decides which apps you get.",
+                manifest.name
+            )));
+        }
         let open = self
             .tasks()
             .values()
@@ -61,7 +125,7 @@ impl Runtime {
         // the tiers org and group rules give them, and no more than its
         // most sensitive label.
         let policy =
-            self.policy
+            self.policy()
                 .for_app(&caller.name, app, &manifest.actions, manifest.max_label());
         let id = TaskId::new();
         let ctx = TaskContext {
@@ -79,12 +143,13 @@ impl Runtime {
             },
             home: caller.home.clone(),
             grants: Vec::new(),
+            groups: policy.groups().map(str::to_owned).collect(),
         };
         // The app's data folders (~/Mail, ~/Calendar) exist before its
         // first call, as they do before an agent's.
         let mut providers = Vec::new();
         for action in &manifest.actions {
-            if let Some((_, provider)) = self.registry.get(action)
+            if let Some((_, provider)) = self.registry().get(action)
                 && !providers.iter().any(|p| Arc::ptr_eq(p, provider))
             {
                 providers.push(Arc::clone(provider));
@@ -119,10 +184,11 @@ impl Runtime {
             uid: caller.uid,
             gid: caller.gid,
         };
+        let registry = self.registry();
         let actions: Vec<AppAction> = manifest
             .actions
             .iter()
-            .filter_map(|name| self.registry.get(name))
+            .filter_map(|name| registry.get(name))
             .map(|(def, _)| AppAction {
                 name: def.name.clone(),
                 title: def.title.clone(),
@@ -200,7 +266,8 @@ impl Runtime {
         if !manifest.declares(&call.action) {
             return Ok(self.refuse_undeclared(&task, &manifest, &call.action));
         }
-        let Some((def, provider)) = self.registry.get(&call.action) else {
+        let registry = self.registry();
+        let Some((def, provider)) = registry.get(&call.action) else {
             return Ok(self.refuse_undeclared(&task, &manifest, &call.action));
         };
         let (def, provider) = (def.clone(), Arc::clone(provider));

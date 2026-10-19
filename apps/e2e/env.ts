@@ -4,6 +4,7 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createConnection } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,3 +67,39 @@ export function outcome(record: AuditRecord): string {
 }
 
 export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** One MCP session on a task socket, as a harness speaks it (ADR 0004). */
+export async function mcp(socket: string, calls: { name: string; arguments: unknown }[]): Promise<unknown[]> {
+  const conn = createConnection(socket);
+  await new Promise<void>((resolve, reject) => conn.once("connect", resolve).once("error", reject));
+  let buffer = "";
+  const waiting = new Map<number, (value: unknown) => void>();
+  conn.on("data", (chunk) => {
+    buffer += chunk.toString();
+    let newline: number;
+    while ((newline = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      if (!line.trim()) continue;
+      const message = JSON.parse(line) as { id?: number; result?: unknown; error?: unknown };
+      if (message.id !== undefined) waiting.get(message.id)?.(message.error ? { error: message.error } : message.result);
+    }
+  });
+  let id = 0;
+  const request = (method: string, params: unknown) =>
+    new Promise<unknown>((resolve) => {
+      id += 1;
+      waiting.set(id, resolve);
+      conn.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    });
+  await request("initialize", {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "apps-e2e", version: "0" },
+  });
+  conn.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+  const results = [];
+  for (const call of calls) results.push(await request("tools/call", call));
+  conn.end();
+  return results;
+}

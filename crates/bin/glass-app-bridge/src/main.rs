@@ -17,8 +17,6 @@
 //! runtime reaches the bridge over the user's own Unix socket and the bridge
 //! names the app from the installed copy it launched.
 
-mod http;
-
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -34,7 +32,8 @@ use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
-use crate::http::{ReadError, Request, Response};
+use glass_http as http;
+use glass_http::{ReadError, Request, Response};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -416,6 +415,7 @@ mod tests {
         Request {
             method: "POST".into(),
             path: "/_bridge/call".into(),
+            query: String::new(),
             headers,
             body: Vec::new(),
         }

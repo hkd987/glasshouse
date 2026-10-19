@@ -244,6 +244,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ed25519-compact"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1454db4f2edb7f0e8fe0c5b375b0c978fc63244cc9f010d160e417eb10139aa8"
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -371,9 +377,9 @@ dependencies = [
  "anyhow",
  "clap",
  "glass-api",
+ "glass-http",
  "glass-rpc",
  "glass-types",
- "httparse",
  "serde",
  "serde_json",
  "tokio",
@@ -393,6 +399,19 @@ dependencies = [
  "serde_json",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "glass-app-catalog"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-managed",
+ "glass-types",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -472,6 +491,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-console"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "glass-first-party",
+ "glass-http",
+ "glass-managed",
+ "glass-policy",
+ "glass-types",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "glass-demo-agent"
 version = "0.1.0"
 dependencies = [
@@ -504,6 +544,7 @@ version = "0.1.0"
 dependencies = [
  "glass-actions",
  "glass-app-calendar",
+ "glass-app-catalog",
  "glass-app-files",
  "glass-app-helpdesk",
  "glass-app-mail",
@@ -533,6 +574,7 @@ name = "glass-gateway-providers"
 version = "0.1.0"
 dependencies = [
  "glass-gateway",
+ "glass-managed",
  "glass-policy",
  "hex",
  "httparse",
@@ -544,6 +586,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-http"
+version = "0.1.0"
+dependencies = [
+ "httparse",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "glass-it-agent"
 version = "0.1.0"
 dependencies = [
@@ -551,6 +602,20 @@ dependencies = [
  "glass-agent-sdk",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "glass-managed"
+version = "0.1.0"
+dependencies = [
+ "ed25519-compact",
+ "glass-types",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -614,6 +679,7 @@ dependencies = [
  "glass-actions",
  "glass-api",
  "glass-app-calendar",
+ "glass-app-catalog",
  "glass-app-files",
  "glass-app-helpdesk",
  "glass-app-mail",
@@ -621,6 +687,7 @@ dependencies = [
  "glass-audit",
  "glass-broker",
  "glass-gateway",
+ "glass-managed",
  "glass-platform",
  "glass-policy",
  "glass-rpc",
@@ -683,11 +750,13 @@ dependencies = [
  "clap",
  "glass-actions",
  "glass-api",
+ "glass-app-catalog",
  "glass-app-system",
  "glass-audit",
  "glass-first-party",
  "glass-gateway",
  "glass-gateway-providers",
+ "glass-managed",
  "glass-platform",
  "glass-policy",
  "glass-rpc",

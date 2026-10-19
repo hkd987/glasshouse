@@ -1,0 +1,30 @@
+[package]
+name = "glass-console"
+description = "The org's admin console server: agent policy, the private catalog and the fleet for IT, signed releases for devices (ADR 0023). Runs on our web servers, never on a device."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+glass-first-party.workspace = true
+glass-http.workspace = true
+glass-managed.workspace = true
+glass-policy.workspace = true
+glass-types.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

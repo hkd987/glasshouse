@@ -108,9 +108,11 @@ absolute paths and symlinks that leave the grant.
   starts: `policy.toml`, or the built-in default without one. If the file
   doesn't validate, glassd enforces the last policy that did
   (`<state_dir>/policy/last-good.toml`) and says why; with no good copy it
-  refuses to start. Managed settings will be fetched in the background
-  after the desktop is up and applied whole, never on the boot path
-  (ADR 0021).
+  refuses to start. On a managed device, glassd then syncs with the org's
+  admin console in the background, never on the boot path: each signed
+  policy or catalog release is verified, validated whole, written with the
+  previous kept and swapped in at once; offline, it keeps what it has
+  (ADR 0021, ADR 0023).
 - Tiers come from policy (`glass-policy`): org baseline, then group and agent
   rules (stricter wins between them), then task restrictions (stricter only).
   Actions outside an agent's allow-list are Never. Each decision records the
@@ -277,14 +279,18 @@ pipeline refuses further side effects (fail closed).
 | `glass-platform` | lib | Jails, ZFS, confined file access, users, xattrs, system facts, the console framebuffer and evdev input |
 | `glass-agent-sdk` | lib | Convenience MCP client for Rust agents |
 | `glass-actions` | lib | The action contract: providers, previews, task context, registry |
-| `glass-app-files`, `-mail`, `-calendar`, `-system`, `-helpdesk` | apps | Each app's actions (ADR 0013) |
+| `glass-managed` | lib | Managed settings between the admin console and devices: signed releases, catalog items and the store rule, catalog-first search, sync and reports (ADR 0023) |
+| `glass-http` | lib | Just enough HTTP/1.1 for our small servers: the bridge's dev mode and the console |
+| `glass-app-files`, `-mail`, `-calendar`, `-system`, `-helpdesk`, `-catalog` | apps | Each app's actions (ADR 0013); `catalog.search` is catalog first (GA-2) |
 | `glass-first-party` | svc | The apps the OS ships, as one registry |
 | `glass-broker` | svc | Decisions and the approval desk |
 | `glass-gateway` | svc | The model gateway: the `model.complete` action, redaction, routing over providers with failover, the call record, the secrets stand-in (ADR 0018) |
-| `glass-gateway-providers` | svc | Providers that leave the machine: Anthropic Messages and Amazon Bedrock over HTTPS; the only crate with an HTTP and TLS stack |
+| `glass-gateway-providers` | svc | Everything that leaves the machine: Anthropic Messages and Amazon Bedrock over HTTPS, and the device's client for its admin console; the only crate with an outbound HTTP and TLS stack |
 | `glass-tailoring` | svc | Personal layers on agents: customization points, versions, re-checks (ADR 0014) |
 | `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
 | `glassd`, `glassctl`, `glass-mcp`, `glass-app-bridge`, `glass-demo-agent`, `glass-it-agent`, `glass-probe` | bin | Executables |
+| `glass-console` | bin | The org's admin console server (AD-6, ADR 0023): policy, catalog, fleet, signing. Runs on our web servers, never ships in the image |
 | `glass-e2e` | tests | End-to-end scenarios |
 | `@glasshouse/sdk`, Mail, Calendar | apps/ (TypeScript) | The first-party web apps and the SDK they share: bridge client, manifests, attribution, offline reads (ADR 0024, `apps/README.md`) |
+| Admin console | apps/console (TypeScript) | The admin console's web app, served by `glass-console` (ADR 0023) |
 | `glass-shell`, `glass-shell-preview`, `glass-shell-fb` | shell/ (own workspace) | The desktop shell's screens (iced, software rendering), their headless renderer, and the desktop on the console framebuffer with live tiles; a control-API client (ADR 0009, 0016) |

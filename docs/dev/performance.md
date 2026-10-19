@@ -59,6 +59,31 @@ after it has loaded and been used; the browser and GPU processes are shared
 by every app, so they aren't counted. Each app is one script of about 13 KB
 and one stylesheet of about 6 KB.
 
+### Admin console (AD-3, AD-4, ADR 0023)
+
+`make console-test` drives the console in headless Chromium on the
+development host against a fixture of 500 devices and 50 catalog items,
+with a dev-host glassd enrolled as a pilot device
+(`apps/e2e/console.e2e.ts`), and fails when one goes over:
+
+| What IT waits for | Budget | Source | Dev host today |
+|---|---|---|---|
+| Policies page interactive | 1 s | AD-3 | 109–141 ms (median of 3) |
+| Catalog page interactive | 1 s | AD-5 | 133–135 ms |
+| A catalog item interactive | 1 s | AD-5 | 117–118 ms |
+| Devices page interactive (500 rows) | 1 s | AD-4 | 294–326 ms |
+| Publish to in force on an online pilot device | 5 s | AD-3 | 121–176 ms |
+| An approval to the catalog on that device | 5 s | AD-5 | under 5 ms after the page confirms it |
+
+*Interactive* is a fresh browser context with the session cookie, from
+navigation to the page drawn with its data (`html[data-ready]`). *In force*
+is from the Publish click to `glassctl status` naming the new version: the
+device long-polls, so the console answers the moment it signs a release,
+and glassd verifies, validates, writes and swaps it in. A device that is
+offline gets it on its next sync (backing off to 5 minutes), and a device in
+a later ring when IT promotes the version. These are host numbers; nothing
+here runs in the VM.
+
 ## Where the time goes
 
 - **Snapshots.** Every write takes a ZFS snapshot first (AU-20), and so do

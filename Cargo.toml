@@ -41,16 +41,23 @@ glass-app-helpdesk = { path = "crates/apps/helpdesk" }
 glass-app-mail = { path = "crates/apps/mail" }
 glass-app-system = { path = "crates/apps/system" }
 glass-runtime = { path = "crates/svc/runtime" }
+glass-managed = { path = "crates/lib/managed" }
+glass-http = { path = "crates/lib/http" }
+glass-app-catalog = { path = "crates/apps/catalog" }
 
 # Third-party crates. Licenses must pass `deny.toml` (no copyleft).
 anyhow = "1.0.104"
 cap-std = "4.0.3"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+# Org signatures on managed settings (ADR 0023): verify on devices, sign in the
+# console. No default features: no RNG, PEM or X25519, and no dependencies.
+ed25519-compact = { version = "2.6.0", default-features = false, features = ["std"] }
 hex = "0.4.3"
-# HTTPS for the model gateway (ADR 0018): responses parsed by httparse, TLS
-# from the base system's OpenSSL and its trust store through native-tls.
-# Only glass-gateway-providers may use them, except that httparse also reads
-# the app bridge's loopback requests in development (ADR 0024).
+# HTTPS for the model gateway and the admin console (ADR 0018, 0023):
+# responses parsed by httparse, TLS from the base system's OpenSSL and its
+# trust store through native-tls. Only glass-gateway-providers may use them
+# to leave the machine; httparse also reads requests to our small servers
+# (glass-http: the app bridge in development, ADR 0024, and the console).
 httparse = "1.10.1"
 libc = "0.2.191"
 native-tls = "0.2.18"

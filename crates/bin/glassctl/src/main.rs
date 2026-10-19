@@ -17,8 +17,9 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use glass_api::{
     AgentSummary, AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalView, AuditVerifyResult,
-    DisplaySafe, Event, HandoffCard, PowerResult, ScopeRequest, SystemStatus, TaskDetail, TaskRef,
-    TaskRequest, TaskView, TileState, UndoReport, UndoRequest, methods,
+    DisplaySafe, Event, HandoffCard, PowerResult, ProfileApp, ProfileAppKind, ScopeRequest,
+    SystemStatus, TaskDetail, TaskRef, TaskRequest, TaskView, TileState, UndoReport, UndoRequest,
+    methods,
 };
 use glass_audit::AuditRecord;
 use glass_rpc::Client;
@@ -50,6 +51,8 @@ enum Command {
     Status,
     /// Agents you may hand work to.
     Agents,
+    /// The apps in your profile, which IT's policy decides.
+    Apps,
     /// Show the handoff card for a task without starting it.
     Plan(TaskArgs),
     /// Show the handoff card, then start the task.
@@ -356,6 +359,32 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             style::bold(a.id.as_str()),
                             a.name,
                             style::dim(&a.description)
+                        )
+                    })
+                    .collect()
+            })
+        }
+        Command::Apps => {
+            let apps: Vec<ProfileApp> = ctl.call(methods::APPS_LIST, Value::Null).await?;
+            ctl.show(&apps, |list| {
+                list.iter()
+                    .map(|a| {
+                        let kind = match a.kind {
+                            ProfileAppKind::Web => "app",
+                            ProfileAppKind::Native => "native app",
+                            ProfileAppKind::Console => "admin console",
+                        };
+                        let url = a
+                            .url
+                            .as_deref()
+                            .map(|u| format!("  {u}"))
+                            .unwrap_or_default();
+                        format!(
+                            "{}  {}  {}{}\n",
+                            style::bold(a.id.as_str()),
+                            a.name,
+                            style::dim(kind),
+                            style::dim(&url)
                         )
                     })
                     .collect()

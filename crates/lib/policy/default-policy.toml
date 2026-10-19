@@ -47,6 +47,8 @@ approval_timeout_secs = 900
 "system.storage.clean_cache" = "notify"
 "system.service.restart" = "ask"
 "helpdesk.ticket.create" = "ask"
+# Catalog first (GA-2): looking up what IT approved reads only.
+"catalog.search" = "auto"
 "security.*" = "never"
 "vendors.bank_details.*" = "never"
 "data.export_bulk" = "never"
@@ -94,9 +96,19 @@ services = ["cron", "ntpd", "openvpn", "cupsd"]
 #
 # Groups and agents can narrow the list: `models = ["claude-bedrock"]`.
 
+# Profiles (role-based delivery): which apps people get is policy. Everyone
+# gets Mail and Calendar; IT's tools for managing computers (the admin
+# console, Activity Monitor, Terminal) are in the profiles of IT's role only,
+# and glassd opens them for no one else. In a managed fleet the directory
+# fills `it-admins` (SCIM, AD-1).
 [[group]]
 name = "everyone"
 agents = ["it-agent", "invoice-demo", "containment-probe", "claude-code"]
+apps = ["mail", "calendar"]
+
+[[group]]
+name = "it-admins"
+apps = ["console", "activity-monitor", "terminal"]
 
 # IT self-service (AE-4): diagnoses this computer and fixes what's on IT's
 # list. The only agent allowed the system actions, which glassd runs with its
@@ -112,12 +124,13 @@ id = "invoice-demo"
 allowed_actions = ["files.*", "mail.*"]
 
 # The user's own Claude Code, connected through glass-mcp (HX-1): Take over on
-# an ended task carries on there. Its calls go through the same tiers, audit
-# and undo as any agent's. Confidential data stays out of harnesses that send
-# model traffic to their own provider (HX-7).
+# an ended task carries on there. Before it builds something it checks the
+# org's catalog for an approved app that already does it (GA-2). Its calls go
+# through the same tiers, audit and undo as any agent's. Confidential data
+# stays out of harnesses that send model traffic to their own provider (HX-7).
 [[agent]]
 id = "claude-code"
-allowed_actions = ["files.*", "mail.*", "calendar.*"]
+allowed_actions = ["files.*", "mail.*", "calendar.*", "catalog.search"]
 max_label = "internal"
 
 # Diagnostics agent that tries to break out of its sandbox and reports what it

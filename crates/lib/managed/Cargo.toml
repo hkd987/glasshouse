@@ -1,0 +1,23 @@
+[package]
+name = "glass-managed"
+description = "Managed settings between the admin console and devices: signed policy and catalog releases, the private catalog's items, device reports (ADR 0023)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+ed25519-compact.workspace = true
+glass-types.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

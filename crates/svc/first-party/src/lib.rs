@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use glass_actions::{Registry, RegistryError};
 use glass_app_calendar::CalendarProvider;
+use glass_app_catalog::{CatalogHandle, CatalogProvider};
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
@@ -24,6 +25,9 @@ pub struct Setup {
     pub helpdesk_outbox: PathBuf,
     /// The machine the system app inspects; tests pass a fake.
     pub system: Arc<dyn SystemOps>,
+    /// The org's catalog as this device last applied it, which glassd's
+    /// managed sync swaps (ADR 0023); `catalog.search` reads it (GA-2).
+    pub catalog: CatalogHandle,
 }
 
 impl Setup {
@@ -33,6 +37,7 @@ impl Setup {
             restartable_services: Vec::new(),
             helpdesk_outbox: PathBuf::from("/nonexistent"),
             system: Arc::new(HostSystem),
+            catalog: CatalogHandle::new(),
         }
     }
 }
@@ -48,6 +53,7 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
         setup.restartable_services,
     )))?;
     registry.register(Arc::new(HelpdeskProvider::new(setup.helpdesk_outbox)))?;
+    registry.register(Arc::new(CatalogProvider::new(setup.catalog)))?;
     registry.register(Arc::new(ModelAction))?;
     Ok(registry)
 }
@@ -72,6 +78,7 @@ mod tests {
             "system.network.check",
             "helpdesk.ticket.create",
             "model.complete",
+            "catalog.search",
         ] {
             assert!(names.iter().any(|n| n == expected), "{expected}");
         }

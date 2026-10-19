@@ -108,7 +108,7 @@ impl AgentApi {
                 ..Default::default()
             }),
         }];
-        for def in self.rt.registry.defs() {
+        for def in self.rt.registry().defs() {
             let tier = task.policy.tier_for(&def.name, def.default_tier).tier;
             let note = match tier {
                 Tier::Never => continue,
@@ -173,8 +173,8 @@ fn instructions(rt: &Runtime, task: &Task) -> String {
         progress = REPORT_PROGRESS_TOOL,
     );
     // The model gateway (ADR 0018): the one way to a model from a jail.
-    let gateway = rt
-        .registry
+    let registry = rt.registry();
+    let gateway = registry
         .get(&glass_gateway::MODEL_COMPLETE.parse().expect("static name"))
         .map(|(def, _)| def)
         .filter(|def| task.policy.tier_for(&def.name, def.default_tier).tier != Tier::Never);

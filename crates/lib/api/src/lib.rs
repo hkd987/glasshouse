@@ -27,7 +27,8 @@ pub use approval::{
 };
 pub use apps::{
     APP_SOCKET_ENV, AppAction, AppCall, AppCallResult, AppManifest, AppOpen, AppPermission,
-    AppSession, AppSessionRef, AppStatus, AppWaiting, DEFAULT_APP_SOCKET, app_methods,
+    AppSession, AppSessionRef, AppStatus, AppWaiting, DEFAULT_APP_SOCKET, ProfileApp,
+    ProfileAppKind, app_methods,
 };
 pub use tailoring::{
     CheckResult, CustomizationPoint, LayerChange, LayerCheck, LayerLine, LayerRef, LayerRevert,
@@ -51,6 +52,9 @@ pub mod methods {
     pub const SYSTEM_STATUS: &str = "system.status";
     /// `()` → `Vec<`[`crate::AgentSummary`]`>`: agents the caller may run.
     pub const AGENTS_LIST: &str = "agents.list";
+    /// `()` → `Vec<`[`crate::ProfileApp`]`>`: the apps in the caller's
+    /// profile, which is all the launcher offers them.
+    pub const APPS_LIST: &str = "apps.list";
     /// [`crate::TaskRequest`] → [`crate::HandoffCard`]. No side effects (DA-2).
     pub const TASK_PLAN: &str = "task.plan";
     /// [`crate::TaskRequest`] → [`crate::TaskView`]. Starts the task (DA-3).

@@ -45,9 +45,9 @@ pub(crate) struct Reply {
 
 /// Where a request goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Target {
-    tls: bool,
-    host: String,
+pub(crate) struct Target {
+    pub(crate) tls: bool,
+    pub(crate) host: String,
     port: u16,
     /// Path and query, starting with `/`.
     path: String,
@@ -69,6 +69,12 @@ impl Http {
     /// Plain HTTP too and no proxy, for tests against a local fake server.
     #[cfg(test)]
     pub fn insecure_for_tests() -> Self {
+        Self::build(false, None)
+    }
+
+    /// Plain HTTP and no proxy, for a console on this machine's loopback
+    /// address in development (ADR 0023). Callers check the address.
+    pub fn loopback() -> Self {
         Self::build(false, None)
     }
 
@@ -348,7 +354,7 @@ fn dechunk(data: &[u8]) -> Result<Option<Vec<u8>>, ProviderError> {
 }
 
 impl Target {
-    fn parse(url: &str) -> Option<Self> {
+    pub(crate) fn parse(url: &str) -> Option<Self> {
         let (tls, rest) = if let Some(rest) = url.strip_prefix("https://") {
             (true, rest)
         } else {

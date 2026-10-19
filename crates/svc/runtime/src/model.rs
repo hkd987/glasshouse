@@ -112,7 +112,7 @@ impl Runtime {
         home: &Path,
     ) -> String {
         let uses_models = self
-            .registry
+            .registry()
             .get(&glass_gateway::MODEL_COMPLETE.parse().expect("static name"))
             .is_some_and(|(def, _)| {
                 policy.tier_for(&def.name, def.default_tier).tier != Tier::Never

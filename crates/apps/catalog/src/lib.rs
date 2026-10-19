@@ -1,0 +1,425 @@
+//! The `catalog` app: catalog first (GA-2). Before an agent builds an app,
+//! or does by hand a job something approved already does, it asks what IT
+//! has approved that the user may install.
+//!
+//! `catalog.search` reads the org's private catalog as this device last
+//! received it (signed, ADR 0023) and returns the items meeting a need,
+//! best first, with how each reaches the user (required or available) and
+//! what each declares it may do (DV-3). It returns only items one of the
+//! user's groups gets and none of them blocks (DV-11). The groups come
+//! from the task's context, which the runtime fills from policy when the
+//! task starts; nothing in the request can widen them.
+//!
+//! Read only, nothing leaves the machine: it runs at Auto and, like every
+//! action, is audited.
+
+use std::sync::{Arc, PoisonError, RwLock};
+
+use glass_actions::{ActionDef, ActionError, ActionOutput, ActionProvider, Preview, TaskContext};
+use glass_api::{AskLabels, display_line};
+use glass_managed::catalog::search;
+use glass_managed::{CatalogItem, CatalogRelease, InstallMode, ItemKind};
+use glass_types::{ActionName, SideEffect, Tier};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+pub const SEARCH: &str = "catalog.search";
+const DEFAULT_LIMIT: usize = 5;
+const MAX_LIMIT: usize = 20;
+const MAX_NEED: usize = 500;
+
+/// The catalog this device applied, with its release version.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Applied {
+    pub version: u64,
+    pub release: CatalogRelease,
+}
+
+/// The device's catalog, shared between the sync that applies releases and
+/// the action that reads them. Each release is swapped in whole.
+#[derive(Debug, Clone, Default)]
+pub struct CatalogHandle(Arc<RwLock<Option<Arc<Applied>>>>);
+
+impl CatalogHandle {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The catalog in force, if one has arrived.
+    pub fn current(&self) -> Option<Arc<Applied>> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn set(&self, applied: Applied) {
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(applied));
+    }
+}
+
+#[derive(Debug)]
+pub struct CatalogProvider {
+    catalog: CatalogHandle,
+}
+
+impl CatalogProvider {
+    pub fn new(catalog: CatalogHandle) -> Self {
+        Self { catalog }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchInput {
+    need: String,
+    #[serde(default)]
+    kind: Option<ItemKind>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+impl SearchInput {
+    fn parse(input: &Value) -> Result<Self, ActionError> {
+        let parsed: Self = glass_actions::parse_input(input)?;
+        if parsed.need.trim().is_empty() {
+            return Err(ActionError::InvalidInput(
+                "say in a sentence what the user needs".into(),
+            ));
+        }
+        if parsed.need.chars().count() > MAX_NEED {
+            return Err(ActionError::InvalidInput(format!(
+                "describe the need in under {MAX_NEED} characters"
+            )));
+        }
+        if parsed.limit.is_some_and(|n| n == 0 || n > MAX_LIMIT) {
+            return Err(ActionError::InvalidInput(format!(
+                "limit is 1 to {MAX_LIMIT}"
+            )));
+        }
+        Ok(parsed)
+    }
+}
+
+fn mode_text(mode: InstallMode) -> &'static str {
+    match mode {
+        InstallMode::Required => "IT installs it for them",
+        InstallMode::Available => "they can install it themselves",
+        // Never returned: search leaves blocked items out.
+        InstallMode::Blocked => "blocked",
+    }
+}
+
+/// What an item declares, in a line (DV-3).
+fn declares_text(item: &CatalogItem) -> String {
+    let d = &item.declares;
+    let actions = if d.actions.is_empty() {
+        "no actions".to_owned()
+    } else {
+        format!("actions {}", d.actions.join(", "))
+    };
+    let network = if d.egress.is_empty() {
+        "no network beyond the model gateway".to_owned()
+    } else {
+        format!("network {}", d.egress.join(", "))
+    };
+    format!("{actions}; data up to {}; {network}", d.max_label)
+}
+
+impl ActionProvider for CatalogProvider {
+    fn actions(&self) -> Vec<ActionDef> {
+        vec![ActionDef {
+            name: SEARCH.parse().expect("static name"),
+            title: "Search the org's catalog".into(),
+            description: "Catalog first: before building an app, or doing by hand a job that \
+                          repeats, look for an app, agent or recorded flow IT already approved \
+                          that this user may install, and suggest it instead of building a \
+                          duplicate. Describe the need in a sentence. Each result says how it \
+                          reaches the user and what it is allowed to do."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "need": { "type": "string", "description": "What the user needs, in a sentence, such as \"track vendor disputes with overdue reminders\"", "maxLength": MAX_NEED },
+                    "kind": { "type": "string", "enum": ["agent", "app", "flow"], "description": "Only this kind of item" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LIMIT }
+                },
+                "required": ["need"],
+                "additionalProperties": false
+            }),
+            side_effect: SideEffect::None,
+            default_tier: Tier::Auto,
+            ask: AskLabels::default(),
+        }]
+    }
+
+    fn preview(
+        &self,
+        _ctx: &TaskContext,
+        action: &ActionName,
+        input: &Value,
+    ) -> Result<Preview, ActionError> {
+        if action.as_str() != SEARCH {
+            return Err(ActionError::InvalidInput(format!(
+                "catalog has no action {action}"
+            )));
+        }
+        let input = SearchInput::parse(input)?;
+        let need: String = display_line(input.need.trim()).chars().take(80).collect();
+        Ok(Preview {
+            summary: format!("Search the org's catalog for \"{need}\""),
+            targets: vec!["Org catalog".into()],
+            ..Preview::default()
+        })
+    }
+
+    fn invoke(
+        &self,
+        ctx: &TaskContext,
+        _action: &ActionName,
+        input: &Value,
+    ) -> Result<ActionOutput, ActionError> {
+        let input = SearchInput::parse(input)?;
+        let Some(catalog) = self.catalog.current() else {
+            return Ok(ActionOutput {
+                text: "No catalog from IT has reached this computer yet, so there is nothing \
+                       approved to suggest."
+                    .into(),
+                data: json!({ "catalog_version": null, "items": [] }),
+                changes: Vec::new(),
+            });
+        };
+        let limit = input.limit.unwrap_or(DEFAULT_LIMIT);
+        let found = search(
+            &catalog.release.items,
+            &ctx.groups,
+            &input.need,
+            input.kind,
+            limit,
+        );
+        let items: Vec<Value> = found
+            .iter()
+            .map(|m| {
+                let item = m.item;
+                json!({
+                    "id": item.id,
+                    "kind": item.kind,
+                    "name": item.name,
+                    "version": item.version,
+                    "publisher": item.publisher,
+                    "publisher_verified": item.publisher_verified,
+                    "internal": item.internal,
+                    "install": m.mode,
+                    "summary": item.summary,
+                    "declares": item.declares,
+                })
+            })
+            .collect();
+        let text = if found.is_empty() {
+            format!(
+                "Nothing approved that this user may install matches \"{}\". Building it is \
+                 the next step if they still want it.",
+                input.need.trim()
+            )
+        } else {
+            let mut text = format!(
+                "{} approved item{} this user may install match{}. Suggest {} before building \
+                 anything:",
+                found.len(),
+                if found.len() == 1 { "" } else { "s" },
+                if found.len() == 1 { "es" } else { "" },
+                if found.len() == 1 { "it" } else { "one" },
+            );
+            for (n, m) in found.iter().enumerate() {
+                let item = m.item;
+                text.push_str(&format!(
+                    "\n{}. {} ({} v{}, by {}{}): {}. {}. Declares {}.",
+                    n + 1,
+                    item.name,
+                    item.kind.as_str(),
+                    item.version,
+                    item.publisher,
+                    if item.internal {
+                        ", built by the org"
+                    } else if item.publisher_verified {
+                        ", verified publisher"
+                    } else {
+                        ""
+                    },
+                    item.summary,
+                    mode_text(m.mode),
+                    declares_text(item),
+                ));
+            }
+            text
+        };
+        Ok(ActionOutput {
+            text,
+            data: json!({ "catalog_version": catalog.version, "items": items }),
+            changes: Vec::new(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use glass_actions::testing::context;
+    use glass_managed::Declared;
+    use glass_types::Label;
+
+    use super::*;
+
+    fn item(id: &str, name: &str, summary: &str, groups: &[(&str, InstallMode)]) -> CatalogItem {
+        CatalogItem {
+            id: id.parse().unwrap(),
+            kind: ItemKind::App,
+            name: name.into(),
+            version: "1.2.0".into(),
+            publisher: "Acme IT".into(),
+            publisher_verified: true,
+            internal: true,
+            summary: summary.into(),
+            keywords: vec!["dispute".into()],
+            declares: Declared {
+                actions: vec!["records.read".into(), "mail.draft".into()],
+                default_tiers: BTreeMap::new(),
+                max_label: Label::Internal,
+                egress: Vec::new(),
+            },
+            groups: groups.iter().map(|(g, m)| ((*g).to_owned(), *m)).collect(),
+            pinned: false,
+            provenance: Default::default(),
+        }
+    }
+
+    fn provider() -> CatalogProvider {
+        let handle = CatalogHandle::new();
+        handle.set(Applied {
+            version: 7,
+            release: CatalogRelease {
+                items: vec![
+                    item(
+                        "vendor-disputes",
+                        "Vendor Disputes",
+                        "Track vendor disputes with overdue reminders",
+                        &[("ap-ops", InstallMode::Available)],
+                    ),
+                    item(
+                        "legal-disputes",
+                        "Legal Disputes",
+                        "Dispute tracking for Legal",
+                        &[("legal", InstallMode::Required)],
+                    ),
+                    item(
+                        "dispute-bot",
+                        "Dispute Bot",
+                        "Disputes, automated",
+                        &[
+                            ("everyone", InstallMode::Available),
+                            ("ap-ops", InstallMode::Blocked),
+                        ],
+                    ),
+                ],
+            },
+        });
+        CatalogProvider::new(handle)
+    }
+
+    fn search_as(p: &CatalogProvider, groups: &[&str], need: &str) -> ActionOutput {
+        let mut ctx = context(std::path::Path::new("/home/demo"));
+        ctx.groups = groups.iter().map(|g| (*g).to_owned()).collect();
+        p.invoke(&ctx, &SEARCH.parse().unwrap(), &json!({ "need": need }))
+            .unwrap()
+    }
+
+    fn ids(out: &ActionOutput) -> Vec<String> {
+        out.data["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn ga2_dv11_search_shows_only_what_the_users_groups_may_install() {
+        let p = provider();
+        let ap = search_as(&p, &["everyone", "ap-ops"], "track vendor disputes");
+        assert_eq!(
+            ids(&ap),
+            ["vendor-disputes"],
+            "another group's item and a blocked one hidden"
+        );
+        assert_eq!(ap.data["catalog_version"], json!(7));
+        assert_eq!(ap.data["items"][0]["install"], json!("available"));
+        assert!(
+            ap.text.contains("Suggest it before building"),
+            "{}",
+            ap.text
+        );
+
+        let legal = search_as(&p, &["everyone", "legal"], "disputes");
+        assert_eq!(
+            ids(&legal),
+            ["dispute-bot", "legal-disputes"],
+            "equal scores by name"
+        );
+        assert!(
+            legal.text.contains("IT installs it for them"),
+            "{}",
+            legal.text
+        );
+
+        let nobody = search_as(&p, &[], "disputes");
+        assert!(ids(&nobody).is_empty(), "no groups, nothing offered");
+        assert!(nobody.text.contains("Nothing approved"), "{}", nobody.text);
+    }
+
+    #[test]
+    fn dv3_results_carry_the_declared_privileges() {
+        let out = search_as(&provider(), &["ap-ops"], "vendor disputes");
+        let declares = &out.data["items"][0]["declares"];
+        assert_eq!(declares["actions"], json!(["records.read", "mail.draft"]));
+        assert_eq!(declares["max_label"], json!("internal"));
+        assert!(
+            out.text.contains(
+                "Declares actions records.read, mail.draft; data up to internal; no network"
+            ),
+            "{}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn ga2_with_no_catalog_yet_it_says_so() {
+        let p = CatalogProvider::new(CatalogHandle::new());
+        let out = search_as(&p, &["everyone"], "anything");
+        assert_eq!(out.data["catalog_version"], Value::Null);
+        assert!(out.text.contains("No catalog from IT"), "{}", out.text);
+    }
+
+    #[test]
+    fn the_request_cant_widen_the_groups_and_bad_input_is_refused() {
+        let p = provider();
+        let ctx = context(std::path::Path::new("/home/demo"));
+        let action: ActionName = SEARCH.parse().unwrap();
+        // There is no groups field to pass.
+        assert!(matches!(
+            p.preview(&ctx, &action, &json!({ "need": "x", "groups": ["ap-ops"] })),
+            Err(ActionError::InvalidInput(_))
+        ));
+        assert!(p.preview(&ctx, &action, &json!({ "need": "  " })).is_err());
+        assert!(
+            p.preview(&ctx, &action, &json!({ "need": "x", "limit": 0 }))
+                .is_err()
+        );
+        let preview = p
+            .preview(&ctx, &action, &json!({ "need": "track\u{202E}disputes" }))
+            .unwrap();
+        assert!(preview.summary.starts_with("Search the org's catalog for"));
+        assert!(!preview.summary.contains('\u{202E}'), "display-safe");
+        assert!(preview.reads.is_empty() && preview.writes.is_empty());
+    }
+}

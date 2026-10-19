@@ -36,6 +36,31 @@ pub mod app_methods {
     pub const APP_CLOSE: &str = "app.close";
 }
 
+/// An app in the caller's profile (`apps.list`), which is what the
+/// launcher offers. Policy decides profiles per group (role-based
+/// delivery), and glassd opens no app outside the caller's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileApp {
+    pub id: AgentId,
+    pub name: String,
+    pub kind: ProfileAppKind,
+    /// For the admin console: its address, from the device's managed
+    /// settings. It reads from the console's servers, not from this device.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileAppKind {
+    /// A web app installed on this device (ADR 0024).
+    Web,
+    /// A native app, such as Activity Monitor (ADR 0025).
+    Native,
+    /// The org's admin console, served from the console's own servers.
+    Console,
+}
+
 /// What an app declares (UI-5, DV-3). glassd reads it from the app's
 /// installed copy and enforces it: an app can never exceed it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

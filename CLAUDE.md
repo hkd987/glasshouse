@@ -39,6 +39,10 @@ details this file leaves out.
   - `make apps-test`: types, unit tests, Playwright (headless Chromium) on dev-host glassd, launch and memory budgets.
   - `make apps-lint`: types, manifests, npm licenses; `make lint` runs it when `apps/` changes.
   - `make apps-dev` serves them at http://mail.localhost:7300 from `make dev-host`'s glassd.
+- The admin console (`glass-console` + `apps/console`, ADR 0023; `apps/README.md`):
+  - `make console-dev` serves it at http://127.0.0.1:7400 (`FIXTURE=500,50`); `GLASS_DEV_ENROLL=build/console/enrollment.json make dev-host` enrolls glassd.
+  - `make console-test`: Rust tests, then Playwright on a 500-device fixture and an enrolled dev-host glassd (page and propagation budgets).
+  - `make console-lint`: clippy, types, BR-1; `make lint` runs it when the console changes.
 - Anything a person waits on has a latency budget in `glass-e2e perf`
   (`docs/dev/performance.md`).
 

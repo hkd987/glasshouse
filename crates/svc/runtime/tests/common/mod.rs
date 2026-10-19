@@ -6,13 +6,14 @@
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use glass_actions::Registry;
 use glass_api::{AppManifest, CustomizationPoint, PointKind, ScopeRequest, TaskRequest, TileState};
 use glass_app_calendar::CalendarProvider;
+use glass_app_catalog::{CatalogHandle, CatalogProvider};
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
@@ -36,11 +37,37 @@ pub struct Harness {
     pub machine: Arc<FakeMachine>,
     /// The model provider `scripted` in policy reaches; what it was sent.
     pub model: Arc<ScriptedProvider>,
+    /// The org catalog `catalog.search` reads; empty until a test sets it.
+    pub catalog: CatalogHandle,
 }
 
 impl Harness {
     pub fn home(&self) -> PathBuf {
         self.me.home.clone()
+    }
+
+    /// The default policy with `from` replaced by `to`, then `extra`, put
+    /// in force on the running runtime as managed settings do (ADR 0023).
+    #[allow(dead_code)]
+    pub fn apply_policy_replacing(&self, from: &str, to: &str, extra: &str) {
+        assert!(glass_policy::DEFAULT_POLICY.contains(from), "{from}");
+        let text = format!(
+            "{}\n{}",
+            glass_policy::DEFAULT_POLICY.replace(from, &to.replace("{me}", &self.me.name)),
+            extra.replace("{me}", &self.me.name)
+        );
+        let registry = test_registry(self.dir.path(), &self.machine, &self.catalog);
+        self.rt
+            .apply_policy(Policy::from_toml(&text).unwrap(), registry, "test");
+    }
+
+    /// Puts the default policy plus `extra` in force on the running
+    /// runtime, with a new registry, as managed settings do (ADR 0023).
+    #[allow(dead_code)]
+    pub fn apply_policy(&self, extra: &str, source: &str) {
+        let policy = test_policy(&self.me.home, &self.me.name, extra);
+        let registry = test_registry(self.dir.path(), &self.machine, &self.catalog);
+        self.rt.apply_policy(policy, registry, source);
     }
 
     pub fn audit_path(&self) -> PathBuf {
@@ -118,6 +145,40 @@ pub async fn eventually(mut check: impl FnMut() -> bool) {
     panic!("condition never became true");
 }
 
+/// The default policy, the test home's Finance folder labeled confidential,
+/// and `extra`, in which `{me}` is `me` and `{home}` is `home`.
+fn test_policy(home: &Path, me: &str, extra: &str) -> Policy {
+    let text = format!(
+        "{}\n[[label]]\npath = \"{}/Finance\"\nlabel = \"confidential\"\n{}",
+        glass_policy::DEFAULT_POLICY,
+        home.display(),
+        extra
+            .replace("{me}", me)
+            .replace("{home}", &home.display().to_string())
+    );
+    Policy::from_toml(&text).unwrap()
+}
+
+/// The apps' actions as glassd registers them, on fakes.
+fn test_registry(dir: &Path, machine: &Arc<FakeMachine>, catalog: &CatalogHandle) -> Registry {
+    let mut registry = Registry::new();
+    registry.register(Arc::new(FilesProvider)).unwrap();
+    registry.register(Arc::new(MailProvider)).unwrap();
+    registry.register(Arc::new(CalendarProvider)).unwrap();
+    let ops: Arc<dyn SystemOps> = machine.clone();
+    registry
+        .register(Arc::new(SystemProvider::new(ops, vec!["ntpd".into()])))
+        .unwrap();
+    registry
+        .register(Arc::new(HelpdeskProvider::new(dir.join("outbox"))))
+        .unwrap();
+    registry.register(Arc::new(ModelAction)).unwrap();
+    registry
+        .register(Arc::new(CatalogProvider::new(catalog.clone())))
+        .unwrap();
+    registry
+}
+
 /// A harness whose policy is the default plus `policy_extra`, in which
 /// `{me}` stands for the test user's login name and `{home}` for their home.
 pub fn harness_with(policy_extra: &str) -> Harness {
@@ -138,28 +199,10 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     fs::write(home.join("Reports/existing.txt"), "original report\n").unwrap();
     fs::write(home.join("Finance/q3.csv"), "secret numbers\n").unwrap();
 
-    let policy_text = format!(
-        "{}\n[[label]]\npath = \"{}/Finance\"\nlabel = \"confidential\"\n{}",
-        glass_policy::DEFAULT_POLICY,
-        home.display(),
-        policy_extra
-            .replace("{me}", &account.name)
-            .replace("{home}", &home.display().to_string())
-    );
-    let policy = Policy::from_toml(&policy_text).unwrap();
-    let mut registry = Registry::new();
-    registry.register(Arc::new(FilesProvider)).unwrap();
-    registry.register(Arc::new(MailProvider)).unwrap();
-    registry.register(Arc::new(CalendarProvider)).unwrap();
+    let policy = test_policy(&home, &account.name, policy_extra);
     let machine = Arc::new(FakeMachine::default());
-    let ops: Arc<dyn SystemOps> = machine.clone();
-    registry
-        .register(Arc::new(SystemProvider::new(ops, vec!["ntpd".into()])))
-        .unwrap();
-    registry
-        .register(Arc::new(HelpdeskProvider::new(dir.path().join("outbox"))))
-        .unwrap();
-    registry.register(Arc::new(ModelAction)).unwrap();
+    let catalog = CatalogHandle::new();
+    let registry = test_registry(dir.path(), &machine, &catalog);
     // Policy names these providers; `down` is always rate limited (MP-8).
     let model = Arc::new(ScriptedProvider::echo());
     let gateway = Gateway::new().with("scripted", model.clone()).with(
@@ -180,6 +223,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
             apps: vec![mail_app(), calendar_app()],
             // The app socket resolves callers by uid; their app data is
             // here, never in the real account's home.
+            console_url: None,
             dev_home: Some(home.clone()),
         },
         policy,
@@ -204,6 +248,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         me,
         machine,
         model,
+        catalog,
     }
 }
 
@@ -238,6 +283,7 @@ pub fn rebuild_with(h: &Harness, policy: &str, catalog: Vec<CatalogEntry>) -> Ar
             harness: Some("claude-code".parse().unwrap()),
             attended_dir: h.dir.path().join("run/attended"),
             apps: Vec::new(),
+            console_url: None,
             dev_home: None,
         },
         policy: Policy::from_toml(policy).unwrap(),

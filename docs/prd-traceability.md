@@ -31,7 +31,7 @@ Tests: *unit* = crate unit tests, *pipeline* =
 | PA-6 FDE, secure boot, TPM keys by default | Not started | — | image build work |
 | PA-7 Each agent its own directory identity with a human owner | Not started | catalog has id + version only | ADR 0008 (proposed) |
 | AD-14 Agents in Microsoft Agent 365 registry | Not started | | |
-| AD-15 Policy from Intune and Entra too | Not started | `policy.toml` is the local stand-in. How managed policy will load is decided (ADR 0021): boot from the last applied policy on disk, fetch in the background, validate, apply whole with the previous version kept (`glass_policy::store`) | unit `store::tests` (fallback, apply, rollback) |
+| AD-15 Policy from Intune and Entra too | Not started | Managed policy from our own console is built (ADR 0021, 0023): boot from the last applied policy on disk, fetch in the background, verify, validate, apply whole with the previous version kept; Intune and Entra would feed the same path | unit `store::tests` (fallback, apply, rollback) |
 
 ## Endpoint protection
 
@@ -133,12 +133,25 @@ thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
-| AD-1 … AD-5, AD-10 … AD-12 Console, SCIM, fleet | Not started | `policy.toml` + `glassd.toml` are the local stand-ins. A machine keeps the last good and the previous policy (AD-3's versions and rollback, on the device side) and falls back to the last good one when a new one doesn't validate (ADR 0021) |
-| AD-6 The admin console: a web app on our servers, the fleet at a glance | Not started | Added 2026-10-19 (Google Admin for Chromebooks is the model). The device side of the contract is ADR 0023 (glass-managed: devices fetch signed policy) |
-| AD-7 Apps in a profile by role; admin UI and IT tools only for the roles that grant them | Not started | Added 2026-10-19. Enforced by glassd from policy (role or group → apps), never by hiding UI in the shell; the launcher shows only what the profile holds |
+| AD-1 Policies per group, synced from Entra ID or Okta via SCIM | Partial | Groups come from the console's directory (`directory.toml` behind the `Directory` trait, the SCIM seam); a published policy carries each group's members from it. Missing: SCIM. `glass-console directory::ad1_…` |
+| AD-2 Per agent: allowed actions, a tier per action class, labels, models, egress | Partial | The console edits a group's tier per action class, allowed agents, most sensitive label and apps, and an agent's network destinations, validating the whole draft as devices will (ADR 0023). Allowed actions and model lists are shown, not yet edited. `edits::ad2_…`, `server::ad3_edit_preview_publish…` |
+| AD-3 Versioned, previewed ("affects 214 users and 3 agents"), rolled out in stages | **Done** | Signed versions, publish to pilot, promote to early and broad, roll back as a new version everywhere; preview against what the broad ring runs; devices verify, validate whole and apply in the background, keeping the previous (ADR 0021, 0023). `impact::ad3_…`, `server::ad3_…`, glassd `managed::ad3_…`, `dv1_…`, runtime `catalog::adr0023_a_policy_applied_live…`, e2e `console.e2e.ts` "ad3 dv1 …" (in force on a pilot device under 5 s) |
+| AD-4 Live view: running agents, pending approvals, blocks in 24 h | Partial | Devices page and each policy page's live panel, from device reports (ids, names and counts only), sent on every change and each minute. Missing: a per-task view across the fleet. `server::ad4_…`, e2e "ad4 …" (pages under 1 s with 500 devices) |
+| AD-5 IT approves, versions and publishes agents and flows to groups | Partial | Catalog page: approve per group with an install mode, block; each decision signs a catalog for every device (ADR 0023). Missing: installing on devices, item versions over time. `server::dv11_…`, e2e "dv11 ga2 …" |
+| AD-6 The admin console: a web app on our servers, the fleet at a glance | Partial | `glass-console` serves `apps/console` (Policies, Catalog, Devices); admins of the directory sign in (ADR 0023). Development mode only: TLS at our web servers, the org's SSO and a managed database aren't built. `make console-test` |
+| AD-7 Apps in a profile by role; admin UI and IT tools only for the roles that grant them | Partial | `[[group]] apps` in policy, set from the console; glassd's `apps.list` (`glassctl apps`) returns the caller's profile and `app.open` refuses an app outside it (audited `AppRefused`); the admin console is a profile entry pointing at the console's servers. Missing: the shell's launcher reading `apps.list` (it lists native apps for everyone) and native apps checking the profile. `policy ad7_…`, runtime `profiles::ad7_…`, e2e "ad3 dv1 …" (`glassctl apps`) |
+| AD-10 Zero-touch enrollment | Not started | Stub: a device enrolls with `[managed]` in `glassd.toml` and the org's enrollment token (ADR 0023) |
+| AD-11 OS and app updates in rings, automatic rollback | Partial | Policy releases go out in pilot, early and broad rings (ADR 0023); OS and app updates don't |
+| AD-12 Remote lock and wipe, key escrow, compliance status | Not started | |
 | AD-16 Communications archiving and supervision | Not started | agent-sent mail is already attributed and audited, which this builds on |
 | LA-1 … LA-3, LA-10 … LA-12, LA-20 Licensing and activation | Not started | Design constraint: a lapsed license pauses agents only; desktop, data and security updates keep working (LA-3) |
-| DV-1 … DV-3, DV-5, DV-10, DV-11 Developer program, private catalog | Not started | DV-3 (declared privileges the OS enforces) shapes the agent manifest: ADR 0008 (proposed) |
+| DV-1 Everything signed | Partial | Policy and catalog releases are signed with the org's ed25519 key and verified by devices against keys in their own config (kind, org, version, payload hash; replays refused). Missing: publisher identity and signing certificates. `signing::dv1_…`, glassd `managed::dv1_…` |
+| DV-2 Automated checks on every submission | Not started | The console shows the checks a submission reports |
+| DV-3 Listings declare their privileges; the OS enforces them | Partial | Catalog items declare actions, most sensitive label, network and default tiers; shown in the console and returned by `catalog.search`. Enforced for apps' manifests (ADR 0024), not yet for agents (ADR 0008). `catalog app dv3_…` |
+| DV-5 Revoke a signature fleet-wide within an hour | Partial | Blocking an item drops it from the next catalog, on online devices within a second. Missing: signature revocation, disabling installed copies, notifying admins |
+| DV-10 Each org's private catalog; only approved items; internal items never public | Partial | Releases hold approved items only; the store rule refuses anything public (DV-13). Missing: installing from the catalog on devices. `server::dv11_…_dv13_…` |
+| DV-11 Per group: required, available or blocked | Partial | Set per group in the console and synced; blocked wins, then required over available; `catalog.search` honors it. Missing: pushing required items. `catalog::dv11_…`, `ga2_dv11_…` |
+| DV-13 Only single-user apps from unmanaged devices go public; enterprise apps never | **Done** | `CatalogItem::public_store_check` refuses org-scoped items and anything built on a managed device (unknown provenance reads as both); the console's public-store request answers with the rule. No public store exists yet. `catalog::dv13_…`, `server::dv11_…_dv13_…` |
 | DV-13 Only single-user apps from unmanaged devices go public; enterprise apps never | Not started | Added 2026-10-19. The catalog refuses publishing anything org-scoped or built on a managed device |
 
 ## Core OS and workplace
@@ -238,7 +251,8 @@ Users shape their own tools (PRD "The edge", ADR 0014). Success metric:
 | TL-11 Re-run the evaluation suite before a layer turns on | Not started | needs eval suites (AE-10); the "Release bar" check reports "not available" rather than passing |
 | TL-13 New agent version: re-apply and re-test every layer; pause failures, notify the owner | Partial | re-checked against the new version's points at startup and before use, paused with the reason, published agent runs; owner sees it on the card and in `glassctl tailor`. Missing: re-test with evals, a pushed notification. `tailoring::tl13_…` |
 | TL-3, TL-4, TL-12, TL-14, TL-20 … TL-22 Team layers, copies, IT controls, inventory, suggestions | P1 | ADR 0014 "Proposed next" |
-| GA-1 … GA-11 Apps built on request | P1 | A generated app is an ordinary app (UI-5): its actions join the registry like any `crates/apps` provider (ADR 0013) and get tiers, audit and undo for free. Catalog-first (GA-2) needs the catalog service; sharing steps (GA-8) reuse the DV-2/DV-3 checks |
+| GA-2 Catalog first: suggest an approved app or agent instead of building a duplicate | **Done** | `catalog.search` (Auto, read only, audited) finds approved items the user's groups may install, by need, with their declared privileges, from the catalog IT published to the device; groups come from the runtime, never the request (ADR 0023). Claude Code has it by default. `crates/apps/catalog` `ga2_…`, runtime `catalog::ga2_…`, glassd `managed::ga2_…`, e2e "dv11 ga2 …" |
+| GA-1, GA-3 … GA-11 Apps built on request | P1 | A generated app is an ordinary app (UI-5): its actions join the registry like any `crates/apps` provider (ADR 0013) and get tiers, audit and undo for free. Sharing steps (GA-8) reuse the DV-2/DV-3 checks; GA-10's controls belong in the console |
 
 ## Base system and portability
 
