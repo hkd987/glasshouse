@@ -112,6 +112,9 @@ pub struct WindowInfo {
     pub area: Rect,
     /// It has the keyboard.
     pub focused: bool,
+    /// Its minimize control hid it; [`Compositor::activate`] brings it
+    /// back (DK-1).
+    pub minimized: bool,
 }
 
 /// An area of the screen, in pixels.
@@ -204,6 +207,7 @@ impl Compositor {
             next_id: 0,
             grab: None,
             refocus: false,
+            minimized: Vec::new(),
         };
         let target = pixman::Image::new(
             pixman::FormatCode::A8R8G8B8,
@@ -411,29 +415,36 @@ impl Compositor {
             .seat
             .get_keyboard()
             .and_then(|k| k.current_focus());
-        self.state
-            .space
-            .elements()
-            .filter_map(|window| {
-                let toplevel = window.toplevel()?;
-                let at = self.state.space.element_location(window)?;
-                let size = window.geometry().size;
-                let (app_id, title) = toplevel_names(toplevel);
-                let id = self.state.frames.iter().find(|f| &f.window == window)?.id;
-                Some(WindowInfo {
-                    id,
-                    app_id,
-                    title,
-                    area: Rect {
-                        x: at.x,
-                        y: at.y,
-                        width: size.w,
-                        height: size.h,
-                    },
-                    focused: focused.as_ref() == Some(toplevel.wl_surface()),
-                })
+        let info = |window: &Window, at: Point<i32, Logical>, minimized: bool| {
+            let toplevel = window.toplevel()?;
+            let size = window.geometry().size;
+            let (app_id, title) = toplevel_names(toplevel);
+            let id = self.state.frames.iter().find(|f| &f.window == window)?.id;
+            Some(WindowInfo {
+                id,
+                app_id,
+                title,
+                area: Rect {
+                    x: at.x,
+                    y: at.y,
+                    width: size.w,
+                    height: size.h,
+                },
+                focused: !minimized && focused.as_ref() == Some(toplevel.wl_surface()),
+                minimized,
             })
-            .collect()
+        };
+        // Minimized windows under the rest: Alt Tab offers them last.
+        let hidden = self
+            .state
+            .minimized
+            .iter()
+            .filter_map(|(window, at)| info(window, *at, true));
+        let shown =
+            self.state.space.elements().filter_map(|window| {
+                info(window, self.state.space.element_location(window)?, false)
+            });
+        hidden.chain(shown).collect()
     }
 
     /// The pointer moved to `at` (pixels on the screen).
@@ -487,6 +498,10 @@ impl Compositor {
                     });
                     return;
                 }
+                Some((window, Part::Minimize)) => {
+                    self.state.minimize(&window);
+                    return;
+                }
                 Some((window, Part::Close)) => {
                     if let Some(toplevel) = window.toplevel() {
                         toplevel.send_close();
@@ -515,9 +530,9 @@ impl Compositor {
         pointer.frame(&mut self.state);
     }
 
-    /// Raises the window with this id (from [`Compositor::windows`]) and
-    /// gives it the keyboard, as Alt Tab does (DK-2). An id no window has
-    /// any more does nothing.
+    /// Raises the window with this id (from [`Compositor::windows`]),
+    /// minimized or not, and gives it the keyboard, as Alt Tab does (DK-2).
+    /// An id no window has any more does nothing.
     pub fn activate(&mut self, id: u64) {
         let Some(window) = self
             .state
@@ -528,6 +543,11 @@ impl Compositor {
         else {
             return;
         };
+        // A minimized window comes back where it was.
+        if let Some(at) = self.state.minimized.iter().position(|(w, _)| w == &window) {
+            let (window, loc) = self.state.minimized.remove(at);
+            self.state.space.map_element(window, loc, true);
+        }
         self.state.focus(Some(window), SERIAL_COUNTER.next_serial());
     }
 
@@ -629,6 +649,8 @@ struct State {
     grab: Option<Grab>,
     /// The window with the keyboard closed; the next one in front gets it.
     refocus: bool,
+    /// Windows minimized, oldest first, and where each was.
+    minimized: Vec<(Window, Point<i32, Logical>)>,
 }
 
 /// A window's id and the title bar the desktop drew for it.
@@ -649,6 +671,8 @@ struct Grab {
 enum Part {
     Content,
     Bar,
+    /// The minimize control (the middle one).
+    Minimize,
     Close,
     /// Minimize or zoom: not built yet, so a click there does nothing
     /// (rather than starting a drag).
@@ -671,7 +695,9 @@ impl State {
                 let on = |cx: i32| (x - f64::from(cx)).powi(2) + (y - cy).powi(2) <= reach * reach;
                 let part = if on(CONTROLS[0]) {
                     Part::Close
-                } else if on(CONTROLS[1]) || on(CONTROLS[2]) {
+                } else if on(CONTROLS[1]) {
+                    Part::Minimize
+                } else if on(CONTROLS[2]) {
                     Part::Control
                 } else {
                     Part::Bar
@@ -693,6 +719,27 @@ impl State {
         window
             .surface_under(at - location.to_f64(), WindowSurfaceType::ALL)
             .map(|(surface, offset)| (surface, (offset + location).to_f64()))
+    }
+
+    /// Hides `window` until it's activated again; the one in front of the
+    /// rest takes the keyboard if it had it (DK-1).
+    fn minimize(&mut self, window: &Window) {
+        let Some(at) = self.space.element_location(window) else {
+            return;
+        };
+        let had_keyboard = window.toplevel().is_some_and(|t| {
+            self.seat
+                .get_keyboard()
+                .and_then(|k| k.current_focus())
+                .as_ref()
+                == Some(t.wl_surface())
+        });
+        self.space.unmap_elem(window);
+        self.minimized.push((window.clone(), at));
+        if had_keyboard {
+            let front = self.space.elements().last().cloned();
+            self.focus(front, SERIAL_COUNTER.next_serial());
+        }
     }
 
     /// Raises `window` and gives it the keyboard; none takes the keyboard
@@ -844,6 +891,7 @@ impl XdgShellHandler for State {
         self.refocus |= focused.as_ref() == Some(surface.wl_surface());
         let gone = |w: &Window| w.toplevel().is_some_and(|t| t == &surface);
         self.unplaced.retain(|w| !gone(w));
+        self.minimized.retain(|(w, _)| !gone(w));
         self.frames.retain(|f| !gone(&f.window));
         if self.grab.as_ref().is_some_and(|g| gone(&g.window)) {
             self.grab = None;

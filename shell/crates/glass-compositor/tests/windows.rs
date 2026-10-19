@@ -381,3 +381,43 @@ fn ui1_the_pointer_leaving_a_window_tells_its_app() {
     until_told(&mut compositor, &hello, &Event::PointerLeft);
     finish(&mut compositor, hello);
 }
+
+#[test]
+fn dk1_the_minimize_control_hides_a_window_until_it_is_activated() {
+    let (mut compositor, socket, _dir) = compositor();
+    let (red, green) = (0xFFC5_3030, 0xFF2E_9E5B);
+    let back = window(&socket, "Back", (400, 300), red);
+    until_told(&mut compositor, &back, &Event::Focused);
+    let front = window(&socket, "Front", (200, 100), green);
+    until_told(&mut compositor, &front, &Event::Focused);
+    let f = compositor.windows()[1].area;
+    until(&mut compositor, "the front window", |c| {
+        pixel(c, f.x + 100, f.y + 50) == bgra(green)
+    });
+    // Its middle control: it goes, and the one behind gets the keyboard.
+    compositor.pointer_moved((f64::from(f.x + CONTROLS[1]), f64::from(f.y - TITLE_BAR / 2)));
+    compositor.pointer_button(BUTTON_LEFT, true);
+    compositor.pointer_button(BUTTON_LEFT, false);
+    until_told(&mut compositor, &back, &Event::Focused);
+    until(&mut compositor, "the back window showing", |c| {
+        pixel(c, f.x + 100, f.y + 50) == bgra(red)
+    });
+    let windows = compositor.windows();
+    assert_eq!(
+        windows
+            .iter()
+            .map(|w| (w.title.as_str(), w.minimized))
+            .collect::<Vec<_>>(),
+        [("Front", true), ("Back", false)],
+        "still listed, under the rest"
+    );
+    // Activated (Alt Tab), it's back where it was, in front.
+    compositor.activate(windows[0].id);
+    until_told(&mut compositor, &front, &Event::Focused);
+    until(&mut compositor, "the front window back", |c| {
+        pixel(c, f.x + 100, f.y + 50) == bgra(green)
+    });
+    assert_eq!(compositor.windows()[1].area, f);
+    finish(&mut compositor, front);
+    finish(&mut compositor, back);
+}
