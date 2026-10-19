@@ -3,7 +3,11 @@
 Status: **Accepted** (2026-10-19): the owner decided chat and meetings are
 end to end encrypted, with a compliance key IT holds, meetings org only up
 to 25; the design below carries it out. Two choices in it are proposed
-defaults the owner can still change (end of this ADR). Not built yet. PRD CF-91 (our own chat), CF-21 (Glasshouse meetings), CF-61 … CF-65, GT-3, AU-1, AU-10, NV-1 … NV-3, CF-41, UI-2, UI-5, UI-7, DV-3. Builds on:
+defaults the owner can still change (end of this ADR). Building slice C1:
+`glass-crypto`, the console's relay, and on computers the member keys,
+store, sync and the four chat actions with `[[app]]` tiers are in; the
+Chat app is next. Policy with `[[app]]` needs a glassd that knows it
+(`PolicyDocument` refuses unknown fields), as `settings` did. PRD CF-91 (our own chat), CF-21 (Glasshouse meetings), CF-61 … CF-65, GT-3, AU-1, AU-10, NV-1 … NV-3, CF-41, UI-2, UI-5, UI-7, DV-3. Builds on:
 - ADR 0018: the base system's OpenSSL.
 - ADR 0023: the console, signed releases, the device API.
 - ADR 0024: apps are principals.
@@ -73,7 +77,7 @@ device key       one per computer, P-256: signs the computer's requests to the c
 - **Member keys are per person per computer.**
   - Why not one key per person: it would have to be copied between computers, or kept by us.
   - Per computer, nothing secret leaves a computer except sealed to another member key. A lost laptop is cut off on its own.
-  - glassd makes the pair the first time someone uses chat on that computer. It lives in `/var/db/glasshouse/chat/<login>/member.key`, mode 0600.
+  - glassd makes the pair the first time the person opens Chat on that computer. An agent's call never makes it: until then an agent's `chat.list` says the person hasn't opened Chat, and its posts are refused. It lives in `/var/db/glasshouse/chat/<login>/member.key`, mode 0600.
   - glassd registers the public halves with the console, signed by the device key.
   - A member key's id is `mk-` plus the first 16 hex digits of the SHA-256 of both public halves.
 - **Epoch keys are chained backward.**
@@ -131,7 +135,7 @@ device key       one per computer, P-256: signs the computer's requests to the c
 - **The store is `/var/db/glasshouse/chat/<login>/`.** It holds:
   - the member key;
   - the conversations, with their membership chains;
-  - the envelopes sealed to this computer;
+  - the conversations' epochs, whole: the maker's signature covers every envelope, so a relay can't drop any;
   - messages, as the verified ciphertext the console sent. Each read opens them.
 - **Nothing goes in the person's home,** so their own processes reach chat only through actions. That includes their attended harness.
 - **The page keeps nothing either.**
@@ -300,7 +304,7 @@ A new app crate, `glass-app-chat` (`crates/apps/chat`), is registered in `glass-
 | `POST /device/v1/register` | Registers a computer's device key (enrollment token) |
 | `POST /device/v1/chat/keys` | Registers a member key for a login on this computer |
 | `POST /device/v1/chat/keys/lookup` | Member keys of logins, revoked ones marked |
-| `POST /device/v1/chat/sync` | Long poll: new messages, epochs with this computer's envelopes, ops, tombstones, key changes, jobs |
+| `POST /device/v1/chat/sync` | Long poll: new messages, the conversations' epochs (whole, as signed), ops, tombstones, key changes, jobs |
 | `POST /device/v1/chat/history` | Older messages of a conversation, 200 at most |
 | `POST /device/v1/chat/conversations` | Create a conversation: kind, sealed name, the creator's signed op, and epoch 1 with every envelope |
 | `POST /device/v1/chat/conversations/<id>/ops` | A signed add, remove or leave |

@@ -221,6 +221,14 @@ async fn main() -> ExitCode {
             read_file("/var/db/glasshouse/audit/audit.log"),
         ),
         attempt(
+            "files: open chat's member keys",
+            Want::Denied,
+            io(
+                std::fs::read_dir("/var/db/glasshouse/chat").map(drop),
+                |()| "opened /var/db/glasshouse/chat".into(),
+            ),
+        ),
+        attempt(
             "files: read daemon config",
             Want::Denied,
             read_file("/usr/local/etc/glasshouse/glassd.toml"),

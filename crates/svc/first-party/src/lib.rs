@@ -10,6 +10,8 @@ use std::sync::Arc;
 use glass_actions::{Registry, RegistryError};
 use glass_app_calendar::CalendarProvider;
 use glass_app_catalog::{CatalogHandle, CatalogProvider};
+use glass_app_chat::ChatProvider;
+pub use glass_app_chat::{ChatHandle, Notice as ChatNotice};
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
@@ -40,6 +42,9 @@ pub struct Setup {
     pub mail: Option<glass_policy::document::MailSettings>,
     /// Device settings: policy's and each person's choices (UX-1).
     pub settings: SettingsHandle,
+    /// The org's chat on this computer: member keys and the sealed store
+    /// (CF-91, ADR 0030). Unconnected, every chat action says there's none.
+    pub chat: ChatHandle,
     /// This device is managed by an org, so a catalog is coming if none
     /// has arrived (the Store says which).
     pub managed: bool,
@@ -56,6 +61,7 @@ impl Setup {
             directory: DirectoryHandle::new(),
             mail: None,
             settings: SettingsHandle::new("/nonexistent"),
+            chat: ChatHandle::new("/nonexistent"),
             managed: false,
         }
     }
@@ -78,9 +84,10 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
         CatalogProvider::new(setup.catalog).managed(setup.managed),
     ))?;
     registry.register(Arc::new(
-        PeopleProvider::new(setup.directory).managed(setup.managed),
+        PeopleProvider::new(setup.directory.clone()).managed(setup.managed),
     ))?;
     registry.register(Arc::new(SettingsProvider::new(setup.settings)))?;
+    registry.register(Arc::new(ChatProvider::new(setup.chat, setup.directory)))?;
     registry.register(Arc::new(ModelAction))?;
     Ok(registry)
 }
@@ -107,6 +114,7 @@ mod tests {
             "model.complete",
             "catalog.search",
             "people.search",
+            "chat.post",
         ] {
             assert!(names.iter().any(|n| n == expected), "{expected}");
         }

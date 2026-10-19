@@ -14,6 +14,7 @@ use glass_actions::Registry;
 use glass_api::{AppManifest, CustomizationPoint, PointKind, ScopeRequest, TaskRequest, TileState};
 use glass_app_calendar::CalendarProvider;
 use glass_app_catalog::{CatalogHandle, CatalogProvider};
+use glass_app_chat::{ChatHandle, ChatProvider};
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
@@ -49,6 +50,8 @@ pub struct Harness {
     pub directory: DirectoryHandle,
     /// Device settings: policy's and the test user's choices (UX-1).
     pub settings: SettingsHandle,
+    /// Chat on this computer (CF-91); unconnected until a test connects it.
+    pub chat: ChatHandle,
 }
 
 impl Harness {
@@ -73,6 +76,7 @@ impl Harness {
             &self.catalog,
             &self.directory,
             &self.settings,
+            &self.chat,
             &policy,
         );
         self.rt.apply_policy(policy, registry, "test");
@@ -89,6 +93,7 @@ impl Harness {
             &self.catalog,
             &self.directory,
             &self.settings,
+            &self.chat,
             &policy,
         );
         self.rt.apply_policy(policy, registry, source);
@@ -201,6 +206,7 @@ fn test_registry(
     catalog: &CatalogHandle,
     directory: &DirectoryHandle,
     settings: &SettingsHandle,
+    chat: &ChatHandle,
     policy: &Policy,
 ) -> Registry {
     let mut registry = Registry::new();
@@ -231,6 +237,9 @@ fn test_registry(
         .register(Arc::new(SettingsProvider::new(settings.clone())))
         .unwrap();
     registry
+        .register(Arc::new(ChatProvider::new(chat.clone(), directory.clone())))
+        .unwrap();
+    registry
 }
 
 /// A harness whose policy is the default plus `policy_extra`, in which
@@ -258,12 +267,14 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     let catalog = CatalogHandle::new();
     let directory = DirectoryHandle::new();
     let settings = SettingsHandle::new(dir.path().join("state/settings"));
+    let chat = ChatHandle::new(dir.path().join("state/chat"));
     let registry = test_registry(
         dir.path(),
         &machine,
         &catalog,
         &directory,
         &settings,
+        &chat,
         &policy,
     );
     // Policy names these providers; `down` is always rate limited (MP-8).
@@ -283,7 +294,13 @@ pub fn harness_with(policy_extra: &str) -> Harness {
             max_live_tasks_per_user: 4,
             harness: Some("claude-code".parse().unwrap()),
             attended_dir: dir.path().join("run/attended"),
-            apps: vec![mail_app(), calendar_app(), store_app(), settings_app()],
+            apps: vec![
+                mail_app(),
+                calendar_app(),
+                store_app(),
+                settings_app(),
+                chat_app(),
+            ],
             // The app socket resolves callers by uid; their app data is
             // here, never in the real account's home.
             console_url: None,
@@ -316,6 +333,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         catalog,
         directory,
         settings,
+        chat,
     }
 }
 
@@ -532,6 +550,17 @@ pub fn settings_app() -> AppManifest {
         "id": "settings", "name": "Settings", "version": "0.1.0",
         "actions": ["settings.list", "settings.set"],
         "permissions": ["offline"], "labels": ["public"]
+    }))
+    .unwrap()
+}
+
+/// Chat as its manifest declares it (ADR 0030): no offline storage, since
+/// the page's storage is in the person's home.
+pub fn chat_app() -> AppManifest {
+    serde_json::from_value(json!({
+        "id": "chat", "name": "Chat", "version": "0.1.0",
+        "actions": ["chat.list", "chat.read", "chat.post", "chat.create", "people.search"],
+        "permissions": [], "labels": ["public", "internal"]
     }))
     .unwrap()
 }

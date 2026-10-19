@@ -23,6 +23,10 @@ pub struct PolicyDocument {
     pub groups: Vec<GroupPolicy>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentPolicy>,
+    /// Tiers for one app's own sessions (ADR 0030): what the person does in
+    /// that app's window, such as a message they typed in Chat.
+    #[serde(default, rename = "app", skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<AppPolicy>,
     /// Folder rules that label data by location (DP-10).
     #[serde(default, rename = "label")]
     pub labels: Vec<FolderLabel>,
@@ -450,6 +454,17 @@ pub enum SettingValue {
     Number(i64),
     Text(String),
     List(Vec<String>),
+}
+
+/// Tiers for one app's sessions (ADR 0030). They are the session's own
+/// rules, as an agent's are, so a group's stricter tier still wins; the
+/// app's manifest still says what it may call at all.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppPolicy {
+    pub id: AgentId,
+    #[serde(default)]
+    pub tiers: BTreeMap<ActionPattern, Tier>,
 }
 
 /// Rules for one catalog agent (AD-2).

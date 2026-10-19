@@ -19,11 +19,12 @@ use std::time::{Duration, Instant};
 
 use glass_app_catalog::Applied;
 use glass_audit::{AuditEvent, EventKind, Outcome};
+use glass_first_party::{ChatHandle, ChatNotice};
 use glass_gateway_providers::ConsoleClient;
 use glass_managed::directory::{self, DirectoryRelease};
 use glass_managed::{
-    CatalogRelease, DeviceReport, DocKind, MAX_WAIT_SECS, PolicyRelease, PublicKey, ReleaseStore,
-    RunningAgent, Signed, SyncRequest, SyncResponse,
+    CatalogRelease, ChatRelease, DeviceReport, DocKind, MAX_WAIT_SECS, PolicyRelease, PublicKey,
+    ReleaseStore, RunningAgent, Signed, SyncRequest, SyncResponse,
 };
 use glass_policy::Policy;
 use glass_policy::store::PolicyStore;
@@ -53,6 +54,7 @@ pub struct Managed {
     policy_version: Option<u64>,
     catalog_version: Option<u64>,
     directory_version: Option<u64>,
+    chat_version: Option<u64>,
     /// Why the last release was refused or the last sync failed.
     last_error: Option<String>,
     /// Since when the console has been out of reach.
@@ -78,6 +80,7 @@ impl Managed {
             policy_version: None,
             catalog_version: None,
             directory_version: None,
+            chat_version: None,
             last_error: None,
             offline_since: None,
         };
@@ -96,6 +99,11 @@ impl Managed {
                 }
             }
             None => tracing::info!("managed: no directory from the console yet"),
+        }
+        if let Some(signed) = this.load(DocKind::Chat)
+            && let Err(e) = this.apply_chat(&signed, true)
+        {
+            this.refused(DocKind::Chat, &signed, &e);
         }
         if let Some(signed) = this.load(DocKind::Policy) {
             let in_force = std::fs::read_to_string(&this.config.policy).unwrap_or_default();
@@ -176,6 +184,17 @@ impl Managed {
                     return;
                 }
             };
+        // Chat long-polls on a connection of its own (ADR 0030).
+        match ConsoleClient::new(&self.managed.url, &token, self.managed.allow_insecure_http) {
+            Ok(chat) => {
+                self.org
+                    .chat
+                    .connect(&self.managed.org, &self.device, Arc::new(chat));
+                let handle = self.org.chat.clone();
+                std::thread::spawn(move || sync_chat(&handle));
+            }
+            Err(e) => tracing::error!("managed: chat: {e}"),
+        }
         let mut retry = FIRST_RETRY;
         let mut reported: Option<Instant> = None;
         loop {
@@ -184,7 +203,7 @@ impl Managed {
                 policy: self.policy_version,
                 catalog: self.catalog_version,
                 directory: self.directory_version,
-                chat: None,
+                chat: self.chat_version,
                 wait_secs: MAX_WAIT_SECS,
             };
             match client.sync(&request) {
@@ -230,6 +249,12 @@ impl Managed {
             match self.apply_directory(&signed, false) {
                 Ok(()) => changed = true,
                 Err(e) => self.refused(DocKind::Directory, &signed, &e),
+            }
+        }
+        if let Some(signed) = response.chat {
+            match self.apply_chat(&signed, false) {
+                Ok(()) => changed = true,
+                Err(e) => self.refused(DocKind::Chat, &signed, &e),
             }
         }
         self.runtime.set_policy_source(self.source());
@@ -386,6 +411,45 @@ impl Managed {
         Ok(())
     }
 
+    /// Verifies and applies IT's Chat release: the compliance key every
+    /// epoch this computer makes is sealed to (ADR 0030, decision 4).
+    fn apply_chat(&mut self, signed: &Signed, again: bool) -> Result<(), String> {
+        let have = if again { None } else { self.chat_version };
+        let release: ChatRelease = signed
+            .open(DocKind::Chat, &self.managed.org, self.keys(), have)
+            .map_err(|e| e.to_string())?;
+        let key = release
+            .key()
+            .map_err(|e| format!("the compliance key: {e}"))?;
+        if ChatRelease::new(&key) != release {
+            return Err("the compliance key's fingerprint doesn't match it".into());
+        }
+        if !again {
+            self.releases.save(signed).map_err(|e| e.to_string())?;
+        }
+        self.org
+            .chat
+            .set_compliance(&release.compliance, &release.fingerprint)?;
+        self.chat_version = Some(signed.version);
+        let mut event = AuditEvent::new(
+            EventKind::ChatLoaded,
+            format!(
+                "Chat v{} from the admin console is in force (compliance key {})",
+                signed.version, release.fingerprint
+            ),
+        );
+        event.detail = serde_json::json!({
+            "console": self.managed.url,
+            "version": signed.version,
+            "key": signed.key,
+            "fingerprint": release.fingerprint,
+            "from_disk": again,
+        });
+        self.runtime.append_audit(event);
+        tracing::info!(version = signed.version, "managed: chat release applied");
+        Ok(())
+    }
+
     /// A release was refused: audited and reported; nothing changes.
     fn refused(&mut self, kind: DocKind, signed: &Signed, why: &str) {
         tracing::warn!(
@@ -434,6 +498,59 @@ impl Managed {
             last_error: self.last_error.clone(),
             reported_at: Timestamp::now(),
         }
+    }
+}
+
+/// Keeps this computer's chat in step with the console until glassd stops:
+/// long polls while there is someone to sync for, backs off while the
+/// console can't be reached (ADR 0030).
+fn sync_chat(chat: &ChatHandle) {
+    let mut retry = FIRST_RETRY;
+    loop {
+        if chat.logins().is_empty() {
+            // Nobody here has used chat yet.
+            std::thread::sleep(FIRST_RETRY);
+            continue;
+        }
+        match chat.sync_once(MAX_WAIT_SECS) {
+            Ok(_) => retry = FIRST_RETRY,
+            Err(e) => {
+                tracing::warn!("chat: sync: {e}");
+                std::thread::sleep(retry);
+                retry = (retry * 2).min(LAST_RETRY);
+            }
+        }
+    }
+}
+
+/// The audit record for a chat notice (AU-1): key ids, conversation ids and
+/// reasons, never a message.
+pub(crate) fn chat_event(notice: &ChatNotice) -> Option<AuditEvent> {
+    match notice {
+        ChatNotice::KeyMade { login, key } => {
+            let mut event = AuditEvent::new(
+                EventKind::ChatKeyMade,
+                format!("Chat key {key} made for {login} on this computer"),
+            );
+            event.user = Some(login.clone());
+            event.detail = serde_json::json!({ "key": key });
+            Some(event)
+        }
+        ChatNotice::Refused {
+            login,
+            conversation,
+            reason,
+        } => {
+            let mut event = AuditEvent::new(
+                EventKind::ChatRefused,
+                format!("Kept a chat record out: {reason}"),
+            );
+            event.outcome = Some(Outcome::Blocked);
+            event.user = (!login.is_empty()).then(|| login.clone());
+            event.detail = serde_json::json!({ "conversation": conversation, "reason": reason });
+            Some(event)
+        }
+        ChatNotice::Changed { .. } => None,
     }
 }
 

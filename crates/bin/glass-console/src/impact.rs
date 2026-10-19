@@ -289,6 +289,7 @@ pub fn preview(
         org: Default::default(),
         groups: Vec::new(),
         agents: Vec::new(),
+        apps: Vec::new(),
         labels: Vec::new(),
         names: BTreeMap::new(),
         fixes: Default::default(),

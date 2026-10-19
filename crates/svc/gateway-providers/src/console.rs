@@ -9,6 +9,10 @@
 //! never appears in an error.
 
 use glass_gateway::ProviderError;
+use glass_managed::chat::{
+    ChatLink, ChatSyncRequest, ChatSyncResponse, CreateConversation, Keys, LinkError, LookupKeys,
+    PostMessage, RegisterKey,
+};
 use glass_managed::{DeviceReport, SyncRequest, SyncResponse};
 
 use crate::http::{Http, Target};
@@ -61,7 +65,13 @@ impl ConsoleClient {
     }
 
     fn post<T: serde::Serialize>(&self, path: &str, body: &T) -> Result<String, String> {
-        let body = serde_json::to_vec(body).map_err(|e| e.to_string())?;
+        self.request(path, body).map_err(|e| e.to_string())
+    }
+
+    /// Posts `body` to `path`: the answer's text, or why not, with the
+    /// console's own reason when it refused the request.
+    fn request<T: serde::Serialize>(&self, path: &str, body: &T) -> Result<String, LinkError> {
+        let body = serde_json::to_vec(body).map_err(|e| LinkError::Unreachable(e.to_string()))?;
         let auth = format!("Bearer {}", self.token);
         let reply = self
             .http
@@ -76,13 +86,58 @@ impl ConsoleClient {
             .map_err(|e| match e {
                 ProviderError::Unavailable(m)
                 | ProviderError::NotConfigured(m)
-                | ProviderError::Rejected(m) => m,
+                | ProviderError::Rejected(m) => LinkError::Unreachable(m),
             })?;
         match reply.status {
             200 => Ok(reply.body),
-            401 | 403 => Err("the console didn't accept this device's enrollment".into()),
-            status => Err(format!("the console answered {status}")),
+            401 | 403 => Err(LinkError::Unreachable(
+                "the console didn't accept this device's enrollment".into(),
+            )),
+            400 | 404 | 409 => Err(LinkError::Refused(
+                serde_json::from_str::<serde_json::Value>(&reply.body)
+                    .ok()
+                    .and_then(|v| v["error"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| format!("the console answered {}", reply.status)),
+            )),
+            status => Err(LinkError::Unreachable(format!(
+                "the console answered {status}"
+            ))),
         }
+    }
+
+    fn answer<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, LinkError> {
+        serde_json::from_str(text)
+            .map_err(|e| LinkError::Unreachable(format!("the console's answer doesn't parse: {e}")))
+    }
+
+    fn seq(text: &str) -> Result<u64, LinkError> {
+        Self::answer::<serde_json::Value>(text)?["seq"]
+            .as_u64()
+            .ok_or_else(|| LinkError::Unreachable("the console's answer has no seq".into()))
+    }
+}
+
+/// Chat's device routes (ADR 0030): what glassd's chat store sends and
+/// fetches, all of it sealed before it gets here.
+impl ChatLink for ConsoleClient {
+    fn register(&self, request: &RegisterKey) -> Result<(), LinkError> {
+        self.request("/device/v1/chat/keys", request).map(drop)
+    }
+
+    fn lookup(&self, request: &LookupKeys) -> Result<Keys, LinkError> {
+        Self::answer(&self.request("/device/v1/chat/keys/lookup", request)?)
+    }
+
+    fn create(&self, request: &CreateConversation) -> Result<u64, LinkError> {
+        Self::seq(&self.request("/device/v1/chat/conversations", request)?)
+    }
+
+    fn post(&self, request: &PostMessage) -> Result<u64, LinkError> {
+        Self::seq(&self.request("/device/v1/chat/messages", request)?)
+    }
+
+    fn sync(&self, request: &ChatSyncRequest) -> Result<ChatSyncResponse, LinkError> {
+        Self::answer(&self.request("/device/v1/chat/sync", request)?)
     }
 }
 
@@ -132,6 +187,29 @@ mod tests {
         );
         assert!(request.head.contains("Authorization: Bearer enroll-123"));
         assert!(request.body.contains("\"policy\":3"), "{}", request.body);
+    }
+
+    #[test]
+    fn cf91_a_refused_chat_request_carries_the_consoles_reason() {
+        let (url, got) = fake::serve(409, r#"{"error":"sam isn't in this conversation."}"#);
+        let client = ConsoleClient::new(&url, "enroll-123", true).unwrap();
+        let err = ChatLink::lookup(
+            &client,
+            &LookupKeys {
+                logins: vec!["sam".into()],
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            LinkError::Refused("sam isn't in this conversation.".into())
+        );
+        assert!(
+            got.recv()
+                .unwrap()
+                .head
+                .starts_with("POST /device/v1/chat/keys/lookup ")
+        );
     }
 
     #[test]

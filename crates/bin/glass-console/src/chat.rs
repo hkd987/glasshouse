@@ -256,7 +256,6 @@ impl ChatState {
             .filter(|k| k.device == request.device && request.logins.contains(&k.login))
             .collect();
         let logins: BTreeSet<&str> = mine.iter().map(|k| k.login.as_str()).collect();
-        let my_keys: BTreeSet<&str> = mine.iter().map(|k| k.id.as_str()).collect();
         let theirs: Vec<&Stored> = self
             .conversations
             .values()
@@ -268,17 +267,8 @@ impl ChatState {
             })
             .collect();
         let ids: BTreeSet<&str> = theirs.iter().map(|s| s.conversation.id.as_str()).collect();
-        let epochs = theirs
-            .iter()
-            .flat_map(|s| &s.epochs)
-            .map(|e| {
-                let mut e = e.clone();
-                e.body
-                    .envelopes
-                    .retain(|env| my_keys.contains(env.key.as_str()));
-                e
-            })
-            .collect();
+        // Whole: the maker's signature covers every envelope.
+        let epochs = theirs.iter().flat_map(|s| s.epochs.clone()).collect();
         let messages: Vec<Message> = self
             .messages
             .iter()
@@ -598,11 +588,9 @@ mod tests {
         // Dana's computer gets it, opens it, and IT's key opens it too.
         let got = org.sync(&dana, 0, 0).await;
         let epoch = &got.epochs[0];
-        assert_eq!(
-            epoch.body.envelopes.len(),
-            1,
-            "only this computer's envelope travels to it"
-        );
+        epoch
+            .verify(got.keys.iter().find(|k| k.login == "priya").unwrap())
+            .expect("it travels whole, as signed");
         let dana_key = epoch.open(&dana.key.id, &dana.secret.agree).unwrap();
         let message = &got.messages[0];
         message
@@ -832,5 +820,90 @@ mod tests {
         let (answer, took) = waiting.await.unwrap();
         assert_eq!(answer.messages.len(), 1);
         assert!(took < Duration::from_secs(1), "{took:?}");
+    }
+
+    /// glassd's chat on two computers, through the console's device API
+    /// over HTTP with the client glassd uses: what one posts, the other
+    /// checks and opens; the console's refusals arrive in words.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cf91_two_computers_chat_through_the_consoles_device_api() {
+        use glass_actions::ActionProvider;
+        use glass_app_chat::{ChatHandle, ChatProvider};
+
+        let org = Org::new().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(Arc::clone(&org.console).serve(listener));
+        let token = org.token.clone();
+        let compliance = org.console.state().chat.compliance.clone();
+        let dir = org.dir.path().join("computers");
+        tokio::task::spawn_blocking(move || {
+            let computer = |name: &str| {
+                let handle = ChatHandle::new(dir.join(name));
+                let client =
+                    glass_gateway_providers::ConsoleClient::new(&url, &token, true).unwrap();
+                handle.connect("acme", name, Arc::new(client));
+                let key = glass_crypto::PublicKey::from_bytes(&hex::decode(&compliance).unwrap())
+                    .unwrap();
+                let release = glass_managed::ChatRelease::new(&key);
+                handle
+                    .set_compliance(&release.compliance, &release.fingerprint)
+                    .unwrap();
+                let provider =
+                    ChatProvider::new(handle.clone(), glass_managed::DirectoryHandle::new());
+                (provider, handle)
+            };
+            let call = |on: &ChatProvider, login: &str, action: &str, input: Value| {
+                let mut ctx = glass_actions::testing::context(Path::new("/nonexistent"));
+                ctx.principal.on_behalf_of.name = login.into();
+                ctx.principal.agent = "chat".parse().unwrap();
+                on.invoke(&ctx, &action.parse().unwrap(), &input)
+            };
+            let (a, a_chat) = computer("dev-a");
+            let (b, b_chat) = computer("dev-b");
+            call(&b, "dana", "chat.list", json!({})).unwrap();
+            let sent = call(
+                &a,
+                "priya",
+                "chat.post",
+                json!({ "posts": [{ "to": ["dana"], "text": "The Northwind terms are in" }] }),
+            )
+            .unwrap();
+            assert_eq!(sent.text, "Posted 1 message in dana.");
+
+            assert!(b_chat.sync_once(0).unwrap());
+            let list = call(&b, "dana", "chat.list", json!({})).unwrap();
+            assert_eq!(list.data["conversations"][0]["unread"], 1, "{}", list.text);
+            let id = list.data["conversations"][0]["id"].clone();
+            let read = call(&b, "dana", "chat.read", json!({ "conversation": id })).unwrap();
+            assert_eq!(
+                read.data["messages"][0]["text"], "The Northwind terms are in",
+                "{}",
+                read.text
+            );
+            call(
+                &b,
+                "dana",
+                "chat.post",
+                json!({ "posts": [{ "conversation": id, "text": "Reading now" }] }),
+            )
+            .unwrap();
+            a_chat.sync_once(0).unwrap();
+            let read = call(&a, "priya", "chat.read", json!({ "conversation": id })).unwrap();
+            assert_eq!(
+                read.data["messages"][1]["text"], "Reading now",
+                "{}",
+                read.text
+            );
+
+            // Dana on a second computer: the console's refusal, in words.
+            let (c, _) = computer("dev-c");
+            let refused = call(&c, "dana", "chat.list", json!({}))
+                .unwrap_err()
+                .to_string();
+            assert!(refused.contains("already has chat on dev-b"), "{refused}");
+        })
+        .await
+        .unwrap();
     }
 }

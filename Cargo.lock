@@ -418,6 +418,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-app-chat"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-crypto",
+ "glass-managed",
+ "glass-types",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "glass-app-files"
 version = "0.1.0"
 dependencies = [
@@ -526,8 +541,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "glass-actions",
+ "glass-app-chat",
  "glass-crypto",
  "glass-first-party",
+ "glass-gateway-providers",
  "glass-http",
  "glass-managed",
  "glass-policy",
@@ -586,6 +604,7 @@ dependencies = [
  "glass-actions",
  "glass-app-calendar",
  "glass-app-catalog",
+ "glass-app-chat",
  "glass-app-files",
  "glass-app-helpdesk",
  "glass-app-mail",
@@ -727,6 +746,7 @@ dependencies = [
  "glass-api",
  "glass-app-calendar",
  "glass-app-catalog",
+ "glass-app-chat",
  "glass-app-files",
  "glass-app-helpdesk",
  "glass-app-mail",
@@ -735,6 +755,7 @@ dependencies = [
  "glass-app-system",
  "glass-audit",
  "glass-broker",
+ "glass-crypto",
  "glass-gateway",
  "glass-managed",
  "glass-platform",

@@ -196,7 +196,9 @@ fn envelope_aad(conversation: &str, epoch: u32, key: &str) -> Vec<u8> {
     format!("{conversation}|{epoch}|{key}").into_bytes()
 }
 
-/// What an epoch says, signed by the member key that made it.
+/// What an epoch says, signed by the member key that made it. The
+/// signature covers the envelopes too, so whoever relays an epoch sends it
+/// whole.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EpochBody {
@@ -567,7 +569,7 @@ pub struct ChatSyncResponse {
     /// The conversations those people are in.
     #[serde(default)]
     pub conversations: Vec<Conversation>,
-    /// Their epochs, with only this computer's envelopes and IT's.
+    /// Their epochs, whole: the maker's signature covers every envelope.
     #[serde(default)]
     pub epochs: Vec<Epoch>,
     /// Messages after `since`, oldest first.
@@ -578,6 +580,225 @@ pub struct ChatSyncResponse {
     pub keys: Vec<MemberKey>,
     /// Ask again with this.
     pub cursor: u64,
+}
+
+/// Why a request to the console didn't go through.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LinkError {
+    /// The console couldn't be reached, or didn't accept this computer.
+    #[error("{0}")]
+    Unreachable(String),
+    /// The console refused the request, and says why.
+    #[error("{0}")]
+    Refused(String),
+}
+
+/// How a computer reaches its console for chat: the device API's chat
+/// routes (ADR 0030). glassd's goes through `ConsoleClient`, the one crate
+/// that leaves the machine; tests use a fake. Every method blocks.
+pub trait ChatLink: Send + Sync + std::fmt::Debug {
+    fn register(&self, request: &RegisterKey) -> std::result::Result<(), LinkError>;
+    fn lookup(&self, request: &LookupKeys) -> std::result::Result<Keys, LinkError>;
+    /// The new conversation's sequence number.
+    fn create(&self, request: &CreateConversation) -> std::result::Result<u64, LinkError>;
+    /// The message's sequence number.
+    fn post(&self, request: &PostMessage) -> std::result::Result<u64, LinkError>;
+    fn sync(&self, request: &ChatSyncRequest) -> std::result::Result<ChatSyncResponse, LinkError>;
+}
+
+/// A console in memory for tests of computers' chat: it keeps and relays
+/// records with the console's main checks, and answers at once.
+pub mod testing {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[derive(Debug, Default)]
+    struct Kept {
+        keys: Vec<MemberKey>,
+        conversations: Vec<(Conversation, Vec<Epoch>)>,
+        messages: Vec<Message>,
+        seq: u64,
+    }
+
+    #[derive(Debug)]
+    pub struct MemoryLink {
+        compliance: String,
+        kept: Mutex<Kept>,
+        offline: AtomicBool,
+    }
+
+    fn refused<T>(m: &str) -> std::result::Result<T, LinkError> {
+        Err(LinkError::Refused(m.into()))
+    }
+
+    impl MemoryLink {
+        /// A console whose org's compliance key is `compliance`.
+        pub fn new(compliance: &PublicKey) -> Self {
+            Self {
+                compliance: hex::encode(compliance.to_bytes()),
+                kept: Mutex::new(Kept::default()),
+                offline: AtomicBool::new(false),
+            }
+        }
+
+        /// Out of reach, or back.
+        pub fn offline(&self, offline: bool) {
+            self.offline.store(offline, Ordering::SeqCst);
+        }
+
+        fn kept(&self) -> std::result::Result<std::sync::MutexGuard<'_, Kept>, LinkError> {
+            if self.offline.load(Ordering::SeqCst) {
+                return Err(LinkError::Unreachable("connection refused".into()));
+            }
+            Ok(self
+                .kept
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner))
+        }
+
+        /// Every message posted, in order.
+        pub fn messages(&self) -> Vec<Message> {
+            self.kept
+                .lock()
+                .map(|k| k.messages.clone())
+                .unwrap_or_default()
+        }
+
+        /// Keeps `message` as if posted, unchecked: what a dishonest
+        /// console could send.
+        pub fn inject(&self, mut message: Message) {
+            if let Ok(mut kept) = self.kept.lock() {
+                kept.seq += 1;
+                message.seq = kept.seq;
+                kept.messages.push(message);
+            }
+        }
+    }
+
+    impl ChatLink for MemoryLink {
+        fn register(&self, request: &RegisterKey) -> std::result::Result<(), LinkError> {
+            let mut kept = self.kept()?;
+            let key = &request.key;
+            if key.keys().is_err() {
+                return refused("a member key doesn't check");
+            }
+            if !kept.keys.iter().any(|k| k.id == key.id) {
+                kept.keys
+                    .retain(|k| !(k.login == key.login && k.device == key.device));
+                kept.keys.push(key.clone());
+            }
+            Ok(())
+        }
+
+        fn lookup(&self, request: &LookupKeys) -> std::result::Result<Keys, LinkError> {
+            let kept = self.kept()?;
+            Ok(Keys {
+                keys: kept
+                    .keys
+                    .iter()
+                    .filter(|k| request.logins.contains(&k.login))
+                    .cloned()
+                    .collect(),
+                compliance: self.compliance.clone(),
+            })
+        }
+
+        fn create(&self, request: &CreateConversation) -> std::result::Result<u64, LinkError> {
+            let mut kept = self.kept()?;
+            let maker = kept
+                .keys
+                .iter()
+                .find(|k| k.id == request.epoch.body.made_by && k.device == request.device);
+            if !maker.is_some_and(|k| request.epoch.verify(k).is_ok()) {
+                return refused("The epoch's signature doesn't check.");
+            }
+            if !request
+                .epoch
+                .body
+                .envelopes
+                .iter()
+                .any(|e| e.key == COMPLIANCE)
+            {
+                return refused("Every epoch is sealed to IT's compliance key too.");
+            }
+            kept.seq += 1;
+            kept.conversations
+                .push((request.conversation.clone(), vec![request.epoch.clone()]));
+            Ok(kept.seq)
+        }
+
+        fn post(&self, request: &PostMessage) -> std::result::Result<u64, LinkError> {
+            let mut kept = self.kept()?;
+            let Ok(header) = request.message.header() else {
+                return refused("a message's header is malformed");
+            };
+            let Some((conversation, _)) = kept
+                .conversations
+                .iter()
+                .find(|(c, _)| c.id == header.conversation)
+            else {
+                return refused("No such conversation.");
+            };
+            if !conversation.members.contains(&header.sender) {
+                return refused("The sender isn't in this conversation.");
+            }
+            let key = kept.keys.iter().find(|k| {
+                k.id == header.key && k.login == header.sender && k.device == request.device
+            });
+            if !key.is_some_and(|k| request.message.verify(k).is_ok()) {
+                return refused("The message's signature doesn't check.");
+            }
+            kept.seq += 1;
+            let mut message = request.message.clone();
+            message.seq = kept.seq;
+            message.at = Some("2026-10-19T14:02:11Z".into());
+            kept.messages.push(message);
+            Ok(kept.seq)
+        }
+
+        fn sync(
+            &self,
+            request: &ChatSyncRequest,
+        ) -> std::result::Result<ChatSyncResponse, LinkError> {
+            let kept = self.kept()?;
+            let logins: Vec<&String> = kept
+                .keys
+                .iter()
+                .filter(|k| k.device == request.device && request.logins.contains(&k.login))
+                .map(|k| &k.login)
+                .collect();
+            let theirs: Vec<&(Conversation, Vec<Epoch>)> = kept
+                .conversations
+                .iter()
+                .filter(|(c, _)| c.members.iter().any(|m| logins.contains(&m)))
+                .collect();
+            let ids: Vec<&str> = theirs.iter().map(|(c, _)| c.id.as_str()).collect();
+            let people: Vec<&String> = theirs.iter().flat_map(|(c, _)| &c.members).collect();
+            Ok(ChatSyncResponse {
+                conversations: theirs.iter().map(|(c, _)| c.clone()).collect(),
+                epochs: theirs.iter().flat_map(|(_, e)| e.clone()).collect(),
+                messages: kept
+                    .messages
+                    .iter()
+                    .filter(|m| m.seq > request.since)
+                    .filter(|m| {
+                        m.header()
+                            .is_ok_and(|h| ids.contains(&h.conversation.as_str()))
+                    })
+                    .cloned()
+                    .collect(),
+                keys: kept
+                    .keys
+                    .iter()
+                    .filter(|k| people.contains(&&k.login))
+                    .cloned()
+                    .collect(),
+                cursor: kept.seq,
+            })
+        }
+    }
 }
 
 #[cfg(test)]

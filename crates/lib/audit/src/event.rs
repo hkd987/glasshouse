@@ -83,6 +83,14 @@ pub enum EventKind {
     /// A release from the admin console was refused; the device kept what
     /// it had (ADR 0023).
     ManagedRefused,
+    /// A chat member key was made and registered for a person on this
+    /// computer (ADR 0030).
+    ChatKeyMade,
+    /// A chat record from the console failed a check and was kept out
+    /// (ADR 0030).
+    ChatRefused,
+    /// IT's Chat release (the compliance key) was applied (ADR 0030).
+    ChatLoaded,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

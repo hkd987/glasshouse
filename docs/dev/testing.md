@@ -52,7 +52,7 @@ glassctl approvals
 glassctl approve <id>       # or: deny, --for-task
 glassctl show <task>        # Now, Activity, Changes, Can't touch, Timeline
 glassctl undo <task> --dry-run
-glassctl run containment-probe "Try to escape"   # must end Done, 22/22
+glassctl run containment-probe "Try to escape"   # must end Done, 23/23
 ```
 
 As root: `glassctl verify`, `jls`, `zfs list -t snapshot`, `tail /var/log/glassd.log`.
@@ -68,7 +68,7 @@ of a sequence of commands (host or VM, as any user) as a PNG. The
 
 - A change to containment, the broker or the audit log needs an e2e run.
 - The probe must stay honest: it ends Failed on the host backend (13/22) and
-  Done in a jail (22/22). If you add a sandbox surface, add a probe check.
+  Done in a jail (23/23). If you add a sandbox surface, add a probe check.
   The two socket checks ("reach the control socket", "reach the app
   socket") look where an image keeps glassd's sockets
   (`/var/run/glasshouse`), so on the host backend, whose sockets are in

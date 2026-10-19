@@ -125,7 +125,7 @@ thumbnails are not started.
 | AU-1 Each action logged with user, agent, task, action, target, decision, approval, snapshot | **Done** | model calls carry their call record (DP-5) |
 | AU-2 Append-only, hash-chained, streamed in OCSF/CEF to the SIEM | Partial | chain + verify done (unit tamper tests); OCSF/CEF export, streaming and OpenBSM not started |
 | AU-3 Rebuild any task end to end | **Done** | `audit.task`, `glassctl audit` |
-| AU-10 "by [agent] for [user]" metadata | **Done** | xattr on files, header on mail (verified in the VM) |
+| AU-10 "by [agent] for [user]" metadata | **Done** | xattr on files, header on mail (verified in the VM), sealed inside an agent's chat message (`au10_an_agents_message_carries_by_agent_for_user_inside_the_seal`) |
 | AU-20 Snapshots before Notify steps, every 5 min, kept 30 days | Partial | before Notify and first change done; cadence and retention not started (snapshots are never destroyed yet) |
 | AU-21 Undo all, lists what it couldn't undo | **Done** | pipeline + e2e `invoices`; single changes too (Changes mockup): pipeline `undoing_single_changes…`, e2e `changes`. Only the task's own files, and a file changed since is left and listed (ADR 0017): `crates/svc/runtime/tests/undo.rs` |
 
@@ -173,7 +173,7 @@ thumbnails are not started.
 | CF-81 Support tiers by directory role, set by IT | Partial | `[support]` in policy: help desk, desktop support and security seeded into a new org; IT edits, previews and publishes them on the console's Remote help page; every console route needs an admin unless named a support route (`cf80_support_staff_reach_nothing_but_remote_help`). The tools themselves come with sessions |
 | CF-82 Consent per session, banner, unattended rules, audit | Not started | ADR 0028 slice b |
 | CF-90 Hand agent work to a colleague in Teams or Slack | Not started | |
-| CF-91 Our own chat app: end to end encrypted, IT holds a compliance key; agents read freely, post with a yes | Not started | Changed by the owner 2026-10-19 (it said we'd ship no messaging app) |
+| CF-91 Our own chat app: end to end encrypted, IT holds a compliance key; agents read freely, post with a yes | In progress | ADR 0030 slice C1. Built: sealing (`glass-crypto`, CFRG vectors), the console's relay that never holds plaintext (`gt3_the_console_never_holds_chat_plaintext`), glassd's member keys, store and sync, `chat.list`/`chat.read` (Auto) and `chat.post`/`chat.create` (Ask; Auto in Chat itself via `[[app]]`), tested in `crates/svc/runtime/tests/chat.rs`. Next: the Chat app. Before a pilot: presence (C2), device keys (P). Changed by the owner 2026-10-19 (it said we'd ship no messaging app) |
 
 ## Power management
 

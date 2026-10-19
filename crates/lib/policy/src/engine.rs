@@ -70,6 +70,18 @@ impl Policy {
                 }
             }
         }
+        let mut seen_apps = std::collections::BTreeSet::new();
+        for app in &doc.apps {
+            if !seen_apps.insert(&app.id) {
+                errors.push(format!("app {:?} has more than one [[app]]", app.id));
+            }
+            if doc.agents.iter().any(|a| a.id == app.id) {
+                errors.push(format!(
+                    "[[app]] {:?} is an agent; apps and agents share one namespace",
+                    app.id
+                ));
+            }
+        }
         let mut seen_agents = std::collections::BTreeSet::new();
         for agent in &doc.agents {
             if !seen_agents.insert(&agent.id) {
@@ -176,8 +188,10 @@ impl Policy {
     /// The effective rules for an app acting for `user` (UI-5, ADR 0024):
     /// declaration ∩ policy (DV-3, ADR 0008). The app may call only the
     /// actions it `declares`, each at the tier org and group rules give
-    /// it; it opens nothing above `max_label` or the user's groups' limits;
-    /// it has no network and no models.
+    /// it, with the app's own `[[app]]` tiers as its rules (ADR 0030), so
+    /// a group's stricter tier still wins; it opens nothing above
+    /// `max_label` or the user's groups' limits; it has no network and no
+    /// models.
     pub fn for_app(
         &self,
         user: &str,
@@ -192,7 +206,13 @@ impl Policy {
                 .iter()
                 .filter_map(|name| name.as_str().parse().ok())
                 .collect(),
-            tiers: BTreeMap::new(),
+            tiers: self
+                .doc
+                .apps
+                .iter()
+                .find(|a| &a.id == app)
+                .map(|a| a.tiers.clone())
+                .unwrap_or_default(),
             max_label: Some(max_label),
             egress: Vec::new(),
             models: Some(Vec::new()),
@@ -232,6 +252,9 @@ impl Policy {
     ///
     /// Each agent is checked once per group that grants it, as a member of
     /// that group and `everyone` only.
+    ///
+    /// `[[app]]` tiers aren't linted: the default policy's own Chat rule
+    /// puts posting below Ask on purpose, held by presence (ADR 0030).
     pub fn lint(&self, actions: &[(ActionName, SideEffect, Tier)]) -> Vec<String> {
         let everyone = self.doc.groups.iter().filter(|g| g.name == EVERYONE);
         let mut warnings = Vec::new();
@@ -651,6 +674,34 @@ mod tests {
         assert_eq!(eff.models().allowed().count(), 0, "apps call no models");
         let stranger = policy.for_app("stranger", &app, &declared, Label::Public);
         assert_eq!(stranger.max_label(), Label::Public);
+    }
+
+    #[test]
+    fn cf91_an_apps_own_tiers_apply_to_its_sessions_and_a_stricter_group_still_wins() {
+        let text = format!(
+            "{}\n[[group]]\nname = \"legal\"\nmembers = [\"priya\"]\n[group.tiers]\n\"chat.post\" = \"ask\"\n",
+            crate::DEFAULT_POLICY
+        );
+        let policy = Policy::from_toml(&text).unwrap();
+        let chat: AgentId = "chat".parse().unwrap();
+        let declared = [name("chat.post"), name("chat.read")];
+        let tier = |user: &str, app: &AgentId| {
+            policy
+                .for_app(user, app, &declared, Label::Internal)
+                .tier_for(&name("chat.post"), Tier::Ask)
+                .tier
+        };
+        // What the person types in Chat doesn't ask; in another app that
+        // declares chat.post, the org's Ask holds.
+        assert_eq!(tier("dana", &chat), Tier::Auto);
+        assert_eq!(tier("dana", &"mail".parse().unwrap()), Tier::Ask);
+        // A group that asks for every message wins over the app's rule.
+        assert_eq!(tier("priya", &chat), Tier::Ask);
+
+        let twice = format!("{}\n[[app]]\nid = \"chat\"\n", crate::DEFAULT_POLICY);
+        assert!(Policy::from_toml(&twice).is_err());
+        let agent = format!("{}\n[[app]]\nid = \"claude-code\"\n", crate::DEFAULT_POLICY);
+        assert!(Policy::from_toml(&agent).is_err());
     }
 
     #[test]

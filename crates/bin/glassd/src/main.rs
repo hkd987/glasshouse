@@ -164,6 +164,9 @@ pub(crate) struct OrgData {
     /// Device settings: policy's, and each person's choices, kept in the
     /// state directory by uid (UX-1, ADR 0029).
     pub(crate) settings: glass_runtime::SettingsHandle,
+    /// The org's chat: member keys and the sealed store, root only in the
+    /// state directory (CF-91, ADR 0030). Connected once managed sync runs.
+    pub(crate) chat: glass_first_party::ChatHandle,
 }
 
 impl OrgData {
@@ -172,6 +175,7 @@ impl OrgData {
             catalog: CatalogHandle::new(),
             directory: glass_managed::DirectoryHandle::new(),
             settings: glass_runtime::SettingsHandle::new(state_dir.join("settings")),
+            chat: glass_first_party::ChatHandle::new(state_dir.join("chat")),
         }
     }
 }
@@ -254,6 +258,7 @@ fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<R
         // registry rebuilt around it.
         mail: policy.mail().cloned(),
         settings: org.settings.clone(),
+        chat: org.chat.clone(),
         managed: config.managed.is_some(),
     })?)
 }
@@ -273,7 +278,14 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         .control_socket
         .parent()
         .context("control socket needs a parent directory")?;
-    for (dir, mode) in [(config.state_dir.as_path(), 0o700), (run_dir, 0o755)] {
+    // Chat's member keys live under the state folder, root only (ADR 0030);
+    // made here so the containment probe has something to try.
+    let chat_dir = config.state_dir.join("chat");
+    for (dir, mode) in [
+        (config.state_dir.as_path(), 0o700),
+        (chat_dir.as_path(), 0o700),
+        (run_dir, 0o755),
+    ] {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode))?;
     }
@@ -389,6 +401,16 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
 
     // A new agent version re-checks every layer on it (TL-13).
     runtime.recheck_layers();
+
+    // Chat's keys and the records it kept out go in the audit log (AU-1).
+    {
+        let runtime = Arc::clone(&runtime);
+        org.chat.on_notice(move |notice| {
+            if let Some(event) = managed::chat_event(notice) {
+                runtime.append_audit(event);
+            }
+        });
+    }
 
     // The browser's settings from policy (UX-1): written now, and again
     // whenever a new policy changes anyone's settings.

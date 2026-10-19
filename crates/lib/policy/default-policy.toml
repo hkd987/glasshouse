@@ -62,6 +62,13 @@ approval_timeout_secs = 900
 # any agent's allowed actions.
 "settings.list" = "auto"
 "settings.set" = "auto"
+# Chat (CF-91, ADR 0030): reading the person's conversations is quiet;
+# posting and making a channel leave the machine and can't be taken back,
+# so they ask. What the person types in Chat itself is the [[app]] below.
+"chat.list" = "auto"
+"chat.read" = "auto"
+"chat.post" = "ask"
+"chat.create" = "ask"
 "security.*" = "never"
 "vendors.bank_details.*" = "never"
 "data.export_bulk" = "never"
@@ -119,11 +126,20 @@ services = ["cron", "ntpd", "openvpn", "cupsd"]
 [[group]]
 name = "everyone"
 agents = ["it-agent", "invoice-demo", "containment-probe", "claude-code"]
-apps = ["browser", "mail", "calendar", "store", "settings", "activity-monitor", "terminal"]
+apps = ["browser", "mail", "calendar", "chat", "store", "settings", "activity-monitor", "terminal"]
 
 [[group]]
 name = "it-admins"
 apps = ["console"]
+
+# What the person types in Chat doesn't ask: they just typed it. These are
+# the Chat app's own rules, so a group that sets "chat.post" = "ask" still
+# asks its members for every message. A tier lowered here is to be held
+# only for a call the person just made in Chat's window (presence, ADR
+# 0030 slice C2); until that lands, nothing reaches a pilot org.
+[[app]]
+id = "chat"
+tiers = { "chat.post" = "auto", "chat.create" = "auto" }
 
 # IT self-service (AE-4): diagnoses this computer and fixes what's on IT's
 # list. The only agent allowed the system actions, which glassd runs with its
@@ -139,13 +155,14 @@ id = "invoice-demo"
 allowed_actions = ["files.*", "mail.*"]
 
 # The user's own Claude Code, connected through glass-mcp (HX-1): Take over on
-# an ended task carries on there. Before it builds something it checks the
+# an ended task carries on there. It reads the person's chat quietly and asks
+# before it posts (CF-91). Before it builds something it checks the
 # org's catalog for an approved app that already does it (GA-2). Its calls go
 # through the same tiers, audit and undo as any agent's. Confidential data
 # stays out of harnesses that send model traffic to their own provider (HX-7).
 [[agent]]
 id = "claude-code"
-allowed_actions = ["files.*", "mail.*", "calendar.*", "catalog.search", "people.search", "settings.list"]
+allowed_actions = ["files.*", "mail.*", "calendar.*", "catalog.search", "people.search", "settings.list", "chat.list", "chat.read", "chat.post"]
 max_label = "internal"
 
 # Diagnostics agent that tries to break out of its sandbox and reports what it
