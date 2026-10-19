@@ -360,6 +360,12 @@ function reading(message: Message): HTMLElement {
   const draft = message.folder === "inbox" ? draftFor(message, state.lists.drafts) : null;
   const isDraft = message.folder === "drafts";
   const sent = isDraft && wasSent(message, state.lists.sent);
+  const waiting = state.outbox.some(
+    (p) =>
+      (p.state === "waiting" || p.state === "sending") &&
+      p.message.subject === message.subject &&
+      p.message.to.join() === message.to.join(),
+  );
   return h(
     "article",
     { class: "message", "data-test": "message" },
@@ -386,11 +392,11 @@ function reading(message: Message): HTMLElement {
             "button",
             {
               class: "button primary",
-              disabled: state.offline || sent,
+              disabled: state.offline || sent || waiting,
               onclick: () => void send({ to: message.to, subject: message.subject, body: message.body }),
               "data-test": "send-draft",
             },
-            sent ? "Sent" : "Send",
+            sent ? "Sent" : waiting ? "Waiting for approval" : "Send",
           )
         : null,
       isDraft

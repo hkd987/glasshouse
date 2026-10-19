@@ -11,6 +11,7 @@ import {
   fromWall,
   isOwn,
   layout,
+  shortRange,
   startOfWeek,
   timeRange,
   wall,
@@ -85,4 +86,9 @@ test("own events, and what a new event lacks", () => {
     "Pick a day.",
     "It has to end after it starts.",
   ]);
+});
+
+test("the week view's short times", () => {
+  assert.match(shortRange("2026-10-20T09:00", "2026-10-20T09:30"), /^9 – 9:30\sAM$/);
+  assert.match(shortRange("2026-10-20T11:00", "2026-10-20T12:00"), /^11\sAM – 12\sPM$/);
 });

@@ -23,7 +23,8 @@ export FREEBSD_PROFILE
 export DIST_PROFILE := $(FREEBSD_PROFILE)
 
 .PHONY: help build check test lint lint-all fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
-	test-env image-release legal-base ci clean shell shell-test shell-lint shell-preview shell-vm greeter-vm
+	test-env image-release legal-base ci clean shell shell-test shell-lint shell-preview shell-vm greeter-vm \
+	apps-build apps-test apps-lint apps-dev
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -114,7 +115,33 @@ greeter-vm: ## Boot-like sign-in on the dev VM: the sign-in screen, then the des
 	cargo build $(SHELL_MANIFEST) --target $(FREEBSD_TARGET) -p glass-shell-fb -p glass-greeter
 	os/freebsd/scripts/shell-vm.sh greeter
 
-ci: lint-all test shell-lint shell-test ## What CI runs on every change
+# The first-party web apps and their SDK (ADR 0009, 0024): a TypeScript
+# workspace in apps/, built with esbuild, tested in headless Chromium against
+# the development host's glassd and the app bridge. See apps/README.md.
+APPS_BROWSERS := /opt/pw-browsers
+
+apps/node_modules: apps/package.json apps/package-lock.json
+	cd apps && npm ci --no-audit --no-fund
+	@touch apps/node_modules
+
+apps-build: apps/node_modules ## Build the web apps into apps/<app>/dist (esbuild)
+	cd apps && node build.mjs
+
+apps-test: apps-build ## Apps: type check, unit tests, Playwright e2e (cold launch and memory budgets) on dev-host glassd
+	cd apps && npm run --silent typecheck
+	cd apps && npm run --silent test:unit
+	cargo build -p glassd -p glassctl -p glass-app-bridge
+	cd apps && PLAYWRIGHT_BROWSERS_PATH=$(APPS_BROWSERS) npx playwright test -c e2e/playwright.config.ts
+
+apps-lint: apps/node_modules ## Apps: types, manifests (DV-3), npm licenses
+	cd apps && npm run --silent lint
+	tools/legal/npm_licenses.py apps
+
+apps-dev: apps-build ## Serve the apps from make dev-host's glassd: http://mail.localhost:7300
+	cargo build -p glass-app-bridge
+	$${CARGO_TARGET_DIR:-target}/debug/glass-app-bridge --dev --apps apps --socket build/dev/run/apps.sock
+
+ci: lint-all test shell-lint shell-test apps-lint apps-test ## What CI runs on every change
 
 clean: ## Remove build outputs (keeps downloaded FreeBSD images in build/cache)
 	cargo clean

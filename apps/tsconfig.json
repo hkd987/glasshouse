@@ -17,6 +17,6 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["sdk/src", "sdk/test", "mail/src", "mail/test", "calendar/src", "calendar/test", "e2e"],
+  "include": ["check-manifests.ts", "sdk/src", "sdk/test", "mail/src", "mail/test", "calendar/src", "calendar/test", "e2e"],
   "exclude": ["**/dist", "node_modules", "sdk/src/sw.ts"]
 }

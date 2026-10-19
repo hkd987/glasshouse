@@ -22,6 +22,7 @@ import {
   isOwn,
   layout,
   longDay,
+  shortRange,
   startOfWeek,
   timeRange,
   wall,
@@ -31,7 +32,7 @@ import {
 
 const FIRST_HOUR = 7;
 const LAST_HOUR = 20;
-const HOUR_PX = 52;
+const HOUR_PX = 56;
 
 interface Draft {
   title: string;
@@ -166,7 +167,8 @@ function grid(): HTMLElement {
           const block = h(
             "button",
             {
-              class: `event ${p.event.kind}${own ? "" : " invited"}${byAgent ? " by-agent" : ""}${state.selected === p.event.id ? " selected" : ""}`,
+              class: `event ${p.event.kind}${own ? "" : " invited"}${byAgent ? " by-agent" : ""}${p.height < 30 ? " short" : ""}${state.selected === p.event.id ? " selected" : ""}`,
+              title: `${p.event.title}, ${timeRange(p.event.start, p.event.end)}`,
               "data-id": p.event.id,
               onclick: () => {
                 state.selected = p.event.id;
@@ -174,9 +176,17 @@ function grid(): HTMLElement {
                 render();
               },
             },
-            h("span", { class: "event-title" }, p.event.kind === "hold" ? `Hold: ${p.event.title}` : p.event.title),
-            p.height >= 40 ? h("span", { class: "event-time" }, timeRange(p.event.start, p.event.end)) : null,
-            byAgent && attribution && p.height >= 56 ? h("span", { class: "event-by" }, `by ${attribution.by}`) : null,
+            h("span", { class: "event-title" }, p.event.title),
+            p.height >= 40 ? h("span", { class: "event-time" }, shortRange(p.event.start, p.event.end)) : null,
+            p.height >= 55 && (byAgent || p.event.kind === "hold")
+              ? h(
+                  "span",
+                  { class: "event-by" },
+                  [p.event.kind === "hold" ? "Hold" : "", byAgent && attribution ? `by ${attribution.by}` : ""]
+                    .filter(Boolean)
+                    .join(" · "),
+                )
+              : null,
           );
           const width = 100 / p.columns;
           block.style.top = `${(p.top / 60) * HOUR_PX}px`;

@@ -84,6 +84,16 @@ export function timeRange(start: string, end: string): string {
   return aHalf === bHalf ? `${aTime} – ${b}` : `${a} – ${b}`;
 }
 
+/** The week view's short form: "9 – 9:30 AM", "11 AM – 12 PM". */
+export function shortRange(start: string, end: string): string {
+  const short = (text: string) => TIME.format(fromWall(text)).replace(":00", "");
+  const a = short(start);
+  const b = short(end);
+  const [aTime, aHalf] = a.split(/\s/);
+  const [, bHalf] = b.split(/\s/);
+  return aHalf === bHalf ? `${aTime} – ${b}` : `${a} – ${b}`;
+}
+
 /** "Monday, October 19" */
 export function longDay(text: string): string {
   return LONG_DAY.format(fromWall(text));
