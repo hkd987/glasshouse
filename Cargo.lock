@@ -377,9 +377,9 @@ dependencies = [
  "anyhow",
  "clap",
  "glass-api",
+ "glass-http",
  "glass-rpc",
  "glass-types",
- "httparse",
  "serde",
  "serde_json",
  "tokio",
@@ -562,6 +562,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "time",
+]
+
+[[package]]
+name = "glass-http"
+version = "0.1.0"
+dependencies = [
+ "httparse",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -42,6 +42,7 @@ glass-app-mail = { path = "crates/apps/mail" }
 glass-app-system = { path = "crates/apps/system" }
 glass-runtime = { path = "crates/svc/runtime" }
 glass-managed = { path = "crates/lib/managed" }
+glass-http = { path = "crates/lib/http" }
 glass-app-catalog = { path = "crates/apps/catalog" }
 
 # Third-party crates. Licenses must pass `deny.toml` (no copyleft).

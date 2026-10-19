@@ -1,7 +1,8 @@
-//! Just enough HTTP/1.1 for a loopback development server: one request per
-//! connection, heads parsed by httparse, bodies framed by Content-Length.
-//! Nothing here is reachable off the machine: the bridge binds loopback
-//! only.
+//! Just enough HTTP/1.1 for our small servers: one request per connection,
+//! heads parsed by httparse, bodies framed by Content-Length. The app
+//! bridge's development mode (ADR 0024) and the admin console (ADR 0023)
+//! serve with it, on loopback in development; in production the console
+//! sits behind our web servers' TLS.
 
 use std::time::Duration;
 
@@ -19,6 +20,8 @@ pub struct Request {
     pub method: String,
     /// The path without its query.
     pub path: String,
+    /// The query, without its `?`; empty when there is none.
+    pub query: String,
     /// Header names in lower case.
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
@@ -69,13 +72,16 @@ fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
         413 => "Payload Too Large",
         415 => "Unsupported Media Type",
         421 => "Misdirected Request",
         431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "Error",
@@ -100,7 +106,7 @@ pub async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Reques
 async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Request, ReadError> {
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 4096];
-    let (head_len, method, path, headers) = loop {
+    let (head_len, method, path, query, headers) = loop {
         let n = stream.read(&mut chunk).await.map_err(|_| ReadError::Gone)?;
         if n == 0 {
             return Err(ReadError::Gone);
@@ -122,8 +128,9 @@ async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Request, ReadError
                     .collect::<Vec<_>>();
                 let method = request.method.unwrap_or_default().to_owned();
                 let target = request.path.unwrap_or("/");
-                let path = target.split(['?', '#']).next().unwrap_or("/").to_owned();
-                break (len, method, path, headers);
+                let target = target.split('#').next().unwrap_or("/");
+                let (path, query) = target.split_once('?').unwrap_or((target, ""));
+                break (len, method, path.to_owned(), query.to_owned(), headers);
             }
             Ok(httparse::Status::Partial) if buf.len() < MAX_HEAD => {}
             Ok(httparse::Status::Partial) => {
@@ -160,6 +167,7 @@ async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Request, ReadError
     Ok(Request {
         method,
         path,
+        query,
         headers,
         body,
     })
