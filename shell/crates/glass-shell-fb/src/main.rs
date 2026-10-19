@@ -39,7 +39,6 @@ use glass_shell::{Message, Power, Theme, session, wallpaper};
 use glass_shell_fb::display::Display;
 use glass_shell_fb::input::{self, Input};
 use time::{OffsetDateTime, UtcOffset};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
@@ -293,22 +292,23 @@ fn ask_to_unlock(password: &Password) {
 }
 
 /// The sign-in screen's answers to unlock requests, a line each on
-/// standard input.
+/// standard input. Read on a thread of its own: a read can't be cancelled,
+/// and tokio's stdin would hold up the runtime's shutdown (signing out,
+/// SIGTERM) until a line came; a plain thread doesn't keep the process.
 fn sign_in_answers() -> mpsc::UnboundedReceiver<String> {
     let (send, answers) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(tokio::io::stdin()).lines();
-        loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => {
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines() {
+            match line {
+                Ok(line) => {
                     if send.send(line).is_err() {
                         return;
                     }
                 }
-                Ok(None) => return eprintln!("unlock: the sign-in screen closed its end"),
                 Err(e) => return eprintln!("unlock: reading the sign-in screen's answers: {e}"),
             }
         }
+        eprintln!("unlock: the sign-in screen closed its end");
     });
     answers
 }

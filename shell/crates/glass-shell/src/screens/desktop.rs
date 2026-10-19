@@ -616,7 +616,12 @@ fn dock<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
         .filter(|t| t.state == TileState::NeedsYou)
         .count();
     let mut agent_dots = Row::new().spacing(4).align_y(Vertical::Center);
-    for color in status_dots(theme, desktop.tasks) {
+    let mut colors = status_dots(theme, desktop.tasks);
+    if colors.is_empty() {
+        // No agent running: the icon's three dots, dimmed, not an empty tile.
+        colors = vec![hexa(0xFFFFFF, 0.28); 3];
+    }
+    for color in colors {
         agent_dots = agent_dots.push(dot(color, 7.0));
     }
     let agents = app(hex(0x15181D), agent_dots.into());
