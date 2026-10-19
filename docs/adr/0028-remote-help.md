@@ -110,6 +110,21 @@ work; it acts in apps as the person, and every action in the session is
 audited as made during it. (Proposed with the other answers; the owner
 can narrow it.)
 
+### Before slice (b): two gaps it must close first
+- **glassd authorizes control calls by uid only.** The kernel gives it
+  the caller's pid (`PeerCred.pid`, LOCAL_PEERCRED) but nothing reads it,
+  and nothing tells glassd which process is the person's desktop: the
+  sign-in screen starts it through `su -l` and never talks to glassd. So
+  today any program the person runs could answer a consent card. Step 1
+  starts by having the sign-in screen register the desktop's pid with
+  glassd for the session, and glassd taking consent answers, frames and
+  input only from that process.
+- **Signed releases have no expiry or device binding.** `Signed::verify`
+  checks the key, hash and `version > have` only, and a reload from disk
+  skips the version check. Offers need an expiry, the device they are
+  for, and a per-device sequence glassd remembers across restarts; policy
+  and catalog releases should get the same expiry check.
+
 ### Building slice (b)
 1. Offers and consent, no pixels: "Ask to see screen" signs an offer,
    the device checks it, the desktop asks, the answer and the banner are
