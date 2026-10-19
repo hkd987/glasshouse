@@ -890,6 +890,13 @@ fn ux20_the_cheat_sheet_lists_what_the_desktop_does_with_its_keys() {
             Message::SwitchWindows { back: false },
         ),
         ("Super /", ch("/"), Modifiers::LOGO, Message::OpenShortcuts),
+        ("Super N", ch("n"), Modifiers::LOGO, Message::ToggleAgents),
+        (
+            "Ctrl F2",
+            Key::Named(Named::F2),
+            Modifiers::CTRL,
+            Message::ToggleSystemMenu,
+        ),
         ("Super L", ch("l"), Modifiers::LOGO, Message::LockScreen),
         (
             "Ctrl Super Q",
@@ -923,9 +930,134 @@ fn ux20_the_cheat_sheet_lists_what_the_desktop_does_with_its_keys() {
         );
         assert_eq!(live.shortcut(&key, modifiers), Some(does), "{keys}");
     }
+    assert!(glass_shell::shortcuts::listed("Arrows, Enter"));
     // The sheet opens, and Esc closes it.
     live.update(Message::OpenShortcuts);
     assert!(live.takes_all_input());
     let esc = live.shortcut(&Key::Named(Named::Escape), Modifiers::empty());
     assert_eq!(esc, Some(Message::CloseSystemWindow));
+}
+
+/// What the shell claims for `key` alone, handed to `update` as the shell
+/// does; `None` when it isn't the shell's.
+fn press(live: &mut Live, key: Named) -> Option<Option<Effect>> {
+    let message = live.shortcut(&Key::Named(key), Modifiers::empty())?;
+    Some(live.update(message))
+}
+
+#[test]
+fn ux20_arrows_move_through_the_system_menu_past_what_cant_be_chosen_and_enter_chooses() {
+    use glass_shell::screens::command_bar;
+    let mut live = Live::new(fixtures::tasks()).signed_in_as("Dana Ruiz");
+    let open = live.shortcut(&Key::Named(Named::F2), Modifiers::CTRL);
+    assert_eq!(
+        open,
+        Some(Message::ToggleSystemMenu),
+        "Ctrl F2, as on a Mac"
+    );
+    live.update(Message::ToggleSystemMenu);
+    assert_eq!(press(&mut live, Named::Enter), None, "nothing selected yet");
+    // About, Keyboard Shortcuts, then past Check for Updates (not yet).
+    for _ in 0..3 {
+        assert_eq!(press(&mut live, Named::ArrowDown), Some(None));
+    }
+    assert_eq!(
+        press(&mut live, Named::Enter),
+        Some(Some(Effect::Focus(command_bar::INPUT))),
+        "Hand an agent a task…"
+    );
+    assert!(live.command_bar().is_some());
+    // The command bar's text field has the arrows and Enter now.
+    assert_eq!(press(&mut live, Named::ArrowDown), None);
+    assert_eq!(press(&mut live, Named::Enter), None);
+    live.update(Message::CloseCommandBar);
+
+    // Up from nothing selects the last line; round the ends as a menu does.
+    live.update(Message::ToggleSystemMenu);
+    press(&mut live, Named::ArrowUp); // Sign out
+    press(&mut live, Named::ArrowDown); // round to About
+    assert_eq!(press(&mut live, Named::Enter), Some(None));
+    assert_eq!(
+        live.shortcut(&Key::Named(Named::Escape), Modifiers::empty()),
+        Some(Message::CloseSystemWindow),
+        "About Glasshouse is open"
+    );
+}
+
+#[test]
+fn ux20_the_selected_line_is_drawn_and_a_menu_opens_with_none_selected() {
+    let theme = Theme::glass();
+    let mut live = Live::new(fixtures::tasks()).signed_in_as("Dana Ruiz");
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    let mut frame = |live: &Live| {
+        screen.render(live.view(&theme, None, artboard_time(), SIZE), None);
+        screen.bgra().to_vec()
+    };
+    live.update(Message::ToggleSystemMenu);
+    let plain = frame(&live);
+    press(&mut live, Named::ArrowDown);
+    assert_ne!(frame(&live), plain, "About is highlighted");
+    live.update(Message::ToggleSystemMenu);
+    live.update(Message::ToggleSystemMenu);
+    assert_eq!(frame(&live), plain, "opened again, nothing is selected");
+}
+
+#[test]
+fn ux20_arrows_and_enter_launch_an_app_from_the_launcher() {
+    use glass_shell::apps::FIRST_PARTY;
+    let mut live = Live::new(fixtures::tasks()).with_apps(FIRST_PARTY.to_vec());
+    live.update(Message::ToggleLauncher);
+    press(&mut live, Named::ArrowRight); // Terminal
+    press(&mut live, Named::ArrowRight); // Activity Monitor
+    assert_eq!(
+        press(&mut live, Named::Enter),
+        Some(Some(Effect::Launch("/usr/local/bin/glass-activity")))
+    );
+    assert!(!live.takes_all_input(), "the launcher closed");
+}
+
+#[test]
+fn ux20_super_n_opens_the_agents_menu_and_enter_opens_never_approves() {
+    use glass_shell::screens::desktop;
+    let tasks = fixtures::tasks();
+    let first = desktop::ordered(&tasks)[0].clone();
+    assert!(
+        first.needs.is_some(),
+        "needs-you first: the one Enter could approve"
+    );
+    let mut live = Live::new(tasks);
+    let ch = Key::Character("n".into());
+    assert_eq!(
+        live.shortcut(&ch, Modifiers::LOGO),
+        Some(Message::ToggleAgents)
+    );
+    live.update(Message::ToggleAgents);
+    press(&mut live, Named::ArrowDown);
+    assert_eq!(
+        press(&mut live, Named::Enter),
+        Some(Some(Effect::Get(first.id))),
+        "its expanded view, where the ask is answered"
+    );
+}
+
+#[test]
+fn ux20_arrows_and_enter_stay_the_apps_when_no_menu_is_open() {
+    let mut live = Live::new(fixtures::tasks());
+    live.set_windows(windows(&[(7, "Terminal")]));
+    let keys = [
+        Named::ArrowUp,
+        Named::ArrowDown,
+        Named::ArrowLeft,
+        Named::ArrowRight,
+        Named::Home,
+        Named::End,
+        Named::Enter,
+    ];
+    for key in keys {
+        assert_eq!(press(&mut live, key), None, "{key:?} on the desktop");
+    }
+    // With Shift (a selection in Terminal), not even in a menu.
+    live.update(Message::ToggleSystemMenu);
+    let shifted = live.shortcut(&Key::Named(Named::ArrowDown), Modifiers::SHIFT);
+    assert_eq!(shifted, None);
 }

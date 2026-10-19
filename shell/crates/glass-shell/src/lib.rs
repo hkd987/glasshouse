@@ -59,6 +59,18 @@ pub fn blank<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// Where an arrow, Home or End moves the selection in a menu or the
+/// launcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Up,
+    Down,
+    Left,
+    Right,
+    First,
+    Last,
+}
+
 /// What the user does in the shell. Each maps onto a control-API call.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
@@ -132,6 +144,11 @@ pub enum Message {
     CancelSwitch,
     /// The mark at the left of the menu bar: open or close the system menu.
     ToggleSystemMenu,
+    /// An arrow, Home or End in the open menu or the launcher (UX-20): move
+    /// what's selected.
+    Select(Step),
+    /// Enter: what a click on the selected item does.
+    ChooseSelected,
     /// The system menu's About Glasshouse.
     OpenAbout,
     /// The keyboard shortcuts' cheat sheet (Super /, UX-20).

@@ -53,15 +53,21 @@ pub fn button_like(
     }
 }
 
-/// A menu item: plain until the pointer is on it, then `highlight` (the
-/// accent, as a Mac menu highlights the item under the pointer); dimmed and
-/// never highlighted while it can't be chosen.
+/// A menu item: plain until the pointer is on it or the keyboard selects
+/// it, then `highlight` (the accent, as a Mac menu highlights the item
+/// under the pointer); dimmed and never highlighted while it can't be
+/// chosen.
 pub fn menu_item(
     text: Color,
     highlight: Color,
+    selected: bool,
 ) -> impl Fn(&iced_widget::Theme, button::Status) -> button::Style {
     move |_, status| {
-        let on = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let on = match status {
+            button::Status::Hovered | button::Status::Pressed => true,
+            button::Status::Active => selected,
+            button::Status::Disabled => false,
+        };
         let text = match status {
             button::Status::Disabled => Color { a: 0.4, ..text },
             _ if on => Color::WHITE,

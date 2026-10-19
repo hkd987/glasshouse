@@ -21,6 +21,9 @@ use crate::{Element, Message, Theme, fonts, icons, style};
 /// Tile width in the stack at the top right.
 pub const WIDTH: f32 = 352.0;
 
+/// A tile's corner radius.
+pub const RADIUS: f32 = 14.0;
+
 /// Height of a screen agent's thumbnail.
 pub const THUMBNAIL_HEIGHT: f32 = 176.0;
 
@@ -82,7 +85,7 @@ pub fn view<'a>(
         .style(move |_| iced_widget::container::Style {
             text_color: Some(t.text),
             shadow: style::shadow(0.30, 14.0, 32.0),
-            ..style::outlined(t.background, 14.0, ring.0, ring.1)
+            ..style::outlined(t.background, RADIUS, ring.0, ring.1)
         });
     button(tile)
         .padding(0)

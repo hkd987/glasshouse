@@ -25,7 +25,7 @@ use crate::screens::login;
 use crate::screens::switcher;
 use crate::screens::system;
 use crate::session::Password;
-use crate::{Element, Message, Power, Theme};
+use crate::{Element, Message, Power, Step, Theme};
 
 #[derive(Debug)]
 pub struct Live {
@@ -70,6 +70,17 @@ pub struct Live {
     windows: Vec<AppWindow>,
     /// Alt Tab's switcher is open, on the window with this id.
     switching: Option<u64>,
+    /// What the keyboard has selected in the open menu or the launcher
+    /// (UX-20): a line or app, by its place in [`Live::lines`].
+    selected: Option<(List, usize)>,
+}
+
+/// A list the arrows move through and Enter chooses from (UX-20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum List {
+    SystemMenu,
+    Agents,
+    Launcher,
 }
 
 /// The locked screen: the sign-in screen's look, for the person signed in.
@@ -92,6 +103,36 @@ enum SystemWindow {
     ForceQuit(Option<TaskId>),
     /// "Restart now?" or "Shut down now?"
     Power(Power),
+}
+
+/// The step an arrow, Home or End takes in a menu or the launcher.
+fn arrow(key: Named) -> Option<Step> {
+    Some(match key {
+        Named::ArrowUp => Step::Up,
+        Named::ArrowDown => Step::Down,
+        Named::ArrowLeft => Step::Left,
+        Named::ArrowRight => Step::Right,
+        Named::Home => Step::First,
+        Named::End => Step::Last,
+        _ => return None,
+    })
+}
+
+/// Where `step` moves the selection in a menu whose lines can or can't be
+/// chosen as `choosable` says: Down and Up to the next line that can, round
+/// the ends as a menu does; Home and End to the first and the last. With
+/// none selected yet, Down selects the first and Up the last.
+fn menu_step(choosable: &[bool], at: Option<usize>, step: Step) -> Option<usize> {
+    let lines: Vec<usize> = (0..choosable.len()).filter(|&n| choosable[n]).collect();
+    let (&first, &last) = (lines.first()?, lines.last()?);
+    let here = at.and_then(|at| lines.iter().position(|&n| n == at));
+    Some(match (step, here) {
+        (Step::First, _) | (Step::Down, None) => first,
+        (Step::Last, _) | (Step::Up, None) => last,
+        (Step::Down, Some(p)) => lines[(p + 1) % lines.len()],
+        (Step::Up, Some(p)) => lines[(p + lines.len() - 1) % lines.len()],
+        (Step::Left | Step::Right, _) => return at,
+    })
 }
 
 /// How long a notification stays on screen, as a macOS banner does. One
@@ -205,6 +246,7 @@ impl Live {
             apps: Vec::new(),
             windows: Vec::new(),
             switching: None,
+            selected: None,
         };
         let waiting: Vec<TaskId> = live
             .tasks
@@ -584,20 +626,43 @@ impl Live {
             }
             Message::ToggleSystemMenu => {
                 self.system_menu = !self.system_menu;
+                self.selected = None;
                 if self.system_menu {
                     self.menu = false;
+                    self.launcher = false;
                     self.command = None;
                 }
                 None
             }
             Message::ToggleLauncher => {
                 self.launcher = !self.launcher;
+                self.selected = None;
                 if self.launcher {
                     self.menu = false;
                     self.system_menu = false;
                     self.command = None;
                 }
                 None
+            }
+            Message::Select(step) => {
+                let list = self.list()?;
+                let at = self.selected_in(list);
+                let lines = self.lines(list);
+                let next = match list {
+                    List::Launcher => launcher::step(at, lines.len(), step),
+                    List::SystemMenu | List::Agents => {
+                        let choosable: Vec<bool> = lines.iter().map(Option::is_some).collect();
+                        menu_step(&choosable, at, step)
+                    }
+                };
+                self.selected = next.map(|at| (list, at));
+                None
+            }
+            Message::ChooseSelected => {
+                let list = self.list()?;
+                let at = self.selected_in(list)?;
+                let message = self.lines(list).into_iter().nth(at).flatten()?;
+                self.update(message)
             }
             Message::SwitchWindows { back } => {
                 let n = self.windows.len();
@@ -642,7 +707,9 @@ impl Live {
             Message::ToggleAgents => {
                 self.menu = !self.menu;
                 self.system_menu = false;
+                self.selected = None;
                 if self.menu {
+                    self.launcher = false;
                     // Everything is in the menu; nothing else on top.
                     self.command = None;
                     self.banners.clear();
@@ -803,6 +870,55 @@ impl Live {
         }
     }
 
+    /// The list the arrows move through: the open menu or the launcher,
+    /// when nothing of the shell's sits over it.
+    fn list(&self) -> Option<List> {
+        if self.window.is_some()
+            || self.command.is_some()
+            || self.open.is_some()
+            || self.switching.is_some()
+            || self.locked.is_some()
+            || self.leaving.is_some()
+        {
+            None
+        } else if self.launcher {
+            Some(List::Launcher)
+        } else if self.system_menu {
+            Some(List::SystemMenu)
+        } else if self.menu {
+            Some(List::Agents)
+        } else {
+            None
+        }
+    }
+
+    fn selected_in(&self, list: List) -> Option<usize> {
+        self.selected.filter(|(l, _)| *l == list).map(|(_, at)| at)
+    }
+
+    /// What choosing each line of `list` does, in the order it's drawn: the
+    /// message its click sends, or none for a line that can't be chosen.
+    fn lines(&self, list: List) -> Vec<Option<Message>> {
+        match list {
+            List::SystemMenu => desktop::system_menu_lines(&self.person, self.lockable)
+                .into_iter()
+                .flatten()
+                .map(|(_, _, message)| message)
+                .collect(),
+            // A tile's click opens it; Enter never approves (that stays a
+            // deliberate press of the tile's button).
+            List::Agents => desktop::ordered(&self.tasks)
+                .into_iter()
+                .map(|task| Some(Message::OpenTask(task.id)))
+                .collect(),
+            List::Launcher => self
+                .apps
+                .iter()
+                .map(|app| Some(Message::Launch(app.id.to_owned())))
+                .collect(),
+        }
+    }
+
     fn open(&mut self, task: TaskId) -> Option<Effect> {
         // Opened from its banner or the menu: those step aside.
         self.menu = false;
@@ -824,7 +940,9 @@ impl Live {
     /// (DA-1); Esc closes About or Force Quit, the command bar, the agents
     /// menu, then a roll back card, then the expanded view (AW-16); Shift
     /// Super Q signs out; Alt Super Esc (a Mac's Option Command Esc) or Ctrl
-    /// Shift Esc (Windows' task manager, DK-2) opens Force Quit.
+    /// Shift Esc (Windows' task manager, DK-2) opens Force Quit. In the open
+    /// menu or the launcher, arrows, Home and End move and Enter chooses
+    /// (UX-20).
     pub fn shortcut(&self, key: &Key, modifiers: Modifiers) -> Option<Message> {
         // Locked, no shortcut does anything; the lock screen takes the keys.
         if self.locked.is_some() {
@@ -864,6 +982,33 @@ impl Live {
             Key::Named(Named::Escape) if self.switching.is_some() => Some(Message::CancelSwitch),
             Key::Named(Named::Escape) if self.window.is_some() => Some(Message::CloseSystemWindow),
             Key::Named(Named::Escape) if self.launcher => Some(Message::ToggleLauncher),
+            // Only while a menu or the launcher is open: everywhere else
+            // these keys are the focused app's or a text field's.
+            Key::Named(named)
+                if modifiers.is_empty() && arrow(*named).is_some() && self.list().is_some() =>
+            {
+                arrow(*named).map(Message::Select)
+            }
+            Key::Named(Named::Enter)
+                if modifiers.is_empty()
+                    && self
+                        .list()
+                        .and_then(|list| self.selected_in(list))
+                        .is_some() =>
+            {
+                Some(Message::ChooseSelected)
+            }
+            // The system menu, as Control F2 moves to a Mac's menu bar.
+            Key::Named(Named::F2) if modifiers.control() => Some(Message::ToggleSystemMenu),
+            // The agents menu, as Super N opens Windows' notifications.
+            Key::Character(c)
+                if c.eq_ignore_ascii_case("n")
+                    && modifiers.logo()
+                    && !modifiers.shift()
+                    && !modifiers.control() =>
+            {
+                Some(Message::ToggleAgents)
+            }
             Key::Named(Named::Space) if modifiers.control() => Some(if bar {
                 Message::CloseCommandBar
             } else {
@@ -988,6 +1133,10 @@ impl Live {
             system_menu: self.system_menu.then(|| self.person.clone()),
             lockable: self.lockable,
             trash_full: self.trash_full,
+            selected: self
+                .list()
+                .filter(|list| *list != List::Launcher)
+                .and_then(|list| self.selected_in(list)),
             ..Desktop::live(&self.tasks, now)
         };
         let mut overlays = Vec::new();
@@ -1015,7 +1164,11 @@ impl Live {
             None => {}
         }
         if self.launcher {
-            overlays.push(launcher::overlay(theme, &self.apps));
+            overlays.push(launcher::overlay(
+                theme,
+                &self.apps,
+                self.selected_in(List::Launcher),
+            ));
         }
         if let Some(chosen) = self.switching {
             overlays.push(switcher::overlay(theme, &self.windows, chosen));

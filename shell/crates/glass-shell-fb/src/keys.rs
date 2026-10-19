@@ -45,6 +45,22 @@ fn kind(code: u16) -> Option<Kind> {
         53 => Some(Char('/', '?')),
         56 | 100 => Some(Modifier(Modifiers::ALT, Named::Alt)),
         57 => named(Named::Space),
+        59..=68 => named(
+            [
+                Named::F1,
+                Named::F2,
+                Named::F3,
+                Named::F4,
+                Named::F5,
+                Named::F6,
+                Named::F7,
+                Named::F8,
+                Named::F9,
+                Named::F10,
+            ][usize::from(code - 59)],
+        ),
+        87 => named(Named::F11),
+        88 => named(Named::F12),
         102 => named(Named::Home),
         103 => named(Named::ArrowUp),
         104 => named(Named::PageUp),
@@ -167,6 +183,18 @@ mod tests {
         assert_eq!(typed(&mut keyboard, 3).as_deref(), Some("@"));
         keyboard.key(42, 0);
         assert_eq!(typed(&mut keyboard, 52).as_deref(), Some("."));
+    }
+
+    #[test]
+    fn ux20_function_keys_are_named_so_ctrl_f2_reaches_the_shell() {
+        let mut keyboard = Keyboard::default();
+        keyboard.key(29, 1);
+        let f2 = keyboard.key(60, 1).pop().expect("a press");
+        assert_eq!(f2.key, Key::Named(Named::F2));
+        assert!(f2.modifiers.control());
+        let f12 = keyboard.key(88, 1).pop().expect("a press");
+        assert_eq!(f12.key, Key::Named(Named::F12));
+        assert_eq!(typed(&mut keyboard, 59), None, "F1 types nothing");
     }
 
     #[test]

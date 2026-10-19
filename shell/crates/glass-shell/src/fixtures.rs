@@ -354,6 +354,7 @@ pub fn desktop(tasks: &[TaskView]) -> Desktop<'_> {
         system_menu: None,
         lockable: false,
         trash_full: false,
+        selected: None,
     }
 }
 

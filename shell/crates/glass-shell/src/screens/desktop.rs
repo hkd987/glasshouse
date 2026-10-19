@@ -42,6 +42,10 @@ pub struct Desktop<'a> {
     pub lockable: bool,
     /// Whether the Trash at the right end of the dock has anything in it.
     pub trash_full: bool,
+    /// The line of the open menu, system or agents, that the keyboard has
+    /// selected (UX-20): a line of [`system_menu_lines`], or a tile of
+    /// [`ordered`].
+    pub selected: Option<usize>,
 }
 
 /// Which agent tiles the desktop shows. They don't stay on screen: a change
@@ -79,6 +83,7 @@ impl<'a> Desktop<'a> {
             system_menu: None,
             lockable: false,
             trash_full: false,
+            selected: None,
         }
     }
 }
@@ -167,6 +172,7 @@ pub fn view<'a>(
                 theme,
                 desktop.system_menu.as_deref().unwrap_or_default(),
                 desktop.lockable,
+                desktop.selected,
             ))
             .x(SYSTEM_MENU_LEFT)
             .y(MENU_BAR_HEIGHT + 2.0)
@@ -274,7 +280,15 @@ fn agents_menu<'a>(
     } else {
         let tiles = ordered(desktop.tasks)
             .into_iter()
-            .map(|task| tiles::view(theme, task, desktop.now, thumbnail(task)));
+            .enumerate()
+            .map(|(n, task)| {
+                let tile = tiles::view(theme, task, desktop.now, thumbnail(task));
+                if desktop.selected == Some(n) {
+                    selection_ring(theme, tile)
+                } else {
+                    tile
+                }
+            });
         scrollable(Column::with_children(tiles).spacing(10))
             .height(Length::Shrink)
             .into()
@@ -345,21 +359,20 @@ const MARK_REACH: f32 = 6.0;
 const MARK_WIDTH: f32 = 16.0 + MARK_REACH * 2.0;
 const SYSTEM_MENU_LEFT: f32 = 6.0;
 
-/// The system menu, under the mark, as a Mac's Apple menu: About
-/// Glasshouse and Check for Updates (there when updates ship); what can be
-/// started from anywhere (an agent's task, for now; apps join it when they
-/// have windows); Force Quit; Restart and Shut Down, each asked first;
-/// signing out (Shift Super Q, as Shift Command Q on a Mac). Sleep, locking
-/// the screen and switching users wait for the compositor (ADR 0019).
-fn system_menu<'a>(theme: &Theme, person: &str, lockable: bool) -> Element<'a, Message> {
+/// One line of a menu: what it says, its shortcut, and what choosing it
+/// does; a line without a message is shown but can't be chosen yet.
+pub type MenuLine = (String, &'static str, Option<Message>);
+
+/// The system menu's lines, in sections. The menu draws them and Enter
+/// chooses from them (UX-20), so what a key chooses is what's shown.
+pub fn system_menu_lines(person: &str, lockable: bool) -> Vec<Vec<MenuLine>> {
     let sign_out = if person.is_empty() {
         "Sign out…".to_owned()
     } else {
         format!("Sign out {person}…")
     };
-    // A line without a message is shown but can't be chosen yet.
-    let sections: [&[(String, &'static str, Option<Message>)]; 5] = [
-        &[
+    vec![
+        vec![
             ("About Glasshouse".to_owned(), "", Some(Message::OpenAbout)),
             (
                 "Keyboard Shortcuts".to_owned(),
@@ -370,17 +383,17 @@ fn system_menu<'a>(theme: &Theme, person: &str, lockable: bool) -> Element<'a, M
             // ship yet.
             ("Check for Updates…".to_owned(), "", None),
         ],
-        &[(
+        vec![(
             "Hand an agent a task…".to_owned(),
             "Ctrl Space",
             Some(Message::OpenCommandBar),
         )],
-        &[(
+        vec![(
             "Force Quit…".to_owned(),
             "Alt Super Esc",
             Some(Message::OpenForceQuit),
         )],
-        &[
+        vec![
             (
                 "Restart…".to_owned(),
                 "",
@@ -393,7 +406,7 @@ fn system_menu<'a>(theme: &Theme, person: &str, lockable: bool) -> Element<'a, M
             ),
         ],
         // Paired as on a Mac: Lock Screen (Control Command Q) over Log Out.
-        &[
+        vec![
             (
                 "Lock Screen".to_owned(),
                 "Ctrl Super Q",
@@ -401,7 +414,22 @@ fn system_menu<'a>(theme: &Theme, person: &str, lockable: bool) -> Element<'a, M
             ),
             (sign_out, "Shift Super Q", Some(Message::SignOut)),
         ],
-    ];
+    ]
+}
+
+/// The system menu, under the mark, as a Mac's Apple menu: About
+/// Glasshouse and Check for Updates (there when updates ship); what can be
+/// started from anywhere (an agent's task, for now; apps join it when they
+/// have windows); Force Quit; Restart and Shut Down, each asked first;
+/// signing out (Shift Super Q, as Shift Command Q on a Mac). Sleep, locking
+/// the screen and switching users wait for the compositor (ADR 0019).
+fn system_menu<'a>(
+    theme: &Theme,
+    person: &str,
+    lockable: bool,
+    selected: Option<usize>,
+) -> Element<'a, Message> {
+    let sections = system_menu_lines(person, lockable);
     // As wide as its longest line, as a menu is. Every line fills that
     // width so the highlight does; the width itself is reckoned from the
     // text, since a filling line would otherwise take the whole screen.
@@ -417,6 +445,7 @@ fn system_menu<'a>(theme: &Theme, person: &str, lockable: bool) -> Element<'a, M
     let mut items = Column::new()
         .spacing(4)
         .width(Length::Fixed(width.max(240.0)));
+    let mut line = 0;
     for (n, section) in sections.iter().enumerate() {
         if n > 0 {
             items = items.push(
@@ -427,7 +456,15 @@ fn system_menu<'a>(theme: &Theme, person: &str, lockable: bool) -> Element<'a, M
             );
         }
         for (label, shortcut, message) in section.iter() {
-            items = items.push(menu_item(theme, label.clone(), shortcut, message.clone()));
+            let chosen = selected == Some(line);
+            items = items.push(menu_item(
+                theme,
+                label.clone(),
+                shortcut,
+                message.clone(),
+                chosen,
+            ));
+            line += 1;
         }
     }
     container(items)
@@ -445,6 +482,7 @@ fn menu_item<'a>(
     label: String,
     shortcut: &'static str,
     message: Option<Message>,
+    selected: bool,
 ) -> Element<'a, Message> {
     button(
         row![
@@ -462,7 +500,21 @@ fn menu_item<'a>(
     .on_press_maybe(message)
     .width(Length::Fill)
     .padding(Padding::from([5.0, 10.0]))
-    .style(style::menu_item(hex(0xF3F5F7), theme.accent))
+    .style(style::menu_item(hex(0xF3F5F7), theme.accent, selected))
+    .into()
+}
+
+/// The keyboard's selection on a tile in the agents menu: the accent drawn
+/// around it, over its own outline, without moving it.
+fn selection_ring<'a>(theme: &Theme, tile: Element<'a, Message>) -> Element<'a, Message> {
+    let accent = theme.accent;
+    stack![
+        tile,
+        container(iced_widget::space())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| style::outlined(Color::TRANSPARENT, tiles::RADIUS, 2.0, accent)),
+    ]
     .into()
 }
 
