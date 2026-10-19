@@ -281,17 +281,25 @@ test("nv3 ad2 the mail service IT sets in the console shows in Mail on the devic
   await mail.close();
 });
 
-test("ux1 IT locks a setting for a group and the computer's Settings shows it locked", async ({ browser }) => {
+test("ux1 adr0031 IT locks settings for a group and the computer's Settings shows them locked", async ({ browser }) => {
   const { page, close } = await session(browser);
   // This computer's person is one of IT's admins.
   await open(page, "#/settings/it-admins", "settings");
   const lock = page.locator('[data-setting="lock.after_minutes"]');
   await lock.locator('[data-state="locked"]').click();
   await lock.locator('input[name="lock.after_minutes"]').fill("5");
-  const home = page.locator('[data-setting="browser.home_page"]');
-  await expect(home).toContainText("set it for Everyone");
+  // The time zone is the computer's whoever uses it; the browser's follow
+  // whoever is signed in, so a group sets them.
+  await expect(page.locator('[data-setting="region.time_zone"]')).toContainText("set it for Everyone");
+  const blocked = page.locator('[data-setting="browser.blocked_sites"]');
+  await expect(blocked.locator("[data-test=for-seat]")).toContainText("while someone in this group is signed in");
+  await blocked.locator('[data-state="locked"]').click();
+  await blocked.locator('textarea[name="browser.blocked_sites"]').fill("games.example");
+  await blocked.scrollIntoViewIfNeeded();
+  await shot(page, "settings-browser-for-a-group");
   await page.click("[data-test=save-settings]");
   await expect(page.locator("[data-test=impact]")).toContainText("IT admins: Lock after 5 minutes (locked)");
+  await expect(page.locator("[data-test=impact]")).toContainText("IT admins: Blocked sites games.example (locked)");
   await page.locator("h1").scrollIntoViewIfNeeded();
   await page.evaluate(() => document.querySelector("main.content")?.scrollTo(0, 0));
   await shot(page, "settings-locked-for-a-group");
@@ -309,6 +317,11 @@ test("ux1 IT locks a setting for a group and the computer's Settings shows it lo
   }).toPass({ timeout: PROPAGATION_BUDGET_MS });
   measured.setting_propagation_ms = Date.now() - started;
   await expect(settings.locator('[data-setting="lock.after_minutes"]')).toContainText("5 minutes");
+  const sites = settings.locator('[data-setting="browser.blocked_sites"]');
+  await expect(sites.locator("[data-test=locked]")).toHaveCount(1);
+  await expect(sites).toContainText("games.example");
+  await sites.scrollIntoViewIfNeeded();
+  await settings.screenshot({ path: join(CONSOLE_SHOTS, "settings-app-browser-for-you.png") });
   await settings.locator('input[name="clock.hour24"]').check();
   await expect(settings.locator(".banner")).toContainText("24-hour clock is on");
   await settings.screenshot({ path: join(CONSOLE_SHOTS, "settings-app-locked-by-it.png") });

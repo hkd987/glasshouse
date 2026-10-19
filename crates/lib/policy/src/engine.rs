@@ -134,9 +134,10 @@ impl Policy {
         crate::settings::resolve(&self.doc, user)
     }
 
-    /// The computer's own settings, such as the browser's (UX-1).
-    pub fn device_settings(&self) -> Vec<crate::settings::Resolved> {
-        crate::settings::device(&self.doc)
+    /// The computer's own settings, such as the browser's (UX-1), with
+    /// `seat` signed in at the screen or nobody (ADR 0031).
+    pub fn computer_settings(&self, seat: Option<&str>) -> Vec<crate::settings::Resolved> {
+        crate::settings::computer(&self.doc, seat)
     }
 
     /// Remote help's roles (CF-81, ADR 0028).

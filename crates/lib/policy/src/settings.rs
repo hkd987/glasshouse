@@ -5,8 +5,10 @@
 //! A group sets a setting either as a default the person may change or
 //! locked. A person's setting comes from the first of their groups, in the
 //! policy's order, that sets it, then from `everyone`, then from the table.
-//! Settings that apply to the whole computer (the browser's) come from
-//! `everyone` only: a computer has one browser policy whoever uses it.
+//! The computer's settings that follow whoever is signed in (the browser's,
+//! USB drives) resolve the same way for the person at the screen, and as
+//! `everyone`'s while nobody is (ADR 0031). Those for the whole computer
+//! whoever uses it (the time zone) come from `everyone` only.
 
 use serde::Serialize;
 
@@ -21,6 +23,9 @@ pub enum Scope {
     Person,
     /// The whole computer's, set for everyone.
     Device,
+    /// The computer's, for whoever is signed in at the screen: set per
+    /// group, and `everyone`'s while nobody is (ADR 0031).
+    Seat,
 }
 
 /// What a setting holds, and how the console and Settings app show it.
@@ -147,7 +152,7 @@ pub fn table() -> &'static [SettingDef] {
                 "Devices",
                 "USB drives",
                 "Off: USB drives and card readers don't connect, and any plugged in is turned off.",
-                Scope::Device,
+                Scope::Seat,
                 true,
             ),
             toggle(
@@ -164,16 +169,16 @@ pub fn table() -> &'static [SettingDef] {
                 title: "Home page",
                 help: "Opens with the browser and its home button.",
                 kind: Kind::Url,
-                scope: Scope::Device,
+                scope: Scope::Seat,
                 default: SettingValue::Text(String::new()),
             },
             SettingDef {
                 id: "browser.blocked_sites",
                 section: "Browser",
                 title: "Blocked sites",
-                help: "Sites nobody can open on this computer, such as example.com or *.games.example.",
+                help: "Sites that don't open, such as example.com or *.games.example.",
                 kind: Kind::Sites,
-                scope: Scope::Device,
+                scope: Scope::Seat,
                 default: SettingValue::List(Vec::new()),
             },
             toggle(
@@ -181,7 +186,7 @@ pub fn table() -> &'static [SettingDef] {
                 "Browser",
                 "Reopen last session's tabs",
                 "Otherwise the browser starts at the home page.",
-                Scope::Device,
+                Scope::Seat,
                 true,
             ),
             toggle(
@@ -189,7 +194,7 @@ pub fn table() -> &'static [SettingDef] {
                 "Privacy",
                 "Camera for websites and apps",
                 "Meetings and calls need it; each site still asks the person.",
-                Scope::Device,
+                Scope::Seat,
                 true,
             ),
             toggle(
@@ -197,7 +202,7 @@ pub fn table() -> &'static [SettingDef] {
                 "Privacy",
                 "Microphone for websites and apps",
                 "Meetings and calls need it; each site still asks the person.",
-                Scope::Device,
+                Scope::Seat,
                 true,
             ),
         ]
@@ -240,7 +245,7 @@ pub fn resolve(doc: &PolicyDocument, user: &str) -> Vec<Resolved> {
     table()
         .iter()
         .map(|def| {
-            let from_group = (def.scope == Scope::Person)
+            let from_group = (def.scope != Scope::Device)
                 .then(|| {
                     theirs.iter().find_map(|g| {
                         g.settings
@@ -272,12 +277,13 @@ pub fn resolve(doc: &PolicyDocument, user: &str) -> Vec<Resolved> {
         .collect()
 }
 
-/// The computer's own settings: those for the whole computer, from
-/// `everyone`.
-pub fn device(doc: &PolicyDocument) -> Vec<Resolved> {
-    resolve(doc, "")
+/// The computer's own settings with `seat` signed in at the screen, or
+/// nobody: those for the whole computer from `everyone`, and those that
+/// follow whoever is signed in from their groups (ADR 0031).
+pub fn computer(doc: &PolicyDocument, seat: Option<&str>) -> Vec<Resolved> {
+    resolve(doc, seat.unwrap_or(""))
         .into_iter()
-        .filter(|r| def(r.id).is_some_and(|d| d.scope == Scope::Device))
+        .filter(|r| def(r.id).is_some_and(|d| d.scope != Scope::Person))
         .collect()
 }
 
@@ -469,6 +475,61 @@ members = ["dana", "mei"]
     }
 
     #[test]
+    fn adr0031_the_computer_follows_whoever_is_signed_in_and_everyone_while_nobody_is() {
+        let policy = Policy::from_toml(&format!(
+            "{DEFAULT_POLICY}
+[[group]]
+name = \"kiosk\"
+members = [\"dana\"]
+[group.settings]
+\"browser.blocked_sites\" = {{ value = [\"games.example\"], locked = true }}
+\"devices.usb_storage\" = {{ value = false, locked = true }}
+"
+        ))
+        .unwrap();
+        let get = |seat: Option<&str>, id: &str| {
+            policy
+                .computer_settings(seat)
+                .into_iter()
+                .find(|r| r.id == id)
+                .unwrap()
+        };
+        let dana = get(Some("dana"), "devices.usb_storage");
+        assert_eq!(
+            (dana.value, dana.source),
+            (SettingValue::Bool(false), Source::Group("kiosk".into()))
+        );
+        assert_eq!(
+            get(Some("dana"), "browser.blocked_sites").value,
+            SettingValue::List(vec!["games.example".into()])
+        );
+        // Someone else, or nobody: everyone's, here the table's.
+        for seat in [Some("mei"), None] {
+            assert_eq!(
+                get(seat, "devices.usb_storage").value,
+                SettingValue::Bool(true)
+            );
+        }
+        // A person's own settings aren't the computer's; the time zone is.
+        let ids: Vec<_> = policy
+            .computer_settings(None)
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert!(ids.contains(&"region.time_zone") && !ids.contains(&"lock.after_minutes"));
+        // Dana's Settings app shows what the computer applies for them.
+        assert_eq!(
+            policy
+                .settings_for("dana")
+                .into_iter()
+                .find(|r| r.id == "devices.usb_storage")
+                .unwrap()
+                .value,
+            SettingValue::Bool(false)
+        );
+    }
+
+    #[test]
     fn ux1_settings_are_checked_and_the_computers_own_are_for_everyone() {
         let bad = |extra: &str| {
             Policy::from_toml(&format!(
@@ -481,8 +542,7 @@ members = ["dana", "mei"]
         assert!(bad("\"lock.after_minutes\" = { value = true }").contains("a number"));
         assert!(bad("\"teleport.on\" = { value = true }").contains("no such setting"));
         assert!(
-            bad("\"browser.home_page\" = { value = \"https://intranet.example\" }")
-                .contains("set for everyone")
+            bad("\"region.time_zone\" = { value = \"Asia/Tokyo\" }").contains("set for everyone")
         );
         let everyone = |id: &str, value: SettingValue| {
             let mut d = doc("");

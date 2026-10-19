@@ -445,28 +445,24 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         });
     }
 
-    // The browser's settings from policy (UX-1): written now, and again
-    // whenever a new policy changes anyone's settings.
+    // Who is at the screen outlasts a restart of glassd, not a reboot; taken
+    // back before anything that follows them is applied (ADR 0031).
+    runtime.keep_seat_in(run_dir.join("seat"));
+
+    // The browser's settings from policy (UX-1), for whoever is signed in:
+    // written now, and again whenever a policy changes them or someone
+    // signs in or out (ADR 0031).
     if let Some(dir) = config.browser_policies.clone() {
-        let settings = org.settings.clone();
-        let write = move || {
-            if let Err(e) = browser::write(&dir, &settings.device()) {
+        device::follow(&org.settings, &runtime, move |computer, _| {
+            if let Err(e) = browser::write(&dir, computer) {
                 tracing::warn!("writing the browser's policy in {}: {e}", dir.display());
-            }
-        };
-        write();
-        org.settings.on_change(move |uid| {
-            if uid.is_none() {
-                write();
             }
         });
     }
 
-    // What IT sets for the whole computer that glassd applies itself: the
-    // time zone and USB drives (ADR 0031).
+    // What IT sets for the computer that glassd applies itself: the time
+    // zone, and USB drives for whoever is signed in (ADR 0031).
     device::watch(&org.settings, &runtime);
-    // Who is at the screen outlasts a restart of glassd, not a reboot.
-    runtime.keep_seat_in(run_dir.join("seat"));
 
     let listener = bind_control_socket(&config.control_socket)?;
     // The app socket (ADR 0024): world-connectable too, authorized by uid,

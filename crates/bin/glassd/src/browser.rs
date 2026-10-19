@@ -121,7 +121,7 @@ mod tests {
             &format!("settings = {{ {extra} }}\napps = [\"browser\""),
             1,
         );
-        Policy::from_toml(&policy).unwrap().device_settings()
+        Policy::from_toml(&policy).unwrap().computer_settings(None)
     }
 
     #[test]

@@ -189,7 +189,7 @@ fn setting_overlaps(draft: &PolicyDocument, directory: &dyn Directory, out: &mut
     let groups: Vec<&GroupPolicy> = draft.groups.iter().filter(|g| g.name != EVERYONE).collect();
     for def in settings::table()
         .iter()
-        .filter(|d| d.scope == settings::Scope::Person)
+        .filter(|d| d.scope != settings::Scope::Device)
     {
         let setters: Vec<(&GroupPolicy, &Managed)> = groups
             .iter()

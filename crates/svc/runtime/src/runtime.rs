@@ -85,6 +85,8 @@ pub struct Runtime {
     pub(crate) wakes: tokio::sync::watch::Sender<u64>,
     /// Where the seat is kept across a restart of glassd (ADR 0031).
     pub(crate) seat_file: std::sync::OnceLock<PathBuf>,
+    /// Who is signed in at the screen, for what follows them (ADR 0031).
+    pub(crate) seat_user: tokio::sync::watch::Sender<Option<String>>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -164,6 +166,7 @@ impl Runtime {
             seat: Mutex::new(None),
             wakes: tokio::sync::watch::Sender::new(0),
             seat_file: std::sync::OnceLock::new(),
+            seat_user: tokio::sync::watch::Sender::new(None),
         })
     }
 

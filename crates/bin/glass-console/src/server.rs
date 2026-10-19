@@ -1209,11 +1209,27 @@ mod tests {
                 "/api/policy/edit",
                 set(
                     "ap-ops",
-                    json!({ "browser.home_page": { "value": "https://intranet.acme.example" } }),
+                    json!({ "region.time_zone": { "value": "Asia/Tokyo" } }),
                 ),
             )
             .await;
-        assert_eq!(status, 400, "the browser is the whole computer's");
+        assert_eq!(status, 400, "the time zone is the whole computer's");
+        // The browser's follow whoever is signed in, so a group sets them
+        // (ADR 0031).
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/policy/edit",
+                set(
+                    "ap-ops",
+                    json!({
+                        "lock.after_minutes": { "value": 5, "locked": true },
+                        "browser.home_page": { "value": "https://ap.acme.example" },
+                    }),
+                ),
+            )
+            .await;
+        assert_eq!(status, 200);
         t.call(
             "POST",
             "/api/policy/edit",
@@ -1279,14 +1295,21 @@ mod tests {
             get("priya", "lock.after_minutes").value,
             glass_policy::document::SettingValue::Number(30)
         );
-        assert_eq!(
+        let home = |seat: Option<&str>| {
             policy
-                .device_settings()
+                .computer_settings(seat)
                 .into_iter()
                 .find(|r| r.id == "browser.home_page")
                 .unwrap()
-                .value,
+                .value
+        };
+        assert_eq!(
+            home(None),
             glass_policy::document::SettingValue::Text("https://intranet.acme.example".into())
+        );
+        assert_eq!(
+            home(Some("dana")),
+            glass_policy::document::SettingValue::Text("https://ap.acme.example".into())
         );
     }
 

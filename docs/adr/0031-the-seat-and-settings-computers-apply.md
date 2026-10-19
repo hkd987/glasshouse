@@ -43,7 +43,7 @@ Extends ADR 0029.
    | Blank the screen after idle | person | built here |
    | Sleep after idle | person | built here |
    | Time zone | computer | built: glassd runs `tzsetup`; `settings.get` carries the offset, so the desktop's clock follows without signing out, and is read again on the hour for summer time |
-   | USB drives allowed or off | computer | built: a devd rule powers off any USB mass-storage interface that attaches (`usbconfig power_off`), and drives already in are powered off at once; seen on the VM with a hot-plugged stick (`vm.sh usb-stick`). Agents get no new surface: their jails see no disks |
+   | USB drives allowed or off | whoever is signed in | built: a devd rule powers off any USB mass-storage interface that attaches (`usbconfig power_off`), and drives already in are powered off at once; seen on the VM with a hot-plugged stick (`vm.sh usb-stick`). Agents get no new surface: their jails see no disks |
    | Do Not Disturb for agents' banners | person | built: they wait in the menu bar's agents menu |
    | Wi-Fi networks, VPN | computer | after decision 4 below |
    | Update window and restart deadline | computer | with the updater (EP-1) |
@@ -119,7 +119,11 @@ Extends ADR 0029.
   agents paused, the sleep command run once, then woken. A unit test
   covers the command. Real hardware stays to do in traceability, as
   PM-5's row says today.
-- Per-role settings for the whole computer (the browser's) can now be
-  the seat's person's. ADR 0029 decision 4 changes when that lands.
+- Per-role settings for the computer: the browser's and USB drives are
+  now the signed-in person's (scope `seat`, ADR 0029 decision 4); glassd
+  re-applies them at each sign-in and sign-out, one run at a time, and
+  takes the kept seat back before the first, so a restart doesn't flip
+  them to everyone's and back. A USB drive setting that changes with the
+  person is audited with whom it was applied for.
 - Not this work's, noted so it isn't lost: glassd doesn't check at start
   that it runs as root.

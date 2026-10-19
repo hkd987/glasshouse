@@ -1,13 +1,15 @@
-//! What IT sets for the whole computer that glassd applies itself (ADR
-//! 0031): the time zone, with the base system's `tzsetup`, and USB drives,
-//! with a devd rule. Each is applied once at start and again whenever a
-//! policy changes it; desktops hear of a new time zone, for their clock.
+//! What IT sets for the computer that glassd applies itself (ADR 0031):
+//! the time zone, with the base system's `tzsetup`, and USB drives, with a
+//! devd rule. Applied at start and again whenever a policy changes them or
+//! someone signs in or out: USB drives, like the browser's settings, follow
+//! whoever is signed in. Desktops hear of a new time zone, for their clock.
 
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use glass_audit::{AuditEvent, EventKind, Outcome};
 use glass_platform::PlatformError;
 use glass_policy::document::SettingValue;
+use glass_policy::settings::Resolved;
 use glass_runtime::{Runtime, SettingsHandle};
 
 /// What glassd last applied.
@@ -17,32 +19,71 @@ struct Applied {
     usb_storage: Option<bool>,
 }
 
-/// Applies the computer's settings now and whenever they change.
-pub(crate) fn watch(settings: &SettingsHandle, runtime: &Arc<Runtime>) {
-    let apply = {
+/// Runs `apply` with the computer's settings for whoever is signed in at
+/// the screen (or nobody): now, whenever a policy changes them, and
+/// whenever someone signs in or out. One run at a time, so a slow one
+/// can't overwrite a newer one.
+pub(crate) fn follow(
+    settings: &SettingsHandle,
+    runtime: &Arc<Runtime>,
+    apply: impl Fn(&[Resolved], Option<&str>) + Send + Sync + 'static,
+) {
+    let mut seats = runtime.watch_seat();
+    let run = {
         let settings = settings.clone();
         let runtime = Arc::downgrade(runtime);
-        let applied = Mutex::new(Applied::default());
+        let one = Mutex::new(());
         Arc::new(move || {
-            let mut applied = applied.lock().unwrap_or_else(|p| p.into_inner());
-            apply(&settings, &runtime, &mut applied);
+            let _one = one.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(runtime) = runtime.upgrade() else {
+                return;
+            };
+            let seat = runtime.seat_user();
+            apply(&settings.computer(seat.as_deref()), seat.as_deref());
         })
     };
-    apply();
-    settings.on_change(move |uid| {
-        if uid.is_none() {
-            apply();
+    run();
+    {
+        let run = Arc::clone(&run);
+        settings.on_change(move |uid| {
+            if uid.is_none() {
+                run();
+            }
+        });
+    }
+    tokio::spawn(async move {
+        while seats.changed().await.is_ok() {
+            let run = Arc::clone(&run);
+            let _ = tokio::task::spawn_blocking(move || run()).await;
         }
     });
 }
 
-fn apply(settings: &SettingsHandle, runtime: &Weak<Runtime>, applied: &mut Applied) {
-    let device = settings.device();
-    let value = |id: &str| device.iter().find(|r| r.id == id).map(|r| r.value.clone());
-    let runtime = runtime.upgrade();
+/// Applies the time zone and USB drives now and whenever they change.
+pub(crate) fn watch(settings: &SettingsHandle, runtime: &Arc<Runtime>) {
+    let applied = Mutex::new(Applied::default());
+    let weak = Arc::downgrade(runtime);
+    follow(settings, runtime, move |computer, seat| {
+        let mut applied = applied.lock().unwrap_or_else(|p| p.into_inner());
+        apply(computer, seat, weak.upgrade().as_deref(), &mut applied);
+    });
+}
+
+fn apply(
+    computer: &[Resolved],
+    seat: Option<&str>,
+    runtime: Option<&Runtime>,
+    applied: &mut Applied,
+) {
+    let value = |id: &str| {
+        computer
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.value.clone())
+    };
     let record = |id: &str, value: serde_json::Value, done: std::result::Result<(), String>| {
-        if let Some(runtime) = &runtime {
-            runtime.append_audit(setting_event(id, value, done));
+        if let Some(runtime) = runtime {
+            runtime.append_audit(setting_event(id, value, seat, done));
         }
     };
 
@@ -55,7 +96,7 @@ fn apply(settings: &SettingsHandle, runtime: &Weak<Runtime>, applied: &mut Appli
                 if changed {
                     tracing::info!(%zone, "time zone set from IT's settings");
                     record("region.time_zone", zone.clone().into(), Ok(()));
-                    if let Some(runtime) = &runtime {
+                    if let Some(runtime) = runtime {
                         runtime.settings_changed();
                     }
                 }
@@ -92,23 +133,27 @@ fn apply(settings: &SettingsHandle, runtime: &Weak<Runtime>, applied: &mut Appli
     }
 }
 
-/// The audit record of a computer setting glassd applied, or failed to.
+/// The audit record of a computer setting glassd applied, or failed to,
+/// with whoever was signed in.
 fn setting_event(
     id: &str,
     value: serde_json::Value,
+    seat: Option<&str>,
     done: std::result::Result<(), String>,
 ) -> AuditEvent {
     let shown = match &value {
         serde_json::Value::String(text) => text.clone(),
         other => other.to_string(),
     };
+    let whom = seat.map(|s| format!(" for {s}")).unwrap_or_default();
     let mut event = AuditEvent::new(
         EventKind::DeviceSettingApplied,
         match &done {
-            Ok(()) => format!("IT's setting {id} ({shown}) applied on this computer"),
-            Err(e) => format!("IT's setting {id} ({shown}) couldn't be applied: {e}"),
+            Ok(()) => format!("IT's setting {id} ({shown}) applied on this computer{whom}"),
+            Err(e) => format!("IT's setting {id} ({shown}) couldn't be applied{whom}: {e}"),
         },
     );
+    event.user = seat.map(str::to_owned);
     event.outcome = Some(match done {
         Ok(()) => Outcome::Completed,
         Err(error) => Outcome::Failed { error },
@@ -123,7 +168,7 @@ mod tests {
 
     #[test]
     fn adr0031_a_setting_applied_or_not_is_on_the_record() {
-        let done = setting_event("region.time_zone", "Asia/Tokyo".into(), Ok(()));
+        let done = setting_event("region.time_zone", "Asia/Tokyo".into(), None, Ok(()));
         assert_eq!(done.kind, EventKind::DeviceSettingApplied);
         assert_eq!(done.outcome, Some(Outcome::Completed));
         assert_eq!(done.detail["value"], "Asia/Tokyo");
@@ -131,8 +176,14 @@ mod tests {
             done.summary
                 .contains("region.time_zone (Asia/Tokyo) applied")
         );
-        let failed = setting_event("devices.usb_storage", false.into(), Err("no devd".into()));
+        let failed = setting_event(
+            "devices.usb_storage",
+            false.into(),
+            Some("dana"),
+            Err("no devd".into()),
+        );
         assert!(matches!(failed.outcome, Some(Outcome::Failed { .. })));
-        assert!(failed.summary.contains("no devd"));
+        assert!(failed.summary.contains("for dana: no devd"));
+        assert_eq!(failed.user.as_deref(), Some("dana"));
     }
 }

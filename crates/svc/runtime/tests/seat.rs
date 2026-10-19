@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use glass_api::{SeatBegin, TileState, methods};
 use glass_audit::{EventKind, Outcome};
+use glass_policy::document::SettingValue;
 use glass_rpc::Client;
 use glass_runtime::Caller;
 use serde_json::{Value, json};
@@ -177,6 +178,7 @@ async fn adr0031_a_restarted_glassd_still_knows_who_is_at_the_screen() {
     let again = rebuild(&h, glass_policy::DEFAULT_POLICY);
     again.keep_seat_in(kept.clone());
     assert!(again.sleep_due(Instant::now() + Duration::from_secs(31 * 60)));
+    assert_eq!(again.seat_user().as_deref(), Some(&*h.me.name));
 
     // A kept seat whose `su` started after it was kept is a pid used
     // again, not the session: it's dropped.
@@ -202,6 +204,67 @@ async fn adr0031_a_restarted_glassd_still_knows_who_is_at_the_screen() {
     assert!(kept.exists());
     h.rt.seat_end(&root(&h)).unwrap();
     assert!(!kept.exists());
+}
+
+const KIOSK: &str = r#"
+[[group]]
+name = "kiosk"
+members = ["{me}"]
+[group.settings]
+"devices.usb_storage" = { value = false, locked = true }
+"browser.blocked_sites" = { value = ["games.example"], locked = true }
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0031_ux1_the_browser_and_usb_drives_follow_whoever_is_signed_in() {
+    let h = harness_with(KIOSK);
+    let usb = |seat: Option<String>| {
+        h.settings
+            .computer(seat.as_deref())
+            .into_iter()
+            .find(|r| r.id == "devices.usb_storage")
+            .unwrap()
+            .value
+    };
+    let mut seats = h.rt.watch_seat();
+    // Nobody at the screen: everyone's, here the computer's default.
+    assert_eq!(h.rt.seat_user(), None);
+    assert_eq!(usb(h.rt.seat_user()), SettingValue::Bool(true));
+
+    // Someone in the kiosk group signs in: theirs, and glassd hears of it.
+    signed_in(&h, std::os::unix::process::parent_id());
+    seats.changed().await.unwrap();
+    assert_eq!(seats.borrow_and_update().as_deref(), Some(&*h.me.name));
+    assert_eq!(usb(h.rt.seat_user()), SettingValue::Bool(false));
+    let sites = h
+        .settings
+        .computer(h.rt.seat_user().as_deref())
+        .into_iter()
+        .find(|r| r.id == "browser.blocked_sites")
+        .unwrap();
+    assert_eq!(
+        sites.value,
+        SettingValue::List(vec!["games.example".into()])
+    );
+    assert!(sites.locked);
+
+    // They sign out: everyone's again.
+    h.rt.seat_end(&root(&h)).unwrap();
+    seats.changed().await.unwrap();
+    assert_eq!(*seats.borrow_and_update(), None);
+    assert_eq!(usb(h.rt.seat_user()), SettingValue::Bool(true));
+
+    // The person can't change what the computer applies for them.
+    let refused = h
+        .settings
+        .choose(
+            &h.me.name,
+            h.me.uid,
+            "devices.usb_storage",
+            Some(SettingValue::Bool(true)),
+        )
+        .unwrap_err();
+    assert!(refused.to_string().contains("the computer's setting"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

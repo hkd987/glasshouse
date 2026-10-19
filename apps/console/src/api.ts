@@ -232,7 +232,7 @@ export interface SettingRow {
   help: string;
   kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" } | { type: "time_zone" };
   /** A person's own, or the whole computer's (set for everyone only). */
-  scope: "person" | "device";
+  scope: "person" | "device" | "seat";
   default: SettingValue;
   /** What this group sets in the draft. */
   set: Managed | null;

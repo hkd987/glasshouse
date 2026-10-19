@@ -1,7 +1,8 @@
 // Settings (UX-1, ADR 0029): how this computer is set up for the person.
 // IT sets some for their groups, as defaults they can change or locked;
 // the rest are theirs. Locked ones show as set by IT and can't be changed
-// here; the browser's are the whole computer's, so IT sets them. Every
+// here; the computer's (the browser's, USB drives, the time zone) are IT's
+// alone, those for the person at the screen from their groups. Every
 // change goes through the bridge and the audit log like any action.
 
 import { Bridge, BridgeError, Offline, h, ready, show } from "@glasshouse/sdk";
@@ -14,7 +15,7 @@ interface Setting {
   title: string;
   help: string;
   kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" } | { type: "time_zone" };
-  scope: "person" | "device";
+  scope: "person" | "device" | "seat";
   default: Value;
   value: Value;
   locked: boolean;
@@ -75,14 +76,17 @@ function who(setting: Setting): HTMLElement | null {
   if (setting.scope === "device") {
     return h("div", { class: "who" }, setting.from === "it" ? "Your organization's default for this computer" : "This computer's default");
   }
+  if (setting.scope === "seat") {
+    return h("div", { class: "who" }, setting.from === "it" ? "Your organization's, for you on this computer" : "This computer's default");
+  }
   if (setting.from === "it") return h("div", { class: "who" }, "Your organization's default");
   return null;
 }
 
 function control(setting: Setting): HTMLElement {
   const busy = state.busy === setting.id || state.offline;
-  // The whole computer's, and what IT locked, show their value only.
-  if (setting.locked || setting.scope === "device") return h("span", { class: "muted" }, words(setting));
+  // The computer's, and what IT locked, show their value only.
+  if (setting.locked || setting.scope !== "person") return h("span", { class: "muted" }, words(setting));
   const reset =
     setting.from === "you"
       ? h("button", { class: "link", disabled: busy, onclick: () => change(setting, undefined) }, "Use default")

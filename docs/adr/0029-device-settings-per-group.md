@@ -29,11 +29,16 @@ yet.
    settings (and which group a tied tier names). IT orders groups on the
    console's Settings page; the preview names people in two groups that
    disagree and says which applies.
-4. **The whole computer's settings are everyone's.** The browser's (home
-   page, blocked sites, tabs, camera, microphone) are one policy per
-   computer whoever uses it, so only `everyone` sets them. Per role needs
-   the device to know who is at the screen, which remote help also needs
-   (ADR 0028, "Before slice (b)"); it comes with that.
+4. **The computer's settings follow whoever is signed in** (changed
+   2026-10-19, ADR 0031). The browser's (home page, blocked sites, tabs,
+   camera, microphone) and USB drives are set per group like a person's:
+   the computer applies the signed-in person's, and `everyone`'s while
+   nobody is, re-applied at each sign-in and sign-out (scope `seat`).
+   Only what is the computer's whoever uses it, the time zone, stays
+   `everyone`'s (scope `device`). The person can't change either kind in
+   Settings; the browser lets them change IT's unlocked defaults there.
+   This was "everyone's only" until the seat (ADR 0031) told glassd who
+   is at the screen.
 5. **Nothing new to push.** Settings ride the policy release: saved to the
    draft, previewed, published to the pilot ring, promoted.
 

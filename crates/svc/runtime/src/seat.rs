@@ -74,6 +74,17 @@ impl Runtime {
         self.seat.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Who is signed in at the screen, if anyone.
+    pub fn seat_user(&self) -> Option<String> {
+        self.seat_user.borrow().clone()
+    }
+
+    /// Hears whenever someone signs in at the screen or out, so what
+    /// follows them (the browser's settings, USB drives) can change.
+    pub fn watch_seat(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.seat_user.subscribe()
+    }
+
     /// The sign-in screen started `begin.user`'s desktop (`seat.begin`).
     pub fn seat_begin(&self, caller: &Caller, begin: SeatBegin) -> Result<()> {
         if !caller.is_admin() {
@@ -85,6 +96,7 @@ impl Runtime {
         tracing::info!(user = %begin.user, session = begin.session_pid, "seat: signed in");
         self.audit(seat_event(&begin.user, true));
         *self.seat_lock() = Some(seat);
+        self.seat_user.send_replace(Some(begin.user.clone()));
         if let Some(path) = self.seat_file.get()
             && let Err(e) = keep(path, &begin)
         {
@@ -114,6 +126,7 @@ impl Runtime {
         match restored {
             Some(seat) => {
                 tracing::info!(user = %seat.user, "seat: still signed in");
+                self.seat_user.send_replace(Some(seat.user.clone()));
                 *self.seat_lock() = Some(seat);
             }
             None => {
@@ -138,6 +151,7 @@ impl Runtime {
         if let Some(path) = self.seat_file.get() {
             let _ = std::fs::remove_file(path);
         }
+        self.seat_user.send_replace(None);
         Ok(())
     }
 

@@ -150,7 +150,16 @@ export async function settingsPage(root: HTMLElement, group: string): Promise<vo
 
   function settingRow(row: SettingRow): HTMLElement {
     const f = form.get(row.id) ?? { state: "unset" as State, value: row.default };
+    // The time zone is the computer's whoever uses it; the browser's and
+    // USB drives follow whoever is signed in (ADR 0031).
     const computerWide = row.scope === "device" && group !== "everyone";
+    const forSeat = row.scope === "seat" && group !== "everyone";
+    const canChange =
+      row.scope === "person"
+        ? "People can change it in Settings."
+        : row.id.startsWith("browser.")
+          ? "People can change it in the browser."
+          : "The computer applies it; people can't change it.";
     const fallback = row.everyone ? `Everyone's: ${words(row, row.everyone.value)}${row.everyone.locked ? ", locked" : ""}` : `Computer's default: ${words(row, row.default)}`;
     const states: [State, string][] = [
       ["unset", group === "everyone" ? "Not set" : "Not set here"],
@@ -170,8 +179,9 @@ export async function settingsPage(root: HTMLElement, group: string): Promise<vo
           : f.state === "unset"
             ? h("div", { class: "hint" }, fallback)
             : f.state === "default"
-              ? h("div", { class: "hint" }, "People can change it in Settings.")
+              ? h("div", { class: "hint" }, canChange)
               : h("div", { class: "hint" }, "People see it but can't change it."),
+        forSeat ? h("div", { class: "hint", "data-test": "for-seat" }, "On the computer while someone in this group is signed in.") : null,
       ),
       computerWide
         ? h("div", {}, row.everyone ? chip(`Everyone: ${words(row, row.everyone.value)}`) : chip("Not set"))

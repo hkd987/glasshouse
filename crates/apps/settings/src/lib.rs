@@ -202,15 +202,15 @@ impl SettingsHandle {
             .collect()
     }
 
-    /// The whole computer's settings, such as the browser's, as policy
-    /// sets them.
-    pub fn device(&self) -> Vec<settings::Resolved> {
+    /// The computer's own settings, such as the browser's, as policy sets
+    /// them with `seat` signed in at the screen, or nobody (ADR 0031).
+    pub fn computer(&self, seat: Option<&str>) -> Vec<settings::Resolved> {
         self.policy()
-            .map(|p| p.device_settings())
+            .map(|p| p.computer_settings(seat))
             .unwrap_or_else(|| {
                 settings::table()
                     .iter()
-                    .filter(|d| d.scope == Scope::Device)
+                    .filter(|d| d.scope != Scope::Person)
                     .map(|d| settings::Resolved {
                         id: d.id,
                         value: d.default.clone(),
@@ -222,7 +222,7 @@ impl SettingsHandle {
     }
 
     /// Sets `user`'s own choice for `id`, or takes it back with `None`.
-    /// Refused, in words, for a setting IT locked or the whole computer's.
+    /// Refused, in words, for a setting IT locked or the computer's.
     pub fn choose(
         &self,
         user: &str,
@@ -232,9 +232,9 @@ impl SettingsHandle {
     ) -> Result<Effective, ActionError> {
         let def = settings::def(id)
             .ok_or_else(|| ActionError::InvalidInput(format!("no setting {id}")))?;
-        if def.scope == Scope::Device {
+        if def.scope != Scope::Person {
             return Err(ActionError::Failed(format!(
-                "{} is the whole computer's setting; IT sets it in the admin console.",
+                "{} is the computer's setting; IT sets it in the admin console.",
                 def.title
             )));
         }
@@ -348,7 +348,7 @@ impl ActionProvider for SettingsProvider {
                 name: SET.parse().expect("static name"),
                 title: "Change a setting".into(),
                 description: "Change one of the person's own settings, such as the 24-hour clock. \
-                              Settings IT locked, and the whole computer's, such as the browser's, \
+                              Settings IT locked, and the computer's, such as the browser's, \
                               can't be changed here. Leave out value to go back to IT's default."
                     .into(),
                 input_schema: json!({
@@ -415,7 +415,7 @@ impl ActionProvider for SettingsProvider {
                 let locked = all.iter().filter(|e| e.locked).count();
                 Ok(ActionOutput {
                     text: format!("{} settings; IT locked {locked}.", all.len()),
-                    data: json!({ "settings": all, "device": self.handle.device() }),
+                    data: json!({ "settings": all, "device": self.handle.computer(Some(&who.name)) }),
                     changes: Vec::new(),
                 })
             }
@@ -509,7 +509,7 @@ members = ["dana"]
             )
             .unwrap_err()
             .to_string();
-        assert!(computer.contains("whole computer's"), "{computer}");
+        assert!(computer.contains("the computer's setting"), "{computer}");
         assert!(
             handle
                 .choose(
