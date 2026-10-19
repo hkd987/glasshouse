@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use glass_crypto::{EpochKey, PublicKey};
+pub use glass_managed::chat::ChatFailure;
 use glass_managed::chat::{
     ChatLink, ChatSyncRequest, ChatSyncResponse, Conversation, Epoch, LinkError, MemberKey,
     MemberSecret, Message, RegisterKey, is_conversation_id,
@@ -31,43 +32,6 @@ pub enum Notice {
     },
     /// New conversations or messages arrived for these people.
     Changed { logins: Vec<String> },
-}
-
-/// Why chat couldn't do something, in words for a refusal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChatFailure {
-    /// Not managed, or IT hasn't set chat up: trying again won't help.
-    NotSetUp(String),
-    /// The console couldn't be reached, or refused.
-    Link(LinkError),
-    /// Something on this computer.
-    Local(String),
-}
-
-impl std::fmt::Display for ChatFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotSetUp(m) | Self::Local(m) | Self::Link(LinkError::Refused(m)) => {
-                f.write_str(m)
-            }
-            Self::Link(LinkError::Unreachable(m)) => write!(
-                f,
-                "your organization's server can't be reached ({m}). Nothing was queued; try again when it's back"
-            ),
-        }
-    }
-}
-
-impl From<glass_managed::chat::ChatError> for ChatFailure {
-    fn from(e: glass_managed::chat::ChatError) -> Self {
-        Self::Local(e.to_string())
-    }
-}
-
-impl From<glass_crypto::CryptoError> for ChatFailure {
-    fn from(e: glass_crypto::CryptoError) -> Self {
-        Self::Local(e.to_string())
-    }
 }
 
 pub(crate) const NOT_MANAGED: &str =
@@ -497,6 +461,17 @@ impl Store {
         let sealed = conversation.name.as_deref()?;
         let key = self.epoch_key(member, &conversation.id, 1)?;
         glass_managed::chat::open_name(&key, &conversation.id, 1, sealed).ok()
+    }
+
+    /// A meeting's title and time, opened (CF-21).
+    pub(crate) fn meeting(
+        &self,
+        member: &Member,
+        conversation: &Conversation,
+    ) -> Option<glass_managed::meet::MeetingDetails> {
+        let sealed = conversation.name.as_deref()?;
+        let key = self.epoch_key(member, &conversation.id, 1)?;
+        glass_managed::meet::MeetingDetails::open(&key, &conversation.id, sealed).ok()
     }
 
     /// Keeps `message`, in sequence order, once.

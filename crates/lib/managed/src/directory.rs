@@ -89,6 +89,15 @@ impl DirectoryRelease {
     pub fn person(&self, login: &str) -> Option<&Person> {
         self.people.iter().find(|p| p.login == login)
     }
+
+    /// The person whose email is `email`, ignoring case: who an invitation
+    /// to that address reaches in the org (CF-21).
+    pub fn by_email(&self, email: &str) -> Option<&Person> {
+        let email = email.trim();
+        self.people
+            .iter()
+            .find(|p| !p.email.is_empty() && p.email.eq_ignore_ascii_case(email))
+    }
 }
 
 /// Whether `email` is shaped like an address mail can go to: one `@`, a

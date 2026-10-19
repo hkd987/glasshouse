@@ -180,6 +180,11 @@ pub enum ConversationKind {
     Group,
     /// Named, with a topic.
     Channel,
+    /// A Glasshouse meeting (CF-21): its organizer and invitees, all in
+    /// the directory. Its sealed name is the title and time
+    /// ([`crate::meet::MeetingDetails`]). Calendar and Meet show it; Chat
+    /// doesn't.
+    Meeting,
 }
 
 /// An epoch's key sealed to one member key, or to IT's.
@@ -593,6 +598,44 @@ pub enum LinkError {
     Refused(String),
 }
 
+/// Why chat, or a meeting, couldn't do something on a computer, in words
+/// for a refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatFailure {
+    /// Not managed, or IT hasn't set chat up: trying again won't help.
+    NotSetUp(String),
+    /// The console couldn't be reached, or refused.
+    Link(LinkError),
+    /// Something on this computer.
+    Local(String),
+}
+
+impl std::fmt::Display for ChatFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSetUp(m) | Self::Local(m) | Self::Link(LinkError::Refused(m)) => {
+                f.write_str(m)
+            }
+            Self::Link(LinkError::Unreachable(m)) => write!(
+                f,
+                "your organization's server can't be reached ({m}). Nothing was queued; try again when it's back"
+            ),
+        }
+    }
+}
+
+impl From<ChatError> for ChatFailure {
+    fn from(e: ChatError) -> Self {
+        Self::Local(e.to_string())
+    }
+}
+
+impl From<CryptoError> for ChatFailure {
+    fn from(e: CryptoError) -> Self {
+        Self::Local(e.to_string())
+    }
+}
+
 /// How a computer reaches its console for chat: the device API's chat
 /// routes (ADR 0030). glassd's goes through `ConsoleClient`, the one crate
 /// that leaves the machine; tests use a fake. Every method blocks.
@@ -675,6 +718,36 @@ pub mod testing {
                 kept.messages.push(message);
             }
         }
+
+        /// Every conversation made, with its epochs.
+        pub fn conversations(&self) -> Vec<(Conversation, Vec<Epoch>)> {
+            self.kept
+                .lock()
+                .map(|k| k.conversations.clone())
+                .unwrap_or_default()
+        }
+
+        /// The registered member key `id`, for the meetings console.
+        pub(crate) fn key(&self, id: &str) -> Option<MemberKey> {
+            self.kept
+                .lock()
+                .ok()?
+                .keys
+                .iter()
+                .find(|k| k.id == id)
+                .cloned()
+        }
+
+        /// Conversation `id`, for the meetings console.
+        pub(crate) fn conversation(&self, id: &str) -> Option<Conversation> {
+            self.kept
+                .lock()
+                .ok()?
+                .conversations
+                .iter()
+                .find(|(c, _)| c.id == id)
+                .map(|(c, _)| c.clone())
+        }
     }
 
     impl ChatLink for MemoryLink {
@@ -707,6 +780,19 @@ pub mod testing {
 
         fn create(&self, request: &CreateConversation) -> std::result::Result<u64, LinkError> {
             let mut kept = self.kept()?;
+            let conversation = &request.conversation;
+            if kept
+                .conversations
+                .iter()
+                .any(|(c, _)| c.id == conversation.id)
+            {
+                return refused("That conversation exists already.");
+            }
+            if conversation.kind == ConversationKind::Meeting
+                && conversation.members.len() > crate::meet::MAX_PEOPLE
+            {
+                return refused("A meeting is for up to 25 people.");
+            }
             let maker = kept
                 .keys
                 .iter()
@@ -868,6 +954,23 @@ mod tests {
         let name = seal_name(&key, &cv, 1, "#northwind-deal").unwrap();
         assert_eq!(open_name(&key, &cv, 1, &name).unwrap(), "#northwind-deal");
         assert!(!name.contains(&hex::encode("northwind")));
+    }
+
+    #[test]
+    fn cf21_a_meeting_is_a_conversation_kind_on_the_wire() {
+        let kinds = [
+            (ConversationKind::Direct, "\"direct\""),
+            (ConversationKind::Group, "\"group\""),
+            (ConversationKind::Channel, "\"channel\""),
+            (ConversationKind::Meeting, "\"meeting\""),
+        ];
+        for (kind, wire) in kinds {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<ConversationKind>(wire).unwrap(),
+                kind
+            );
+        }
     }
 
     #[test]
