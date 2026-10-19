@@ -13,7 +13,7 @@ interface Setting {
   section: string;
   title: string;
   help: string;
-  kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" };
+  kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" } | { type: "time_zone" };
   scope: "person" | "device";
   default: Value;
   value: Value;

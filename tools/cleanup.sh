@@ -8,6 +8,7 @@
 #     rebuilt as needed, slower once; with --deep the `vm` profile's too, which makes the next
 #     `make freebsd vm-deploy` take minutes instead of seconds;
 #   - test binaries left from earlier builds of the same test (only the newest of each stays);
+#   - split debug info (.dwo) older than 3 hours: cargo leaves one per codegen unit per build;
 #   - build/dist (staging, rewritten by every stage-dist.sh) and build/logs;
 #   - VM directories under build/ other than build/vm whose QEMU isn't running, and a bake VM
 #     (build/vm/bake) a failed image build left behind;
@@ -77,6 +78,20 @@ mapfile -t stale < <(find target/*/deps target/*/*/deps shell/target/*/deps shel
 	-printf '%T@ %p\n' 2>/dev/null |
 	sort -rn | awk '{ key = $2; sub(/-[0-9a-f]+$/, "", key); if (seen[key]++) print $2 }')
 ((${#stale[@]})) && gone "${stale[@]}"
+# Split debug info (split-debuginfo = "unpacked"): one .dwo per codegen unit of every build, and
+# cargo never removes an earlier build's. Hundreds of thousands pile up; those not written in the
+# last 3 hours go (a current one is written again by its next build; until then, only backtraces
+# lose line numbers).
+dwo() {
+	find target/*/deps target/*/*/deps shell/target/*/deps shell/target/*/*/deps -maxdepth 1 \
+		-name '*.dwo' -mmin +180 "$@" 2>/dev/null
+}
+if $apply; then
+	dwo -delete || true
+	echo "removed: split debug info older than 3 hours"
+else
+	echo "would remove: $(dwo -printf '%s\n' | awk '{ s += $1 } END { printf "%.1fG", s / 1e9 }') of split debug info older than 3 hours"
+fi
 # An image build deploys build/dist while its bake VM runs: leave it until then.
 # The bake scripts keep their pid in build/images/.bake.pid while they run, QEMU up or not.
 bake_running() {

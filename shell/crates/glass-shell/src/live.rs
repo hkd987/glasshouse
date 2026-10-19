@@ -541,8 +541,12 @@ impl Live {
         }
     }
 
-    /// Shows `task` as a banner from `at`.
+    /// Shows `task` as a banner from `at`, unless the person turned on Do
+    /// Not Disturb: then it waits in the menu bar's agents menu only.
     fn notify(&mut self, task: TaskId, state: TileState, at: Instant) {
+        if self.settings.flag("notifications.do_not_disturb", false) {
+            return;
+        }
         let lasts = if state == TileState::NeedsYou {
             NEEDS_YOU_BANNER
         } else {
@@ -1209,7 +1213,7 @@ impl Live {
         }
         // Locked: the sign-in screen's look, for the person signed in.
         if let Some(locked) = &self.locked {
-            let (date, time) = greeter::clock_lines(now);
+            let (date, time) = greeter::clock_lines(now, self.hour24());
             let message = if locked.checking {
                 Some("Checking…".to_owned())
             } else {

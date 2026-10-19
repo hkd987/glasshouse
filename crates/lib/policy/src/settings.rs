@@ -37,6 +37,9 @@ pub enum Kind {
     Url,
     /// Sites, such as `example.com` or `*.games.example`.
     Sites,
+    /// A time zone's name, such as `America/New_York`; empty is the
+    /// computer's own.
+    TimeZone,
 }
 
 /// One setting a computer has.
@@ -122,7 +125,26 @@ pub fn table() -> &'static [SettingDef] {
                 "clock.hour24",
                 "Date & time",
                 "24-hour clock",
-                "Shows 14:00 instead of 2:00 PM in the menu bar.",
+                "Shows 14:00 instead of 2:00 PM in the menu bar and on the lock screen.",
+                Scope::Person,
+                false,
+            ),
+            // glassd sets it with the base system's tzsetup; the clock
+            // follows without signing out (ADR 0031).
+            SettingDef {
+                id: "region.time_zone",
+                section: "Date & time",
+                title: "Time zone",
+                help: "Such as America/New_York or Europe/London. Empty keeps the computer's own.",
+                kind: Kind::TimeZone,
+                scope: Scope::Device,
+                default: SettingValue::Text(String::new()),
+            },
+            toggle(
+                "notifications.do_not_disturb",
+                "Notifications",
+                "Do Not Disturb",
+                "Agents' notifications stay in the menu bar instead of popping up; what needs you still waits there.",
                 Scope::Person,
                 false,
             ),
@@ -264,6 +286,20 @@ pub fn describe(def: &SettingDef, value: &SettingValue) -> String {
     }
 }
 
+/// Whether `zone` is shaped like a time zone's name: `UTC`, or `Area/City`
+/// (`America/Argentina/Buenos_Aires`), each part letters, digits, `_`, `+`
+/// or `-`. Nothing that could leave the zone folder.
+pub fn time_zone_ok(zone: &str) -> bool {
+    let parts: Vec<&str> = zone.split('/').collect();
+    zone.len() <= 64
+        && parts.len() <= 3
+        && parts.iter().all(|p| {
+            p.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-'))
+        })
+}
+
 fn site_ok(site: &str) -> bool {
     let host = site.strip_prefix("*.").unwrap_or(site);
     !host.is_empty()
@@ -304,10 +340,20 @@ pub fn check(def: &SettingDef, value: &SettingValue) -> Result<(), String> {
                 None => Ok(()),
             }
         }
+        (Kind::TimeZone, SettingValue::Text(zone)) => {
+            if zone.is_empty() || time_zone_ok(zone) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{zone:?} isn't a time zone such as America/New_York"
+                ))
+            }
+        }
         (Kind::Toggle, _) => Err("on or off".into()),
         (Kind::Number { .. }, _) => Err("a number".into()),
         (Kind::Url, _) => Err("a web address".into()),
         (Kind::Sites, _) => Err("a list of sites".into()),
+        (Kind::TimeZone, _) => Err("a time zone's name".into()),
     }
 }
 
@@ -382,6 +428,34 @@ members = ["dana", "mei"]
         assert_eq!(get("dana", "clock.hour24").value, SettingValue::Bool(true));
         assert_eq!(get("sam", "browser.restore_tabs").source, Source::Everyone);
         assert_eq!(get("sam", "lock.after_minutes").source, Source::Default);
+    }
+
+    #[test]
+    fn adr0031_a_time_zone_is_a_name_that_stays_in_the_zone_folder() {
+        for zone in [
+            "UTC",
+            "America/New_York",
+            "America/Argentina/Buenos_Aires",
+            "Etc/GMT+5",
+        ] {
+            assert!(time_zone_ok(zone), "{zone}");
+        }
+        for zone in [
+            "",
+            "../etc/passwd",
+            "America/../../x",
+            "/etc/localtime",
+            "A/B/C/D",
+            "America/New York",
+        ] {
+            assert!(!time_zone_ok(zone), "{zone}");
+        }
+        let def = def("region.time_zone").unwrap();
+        assert!(
+            check(def, &SettingValue::Text(String::new())).is_ok(),
+            "the computer's own"
+        );
+        assert!(check(def, &SettingValue::Text("../x".into())).is_err());
     }
 
     #[test]

@@ -34,6 +34,10 @@ pub struct SettingView {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SettingsView {
     pub settings: Vec<SettingView>,
+    /// The computer's offset from UTC now, in seconds east (ADR 0031): the
+    /// desktop's clock follows a new time zone without signing out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utc_offset_secs: Option<i32>,
 }
 
 impl SettingsView {

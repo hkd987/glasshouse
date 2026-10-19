@@ -433,6 +433,53 @@ pub fn parent_pid(pid: u32) -> Option<u32> {
         .ok()
 }
 
+/// The computer's offset from UTC now, in seconds east, from the base
+/// system's `date` (which reads `/etc/localtime` afresh each time).
+pub fn utc_offset_secs() -> Option<i32> {
+    parse_offset(cmd::run("date", &["+%z"]).ok()?.trim())
+}
+
+/// `+0200` → 7200, `-0530` → -19800.
+fn parse_offset(text: &str) -> Option<i32> {
+    let (sign, digits) = match text.as_bytes().first()? {
+        b'+' => (1, &text[1..]),
+        b'-' => (-1, &text[1..]),
+        _ => return None,
+    };
+    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i32 = digits[..2].parse().ok()?;
+    let minutes: i32 = digits[2..].parse().ok()?;
+    Some(sign * (hours * 3600 + minutes * 60))
+}
+
+/// Sets the computer's time zone to `zone` (`America/New_York`) with the
+/// base system's `tzsetup` (ADR 0031). Refused unless `zone` is a plain
+/// name of a file under `/usr/share/zoneinfo`.
+pub fn set_time_zone(zone: &str) -> Result<()> {
+    if !cfg!(target_os = "freebsd") {
+        return Err(PlatformError::Unsupported("setting the time zone".into()));
+    }
+    let plain = !zone.is_empty()
+        && zone.len() <= 64
+        && zone.split('/').all(|p| {
+            p.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-'))
+        });
+    if !plain
+        || !std::path::Path::new("/usr/share/zoneinfo")
+            .join(zone)
+            .is_file()
+    {
+        return Err(PlatformError::Unsafe(format!(
+            "{zone:?} is not a time zone"
+        )));
+    }
+    cmd::run("tzsetup", &[zone]).map(|_| ())
+}
+
 /// What puts the computer to sleep (ACPI S3) and returns once it wakes.
 pub const SLEEP_COMMAND: (&str, &[&str]) = ("acpiconf", &["-s", "3"]);
 
@@ -520,6 +567,17 @@ mod tests {
         assert_eq!(parent_pid(me), Some(std::os::unix::process::parent_id()));
         assert_eq!(parent_pid(u32::MAX), None);
         assert_eq!(SLEEP_COMMAND, ("acpiconf", &["-s", "3"][..]));
+    }
+
+    #[test]
+    fn adr0031_the_offset_comes_from_date() {
+        assert_eq!(parse_offset("+0200"), Some(7200));
+        assert_eq!(parse_offset("-0530"), Some(-19800));
+        assert_eq!(parse_offset("+0000"), Some(0));
+        assert_eq!(parse_offset("0200"), None);
+        assert_eq!(parse_offset("+2"), None);
+        assert!(utc_offset_secs().is_some(), "date +%z answers here too");
+        assert!(set_time_zone("../../etc/passwd").is_err());
     }
 
     #[test]

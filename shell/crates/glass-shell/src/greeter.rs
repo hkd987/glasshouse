@@ -131,7 +131,7 @@ impl Greeter {
     /// The screen at `now`, local time.
     pub fn screen(&self, now: OffsetDateTime) -> SignIn {
         let account = self.account();
-        let (date, time) = clock_lines(now);
+        let (date, time) = clock_lines(now, false);
         SignIn {
             date,
             time,
@@ -151,14 +151,18 @@ impl Greeter {
 
 /// The sign-in screen's (and the lock screen's) date and big clock:
 /// "Monday, October 19" and "8:02".
-pub fn clock_lines(now: OffsetDateTime) -> (String, String) {
+pub fn clock_lines(now: OffsetDateTime, hour24: bool) -> (String, String) {
     let format =
         |f: &[time::format_description::BorrowedFormatItem<'_>]| now.format(f).unwrap_or_default();
     (
         format(format_description!(
             "[weekday repr:long], [month repr:long] [day padding:none]"
         )),
-        format(format_description!("[hour repr:12 padding:none]:[minute]")),
+        if hour24 {
+            format(format_description!("[hour]:[minute]"))
+        } else {
+            format(format_description!("[hour repr:12 padding:none]:[minute]"))
+        },
     )
 }
 

@@ -327,6 +327,11 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 // and whether the screen has gone unused long enough to
                 // lock (UX-1's `lock.after_minutes`).
                 shell.live.set_trash_full(trash_full());
+                // On the hour, settings again: the computer's offset from
+                // UTC moves with summer time.
+                if shell.now().minute() == 0 {
+                    shell.carry_out_all(client.as_ref(), vec![Effect::LoadSettings]).await;
+                }
                 if shell.live.idle_too_long(Instant::now()) {
                     let effects = Vec::from_iter(shell.live.update(Message::LockScreen));
                     shell.carry_out_all(client.as_ref(), effects).await;
@@ -1123,7 +1128,18 @@ impl Shell {
             Effect::LoadSettings => {
                 let result: Result<SettingsView, _> = client.call(methods::SETTINGS_GET, ()).await;
                 match result {
-                    Ok(settings) => self.dirty |= self.live.set_settings(settings),
+                    Ok(settings) => {
+                        // The computer's time zone, as it is now (ADR 0031).
+                        if let Some(offset) = settings
+                            .utc_offset_secs
+                            .and_then(|s| UtcOffset::from_whole_seconds(s).ok())
+                            .filter(|o| *o != self.offset)
+                        {
+                            self.offset = offset;
+                            self.dirty = true;
+                        }
+                        self.dirty |= self.live.set_settings(settings);
+                    }
                     Err(e) => eprintln!("settings.get: {e}"),
                 }
                 Vec::new()

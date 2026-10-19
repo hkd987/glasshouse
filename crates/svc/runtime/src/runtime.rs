@@ -193,7 +193,14 @@ impl Runtime {
                 .iter()
                 .map(glass_app_settings::Effective::view)
                 .collect(),
+            utc_offset_secs: glass_platform::system::utc_offset_secs(),
         }
+    }
+
+    /// Something every desktop reads with its settings changed, such as the
+    /// computer's time zone (ADR 0031): they ask again.
+    pub fn settings_changed(&self) {
+        let _ = self.events.send((EVERYONE_UID, Event::SettingsChanged));
     }
 
     fn settings(&self) -> Arc<Settings> {

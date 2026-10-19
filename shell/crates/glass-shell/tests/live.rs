@@ -1215,6 +1215,7 @@ fn ux1_the_clock_and_the_lock_follow_the_persons_settings() {
                 setting("lock.after_minutes", serde_json::json!(5)),
                 setting("clock.hour24", serde_json::json!(true)),
             ],
+            utc_offset_secs: None,
         }),
         "the clock changes what's drawn"
     );
@@ -1263,6 +1264,52 @@ fn adr0031_the_screen_blanks_after_the_persons_minutes_and_the_next_input_only_w
             locked: true,
             from: SettingFrom::It,
         }],
+        utc_offset_secs: None,
     });
     assert!(!live.blank_due(minutes(600)));
+}
+
+#[test]
+fn adr0031_do_not_disturb_keeps_banners_from_popping_up_and_the_lock_clock_follows_24_hours() {
+    use glass_api::TileState;
+    use glass_api::settings::{SettingFrom, SettingView, SettingsView};
+    use std::time::Instant;
+
+    let setting = |id: &str, on: bool| SettingView {
+        id: id.into(),
+        value: serde_json::json!(on),
+        locked: false,
+        from: SettingFrom::You,
+    };
+    let mut live = Live::new(Vec::new());
+    live.set_settings(SettingsView {
+        settings: vec![setting("notifications.do_not_disturb", true)],
+        utc_offset_secs: None,
+    });
+    let mut waiting = fixtures::tasks().remove(0);
+    waiting.state = TileState::NeedsYou;
+    live.apply_at(
+        glass_api::Event::TaskUpdated {
+            task: Box::new(waiting.clone()),
+        },
+        Instant::now(),
+    );
+    assert!(live.banners().is_empty(), "it waits in the menu bar only");
+    assert_eq!(live.tasks().len(), 1, "and is still there to open");
+
+    // Off again: the next change pops up as before.
+    live.set_settings(SettingsView::default());
+    let mut done = waiting;
+    done.state = TileState::Done;
+    live.apply_at(
+        glass_api::Event::TaskUpdated {
+            task: Box::new(done),
+        },
+        Instant::now(),
+    );
+    assert!(!live.banners().is_empty());
+
+    let at = time::macros::datetime!(2026-10-19 14:05 UTC);
+    assert_eq!(glass_shell::greeter::clock_lines(at, false).1, "2:05");
+    assert_eq!(glass_shell::greeter::clock_lines(at, true).1, "14:05");
 }

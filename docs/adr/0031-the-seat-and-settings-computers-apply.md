@@ -1,7 +1,7 @@
 # 0031. The seat, and the settings a computer applies itself
 
-Status: **Accepted** (2026-10-19). Building: the seat, blank screen and
-sleep. PRD UX-1, AD-2, PM-5; the owner asked that IT control every device
+Status: **Accepted** (2026-10-19). Built: the seat, blank screen, sleep,
+time zone and Do Not Disturb. Next: USB storage, then Wi-Fi and VPN. PRD UX-1, AD-2, PM-5; the owner asked that IT control every device
 setting per role (2026-10-19) and chose four groups to add: updates and
 sleep, network and VPN, sharing and devices, notifications and region.
 Extends ADR 0029.
@@ -42,9 +42,9 @@ Extends ADR 0029.
    |---|---|---|
    | Blank the screen after idle | person | built here |
    | Sleep after idle | person | built here |
-   | Time zone | computer | next: glassd sets it, the desktop's clock follows without signing out |
+   | Time zone | computer | built: glassd runs `tzsetup`; `settings.get` carries the offset, so the desktop's clock follows without signing out, and is read again on the hour for summer time |
    | USB storage allowed or off | computer | next, with a devfs rule and a probe check |
-   | Do Not Disturb for agents' banners | person | next |
+   | Do Not Disturb for agents' banners | person | built: they wait in the menu bar's agents menu |
    | Wi-Fi networks, VPN | computer | after decision 4 below |
    | Update window and restart deadline | computer | with the updater (EP-1) |
    | Bluetooth, printers | computer | when the image has them |

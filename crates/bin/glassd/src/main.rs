@@ -461,6 +461,47 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         });
     }
 
+    // The time zone IT set for the computer (ADR 0031): applied when it
+    // changes, then every desktop asks again, for its clock.
+    {
+        let settings = org.settings.clone();
+        let runtime = Arc::downgrade(&runtime);
+        let applied = std::sync::Mutex::new(String::new());
+        let apply = move || {
+            let zone = settings
+                .device()
+                .into_iter()
+                .find(|r| r.id == "region.time_zone")
+                .and_then(|r| match r.value {
+                    glass_policy::document::SettingValue::Text(zone) => Some(zone),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let mut applied = applied.lock().unwrap_or_else(|p| p.into_inner());
+            if zone.is_empty() || *applied == zone {
+                return;
+            }
+            match glass_platform::system::set_time_zone(&zone) {
+                Ok(()) => {
+                    tracing::info!(%zone, "time zone set from IT's settings");
+                    *applied = zone;
+                    if let Some(runtime) = runtime.upgrade() {
+                        runtime.settings_changed();
+                    }
+                }
+                Err(e) => tracing::warn!("setting the time zone to {zone}: {e}"),
+            }
+        };
+        let apply = Arc::new(apply);
+        apply();
+        let again = Arc::clone(&apply);
+        org.settings.on_change(move |uid| {
+            if uid.is_none() {
+                again();
+            }
+        });
+    }
+
     let listener = bind_control_socket(&config.control_socket)?;
     // The app socket (ADR 0024): world-connectable too, authorized by uid,
     // and carrying only the app methods.

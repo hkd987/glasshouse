@@ -11,6 +11,23 @@ import { h, show } from "@glasshouse/sdk";
 import { type Impact, type Managed, type SettingRow, type SettingValue, type SettingsPage, api } from "./api.ts";
 import { card, chip, mono, notice, plural } from "./ui.ts";
 
+/** Time zones IT picks from most; any other name of the zone database works too. */
+const ZONES = [
+  "UTC",
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "America/Sao_Paulo",
+  "Europe/London",
+  "Europe/Paris",
+  "Europe/Berlin",
+  "Asia/Kolkata",
+  "Asia/Singapore",
+  "Asia/Tokyo",
+  "Australia/Sydney",
+];
+
 type State = "unset" | "default" | "locked";
 
 /** A value in words, as the preview says it. */
@@ -112,6 +129,21 @@ export async function settingsPage(root: HTMLElement, group: string): Promise<vo
               ),
           },
           Array.isArray(f.value) ? f.value.join("\n") : "",
+        );
+      case "time_zone":
+        return h(
+          "span",
+          {},
+          h("input", {
+            class: "text",
+            name: row.id,
+            value: String(f.value),
+            placeholder: "America/New_York",
+            list: "time-zones",
+            disabled,
+            oninput: (e: Event) => set((e.target as HTMLInputElement).value.trim()),
+          }),
+          h("datalist", { id: "time-zones" }, ...ZONES.map((zone) => h("option", { value: zone }))),
         );
     }
   }

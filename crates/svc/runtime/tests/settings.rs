@@ -79,6 +79,10 @@ async fn ux1_the_desktop_reads_its_settings_hears_of_changes_and_the_app_changes
         "the computer's default"
     );
     assert!(
+        before.utc_offset_secs.is_some(),
+        "the computer's offset from UTC, for the desktop's clock (ADR 0031)"
+    );
+    assert!(
         before
             .settings
             .iter()
@@ -144,7 +148,7 @@ async fn ux1_the_desktop_reads_its_settings_hears_of_changes_and_the_app_changes
 
     let list = call(&apps, settings.session, "settings.list", json!({})).await;
     assert!(list.ok, "{}", list.text);
-    assert_eq!(list.text, "9 settings; IT locked 1.");
+    assert_eq!(list.text, "11 settings; IT locked 1.");
     assert!(
         list.data["device"]
             .as_array()
