@@ -452,14 +452,49 @@ impl Compositor {
     pub fn pointer_moved(&mut self, at: (f64, f64)) {
         self.state.pointer = at.into();
         // Dragging a title bar moves its window; the app hears nothing.
-        if let Some(grab) = &self.state.grab {
-            let to = self.state.pointer - grab.offset;
-            let top = f64::from(self.state.work_area.top + TITLE_BAR);
-            let window = grab.window.clone();
-            self.state
-                .space
-                .map_element(window, (to.x as i32, to.y.max(top) as i32), false);
-            return;
+        match &self.state.grab {
+            Some(Grab::Move { window, offset }) => {
+                let to = self.state.pointer - *offset;
+                let top = f64::from(self.state.work_area.top + TITLE_BAR);
+                let window = window.clone();
+                self.state
+                    .space
+                    .map_element(window, (to.x as i32, to.y.max(top) as i32), false);
+                return;
+            }
+            // Dragging an edge asks the app for the size it makes; the
+            // window moves with a left or top edge (DK-1).
+            Some(Grab::Resize {
+                window,
+                edges,
+                from,
+                at,
+                size,
+            }) => {
+                let moved = self.state.pointer - *from;
+                let (dx, dy) = (moved.x as i32, moved.y as i32);
+                let grow = |near: bool, far: bool, d: i32| match (near, far) {
+                    (true, _) => -d,
+                    (_, true) => d,
+                    _ => 0,
+                };
+                let w = (size.w + grow(edges.left, edges.right, dx)).max(MIN_SIZE.0);
+                let h = (size.h + grow(edges.top, edges.bottom, dy)).max(MIN_SIZE.1);
+                let x = if edges.left { at.x + size.w - w } else { at.x };
+                let y = if edges.top { at.y + size.h - h } else { at.y };
+                let window = window.clone();
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.with_pending_state(|state| {
+                        state.size = Some((w, h).into());
+                        state.states.unset(xdg_toplevel::State::Maximized);
+                    });
+                    toplevel.send_pending_configure();
+                }
+                self.state.zoomed.retain(|z| z.window != window);
+                self.state.space.map_element(window, (x, y), false);
+                return;
+            }
+            None => {}
         }
         let under = self.state.surface_under(self.state.pointer);
         let Some(pointer) = self.state.seat.get_pointer() else {
@@ -493,12 +528,28 @@ impl Compositor {
                         .space
                         .element_location(&window)
                         .unwrap_or_default();
-                    self.state.grab = Some(Grab {
+                    self.state.grab = Some(Grab::Move {
                         offset: self.state.pointer - at.to_f64(),
                         window,
                     });
                     return;
                 }
+                Some((window, Part::Edge(edges))) if button == BUTTON_LEFT => {
+                    let at = self
+                        .state
+                        .space
+                        .element_location(&window)
+                        .unwrap_or_default();
+                    self.state.grab = Some(Grab::Resize {
+                        edges,
+                        from: self.state.pointer,
+                        at,
+                        size: window.geometry().size,
+                        window,
+                    });
+                    return;
+                }
+                Some((_, Part::Edge(_))) => return,
                 Some((window, Part::Minimize)) => {
                     self.state.minimize(&window);
                     return;
@@ -675,10 +726,43 @@ struct Frame {
 }
 
 /// A window moving with the pointer: where on it the pointer took hold.
-struct Grab {
-    window: Window,
-    offset: Point<f64, Logical>,
+enum Grab {
+    /// Its title bar: where on the window the pointer took hold.
+    Move {
+        window: Window,
+        offset: Point<f64, Logical>,
+    },
+    /// An edge or corner: where the pointer and the window started.
+    Resize {
+        window: Window,
+        edges: Edges,
+        from: Point<f64, Logical>,
+        at: Point<i32, Logical>,
+        size: Size<i32, Logical>,
+    },
 }
+
+impl Grab {
+    fn window(&self) -> &Window {
+        match self {
+            Grab::Move { window, .. } | Grab::Resize { window, .. } => window,
+        }
+    }
+}
+
+/// Which edges of a window the pointer holds: one, or two at a corner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Edges {
+    left: bool,
+    right: bool,
+    top: bool,
+    bottom: bool,
+}
+
+/// How far outside a window its edges can be taken hold of.
+const EDGE: i32 = 6;
+/// The smallest a window is made by dragging an edge.
+const MIN_SIZE: (i32, i32) = (160, 80);
 
 /// What part of a window is under the pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -690,6 +774,8 @@ enum Part {
     Close,
     /// The zoom control (the right one).
     Zoom,
+    /// Just outside an edge or a corner: dragging resizes.
+    Edge(Edges),
 }
 
 impl State {
@@ -716,6 +802,21 @@ impl State {
                     Part::Bar
                 };
                 return Some((window.clone(), part));
+            }
+            // Just outside the window and its title bar: an edge or corner.
+            let height = window.geometry().size.h;
+            let (left, top) = (-f64::from(EDGE), -f64::from(TITLE_BAR + EDGE));
+            let (right, bottom) = (f64::from(width + EDGE), f64::from(height + EDGE));
+            if (left..right).contains(&x) && (top..bottom).contains(&y) {
+                let edges = Edges {
+                    left: x < 0.0,
+                    right: x >= f64::from(width),
+                    top: y < -f64::from(TITLE_BAR),
+                    bottom: y >= f64::from(height),
+                };
+                if edges.left || edges.right || edges.top || edges.bottom {
+                    return Some((window.clone(), Part::Edge(edges)));
+                }
             }
             let bbox = window.bbox();
             let inside = at - loc.to_f64() + window.geometry().loc.to_f64();
@@ -944,7 +1045,7 @@ impl XdgShellHandler for State {
         self.minimized.retain(|(w, _)| !gone(w));
         self.zoomed.retain(|z| !gone(&z.window));
         self.frames.retain(|f| !gone(&f.window));
-        if self.grab.as_ref().is_some_and(|g| gone(&g.window)) {
+        if self.grab.as_ref().is_some_and(|g| gone(g.window())) {
             self.grab = None;
         }
     }

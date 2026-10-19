@@ -390,3 +390,36 @@ fn dk1_zoom_fills_the_work_area_and_again_puts_it_back() {
         [format!("800x{height}"), "200x100".into()]
     );
 }
+
+#[test]
+fn dk1_dragging_a_corner_resizes_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("wayland-test");
+    let work = WorkArea {
+        top: 32,
+        bottom: 80,
+    };
+    let mut compositor = Compositor::new(socket.to_str().unwrap(), (800, 600), work).unwrap();
+    let seen = Seen::default();
+    let app = Sizer {
+        size: (200, 100),
+        seen: seen.clone(),
+    };
+    let path = socket.clone();
+    std::thread::spawn(move || glass_window::run_on(&path, app, Wake::new().unwrap()));
+    until(&mut compositor, "the window", |c| {
+        c.windows().first().is_some_and(|w| w.area.width == 200)
+    });
+    let w = compositor.windows()[0].area;
+    // Just past the bottom right corner, then 100 right and 50 down.
+    let corner = (f64::from(w.x + w.width + 2), f64::from(w.y + w.height + 2));
+    compositor.pointer_moved(corner);
+    compositor.pointer_button(BUTTON_LEFT, true);
+    compositor.pointer_moved((corner.0 + 100.0, corner.1 + 50.0));
+    compositor.pointer_button(BUTTON_LEFT, false);
+    until(&mut compositor, "the window resized", |c| {
+        let a = c.windows()[0].area;
+        (a.x, a.y, a.width, a.height) == (w.x, w.y, 300, 150)
+    });
+    assert_eq!(*seen.lock().unwrap(), ["300x150"]);
+}
