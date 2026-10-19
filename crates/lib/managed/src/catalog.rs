@@ -7,10 +7,16 @@
 //! members: required (pushed), available (self-install) or blocked. A user
 //! sees an item when one of their groups has it required or available and
 //! none blocks it: blocked wins, as the stricter rule does in policy.
+//!
+//! Items share one id namespace whatever their kind, as apps and agents do
+//! on a device (ADR 0024): a release with two items under one id is
+//! refused. And the store rule: an org's items never go to the public
+//! store. Only a single person's app, built on a device no org manages,
+//! may ([`CatalogItem::public_store_check`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use glass_types::{Label, Tier};
+use glass_types::{AgentId, Label, Tier};
 use serde::{Deserialize, Serialize};
 
 /// What kind of thing an item is.
@@ -81,12 +87,58 @@ impl Default for Declared {
     }
 }
 
+/// Whose an item is, for the store rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// The org's: built, bought or approved for its people.
+    #[default]
+    Org,
+    /// One person's own app, built on request for them alone (GA-5).
+    Personal,
+}
+
+/// Where an item came from. Unknown provenance counts as the org's, built
+/// on a managed device: the strictest reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Provenance {
+    #[serde(default)]
+    pub scope: Scope,
+    /// Built on a device an org manages (enrolled with a console).
+    #[serde(default = "managed_by_default")]
+    pub built_on_managed_device: bool,
+}
+
+fn managed_by_default() -> bool {
+    true
+}
+
+impl Default for Provenance {
+    fn default() -> Self {
+        Self {
+            scope: Scope::Org,
+            built_on_managed_device: true,
+        }
+    }
+}
+
+/// Why an item may not go to the public store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum StoreRefusal {
+    #[error("it belongs to the org, and an org's apps and agents never go to the public store")]
+    OrgScoped,
+    #[error("it was built on a device the org manages, so it is the org's and stays private")]
+    BuiltOnManagedDevice,
+}
+
 /// One approved item in the org's catalog.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogItem {
-    /// Stable id, such as `contract-review`. For agents, the agent id.
-    pub id: String,
+    /// Stable id, such as `contract-review`: the agent's or app's id on
+    /// devices. Unique in the catalog whatever the kind.
+    pub id: AgentId,
     pub kind: ItemKind,
     pub name: String,
     pub version: String,
@@ -110,6 +162,8 @@ pub struct CatalogItem {
     /// Devices stay on this version until IT moves the pin (DV-12).
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default)]
+    pub provenance: Provenance,
 }
 
 impl CatalogItem {
@@ -131,10 +185,18 @@ impl CatalogItem {
         best
     }
 
-    /// Whether the item may ever be listed outside the org, such as on a
-    /// public exchange (DV-20): never for the org's own items (DV-10).
-    pub fn publicly_listable(&self) -> bool {
-        !self.internal
+    /// The store rule: whether the item may be published to the public
+    /// store (DV-20). An org's items never may, whoever built them (DV-10);
+    /// neither may anything built on a managed device. Only a single
+    /// person's app, built on a device no org manages, may.
+    pub fn public_store_check(&self) -> Result<(), StoreRefusal> {
+        if self.internal || self.provenance.scope == Scope::Org {
+            return Err(StoreRefusal::OrgScoped);
+        }
+        if self.provenance.built_on_managed_device {
+            return Err(StoreRefusal::BuiltOnManagedDevice);
+        }
+        Ok(())
     }
 }
 
@@ -143,6 +205,27 @@ impl CatalogItem {
 #[serde(deny_unknown_fields)]
 pub struct CatalogRelease {
     pub items: Vec<CatalogItem>,
+}
+
+impl CatalogRelease {
+    /// What a console checks before signing and a device before applying:
+    /// one item per id, whatever its kind (apps and agents share one
+    /// namespace), and nothing that went public from an org (DV-10).
+    pub fn check(&self) -> Result<(), String> {
+        let mut seen = BTreeSet::new();
+        for item in &self.items {
+            if !seen.insert(&item.id) {
+                return Err(format!(
+                    "two items are named {}; apps, agents and flows share one id namespace",
+                    item.id
+                ));
+            }
+            if item.name.trim().is_empty() || item.name.chars().any(char::is_control) {
+                return Err(format!("{}: the name must be one line", item.id));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A search hit.
@@ -292,7 +375,7 @@ mod tests {
 
     fn item(id: &str, name: &str, summary: &str, groups: &[(&str, InstallMode)]) -> CatalogItem {
         CatalogItem {
-            id: id.into(),
+            id: id.parse().unwrap(),
             kind: ItemKind::App,
             name: name.into(),
             version: "1.0.0".into(),
@@ -307,6 +390,7 @@ mod tests {
             },
             groups: groups.iter().map(|(g, m)| ((*g).to_owned(), *m)).collect(),
             pinned: false,
+            provenance: Provenance::default(),
         }
     }
 
@@ -389,11 +473,43 @@ mod tests {
     }
 
     #[test]
-    fn dv10_the_orgs_own_items_are_never_publicly_listable() {
+    fn dv10_store_rule_only_a_personal_app_from_an_unmanaged_device_goes_public() {
         let mut it = item("x", "X", "", &[]);
-        assert!(!it.publicly_listable());
+        assert_eq!(it.public_store_check(), Err(StoreRefusal::OrgScoped));
         it.internal = false;
-        assert!(it.publicly_listable());
+        assert_eq!(
+            it.public_store_check(),
+            Err(StoreRefusal::OrgScoped),
+            "a bought or approved item is the org's too"
+        );
+        it.provenance.scope = Scope::Personal;
+        assert_eq!(
+            it.public_store_check(),
+            Err(StoreRefusal::BuiltOnManagedDevice),
+            "built on a managed device: the org's"
+        );
+        it.provenance.built_on_managed_device = false;
+        assert_eq!(it.public_store_check(), Ok(()));
+        it.internal = true;
+        assert_eq!(it.public_store_check(), Err(StoreRefusal::OrgScoped));
+
+        // Provenance nobody recorded reads as the strictest.
+        let json = r#"{"scope":"personal"}"#;
+        let p: Provenance = serde_json::from_str(json).unwrap();
+        assert!(p.built_on_managed_device);
+    }
+
+    #[test]
+    fn a_release_has_one_item_per_id_whatever_its_kind() {
+        let mut agent = item("disputes", "Disputes", "", &[]);
+        agent.kind = ItemKind::Agent;
+        let app = item("disputes", "Disputes app", "", &[]);
+        let release = CatalogRelease {
+            items: vec![agent, app],
+        };
+        let err = release.check().unwrap_err();
+        assert!(err.contains("one id namespace"), "{err}");
+        assert!(serde_json::from_str::<CatalogItem>(r#"{"id":"Bad Id"}"#).is_err());
     }
 
     #[test]

@@ -22,7 +22,7 @@ use crate::common::{Harness, eventually, harness, harness_with, tool};
 
 fn item(id: &str, name: &str, groups: &[(&str, InstallMode)]) -> CatalogItem {
     CatalogItem {
-        id: id.into(),
+        id: id.parse().unwrap(),
         kind: ItemKind::App,
         name: name.into(),
         version: "3.0.0".into(),
@@ -39,6 +39,7 @@ fn item(id: &str, name: &str, groups: &[(&str, InstallMode)]) -> CatalogItem {
         },
         groups: groups.iter().map(|(g, m)| ((*g).to_owned(), *m)).collect(),
         pinned: false,
+        provenance: Default::default(),
     }
 }
 

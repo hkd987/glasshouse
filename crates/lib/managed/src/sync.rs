@@ -1,12 +1,12 @@
 //! What a device and its console say to each other (ADR 0023).
 //!
 //! ```text
-//! GET  /device/v1/sync?device=<id>&policy=<v>&catalog=<v>&wait=<s>  → SyncResponse
-//! POST /device/v1/report                                            ← DeviceReport
+//! POST /device/v1/sync    SyncRequest → SyncResponse
+//! POST /device/v1/report  DeviceReport → {}
 //! ```
 //!
 //! Both carry the org's enrollment token as a bearer token. A sync waits
-//! up to `wait` seconds for a release newer than the versions the device
+//! up to `wait_secs` for a release newer than the versions the device
 //! names, so a change reaches online devices in about a second without
 //! them polling hard; it answers at once when there is one.
 
@@ -50,6 +50,23 @@ impl Ring {
         }
     }
 }
+
+/// What a device asks for: anything newer than what it has in force.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyncRequest {
+    pub device: String,
+    #[serde(default)]
+    pub policy: Option<u64>,
+    #[serde(default)]
+    pub catalog: Option<u64>,
+    /// How long the console may hold the answer waiting for a release.
+    #[serde(default)]
+    pub wait_secs: u64,
+}
+
+/// The longest a sync is held open.
+pub const MAX_WAIT_SECS: u64 = 25;
 
 /// The console's answer to a sync: releases newer than the device named,
 /// for the device's ring. `None` means nothing newer.

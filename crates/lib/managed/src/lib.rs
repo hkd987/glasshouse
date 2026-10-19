@@ -27,10 +27,15 @@ pub mod signing;
 pub mod store;
 pub mod sync;
 
-pub use catalog::{CatalogItem, CatalogRelease, Declared, InstallMode, ItemKind, Match};
+pub use catalog::{
+    CatalogItem, CatalogRelease, Declared, InstallMode, ItemKind, Match, Provenance, Scope,
+    StoreRefusal,
+};
 pub use signing::{DocKind, OrgKey, PublicKey, Refusal, Signed};
 pub use store::ReleaseStore;
-pub use sync::{DeviceReport, PolicyRelease, Ring, RunningAgent, SyncResponse};
+pub use sync::{
+    DeviceReport, MAX_WAIT_SECS, PolicyRelease, Ring, RunningAgent, SyncRequest, SyncResponse,
+};
 
 /// SHA-256 of `bytes`, as lowercase hex.
 pub fn sha256_hex(bytes: &[u8]) -> String {

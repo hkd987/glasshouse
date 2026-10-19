@@ -273,7 +273,7 @@ mod tests {
 
     fn item(id: &str, name: &str, summary: &str, groups: &[(&str, InstallMode)]) -> CatalogItem {
         CatalogItem {
-            id: id.into(),
+            id: id.parse().unwrap(),
             kind: ItemKind::App,
             name: name.into(),
             version: "1.2.0".into(),
@@ -290,6 +290,7 @@ mod tests {
             },
             groups: groups.iter().map(|(g, m)| ((*g).to_owned(), *m)).collect(),
             pinned: false,
+            provenance: Default::default(),
         }
     }
 
