@@ -258,6 +258,15 @@ async fn main() -> ExitCode {
                 |_| "connected".into(),
             ),
         ),
+        // Apps' socket (ADR 0024): an agent reaching it could act as an
+        // installed app for its user, outside its own policy.
+        attempt(
+            "net: reach the app socket",
+            Want::Denied,
+            io(UnixStream::connect("/var/run/glasshouse/apps.sock"), |_| {
+                "connected".into()
+            }),
+        ),
         attempt("proc: see other processes", Want::Denied, processes()),
         attempt(
             "proc: signal init",
