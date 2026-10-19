@@ -9,15 +9,19 @@ import * as esbuild from "esbuild";
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const APPS = ["mail", "calendar"];
+/** Web apps our web servers serve rather than a device: the admin console
+ * (ADR 0023). No offline service worker: they read from their server. */
+export const SITES = ["console"];
 
 /** @param {string} app */
 function options(app) {
   const dir = join(here, app);
+  const site = SITES.includes(app);
   return {
     entryPoints: [
       { in: join(dir, "src/main.ts"), out: "app" },
       { in: join(dir, "src/app.css"), out: "app" },
-      { in: join(here, "sdk/src/sw.ts"), out: "sw" },
+      ...(site ? [] : [{ in: join(here, "sdk/src/sw.ts"), out: "sw" }]),
     ],
     outdir: join(dir, "dist"),
     bundle: true,
@@ -32,7 +36,7 @@ function options(app) {
 
 async function build() {
   const watch = process.argv.includes("--watch");
-  for (const app of APPS) {
+  for (const app of [...APPS, ...SITES]) {
     const dist = join(here, app, "dist");
     await rm(dist, { recursive: true, force: true });
     await mkdir(dist, { recursive: true });
