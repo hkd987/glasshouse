@@ -90,7 +90,7 @@ thumbnails are not started.
 |---|---|---|
 | NV-1 Action registry (name, inputs, side effects, default tier) | **Done** | `glass-actions`; typed *outputs* not yet declared |
 | NV-2 Registry speaks MCP | **Done** | ADR 0004 |
-| NV-3 Full first-party coverage: files, mail, calendar, browser, settings | Partial | files, mail (mock store); calendar, browser, settings not started. No document or spreadsheet editors of our own: agents use Microsoft 365 and Google Workspace through their APIs |
+| NV-3 Full first-party coverage: files, mail, calendar, browser, settings | Partial | files; mail (mock store: list, read, draft, send); calendar (`glass-app-calendar`: list, read, hold, create, update, delete, invite; pipeline `calendar_…`). Mail and Calendar also ship as apps (UI-5). Browser and settings not started. No document or spreadsheet editors of our own: agents use Microsoft 365 and Google Workspace through their APIs |
 | NV-10 Toolkit requires role + label | Not started | shell |
 | NV-11 A11y tree through the broker | Not started | |
 | NV-20 Screen agents on their own display | Not started | |
@@ -185,7 +185,9 @@ thumbnails are not started.
 |---|---|---|
 | UI-4 Shell in Rust with iced and AccessKit | Partial | `shell/` (its own workspace): boot, sign-in, desktop and command-bar screens match the mockups, from `glass_api` data. `glass-shell-fb` draws the desktop on the VM's screen (console framebuffer) with live tiles from `events.subscribe` (`make shell-vm`), keyboard and pointer from evdev, and redraws only what changed. `glass-greeter` signs people in on that screen through PAM and starts their desktop, and checks the password that unlocks its lock screen (ADR 0019, `make greeter-vm`). Missing: the compositor (ADR 0016), AccessKit |
 | UI-1 … UI-3 Wayland compositor on Smithay, isolation, agent displays | Not started | ADR 0016 (accepted): framebuffer output in the VM, verified with `glass-shell-fb`; DRM on hardware |
-| UI-5, UI-6 Web apps and native apps with manifests | Not started | ADR 0009 |
+| UI-5 Web apps with manifests, reaching the system only through the brokers, offline | Partial | ADR 0024: glassd's app socket runs an app's calls through the pipeline as "by [app] for [user]", refusing undeclared actions (DV-3); `glass-app-bridge` (loopback dev mode); `apps/` (SDK, Mail, Calendar; reads offline). Runtime `apps.rs` tests, glassd `dv3_apps_install_only…`, `make apps-test` (Playwright). Missing: our Chromium build as the app runtime, the OS-side app identity, install through the catalog, packaging into the image |
+| UI-6 Native apps with manifests | Not started | Same app socket and manifest as UI-5 (ADR 0024) |
+| UI-7 Web app budgets: cold launch under 1 s, under 150 MB | **Done** (dev host) | `apps/e2e/perf.spec.ts` fails over budget; Mail and Calendar launch cold in about 0.18 s and use about 115 MB (renderer RSS), `docs/dev/performance.md` |
 
 ## Desktop experience
 

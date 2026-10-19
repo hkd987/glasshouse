@@ -16,13 +16,15 @@ tests/<suite>        end-to-end suites that drive a running system
 os/freebsd/          everything that becomes the OS image: overlay, image and VM tooling
 shell/               the desktop shell UI (ADR 0009): its own Cargo workspace, so the
                      core never compiles the UI toolkit; a control-API client (shell/README.md)
+apps/                first-party web apps (ADR 0009, 0024): a TypeScript workspace with the
+                     SDK (apps/sdk) and one folder per app with its manifest.json; their OS
+                     actions stay in crates/apps (apps/README.md)
 tools/               developer tooling (checks, dev runners, screenshots, legal notices)
 docs/                architecture, decisions (adr/), developer guides (dev/)
 ```
 
 Future top-level areas, when they start: the compositor (M2, next to the
-shell in `shell/`), `apps/` (first-party TypeScript web apps; their OS actions stay
-in `crates/apps`), `agents/` (agent
+shell in `shell/`), `agents/` (agent
 harness bundles, ADR 0010), `console/` (admin console), `gateway/` if the
 model gateway outgrows its crates (`crates/svc/gateway`,
 `crates/svc/gateway-providers`, ADR 0018).
@@ -80,5 +82,10 @@ Consequences worth knowing:
 - **An agent**: a program that speaks MCP on `GLASS_AGENT_SOCKET`. Put it in
   `crates/bin`, add it to `os/freebsd/dist.manifest`, the catalog in the
   shipped `glassd.toml`, and an `[[agent]]` entry in policy.
+- **A web app**: a folder in `apps/` with `manifest.json` (its id and the
+  actions it calls), `index.html`, `src/main.ts` and `src/app.css`, built on
+  `apps/sdk`; add it to `APPS` in `apps/build.mjs`. Its actions are
+  `crates/apps` providers like any other. Every npm dependency must pass
+  `tools/legal/npm_licenses.py` (`make apps-lint`).
 - **A decision**: write an ADR in `docs/adr/` when a choice is hard to
   reverse or would surprise a new engineer.

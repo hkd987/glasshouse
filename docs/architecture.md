@@ -39,6 +39,15 @@ undo. Safety comes from the OS, not from the model behaving well.
   carries the `glass-api` methods. Every call is authorized by the caller's
   kernel-reported uid: users see and act on their own tasks; root sees all.
   Answering an approval is always the task owner's call.
+- **The app socket** (`/var/run/glasshouse/apps.sock`, mode 0666) is how
+  apps reach the system (UI-5, ADR 0024). It carries only `app.open`,
+  `app.call`, `app.status` and `app.close`, authorized by uid like the
+  control socket. An open app is a task whose principal is the app ("by
+  mail for demo"): its calls run the same pipeline as an agent's, limited
+  to what its manifest (read by glassd from the installed copy) declares.
+  `glass-app-bridge`, a user-level process, serves the apps' pages and
+  relays their calls; in this slice only over loopback HTTP for
+  development.
 - **A task socket** is created per task *inside* that task's jail, owned by
   the task's user, mode 0600. It speaks MCP (ADR 0004). It is the agent's only
   way to affect anything outside the jail. An *attended* agent (the user's
@@ -268,13 +277,14 @@ pipeline refuses further side effects (fail closed).
 | `glass-platform` | lib | Jails, ZFS, confined file access, users, xattrs, system facts, the console framebuffer and evdev input |
 | `glass-agent-sdk` | lib | Convenience MCP client for Rust agents |
 | `glass-actions` | lib | The action contract: providers, previews, task context, registry |
-| `glass-app-files`, `-mail`, `-system`, `-helpdesk` | apps | Each app's actions (ADR 0013) |
+| `glass-app-files`, `-mail`, `-calendar`, `-system`, `-helpdesk` | apps | Each app's actions (ADR 0013) |
 | `glass-first-party` | svc | The apps the OS ships, as one registry |
 | `glass-broker` | svc | Decisions and the approval desk |
 | `glass-gateway` | svc | The model gateway: the `model.complete` action, redaction, routing over providers with failover, the call record, the secrets stand-in (ADR 0018) |
 | `glass-gateway-providers` | svc | Providers that leave the machine: Anthropic Messages and Amazon Bedrock over HTTPS; the only crate with an HTTP and TLS stack |
 | `glass-tailoring` | svc | Personal layers on agents: customization points, versions, re-checks (ADR 0014) |
 | `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
-| `glassd`, `glassctl`, `glass-mcp`, `glass-demo-agent`, `glass-it-agent`, `glass-probe` | bin | Executables |
+| `glassd`, `glassctl`, `glass-mcp`, `glass-app-bridge`, `glass-demo-agent`, `glass-it-agent`, `glass-probe` | bin | Executables |
 | `glass-e2e` | tests | End-to-end scenarios |
+| `@glasshouse/sdk`, Mail, Calendar | apps/ (TypeScript) | The first-party web apps and the SDK they share: bridge client, manifests, attribution, offline reads (ADR 0024, `apps/README.md`) |
 | `glass-shell`, `glass-shell-preview`, `glass-shell-fb` | shell/ (own workspace) | The desktop shell's screens (iced, software rendering), their headless renderer, and the desktop on the console framebuffer with live tiles; a control-API client (ADR 0009, 0016) |

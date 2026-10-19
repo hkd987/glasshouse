@@ -34,6 +34,11 @@ details this file leaves out.
   shell-lint`; `make shell-preview` renders its screens to PNG,
   `make shell-vm` puts the desktop on the VM's screen and `make greeter-vm`
   the sign-in screen before it (the user likes seeing them).
+- The web apps are a TypeScript workspace (`apps/README.md`, ADR 0024):
+  - `make apps-build` bundles them with esbuild into `apps/<app>/dist`.
+  - `make apps-test`: types, unit tests, Playwright (headless Chromium) on dev-host glassd, launch and memory budgets.
+  - `make apps-lint`: types, manifests, npm licenses; `make lint` runs it when `apps/` changes.
+  - `make apps-dev` serves them at http://mail.localhost:7300 from `make dev-host`'s glassd.
 - Anything a person waits on has a latency budget in `glass-e2e perf`
   (`docs/dev/performance.md`).
 
