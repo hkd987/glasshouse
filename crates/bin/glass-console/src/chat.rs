@@ -63,7 +63,7 @@ fn invalid(m: impl Into<String>) -> Refused {
 }
 
 impl ChatState {
-    fn key(&self, id: &str) -> Option<&MemberKey> {
+    pub(crate) fn key(&self, id: &str) -> Option<&MemberKey> {
         self.keys.iter().find(|k| k.id == id)
     }
 
@@ -326,7 +326,12 @@ mod tests {
     };
     use serde_json::{Value, json};
 
+    use glass_managed::meet::{
+        Joined, MediaKey, MediaKeyRecord, MediaKeys, MeetBody, MeetOp, MeetRequest,
+    };
+
     use crate::directory::LocalDirectory;
+    use crate::relay::Relay;
     use crate::server::Console;
     use crate::state::State;
 
@@ -451,6 +456,62 @@ mod tests {
                 )
                 .await;
             (status, id, key)
+        }
+
+        /// `by` makes a meeting with `members` (Calendar's approved invite
+        /// does this): its id.
+        async fn meeting(&self, by: &Computer, members: &[&str]) -> String {
+            let keys = self.keys(members).await;
+            let compliance =
+                glass_crypto::PublicKey::from_bytes(&hex::decode(&keys.compliance).unwrap())
+                    .unwrap();
+            let id = new_conversation_id().unwrap();
+            let key = EpochKey::generate().unwrap();
+            let epoch = Epoch::make(
+                &id,
+                1,
+                &key,
+                None,
+                &keys.keys,
+                &compliance,
+                (&by.key, &by.secret),
+            )
+            .unwrap();
+            let conversation = Conversation {
+                id: id.clone(),
+                kind: ConversationKind::Meeting,
+                members: members.iter().map(|m| (*m).to_owned()).collect(),
+                created_by: by.key.login.clone(),
+                name: Some(seal_name(&key, &id, 1, "Northwind renewal").unwrap()),
+                epoch: 1,
+            };
+            let (status, body) = self
+                .post(
+                    "chat/conversations",
+                    &json!({ "device": by.name, "conversation": conversation, "epoch": epoch }),
+                )
+                .await;
+            assert_eq!(status, 200, "{body}");
+            id
+        }
+
+        /// `who` asks meeting `meeting` to `op`, signed by their member key.
+        async fn meet(&self, who: &Computer, meeting: &str, op: MeetOp) -> (u16, Value) {
+            let path = match &op {
+                MeetOp::Join { .. } => "join",
+                MeetOp::Keys => "keys",
+                MeetOp::Leave => "leave",
+            };
+            let body = MeetBody {
+                meeting: meeting.into(),
+                op,
+                device: who.name.clone(),
+                login: who.key.login.clone(),
+                key: who.key.id.clone(),
+                at: "2026-10-19T14:02:11Z".into(),
+            };
+            let request = MeetRequest::sign(body, &who.secret).unwrap();
+            self.post(&format!("meet/{meeting}/{path}"), &request).await
         }
 
         async fn say(
@@ -905,5 +966,268 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// A stand-in for glass-sfu's private API: two seats a room, answers
+    /// naming the participant, and every call written down.
+    async fn fake_relay() -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        tokio::spawn(async move {
+            let mut seats: std::collections::BTreeMap<String, std::collections::BTreeSet<u64>> =
+                Default::default();
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = glass_http::read_request(&mut stream).await.unwrap();
+                seen.lock()
+                    .unwrap()
+                    .push(format!("{} {}", request.method, request.path));
+                let room = request
+                    .path
+                    .split('/')
+                    .nth(2)
+                    .unwrap_or_default()
+                    .to_owned();
+                let response = match request.method.as_str() {
+                    "POST" => {
+                        let body: Value = serde_json::from_slice(&request.body).unwrap();
+                        let n = body["participant"].as_u64().unwrap();
+                        let taken = seats.entry(room).or_default();
+                        if taken.len() >= 2 && !taken.contains(&n) {
+                            glass_http::Response::json(
+                                409,
+                                &json!({ "error": "the room has its 2 participants already" }),
+                            )
+                        } else {
+                            taken.insert(n);
+                            glass_http::Response::json(
+                                200,
+                                &json!({ "answer": format!("v=0 answer for {n}") }),
+                            )
+                        }
+                    }
+                    _ => {
+                        match request.path.split('/').nth(4) {
+                            Some(n) => {
+                                seats.entry(room).or_default().remove(&n.parse().unwrap());
+                            }
+                            None => {
+                                seats.remove(&room);
+                            }
+                        }
+                        glass_http::Response::json(204, &Value::Null)
+                    }
+                };
+                glass_http::write_response(&mut stream, response, false)
+                    .await
+                    .unwrap();
+            }
+        });
+        (addr, calls)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cf21_two_computers_meet_through_the_console_which_keeps_no_media_key() {
+        let org = Org::new().await;
+        let (relay, calls) = fake_relay().await;
+        org.console.set_relay(Relay::new(&relay).unwrap());
+        let dana = org.computer("laptop-dana", "dana").await;
+        let priya = org.computer("laptop-priya", "priya").await;
+        let mei = org.computer("laptop-mei", "mei").await;
+        let meeting = org.meeting(&dana, &["dana", "priya"]).await;
+
+        // No session yet: the first to join makes the media key, sealed to
+        // the meeting's people and nobody else.
+        let (status, keys) = org.meet(&dana, &meeting, MeetOp::Keys).await;
+        assert_eq!(status, 200, "{keys}");
+        assert!(
+            serde_json::from_value::<MediaKeys>(keys)
+                .unwrap()
+                .media
+                .is_empty()
+        );
+        let (status, body) = org
+            .meet(
+                &dana,
+                &meeting,
+                MeetOp::Join {
+                    offer: "v=0 dana".into(),
+                    media: None,
+                },
+            )
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (409, Some("The meeting has no media key yet; send one."))
+        );
+        let media_key = MediaKey::generate().unwrap();
+        let record = MediaKeyRecord::make(
+            &meeting,
+            &media_key,
+            &[dana.key.clone(), priya.key.clone()],
+            (&dana.key, &dana.secret),
+        )
+        .unwrap();
+        let (status, body) = org
+            .meet(
+                &dana,
+                &meeting,
+                MeetOp::Join {
+                    offer: "v=0 dana".into(),
+                    media: Some(record.clone()),
+                },
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let joined: Joined = serde_json::from_value(body).unwrap();
+        assert_eq!(
+            (joined.participant, joined.answer.as_str()),
+            (1, "v=0 answer for 1")
+        );
+
+        // The second gets the first's key, even when it brings its own.
+        let theirs = MediaKeyRecord::make(
+            &meeting,
+            &MediaKey::generate().unwrap(),
+            &[dana.key.clone(), priya.key.clone()],
+            (&priya.key, &priya.secret),
+        )
+        .unwrap();
+        let (status, body) = org
+            .meet(
+                &priya,
+                &meeting,
+                MeetOp::Join {
+                    offer: "v=0 priya".into(),
+                    media: Some(theirs),
+                },
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let joined: Joined = serde_json::from_value(body).unwrap();
+        assert_eq!(joined.participant, 2);
+        assert_eq!(joined.media, std::slice::from_ref(&record));
+        assert_eq!(
+            joined.media[0]
+                .open(&priya.key.id, &priya.secret.agree)
+                .unwrap(),
+            media_key
+        );
+        assert!(
+            joined.keys.iter().any(|k| k.id == dana.key.id),
+            "to check the maker's signature"
+        );
+
+        // Someone not in the meeting gets nothing, not even the record.
+        let (status, body) = org.meet(&mei, &meeting, MeetOp::Keys).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (409, Some("You aren't in this meeting."))
+        );
+        let (status, _) = org
+            .meet(
+                &mei,
+                &meeting,
+                MeetOp::Join {
+                    offer: "v=0 mei".into(),
+                    media: None,
+                },
+            )
+            .await;
+        assert_eq!(status, 409);
+        // Nor does a request someone else signed for dana.
+        let mut forged = MeetRequest::sign(
+            MeetBody {
+                meeting: meeting.clone(),
+                op: MeetOp::Keys,
+                device: dana.name.clone(),
+                login: "dana".into(),
+                key: dana.key.id.clone(),
+                at: "2026-10-19T14:02:11Z".into(),
+            },
+            &mei.secret,
+        )
+        .unwrap();
+        forged.body.at = "2026-10-19T14:02:12Z".into();
+        let (status, body) = org.post(&format!("meet/{meeting}/keys"), &forged).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (409, Some("The request's signature doesn't check."))
+        );
+
+        // A third person: the relay holds two for now, and says so; the
+        // seat it didn't take is given back.
+        let three = org.meeting(&dana, &["dana", "priya", "mei"]).await;
+        let record3 = MediaKeyRecord::make(
+            &three,
+            &MediaKey::generate().unwrap(),
+            &[dana.key.clone(), priya.key.clone(), mei.key.clone()],
+            (&dana.key, &dana.secret),
+        )
+        .unwrap();
+        for (who, media) in [(&dana, Some(record3)), (&priya, None)] {
+            let (status, body) = org
+                .meet(
+                    who,
+                    &three,
+                    MeetOp::Join {
+                        offer: "v=0".into(),
+                        media,
+                    },
+                )
+                .await;
+            assert_eq!(status, 200, "{body}");
+        }
+        let (status, body) = org
+            .meet(
+                &mei,
+                &three,
+                MeetOp::Join {
+                    offer: "v=0".into(),
+                    media: None,
+                },
+            )
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (
+                409,
+                Some("This meeting is full: meetings hold two people for now.")
+            )
+        );
+
+        // Leaving frees the seat; the last one out ends the session, and
+        // its media key goes with it.
+        for who in [&dana, &priya] {
+            let (status, _) = org.meet(who, &meeting, MeetOp::Leave).await;
+            assert_eq!(status, 200);
+        }
+        let (_, keys) = org.meet(&priya, &meeting, MeetOp::Keys).await;
+        assert!(
+            serde_json::from_value::<MediaKeys>(keys)
+                .unwrap()
+                .media
+                .is_empty()
+        );
+        let calls = calls.lock().unwrap().clone();
+        assert!(
+            calls.contains(&format!("DELETE /rooms/{meeting}/participants/1")),
+            "{calls:?}"
+        );
+        assert!(
+            calls.contains(&format!("DELETE /rooms/{meeting}")),
+            "{calls:?}"
+        );
+
+        // Nothing the console wrote holds the media key, in any form.
+        org.console.state().save_chat().unwrap();
+        for (path, bytes) in files(org.dir.path()) {
+            assert!(
+                !found_in(&bytes, media_key.as_bytes()),
+                "the media key is in {path}"
+            );
+        }
     }
 }

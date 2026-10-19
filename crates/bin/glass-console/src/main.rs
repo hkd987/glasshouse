@@ -14,6 +14,8 @@ mod directory;
 mod edits;
 mod fixture;
 mod impact;
+mod meet;
+mod relay;
 mod server;
 mod state;
 mod views;
@@ -57,6 +59,10 @@ struct Args {
     /// items: `500,50`.
     #[arg(long)]
     fixture: Option<String>,
+    /// The meeting relay's API (`glass-sfu --api`), on this machine.
+    /// Without it, meetings can't be joined (ADR 0030 §6).
+    #[arg(long)]
+    relay: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -145,6 +151,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
         "admin console ready (development)"
     );
     let console = server::Console::new(state, Box::new(directory), args.web, url);
+    if let Some(api) = &args.relay {
+        console.set_relay(relay::Relay::new(api)?);
+    }
     console.serve(listener).await
 }
 

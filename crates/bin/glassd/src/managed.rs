@@ -195,10 +195,12 @@ impl Managed {
             }
             Err(e) => tracing::error!("managed: chat: {e}"),
         }
-        // Meetings (CF-21) connect here too, `self.org.meet.connect(..)`,
-        // once ConsoleClient speaks the console's meeting routes
-        // (`glass_managed::meet::MeetLink`). Until then `meet.join` says
-        // this computer can't reach meetings; Calendar still lists them.
+        // Meetings (CF-21) go to the same console, on a client of their
+        // own: a join mustn't wait behind chat's long poll.
+        match ConsoleClient::new(&self.managed.url, &token, self.managed.allow_insecure_http) {
+            Ok(meet) => self.org.meet.connect(Arc::new(meet)),
+            Err(e) => tracing::error!("managed: meetings: {e}"),
+        }
         let mut retry = FIRST_RETRY;
         let mut reported: Option<Instant> = None;
         loop {

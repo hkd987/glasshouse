@@ -13,6 +13,7 @@ use glass_managed::chat::{
     ChatLink, ChatSyncRequest, ChatSyncResponse, CreateConversation, Keys, LinkError, LookupKeys,
     PostMessage, RegisterKey,
 };
+use glass_managed::meet::{Joined, MediaKeys, MeetLink, MeetRequest};
 use glass_managed::{DeviceReport, SyncRequest, SyncResponse};
 
 use crate::http::{Http, Target};
@@ -139,6 +140,32 @@ impl ChatLink for ConsoleClient {
     fn sync(&self, request: &ChatSyncRequest) -> Result<ChatSyncResponse, LinkError> {
         Self::answer(&self.request("/device/v1/chat/sync", request)?)
     }
+}
+
+/// Meetings through the same console (ADR 0030 §6): each request signed by
+/// the person's member key, the meeting's id in the path.
+impl MeetLink for ConsoleClient {
+    fn join(&self, request: &MeetRequest) -> Result<Joined, LinkError> {
+        Self::answer(&self.request(&meet_path(request, "join")?, request)?)
+    }
+
+    fn keys(&self, request: &MeetRequest) -> Result<MediaKeys, LinkError> {
+        Self::answer(&self.request(&meet_path(request, "keys")?, request)?)
+    }
+
+    fn leave(&self, request: &MeetRequest) -> Result<(), LinkError> {
+        self.request(&meet_path(request, "leave")?, request)
+            .map(drop)
+    }
+}
+
+/// `/device/v1/meet/<id>/<op>`, for a meeting id that is a conversation's.
+fn meet_path(request: &MeetRequest, op: &str) -> Result<String, LinkError> {
+    let id = &request.body.meeting;
+    if !glass_managed::chat::is_conversation_id(id) {
+        return Err(LinkError::Refused(format!("{id:?} isn't a meeting")));
+    }
+    Ok(format!("/device/v1/meet/{id}/{op}"))
 }
 
 fn is_loopback(host: &str) -> bool {

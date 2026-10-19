@@ -1,0 +1,9 @@
+{
+  "id": "meet",
+  "name": "Meet",
+  "version": "0.1.0",
+  "description": "Video meetings with people in your organization, sealed end to end: the relay forwards what it can't open, and nothing is recorded.",
+  "actions": ["meet.list", "meet.join", "meet.keys", "meet.leave"],
+  "permissions": ["media"],
+  "labels": ["public", "internal"]
+}

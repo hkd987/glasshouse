@@ -36,7 +36,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use glass_http::{ReadError, Request, Response};
+use glass_managed::meet::{Joined, MAX_SDP_BYTES, MeetOp, MeetRequest};
 use glass_managed::{DeviceReport, InstallMode, MAX_WAIT_SECS, Ring, SyncRequest, chat};
+
+use crate::relay::RelayError;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
@@ -63,6 +66,10 @@ pub struct Console {
     releases: watch::Sender<u64>,
     /// Bumped whenever chat changes, to wake computers waiting on it.
     chat_changed: watch::Sender<u64>,
+    /// Meetings' sessions, in memory only (ADR 0030 §6).
+    rooms: Mutex<crate::meet::Rooms>,
+    /// The relay that carries meetings' media, beside the console.
+    relay: std::sync::OnceLock<crate::relay::Relay>,
     /// The built web app (`apps/console/dist`).
     web: PathBuf,
     /// The console's address, as devices reach it.
@@ -167,9 +174,16 @@ impl Console {
             sessions: Mutex::new(HashMap::new()),
             releases,
             chat_changed,
+            rooms: Mutex::new(crate::meet::Rooms::default()),
+            relay: std::sync::OnceLock::new(),
             web,
             url,
         })
+    }
+
+    /// The relay meetings' media goes through (`--relay`).
+    pub fn set_relay(&self, relay: crate::relay::Relay) {
+        let _ = self.relay.set(relay);
     }
 
     pub fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -700,8 +714,107 @@ impl Console {
                 let _ = tokio::time::timeout(wait, changed.changed()).await;
                 ok(serde_json::to_value(self.state().chat.sync(&sync)).unwrap_or_default())
             }
+            meet if meet.starts_with("meet/") => self.meet(meet, request).await,
             _ => error(404, "not found"),
         }
+    }
+
+    // ---- meetings (ADR 0030 §6) -----------------------------------------
+
+    /// `meet/<meeting>/{join,keys,leave}`, each signed by the person's
+    /// member key.
+    async fn meet(&self, path: &str, request: &Request) -> Response {
+        let Some((meeting, op)) = path
+            .strip_prefix("meet/")
+            .and_then(|rest| rest.split_once('/'))
+            .filter(|(id, _)| glass_managed::chat::is_conversation_id(id))
+        else {
+            return error(404, "not found");
+        };
+        let meet: MeetRequest = match body(request) {
+            Ok(b) => b,
+            Err(r) => return r,
+        };
+        match op {
+            "join" => self.meet_join(meeting, &meet).await,
+            "keys" => {
+                let state = self.state();
+                let keys = lock(&self.rooms).keys(&state.chat, meeting, &meet);
+                match keys {
+                    Ok(keys) => ok(serde_json::to_value(keys).unwrap_or_default()),
+                    Err(r) => refused(r),
+                }
+            }
+            "leave" => self.meet_leave(meeting, &meet).await,
+            _ => error(404, "not found"),
+        }
+    }
+
+    async fn meet_join(&self, meeting: &str, request: &MeetRequest) -> Response {
+        let MeetOp::Join { offer, .. } = &request.body.op else {
+            return error(400, "this route joins");
+        };
+        if offer.len() > MAX_SDP_BYTES {
+            return error(400, "the offer is too large");
+        }
+        let Some(relay) = self.relay.get().cloned() else {
+            return error(503, "meetings aren't set up on this console");
+        };
+        let seat = {
+            let state = self.state();
+            let seat = lock(&self.rooms).join(&state.chat, meeting, request);
+            match seat {
+                Ok(seat) => seat,
+                Err(r) => return refused(r),
+            }
+        };
+        match relay.join(meeting, seat.participant, offer).await {
+            Ok(answer) => {
+                tracing::info!(meeting, login = %request.body.login, participant = seat.participant, "meet: joined");
+                let joined = Joined {
+                    answer,
+                    participant: seat.participant,
+                    media: seat.media,
+                    keys: seat.keys,
+                };
+                ok(serde_json::to_value(joined).unwrap_or_default())
+            }
+            Err(e) => {
+                if seat.new {
+                    lock(&self.rooms).unseat(meeting, request);
+                }
+                match e {
+                    RelayError::Refused(m) => error(409, &m),
+                    RelayError::Down(m) => {
+                        tracing::warn!(meeting, "meet: {m}");
+                        error(503, "the meeting's relay can't be reached right now")
+                    }
+                }
+            }
+        }
+    }
+
+    async fn meet_leave(&self, meeting: &str, request: &MeetRequest) -> Response {
+        let left = {
+            let state = self.state();
+            let left = lock(&self.rooms).leave(&state.chat, meeting, request);
+            match left {
+                Ok(left) => left,
+                Err(r) => return refused(r),
+            }
+        };
+        tracing::info!(meeting, login = %request.body.login, ended = left.ended, "meet: left");
+        if let Some(relay) = self.relay.get() {
+            let done = match (left.participant, left.ended) {
+                (_, true) => relay.end(meeting).await,
+                (Some(participant), false) => relay.leave(meeting, participant).await,
+                (None, false) => Ok(()),
+            };
+            if let Err(e) = done {
+                tracing::warn!(meeting, "meet: the relay: {e:?}");
+            }
+        }
+        ok(json!({}))
     }
 }
 
