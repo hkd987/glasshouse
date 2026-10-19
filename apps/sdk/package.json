@@ -1,0 +1,12 @@
+{
+  "name": "@glasshouse/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The typed bridge client and manifest types every Glasshouse app builds on (ADR 0024).",
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./base.css": "./src/base.css"
+  }
+}

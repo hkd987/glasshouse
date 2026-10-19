@@ -1,0 +1,199 @@
+/* The Glass theme's window tokens (shell/crates/glass-shell/src/theme.rs),
+   shared by every first-party app: calm, light, Mac-like (DK-1, UX-10). */
+:root {
+  --accent: #3d6bff;
+  --accent-soft: #eaf0ff;
+  --attention: #f08a24;
+  --attention-soft: #fff4ea;
+  --attention-text: #a0510b;
+  --window: #ffffff;
+  --title-bar: #f4f6f8;
+  --border: #c9d0d8;
+  --divider: #e1e5ea;
+  --text: #14171c;
+  --muted: #5f6875;
+  --faint: #8c95a1;
+  --selected: #eef2f8;
+  --hover: #f6f8fa;
+  --ok: #2e7d4f;
+  --danger: #c43d3d;
+  --radius: 10px;
+  --radius-small: 7px;
+  color-scheme: light;
+  font-family: Inter, "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--window);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 16px;
+  border-radius: var(--radius-small);
+  border: 1px solid var(--border);
+  background: var(--window);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.button:hover {
+  background: var(--hover);
+}
+
+.button.primary {
+  background: var(--text);
+  border-color: var(--text);
+  color: #fff;
+}
+
+.button.primary:hover {
+  background: #2a2f37;
+}
+
+.button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.button:focus-visible,
+.row:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 16px 0 20px;
+  background: var(--title-bar);
+  border-bottom: 1px solid var(--divider);
+}
+
+.titlebar h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.titlebar .spacer {
+  flex: 1;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.user {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* "by [agent] for [user]" (AU-10). */
+.attribution {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px 0 8px;
+  border-radius: 11px;
+  background: var(--accent-soft);
+  color: #2c4fc4;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.attribution-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* Waiting for the user on the desktop: the only color that pulses. */
+.waiting-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--attention);
+  animation: pulse 1.6s ease-in-out infinite;
+  flex: none;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waiting-dot {
+    animation: none;
+  }
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.banner.offline {
+  background: var(--title-bar);
+  color: var(--muted);
+  border: 1px solid var(--divider);
+}
+
+.banner.waiting {
+  background: var(--attention-soft);
+  border: 1px solid #f6c597;
+  color: var(--attention-text);
+}
+
+.banner.refused {
+  background: #fdf0f0;
+  border: 1px solid #efc4c4;
+  color: #9b2c2c;
+}
+
+.empty {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--faint);
+}

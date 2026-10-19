@@ -1,0 +1,294 @@
+@import "../../sdk/src/base.css";
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.titlebar .week-title {
+  font-weight: 500;
+  min-width: 170px;
+}
+
+.nav {
+  display: flex;
+  gap: 6px;
+}
+
+.button.icon {
+  width: 34px;
+  padding: 0;
+  font-size: 18px;
+}
+
+.body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 312px;
+  min-height: 0;
+}
+
+/* The week. */
+.week {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--divider);
+}
+
+.week > .banner {
+  margin: 10px 14px 0;
+}
+
+.week-head {
+  display: grid;
+  grid-template-columns: 56px repeat(7, 1fr);
+  border-bottom: 1px solid var(--divider);
+}
+
+.day-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 0 9px;
+  border-left: 1px solid var(--divider);
+}
+
+.day-head .weekday {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.day-head .date {
+  font-size: 17px;
+  font-weight: 500;
+}
+
+.day-head.today .date {
+  display: inline-grid;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  border-radius: 14px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.week-scroll {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.week-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: 56px repeat(7, 1fr);
+}
+
+.gutter .hour-label {
+  height: 52px;
+  padding: 0 8px 0 0;
+  text-align: right;
+  font-size: 11px;
+  color: var(--faint);
+  transform: translateY(-7px);
+}
+
+.gutter .hour-label:first-child {
+  visibility: hidden;
+}
+
+.day {
+  position: relative;
+  border-left: 1px solid var(--divider);
+}
+
+.day.today {
+  background: #fafbff;
+}
+
+.hour-line {
+  height: 52px;
+  border-top: 1px solid #eef1f4;
+}
+
+.now {
+  position: absolute;
+  height: 2px;
+  background: var(--attention);
+  pointer-events: none;
+}
+
+.event {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow: hidden;
+  padding: 4px 8px;
+  border: 0;
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: #1d3a99;
+  text-align: left;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.event .event-title {
+  font-weight: 600;
+}
+
+.event .event-time,
+.event .event-by {
+  opacity: 0.8;
+}
+
+.event.invited {
+  border-left-color: #0e8a8a;
+  background: #e6f5f4;
+  color: #0b5c5c;
+}
+
+/* A hold is tentative time: dashed, striped. */
+.event.hold {
+  border: 1px dashed #7d93e8;
+  border-left: 3px solid var(--accent);
+  background: repeating-linear-gradient(135deg, #f3f6ff 0 7px, #e8eeff 7px 14px);
+}
+
+.event.selected {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* The side panel. */
+.side {
+  padding: 22px 22px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.side h2 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 600;
+}
+
+.notice {
+  color: var(--ok);
+  font-size: 13px;
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kind {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.kind.hold {
+  color: #4a63c9;
+}
+
+.when {
+  margin-top: 4px;
+  font-weight: 500;
+}
+
+.detail-attribution {
+  margin: 8px 0 4px;
+}
+
+.detail-row {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 8px;
+  padding: 9px 0;
+  border-top: 1px solid var(--divider);
+  font-size: 13px;
+}
+
+.notes {
+  margin-top: 6px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--title-bar);
+  white-space: pre-wrap;
+  font-size: 13px;
+}
+
+.upcoming p {
+  margin: 6px 0 12px;
+}
+
+.hold-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 12px 14px;
+  border: 1px dashed #b7c4f2;
+  border-radius: var(--radius);
+  background: #f8faff;
+  text-align: left;
+}
+
+.event-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.event-form .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.event-form .field span {
+  color: var(--muted);
+}
+
+.event-form input,
+.event-form textarea {
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  background: var(--window);
+}
+
+.event-form textarea {
+  height: auto;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.times {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
