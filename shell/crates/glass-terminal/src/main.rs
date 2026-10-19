@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex};
 use alacritty_terminal::event::{Event as TermEvent, EventListener, Notify, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Notifier};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column as GridColumn, Line, Point as GridPoint, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{self, Term, TermMode};
@@ -27,7 +29,7 @@ use glass_shell::{Element, fonts};
 use glass_window::{App, KeyPress, Wake, Waker};
 use iced_core::keyboard::Modifiers;
 use iced_core::text::LineHeight;
-use iced_core::{Color, Length, Padding};
+use iced_core::{Color, Length, Padding, Point};
 use iced_widget::{Column, Row, container, mouse_area, text};
 use xkb::Keysym;
 
@@ -45,6 +47,12 @@ const BACKGROUND: Rgb = Rgb {
     r: 0x15,
     g: 0x18,
     b: 0x1D,
+};
+/// Selected text's background.
+const SELECTION: Rgb = Rgb {
+    r: 0x26,
+    g: 0x4F,
+    b: 0x78,
 };
 const FOREGROUND: Rgb = Rgb {
     r: 0xE6,
@@ -141,12 +149,23 @@ struct Terminal {
     default_title: String,
     title: String,
     exited: bool,
+    /// Where the pointer is over the text, and whether a drag is selecting.
+    pointer: Point,
+    selecting: bool,
+    /// Text to put on the clipboard, and a paste asked for (DK-2).
+    copy: Option<String>,
+    paste: bool,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     /// The wheel turned: lines, up positive.
     Scroll(f32),
+    /// The pointer moved over the text, a button went down, then up:
+    /// dragging selects.
+    Moved(Point),
+    Pressed,
+    Released,
 }
 
 impl Terminal {
@@ -196,6 +215,10 @@ impl Terminal {
             title: title.clone(),
             default_title: title,
             exited: false,
+            pointer: Point::ORIGIN,
+            selecting: false,
+            copy: None,
+            paste: false,
         })
     }
 }
@@ -259,6 +282,9 @@ impl App for Terminal {
             };
             Message::Scroll(lines)
         })
+        .on_move(Message::Moved)
+        .on_press(Message::Pressed)
+        .on_release(Message::Released)
         .into()
     }
 
@@ -268,10 +294,54 @@ impl App for Terminal {
                 let lines = (lines * 3.0).round() as i32;
                 self.term.lock().scroll_display(Scroll::Delta(lines));
             }
+            Message::Moved(at) => {
+                self.pointer = at;
+                if self.selecting {
+                    let mut term = self.term.lock();
+                    let (point, side) = grid_point(&term, at);
+                    if let Some(selection) = term.selection.as_mut() {
+                        selection.update(point, side);
+                    }
+                }
+            }
+            Message::Pressed => {
+                let mut term = self.term.lock();
+                let (point, side) = grid_point(&term, self.pointer);
+                term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+                self.selecting = true;
+            }
+            Message::Released => {
+                self.selecting = false;
+                let mut term = self.term.lock();
+                if term.selection.as_ref().is_some_and(Selection::is_empty) {
+                    term.selection = None;
+                }
+            }
         }
     }
 
     fn key(&mut self, press: &KeyPress) -> bool {
+        match clip_key(press) {
+            Some(ClipKey::Copy) => {
+                self.copy = self.term.lock().selection_to_string();
+                return true;
+            }
+            Some(ClipKey::Paste) => {
+                self.paste = true;
+                return true;
+            }
+            // Ctrl C copies what's selected, as on Windows; with nothing
+            // selected it interrupts, as always.
+            Some(ClipKey::CopyIfSelected) => {
+                let mut term = self.term.lock();
+                if let Some(text) = term.selection_to_string().filter(|t| !t.is_empty()) {
+                    self.copy = Some(text);
+                    term.selection = None;
+                    return true;
+                }
+            }
+            None => {}
+        }
         let app_cursor = self.term.lock().mode().contains(TermMode::APP_CURSOR);
         if let Some(bytes) = key_bytes(press, app_cursor) {
             // Typing shows the bottom again, as in any terminal.
@@ -298,6 +368,83 @@ impl App for Terminal {
     fn done(&self) -> bool {
         self.exited
     }
+
+    fn copied(&mut self) -> Option<String> {
+        self.copy.take()
+    }
+
+    fn wants_paste(&mut self) -> bool {
+        std::mem::take(&mut self.paste)
+    }
+
+    fn paste(&mut self, text: String) {
+        let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+        self.term.lock().scroll_display(Scroll::Bottom);
+        self.notifier.notify(paste_bytes(&text, bracketed));
+    }
+}
+
+/// The clipboard's keys in a terminal (DK-2): Ctrl Shift C and V, as on
+/// Linux and in Windows Terminal, and Ctrl C, which copies only when
+/// something is selected.
+#[derive(Debug, PartialEq)]
+enum ClipKey {
+    Copy,
+    Paste,
+    CopyIfSelected,
+}
+
+fn clip_key(press: &KeyPress) -> Option<ClipKey> {
+    let held = |m| press.modifiers.contains(m);
+    if !held(Modifiers::CTRL) || held(Modifiers::ALT) || held(Modifiers::LOGO) {
+        return None;
+    }
+    let shift = held(Modifiers::SHIFT);
+    match press.keysym {
+        Keysym::c | Keysym::C if shift => Some(ClipKey::Copy),
+        Keysym::c => Some(ClipKey::CopyIfSelected),
+        Keysym::v | Keysym::V if shift => Some(ClipKey::Paste),
+        _ => None,
+    }
+}
+
+/// What a paste sends. When the shell asked for bracketed paste, the text
+/// is marked as pasted, and has no escapes in it, so it can't end the
+/// paste early and send keys of its own. Otherwise line ends become
+/// Return, as typed.
+fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let mut bytes = b"\x1b[200~".to_vec();
+        bytes.extend(text.replace('\x1b', "").bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+        bytes
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+    }
+}
+
+/// The cell under a point of the text (the window's pixels), and which
+/// half of it: a column, a row on the screen and the side.
+fn cell_at(at: Point) -> (usize, usize, Side) {
+    let x = ((at.x - PADDING) / CELL_WIDTH).max(0.0);
+    let y = ((at.y - PADDING) / CELL_HEIGHT).max(0.0);
+    let side = if x.fract() < 0.5 {
+        Side::Left
+    } else {
+        Side::Right
+    };
+    (
+        (x as usize).min(COLUMNS - 1),
+        (y as usize).min(LINES - 1),
+        side,
+    )
+}
+
+/// The grid's point under a point of the text, scrolled back as shown.
+fn grid_point<T>(term: &Term<T>, at: Point) -> (GridPoint, Side) {
+    let (column, row, side) = cell_at(at);
+    let line = Line(row as i32 - term.grid().display_offset() as i32);
+    (GridPoint::new(line, GridColumn(column)), side)
 }
 
 /// A stretch of a row in one look.
@@ -328,6 +475,7 @@ impl Terminal {
             }
         };
         let cursor = content.cursor;
+        let selection = content.selection;
         let offset = content.display_offset as i32;
         let mut rows: Vec<Vec<Run>> = (0..LINES).map(|_| Vec::new()).collect();
         for indexed_cell in content.display_iter {
@@ -348,6 +496,8 @@ impl Terminal {
                 && content.display_offset == 0;
             if at_cursor {
                 (fg, bg) = (BACKGROUND, FOREGROUND);
+            } else if selection.is_some_and(|s| s.contains(indexed_cell.point)) {
+                (fg, bg) = (FOREGROUND, SELECTION);
             }
             let c = if cell.c == '\0' { ' ' } else { cell.c };
             match row.last_mut() {
@@ -490,6 +640,52 @@ mod tests {
             b"\x1bb"
         );
         assert_eq!(sent(&press(Keysym::Shift_L, "", none), false), b"");
+    }
+
+    #[test]
+    fn dk2_clipboard_keys_and_what_a_paste_sends() {
+        let ctrl = Modifiers::CTRL;
+        let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+        assert_eq!(
+            clip_key(&press(Keysym::C, "C", ctrl_shift)),
+            Some(ClipKey::Copy)
+        );
+        assert_eq!(
+            clip_key(&press(Keysym::V, "V", ctrl_shift)),
+            Some(ClipKey::Paste)
+        );
+        assert_eq!(
+            clip_key(&press(Keysym::c, "\u{3}", ctrl)),
+            Some(ClipKey::CopyIfSelected)
+        );
+        assert_eq!(
+            clip_key(&press(Keysym::v, "\u{16}", ctrl)),
+            None,
+            "Ctrl V is the shell's"
+        );
+        assert_eq!(clip_key(&press(Keysym::c, "c", Modifiers::empty())), None);
+
+        assert_eq!(paste_bytes("ls\nexit\r\n", false), b"ls\rexit\r");
+        assert_eq!(
+            paste_bytes("echo hi\x1b[201~rm -rf ~\n", true),
+            b"\x1b[200~echo hi[201~rm -rf ~\n\x1b[201~",
+            "a pasted end marker can't end the paste"
+        );
+    }
+
+    #[test]
+    fn dk2_a_point_of_the_window_is_a_cell_and_its_half() {
+        let at = |col: f32, row: f32| {
+            Point::new(PADDING + col * CELL_WIDTH, PADDING + row * CELL_HEIGHT)
+        };
+        assert_eq!(cell_at(at(0.2, 0.5)), (0, 0, Side::Left));
+        assert_eq!(cell_at(at(3.7, 2.5)), (3, 2, Side::Right));
+        assert_eq!(
+            cell_at(Point::ORIGIN),
+            (0, 0, Side::Left),
+            "the padding is the first cell's"
+        );
+        assert_eq!(cell_at(at(500.0, 500.0)).0, COLUMNS - 1);
     }
 
     #[test]

@@ -18,7 +18,7 @@
 #   key <key>...             press keys, QEMU names: ctrl-spc, ret, esc, a, shift-a
 #   keydown|keyup <key>      one key down or up on its own (keydown alt, key tab: Alt Tab's switcher)
 #   scroll up|down [n]       turn the wheel n notches where the pointer is
-#   type <text>              type text on the USB keyboard (letters, digits, space, . , - /)
+#   type <text>              type text on the USB keyboard (letters, digits, space, . , - / :)
 # Env knobs: VM_DIR VM_SSH_PORT VM_CPUS VM_CPU_MODEL VM_ACCEL VM_MEM VM_DISK_SIZE VM_BOOT_TIMEOUT VM_BASE_IMAGE
 #   VM_FIRMWARE=uefi|bios VM_SCREEN VM_EXTRA_DISK (see lib.sh).
 set -euo pipefail
@@ -258,6 +258,7 @@ cmd_type() {
 		,) k="comma" ;;
 		-) k="minus" ;;
 		/) k="slash" ;;
+		:) k="shift-semicolon" ;;
 		*) die "vm.sh type: can't type '$c'" ;;
 		esac
 		monitor "sendkey $k"
