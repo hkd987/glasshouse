@@ -189,8 +189,8 @@ mod tests {
             name: "Mail".into(),
             start: Start::Web,
         };
-        assert!(mail.owns_window("chrome-mail.localhost__-Default"));
-        assert!(!mail.owns_window("chrome-calendar.localhost__-Default"));
+        assert!(mail.owns_window("chrome-mail.localhost__-Apps"));
+        assert!(!mail.owns_window("chrome-calendar.localhost__-Apps"));
         let terminal = AppEntry::native("terminal").unwrap();
         assert!(terminal.owns_window("glass.terminal"));
         let browser = AppEntry {
@@ -199,6 +199,6 @@ mod tests {
             start: Start::Browser { url: None },
         };
         assert!(browser.owns_window("chromium-browser"));
-        assert!(!browser.owns_window("chrome-mail.localhost__-Default"));
+        assert!(!browser.owns_window("chrome-mail.localhost__-Apps"));
     }
 }

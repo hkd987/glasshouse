@@ -29,16 +29,29 @@ include GPL-3.0. What the engine actually links is much less.
    --disable-gpu`: the engine draws into shared-memory buffers, which our
    pixman compositor composites. No Mesa, no LLVM. GPU rendering waits for
    the compositor's DRM output (ADR 0016).
-3. **Two profiles per person.** The Browser's
-   (`~/.config/glasshouse/browser`) and one for all web apps
-   (`~/.local/share/glasshouse/app-runtime`), so browsing never shares an
-   app's cookies, storage or extensions. A web app is the engine's window
-   on its own origin, `--app=http://<app>.localhost:<port>/`. Windows name
-   their app: `chrome-<app>.localhost__-Default` for an app,
-   `chromium-browser` for the Browser (`glass_shell::engine`). The shell
-   starts the engine with these flags and no first-run, default-browser
-   or background services; a new profile is seeded with the engine's own
-   window frame off.
+3. **One engine per person, two profiles, kept running.** Both profiles
+   live in one engine data folder (`~/.local/share/glasshouse/engine`):
+   `Browser`, and `Apps` for every web app, so browsing never shares an
+   app's cookies, storage or extensions, and one set of engine processes
+   serves both. A web app is the engine's window on its own origin,
+   `--app=http://<app>.localhost:<port>/`. Windows name their app:
+   `chrome-<app>.localhost__-Apps` for an app, `chromium-browser` for the
+   Browser (`glass_shell::engine`). The engine runs without first-run,
+   default-browser or background services, and a new profile is seeded
+   with the engine's own window frame off.
+
+   The desktop starts the engine with no window as soon as it has drawn
+   its first frame after sign-in (UI-7), held open by its control pipe
+   (`--remote-debugging-pipe` on descriptors 3 and 4): the desktop keeps the
+   write end and never writes, so the engine runs until the desktop ends
+   rather than until its last window closes, and nothing else can drive
+   it through that pipe (a debugging *port* would let any local process
+   in, so it's never used). Opening an app hands the window to the running
+   engine on its socket in the person's engine folder, in the engine's own
+   start message (`engine::window_request`), instead of starting a second
+   copy of the engine to pass it on; if that fails, the engine is started
+   with the window's command line as before. It costs about 90 MB with no
+   window. Measurements: `docs/dev/performance.md`.
 4. **The bridge on the device: kernel-checked loopback.** ADR 0024 planned
    a Unix socket between the runtime and the bridge; a stock browser
    speaks HTTP only over TCP. So `glass-app-bridge --session`, which the
@@ -94,7 +107,12 @@ include GPL-3.0. What the engine actually links is much less.
   socket and the pipeline; refused connections never reach glassd and
   are logged by the bridge.
 - **Lifetime.** The bridge and the engine are the person's processes:
-  signing out ends them (`users::end_processes`).
+  signing out ends them (`users::end_processes`); the engine's control
+  pipe closing as the desktop exits ends it too.
+- **Control pipe.** Only the desktop holds it; the engine reads commands
+  from it and the desktop never sends any. It isn't a new reach: the
+  desktop already runs as the person, and the engine's socket for new
+  windows is in the person's own engine folder (mode 0700), as before.
 
 ## Consequences
 - Images grow by about 400 MB (the engine 340 MB, its libraries 33 MB).

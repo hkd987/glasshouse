@@ -1111,7 +1111,7 @@ fn ui5_the_docks_mail_opens_mail_and_once_open_brings_it_forward() {
         },
         glass_shell::apps::AppWindow {
             id: 9,
-            app_id: "chrome-mail.localhost__-Default".into(),
+            app_id: "chrome-mail.localhost__-Apps".into(),
             title: "Mail".into(),
         },
     ]);

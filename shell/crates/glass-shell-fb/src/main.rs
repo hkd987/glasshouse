@@ -130,11 +130,13 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
     };
 
     let asked = started.elapsed();
+    let apps = offered(&profile);
+    let engine_wanted = uses_engine(&apps);
     let mut live = Live::new(tasks)
         .without_wallpaper()
         .signed_in_as(signed_in_as())
         .about(about())
-        .with_apps(offered(&profile));
+        .with_apps(apps);
     // The sign-in screen started this session, so it can check the
     // password that unlocks the screen (`session`).
     if args.from_sign_in {
@@ -153,6 +155,14 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
     );
     if args.once {
         return Ok(None);
+    }
+    // With the desktop drawn, the browser engine and the app bridge get
+    // ready for the first web app the person opens.
+    if engine_wanted && shell.apps.is_some() {
+        std::thread::spawn(|| {
+            bridge();
+            warm_engine();
+        });
     }
     let (mut inputs, devices) = if args.input {
         input::start(shell.display.pixels())
@@ -222,12 +232,14 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                     batch.push(more);
                 }
                 let mut effects = shell.input(&batch);
+                let launching = &mut shell.launching;
                 effects.retain(|effect| match effect {
                     Effect::Unlock(password) => {
                         ask_to_unlock(password);
                         false
                     }
                     Effect::Launch(app) => {
+                        launching.push((app.clone(), Instant::now()));
                         launch(app);
                         false
                     }
@@ -319,6 +331,10 @@ async fn attach(
     .map_err(|_| anyhow!("glassd didn't answer in {} s", ATTACH_WITHIN.as_secs()))?
 }
 
+/// How long a started app has to show a window before the desktop stops
+/// timing it.
+const LAUNCH_GIVES_UP: Duration = Duration::from_secs(60);
+
 /// How long the desktop waits for glassd before coming up without it.
 const ATTACH_WITHIN: Duration = Duration::from_secs(3);
 
@@ -384,17 +400,25 @@ fn launch(app: &AppEntry) {
 }
 
 fn start(app: &AppEntry) {
-    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let home = home();
     let (program, args) = match &app.start {
         Start::Program { command, .. } => (*command, Vec::new()),
         Start::Browser { url } => {
-            seed_profile(&home.join(engine::BROWSER_PROFILE));
-            (engine::ENGINE, engine::browser(&home, url.as_deref()))
+            warm_engine();
+            let args = engine::browser(&home, url.as_deref());
+            if hand_to_engine(&app.id, &home, &args) {
+                return;
+            }
+            (engine::ENGINE, args)
         }
         Start::Web => {
             let port = bridge();
-            seed_profile(&home.join(engine::APPS_PROFILE));
-            (engine::ENGINE, engine::web_app(&home, &app.id, port))
+            warm_engine();
+            let args = engine::web_app(&home, &app.id, port);
+            if hand_to_engine(&app.id, &home, &args) {
+                return;
+            }
+            (engine::ENGINE, args)
         }
     };
     let started = std::process::Command::new(program)
@@ -412,6 +436,133 @@ fn start(app: &AppEntry) {
         Err(e) => eprintln!("apps: {}: {program}: {e}", app.id),
     }
 }
+
+fn home() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+}
+
+/// Whether `apps` has any that open in the browser engine.
+fn uses_engine(apps: &[AppEntry]) -> bool {
+    apps.iter()
+        .any(|a| !matches!(a.start, Start::Program { .. }))
+}
+
+/// The person's browser engine, running with no window for the session
+/// (UI-7, `engine::warm`) so a window is handed to it rather than waiting
+/// for an engine to start: started at sign-in and again if it has exited,
+/// and ready (answering new windows) when this returns, or after a while
+/// if it isn't. The desktop holds its control pipe and never writes to
+/// it; the pipe closes when the desktop ends, and the engine with it.
+fn warm_engine() {
+    type Warm = (std::process::Child, std::process::ChildStdin);
+    static ENGINE: std::sync::Mutex<Option<Warm>> = std::sync::Mutex::new(None);
+    let data = home().join(engine::DATA);
+    let pid = {
+        let mut running = ENGINE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((child, _)) = running.as_mut()
+            && matches!(child.try_wait(), Ok(None))
+        {
+            child.id()
+        } else {
+            *running = None;
+            for profile in engine::PROFILES {
+                seed_profile(&data.join(profile));
+            }
+            // The pipe on 3 (read) and nothing on 4: the engine never
+            // hears from it, and nothing it says is kept.
+            let started = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(r#"exec "$0" "$@" 3<&0 4>/dev/null </dev/null"#)
+                .arg(engine::ENGINE)
+                .args(engine::warm(&home()))
+                .env("WAYLAND_DISPLAY", "wayland-0")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match started {
+                Ok(mut child) => {
+                    let id = child.id();
+                    if let Some(pipe) = child.stdin.take() {
+                        *running = Some((child, pipe));
+                    }
+                    eprintln!("apps: browser engine starting");
+                    id
+                }
+                Err(e) => return eprintln!("apps: browser engine: {e}"),
+            }
+        }
+    };
+    // Ready once it has claimed its data (the lock names its process) and
+    // answers on its socket.
+    let started = Instant::now();
+    let deadline = started + ENGINE_READY_WITHIN;
+    let ready = || {
+        data.join(engine::READY_FILE).exists()
+            && std::fs::read_link(data.join(engine::LOCK_FILE))
+                .is_ok_and(|to| to.to_string_lossy().ends_with(&format!("-{pid}")))
+    };
+    let mut waited = false;
+    while !ready() {
+        if Instant::now() >= deadline {
+            return eprintln!(
+                "apps: browser engine not ready in {} s",
+                ENGINE_READY_WITHIN.as_secs()
+            );
+        }
+        waited = true;
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if waited {
+        eprintln!(
+            "apps: browser engine ready in {} ms",
+            started.elapsed().as_millis()
+        );
+    }
+}
+
+/// Asks the running engine for the window `args` would start one with,
+/// on its socket: no second copy of the engine starts just to pass them on
+/// (`engine::window_request`). Whether it took the window; if it didn't,
+/// the engine is started with them, which hands them over the same way.
+fn hand_to_engine(id: &str, home: &std::path::Path, args: &[String]) -> bool {
+    use std::io::{Read, Write};
+    let socket = home.join(engine::DATA).join(engine::READY_FILE);
+    let asked = (|| -> std::io::Result<Vec<u8>> {
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket)?;
+        stream.set_write_timeout(Some(HAND_OVER_WITHIN))?;
+        stream.set_read_timeout(Some(HAND_OVER_WITHIN))?;
+        stream.write_all(&engine::window_request(home, args))?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        let mut answer = Vec::new();
+        stream.take(64).read_to_end(&mut answer)?;
+        Ok(answer)
+    })();
+    match asked {
+        Ok(answer) if answer.starts_with(engine::TAKEN) => {
+            eprintln!("apps: started {id} (handed to the browser engine)");
+            true
+        }
+        Ok(answer) => {
+            eprintln!(
+                "apps: {id}: the browser engine answered {:?}; starting it",
+                String::from_utf8_lossy(&answer)
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("apps: {id}: browser engine: {e}; starting it");
+            false
+        }
+    }
+}
+
+/// How long the engine has to answer for a window.
+const HAND_OVER_WITHIN: Duration = Duration::from_secs(10);
+
+/// How long a window waits for the engine to be ready before it's handed
+/// over anyway (an engine that's starting still takes it).
+const ENGINE_READY_WITHIN: Duration = Duration::from_secs(60);
 
 /// A new engine profile starts with the desktop's preferences
 /// (`engine::NEW_PROFILE_PREFERENCES`); one that exists is left alone.
@@ -595,6 +746,9 @@ struct Shell {
     listed: Vec<AppWindow>,
     /// Each window's title bar as last drawn: id, title, focus, width.
     bars: Vec<(u64, String, bool, i32)>,
+    /// Apps started and not yet showing a window, with when: how long an
+    /// app takes to open is logged (UI-7).
+    launching: Vec<(AppEntry, Instant)>,
 }
 
 impl Shell {
@@ -641,6 +795,7 @@ impl Shell {
             app_titles: Vec::new(),
             listed: Vec::new(),
             bars: Vec::new(),
+            launching: Vec::new(),
         })
     }
 
@@ -662,6 +817,21 @@ impl Shell {
             eprintln!("apps: {} windows: {}", titles.len(), titles.join(", "));
             self.app_titles = titles;
         }
+        self.launching.retain(|(app, at)| {
+            if windows.iter().any(|w| app.owns_window(&w.app_id)) {
+                eprintln!("apps: {} opened in {} ms", app.id, at.elapsed().as_millis());
+                false
+            } else if at.elapsed() > LAUNCH_GIVES_UP {
+                eprintln!(
+                    "apps: {} showed no window in {} s",
+                    app.id,
+                    LAUNCH_GIVES_UP.as_secs()
+                );
+                false
+            } else {
+                true
+            }
+        });
         // For Alt Tab: the windows, the one last used (the top) first.
         let listed: Vec<AppWindow> = windows
             .iter()

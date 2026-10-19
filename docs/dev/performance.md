@@ -59,6 +59,36 @@ after it has loaded and been used; the browser and GPU processes are shared
 by every app, so they aren't counted. Each app is one script of about 13 KB
 and one stylesheet of about 6 KB.
 
+#### On the device: from the click to the app's window
+
+The desktop logs how long each app it starts takes to show a window
+(`apps: mail opened in … ms`, in the sign-in screen's log). A web app's
+window or the Browser comes from the browser engine (ADR 0027), which the
+desktop starts with no window when the person signs in and keeps running,
+so a window is handed to a running engine over its socket instead of
+waiting for one to start (`glass_shell::engine`).
+
+| Mail, click to window | Emulated VM | This host's CPU, natively |
+|---|---|---|
+| Engine not running (before) | 19.5 s | 0.33 s (median of 3, two runs) |
+| Engine running, window handed over (now) | 5.8–12 s | 0.07 s |
+| Starting a second engine to hand it over | 1.1 s | |
+| Handing it over on the socket (now) | 0.07 s | |
+
+The VM can't show the hardware number. The engine compiles JavaScript as
+it runs, which an emulated CPU handles worst of all: the same steps take
+40 to 60 times longer there than natively, against 10 to 20 times for our
+own programs. The native column is `node tools/perf/engine-launch.cjs`:
+the full engine (the dev host's Chromium build, in its headless mode)
+loading the same Mail page, cold and in a running engine, with no
+compositor in between. A person's first start, which creates their
+engine data, takes about 0.4 s natively, and happens at their first sign-in,
+before they open anything.
+
+The running engine costs about 90 MB with no window (the VM's free memory
+before and after it starts); each app window adds its page's renderer (about
+115 MB for Mail, above).
+
 ### Admin console (AD-3, AD-4, ADR 0023)
 
 `make console-test` drives the console in headless Chromium on the
