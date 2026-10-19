@@ -655,6 +655,7 @@ impl Shell {
                 AppInput::Moved(x, y) => apps.pointer_moved((x, y)),
                 AppInput::Button(code, down) => apps.pointer_button(code, down),
                 AppInput::Key(code, down) => apps.key(code, down),
+                AppInput::Axis(lines) => apps.pointer_axis(f64::from(lines)),
             }
         }
         if !input.is_empty() {

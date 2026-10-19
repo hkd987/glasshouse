@@ -350,3 +350,16 @@ fn dk2_activating_a_window_raises_it_and_gives_it_the_keyboard() {
     finish(&mut compositor, front);
     finish(&mut compositor, back);
 }
+
+#[test]
+fn ui8_the_wheel_scrolls_the_window_under_the_pointer() {
+    let (mut compositor, socket, _dir) = compositor();
+    let hello = window(&socket, "Hello", (200, 100), 0xFF2F_7BEA);
+    until_told(&mut compositor, &hello, &Event::Focused);
+    let w = compositor.windows()[0].area;
+    compositor.pointer_moved((f64::from(w.x + 50), f64::from(w.y + 50)));
+    // One notch away from the person: up, a negative Wayland value.
+    compositor.pointer_axis(1.0);
+    until_told(&mut compositor, &hello, &Event::Scrolled(-10));
+    finish(&mut compositor, hello);
+}

@@ -61,6 +61,9 @@ pub enum AppInput {
     Button(u32, bool),
     /// An evdev key code went down or up.
     Key(u32, bool),
+    /// The wheel turned by this many lines (positive away from the person)
+    /// over a window.
+    Axis(f32),
 }
 
 /// Where input goes when apps have windows: the shell decides.
@@ -224,6 +227,15 @@ impl Display {
                             mouse::Event::ButtonReleased(button)
                         }));
                     }
+                }
+                // Over a window, the wheel scrolls it (Terminal's
+                // scrollback); elsewhere the shell's views.
+                Input::Wheel(lines) if self.app_has(self.pointer, route) => {
+                    typed.apps.push(AppInput::Moved(
+                        f64::from(self.pointer.x),
+                        f64::from(self.pointer.y),
+                    ));
+                    typed.apps.push(AppInput::Axis(lines));
                 }
                 Input::Wheel(lines) => {
                     typed

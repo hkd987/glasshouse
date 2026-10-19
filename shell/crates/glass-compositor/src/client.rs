@@ -50,6 +50,8 @@ pub enum Event {
         code: u32,
         pressed: bool,
     },
+    /// The vertical axis moved by this much (positive: down).
+    Scrolled(i32),
     /// The compositor asked it to close.
     CloseAsked,
 }
@@ -338,6 +340,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for App {
                 button,
                 pressed: state == WEnum::Value(wl_pointer::ButtonState::Pressed),
             }),
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value,
+                ..
+            } => app.tell(Event::Scrolled(value as i32)),
             _ => {}
         }
     }

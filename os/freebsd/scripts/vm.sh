@@ -17,6 +17,7 @@
 #   drag <x> <y> <x2> <y2>   press at (x, y), move to (x2, y2) in steps, release there
 #   key <key>...             press keys, QEMU names: ctrl-spc, ret, esc, a, shift-a
 #   keydown|keyup <key>      one key down or up on its own (keydown alt, key tab: Alt Tab's switcher)
+#   scroll up|down [n]       turn the wheel n notches where the pointer is
 #   type <text>              type text on the USB keyboard (letters, digits, space, . , - /)
 # Env knobs: VM_DIR VM_SSH_PORT VM_CPUS VM_CPU_MODEL VM_ACCEL VM_MEM VM_DISK_SIZE VM_BOOT_TIMEOUT VM_BASE_IMAGE
 #   VM_FIRMWARE=uefi|bios VM_SCREEN VM_EXTRA_DISK (see lib.sh).
@@ -226,6 +227,16 @@ cmd_key() {
 	for k in "$@"; do monitor "sendkey $k"; done
 }
 
+# scroll up|down [notches]: turn the wheel where the pointer is (QMP).
+cmd_scroll() {
+	[[ ${1:-} == up || ${1:-} == down ]] || die "usage: vm.sh scroll up|down [notches]"
+	local button=wheel-$1 i
+	for ((i = 0; i < ${2:-1}; i++)); do
+		qmp_input "[{\"type\":\"btn\",\"data\":{\"down\":true,\"button\":\"$button\"}}]"
+		qmp_input "[{\"type\":\"btn\",\"data\":{\"down\":false,\"button\":\"$button\"}}]"
+	done
+}
+
 # keydown|keyup <qcode>: one key down, or up, on its own (QMP), to see what shows while it's held,
 # such as Alt Tab's switcher; a key held with sendkey's hold time repeats.
 cmd_keyupdown() {
@@ -316,6 +327,7 @@ click) cmd_click "$@" ;;
 drag) cmd_drag "$@" ;;
 key) cmd_key "$@" ;;
 keydown) cmd_keyupdown true "$@" ;;
+scroll) cmd_scroll "$@" ;;
 keyup) cmd_keyupdown false "$@" ;;
 type) cmd_type "$@" ;;
 reset) cmd_reset ;;

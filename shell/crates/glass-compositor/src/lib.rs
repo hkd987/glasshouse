@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
 use smithay::backend::allocator::Fourcc;
+use smithay::backend::input::{Axis, AxisSource};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
@@ -37,7 +38,7 @@ use smithay::backend::renderer::{Bind, Color32F, ExportMem};
 use smithay::desktop::space::SpaceElement;
 use smithay::desktop::{PopupManager, Space, Window, WindowSurfaceType};
 use smithay::input::keyboard::{FilterResult, Keycode};
-use smithay::input::pointer::{ButtonEvent, CursorImageStatus, MotionEvent};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, CursorImageStatus, MotionEvent};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::pixman;
@@ -524,6 +525,22 @@ impl Compositor {
             return;
         };
         self.state.focus(Some(window), SERIAL_COUNTER.next_serial());
+    }
+
+    /// The wheel turned by `lines` (positive away from the person) over
+    /// the window under the pointer: it scrolls (Terminal's scrollback).
+    pub fn pointer_axis(&mut self, lines: f64) {
+        let Some(pointer) = self.state.seat.get_pointer() else {
+            return;
+        };
+        // Wayland scrolls down for positive values, ten units a line, and
+        // 120 to a wheel notch.
+        let frame = AxisFrame::new(self.time())
+            .source(AxisSource::Wheel)
+            .value(Axis::Vertical, -lines * 10.0)
+            .v120(Axis::Vertical, (-lines * 120.0) as i32);
+        pointer.axis(&mut self.state, frame);
+        pointer.frame(&mut self.state);
     }
 
     /// A key (an evdev code) went down or up, for the focused window.
