@@ -17,6 +17,11 @@ dependencies, for the FreeBSD target) and writes:
   --sbom FILE      A CycloneDX 1.5 JSON SBOM. Admins and customer security
                    teams only (BR-4): never stage it into the image or
                    publish it.
+  --base-packages FILE
+                   Also list the image's base packages in the SBOM (BS-6):
+                   the inventory a package-list image build writes beside
+                   the image (`<name> <version>` per line; `make
+                   image-pkgbase`, ADR 0022).
 
     tools/legal/notices.py --package glassd --package glassctl \\
         --shell-package glass-greeter --assets shell/assets/fonts \\
@@ -196,7 +201,19 @@ def write_notices(path: Path, packages: list[dict], base: str, assets: list[tupl
     return bare
 
 
-def write_sbom(path: Path, packages: list[dict], roots: list[str], version: str) -> None:
+def base_packages(path: Path) -> list[tuple[str, str]]:
+    """The image's base packages, by name and version, from its inventory."""
+    found = []
+    for n, line in enumerate(path.read_text().splitlines(), 1):
+        fields = line.split()
+        if len(fields) != 2:
+            sys.exit(f"notices: {path}:{n}: expected '<package> <version>'")
+        found.append((fields[0], fields[1]))
+    return found
+
+
+def write_sbom(path: Path, packages: list[dict], roots: list[str], version: str,
+               base: list[tuple[str, str]]) -> None:
     components = [
         {
             "type": "library",
@@ -206,6 +223,17 @@ def write_sbom(path: Path, packages: list[dict], roots: list[str], version: str)
             "licenses": [{"expression": p["license"]}] if p.get("license") else [],
         }
         for p in packages
+    ]
+    # The base system, one component per package as the image installed it.
+    components += [
+        {
+            "type": "operating-system" if name.startswith("FreeBSD-kernel") else "application",
+            "name": name,
+            "version": pkg_version,
+            "purl": f"pkg:generic/{name}@{pkg_version}",
+            "properties": [{"name": "glasshouse:layer", "value": "base"}],
+        }
+        for name, pkg_version in base
     ]
     sbom = {
         "bomFormat": "CycloneDX",
@@ -232,6 +260,7 @@ def main() -> int:
     ap.add_argument("--assets", type=Path, action="append", default=[], help="a directory of shipped assets")
     ap.add_argument("--sbom", type=Path)
     ap.add_argument("--base-txz", type=Path, help="FreeBSD base.txz, for the base COPYRIGHT")
+    ap.add_argument("--base-packages", type=Path, help="the image's base package inventory, for the SBOM")
     args = ap.parse_args()
 
     meta = metadata()
@@ -261,8 +290,10 @@ def main() -> int:
             print(f"notices: {name} ships no license file; listed by SPDX id only", file=sys.stderr)
     if args.sbom:
         version = next(p["version"] for p in meta["packages"] if p["id"] in meta["workspace_members"])
-        write_sbom(args.sbom, packages, args.package + args.shell_package, version)
-        print(f"notices: SBOM -> {args.sbom}", file=sys.stderr)
+        base = base_packages(args.base_packages) if args.base_packages else []
+        write_sbom(args.sbom, packages, args.package + args.shell_package, version, base)
+        print(f"notices: SBOM -> {args.sbom} ({len(packages)} crates, {len(base)} base packages)",
+              file=sys.stderr)
     return 1 if problems else 0
 
 

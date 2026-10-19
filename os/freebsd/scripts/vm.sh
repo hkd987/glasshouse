@@ -17,7 +17,7 @@
 #   key <key>...             press keys, QEMU names: ctrl-spc, ret, esc, a, shift-a
 #   type <text>              type text on the USB keyboard (letters, digits, space, . , - /)
 # Env knobs: VM_DIR VM_SSH_PORT VM_CPUS VM_CPU_MODEL VM_ACCEL VM_MEM VM_DISK_SIZE VM_BOOT_TIMEOUT VM_BASE_IMAGE
-#   VM_FIRMWARE=uefi|bios VM_SCREEN (see lib.sh).
+#   VM_FIRMWARE=uefi|bios VM_SCREEN VM_EXTRA_DISK (see lib.sh).
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -61,12 +61,18 @@ cmd_up() {
 		firmware=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE"
 			-drive "if=pflash,format=raw,unit=1,file=$VM_EFIVARS")
 	fi
+	# A second disk for the guest to write (the package-list image build), after the seed: vtbd2.
+	local extra=()
+	if [[ -n ${VM_EXTRA_DISK:-} ]]; then
+		[[ -f $VM_EXTRA_DISK ]] || die "VM_EXTRA_DISK $VM_EXTRA_DISK doesn't exist"
+		extra=(-drive "if=virtio,file=$VM_EXTRA_DISK,format=qcow2,discard=unmap")
+	fi
 	rm -f "$VM_MONITOR" "$VM_QMP"
 	qemu-system-x86_64 \
 		-name glasshouse-dev -machine q35 -accel "$VM_ACCEL" -cpu "$VM_CPU_MODEL" \
 		-smp "$VM_CPUS" -m "$VM_MEM" \
 		-drive "if=virtio,file=$VM_DISK,format=qcow2,discard=unmap" \
-		-drive "if=virtio,file=$VM_SEED,format=raw,readonly=on" \
+		-drive "if=virtio,file=$VM_SEED,format=raw,readonly=on" "${extra[@]}" \
 		-netdev "user,id=net0,hostname=glasshouse-dev,hostfwd=tcp:127.0.0.1:$VM_SSH_PORT-:22" \
 		-device virtio-net-pci,netdev=net0 -device virtio-rng-pci \
 		-vga none -device "VGA,xres=${VM_SCREEN%x*},yres=${VM_SCREEN#*x}" \

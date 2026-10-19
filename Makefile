@@ -57,9 +57,13 @@ legal-base: ## Regenerate the base system's notices and source offer from its sr
 	os/freebsd/scripts/fetch.sh src
 	tools/legal/base_notices.py
 
+# The SBOM's base section: the package inventory of the last package-list image
+# build (make image-pkgbase, ADR 0022), if there is one.
+BASE_INVENTORY ?= $(lastword $(sort $(wildcard build/images/glasshouse-*-desktop.packages.txt)))
+
 sbom: ## Software bill of materials, admins and security reviews only (BR-4); never ship it
 	tools/legal/notices.py $(addprefix --package ,$(SHIPPED)) $(addprefix --shell-package ,$(SHIPPED_SHELL)) \
-		--sbom build/sbom/glasshouse.cdx.json
+		$(if $(BASE_INVENTORY),--base-packages $(BASE_INVENTORY)) --sbom build/sbom/glasshouse.cdx.json
 
 timings: ## Profile a clean build; opens target/cargo-timings/cargo-timing.html
 	cargo build --workspace --timings

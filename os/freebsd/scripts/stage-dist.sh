@@ -3,14 +3,15 @@
 # Recreates the staging root build/dist/freebsd/ (mirrors the guest's /): copies the overlay
 # tree os/freebsd/overlay/, then the cross-compiled binaries listed in os/freebsd/dist.manifest.
 # Binaries come from ${CARGO_TARGET_DIR:-target}/x86_64-unknown-freebsd/${DIST_PROFILE:-release}/,
-# and shell/<binary> from the shell workspace's shell/target/x86_64-unknown-freebsd/<same>/.
+# and shell/<binary> from the shell workspace's ${SHELL_TARGET_DIR:-shell/target}/x86_64-unknown-freebsd/<same>/
+# (a worktree can stage another checkout's builds by pointing both at them).
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
 manifest=$FREEBSD_OS_DIR/dist.manifest
 bindir=${CARGO_TARGET_DIR:-$REPO_ROOT/target}/x86_64-unknown-freebsd/${DIST_PROFILE:-release}
-shell_bindir=$REPO_ROOT/shell/target/x86_64-unknown-freebsd/${DIST_PROFILE:-release}
+shell_bindir=${SHELL_TARGET_DIR:-$REPO_ROOT/shell/target}/x86_64-unknown-freebsd/${DIST_PROFILE:-release}
 
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"

@@ -1,0 +1,98 @@
+# The desktop image's base packages (ADR 0022 item 1, BS-3): one package per line.
+#
+# `make image-pkgbase` installs exactly these into a fresh root on a new ZFS
+# pool (os/freebsd/scripts/bake-pkgbase.sh). A package this list doesn't name
+# fails the build, so every dependency is here, with what needs it, and a
+# program missing a library fails it too. Versions come from the pinned
+# repository (release.env); the image records the exact list, with versions,
+# in /usr/local/share/glasshouse/packages.txt (BS-6).
+#
+# Never listed: debug files (-dbg), headers and static libraries (-dev),
+# 32-bit libraries (-lib32), test suites (-tests), the toolchain (clang, lld,
+# lldb, toolchain), sources (src, src-sys) and manual pages (kernel-man,
+# mandoc; they also name the base system, BR-1).
+#
+# Our own binaries, overlay and branding are staged over the root
+# (stage-dist.sh, deploy.sh) until they ship as glasshouse-* packages
+# (ADR 0022 item 3).
+
+# --- Kernel and boot
+FreeBSD-kernel-generic          # the kernel and its modules: ZFS, jails, racct/rctl, vt, evdev
+FreeBSD-bootloader              # loader.efi, gptzfsboot and the Lua boot menu our branding draws on
+
+# --- Core system
+FreeBSD-runtime                 # init, sh, login, the core commands (mount, pw, tar, ifconfig, ps, sysctl)
+FreeBSD-clibs                   # libc, libthr, the run-time linker
+FreeBSD-rc                      # rc(8), service(8) and the base rc.d scripts (growfs, zfs, ...)
+FreeBSD-mtree                   # (needed by FreeBSD-rc)
+FreeBSD-utilities               # the rest of the commands: su, rctl, daemon, nice, jot, cut, awk, top
+FreeBSD-bsdconfig               # sysrc(8): post-install.sh and rc.d/glasshouse_identity use it
+FreeBSD-pam                     # PAM modules: the sign-in screen and su check passwords with them
+FreeBSD-pam-lib                 # libpam
+FreeBSD-locales                 # UTF-8 locales for the desktop
+FreeBSD-zoneinfo                # time zones
+FreeBSD-vi                      # the default EDITOR (vipw, crontab -e)
+FreeBSD-pkg-bootstrap           # /usr/sbin/pkg and the repository's keys
+pkg                             # the package database: `pkg query` lists what the image is (BS-6)
+
+# --- Storage
+FreeBSD-zfs                     # zfs, zpool, bectl: the root pool, undo snapshots, boot environments
+FreeBSD-zfs-lib                 # libzfs and friends
+FreeBSD-geom                    # gpart, glabel: growfs grows the pool into the disk on first boot
+
+# --- Agents' containment
+FreeBSD-jail                    # jail, jexec, jls: every agent task runs in a jail
+
+# --- Devices, power and console
+FreeBSD-devd                    # device events
+FreeBSD-devmatch                # loads the drivers for the hardware found
+FreeBSD-acpi                    # acpiconf: sleep and wake (PM-1)
+FreeBSD-powerd                  # CPU frequency scaling on battery
+FreeBSD-vt-data                 # console fonts and keymaps (vt; the syscons ones aren't used)
+FreeBSD-console-tools           # kbdcontrol, vidcontrol: load those keymaps and fonts
+FreeBSD-firmware-iwm            # Intel Wi-Fi firmware for laptops
+
+# --- Network
+FreeBSD-dhclient                # DHCP
+FreeBSD-resolvconf              # (needed by FreeBSD-dhclient)
+FreeBSD-wpa                     # Wi-Fi and 802.1X (CF-10)
+FreeBSD-ntp                     # time sync; certificates need the right time (not enabled yet)
+FreeBSD-openssl-lib             # libssl.so.35, libcrypto: glassd's TLS to model providers
+FreeBSD-openssl                 # (needed by FreeBSD-certctl)
+FreeBSD-certctl                 # the trusted-certificate store
+FreeBSD-caroot                  # the root certificates TLS checks against
+
+# --- System services
+FreeBSD-syslogd                 # system log
+FreeBSD-newsyslog               # log rotation
+FreeBSD-bzip2                   # (needed by FreeBSD-newsyslog)
+FreeBSD-cron                    # runs newsyslog and periodic
+FreeBSD-periodic                # daily cleanup and checks
+FreeBSD-dma                     # local mail: periodic's reports go to root's mailbox
+
+# --- Libraries the packages above link (pkg resolves these from what each
+#     program links; listed so the list is the whole image)
+FreeBSD-audit-lib               # libbsm: runtime (login, su), utilities, ssh
+FreeBSD-blocklist               # libblocklist: utilities, ssh
+FreeBSD-bzip2-lib               # libbz2: libarchive, utilities
+FreeBSD-ctf-lib                 # libctf: utilities
+FreeBSD-fetch                   # libfetch: pkg-bootstrap
+FreeBSD-libarchive              # libarchive: runtime (tar), utilities, pkg
+FreeBSD-libbsdstat              # utilities
+FreeBSD-libcasper               # Capsicum services: runtime, utilities, dhclient, syslogd
+FreeBSD-libldns                 # utilities, ssh
+FreeBSD-libmagic                # libmagic: utilities (file)
+FreeBSD-libucl                  # pkg-bootstrap, utilities, flua
+FreeBSD-ncurses-lib             # libncursesw: runtime, utilities, vi
+FreeBSD-tcpd                    # libwrap: utilities, ssh
+FreeBSD-ufs-lib                 # libufs: geom, utilities
+FreeBSD-xz-lib                  # liblzma: libarchive, utilities
+FreeBSD-zlib                    # libz: runtime, utilities, zfs, pkg
+FreeBSD-zstd-lib                # libzstd: libarchive, runtime, utilities
+
+# --- Development images only; a product image drops these
+FreeBSD-ssh                     # sshd: vm.sh, deploy.sh and the e2e suite reach the VM over SSH
+FreeBSD-kerberos-lib            # (needed by FreeBSD-ssh)
+FreeBSD-nuageinit               # first-boot provisioning from the VM's seed (os/freebsd/vm/user-data.in)
+FreeBSD-flua                    # (needed by FreeBSD-nuageinit)
+FreeBSD-libyaml                 # (needed by FreeBSD-flua)

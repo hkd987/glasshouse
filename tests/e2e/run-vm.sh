@@ -35,9 +35,11 @@ glass_jails='jls name | grep -c "^glass-" || true'
 # rctl rules on task jails (PA-2: they go with the jail).
 glass_limits='rctl | grep -c "^jail:glass-" || true'
 
-cargo build --profile "$profile" --target x86_64-unknown-freebsd -p glass-e2e
+# GLASS_E2E_BIN: a glass-e2e already built (another checkout's), instead of building one here.
+bin=${GLASS_E2E_BIN:-$target/glass-e2e}
+[[ -n ${GLASS_E2E_BIN:-} ]] || cargo build --profile "$profile" --target x86_64-unknown-freebsd -p glass-e2e
 "$vm" run "mkdir -p ${e2e%/*}"
-"$vm" scp-in "$target/glass-e2e" "$e2e"
+"$vm" scp-in "$bin" "$e2e"
 
 step "scenarios as demo"
 "$vm" run "su demo -c '$e2e all'"

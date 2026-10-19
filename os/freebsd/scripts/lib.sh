@@ -36,6 +36,7 @@ OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
 VM_SCREEN=${VM_SCREEN:-1280x800}                        # the display's size (ADR 0016); match loader.conf
 VM_BOOT_TIMEOUT=${VM_BOOT_TIMEOUT:-900}                 # seconds; TCG first boot is slow
 BASE_IMAGE=${VM_BASE_IMAGE:-$PRISTINE_IMAGE}            # backing disk for new overlays
+# VM_EXTRA_DISK: a second qcow2 the guest sees as vtbd2 (bake-pkgbase.sh builds an image on it).
 VM_SSH_KEY=${VM_SSH_KEY:-$BUILD_DIR/vm/ssh/id_ed25519}  # dev-only key, shared by all VM_DIRs
 
 VM_DISK=$VM_DIR/disk.qcow2
