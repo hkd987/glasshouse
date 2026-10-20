@@ -665,15 +665,12 @@ dependencies = [
  "glass-platform",
  "glass-policy",
  "glass-types",
- "hex",
  "mail-builder",
  "mail-parser",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "time",
- "tracing",
  "uuid",
 ]
 

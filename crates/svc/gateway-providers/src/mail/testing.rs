@@ -182,6 +182,31 @@ impl Mox {
         sync.new.iter().map(|m| m.uid).collect()
     }
 
+    /// Gives its account another password (`mox setaccountpassword`).
+    pub fn set_password(&self, password: &str) {
+        use std::io::Write;
+        let bin = binary().expect("mox is here: it's running");
+        let mut child = Command::new(bin)
+            .arg("-config")
+            .arg(self.dir.path().join("mox/mox.conf"))
+            .args(["setaccountpassword", "mox"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("mox setaccountpassword runs");
+        child
+            .stdin
+            .take()
+            .expect("its stdin")
+            .write_all(format!("{password}\n").as_bytes())
+            .expect("the password reaches it");
+        assert!(
+            child.wait().expect("it ends").success(),
+            "mox refused the password"
+        );
+    }
+
     /// What its delivery queue holds: a line per message, from `mox queue
     /// list`.
     pub fn queue(&self) -> Vec<String> {

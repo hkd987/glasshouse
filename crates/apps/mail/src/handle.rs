@@ -366,10 +366,25 @@ impl MailHandle {
         cache
             .prepare()
             .map_err(|e| SyncError::Local(format!("making the mail folders: {e}")))?;
+        let reading = |e: std::io::Error| SyncError::Local(format!("reading the mail folder: {e}"));
+        // With no record of where this folder's sync left off (a new
+        // sign-in, a lost state folder), start from what the cache holds,
+        // so mail that went from the server meanwhile goes from here too;
+        // a different UIDVALIDITY on the server starts it afresh.
+        let since = match since {
+            Some(s) => Some(s),
+            None => cache.kept_validity(role).map_err(reading)?.map(|validity| {
+                let uids = cache.uids(role, validity).unwrap_or_default();
+                FolderState {
+                    uid_validity: validity,
+                    uid_next: uids.last().map_or(1, |u| u.saturating_add(1)),
+                    highest_modseq: None,
+                    exists: uids.len() as u32,
+                }
+            }),
+        };
         let known = match since {
-            Some(s) => cache
-                .uids(role, s.uid_validity)
-                .map_err(|e| SyncError::Local(format!("reading the mail folder: {e}")))?,
+            Some(s) => cache.uids(role, s.uid_validity).map_err(reading)?,
             None => Vec::new(),
         };
         let limits = SyncLimits {

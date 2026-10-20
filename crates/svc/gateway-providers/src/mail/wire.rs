@@ -11,8 +11,10 @@ use glass_managed::mail::{LinkError, Server};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a server may take to answer one command.
 pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(60);
-/// The longest line a server may send us (literals are read apart).
-const MAX_LINE: usize = 64 * 1024;
+/// The longest line a server may send us (literals are read apart): a
+/// `* SEARCH` of every UID in a large folder is one line, about 7 bytes a
+/// message, so this holds a million.
+const MAX_LINE: usize = 8 * 1024 * 1024;
 
 /// How this link reaches servers: TLS, and in tests a certificate to trust
 /// and an address for a name.
@@ -192,6 +194,12 @@ impl Conn {
         loop {
             if let Some(at) = self.buf[searched..].windows(2).position(|w| w == b"\r\n") {
                 let at = searched + at;
+                if at > MAX_LINE {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "line too long",
+                    ));
+                }
                 let line = self.buf[..at].to_vec();
                 self.buf.drain(..at + 2);
                 return Ok(line);
@@ -243,4 +251,53 @@ fn first_line(text: &str) -> String {
         .chars()
         .take(160)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::net::TcpListener;
+
+    use super::*;
+
+    /// A connection to a server that sends `bytes` and closes.
+    fn serving(bytes: Vec<u8>) -> Conn {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // The client may hang up first (the cap): that is fine.
+            let _ = stream.write_all(&bytes);
+        });
+        Conn {
+            stream: Stream::Plain(TcpStream::connect(addr).unwrap()),
+            buf: Vec::new(),
+            host: "test".into(),
+        }
+    }
+
+    #[test]
+    fn a_search_of_a_large_folder_is_one_long_line_and_reads() {
+        // 100,000 UIDs: about 690 KB on one line, as a first sync's
+        // `UID SEARCH ALL` answers for a big Inbox.
+        let mut line = b"* SEARCH".to_vec();
+        for uid in 1..=100_000u32 {
+            line.extend_from_slice(format!(" {uid}").as_bytes());
+        }
+        let len = line.len();
+        line.extend_from_slice(b"\r\ng1 OK done\r\n");
+        let mut conn = serving(line);
+        assert_eq!(conn.read_line().unwrap().len(), len);
+        assert_eq!(conn.read_line().unwrap(), b"g1 OK done");
+        // And a line past the cap is refused, not read forever.
+        let mut endless = vec![b'x'; MAX_LINE + 2];
+        endless.extend_from_slice(b"\r\n");
+        let refused = serving(endless).read_line();
+        assert!(
+            matches!(&refused, Err(e) if e.to_string().contains("too long")),
+            "read {:?} bytes",
+            refused.as_ref().map(Vec::len)
+        );
+    }
 }

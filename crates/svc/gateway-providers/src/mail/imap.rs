@@ -150,18 +150,28 @@ impl Session {
         if session.capabilities.is_empty() {
             session.capability()?;
         }
-        if session.has("LOGINDISABLED") {
-            return Err(LinkError::Refused(format!(
-                "{} doesn't allow signing in with a password",
-                session.conn.host
-            )));
-        }
-        let login = format!(
-            "LOGIN {} {}",
-            astring(&account.user)?,
-            astring(account.secret.expose())?
-        );
-        let done = session.command(&login, |_| Ok(()))?;
+        // LOGIN takes quoted ASCII; anything else (a password with ü, a
+        // server that disables LOGIN) signs in with AUTHENTICATE PLAIN,
+        // whose base64 carries any bytes.
+        let done = match (quoted(&account.user), quoted(account.secret.expose())) {
+            (Ok(user), Ok(secret)) if !session.has("LOGINDISABLED") => {
+                session.command(&format!("LOGIN {user} {secret}"), |_| Ok(()))?
+            }
+            _ if session.has("AUTH=PLAIN") => session.authenticate_plain(account)?,
+            _ if session.has("LOGINDISABLED") => {
+                return Err(LinkError::Refused(format!(
+                    "{} doesn't allow signing in with a password",
+                    session.conn.host
+                )));
+            }
+            _ => {
+                return Err(LinkError::SignIn(
+                    "the user name or password has characters this mail server can't be sent \
+                     in a sign-in"
+                        .into(),
+                ));
+            }
+        };
         if !done.ok {
             return Err(LinkError::SignIn(format!(
                 "{} didn't accept the password for {}: {}",
@@ -181,6 +191,30 @@ impl Session {
             session.qresync = done.ok;
         }
         Ok(session)
+    }
+
+    /// SASL PLAIN (RFC 4616): in the command itself where the server takes
+    /// that (SASL-IR, RFC 4959), else after its go-ahead.
+    fn authenticate_plain(&mut self, account: &Account) -> Result<Done, LinkError> {
+        let mut plain = Vec::new();
+        plain.push(0);
+        plain.extend_from_slice(account.user.as_bytes());
+        plain.push(0);
+        plain.extend_from_slice(account.secret.expose().as_bytes());
+        let encoded = glass_managed::base64::encode(&plain);
+        if self.has("SASL-IR") {
+            return self.command(&format!("AUTHENTICATE PLAIN {encoded}"), |_| Ok(()));
+        }
+        let tag = self.next_tag();
+        self.conn
+            .write_all(format!("{tag} AUTHENTICATE PLAIN\r\n").as_bytes())?;
+        match self.read_response()? {
+            Response::Continue(_) => {}
+            Response::Tagged { tag: t, done } if t == tag => return Ok(done),
+            _ => return Err(self.garbled("an answer to AUTHENTICATE")),
+        }
+        self.conn.write_all(format!("{encoded}\r\n").as_bytes())?;
+        self.finish(&tag, |_| Ok(()))
     }
 
     pub(crate) fn has(&self, capability: &str) -> bool {
@@ -631,16 +665,6 @@ pub(crate) fn quoted(text: &str) -> Result<String, LinkError> {
 
 /// A sign-in name or password: quoted when it can be, else a synchronizing
 /// literal isn't worth it here, so it is refused with a reason.
-fn astring(text: &str) -> Result<String, LinkError> {
-    quoted(text).map_err(|_| {
-        LinkError::SignIn(
-            "the user name or password has characters this mail server can't be sent in a \
-             sign-in"
-                .into(),
-        )
-    })
-}
-
 /// `{123}` or `{123+}` at a line's end: the literal that follows.
 fn literal_length(line: &[u8]) -> Option<usize> {
     let line = line.strip_suffix(b"}")?;

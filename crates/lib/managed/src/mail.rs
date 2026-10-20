@@ -111,7 +111,7 @@ impl Role {
             Some(Role::Drafts)
         } else if named(&["Sent", "Sent Messages", "Sent Items", "Sent Mail"]) {
             Some(Role::Sent)
-        } else if named(&["Archive", "Archives", "All Mail"]) {
+        } else if named(&["Archive", "Archives"]) {
             Some(Role::Archive)
         } else if named(&["Junk", "Spam", "Junk E-mail", "Junk Email", "Bulk Mail"]) {
             Some(Role::Junk)
@@ -574,6 +574,8 @@ pub mod testing {
             assert_eq!(Role::of("[Gmail]/Spam", &[]), Some(Role::Junk));
             assert_eq!(Role::of("Deleted Items", &[]), Some(Role::Trash));
             assert_eq!(Role::of("Projects", &[]), None);
+            // Gmail's All Mail holds everything: never synced as Archive.
+            assert_eq!(Role::of("[Gmail]/All Mail", &[]), None);
         }
     }
 }

@@ -165,6 +165,20 @@ fn em0_a_wrong_password_is_a_sign_in_error_and_never_echoed() {
 }
 
 #[test]
+fn em0_a_password_with_any_characters_signs_in_to_both_servers() {
+    // LOGIN takes quoted ASCII only; AUTHENTICATE PLAIN carries the rest.
+    let Some(mox) = Mox::start() else { return };
+    let password = "Grüße-über-ünïcode-7";
+    mox.set_password(password);
+    let mut me = mox.account("dana");
+    me.secret = Secret::new(password);
+    mox.link().check(&me).unwrap();
+    me.secret = Secret::new("Grüße-falsch");
+    let wrong = mox.link().check(&me).unwrap_err();
+    assert!(matches!(wrong, LinkError::SignIn(_)), "{wrong:?}");
+}
+
+#[test]
 fn em0_starttls_ports_work_and_an_untrusted_server_is_refused() {
     let Some(mox) = Mox::start() else { return };
     let mut me = mox.account("dana");

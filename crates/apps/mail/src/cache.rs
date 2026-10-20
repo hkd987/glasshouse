@@ -134,6 +134,15 @@ impl Cache {
         Ok(uids)
     }
 
+    /// The UIDVALIDITY most of a folder's synced files carry, if any.
+    pub(crate) fn kept_validity(&self, role: Role) -> std::io::Result<Option<u32>> {
+        let mut counts: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+        for (validity, _) in self.names(role)?.iter().filter_map(|n| parse_synced(n)) {
+            *counts.entry(validity).or_default() += 1;
+        }
+        Ok(counts.into_iter().max_by_key(|(_, n)| *n).map(|(v, _)| v))
+    }
+
     /// Keeps a synced message; one already kept stays as it is.
     pub(crate) fn keep(&self, role: Role, name: &str, raw: &[u8]) -> std::io::Result<PathBuf> {
         let rel = rel_dir(role).join(name);

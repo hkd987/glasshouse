@@ -378,6 +378,31 @@ fn em0_the_inbox_syncs_into_the_cache_by_uid_and_agents_read_text_only() {
 }
 
 #[test]
+fn em0_after_signing_in_again_mail_that_went_meanwhile_leaves_the_cache() {
+    let (home, ctx) = setup();
+    let s = service();
+    let stays = s.link.deliver("INBOX", &arriving("Stays"));
+    let goes = s.link.deliver("INBOX", &arriving("Goes"));
+    s.connect(&ctx);
+    let inbox = || {
+        let mut names: Vec<String> = fs::read_dir(home.path().join("Mail/Inbox"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(inbox().len(), 2);
+    // On a phone, one is filed away; then this computer signs in again,
+    // which starts its record of the folder afresh.
+    let account = s.mail.account("demo").unwrap().1;
+    s.link.move_to(&account, "INBOX", goes, "Archive").unwrap();
+    s.connect(&ctx);
+    assert_eq!(inbox(), [cache::synced_name(1000, stays)]);
+}
+
+#[test]
 fn em0_a_send_is_built_here_submitted_filed_in_sent_and_audited_by_hash() {
     let (home, ctx) = setup();
     let s = service();
