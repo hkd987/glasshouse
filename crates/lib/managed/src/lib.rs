@@ -31,6 +31,7 @@ pub mod device;
 pub mod directory;
 pub mod mail;
 pub mod meet;
+pub mod models;
 pub mod shared;
 pub mod signing;
 pub mod skills;

@@ -305,6 +305,10 @@ pub enum ProviderKind {
     /// keep no data and don't train on it.
     #[serde(rename = "openrouter")]
     OpenRouter,
+    /// The org's model credits, through its admin console, which forwards
+    /// each call to OpenRouter with the org's key (ADR 0039): no key on the
+    /// computer. Managed computers only.
+    Credits,
     /// Canned, deterministic replies made on this machine; nothing leaves.
     /// For development and tests.
     Scripted,

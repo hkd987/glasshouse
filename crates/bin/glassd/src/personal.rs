@@ -117,7 +117,7 @@ impl PersonalModels {
         let policy = with_models(base, connected(&self.config).as_deref());
         let registry =
             crate::registry(&self.config, &policy, &self.org).map_err(|e| format!("{e:#}"))?;
-        let models = crate::gateway(&self.config, &policy);
+        let models = crate::gateway(&self.config, &policy, &self.org);
         runtime.apply_policy(policy, registry, self.source.clone());
         runtime.set_gateway(models.gateway);
         Ok(())

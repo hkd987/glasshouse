@@ -255,6 +255,8 @@ export interface CreditsPage {
   grants: { at: string; usd: number; note: string; paid: boolean }[];
   /** An admin accepted the model providers' terms for the org. */
   terms_accepted: boolean;
+  /** What each computer spent, most first: never what was said. */
+  by_computer: { device: string; calls: number; spent_usd: number; last: string | null }[];
   /** Admins may buy credits here, by card. */
   can_buy: boolean;
   min_usd: number;

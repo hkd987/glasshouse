@@ -3,16 +3,18 @@
 Status: **Accepted** (2026-10-20). Built: the OpenRouter provider; the
 cost and model on the record; a gateway that follows its keys; the
 console's credits (one capped key per org, grants by our operators, the
-Model credits page, the policy edit) and the key's delivery to computers;
-individuals' own keys in Settings; payment by card through Stripe at our
-markup, and the providers' terms accepted for each org. Next: whether
-credits' requests go through our servers (open, below); rotating the key.
+Model credits page, the policy edit); computers' calls through the
+console, which keeps the org's key; individuals' own keys in Settings;
+payment by card through Stripe at our markup, and the providers' terms
+accepted for each org. Next: an admin control to let agents call models;
+low-balance alerts.
 PRD MP-1, MP-4, MP-8, MP-10, MP-11, GT-3. The owner asked for a path for
 orgs that use neither Bedrock nor Claude Code: admins buy model usage
 from us in bulk, and we route it with OpenRouter's auto mode
 (2026-10-20). The owner chose Stripe for payments and a markup over
-OpenRouter's price, with requests passed through to OpenRouter
-(2026-10-20).
+OpenRouter's price, with requests passed through to OpenRouter, and then
+that credits' requests go through our servers (2026-10-20). For credits
+only, this amends ADR 0018: their prompts cross our servers.
 
 ## Context
 - Agents reach models only through the model gateway (ADR 0018). Policy
@@ -59,15 +61,24 @@ OpenRouter's price, with requests passed through to OpenRouter
      whatever it does.
    - Per-computer keys were rejected: a limit caps one key. An org's pool
      would have to be split and rebalanced, or overspent N times.
-   - A proxy through the console was rejected (ADR 0018). Model traffic
-     leaves from the computer, and our servers never hold prompts.
-3. **Computers get the org's key over their signed sync (ADR 0030 slice
-   P).**
-   - The key arrives as its own field of the sync reply, only to a
-     computer whose request its own registered key signed. It is never in
-     a signed release, which is kept and logged.
-   - glassd keeps it root only beside its state, outside every jail. It
-     rebuilds the gateway when the key arrives, changes or goes.
+   - The org's key stays on our servers too: no computer ever holds it.
+3. **Computers call models on credits through the console.**
+   - Policy names the provider with kind `credits`. On a managed computer
+     glassd's `credits` provider sends each call to the console
+     (`/device/v1/models/complete`), signed with the computer's own key
+     (ADR 0030 slice P), on a connection of its own.
+   - The console forwards it to OpenRouter with the org's key, for a model
+     the org's published policy runs on credits, at most 32,768 tokens out
+     and 64 calls at once. Used-up credits are refused in words, and the
+     computer fails over to the next model on its route.
+   - The console keeps which computer called, the tokens and the cost,
+     never the prompt or the reply (`model-usage.json`). The answer tells
+     the computer what the call cost the org, at the rate it paid, for its
+     audit record. Admins see spend by computer.
+   - A computer sent the key by an earlier console is told to forget it:
+     glassd removes it, on the record, and never keeps a key it's sent.
+   - What crosses our servers was redacted on the computer already (DP-3):
+     secrets always, and the personal details policy names.
 4. **Policy says where it may be used, as for any provider.**
    - Turning credits on in the console is a policy edit, published like
      any rule. It adds the provider `credits`, the model `auto`
@@ -106,22 +117,16 @@ OpenRouter's price, with requests passed through to OpenRouter
 - An org with no cloud account can turn models on in minutes. Its spend
   is capped by OpenRouter, and each call's cost and model are on the
   record.
-- Model traffic goes to a further party (OpenRouter, then the provider it
-  picks). The ZDR flag is OpenRouter's promise for those providers; the
-  PRD's GT-3 wording has to say so, and confidential data stays off it by
-  default.
-- A computer that leaves the org keeps a key until it's rotated. Rotating
-  (create, push, disable the old one) is the next step, and so is
-  rotating when IT removes a computer.
-- **Open: should credits' requests go through our servers?** Today the
-  org's OpenRouter key is on each of its computers, readable by root, so
-  an org's IT could use it outside Glasshouse: that is close to the
-  "transfer the access granted" §7 forbids. Passing requests through our
-  servers keeps the key with us (the computer signs each request with its
-  own key, ADR 0030 slice P), makes rotation moot and meters each call
-  exactly, but prompts (redacted on the computer) would cross our
-  servers, which GT-3 says they don't. The owner decides; until then
-  credits stay as built.
+- Model traffic on credits goes through our servers and then to further
+  parties (OpenRouter, then the provider it picks). The ZDR flag is
+  OpenRouter's promise for those providers; GT-3 says all of this, and
+  confidential data stays off credits by default.
+- Customers never hold OpenRouter access: the key is ours, used only for
+  calls Glasshouse's agents make for them, which is how §5.1 describes
+  incorporating the service. A lost or removed computer has no key to
+  misuse; removing it from the org stops its calls at once.
+- Each call takes one more hop. The console is now in the path of model
+  calls on credits: it has to stay up and scale with them.
 
 ## What no code supplies
 - Whether Glasshouse credits are "incorporated into our product" (§5.1)

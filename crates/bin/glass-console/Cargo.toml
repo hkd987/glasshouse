@@ -15,6 +15,7 @@ glass-app-studio.workspace = true
 glass-first-party.workspace = true
 glass-http.workspace = true
 glass-crypto.workspace = true
+glass-gateway.workspace = true
 glass-gateway-providers.workspace = true
 glass-managed.workspace = true
 glass-platform.workspace = true

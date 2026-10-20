@@ -96,6 +96,8 @@ pub struct Console {
     credits: std::sync::OnceLock<CreditsService>,
     /// One grant at a time: each reads and raises the key's limit.
     granting: tokio::sync::Mutex<()>,
+    /// Model calls being forwarded (ADR 0039).
+    model_calls: tokio::sync::Semaphore,
 }
 
 /// What model credits need on our side (ADR 0039).
@@ -109,7 +111,13 @@ struct CreditsService {
     markup: f64,
     /// How orgs pay, when they may buy credits themselves.
     payments: Option<Arc<dyn crate::credits::Payments>>,
+    /// What forwards the org's computers' model calls with its key.
+    models: Arc<dyn crate::credits::ModelForwarder>,
 }
+
+/// Model calls forwarded at once, for every computer: more wait for none
+/// and fail over (ADR 0039).
+const MAX_MODEL_CALLS: usize = 64;
 
 /// `POST /api/credits/checkout`: what an admin buys.
 #[derive(Deserialize)]
@@ -314,26 +322,148 @@ impl Console {
             url,
             credits: std::sync::OnceLock::new(),
             granting: tokio::sync::Mutex::new(()),
+            model_calls: tokio::sync::Semaphore::new(MAX_MODEL_CALLS),
         })
     }
 
     /// Offers model credits (ADR 0039): `keys` makes and manages the
     /// org's key, `operator` is the token our staff add credits with,
-    /// `markup` is ours over OpenRouter's price, and with `payments` the
-    /// org's admins buy credits themselves.
+    /// `markup` is ours over OpenRouter's price, with `payments` the org's
+    /// admins buy credits themselves, and `models` forwards its computers'
+    /// calls with the org's key.
     pub fn set_credits(
         &self,
         keys: Arc<dyn crate::credits::KeyService>,
         operator: String,
         markup: f64,
         payments: Option<Arc<dyn crate::credits::Payments>>,
+        models: Arc<dyn crate::credits::ModelForwarder>,
     ) {
         let _ = self.credits.set(CreditsService {
             keys,
             operator,
             markup,
             payments,
+            models,
         });
+    }
+
+    /// `POST /device/v1/models/complete`, signed by the computer calling
+    /// (ADR 0039): forwards the call to OpenRouter with the org's key, for
+    /// a model the org's published policy runs on credits. Keeps who
+    /// called, the tokens and the cost, never what was said.
+    async fn complete_model(&self, device: &str, request: &Request) -> Response {
+        use glass_gateway::{Message, ProviderError, ProviderRequest, Role};
+        use glass_managed::models::{MAX_OUTPUT_TOKENS, ModelAnswer, ModelCall};
+
+        let Some(service) = self.credits.get() else {
+            return error(404, "This console doesn't sell model credits.");
+        };
+        let call: ModelCall = match body(request) {
+            Ok(b) => b,
+            Err(r) => return r,
+        };
+        let (key, allowed, rate) = {
+            let state = self.state();
+            let rate = if state.credits.limit() > 0.0 {
+                state.credits.granted() / state.credits.limit()
+            } else {
+                1.0
+            };
+            (
+                state.credits.key().map(str::to_owned),
+                state.credit_models(),
+                rate,
+            )
+        };
+        let Some(key) = key else {
+            return error(402, "The organization has no model credits.");
+        };
+        if !allowed.contains(&call.model) {
+            return error(
+                400,
+                &format!(
+                    "{} isn't a model the organization's policy runs on its credits",
+                    call.model
+                ),
+            );
+        }
+        let mut messages = Vec::with_capacity(call.messages.len());
+        for m in &call.messages {
+            let role = match m.role.as_str() {
+                "user" => Role::User,
+                "assistant" => Role::Assistant,
+                other => return error(400, &format!("no role {other:?}")),
+            };
+            messages.push(Message {
+                role,
+                content: m.content.clone(),
+            });
+        }
+        if messages.is_empty() {
+            return error(400, "a call needs a message");
+        }
+        let Ok(_permit) = self.model_calls.try_acquire() else {
+            return error(503, "Too many model calls at once; try again.");
+        };
+        let models = Arc::clone(&service.models);
+        let model = call.model.clone();
+        let system = call.system.clone();
+        let max_tokens = call.max_tokens.clamp(1, MAX_OUTPUT_TOKENS);
+        let done = tokio::task::spawn_blocking(move || {
+            models.complete(
+                &key,
+                &ProviderRequest {
+                    model: &model,
+                    system: system.as_deref(),
+                    messages: &messages,
+                    max_tokens,
+                },
+            )
+        })
+        .await;
+        let reply = match done {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(e)) => {
+                let message = e.to_string();
+                tracing::info!(%device, model = %call.model, "credits: a call failed: {message}");
+                return match e {
+                    ProviderError::Unavailable(m) if m.contains("402") => error(
+                        402,
+                        "The organization's model credits are used up: its admins can buy more in the admin console.",
+                    ),
+                    ProviderError::Unavailable(_) => error(503, &message),
+                    // The org's key itself is refused: ours to fix.
+                    ProviderError::NotConfigured(_) => {
+                        tracing::error!("credits: OpenRouter refused the org's key: {message}");
+                        error(503, "Model credits aren't working right now.")
+                    }
+                    ProviderError::Rejected(_) => error(400, &message),
+                };
+            }
+            Err(e) => return error(500, &e.to_string()),
+        };
+        let provider_usd = reply.cost_usd.unwrap_or(0.0);
+        self.state().usage.record(device, provider_usd);
+        tracing::info!(
+            %device,
+            model = %call.model,
+            served_by = reply.served_by.as_deref().unwrap_or("-"),
+            input = reply.input_tokens,
+            output = reply.output_tokens,
+            "credits: a call forwarded"
+        );
+        let answer = ModelAnswer {
+            text: reply.text,
+            input_tokens: reply.input_tokens,
+            output_tokens: reply.output_tokens,
+            stop_reason: reply.stop_reason,
+            cost_usd: reply
+                .cost_usd
+                .map(|c| (c * rate * 1_000_000.0).round() / 1_000_000.0),
+            served_by: reply.served_by,
+        };
+        ok(serde_json::to_value(answer).unwrap_or_default())
     }
 
     /// `/api/credits…`, for the org's admins (ADR 0039): the page, buying
@@ -406,7 +536,10 @@ impl Console {
             }
             _ => None,
         };
-        let mut view = self.state().credits.view(usage, on);
+        let mut view = {
+            let state = self.state();
+            state.credits.view(usage, on, &state.usage)
+        };
         view["offered"] = json!(self.credits.get().is_some());
         view["can_buy"] = json!(self.credits.get().is_some_and(|c| c.payments.is_some()));
         view["min_usd"] = json!(crate::credits::MIN_PURCHASE_USD);
@@ -544,7 +677,7 @@ impl Console {
                 let mut state = self.state();
                 state.credits = credits;
                 let on = state.draft().is_ok_and(|d| crate::edits::credits_on(&d));
-                let view = state.credits.view(Some(Ok(usage)), on);
+                let view = state.credits.view(Some(Ok(usage)), on, &state.usage);
                 drop(state);
                 self.released();
                 Ok(view)
@@ -625,6 +758,9 @@ impl Console {
                 let mut state = flusher.state();
                 if let Err(e) = state.save_fleet() {
                     tracing::warn!("saving the fleet: {e:#}");
+                }
+                if let Err(e) = state.save_usage() {
+                    tracing::warn!("saving model credit usage: {e:#}");
                 }
             }
         });
@@ -1085,6 +1221,7 @@ impl Console {
             );
         }
         match path {
+            "models/complete" => self.complete_model(&device, request).await,
             "sync" => {
                 let sync: SyncRequest = match body(request) {
                     Ok(b) => b,
@@ -1744,8 +1881,13 @@ mod tests {
         let (status, page) = t.call("GET", "/api/credits", Value::Null).await;
         assert_eq!((status, &page["offered"]), (200, &json!(false)));
         let keys = Arc::new(crate::credits::MemoryKeys::default());
-        t.console
-            .set_credits(keys.clone(), OPERATOR.into(), 0.0, None);
+        t.console.set_credits(
+            keys.clone(),
+            OPERATOR.into(),
+            0.0,
+            None,
+            Arc::new(crate::credits::DevModels::new(keys.clone())),
+        );
         let grant = |token: &str, usd: f64| {
             let auth = format!("Bearer {token}");
             request(
@@ -1776,10 +1918,11 @@ mod tests {
         assert_eq!(json_of(&r)["granted_usd"], 100.0);
         assert!(!String::from_utf8_lossy(&r.body).contains("sk-or"));
 
-        // A computer gets the key once, and nothing when it has it.
+        // The key stays here: a computer hears only that it has none (and
+        // forgets one it was sent before), once.
         let credits = t.sync("lab-1", None, 0).await.credits.unwrap();
         assert_eq!(credits.version, 1);
-        assert!(credits.api_key.as_deref().unwrap().starts_with("sk-or-v1-"));
+        assert_eq!(credits.api_key, None);
         let r = t
             .device(
                 "/device/v1/sync",
@@ -1858,6 +2001,7 @@ mod tests {
             "operator-token-for-tests-only-0123456789".into(),
             0.25,
             Some(Arc::new(crate::credits::DevPayments::new(SECRET))),
+            Arc::new(crate::credits::DevModels::new(keys.clone())),
         );
         let (_, page) = t.call("GET", "/api/credits", Value::Null).await;
         assert_eq!(
@@ -1931,6 +2075,176 @@ mod tests {
         );
         assert_eq!(page["grants"][0]["paid"], true);
         assert!(t.sync("lab-1", None, 0).await.credits.is_some());
+    }
+
+    const CREDITS_OPERATOR: &str = "operator-token-for-tests-only-0123456789";
+
+    /// The console sells credits with in-memory keys and models at a 25 %
+    /// markup; an admin accepted the terms and published credits for
+    /// agents. No credits are bought yet.
+    async fn selling(t: &Test) -> Arc<crate::credits::MemoryKeys> {
+        let keys = Arc::new(crate::credits::MemoryKeys::default());
+        t.console.set_credits(
+            keys.clone(),
+            CREDITS_OPERATOR.into(),
+            0.25,
+            None,
+            Arc::new(crate::credits::DevModels::new(keys.clone())),
+        );
+        for (path, body) in [
+            ("/api/credits/terms", json!({ "accept": true })),
+            ("/api/policy/edit", json!({ "edit": "credits", "on": true })),
+            ("/api/policy/publish", json!({})),
+        ] {
+            let (status, answer) = t.call("POST", path, body).await;
+            assert_eq!(status, 200, "{path}: {answer}");
+        }
+        keys
+    }
+
+    async fn buy(t: &Test, usd: f64) {
+        let auth = format!("Bearer {CREDITS_OPERATOR}");
+        let r = t
+            .console
+            .handle(&request(
+                "POST",
+                "/ops/credits",
+                &json!({ "usd": usd }),
+                &[("authorization", auth.as_str())],
+            ))
+            .await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+    }
+
+    fn model_call(device: &str, model: &str) -> Value {
+        json!({
+            "device": device,
+            "model": model,
+            "system": "Be brief.",
+            "messages": [{ "role": "user", "content": "Summarise the Q3 plan [redacted:email#1]" }],
+            "max_tokens": 500
+        })
+    }
+
+    #[tokio::test]
+    async fn adr0039_the_console_forwards_a_computers_call_on_the_orgs_credits_and_keeps_only_the_cost()
+     {
+        let t = console().await;
+        let keys = selling(&t).await;
+        let complete = "/device/v1/models/complete";
+
+        // No credits bought: the computer hears so and fails over.
+        let r = t
+            .device(complete, model_call("lab-1", "openrouter/auto"))
+            .await;
+        assert_eq!(r.status, 402, "{}", String::from_utf8_lossy(&r.body));
+        buy(&t, 100.0).await;
+
+        // Only a model the published policy runs on credits.
+        let r = t
+            .device(complete, model_call("lab-1", "openai/gpt-5-pro"))
+            .await;
+        assert_eq!(r.status, 400);
+        // A computer can't call as another, nor change a signed call.
+        let call = model_call("lab-1", "openrouter/auto");
+        let mut tampered = t.signed(complete, &call).await;
+        tampered.body = model_call("lab-1", "openai/gpt-5-pro")
+            .to_string()
+            .into_bytes();
+        assert_eq!(t.console.handle(&tampered).await.status, 401);
+        let as_other = model_call("lab-2", "openrouter/auto")
+            .to_string()
+            .into_bytes();
+        let now = glass_types::Timestamp::now().unix_seconds();
+        let headers = lock(&t.devices)["lab-1"]
+            .sign("POST", complete, now, &as_other)
+            .unwrap();
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let mut other = request("POST", complete, &Value::Null, &headers);
+        other.body = as_other;
+        assert_eq!(t.console.handle(&other).await.status, 403);
+
+        let r = t
+            .device(complete, model_call("lab-1", "openrouter/auto"))
+            .await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let answer: glass_managed::models::ModelAnswer = serde_json::from_slice(&r.body).unwrap();
+        assert!(
+            answer.text.contains("Summarise the Q3 plan"),
+            "{}",
+            answer.text
+        );
+        assert_eq!(answer.served_by.as_deref(), Some("development/echo"));
+        let body = String::from_utf8_lossy(&r.body);
+        assert!(!body.contains("sk-or"), "{body}");
+
+        // The org pays its rate: OpenRouter's cost and 25 %.
+        let usage = t.console.state().usage.devices["lab-1"].clone();
+        assert_eq!(usage.calls, 1);
+        let charged = answer.cost_usd.unwrap();
+        assert!(
+            (charged - usage.provider_usd * 1.25).abs() < 1e-5,
+            "{charged} {usage:?}"
+        );
+        let (_, page) = t.call("GET", "/api/credits", Value::Null).await;
+        assert_eq!(page["by_computer"][0]["device"], "lab-1");
+        assert_eq!(page["by_computer"][0]["calls"], 1);
+
+        // Nothing of what was said is kept.
+        t.console.state().save_usage().unwrap();
+        let kept = std::fs::read_to_string(t._dir.path().join("model-usage.json")).unwrap();
+        assert!(!kept.contains("Q3") && !kept.contains("brief"), "{kept}");
+
+        // Used up: the computer hears it in words and fails over.
+        let hash = t.console.state().credits.hash.clone().unwrap();
+        keys.spend(&hash, 80.0);
+        let r = t
+            .device(complete, model_call("lab-1", "openrouter/auto"))
+            .await;
+        assert_eq!(r.status, 402);
+        assert!(String::from_utf8_lossy(&r.body).contains("used up"));
+    }
+
+    #[tokio::test]
+    async fn adr0039_a_computers_gateway_reaches_models_through_the_console_with_no_key_of_its_own()
+    {
+        use glass_gateway::{Message, ModelProvider, ProviderRequest, Role};
+
+        let t = console().await;
+        selling(&t).await;
+        buy(&t, 50.0).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(Arc::clone(&t.console).serve(listener));
+
+        // The computer, as glassd sets it up: its own key, registered with
+        // the enrollment token, and the credits provider on that link.
+        let key = Arc::new(glass_managed::device::DeviceKey::generate("lab-9").unwrap());
+        let client = glass_gateway_providers::ConsoleClient::new(&url, &t.token, true)
+            .unwrap()
+            .signed_by(key);
+        let link = glass_gateway_providers::CreditsLink::new();
+        let provider = glass_gateway_providers::CreditsProvider::new(Arc::clone(&link));
+        let reply = tokio::task::spawn_blocking(move || {
+            client.register_device().unwrap();
+            link.connect(Arc::new(client), "lab-9");
+            let messages = [Message {
+                role: Role::User,
+                content: "Draft the agenda".into(),
+            }];
+            provider.complete(&ProviderRequest {
+                model: "openrouter/auto",
+                system: None,
+                messages: &messages,
+                max_tokens: 200,
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(reply.text.contains("Draft the agenda"), "{}", reply.text);
+        assert!(reply.cost_usd.unwrap() > 0.0);
+        assert_eq!(t.console.state().usage.devices["lab-9"].calls, 1);
     }
 
     #[tokio::test]

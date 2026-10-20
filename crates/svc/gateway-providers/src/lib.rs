@@ -18,6 +18,7 @@
 mod anthropic;
 mod bedrock;
 mod console;
+mod credits;
 mod http;
 pub mod mail;
 mod openrouter;
@@ -32,14 +33,21 @@ use glass_policy::document::{ProviderEntry, ProviderKind};
 pub use anthropic::AnthropicProvider;
 pub use bedrock::{AwsCredentials, BedrockProvider};
 pub use console::ConsoleClient;
+pub use credits::{CreditsLink, CreditsProvider};
 pub use mail::ImapLink;
 pub use openrouter::{
     AUTO as OPENROUTER_AUTO, KeyUsage, MadeKey, OpenRouterKeys, OpenRouterProvider,
 };
 
 /// A gateway with a provider for each policy entry this machine can use,
-/// and a note for each it can't. Notes never contain a credential.
-pub fn connect(providers: &[ProviderEntry], secrets: &Secrets) -> (Gateway, Vec<String>) {
+/// and a note for each it can't. Notes never contain a credential. Model
+/// credits go through the org's console, on a managed computer's `credits`
+/// link (ADR 0039).
+pub fn connect(
+    providers: &[ProviderEntry],
+    secrets: &Secrets,
+    credits: Option<&Arc<CreditsLink>>,
+) -> (Gateway, Vec<String>) {
     let mut gateway = Gateway::new();
     let mut notes = Vec::new();
     for entry in providers {
@@ -55,6 +63,13 @@ pub fn connect(providers: &[ProviderEntry], secrets: &Secrets) -> (Gateway, Vec<
                 ),
                 None => notes.push(format!(
                     "model provider {}: no api_key in the secrets file, so calls skip it",
+                    entry.id
+                )),
+            },
+            ProviderKind::Credits => match credits {
+                Some(link) => gateway.add(&entry.id, Arc::new(CreditsProvider::new(Arc::clone(link)))),
+                None => notes.push(format!(
+                    "model provider {}: model credits come through an organization's admin console, and no organization manages this computer",
                     entry.id
                 )),
             },
@@ -126,7 +141,7 @@ mod tests {
             "[anthropic]\napi_key = \"not-a-real-key\"\n[credits]\napi_key = \"sk-or-not-real\"\n",
         )
         .unwrap();
-        let (gateway, notes) = connect(providers, &secrets);
+        let (gateway, notes) = connect(providers, &secrets, None);
         assert_eq!(
             gateway.providers().collect::<Vec<_>>(),
             ["anthropic", "credits", "scripted"]

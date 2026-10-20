@@ -18,6 +18,7 @@ use glass_managed::chat::{
 };
 use glass_managed::device::{DeviceKey, REGISTER_PATH};
 use glass_managed::meet::{Joined, MediaKeys, MeetLink, MeetRequest};
+use glass_managed::models::{COMPLETE_PATH, ModelAnswer, ModelCall};
 use glass_managed::{DeviceReport, SyncRequest, SyncResponse};
 
 use crate::http::{Http, Target};
@@ -90,6 +91,57 @@ impl ConsoleClient {
 
     fn post<T: serde::Serialize>(&self, path: &str, body: &T) -> Result<String, String> {
         self.request(path, body).map_err(|e| e.to_string())
+    }
+
+    /// A model call on the org's credits (ADR 0039), signed with this
+    /// computer's key: the console forwards it with the org's key. Errors
+    /// say whether the next model on the route should try.
+    pub fn complete_model(&self, call: &ModelCall) -> Result<ModelAnswer, ProviderError> {
+        let body = serde_json::to_vec(call)
+            .map_err(|e| ProviderError::Rejected(format!("the call doesn't encode: {e}")))?;
+        let reply = self.send(COMPLETE_PATH, &body)?;
+        let why = || Self::reason(&reply.body).unwrap_or_else(|| format!("HTTP {}", reply.status));
+        match reply.status {
+            200 => serde_json::from_str(&reply.body).map_err(|e| {
+                ProviderError::Unavailable(format!("the console's answer doesn't parse: {e}"))
+            }),
+            // The org's credits are used up, or it has none.
+            402 => Err(ProviderError::Unavailable(format!("HTTP 402: {}", why()))),
+            // This computer isn't registered, or the console doesn't sell
+            // credits: another model on the route might answer.
+            401 | 403 | 404 => Err(ProviderError::NotConfigured(format!(
+                "HTTP {}: {}",
+                reply.status,
+                why()
+            ))),
+            400 | 413 | 422 => Err(ProviderError::Rejected(format!(
+                "HTTP {}: {}",
+                reply.status,
+                why()
+            ))),
+            status => Err(ProviderError::Unavailable(format!(
+                "HTTP {status}: {}",
+                why()
+            ))),
+        }
+    }
+
+    /// Posts `body` to `path`, signed with this computer's key.
+    fn send(&self, path: &str, body: &[u8]) -> Result<crate::http::Reply, ProviderError> {
+        let key = self.key.as_ref().ok_or_else(|| {
+            ProviderError::NotConfigured("this computer has no device key yet".into())
+        })?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        let mut headers = vec![("Content-Type", "application/json".to_owned())];
+        headers.extend(
+            key.sign("POST", path, now, body)
+                .map_err(ProviderError::NotConfigured)?,
+        );
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        self.http
+            .post(&format!("{}{path}", self.base), &headers, body)
     }
 
     /// Posts `body` to `path`: the answer's text, or why not, with the

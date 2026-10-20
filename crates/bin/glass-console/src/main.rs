@@ -81,9 +81,10 @@ struct Args {
     /// credits with, our `markup` over OpenRouter's price (0.25 is 25 %)
     /// and, for admins to pay by card, `stripe_secret_key` and
     /// `stripe_webhook_secret` (`endpoint`, `stripe_endpoint` optional).
-    /// With `--dev` and no file, credits are kept in memory, reach no
-    /// model, cost 25 % over and are paid by webhooks signed with
-    /// `GLASS_CONSOLE_STRIPE_WEBHOOK` (or a fixed development secret).
+    /// With `--dev` and no file, credits are kept in memory, cost 25 % over,
+    /// are paid by webhooks signed with `GLASS_CONSOLE_STRIPE_WEBHOOK` (or
+    /// a fixed development secret), and computers' calls are answered here,
+    /// reaching no model.
     #[arg(long)]
     credits: Option<PathBuf>,
 }
@@ -255,6 +256,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 config.operator_token,
                 config.markup,
                 payments,
+                std::sync::Arc::new(credits::OpenRouterForwarder::new(
+                    config.endpoint.as_deref(),
+                )),
             );
         }
         None if args.dev => {
@@ -262,11 +266,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "dev-operator-token-not-a-secret".into());
             let webhook = std::env::var("GLASS_CONSOLE_STRIPE_WEBHOOK")
                 .unwrap_or_else(|_| "whsec_dev_not_a_secret".into());
+            let keys = std::sync::Arc::new(credits::MemoryKeys::default());
             console.set_credits(
-                std::sync::Arc::new(credits::MemoryKeys::default()),
+                keys.clone(),
                 token,
                 DEV_MARKUP,
                 Some(std::sync::Arc::new(credits::DevPayments::new(webhook))),
+                std::sync::Arc::new(credits::DevModels::new(keys)),
             );
         }
         None => {}

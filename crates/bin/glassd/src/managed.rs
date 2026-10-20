@@ -56,7 +56,8 @@ pub struct Managed {
     catalog_version: Option<u64>,
     directory_version: Option<u64>,
     chat_version: Option<u64>,
-    /// The org's model credits key this computer has (ADR 0039).
+    /// The model credits version the console last told this computer of
+    /// (ADR 0039): only that it keeps no key.
     credits_version: Option<u64>,
     /// Why the last release was refused or the last sync failed.
     last_error: Option<String>,
@@ -84,7 +85,7 @@ impl Managed {
             catalog_version: None,
             directory_version: None,
             chat_version: None,
-            credits_version: kept_credits_version(&crate::credits_path(config)),
+            credits_version: None,
             last_error: None,
             offline_since: None,
         };
@@ -212,6 +213,12 @@ impl Managed {
                 std::thread::spawn(move || sync_chat(&handle));
             }
             Err(e) => tracing::error!("managed: chat: {e}"),
+        }
+        // Model calls on the org's credits (ADR 0039) go to the console too,
+        // on a client of their own: a long answer mustn't hold up the rest.
+        match console(&token) {
+            Ok(models) => self.org.credits.connect(Arc::new(models), &self.device),
+            Err(e) => tracing::error!("managed: model credits: {e}"),
         }
         // Meetings (CF-21) go to the same console, on a client of their
         // own: a join mustn't wait behind chat's long poll.
@@ -348,48 +355,34 @@ impl Managed {
     /// Keeps the org's model credits key root only, or forgets it when the
     /// org has none now, and rebuilds the gateway with it (ADR 0039). The
     /// key is never in a log or the audit record.
+    /// Calls on the org's model credits go through its console, which
+    /// keeps the org's key (ADR 0039): a computer keeps none. One it was
+    /// sent before goes, on the record; a key sent now is never kept.
     fn apply_credits(&mut self, credits: &ModelCredits) -> Result<(), String> {
         let path = crate::credits_path(&self.config);
-        match &credits.api_key {
-            Some(key) => {
-                let text = format!(
-                    "# The org's model credits key, from its console (ADR 0039).\n[credits]\napi_key = {}\nversion = \"{}\"\n",
-                    toml::Value::String(key.clone()),
-                    credits.version
-                );
-                crate::write_root_only(&path, text.as_bytes())
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-            }
-            None => match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("{}: {e}", path.display())),
-            },
-        }
+        let removed = match std::fs::remove_file(&path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
         self.credits_version = Some(credits.version);
-        let models = crate::gateway(&self.config, &self.runtime.current_policy());
-        self.runtime.set_gateway(models.gateway);
-        let mut event = AuditEvent::new(
-            EventKind::CreditsKeyApplied,
-            if credits.api_key.is_some() {
-                format!(
-                    "The org's model credits key v{} from the admin console is in place",
-                    credits.version
-                )
-            } else {
-                "The org has no model credits key now; this computer's is gone".into()
-            },
-        );
-        event.detail = serde_json::json!({
-            "console": self.managed.url,
-            "version": credits.version,
-            "key": credits.api_key.is_some(),
-        });
-        self.runtime.append_audit(event);
-        tracing::info!(
-            version = credits.version,
-            "managed: model credits key applied"
-        );
+        if removed || credits.api_key.is_some() {
+            let mut event = AuditEvent::new(
+                EventKind::CreditsKeyApplied,
+                "The org's model credits key is no longer kept on this computer: model calls on credits go through the admin console",
+            );
+            event.detail = serde_json::json!({
+                "console": self.managed.url,
+                "version": credits.version,
+                "removed": removed,
+                "sent_and_refused": credits.api_key.is_some(),
+            });
+            self.runtime.append_audit(event);
+            tracing::info!(
+                version = credits.version,
+                "managed: the model credits key is gone from this computer"
+            );
+        }
         Ok(())
     }
 
@@ -424,7 +417,7 @@ impl Managed {
         });
         self.policy_version = Some(signed.version);
         // Its model providers, with the keys this computer has (ADR 0039).
-        let models = crate::gateway(&self.config, &policy);
+        let models = crate::gateway(&self.config, &policy, &self.org);
         self.runtime.apply_policy(policy, registry, self.source());
         self.runtime.set_gateway(models.gateway);
         let mut event = AuditEvent::new(
@@ -773,13 +766,6 @@ fn read_token(path: &Path) -> Result<String, String> {
     Ok(token.trim().to_owned())
 }
 
-/// The version of the credits key kept at `path`, if one is.
-fn kept_credits_version(path: &Path) -> Option<u64> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let table: toml::Table = toml::from_str(&text).ok()?;
-    table.get("credits")?.get("version")?.as_str()?.parse().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -1049,24 +1035,29 @@ mod tests {
     }
 
     #[test]
-    fn adr0039_the_orgs_credits_key_is_kept_root_only_reaches_the_gateway_and_can_go() {
+    fn adr0039_credits_go_through_the_console_and_no_key_is_kept_on_the_computer() {
         let key = OrgKey::from_seed([7; 32]);
         let d = device(&key);
         let policy = Policy::from_toml(&format!(
-            "{}\n[[models.provider]]\nid = \"credits\"\nkind = \"openrouter\"\nname = \"Glasshouse model credits\"\n",
+            "{}\n[[models.provider]]\nid = \"credits\"\nkind = \"credits\"\nname = \"Glasshouse model credits\"\n",
             glass_policy::DEFAULT_POLICY
         ))
         .unwrap();
         let path = crate::credits_path(&d.config);
+        // A managed computer's gateway has the credits provider, on the
+        // link to its console, whatever keys it holds.
         let providers = |policy: &Policy| {
-            crate::gateway(&d.config, policy)
+            crate::gateway(&d.config, policy, &d.org)
                 .gateway
                 .providers()
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         };
-        assert!(!providers(&policy).contains(&"credits".to_owned()));
+        assert!(providers(&policy).contains(&"credits".to_owned()));
 
+        // A key an earlier console sent is removed, on the record; one sent
+        // now is never kept.
+        crate::write_root_only(&path, b"[credits]\napi_key = \"sk-or-v1-old\"\n").unwrap();
         let mut m = d.managed();
         let response = |api_key: Option<&str>, version| SyncResponse {
             ring: glass_managed::Ring::Broad,
@@ -1079,32 +1070,14 @@ mod tests {
                 api_key: api_key.map(str::to_owned),
             }),
         };
-        assert!(m.handle(response(Some("sk-or-v1-org-key-not-real"), 1)));
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o077, 0, "root only");
-        let dir_mode = std::fs::metadata(path.parent().unwrap())
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(dir_mode & 0o077, 0);
-        assert!(providers(&policy).contains(&"credits".to_owned()));
-        assert_eq!(d.audited(EventKind::CreditsKeyApplied), 1);
-        let log = std::fs::read_to_string(d.dir.path().join("audit.log")).unwrap();
-        assert!(
-            !log.contains("sk-or-v1-org-key"),
-            "the key isn't on the record"
-        );
-
-        // After a restart it asks only for what's newer.
-        drop(m);
-        let mut m = d.managed();
-        assert_eq!(m.credits_version, Some(1));
-
-        // The org has none now: the key goes, and with it the provider.
         assert!(m.handle(response(None, 2)));
         assert!(!path.exists());
-        assert!(!providers(&policy).contains(&"credits".to_owned()));
-        assert_eq!(m.credits_version, Some(2));
+        assert_eq!(d.audited(EventKind::CreditsKeyApplied), 1);
+        assert!(m.handle(response(Some("sk-or-v1-sent-anyway"), 3)));
+        assert!(!path.exists());
+        let log = std::fs::read_to_string(d.dir.path().join("audit.log")).unwrap();
+        assert!(!log.contains("sk-or-v1"), "no key on the record");
+        assert_eq!(m.credits_version, Some(3));
     }
 
     #[tokio::test]

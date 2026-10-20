@@ -1,10 +1,11 @@
 // Model credits (ADR 0039): model usage the org buys from Glasshouse, for
 // orgs without Amazon Bedrock or Claude Code, paid by card on Stripe's own
-// page. Each computer calls models itself with the org's key, through
-// OpenRouter, which picks the best model for each request; the key's limit
-// is what the org bought, so no computer can spend more. Turning credits on
-// for agents is a policy edit, published like any rule, once an admin
-// accepted the model providers' terms. The key itself never comes here.
+// page. Each computer sends its calls to this console, signed with its own
+// key; the console forwards them to OpenRouter, which picks the best model
+// for each request, with the org's key, capped at what the org bought.
+// Turning credits on for agents is a policy edit, published like any rule,
+// once an admin accepted the model providers' terms. The key never leaves
+// our servers, and never comes to this page.
 
 import { h, show } from "@glasshouse/sdk";
 
@@ -153,6 +154,19 @@ export async function creditsPage(root: HTMLElement, returned?: string): Promise
                         ),
                   ),
                   card(
+                    "By computer",
+                    page.by_computer.length ? "What each computer's agents spent. What they asked is never kept." : "No computer has used credits yet.",
+                    ...page.by_computer.map((c) =>
+                      h(
+                        "div",
+                        { class: "grant", "data-test": "computer" },
+                        h("span", { class: "mono" }, c.device),
+                        h("span", {}, dollars(c.spent_usd)),
+                        h("span", { class: "card-sub" }, `${c.calls} ${c.calls === 1 ? "call" : "calls"}`),
+                      ),
+                    ),
+                  ),
+                  card(
                     "Purchases",
                     page.grants.length ? null : "None yet.",
                     ...page.grants.map((g) =>
@@ -194,7 +208,7 @@ export async function creditsPage(root: HTMLElement, returned?: string): Promise
                     : card("Buying more", "Glasshouse adds credits to your org: ask your account contact. Unused credits expire a year after purchase."),
                   card(
                     "Where requests go",
-                    "Each computer sends its own requests through OpenRouter, only to providers that keep no data and don't train on it. Prompts never pass through Glasshouse's servers, and each request's model and cost are in the computer's audit log.",
+                    "Each computer sends its requests to Glasshouse, signed with its own key, already stripped of secrets and personal details. Glasshouse passes them to OpenRouter, only to providers that keep no data and don't train on it, and keeps only which computer called, the tokens and the cost. Your org's OpenRouter key never leaves our servers.",
                   ),
                 ),
               ),

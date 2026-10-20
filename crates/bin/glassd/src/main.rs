@@ -117,7 +117,7 @@ fn main() -> ExitCode {
 /// policy names that has what it needs. A secrets file that isn't private
 /// is refused, and calls then go only to providers that need no secret.
 /// Nothing here logs a credential.
-fn gateway(config: &Config, policy: &Policy) -> Models {
+fn gateway(config: &Config, policy: &Policy, org: &OrgData) -> Models {
     let mut notes = Vec::new();
     let uid = glass_platform::users::effective_uid();
     let mut secrets = match Secrets::load(&config.model_secrets, uid) {
@@ -127,20 +127,18 @@ fn gateway(config: &Config, policy: &Policy) -> Models {
             Secrets::default()
         }
     };
-    // The org's model credits key as its console sent it, on a managed
-    // computer; on one nobody manages, its owner's own key (ADR 0039).
-    // IT's own file wins any clash.
-    let extra = if config.managed.is_some() {
-        credits_path(config)
-    } else {
-        personal::path(config)
-    };
-    match Secrets::load(&extra, uid) {
-        Ok(more) => secrets.merge(more),
-        Err(e) => notes.push(e.to_string()),
+    // On a computer nobody manages, its owner's own key (ADR 0039); IT's
+    // own file wins any clash. A managed computer's model credits go
+    // through its console, which keeps the org's key.
+    if config.managed.is_none() {
+        match Secrets::load(&personal::path(config), uid) {
+            Ok(more) => secrets.merge(more),
+            Err(e) => notes.push(e.to_string()),
+        }
     }
+    let credits = config.managed.is_some().then_some(&org.credits);
     let (gateway, more) =
-        glass_gateway_providers::connect(&policy.document().models.providers, &secrets);
+        glass_gateway_providers::connect(&policy.document().models.providers, &secrets, credits);
     notes.extend(more);
     for note in &notes {
         tracing::warn!("models: {note}");
@@ -151,8 +149,9 @@ fn gateway(config: &Config, policy: &Policy) -> Models {
     }
 }
 
-/// Where glassd keeps the org's model credits key (ADR 0039): root only,
-/// in its state, which no jail mounts.
+/// Where an earlier glassd kept the org's model credits key: removed when
+/// the console says so, since calls on credits go through the console,
+/// which keeps the key (ADR 0039).
 pub(crate) fn credits_path(config: &Config) -> PathBuf {
     config.state_dir.join("models/credits.toml")
 }
@@ -195,6 +194,9 @@ pub(crate) struct OrgData {
     /// How meetings reach the console's meeting routes (CF-21). Meetings
     /// are conversations in `chat`'s store; the media key is never kept.
     pub(crate) meet: glass_first_party::MeetHandle,
+    /// The link model calls on the org's credits take to its console (ADR
+    /// 0039), connected once managed sync has the computer's key.
+    pub(crate) credits: Arc<glass_gateway_providers::CreditsLink>,
     /// Mail (ADR 0037): the link `[mail]` names, and each person's sign-in
     /// and sync state, root only in the state directory.
     pub(crate) mail: glass_first_party::MailHandle,
@@ -224,6 +226,7 @@ impl OrgData {
             },
             chat: glass_first_party::ChatHandle::new(state_dir.join("chat")),
             meet: glass_first_party::MeetHandle::new(),
+            credits: glass_gateway_providers::CreditsLink::new(),
             mail: glass_first_party::MailHandle::new(state_dir.join("mail")),
             studio: glass_first_party::Studio::new(glass_app_studio::StudioPaths {
                 store: state_dir.join("apps"),
@@ -265,7 +268,7 @@ fn prepare(args: &Args) -> anyhow::Result<Prepared> {
     for warning in loaded.policy.lint(&registry.lint_info()) {
         tracing::warn!("policy: {warning}");
     }
-    let models = gateway(&config, &loaded.policy);
+    let models = gateway(&config, &loaded.policy, &org);
     let (apps, skipped) = config.load_apps(&registry);
     for reason in &skipped {
         tracing::warn!("app not installed: {reason}");

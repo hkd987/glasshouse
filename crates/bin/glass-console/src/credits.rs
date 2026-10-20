@@ -12,8 +12,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::Context as _;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use glass_gateway::{ModelProvider, ProviderError, ProviderReply, ProviderRequest, Secret};
 use glass_gateway_providers::stripe::{Checkout, CheckoutRequest, Stripe};
-use glass_gateway_providers::{KeyUsage, OpenRouterKeys};
+use glass_gateway_providers::{KeyUsage, OpenRouterKeys, OpenRouterProvider};
 use glass_managed::ModelCredits;
 use glass_types::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -51,7 +55,8 @@ impl KeyService for OpenRouterKeys {
 /// (`--dev`) and tests. Nothing it makes reaches any model.
 #[derive(Debug, Default)]
 pub struct MemoryKeys {
-    keys: Mutex<Vec<(String, KeyUsage)>>,
+    /// Hash, key and usage.
+    keys: Mutex<Vec<(String, String, KeyUsage)>>,
 }
 
 impl MemoryKeys {
@@ -59,12 +64,32 @@ impl MemoryKeys {
     #[cfg(test)]
     pub fn spend(&self, hash: &str, dollars: f64) {
         let mut keys = self.keys.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((_, usage)) = keys.iter_mut().find(|(h, _)| h == hash) {
-            usage.usage += dollars;
-            usage.usage_monthly += dollars;
-            usage.limit_remaining = usage.limit.map(|l| (l - usage.usage).max(0.0));
+        if let Some((_, _, usage)) = keys.iter_mut().find(|(h, _, _)| h == hash) {
+            charge(usage, dollars);
         }
     }
+
+    /// Charges `dollars` to `key` as OpenRouter would a call: refused once
+    /// the key's limit is spent.
+    fn charge_key(&self, key: &str, dollars: f64) -> Result<(), ProviderError> {
+        let mut keys = self.keys.lock().unwrap_or_else(|p| p.into_inner());
+        let Some((_, _, usage)) = keys.iter_mut().find(|(_, k, _)| k == key) else {
+            return Err(ProviderError::NotConfigured("HTTP 401: no such key".into()));
+        };
+        if usage.limit_remaining.is_some_and(|left| left < dollars) {
+            return Err(ProviderError::Unavailable(
+                "HTTP 402: the credits for this key are used up".into(),
+            ));
+        }
+        charge(usage, dollars);
+        Ok(())
+    }
+}
+
+fn charge(usage: &mut KeyUsage, dollars: f64) {
+    usage.usage += dollars;
+    usage.usage_monthly += dollars;
+    usage.limit_remaining = usage.limit.map(|l| (l - usage.usage).max(0.0));
 }
 
 impl KeyService for MemoryKeys {
@@ -74,6 +99,7 @@ impl KeyService for MemoryKeys {
         let key = format!("sk-or-v1-memory-{}", keys.len() + 1);
         keys.push((
             hash.clone(),
+            key.clone(),
             KeyUsage {
                 limit: Some(limit),
                 limit_remaining: Some(limit),
@@ -87,9 +113,9 @@ impl KeyService for MemoryKeys {
 
     fn set_limit(&self, hash: &str, limit: f64) -> Result<KeyUsage, String> {
         let mut keys = self.keys.lock().unwrap_or_else(|p| p.into_inner());
-        let (_, usage) = keys
+        let (_, _, usage) = keys
             .iter_mut()
-            .find(|(h, _)| h == hash)
+            .find(|(h, _, _)| h == hash)
             .ok_or("no such key")?;
         usage.limit = Some(limit);
         usage.limit_remaining = Some((limit - usage.usage).max(0.0));
@@ -99,9 +125,175 @@ impl KeyService for MemoryKeys {
     fn usage(&self, hash: &str) -> Result<KeyUsage, String> {
         let keys = self.keys.lock().unwrap_or_else(|p| p.into_inner());
         keys.iter()
-            .find(|(h, _)| h == hash)
-            .map(|(_, u)| u.clone())
+            .find(|(h, _, _)| h == hash)
+            .map(|(_, _, u)| u.clone())
             .ok_or_else(|| "no such key".into())
+    }
+}
+
+/// Sends a model call on to a provider with the org's key (ADR 0039):
+/// OpenRouter, or for development and tests, [`DevModels`].
+pub trait ModelForwarder: Send + Sync + std::fmt::Debug {
+    fn complete(
+        &self,
+        key: &str,
+        request: &ProviderRequest<'_>,
+    ) -> Result<ProviderReply, ProviderError>;
+}
+
+/// OpenRouter with the org's key. The provider (and its TLS setup) is
+/// kept while the key stays the same.
+pub struct OpenRouterForwarder {
+    endpoint: Option<String>,
+    made: Mutex<Option<(String, Arc<OpenRouterProvider>)>>,
+}
+
+impl OpenRouterForwarder {
+    pub fn new(endpoint: Option<&str>) -> Self {
+        Self {
+            endpoint: endpoint.map(str::to_owned),
+            made: Mutex::new(None),
+        }
+    }
+}
+
+/// Never the key.
+impl std::fmt::Debug for OpenRouterForwarder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenRouterForwarder")
+            .field("endpoint", &self.endpoint)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ModelForwarder for OpenRouterForwarder {
+    fn complete(
+        &self,
+        key: &str,
+        request: &ProviderRequest<'_>,
+    ) -> Result<ProviderReply, ProviderError> {
+        let provider = {
+            let mut made = self.made.lock().unwrap_or_else(|p| p.into_inner());
+            match &*made {
+                Some((k, provider)) if k == key => Arc::clone(provider),
+                _ => {
+                    let provider = Arc::new(OpenRouterProvider::new(
+                        self.endpoint.as_deref(),
+                        Secret::new(key),
+                    ));
+                    *made = Some((key.to_owned(), Arc::clone(&provider)));
+                    provider
+                }
+            }
+        };
+        provider.complete(request)
+    }
+}
+
+/// For `--dev` and tests: answers on this machine, charging the in-memory
+/// key as OpenRouter would ($3 in and $15 out per million tokens).
+#[derive(Debug)]
+pub struct DevModels {
+    keys: Arc<MemoryKeys>,
+}
+
+impl DevModels {
+    pub fn new(keys: Arc<MemoryKeys>) -> Self {
+        Self { keys }
+    }
+}
+
+impl ModelForwarder for DevModels {
+    fn complete(
+        &self,
+        key: &str,
+        request: &ProviderRequest<'_>,
+    ) -> Result<ProviderReply, ProviderError> {
+        let asked: usize = request
+            .messages
+            .iter()
+            .map(|m| m.content.chars().count())
+            .sum::<usize>()
+            + request.system.map_or(0, |s| s.chars().count());
+        let last: String = request
+            .messages
+            .last()
+            .map(|m| m.content.chars().take(200).collect())
+            .unwrap_or_default();
+        let text = format!("Answered on model credits: {last}");
+        let input = (asked as u64).div_ceil(4).max(1);
+        let output = (text.chars().count() as u64).div_ceil(4);
+        let cost = ((input * 3 + output * 15) as f64 / 1_000_000.0 * 1e6).round() / 1e6;
+        self.keys.charge_key(key, cost)?;
+        Ok(ProviderReply {
+            text,
+            input_tokens: input,
+            output_tokens: output,
+            stop_reason: Some("stop".into()),
+            cost_usd: Some(cost),
+            served_by: Some("development/echo".into()),
+        })
+    }
+}
+
+/// What one computer spent on the org's credits.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeviceUsage {
+    pub calls: u64,
+    /// OpenRouter's dollars.
+    pub provider_usd: f64,
+    #[serde(default)]
+    pub last: Option<Timestamp>,
+}
+
+/// Each computer's calls on the org's credits (ADR 0039), as the console
+/// forwarded them: who, how many and what they cost, never what was said.
+/// Kept in `model-usage.json`, written in the background.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub devices: BTreeMap<String, DeviceUsage>,
+    #[serde(skip)]
+    dirty: bool,
+}
+
+impl Usage {
+    fn path(dir: &Path) -> PathBuf {
+        dir.join("model-usage.json")
+    }
+
+    pub fn load(dir: &Path) -> anyhow::Result<Self> {
+        let path = Self::path(dir);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    /// One call by `device` that cost OpenRouter's `provider_usd`.
+    pub fn record(&mut self, device: &str, provider_usd: f64) {
+        let usage = self.devices.entry(device.to_owned()).or_default();
+        usage.calls += 1;
+        usage.provider_usd += provider_usd;
+        usage.last = Some(Timestamp::now());
+        self.dirty = true;
+    }
+
+    /// Writes it if a call came in since it was last written.
+    pub fn save(&mut self, dir: &Path) -> anyhow::Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+        let path = Self::path(dir);
+        let tmp = path.with_extension("json.new");
+        std::fs::write(&tmp, serde_json::to_vec(self)?)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
+        self.dirty = false;
+        Ok(())
     }
 }
 
@@ -240,6 +432,10 @@ pub struct Credits {
     /// The org's acceptance of the model providers' terms.
     #[serde(default)]
     pub terms: Option<Accepted>,
+    /// Computers no longer hold the key (ADR 0039): those sent it before
+    /// were told to forget it.
+    #[serde(default)]
+    withdrawn: bool,
 }
 
 impl std::fmt::Debug for Credits {
@@ -259,13 +455,20 @@ impl Credits {
 
     pub fn load(dir: &Path) -> anyhow::Result<Self> {
         let path = Self::path(dir);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        let mut credits: Self = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text)
+                .with_context(|| format!("parsing {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        // Kept from when computers held the key: a new version tells them
+        // to forget it.
+        if credits.version > 0 && !credits.withdrawn {
+            credits.version += 1;
+            credits.withdrawn = true;
+            credits.save(dir)?;
         }
+        Ok(credits)
     }
 
     fn save(&self, dir: &Path) -> anyhow::Result<()> {
@@ -355,6 +558,7 @@ impl Credits {
                 self.hash = Some(hash.clone());
                 self.key = Some(key);
                 self.version += 1;
+                self.withdrawn = true;
                 keys.usage(&hash)?
             }
         };
@@ -372,15 +576,22 @@ impl Credits {
     /// What a computer that has version `have` gets: the key, when it
     /// changed since.
     pub fn for_device(&self, have: Option<u64>) -> Option<ModelCredits> {
-        (self.version > 0 && have.is_none_or(|v| v < self.version)).then(|| ModelCredits {
+        // The key stays here (ADR 0039): computers call through the console.
+        // A computer that was sent it before hears that it's gone.
+        (self.version > 0 && have.is_none_or(|v| v < self.version)).then_some(ModelCredits {
             version: self.version,
-            api_key: self.key.clone(),
+            api_key: None,
         })
+    }
+
+    /// The org's OpenRouter key, for forwarding its computers' calls.
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
     }
 
     /// The Credits page: what was bought and spent, in the org's dollars
     /// (OpenRouter's at the rate it paid), never the key or our markup.
-    pub fn view(&self, usage: Option<Result<KeyUsage, String>>, on: bool) -> Value {
+    pub fn view(&self, usage: Option<Result<KeyUsage, String>>, on: bool, by: &Usage) -> Value {
         let rate = if self.limit() > 0.0 {
             self.granted() / self.limit()
         } else {
@@ -392,6 +603,15 @@ impl Credits {
             Some(Err(e)) => (None, None, Some(e)),
             None => (None, None, None),
         };
+        let mut computers: Vec<(&String, &DeviceUsage)> = by.devices.iter().collect();
+        computers.sort_by(|a, b| b.1.provider_usd.total_cmp(&a.1.provider_usd));
+        let computers: Vec<Value> = computers
+            .into_iter()
+            .take(20)
+            .map(|(device, u)| {
+                json!({ "device": device, "calls": u.calls, "spent_usd": cents(u.provider_usd), "last": u.last })
+            })
+            .collect();
         let grants: Vec<Value> = self
             .grants
             .iter()
@@ -405,6 +625,7 @@ impl Credits {
             "remaining_usd": remaining,
             "grants": grants,
             "terms_accepted": self.terms.is_some(),
+            "by_computer": computers,
             "problem": problem,
         })
     }
@@ -427,7 +648,8 @@ mod tests {
         assert_eq!(usage.limit, Some(100.0));
         let sent = credits.for_device(None).unwrap();
         assert_eq!(sent.version, 1);
-        assert!(sent.api_key.as_deref().unwrap().starts_with("sk-or-v1-"));
+        assert_eq!(sent.api_key, None, "the key stays on our servers");
+        assert!(credits.key().unwrap().starts_with("sk-or-v1-"));
         assert_eq!(credits.for_device(Some(1)), None, "the computer has it");
 
         keys.spend(credits.hash.as_deref().unwrap(), 30.0);
@@ -449,7 +671,9 @@ mod tests {
         let back = Credits::load(dir.path()).unwrap();
         assert_eq!(back.granted(), 150.0);
         assert_eq!(back.for_device(None), credits.for_device(None));
-        let view = credits.view(Some(Ok(usage)), true).to_string();
+        let view = credits
+            .view(Some(Ok(usage)), true, &Usage::default())
+            .to_string();
         assert!(!view.contains("sk-or-v1-"), "{view}");
         assert!(!format!("{credits:?}").contains("sk-or-v1-"));
 
@@ -507,7 +731,7 @@ mod tests {
         // OpenRouter spends $20: the org sees $25 of its $100 spent.
         keys.spend(credits.hash.as_deref().unwrap(), 20.0);
         let usage = keys.usage(credits.hash.as_deref().unwrap()).unwrap();
-        let view = credits.view(Some(Ok(usage)), false);
+        let view = credits.view(Some(Ok(usage)), false, &Usage::default());
         assert_eq!(
             (
                 &view["granted_usd"],

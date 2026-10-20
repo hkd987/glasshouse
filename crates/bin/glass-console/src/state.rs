@@ -239,6 +239,8 @@ pub struct State {
     pub fleet_dirty: bool,
     /// Model credits (ADR 0039): what the org bought, and its key.
     pub credits: crate::credits::Credits,
+    /// What each computer spent on them.
+    pub usage: crate::credits::Usage,
 }
 
 impl State {
@@ -291,6 +293,7 @@ impl State {
             fleet: read_json(&dir.join("fleet.json"))?.unwrap_or_default(),
             fleet_dirty: false,
             credits: crate::credits::Credits::load(dir)?,
+            usage: crate::credits::Usage::load(dir)?,
         };
         if state.policy.versions.is_empty() {
             if state.policy.draft.is_empty() {
@@ -362,6 +365,43 @@ impl State {
     pub fn in_force(&self, ring: Ring) -> Option<&PolicyVersion> {
         let version = self.policy.rings.get(&ring)?;
         self.policy.versions.iter().find(|v| v.version == *version)
+    }
+
+    /// The models the org's published policies run on its credits (ADR
+    /// 0039), by the provider's id (`openrouter/auto`): the only ones the
+    /// console forwards for its computers.
+    pub fn credit_models(&self) -> std::collections::BTreeSet<String> {
+        use glass_policy::document::ProviderKind;
+        let mut models = std::collections::BTreeSet::new();
+        for ring in Ring::ALL {
+            let Some(doc) = self
+                .in_force(ring)
+                .and_then(|v| toml::from_str::<PolicyDocument>(&v.text).ok())
+            else {
+                continue;
+            };
+            let credits: Vec<&str> = doc
+                .models
+                .providers
+                .iter()
+                .filter(|p| p.kind == ProviderKind::Credits)
+                .map(|p| p.id.as_str())
+                .collect();
+            models.extend(
+                doc.models
+                    .models
+                    .iter()
+                    .filter(|m| credits.contains(&m.provider.as_str()))
+                    .map(|m| m.model.clone()),
+            );
+        }
+        models
+    }
+
+    /// Writes what computers spent on credits, if anything changed.
+    pub fn save_usage(&mut self) -> anyhow::Result<()> {
+        let dir = self.dir.clone();
+        self.usage.save(&dir)
     }
 
     /// The remote help roles in force (ADR 0028): the newest policy's, the

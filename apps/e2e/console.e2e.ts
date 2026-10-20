@@ -6,7 +6,7 @@
 // fails when a budget is exceeded. Screenshots are 1440x900.
 
 import { createHmac } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { type Browser, type BrowserContext, type Page, expect, test } from "@playwright/test";
@@ -102,11 +102,10 @@ test("adr0039 credits Glasshouse adds reach the org's computers, and its admins 
   expect(grant.status).toBe(200);
   expect(await grant.text()).not.toContain("sk-or");
 
-  // The enrolled computer gets the org's key over its signed sync, at once,
-  // and the record says so without it.
-  await expect
-    .poll(() => audit().filter((r) => r.event.kind === "credits_key_applied").length, { timeout: 30_000 })
-    .toBeGreaterThan(0);
+  // The org's key stays on the console: the enrolled computer, which syncs
+  // at once, never holds it or records it.
+  await new Promise((r) => setTimeout(r, 1000));
+  expect(existsSync(join(DEV, "state/models/credits.toml"))).toBe(false);
   expect(JSON.stringify(audit())).not.toContain("sk-or-v1-memory");
 
   const { page, close } = await session(browser);

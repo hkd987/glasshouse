@@ -84,7 +84,7 @@ fn credits(doc: &mut PolicyDocument, on: bool) {
         if !models.providers.iter().any(|p| p.id == CREDITS_PROVIDER) {
             models.providers.push(ProviderEntry {
                 id: CREDITS_PROVIDER.into(),
-                kind: ProviderKind::OpenRouter,
+                kind: ProviderKind::Credits,
                 name: "Glasshouse model credits".into(),
                 region: None,
                 endpoint: None,
