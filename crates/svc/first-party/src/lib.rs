@@ -17,6 +17,9 @@ use glass_app_docs::DocsProvider;
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
+pub use glass_app_mail::{
+    MailHandle, Notice as MailNotice, Remote as MailRemote, server as mail_server,
+};
 pub use glass_app_meet::MeetHandle;
 use glass_app_meet::MeetProvider;
 use glass_app_people::PeopleProvider;
@@ -49,6 +52,9 @@ pub struct Setup {
     pub directory: DirectoryHandle,
     /// The org's mail service, from policy (NV-3).
     pub mail: Option<glass_policy::document::MailSettings>,
+    /// Mail on this computer (ADR 0037): the link to that service, each
+    /// person's sign-in, root only, and where their cache's sync left off.
+    pub mail_handle: MailHandle,
     /// Device settings: policy's and each person's choices (UX-1).
     pub settings: SettingsHandle,
     /// The org's chat on this computer: member keys and the sealed store
@@ -76,6 +82,7 @@ impl Setup {
             catalog: CatalogHandle::new(),
             directory: DirectoryHandle::new(),
             mail: None,
+            mail_handle: MailHandle::new("/nonexistent"),
             settings: SettingsHandle::new("/nonexistent"),
             chat: ChatHandle::new("/nonexistent"),
             meet: MeetHandle::new(),
@@ -91,7 +98,9 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
     let mut registry = Registry::new();
     registry.register(Arc::new(FilesProvider))?;
     registry.register(Arc::new(
-        MailProvider::new(setup.directory.clone()).settings(setup.mail),
+        MailProvider::new(setup.directory.clone())
+            .settings(setup.mail)
+            .mail(setup.mail_handle),
     ))?;
     // Meetings are conversations in chat's store (CF-21): Calendar and Meet
     // reach them through it, never through Chat (ADR 0013).
@@ -153,6 +162,8 @@ mod tests {
         for expected in [
             "files.read",
             "mail.send",
+            "mail.move",
+            "mail.connect",
             "calendar.hold",
             "calendar.invite",
             "system.network.check",

@@ -18,6 +18,8 @@
 //!   fleet view (AD-4).
 //! - [`store`]: the releases a device last applied, on its own disk, so it
 //!   keeps working on them offline (ADR 0021).
+//! - [`mail`]: the [`mail::MailLink`] the mail actions reach a person's
+//!   mailbox through, whatever the provider (ADR 0037, IN-2).
 //!
 //! It does no network I/O: the console serves HTTP and glassd fetches
 //! through `glass-gateway-providers`, the one crate that leaves the machine.
@@ -26,6 +28,7 @@ pub mod base64;
 pub mod catalog;
 pub mod chat;
 pub mod directory;
+pub mod mail;
 pub mod meet;
 pub mod shared;
 pub mod signing;

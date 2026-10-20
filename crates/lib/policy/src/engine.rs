@@ -125,6 +125,30 @@ impl Policy {
                 ));
             }
         }
+        // So is connecting mail (ADR 0037): a rule naming it could only
+        // mislead, since no agent ever does it. Patterns such as `mail.*`
+        // name it with the rest and stay valid.
+        for group in &doc.groups {
+            for pattern in group.tiers.keys().filter(|p| is_persons_own(p.as_str())) {
+                errors.push(format!(
+                    "group {:?} has a rule for {pattern}: {PERSONS_OWN_WHY}",
+                    group.name
+                ));
+            }
+        }
+        for agent in &doc.agents {
+            let named = agent
+                .allowed_actions
+                .iter()
+                .chain(agent.tiers.keys())
+                .filter(|p| is_persons_own(p.as_str()));
+            for pattern in named {
+                errors.push(format!(
+                    "agent {} names {pattern}: {PERSONS_OWN_WHY}",
+                    agent.id
+                ));
+            }
+        }
         let mut seen_agents = std::collections::BTreeSet::new();
         for agent in &doc.agents {
             if !seen_agents.insert(&agent.id) {
@@ -367,6 +391,19 @@ pub fn people_only(action: &ActionName) -> bool {
     in_people_only_app(action.as_str())
 }
 
+/// Actions only the person takes, in their own app, because they carry a
+/// secret only the person has (ADR 0037): an agent's call is Never,
+/// whatever its rules say.
+pub const PERSONS_OWN: &[&str] = &["mail.connect"];
+
+const PERSONS_OWN_WHY: &str = "only the person connects their mail, with their password, in \
+     Mail (ADR 0037); no agent ever does, and the Mail app's own [[app]] tiers say what the \
+     person does there";
+
+fn is_persons_own(name: &str) -> bool {
+    PERSONS_OWN.contains(&name)
+}
+
 /// Whether `pattern` names a people-only app's actions: `meet.*` or one of
 /// them. `*` names no app.
 fn names_people_only(pattern: &ActionPattern) -> bool {
@@ -398,6 +435,9 @@ pub enum RuleSource {
     },
     /// Only people do this, in their own apps; never an agent (CF-21).
     PeopleOnly,
+    /// The person's own, with a secret only they have (ADR 0037): never an
+    /// agent.
+    PersonsOwn,
 }
 
 impl fmt::Display for RuleSource {
@@ -410,6 +450,9 @@ impl fmt::Display for RuleSource {
             RuleSource::Agent { pattern } => write!(f, "agent rule {pattern}"),
             RuleSource::Restriction { pattern } => write!(f, "task restriction {pattern}"),
             RuleSource::PeopleOnly => f.write_str("meetings are for people, never agents"),
+            RuleSource::PersonsOwn => {
+                f.write_str("only the person does this, in their own app, never an agent")
+            }
         }
     }
 }
@@ -503,6 +546,13 @@ impl EffectivePolicy {
             return TierDecision {
                 tier: Tier::Never,
                 source: RuleSource::PeopleOnly,
+            };
+        }
+        // Nor connects the person's mail with their password (ADR 0037).
+        if !self.app && is_persons_own(action.as_str()) {
+            return TierDecision {
+                tier: Tier::Never,
+                source: RuleSource::PersonsOwn,
             };
         }
         if !self
@@ -854,6 +904,66 @@ mod tests {
         // `*` names no app, and "meeting.*" isn't meetings.
         with_default("[[agent]]\nid = \"anything\"\nallowed_actions = [\"*\", \"meeting.*\"]\n")
             .unwrap();
+    }
+
+    #[test]
+    fn em0_no_agent_connects_mail_whatever_its_rules_and_the_mail_app_does() {
+        // ADR 0037: the password is the person's. A group's "*" = auto and
+        // an agent's "mail.*" still leave mail.connect at Never.
+        let everything = "[[agent]]\nid = \"anything\"\nallowed_actions = [\"*\", \"mail.*\"]\n\
+                          [[group]]\nname = \"all\"\nmembers = [\"dana\"]\nagents = [\"anything\"]\n\
+                          [group.tiers]\n\"*\" = \"auto\"\n\"mail.*\" = \"auto\"\n";
+        let policy = with_default(everything).unwrap();
+        let agent = policy
+            .effective("dana", &"anything".parse().unwrap())
+            .unwrap();
+        let connect = agent.tier_for(&name("mail.connect"), Tier::Auto);
+        assert_eq!(connect.tier, Tier::Never);
+        assert_eq!(connect.source, RuleSource::PersonsOwn);
+        assert_eq!(
+            agent.tier_for(&name("mail.move"), Tier::Ask).tier,
+            Tier::Auto
+        );
+        // A rule naming it doesn't validate.
+        for extra in [
+            "[[group]]\nname = \"sales\"\nmembers = [\"dana\"]\n[group.tiers]\n\"mail.connect\" = \"auto\"\n",
+            "[[agent]]\nid = \"x\"\nallowed_actions = [\"mail.connect\"]\n",
+        ] {
+            let err = with_default(extra).unwrap_err().to_string();
+            assert!(
+                err.contains("mail.connect") && err.contains("no agent ever does"),
+                "{err}"
+            );
+        }
+        // In Mail the person connects without being asked; agents in the
+        // default policy never do.
+        let policy = Policy::from_toml(crate::DEFAULT_POLICY).unwrap();
+        let mail = policy.for_app(
+            "dana",
+            &"mail".parse().unwrap(),
+            &[name("mail.connect"), name("mail.move"), name("mail.send")],
+            Label::Internal,
+        );
+        assert_eq!(
+            mail.tier_for(&name("mail.connect"), Tier::Never).tier,
+            Tier::Auto
+        );
+        assert_eq!(
+            mail.tier_for(&name("mail.move"), Tier::Notify).tier,
+            Tier::Auto
+        );
+        assert_eq!(mail.tier_for(&name("mail.send"), Tier::Ask).tier, Tier::Ask);
+        let claude = policy
+            .effective("dana", &"claude-code".parse().unwrap())
+            .unwrap();
+        assert_eq!(
+            claude.tier_for(&name("mail.connect"), Tier::Never).tier,
+            Tier::Never
+        );
+        assert_eq!(
+            claude.tier_for(&name("mail.move"), Tier::Notify).tier,
+            Tier::Notify
+        );
     }
 
     #[test]

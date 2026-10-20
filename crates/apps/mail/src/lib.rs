@@ -1,44 +1,74 @@
-//! The `mail` app's actions, backed by the first-party mail store in the
-//! user's home (`~/Mail/Inbox`, `~/Mail/Drafts`, `~/Mail/Sent`).
+//! The `mail` app's actions (NV-3, IN-2, ADR 0037): one set of actions,
+//! whatever the person's mail service.
 //!
-//! Reading the mailboxes is quiet (`mail.list`, `mail.read`), and each
-//! message comes back with its "by [agent] for [user]" line when an agent
-//! wrote it, so the Mail app can show it inline (AU-10). Drafts are local
-//! and undoable. Sending leaves the machine and can't be
-//! recalled, which is why `mail.send` defaults to Ask. Sends are batched:
-//! "Send 6 reminders" is one call, one approval with a review list (DA-12).
-//! Until the mail service lands, "sent" messages are delivered to `~/Mail/Sent`
-//! and the inbox is whatever is filed in `~/Mail/Inbox`.
+//! With IT's `[mail] service = "imap"` and the person's password given once
+//! through `mail.connect`, mail comes from their service through a
+//! [`MailLink`](glass_managed::mail::MailLink) that glassd connects to the
+//! shared [`MailHandle`], and `~/Mail` is its cache: each folder synced
+//! into `~/Mail/<Folder>`, a file per message named after its UIDVALIDITY
+//! and UID. Without a service, `~/Mail` is the whole store, as before EM0:
+//! sent mail stays in Sent on this computer, and the Inbox is what is filed
+//! there (the local store, for development and tests).
+//!
+//! Reading is quiet (`mail.list`, `mail.read`), and each message comes back
+//! with its "by [agent] for [user]" line when an agent wrote it, so the Mail
+//! app can show it inline (AU-10). Agents read text: HTML is reduced to it,
+//! and only the Mail app is handed a message's HTML, which it shows in a
+//! frame with no scripts and no network. Drafts stay on this computer and
+//! undoable. Sending leaves the machine and can't be recalled, which is why
+//! `mail.send` defaults to Ask; sends are batched ("Send 6 reminders" is
+//! one call, one approval with a review list, DA-12). glassd builds each
+//! message (`From:` from the directory, a Message-ID of its own, the
+//! by-line header), submits it and files it in Sent; the audit record
+//! keeps its Message-ID, size, SHA-256 and the server's reply, never its
+//! text. Offline, a send says so and the message waits in Drafts.
+//! `mail.move` files mail in Inbox, Archive, Junk or Trash; undo moves it
+//! back. `mail.connect` is the person's own, in Mail: never an agent's.
 
-use std::path::{Path, PathBuf};
+mod cache;
+mod handle;
+mod message;
+
+use std::path::PathBuf;
 
 use glass_api::{AskLabels, ChangeKind};
+use glass_managed::mail::{Account, LinkError, Outgoing, Role, Secret};
 use glass_managed::{DirectoryHandle, Sender};
-use glass_platform::fs::{ConfinedDir, Owner};
-use glass_policy::document::MailSettings;
+use glass_policy::document::{MailSecurity, MailServer, MailService, MailSettings};
 use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use glass_actions::{
-    ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, TaskContext, attribute,
-    parse_input,
+    AUDIT_DETAIL, ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview,
+    TaskContext, attribute, parse_input,
 };
 
-const MAIL_DIR: &str = "Mail";
-const INBOX: &str = "Inbox";
-const DRAFTS: &str = "Drafts";
-const SENT: &str = "Sent";
-/// Most messages one `mail.send` may carry.
+use crate::cache::{Cache, MAIL_DIR};
+use crate::handle::SyncError;
+pub use crate::handle::{MailHandle, Notice, Remote};
+use crate::message::Draft;
+
+/// The Mail app: the one caller handed a message's HTML, and the only one
+/// that connects mail.
+const APP: &str = "mail";
+/// Most messages one `mail.send` or `mail.move` may carry.
 const MAX_BATCH: usize = 50;
-/// Largest message `mail.read` opens.
-const MAX_MESSAGE_BYTES: u64 = 1024 * 1024;
 /// Most messages one listing reads and returns; it returns
 /// [`DEFAULT_LIMIT`] unless asked for more.
 const MAX_LISTED: usize = 500;
 const DEFAULT_LIMIT: usize = 50;
-/// The header that carries "by [agent] for [user]" (AU-10).
-const ATTRIBUTION_HEADER: &str = "X-Glasshouse-Attribution";
+/// The longest password `mail.connect` takes.
+const MAX_SECRET: usize = 1024;
+
+/// A server from policy, as links reach it.
+pub fn server(server: &MailServer) -> glass_managed::mail::Server {
+    glass_managed::mail::Server {
+        host: server.host.clone(),
+        port: server.port,
+        implicit_tls: server.security == MailSecurity::Tls,
+    }
+}
 
 /// Mail, sent as the person the org's directory says they are, through
 /// the service IT set in policy.
@@ -46,6 +76,18 @@ const ATTRIBUTION_HEADER: &str = "X-Glasshouse-Attribution";
 pub struct MailProvider {
     directory: DirectoryHandle,
     settings: Option<MailSettings>,
+    mail: MailHandle,
+}
+
+/// Where a person's mail is, for one call.
+enum Mode {
+    /// `~/Mail` is the whole store: no service from IT, or one EM0 doesn't
+    /// reach yet.
+    Local,
+    /// Their service, signed in.
+    Remote(Box<(Remote, Account)>),
+    /// IT set a service, and this computer can't reach it for them: why.
+    NotConnected(String),
 }
 
 impl MailProvider {
@@ -55,6 +97,7 @@ impl MailProvider {
         Self {
             directory,
             settings: None,
+            mail: MailHandle::default(),
         }
     }
 
@@ -62,6 +105,13 @@ impl MailProvider {
     /// person's address when the directory has none.
     pub fn settings(mut self, settings: Option<MailSettings>) -> Self {
         self.settings = settings;
+        self
+    }
+
+    /// The link to that service and each person's sign-in and cache
+    /// state, which glassd keeps across policy changes (ADR 0037).
+    pub fn mail(mut self, mail: MailHandle) -> Self {
+        self.mail = mail;
         self
     }
 
@@ -88,9 +138,33 @@ impl MailProvider {
         }
     }
 
+    fn imap(&self) -> bool {
+        self.settings
+            .as_ref()
+            .is_some_and(|s| s.service == MailService::Imap)
+    }
+
+    fn mode(&self, login: &str) -> Mode {
+        if !self.imap() {
+            return Mode::Local;
+        }
+        match self.mail.account(login) {
+            Some(both) => Mode::Remote(Box::new(both)),
+            None if self.mail.remote().is_none() => {
+                Mode::NotConnected("this computer can't reach the org's mail service yet".into())
+            }
+            None => Mode::NotConnected(
+                "your mail isn't connected on this computer yet: connect it in Mail with your \
+                 mail password"
+                    .into(),
+            ),
+        }
+    }
+
     /// `mail.account`: who the person sends as, and through which service.
     fn account(&self, ctx: &TaskContext) -> ActionOutput {
-        let (sender, source) = self.sender(&ctx.principal.on_behalf_of.name);
+        let login = &ctx.principal.on_behalf_of.name;
+        let (sender, source) = self.sender(login);
         let Some(settings) = &self.settings else {
             return ActionOutput {
                 text: format!(
@@ -98,14 +172,17 @@ impl MailProvider {
                      stays in Sent here.",
                     sender.mailbox()
                 ),
+                // The same fields as with a service (IN-2), empty.
                 data: json!({
                     "name": sender.name, "address": sender.email, "source": source,
-                    "service": null, "connected": false,
+                    "service": null, "service_title": null, "tenant": null,
+                    "incoming": null, "outgoing": null,
+                    "connected": false, "connectable": false,
                 }),
                 changes: Vec::new(),
             };
         };
-        let server = |s: &Option<glass_policy::document::MailServer>| {
+        let server = |s: &Option<MailServer>| {
             s.as_ref()
                 .map(|s| json!({ "host": s.host, "port": s.port, "security": s.security }))
         };
@@ -113,10 +190,24 @@ impl MailProvider {
             Some(tenant) => format!("{} ({tenant})", settings.service.title()),
             None => settings.service.title().to_owned(),
         };
+        let connected = self.imap() && self.mail.connected(login);
+        let state = if connected {
+            format!(
+                "Connected as {}.",
+                self.mail.user(login).unwrap_or_default()
+            )
+        } else if self.imap() {
+            "Not connected on this computer yet: connect in Mail with your mail password. Until \
+             then, mail can't be sent or received."
+                .to_owned()
+        } else {
+            "Sending and receiving aren't connected to it yet: sent mail stays in Sent on this \
+             computer."
+                .to_owned()
+        };
         ActionOutput {
             text: format!(
-                "Mail goes as {} through {through}, set up by IT. Sending and receiving aren't \
-                 connected to it yet: sent mail stays in Sent on this computer.",
+                "Mail goes as {} through {through}, set up by IT. {state}",
                 sender.mailbox()
             ),
             data: json!({
@@ -128,7 +219,8 @@ impl MailProvider {
                 "tenant": settings.tenant,
                 "incoming": server(&settings.incoming),
                 "outgoing": server(&settings.outgoing),
-                "connected": false,
+                "connected": connected,
+                "connectable": self.imap(),
             }),
             changes: Vec::new(),
         }
@@ -167,54 +259,83 @@ struct ReadInput {
     id: String,
 }
 
-/// A mailbox in the store.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MoveInput {
+    ids: Vec<String>,
+    to: Folder,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectInput {
+    password: String,
+    #[serde(default)]
+    user: Option<String>,
+}
+
+/// A mailbox, as actions name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Folder {
     Inbox,
     Drafts,
     Sent,
+    Archive,
+    Junk,
+    Trash,
 }
 
 impl Folder {
-    const ALL: [Folder; 3] = [Folder::Inbox, Folder::Drafts, Folder::Sent];
+    const ALL: [Folder; 6] = [
+        Folder::Inbox,
+        Folder::Drafts,
+        Folder::Sent,
+        Folder::Archive,
+        Folder::Junk,
+        Folder::Trash,
+    ];
+
+    fn role(self) -> Role {
+        match self {
+            Folder::Inbox => Role::Inbox,
+            Folder::Drafts => Role::Drafts,
+            Folder::Sent => Role::Sent,
+            Folder::Archive => Role::Archive,
+            Folder::Junk => Role::Junk,
+            Folder::Trash => Role::Trash,
+        }
+    }
+
+    fn of(role: Role) -> Folder {
+        match role {
+            Role::Inbox => Folder::Inbox,
+            Role::Drafts => Folder::Drafts,
+            Role::Sent => Folder::Sent,
+            Role::Archive => Folder::Archive,
+            Role::Junk => Folder::Junk,
+            Role::Trash => Folder::Trash,
+        }
+    }
 
     fn dir(self) -> &'static str {
-        match self {
-            Folder::Inbox => INBOX,
-            Folder::Drafts => DRAFTS,
-            Folder::Sent => SENT,
-        }
+        cache::dir(self.role())
     }
 
     fn key(self) -> &'static str {
-        match self {
-            Folder::Inbox => "inbox",
-            Folder::Drafts => "drafts",
-            Folder::Sent => "sent",
-        }
+        cache::key(self.role())
+    }
+
+    /// Where `mail.move` may file mail (ADR 0037 §6).
+    fn takes_moves(self) -> bool {
+        matches!(
+            self,
+            Folder::Inbox | Folder::Archive | Folder::Junk | Folder::Trash
+        )
     }
 }
 
-/// "by invoice-demo for demo", split into who wrote it and for whom.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-struct Attribution {
-    text: String,
-    by: String,
-    #[serde(rename = "for")]
-    for_user: String,
-}
-
-impl Attribution {
-    fn parse(text: &str) -> Option<Self> {
-        let (by, for_user) = text.strip_prefix("by ")?.rsplit_once(" for ")?;
-        Some(Self {
-            text: text.to_owned(),
-            by: by.to_owned(),
-            for_user: for_user.to_owned(),
-        })
-    }
-}
+use message::Attribution;
 
 /// A message as listings and reads return it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -232,37 +353,6 @@ struct Summary {
     attribution: Option<Attribution>,
 }
 
-/// Splits a stored message into its headers and body. Folded header lines
-/// join the header before them.
-fn parse_message(text: &str) -> (Vec<(String, String)>, String) {
-    let mut headers: Vec<(String, String)> = Vec::new();
-    let mut lines = text.split_inclusive('\n');
-    for raw in lines.by_ref() {
-        let line = raw.trim_end_matches(['\r', '\n']);
-        if line.is_empty() {
-            break;
-        }
-        if line.starts_with([' ', '\t']) {
-            if let Some((_, value)) = headers.last_mut() {
-                value.push(' ');
-                value.push_str(line.trim());
-            }
-            continue;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            headers.push((name.trim().to_owned(), value.trim().to_owned()));
-        }
-    }
-    (headers, lines.collect())
-}
-
-fn header<'a>(headers: &'a [(String, String)], name: &str) -> &'a str {
-    headers
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
-        .map_or("", |(_, v)| v.as_str())
-}
-
 fn message_schema() -> Value {
     json!({
         "type": "object",
@@ -276,9 +366,50 @@ fn message_schema() -> Value {
     })
 }
 
+fn folder_names(filter: impl Fn(Folder) -> bool) -> Vec<&'static str> {
+    Folder::ALL
+        .into_iter()
+        .filter(|f| filter(*f))
+        .map(Folder::key)
+        .collect()
+}
+
+fn plural(n: usize, one: &str) -> String {
+    if n == 1 {
+        format!("{n} {one}")
+    } else {
+        format!("{n} {one}s")
+    }
+}
+
+/// Why a folder couldn't be brought up to date, said for whoever reads the
+/// listing.
+fn stale_note(error: &SyncError) -> String {
+    match error {
+        SyncError::NotConnected => {
+            "mail isn't connected on this computer, so this is what it kept".into()
+        }
+        SyncError::Link(e @ LinkError::Unreachable(_)) => {
+            format!("offline: {e}, so this is what this computer kept")
+        }
+        SyncError::Link(LinkError::SignIn(_)) => {
+            "the mail server no longer accepts your password: connect again in Mail. This is \
+             what this computer kept"
+                .into()
+        }
+        SyncError::Link(LinkError::Refused(e)) | SyncError::Local(e) => {
+            format!("couldn't bring it up to date ({e}), so this is what this computer kept")
+        }
+    }
+}
+
 impl MailProvider {
     fn mail_dir(ctx: &TaskContext) -> PathBuf {
         ctx.home.join(MAIL_DIR)
+    }
+
+    fn cache(ctx: &TaskContext) -> Result<Cache, ActionError> {
+        Cache::open(&ctx.home, ctx.owner).map_err(|e| ActionError::io("mail store", e))
     }
 
     fn validate(message: &Message) -> Result<(), ActionError> {
@@ -307,59 +438,24 @@ impl MailProvider {
         Ok(())
     }
 
-    fn render(&self, ctx: &TaskContext, message: &Message, sent: bool) -> String {
-        let mut text = format!(
-            "From: {from}\nTo: {to}\nSubject: {subject}\nDate: {date}\nX-Glasshouse-Attribution: {attr}\nX-Glasshouse-Task: {task}\n",
-            from = self.sender(&ctx.principal.on_behalf_of.name).0.mailbox(),
-            to = message.to.join(", "),
-            subject = message.subject,
-            date = Timestamp::now(),
-            attr = ctx.principal.attribution(),
-            task = ctx.principal.task,
-        );
-        if sent {
-            text.push_str("X-Glasshouse-Sent: yes\n");
-        }
-        text.push('\n');
-        text.push_str(&message.body);
-        if !message.body.ends_with('\n') {
-            text.push('\n');
-        }
-        text
+    /// `message` as glassd builds it, from the person and the agent.
+    fn build(&self, ctx: &TaskContext, message: &Message, message_id: &str) -> Vec<u8> {
+        let (from, _) = self.sender(&ctx.principal.on_behalf_of.name);
+        message::build(&Draft {
+            from: &from,
+            to: &message.to,
+            subject: &message.subject,
+            body: &message.body,
+            attribution: &ctx.principal.attribution(),
+            task: &ctx.principal.task.to_string(),
+            message_id,
+            date: Timestamp::now().unix_seconds(),
+        })
     }
 
-    /// Saves a message under a name nobody else has taken: two tasks
-    /// mailing the same subject in the same second get two files.
-    fn save_new(
-        mail: &ConfinedDir,
-        folder: &str,
-        message: &Message,
-        index: usize,
-        text: &str,
-        owner: Owner,
-    ) -> std::io::Result<PathBuf> {
-        let name = Self::file_name(message, index);
-        let stem = name.trim_end_matches(".eml");
-        for attempt in 1..=100 {
-            let file = if attempt == 1 {
-                name.clone()
-            } else {
-                format!("{stem}-{attempt}.eml")
-            };
-            let rel = PathBuf::from(folder).join(file);
-            match mail.write_new(&rel, text.as_bytes(), Some(owner)) {
-                Ok(()) => return Ok(rel),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "no free file name",
-        ))
-    }
-
-    fn file_name(message: &Message, index: usize) -> String {
+    /// The start of a local file's name: when, which, and a few words of
+    /// the subject.
+    fn stem(message: &Message, index: usize) -> String {
         let slug: String = message
             .subject
             .chars()
@@ -378,7 +474,7 @@ impl MailProvider {
             .join("-");
         let stamp = Timestamp::now().unix_seconds();
         format!(
-            "{stamp}-{index}-{}.eml",
+            "{stamp}-{index}-{}",
             if slug.is_empty() {
                 "message".into()
             } else {
@@ -396,66 +492,391 @@ impl MailProvider {
     fn message_ref(id: &str) -> Result<(Folder, &str), ActionError> {
         let bad = || ActionError::InvalidInput(format!("{id:?} is not a message id"));
         let (folder, name) = id.split_once('/').ok_or_else(bad)?;
-        let folder = Folder::ALL
-            .into_iter()
-            .find(|f| f.key() == folder)
-            .ok_or_else(bad)?;
-        let plain = name.len() <= 200
-            && name.ends_with(".eml")
-            && !name.starts_with('.')
-            && name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-        if plain {
+        let folder = cache::role_of_key(folder).map(Folder::of).ok_or_else(bad)?;
+        if cache::plain_name(name) {
             Ok((folder, name))
         } else {
             Err(bad())
         }
     }
 
-    fn summary(folder: Folder, name: &str, text: &str) -> (Summary, String) {
-        let (headers, body) = parse_message(text);
-        let snippet: String = body
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .take(140)
-            .collect();
-        let summary = Summary {
+    fn summary(folder: Folder, name: &str, parsed: &message::Parsed) -> Summary {
+        Summary {
             id: format!("{}/{name}", folder.key()),
             folder,
-            from: header(&headers, "From").to_owned(),
-            to: header(&headers, "To")
-                .split(',')
-                .map(str::trim)
-                .filter(|a| !a.is_empty())
-                .map(str::to_owned)
-                .collect(),
-            subject: header(&headers, "Subject").to_owned(),
-            date: header(&headers, "Date").to_owned(),
-            snippet,
-            attribution: Attribution::parse(header(&headers, ATTRIBUTION_HEADER)),
-        };
-        (summary, body)
+            from: parsed.from.clone(),
+            to: parsed.to.clone(),
+            subject: parsed.subject.clone(),
+            date: parsed.date.clone(),
+            snippet: parsed.snippet.clone(),
+            attribution: parsed.attribution.clone(),
+        }
     }
 
-    fn read_text(mail: &ConfinedDir, rel: &Path) -> Result<String, ActionError> {
-        let raw = mail
-            .read(rel, MAX_MESSAGE_BYTES)
-            .map_err(|e| ActionError::io(format!("message {}", rel.display()), e))?;
-        Ok(String::from_utf8_lossy(&raw).into_owned())
+    /// Brings `folder` up to date when the person's service holds it and it
+    /// isn't fresh; a note for the listing when it couldn't be.
+    fn refresh(&self, ctx: &TaskContext, folder: Folder) -> Option<String> {
+        let login = &ctx.principal.on_behalf_of.name;
+        self.mail.remember(login, &ctx.home, ctx.owner);
+        if folder == Folder::Drafts {
+            return None;
+        }
+        match self.mode(login) {
+            Mode::Local => None,
+            Mode::NotConnected(why) => Some(format!("{why}; this is what this computer kept")),
+            Mode::Remote(_) if self.mail.is_fresh(login, folder.role()) => None,
+            Mode::Remote(_) => self
+                .mail
+                .sync(login, &ctx.home, ctx.owner, folder.role())
+                .err()
+                .map(|e| stale_note(&e)),
+        }
+    }
+
+    fn list(
+        &self,
+        ctx: &TaskContext,
+        folder: Folder,
+        limit: usize,
+    ) -> Result<ActionOutput, ActionError> {
+        let note = self.refresh(ctx, folder);
+        let cache = Self::cache(ctx)?;
+        let names = cache
+            .names(folder.role())
+            .map_err(|e| ActionError::io("mail store", e))?;
+        // Stored names start with when they were saved or their UID, so
+        // the last names are the newest; the Date header orders them.
+        let mut messages: Vec<(i64, Summary)> = names
+            .iter()
+            .rev()
+            .take(MAX_LISTED)
+            .filter_map(|name| {
+                let raw = cache.read_start(folder.role(), name).ok()?;
+                let parsed = message::parse(&raw);
+                Some((parsed.when, Self::summary(folder, name, &parsed)))
+            })
+            .collect();
+        messages.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.id.cmp(&a.1.id)));
+        messages.truncate(limit);
+        let messages: Vec<Summary> = messages.into_iter().map(|(_, s)| s).collect();
+        let n = messages.len();
+        let mut text = format!("{} in {}", plural(n, "message"), folder.dir());
+        if let Some(note) = note {
+            text.push_str(&format!(" ({note})"));
+        }
+        Ok(ActionOutput {
+            text,
+            data: json!({ "folder": folder, "messages": messages }),
+            changes: Vec::new(),
+        })
+    }
+
+    fn read(&self, ctx: &TaskContext, id: &str) -> Result<ActionOutput, ActionError> {
+        let (folder, name) = Self::message_ref(id)?;
+        let cache = Self::cache(ctx)?;
+        let raw = cache
+            .read(folder.role(), name)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => ActionError::NotFound(format!(
+                    "message {id}: it isn't in {} on this computer (moved, or not synced yet; list \
+                 the folder again)",
+                    folder.dir()
+                )),
+                _ => ActionError::io(format!("message {id}"), e),
+            })?;
+        let parsed = message::parse(&raw);
+        let summary = Self::summary(folder, name, &parsed);
+        let mut data = json!({ "message": summary });
+        data["message"]["body"] = Value::String(parsed.body.clone());
+        // Only the Mail app is handed HTML, which it frames with no scripts
+        // and no network; agents read the text (ADR 0037).
+        data["message"]["html"] = match (&parsed.html, ctx.principal.agent.as_str() == APP) {
+            (Some(html), true) => Value::String(html.clone()),
+            _ => Value::Null,
+        };
+        Ok(ActionOutput {
+            text: format!("From {}: {}", summary.from, summary.subject),
+            data,
+            changes: Vec::new(),
+        })
+    }
+
+    fn draft(&self, ctx: &TaskContext, message: &Message) -> Result<ActionOutput, ActionError> {
+        let cache = Self::cache(ctx)?;
+        let (from, _) = self.sender(&ctx.principal.on_behalf_of.name);
+        let raw = self.build(ctx, message, &message::new_message_id(&from));
+        let rel = cache
+            .save_new(Role::Drafts, &Self::stem(message, 0), &raw)
+            .map_err(|e| ActionError::io("saving draft", e))?;
+        let path = cache.host_path(&rel);
+        attribute(ctx, &path);
+        let file = rel.file_name().map(|n| n.to_string_lossy().into_owned());
+        Ok(ActionOutput {
+            text: format!("Saved draft \"{}\"", message.subject),
+            data: json!({
+                "draft": rel.strip_prefix(MAIL_DIR).unwrap_or(&rel).display().to_string(),
+                "id": file.map(|f| format!("drafts/{f}")),
+            }),
+            changes: vec![Change {
+                kind: ChangeKind::Created,
+                target: format!("Drafts: {}", message.subject),
+                reversible: true,
+                paths: vec![path],
+            }],
+        })
+    }
+
+    /// Keeps messages that weren't sent in Drafts; their ids.
+    fn keep_unsent(&self, ctx: &TaskContext, cache: &Cache, messages: &[Message]) -> Vec<String> {
+        let (from, _) = self.sender(&ctx.principal.on_behalf_of.name);
+        messages
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| {
+                let raw = self.build(ctx, m, &message::new_message_id(&from));
+                let rel = cache.save_new(Role::Drafts, &Self::stem(m, i), &raw).ok()?;
+                attribute(ctx, &cache.host_path(&rel));
+                let name = rel.file_name()?.to_string_lossy().into_owned();
+                Some(format!("drafts/{name}"))
+            })
+            .collect()
+    }
+
+    fn send(&self, ctx: &TaskContext, messages: &[Message]) -> Result<ActionOutput, ActionError> {
+        let login = &ctx.principal.on_behalf_of.name;
+        self.mail.remember(login, &ctx.home, ctx.owner);
+        let cache = Self::cache(ctx)?;
+        let (from, _) = self.sender(login);
+        let remote = match self.mode(login) {
+            Mode::Local => None,
+            Mode::Remote(both) => Some(*both),
+            Mode::NotConnected(why) => {
+                let kept = self.keep_unsent(ctx, &cache, messages);
+                return Err(ActionError::Failed(format!(
+                    "Not sent: {why}. {} kept in Drafts ({}); send {} once mail is connected.",
+                    if messages.len() == 1 {
+                        "It's".to_owned()
+                    } else {
+                        format!("All {} are", messages.len())
+                    },
+                    kept.join(", "),
+                    if messages.len() == 1 { "it" } else { "them" },
+                )));
+            }
+        };
+        if remote.is_some() && from.email.is_none() {
+            return Err(ActionError::Failed(
+                "Not sent: you have no mail address in the org's directory or IT's mail \
+                 settings, so there's no one to send it as."
+                    .into(),
+            ));
+        }
+        let mut changes = Vec::new();
+        let mut audit = Vec::new();
+        for (index, message) in messages.iter().enumerate() {
+            let message_id = message::new_message_id(&from);
+            let raw = self.build(ctx, message, &message_id);
+            let (reply, path, filed) = match &remote {
+                // No service: it stays in Sent here, as before EM0.
+                None => {
+                    let rel = cache
+                        .save_new(Role::Sent, &Self::stem(message, index), &raw)
+                        .map_err(|e| ActionError::io("sending", e))?;
+                    (None, Some(cache.host_path(&rel)), true)
+                }
+                Some((remote, account)) => {
+                    let envelope_from = from.email.as_deref().unwrap_or_default();
+                    match remote.link.submit(
+                        account,
+                        &Outgoing {
+                            from: envelope_from,
+                            to: &message.to,
+                            message: &raw,
+                        },
+                    ) {
+                        Ok(submitted) => {
+                            let (path, filed) = self.file_sent(ctx, &cache, remote, account, &raw);
+                            (Some(submitted.reply), path, filed)
+                        }
+                        Err(e) => {
+                            let kept = self.keep_unsent(ctx, &cache, &messages[index..]);
+                            let why = match &e {
+                                LinkError::Unreachable(m) => {
+                                    format!(
+                                        "you're offline or the mail server is out of reach ({m})"
+                                    )
+                                }
+                                LinkError::SignIn(_) => "the mail server no longer accepts your \
+                                                         password: connect again in Mail"
+                                    .to_owned(),
+                                LinkError::Refused(m) => format!("the mail server refused it: {m}"),
+                            };
+                            let waiting = format!(
+                                "{} waiting in Drafts ({})",
+                                plural(kept.len(), "message"),
+                                kept.join(", ")
+                            );
+                            if index == 0 {
+                                return Err(ActionError::Failed(format!(
+                                    "Not sent: {why}. Nothing left this computer; {waiting}."
+                                )));
+                            }
+                            return Ok(ActionOutput {
+                                text: format!(
+                                    "Sent {} of {}, then stopped: {why}. {waiting}.",
+                                    index,
+                                    messages.len()
+                                ),
+                                data: json!({ "sent": index, AUDIT_DETAIL: audit }),
+                                changes,
+                            });
+                        }
+                    }
+                }
+            };
+            if let Some(path) = &path {
+                attribute(ctx, path);
+            }
+            audit.push(json!({
+                "message_id": format!("<{message_id}>"),
+                "recipients": message.to.len(),
+                "size": raw.len(),
+                "sha256": glass_managed::sha256_hex(&raw),
+                "reply": reply,
+                "filed_in_sent": filed,
+            }));
+            changes.push(Change {
+                kind: ChangeKind::Sent,
+                target: Self::describe(message),
+                reversible: false,
+                paths: path.into_iter().collect(),
+            });
+        }
+        let unfiled = audit.iter().filter(|a| a["filed_in_sent"] == false).count();
+        let mut text = format!("Sent {}", plural(messages.len(), "email"));
+        if unfiled > 0 {
+            text.push_str(&format!(
+                "; {} couldn't be filed in Sent on the mail server",
+                plural(unfiled, "copy")
+            ));
+        }
+        Ok(ActionOutput {
+            text,
+            data: json!({ "sent": messages.len(), AUDIT_DETAIL: audit }),
+            changes,
+        })
+    }
+
+    /// Files a sent message in the service's Sent folder and the cache,
+    /// byte for byte what left. Where it is here, and whether the server
+    /// took it.
+    fn file_sent(
+        &self,
+        ctx: &TaskContext,
+        cache: &Cache,
+        remote: &Remote,
+        account: &Account,
+        raw: &[u8],
+    ) -> (Option<PathBuf>, bool) {
+        let login = &ctx.principal.on_behalf_of.name;
+        let Ok((name, mut state)) = self.mail.folder(login, remote, account, Role::Sent) else {
+            return (None, false);
+        };
+        // Sent's UIDVALIDITY names the copy here: sync it once if this
+        // computer hasn't.
+        if state.is_none()
+            && self
+                .mail
+                .sync(login, &ctx.home, ctx.owner, Role::Sent)
+                .is_ok()
+        {
+            state = self
+                .mail
+                .folder(login, remote, account, Role::Sent)
+                .ok()
+                .and_then(|(_, s)| s);
+        }
+        match remote.link.append(account, &name, raw) {
+            Ok(Some(uid)) => {
+                let path = state.and_then(|s| {
+                    let rel = cache
+                        .keep(Role::Sent, &cache::synced_name(s.uid_validity, uid), raw)
+                        .ok()?;
+                    Some(cache.host_path(&rel))
+                });
+                (path, true)
+            }
+            Ok(None) => (None, true),
+            Err(_) => (None, false),
+        }
+    }
+
+    fn connect(
+        &self,
+        ctx: &TaskContext,
+        input: &ConnectInput,
+    ) -> Result<ActionOutput, ActionError> {
+        let login = &ctx.principal.on_behalf_of.name;
+        let (sender, _) = self.sender(login);
+        let user = input.user.clone().or(sender.email.clone()).ok_or_else(|| {
+            ActionError::Failed(
+                "There's no mail address for you in the directory: give the name you sign in \
+                     to mail with."
+                    .into(),
+            )
+        })?;
+        if !self.imap() {
+            return Err(ActionError::Failed(
+                "IT hasn't set up a mail service this computer connects to, so there's nothing \
+                 to connect."
+                    .into(),
+            ));
+        }
+        let secret = Secret::new(input.password.clone());
+        let Some((remote, account)) = self.mail.trial(login, &user, secret.clone()) else {
+            return Err(ActionError::Failed(
+                "This computer can't reach the org's mail service yet; nothing was saved.".into(),
+            ));
+        };
+        remote.link.check(&account).map_err(|e| {
+            ActionError::Failed(match e {
+                LinkError::SignIn(_) => format!(
+                    "The mail server didn't accept that password for {user}. Nothing was saved."
+                ),
+                LinkError::Unreachable(m) => {
+                    format!("The mail server can't be reached ({m}). Nothing was saved; try again when online.")
+                }
+                LinkError::Refused(m) => format!("The mail server refused: {m}. Nothing was saved."),
+            })
+        })?;
+        self.mail
+            .save_sign_in(login, &user, &secret)
+            .map_err(|e| ActionError::Failed(format!("Couldn't keep the sign-in: {e}")))?;
+        self.mail.remember(login, &ctx.home, ctx.owner);
+        // The Inbox right away, so Mail opens on it; a failure here is the
+        // listing's to say.
+        let _ = self.mail.sync(login, &ctx.home, ctx.owner, Role::Inbox);
+        Ok(ActionOutput {
+            text: format!(
+                "Connected: mail comes and goes as {} through {}.",
+                user, remote.incoming.host
+            ),
+            data: json!({ "connected": true, "user": user }),
+            changes: Vec::new(),
+        })
     }
 }
 
 impl ActionProvider for MailProvider {
     fn actions(&self) -> Vec<ActionDef> {
+        let listed = folder_names(|_| true);
         vec![
             ActionDef {
                 name: "mail.account".parse().expect("static name"),
                 title: "See the mail account".into(),
                 description: "Who the user sends mail as (their name and address from the \
-                              org's directory) and the mail service IT set up for this computer."
+                              org's directory), the mail service IT set up for this computer, and \
+                              whether it's connected."
                     .into(),
                 input_schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
                 side_effect: SideEffect::None,
@@ -466,14 +887,15 @@ impl ActionProvider for MailProvider {
                 name: "mail.list".parse().expect("static name"),
                 title: "Read the mailboxes".into(),
                 description: format!(
-                    "List the messages in one mailbox (inbox, drafts or sent), newest first: \
-                     sender, recipients, subject, date, the start of the body, and who wrote it \
-                     when an agent did. Up to {MAX_LISTED}; {DEFAULT_LIMIT} unless limit says."
+                    "List the messages in one mailbox ({}), newest first: sender, recipients, \
+                     subject, date, the start of the body, and who wrote it when an agent did. Up \
+                     to {MAX_LISTED}; {DEFAULT_LIMIT} unless limit says.",
+                    listed.join(", ")
                 ),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "folder": { "type": "string", "enum": ["inbox", "drafts", "sent"] },
+                        "folder": { "type": "string", "enum": listed },
                         "limit": { "type": "integer", "minimum": 1, "maximum": MAX_LISTED }
                     },
                     "required": ["folder"],
@@ -486,7 +908,7 @@ impl ActionProvider for MailProvider {
             ActionDef {
                 name: "mail.read".parse().expect("static name"),
                 title: "Read emails".into(),
-                description: "Read one message, by the id mail.list gave it.".into(),
+                description: "Read one message, by the id mail.list gave it, as text.".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": { "id": { "type": "string" } },
@@ -526,22 +948,56 @@ impl ActionProvider for MailProvider {
                 default_tier: Tier::Ask,
                 ask: AskLabels::new("Review drafts", "Approve and send"),
             },
+            ActionDef {
+                name: "mail.move".parse().expect("static name"),
+                title: "File emails".into(),
+                description: format!(
+                    "Move messages, by the ids mail.list gave them, to inbox, archive, junk or \
+                     trash (up to {MAX_BATCH}). Moving out of junk rescues a message. Undo moves \
+                     them back."
+                ),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "ids": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": MAX_BATCH },
+                        "to": { "type": "string", "enum": folder_names(Folder::takes_moves) }
+                    },
+                    "required": ["ids", "to"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Notify,
+                ask: AskLabels::new("Review", "Approve and move"),
+            },
+            ActionDef {
+                name: "mail.connect".parse().expect("static name"),
+                title: "Connect mail".into(),
+                description: "The person connects their mail on this computer with their mail \
+                              password, in Mail. Only people do this, never an agent."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "password": { "type": "string", "minLength": 1, "maxLength": MAX_SECRET },
+                        "user": { "type": "string" }
+                    },
+                    "required": ["password"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::Irreversible,
+                default_tier: Tier::Never,
+                ask: AskLabels::new("Review", "Approve and connect"),
+            },
         ]
     }
 
     fn prepare(&self, ctx: &TaskContext) -> Result<(), ActionError> {
-        let home = ConfinedDir::open(&ctx.home).map_err(|e| ActionError::io("home folder", e))?;
-        for folder in [INBOX, DRAFTS, SENT] {
-            let rel = PathBuf::from(MAIL_DIR).join(folder);
-            // The person's own, made and handed over through the confined
-            // handle: a chown on the joined path would follow a symlink
-            // they put there (PA-3).
-            if !home.exists(&rel) {
-                home.create_dir_all_as(&rel, ctx.owner)
-                    .map_err(|e| ActionError::io("mail folders", e))?;
-            }
-        }
-        Ok(())
+        // The person's own, made and handed over through the confined
+        // handle: a chown on the joined path would follow a symlink they
+        // put there (PA-3).
+        Self::cache(ctx)?
+            .prepare()
+            .map_err(|e| ActionError::io("mail folders", e))
     }
 
     fn preview(
@@ -570,11 +1026,8 @@ impl ActionProvider for MailProvider {
                 Ok(Preview {
                     summary: format!("Read mail: {}", folder.dir()),
                     targets: vec![folder.dir().to_owned()],
-                    items: Vec::new(),
                     reads: vec![mail.join(folder.dir())],
-                    writes: Vec::new(),
-                    snapshot_roots: Vec::new(),
-                    label: None,
+                    ..Preview::default()
                 })
             }
             "mail.read" => {
@@ -583,11 +1036,8 @@ impl ActionProvider for MailProvider {
                 Ok(Preview {
                     summary: format!("Read email {id}"),
                     targets: vec![id.clone()],
-                    items: Vec::new(),
                     reads: vec![mail.join(folder.dir()).join(name)],
-                    writes: Vec::new(),
-                    snapshot_roots: Vec::new(),
-                    label: None,
+                    ..Preview::default()
                 })
             }
             "mail.draft" => {
@@ -598,10 +1048,9 @@ impl ActionProvider for MailProvider {
                     summary: format!("Draft email {}", line.replacen("To ", "to ", 1)),
                     targets: message.to.clone(),
                     items: vec![line],
-                    reads: Vec::new(),
-                    writes: vec![mail.join(DRAFTS)],
-                    snapshot_roots: vec![mail.join(DRAFTS)],
-                    label: None,
+                    writes: vec![mail.join(cache::dir(Role::Drafts))],
+                    snapshot_roots: vec![mail.join(cache::dir(Role::Drafts))],
+                    ..Preview::default()
                 })
             }
             "mail.send" => {
@@ -621,10 +1070,85 @@ impl ActionProvider for MailProvider {
                     },
                     targets: messages.iter().flat_map(|m| m.to.clone()).collect(),
                     items: messages.iter().map(Self::describe).collect(),
-                    reads: Vec::new(),
-                    writes: vec![mail.join(SENT)],
-                    snapshot_roots: Vec::new(),
+                    // Sent here; or Drafts, when it can't leave.
+                    writes: vec![
+                        mail.join(cache::dir(Role::Sent)),
+                        mail.join(cache::dir(Role::Drafts)),
+                    ],
+                    ..Preview::default()
+                })
+            }
+            "mail.move" => {
+                let MoveInput { ids, to } = parse_input(input)?;
+                let moves = self.moves(ctx, &ids, to)?;
+                let cache = Self::cache(ctx)?;
+                let items: Vec<String> = moves
+                    .iter()
+                    .map(|(folder, name)| {
+                        let parsed = cache
+                            .read_start(folder.role(), name)
+                            .map(|raw| message::parse(&raw))
+                            .ok();
+                        match parsed {
+                            Some(p) => format!(
+                                "{}: from {}: {}",
+                                folder.dir(),
+                                p.from,
+                                if p.subject.is_empty() {
+                                    "(no subject)"
+                                } else {
+                                    &p.subject
+                                }
+                            ),
+                            None => format!("{}: {name}", folder.dir()),
+                        }
+                    })
+                    .collect();
+                let mut dirs: Vec<PathBuf> = moves
+                    .iter()
+                    .map(|(f, _)| mail.join(f.dir()))
+                    .chain([mail.join(to.dir())])
+                    .collect();
+                dirs.sort();
+                dirs.dedup();
+                Ok(Preview {
+                    summary: match moves.as_slice() {
+                        [_] => format!(
+                            "Move an email to {}: {}",
+                            to.dir(),
+                            items[0].split_once(": ").map_or("", |(_, rest)| rest)
+                        ),
+                        _ => format!("Move {} emails to {}", moves.len(), to.dir()),
+                    },
+                    targets: ids.clone(),
+                    items,
+                    reads: moves
+                        .iter()
+                        .map(|(f, n)| mail.join(f.dir()).join(n))
+                        .collect(),
+                    writes: dirs.clone(),
+                    snapshot_roots: dirs,
                     label: None,
+                })
+            }
+            "mail.connect" => {
+                let input: ConnectInput = parse_input(input)?;
+                if input.password.is_empty() || input.password.len() > MAX_SECRET {
+                    return Err(ActionError::InvalidInput(format!(
+                        "a password is 1 to {MAX_SECRET} characters"
+                    )));
+                }
+                let (sender, _) = self.sender(&ctx.principal.on_behalf_of.name);
+                let user = input
+                    .user
+                    .clone()
+                    .or(sender.email)
+                    .unwrap_or_else(|| ctx.principal.on_behalf_of.name.clone());
+                // Never the password: the summary and targets are audited.
+                Ok(Preview {
+                    summary: format!("Connect mail as {user}"),
+                    targets: vec![user],
+                    ..Preview::default()
                 })
             }
             _ => Err(ActionError::InvalidInput(format!(
@@ -639,300 +1163,63 @@ impl ActionProvider for MailProvider {
         action: &ActionName,
         input: &Value,
     ) -> Result<ActionOutput, ActionError> {
-        if action.as_str() == "mail.account" {
-            let _: NoInput = parse_input(input)?;
-            return Ok(self.account(ctx));
-        }
-        let mail = ConfinedDir::open(&Self::mail_dir(ctx))
-            .map_err(|e| ActionError::io("mail store", e))?;
         match action.as_str() {
+            "mail.account" => {
+                let _: NoInput = parse_input(input)?;
+                Ok(self.account(ctx))
+            }
             "mail.list" => {
                 let ListInput { folder, limit } = parse_input(input)?;
                 let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LISTED);
-                let entries = match mail.list(Path::new(folder.dir())) {
-                    Ok(entries) => entries,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-                    Err(e) => return Err(ActionError::io("mail store", e)),
-                };
-                // Stored names start with the time they were saved, so the
-                // last names are the newest; the Date header orders them.
-                let mut messages: Vec<Summary> = entries
-                    .iter()
-                    .rev()
-                    .filter(|e| !e.is_dir)
-                    .filter(|e| Self::message_ref(&format!("{}/{}", folder.key(), e.name)).is_ok())
-                    .take(MAX_LISTED)
-                    .filter_map(|e| {
-                        let text =
-                            Self::read_text(&mail, &Path::new(folder.dir()).join(&e.name)).ok()?;
-                        Some(Self::summary(folder, &e.name, &text).0)
-                    })
-                    .collect();
-                messages.sort_by(|a, b| b.date.cmp(&a.date).then(b.id.cmp(&a.id)));
-                messages.truncate(limit);
-                let n = messages.len();
-                Ok(ActionOutput {
-                    text: format!(
-                        "{n} message{} in {}",
-                        if n == 1 { "" } else { "s" },
-                        folder.dir()
-                    ),
-                    data: json!({ "folder": folder, "messages": messages }),
-                    changes: Vec::new(),
-                })
+                self.list(ctx, folder, limit)
             }
             "mail.read" => {
                 let ReadInput { id } = parse_input(input)?;
-                let (folder, name) = Self::message_ref(&id)?;
-                let text = Self::read_text(&mail, &Path::new(folder.dir()).join(name))?;
-                let (summary, body) = Self::summary(folder, name, &text);
-                let mut data = json!({ "message": summary });
-                data["message"]["body"] = Value::String(body);
-                Ok(ActionOutput {
-                    text: format!("From {}: {}", summary.from, summary.subject),
-                    data,
-                    changes: Vec::new(),
-                })
+                self.read(ctx, &id)
             }
             "mail.draft" => {
                 let message: Message = parse_input(input)?;
                 Self::validate(&message)?;
-                let rel = Self::save_new(
-                    &mail,
-                    DRAFTS,
-                    &message,
-                    0,
-                    &self.render(ctx, &message, false),
-                    ctx.owner,
-                )
-                .map_err(|e| ActionError::io("saving draft", e))?;
-                attribute(ctx, &Self::mail_dir(ctx).join(&rel));
-                let target = format!("Drafts: {}", message.subject);
-                Ok(ActionOutput {
-                    text: format!("Saved draft \"{}\"", message.subject),
-                    data: json!({ "draft": rel.display().to_string() }),
-                    changes: vec![Change {
-                        kind: ChangeKind::Created,
-                        target,
-                        reversible: true,
-                        paths: vec![Self::mail_dir(ctx).join(&rel)],
-                    }],
-                })
+                self.draft(ctx, &message)
             }
             "mail.send" => {
                 let SendInput { messages } = parse_input(input)?;
-                messages.iter().try_for_each(Self::validate)?;
-                let mut changes = Vec::new();
-                for (index, message) in messages.iter().enumerate() {
-                    let rel = Self::save_new(
-                        &mail,
-                        SENT,
-                        message,
-                        index,
-                        &self.render(ctx, message, true),
-                        ctx.owner,
-                    )
-                    .map_err(|e| ActionError::io("sending", e))?;
-                    attribute(ctx, &Self::mail_dir(ctx).join(&rel));
-                    changes.push(Change {
-                        kind: ChangeKind::Sent,
-                        target: Self::describe(message),
-                        reversible: false,
-                        paths: vec![Self::mail_dir(ctx).join(&rel)],
-                    });
+                if messages.is_empty() || messages.len() > MAX_BATCH {
+                    return Err(ActionError::InvalidInput(format!(
+                        "send 1 to {MAX_BATCH} messages per call"
+                    )));
                 }
-                Ok(ActionOutput {
-                    text: format!(
-                        "Sent {} email{}",
-                        messages.len(),
-                        if messages.len() == 1 { "" } else { "s" }
-                    ),
-                    data: json!({ "sent": messages.len() }),
-                    changes,
-                })
+                messages.iter().try_for_each(Self::validate)?;
+                self.send(ctx, &messages)
+            }
+            "mail.move" => {
+                let MoveInput { ids, to } = parse_input(input)?;
+                self.move_messages(ctx, &ids, to)
+            }
+            "mail.connect" => {
+                let input: ConnectInput = parse_input(input)?;
+                self.connect(ctx, &input)
             }
             _ => Err(ActionError::InvalidInput(format!(
                 "mail has no action {action}"
             ))),
         }
     }
+
+    fn revert(
+        &self,
+        ctx: &TaskContext,
+        action: &ActionName,
+        paths: &[PathBuf],
+    ) -> Result<(), ActionError> {
+        if action.as_str() != "mail.move" {
+            return Ok(());
+        }
+        self.move_back(ctx, paths)
+    }
 }
+
+mod moves;
 
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use super::*;
-    use glass_actions::testing::context;
-
-    fn setup() -> (tempfile::TempDir, TaskContext) {
-        use std::os::unix::fs::MetadataExt;
-        let dir = tempfile::tempdir().unwrap();
-        let mut ctx = context(dir.path());
-        let meta = fs::metadata(dir.path()).unwrap();
-        ctx.owner = glass_platform::fs::Owner {
-            uid: meta.uid(),
-            gid: meta.gid(),
-        };
-        MailProvider::default().prepare(&ctx).unwrap();
-        (dir, ctx)
-    }
-
-    #[test]
-    fn pa3_mail_folders_are_never_made_through_a_symlink_out_of_home() {
-        let outside = tempfile::tempdir().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), dir.path().join(MAIL_DIR)).unwrap();
-        let ctx = context(dir.path());
-        assert!(MailProvider::default().prepare(&ctx).is_err());
-        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn batched_sends_are_one_preview_with_a_review_list() {
-        let (_dir, ctx) = setup();
-        let input = json!({ "messages": (0..6).map(|i| json!({
-            "to": [format!("vendor{i}@example.com")], "subject": "Invoice reminder", "body": "Please pay."
-        })).collect::<Vec<_>>() });
-        let preview = MailProvider::default()
-            .preview(&ctx, &"mail.send".parse().unwrap(), &input)
-            .unwrap();
-        assert_eq!(preview.summary, "Send 6 emails");
-        assert_eq!(preview.items.len(), 6);
-        assert!(preview.snapshot_roots.is_empty(), "sends are not undoable");
-    }
-
-    #[test]
-    fn drafts_carry_attribution_headers() {
-        let (dir, ctx) = setup();
-        let input =
-            json!({ "to": ["ap@example.com"], "subject": "Q3 summary", "body": "Attached." });
-        let out = MailProvider::default()
-            .invoke(&ctx, &"mail.draft".parse().unwrap(), &input)
-            .unwrap();
-        assert!(out.changes[0].reversible);
-        let drafts: Vec<_> = fs::read_dir(dir.path().join("Mail/Drafts"))
-            .unwrap()
-            .flatten()
-            .collect();
-        assert_eq!(drafts.len(), 1);
-        let text = fs::read_to_string(drafts[0].path()).unwrap();
-        assert!(text.contains("X-Glasshouse-Attribution: by invoice-demo for demo"));
-    }
-
-    #[test]
-    fn same_subject_in_the_same_second_makes_two_drafts() {
-        // Two tasks drafting at once must not overwrite each other.
-        let (dir, ctx) = setup();
-        let input = json!({ "to": ["ap@example.com"], "subject": "Same", "body": "x" });
-        let draft = "mail.draft".parse().unwrap();
-        let first = MailProvider::default()
-            .invoke(&ctx, &draft, &input)
-            .unwrap();
-        let second = MailProvider::default()
-            .invoke(&ctx, &draft, &input)
-            .unwrap();
-        assert_ne!(first.changes[0].paths, second.changes[0].paths);
-        let count = fs::read_dir(dir.path().join("Mail/Drafts"))
-            .unwrap()
-            .count();
-        assert_eq!(count, 2);
-    }
-
-    #[test]
-    fn au10_listings_and_reads_say_who_wrote_each_message() {
-        let (dir, ctx) = setup();
-        fs::write(
-            dir.path().join("Mail/Inbox/1792400000-0-northwind.eml"),
-            "From: Dana Ruiz <dana@northwind.example>\nTo: demo@corp.example\n\
-             Subject: Renewal terms\nDate: 2026-10-19T08:00:00Z\n\nHi,\n\nCan we talk\n terms?\n",
-        )
-        .unwrap();
-        let input = json!({ "to": ["dana@northwind.example"], "subject": "Re: Renewal terms", "body": "Yes." });
-        MailProvider::default()
-            .invoke(&ctx, &"mail.draft".parse().unwrap(), &input)
-            .unwrap();
-
-        let list = "mail.list".parse().unwrap();
-        let preview = MailProvider::default()
-            .preview(&ctx, &list, &json!({ "folder": "inbox" }))
-            .unwrap();
-        assert_eq!(preview.reads, vec![dir.path().join("Mail/Inbox")]);
-        assert!(preview.writes.is_empty());
-        let inbox = MailProvider::default()
-            .invoke(&ctx, &list, &json!({ "folder": "inbox" }))
-            .unwrap();
-        let message = &inbox.data["messages"][0];
-        assert_eq!(message["subject"], "Renewal terms");
-        assert_eq!(message["snippet"], "Hi, Can we talk terms?");
-        assert!(message["attribution"].is_null(), "a person wrote it");
-
-        let drafts = MailProvider::default()
-            .invoke(&ctx, &list, &json!({ "folder": "drafts" }))
-            .unwrap();
-        let draft = &drafts.data["messages"][0];
-        assert_eq!(draft["attribution"]["by"], "invoice-demo");
-        assert_eq!(draft["attribution"]["for"], "demo");
-
-        let read = MailProvider::default()
-            .invoke(
-                &ctx,
-                &"mail.read".parse().unwrap(),
-                &json!({ "id": draft["id"] }),
-            )
-            .unwrap();
-        assert_eq!(read.data["message"]["body"], "Yes.\n");
-        assert_eq!(
-            read.data["message"]["attribution"]["text"],
-            "by invoice-demo for demo"
-        );
-    }
-
-    #[test]
-    fn message_ids_stay_inside_their_mailbox() {
-        let (_dir, ctx) = setup();
-        let read = "mail.read".parse().unwrap();
-        for id in [
-            "inbox/../../etc/passwd.eml",
-            "inbox/.hidden.eml",
-            "archive/x.eml",
-            "inbox/x.txt",
-            "inbox",
-        ] {
-            assert!(
-                matches!(
-                    MailProvider::default().preview(&ctx, &read, &json!({ "id": id })),
-                    Err(ActionError::InvalidInput(_))
-                ),
-                "{id}"
-            );
-        }
-        assert!(
-            MailProvider::default()
-                .preview(
-                    &ctx,
-                    &"mail.list".parse().unwrap(),
-                    &json!({ "folder": "trash" })
-                )
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn rejects_bad_addresses_and_header_injection() {
-        let (_dir, ctx) = setup();
-        let draft = "mail.draft".parse().unwrap();
-        let bad_addr = json!({ "to": ["not an address"], "subject": "x", "body": "y" });
-        assert!(
-            MailProvider::default()
-                .preview(&ctx, &draft, &bad_addr)
-                .is_err()
-        );
-        let injected = json!({ "to": ["a@b.co"], "subject": "x\nBcc: all@corp.com", "body": "y" });
-        assert!(
-            MailProvider::default()
-                .preview(&ctx, &draft, &injected)
-                .is_err()
-        );
-    }
-}
+mod tests;

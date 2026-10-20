@@ -17,7 +17,7 @@ use glass_app_catalog::{CatalogHandle, CatalogProvider};
 use glass_app_chat::{ChatHandle, ChatProvider};
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
-use glass_app_mail::MailProvider;
+use glass_app_mail::{MailHandle, MailProvider};
 use glass_app_meet::{MeetHandle, MeetProvider};
 use glass_app_people::PeopleProvider;
 use glass_app_settings::{SettingsHandle, SettingsProvider};
@@ -57,6 +57,9 @@ pub struct Harness {
     /// How meetings reach the console (CF-21); unconnected until a test
     /// connects it.
     pub meet: MeetHandle,
+    /// Mail's link and sign-ins (ADR 0037); the local store until a test
+    /// connects a service.
+    pub mail: MailHandle,
     /// The apps people make (ADR 0032), bundled by a stand-in for esbuild.
     pub studio: Studio,
     /// Org apps glassd fetched (R2); none until a test sets them.
@@ -87,6 +90,7 @@ impl Harness {
             &self.settings,
             &self.chat,
             &self.meet,
+            &self.mail,
             &self.studio,
             &policy,
         );
@@ -106,6 +110,7 @@ impl Harness {
             &self.settings,
             &self.chat,
             &self.meet,
+            &self.mail,
             &self.studio,
             &policy,
         );
@@ -222,6 +227,7 @@ fn test_registry(
     settings: &SettingsHandle,
     chat: &ChatHandle,
     meet: &MeetHandle,
+    mail: &MailHandle,
     studio: &Studio,
     policy: &Policy,
 ) -> Registry {
@@ -229,7 +235,9 @@ fn test_registry(
     registry.register(Arc::new(FilesProvider)).unwrap();
     registry
         .register(Arc::new(
-            MailProvider::new(directory.clone()).settings(policy.mail().cloned()),
+            MailProvider::new(directory.clone())
+                .settings(policy.mail().cloned())
+                .mail(mail.clone()),
         ))
         .unwrap();
     // Meetings are conversations in chat's store (CF-21), as glassd wires it.
@@ -315,6 +323,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     let settings = SettingsHandle::new(dir.path().join("state/settings"));
     let chat = ChatHandle::new(dir.path().join("state/chat"));
     let meet = MeetHandle::new();
+    let mail = MailHandle::new(dir.path().join("state/mail"));
     let apps_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps");
     // Our apps' source as images lay it out, linked to the repository's.
     let source = dir.path().join("source");
@@ -337,6 +346,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         &settings,
         &chat,
         &meet,
+        &mail,
         &studio,
         &policy,
     );
@@ -396,6 +406,16 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         &rt,
         |_groups, _need| Vec::new(),
     )));
+    // New mail wakes Mail, as glassd wires it (ADR 0037).
+    {
+        let rt = Arc::downgrade(&rt);
+        mail.on_notice(move |notice| {
+            let glass_app_mail::Notice::Changed { login } = notice;
+            if let Some(rt) = rt.upgrade() {
+                rt.app_changed(login, "mail");
+            }
+        });
+    }
     // News in chat wakes the app that shows it, as glassd wires it.
     {
         let rt = Arc::downgrade(&rt);
@@ -428,6 +448,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         settings,
         chat,
         meet,
+        mail,
         studio,
         org_apps,
     }
@@ -633,7 +654,7 @@ impl SystemOps for FakeMachine {
 pub fn mail_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "mail", "name": "Mail", "version": "0.1.0",
-        "actions": ["mail.account", "mail.list", "mail.read", "mail.draft", "mail.send", "people.search"],
+        "actions": ["mail.account", "mail.list", "mail.read", "mail.draft", "mail.send", "mail.move", "mail.connect", "people.search"],
         "permissions": ["offline"], "labels": ["public", "internal"]
     }))
     .unwrap()

@@ -28,6 +28,13 @@ pub use def::{ActionDef, ActionError, ActionOutput, ActionProvider, Change, Prev
 pub use live::{Live, Pulled};
 pub use registry::{Registry, RegistryError};
 
+/// The key in an [`ActionOutput`]'s `data` whose value the runtime moves
+/// into the call's audit record, under the app's name (`detail.mail`),
+/// instead of handing it to the caller: what the record must keep and the
+/// result needn't carry, such as a sent message's SHA-256 and the server's
+/// reply (AU-1, ADR 0037). Never content, never a credential.
+pub const AUDIT_DETAIL: &str = "_audit";
+
 /// Tags a file the agent changed with "by [agent] for [user]" (AU-10).
 /// Best effort: a filesystem without extended attributes still gets the
 /// change, and the audit log still attributes it.

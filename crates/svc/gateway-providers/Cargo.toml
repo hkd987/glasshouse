@@ -1,6 +1,6 @@
 [package]
 name = "glass-gateway-providers"
-description = "Everything that leaves the machine: Anthropic Messages and Amazon Bedrock model calls, and managed settings from the org's admin console, over HTTPS with the base system's OpenSSL."
+description = "Everything that leaves the machine: Anthropic Messages and Amazon Bedrock model calls, managed settings from the org's admin console, and the person's mail over IMAP and SMTP submission, in TLS with the base system's OpenSSL."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,6 +21,15 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 time.workspace = true
+# The mox test harness (`mail::testing`), for other crates' tests.
+tempfile = { workspace = true, optional = true }
+
+[features]
+# `mail::testing`: a `mox localserve` per test (ADR 0037, EM0). Tests only.
+testing = ["dep:tempfile"]
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -41,6 +41,8 @@ glass-app-meet.workspace = true
 glass-app-people.workspace = true
 glass-app-system.workspace = true
 glass-crypto.workspace = true
+# Mail against a real server, `mox localserve` (ADR 0037, EM0).
+glass-gateway-providers = { workspace = true, features = ["testing"] }
 glass-managed.workspace = true
 tempfile.workspace = true
 
