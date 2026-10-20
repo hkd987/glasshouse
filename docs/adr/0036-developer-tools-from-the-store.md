@@ -78,13 +78,11 @@ root (they all install `bin/node`).
 6. **Agents** reach developer tools only through the workspace, under the
    harness (DW-5), never through the base system's agent jails.
 
-## Open question for the owner
-Which desktop git client goes in first:
-- `git-cola`, a native Qt app, mature;
-- VS Code's built-in source control plus `lazygit` for the terminal;
-- our own small Git app on the apps platform, whose actions agents could
-  call and whose pushes the audit sees directly (DW-20);
-- GitHub Desktop's Linux fork, once the Linux workspace exists.
+## The git client
+The owner chose GitHub Desktop (2026-10-20). It has no FreeBSD build, so it
+comes with the Linux workspace (DW-2), from GitHub's Linux fork. Until then
+developers have VS Code's built-in source control and the GitHub CLI
+(`gh`), both native.
 
 ## Consequences
 - The org's mirror carries these packages, a few GB per language

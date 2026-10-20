@@ -70,6 +70,14 @@ def main() -> int:
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     data = json.load(open(sys.argv[1]))
+    # A saved read is either the result itself or a list of text parts, one
+    # of them the result (when the connector adds a notice before it).
+    if isinstance(data, list):
+        data = next(
+            json.loads(part["text"])
+            for part in data
+            if part.get("type") == "text" and part["text"].lstrip().startswith("{")
+        )
     xml = data.get("data", data).get("xml") or data["value"]["xml"]
     out: list[str] = []
     walk(ET.fromstring(xml), out)

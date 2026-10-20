@@ -178,10 +178,10 @@ thumbnails are not started.
 | CF-82 Consent per session, banner, unattended rules, audit | Not started | ADR 0028 slice b |
 | CF-90 Hand agent work to a colleague in Teams or Slack | Not started | |
 | CF-91 Our own chat app: end to end encrypted, IT holds a compliance key; agents read freely, post with a yes | In progress | ADR 0030 slice C1. Built: sealing (`glass-crypto`, CFRG vectors), the console's relay that never holds plaintext (`gt3_the_console_never_holds_chat_plaintext`), glassd's member keys, store and sync, `chat.list`/`chat.read` (Auto) and `chat.post`/`chat.create` (Ask; Auto in Chat itself via `[[app]]`), tested in `crates/svc/runtime/tests/chat.rs`. The Chat app (`apps/chat`): two people message each other live, an agent's post waits on the desktop and shows its by-line, the page keeps nothing (`apps/e2e/chat.e2e.ts`). Before a pilot: presence (C2), device keys (P), search (C4). Changed by the owner 2026-10-19 (it said we'd ship no messaging app) |
-| CF-92 Chat's everyday features: threads, reactions, mentions, edit and delete, pins, topics, browse and join, unread, drafts, notifications per channel | Partial | Proposed 2026-10-20. `chat.post` takes `reply_to` and `chat.read` returns it, and named conversations carry a topic, but the Chat app shows neither. Reactions exist as a shared-space part (`Part::Reaction`), not yet in chat. Browsing and joining need C2's membership |
-| CF-93 Search across conversations, on the device (P1) | Not started | Proposed 2026-10-20. An index on the person's computer over messages glassd has opened; never on the relay |
+| CF-92 Chat's everyday features: threads, reactions, mentions, edit and delete, pins, topics, browse and join, unread, drafts, notifications per channel | Partial | Proposed 2026-10-20; the owner wants all of CF-92 to CF-95 for pilots, working. `chat.post` takes `reply_to` and `chat.read` returns it, and named conversations carry a topic, but the Chat app shows neither. Reactions exist as a shared-space part (`Part::Reaction`), not yet in chat. Browsing and joining need C2's membership |
+| CF-93 Search across conversations, on the device | Not started | Proposed 2026-10-20. An index on the person's computer over messages glassd has opened; never on the relay |
 | CF-94 Presence and status; huddles | Not started | Proposed 2026-10-20. Presence is part of chat C2; a huddle is a Glasshouse meeting (CF-21) started from a conversation |
-| CF-95 Group mentions, agents in channels, cards (P1) | Partial | Proposed 2026-10-20. Artifacts already show as cards in Chat (AR-5) |
+| CF-95 Group mentions, agents in channels, cards | Partial | Proposed 2026-10-20. Artifacts already show as cards in Chat (AR-5) |
 
 ## Power management
 
@@ -196,7 +196,7 @@ thumbnails are not started.
 
 | Id | Status | Notes |
 |---|---|---|
-| DW-7 Developer tools in the Store: VS Code, git, the GitHub CLI, a git client, the core languages, versions side by side | Not started | Proposed 2026-10-20; ADR 0036. Every one has a package in the quarterly set our images build from (the ADR lists them); GitHub Desktop has no FreeBSD build. Which git client first is the owner's call |
+| DW-7 Developer tools in the Store: VS Code, git, the GitHub CLI, GitHub Desktop, the core languages, versions side by side | Not started | Proposed 2026-10-20; ADR 0036. Every one has a package in the quarterly set our images build from (the ADR lists them); GitHub Desktop has no FreeBSD build; the owner chose it anyway (2026-10-20), so it comes with the Linux workspace, and until then VS Code's source control and `gh` cover git |
 | DW-8 Tools install into the developer jail; Linux-only tools into the Linux workspace | Not started | Proposed 2026-10-20; ADR 0036 (per-version roots, a shim that follows the project's pin file) |
 | DW-9 Native VS Code uses Open VSX (P1) | Not started | Proposed 2026-10-20. The FreeBSD port's own choice since 2023 |
 | DW-1, DW-3, DW-10, DW-11, DW-13, DW-20, DW-21, DW-23 | Not started | A bhyve Linux VM plus developer jails, audited from the host. Reuses the jail, broker and audit pieces; the runtime's sandbox interface was built for a second backend |
@@ -335,7 +335,7 @@ artifacts* = `crates/svc/runtime/tests/artifacts.rs`.
 | SC-1 … SC-5 Scheduling | Not started | — | — |
 | IN-1 … IN-4 Microsoft 365 as provider | Not started | Plan: a Graph adapter in `glass-gateway-providers`, a provider setting per service | — |
 | IN-5 No approval from Microsoft; each person's own sign-in; user consent where the tenant allows it | Not started | Proposed 2026-10-20. Microsoft's managed default consent policy now requires an admin's approval for third-party apps that read mail, calendars or Teams content, so IN-3's one-time grant stays the usual path |
-| EM-1 … EM-4 Glasshouse Mail | Not started | P1 | — |
+| EM-1 … EM-4 Glasshouse Mail | Not started | Moved to P0 by the owner 2026-10-20, for teams starting with no email. Needs an ADR: what runs the mail servers, delivery and reputation, and where mail is kept |
 
 ## Pilot readiness
 

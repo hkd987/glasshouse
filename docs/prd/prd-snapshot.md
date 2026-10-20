@@ -608,7 +608,7 @@ Developers run unsigned code and Linux containers all day, which collides with s
 - DW-4. SSH keys and commit-signing keys are stored in the TPM and can't be copied off the machine.
 - DW-5. Claude Code, Codex and other coding agents run in the workspace with the same tiles, approvals and undo, through the harness plugin (HX-1 to HX-7).
 - DW-6. Fast file sharing between the host and the workspace, and localhost networking so the host browser reaches services running in it. A higher-spec certified laptop tier for developers.
-- DW-7. The Store offers developer tools to people with developer mode (DW-10): VS Code, git, the GitHub CLI, a desktop git client, and the core languages (Node.js, Go, Python, Rust, Java, .NET, Ruby, PHP, Swift and Zig). Each installs in one click from signed packages, several versions side by side, and a project's pinned version is honored (.nvmrc, go.mod, .python-version, rust-toolchain.toml).
+- DW-7. The Store offers developer tools to people with developer mode (DW-10): VS Code, git, the GitHub CLI, GitHub Desktop, and the core languages (Node.js, Go, Python, Rust, Java, .NET, Ruby, PHP, Swift and Zig). Each installs in one click from signed packages, several versions side by side, and a project's pinned version is honored (.nvmrc, go.mod, .python-version, rust-toolchain.toml).
 - DW-8. Developer tools install into the person's developer jail (DW-1), never the signed base system, because what they build and download is unsigned (EP-2). Node versions come from our signed builds, since Node publishes no FreeBSD binaries; nvm itself, GitHub Desktop and other Linux-only tools run in the Linux workspace (DW-2).
 - DW-9. The native VS Code is the open-source build, which installs extensions from Open VSX. Extensions Microsoft publishes only to its own marketplace, such as Pylance and Remote Development, need Microsoft's build in the Linux workspace.
 **For security and IT**
@@ -679,8 +679,8 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Desktop experience: UX-1, UX-2, UX-10, UX-20 to UX-22, UX-30
 - Architecture commitments: FD-1 to FD-4
 - Base system and portability: BS-1 to BS-6, PL-1, PL-2
-- Working together (proposed 2026-10-20): AR-1 to AR-4, AR-5 inside the org, SK-1 to SK-3, DC-1 to DC-4, DC-6, SH-1 to SH-3, SC-1, SC-3, SC-4, and IN-1 and IN-2 for mail and calendar
-- Chat, settings and developer tools (proposed 2026-10-20): CF-12, CF-92, CF-94, DW-7 and DW-8 for tools with a native build, IN-5
+- Working together (proposed 2026-10-20): AR-1 to AR-4, AR-5 inside the org, SK-1 to SK-3, DC-1 to DC-4, DC-6, SH-1 to SH-3, SC-1, SC-3, SC-4, IN-1 and IN-2 for mail and calendar, and EM-1 to EM-4 (moved up by the owner 2026-10-20)
+- Chat, settings and developer tools (proposed 2026-10-20): CF-12, CF-92 to CF-95 (all of them, the owner 2026-10-20), DW-7 and DW-8 for tools with a native build, IN-5
 **P1 · V1 GA**
 - AW-6, DA-4, DA-14, NV-4, NV-21, NV-22, NV-30 to NV-32
 - DP-6, DP-11, DP-20, DP-30, AU-4, AU-11, AU-22
@@ -696,8 +696,8 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Agent engine: AE-2 (remaining agents), AE-20 to AE-25
 - Tailoring catalog items: TL-12, TL-14
 - Desktop experience: UX-3, UX-11, UX-31, UX-40
-- Working together (proposed 2026-10-20): AR-5 links outside the org, AR-6, SK-4 to SK-6, DC-5, SC-2, SC-5, IN-1 for chat and meetings, IN-3, IN-4, EM-1 to EM-4
-- Chat, settings and developer tools (proposed 2026-10-20): CF-13, CF-93, CF-95, DW-8 for Linux-only tools, DW-9
+- Working together (proposed 2026-10-20): AR-5 links outside the org, AR-6, SK-4 to SK-6, DC-5, SC-2, SC-5, IN-1 for chat and meetings, IN-3, IN-4
+- Chat, settings and developer tools (proposed 2026-10-20): CF-13, DW-8 for Linux-only tools (GitHub Desktop among them), DW-9
 **P2 · Later**
 - Undo into third-party SaaS through compensating actions at scale
 - A public agent and adapter marketplace
