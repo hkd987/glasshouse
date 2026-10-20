@@ -5,6 +5,7 @@
 // approves reaches catalog.search on the device (DV-11, GA-2). The test
 // fails when a budget is exceeded. Screenshots are 1440x900.
 
+import { createHmac } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
@@ -113,6 +114,13 @@ test("adr0039 credits Glasshouse adds reach the org's computers, and its admins 
   const credits = page.locator("[data-test=credits]");
   await expect(credits).toContainText("$100.00");
   await expect(page.locator("[data-test=grant]")).toContainText("e2e order");
+
+  // Agents use them only once an admin accepts the providers' terms.
+  await page.locator("[data-test=use-credits]").click();
+  await expect(credits).toContainText("Accept the model providers' terms");
+  await page.locator("[data-test=terms] input[name=terms]").check();
+  await page.locator("[data-test=accept-terms]").click();
+  await expect(credits).toContainText("Terms accepted");
   await page.locator("[data-test=use-credits]").click();
   await expect(credits).toContainText("Saved to the draft");
   await expect(credits).toContainText("On in the draft");
@@ -120,6 +128,38 @@ test("adr0039 credits Glasshouse adds reach the org's computers, and its admins 
   // Back off, so the draft is as other tests left it.
   await page.locator("[data-test=use-credits]").click();
   await expect(credits).toContainText("Off");
+
+  // An admin buys $50 by card: Stripe's page (here the console's own
+  // development stand-in) sends them back, and Stripe's signed webhook
+  // adds the credits.
+  await page.locator("input[name=usd]").fill("50");
+  await page.locator("[data-test=buy]").click();
+  await page.waitForURL(/#\/credits\/paid$/);
+  await expect(credits).toContainText("Payment received");
+  const event = JSON.stringify({
+    id: "evt_e2e",
+    type: "checkout.session.completed",
+    data: { object: { id: "cs_dev_e2e", mode: "payment", payment_status: "paid", amount_total: 5000, currency: "usd", metadata: { org: "acme", kind: "model_credits" } } },
+  });
+  const at = Math.floor(Date.now() / 1000);
+  const signature = createHmac("sha256", "whsec_dev_not_a_secret").update(`${at}.${event}`).digest("hex");
+  const paid = await fetch(new URL("/stripe/webhook", CONSOLE_URL), {
+    method: "POST",
+    headers: { "stripe-signature": `t=${at},v1=${signature}`, "content-type": "application/json" },
+    body: event,
+  });
+  expect(paid.status).toBe(200);
+  await expect(credits).toContainText("Your payment is in", { timeout: 10_000 });
+  await expect(credits).toContainText("$150.00");
+  await expect(page.locator("[data-test=grant]").last()).toContainText("Paid by card");
+  await shot(page, "credits-paid");
+  // A forged one is refused.
+  const forged = await fetch(new URL("/stripe/webhook", CONSOLE_URL), {
+    method: "POST",
+    headers: { "stripe-signature": `t=${at},v1=${"0".repeat(64)}`, "content-type": "application/json" },
+    body: event,
+  });
+  expect(forged.status).toBe(400);
   await close();
 });
 

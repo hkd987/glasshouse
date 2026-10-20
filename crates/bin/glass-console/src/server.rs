@@ -104,6 +104,25 @@ struct CreditsService {
     keys: Arc<dyn crate::credits::KeyService>,
     /// Ours, not an org admin's: it adds credits.
     operator: String,
+    /// Ours over OpenRouter's price: 0.25 sells $1.25 of credits for each
+    /// $1 OpenRouter charges.
+    markup: f64,
+    /// How orgs pay, when they may buy credits themselves.
+    payments: Option<Arc<dyn crate::credits::Payments>>,
+}
+
+/// `POST /api/credits/checkout`: what an admin buys.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuyCredits {
+    usd: f64,
+}
+
+/// `POST /api/credits/terms`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptTerms {
+    accept: bool,
 }
 
 /// `POST /ops/credits`: what an operator adds.
@@ -299,15 +318,27 @@ impl Console {
     }
 
     /// Offers model credits (ADR 0039): `keys` makes and manages the
-    /// org's key, and `operator` is the token our staff add credits with.
-    pub fn set_credits(&self, keys: Arc<dyn crate::credits::KeyService>, operator: String) {
-        let _ = self.credits.set(CreditsService { keys, operator });
+    /// org's key, `operator` is the token our staff add credits with,
+    /// `markup` is ours over OpenRouter's price, and with `payments` the
+    /// org's admins buy credits themselves.
+    pub fn set_credits(
+        &self,
+        keys: Arc<dyn crate::credits::KeyService>,
+        operator: String,
+        markup: f64,
+        payments: Option<Arc<dyn crate::credits::Payments>>,
+    ) {
+        let _ = self.credits.set(CreditsService {
+            keys,
+            operator,
+            markup,
+            payments,
+        });
     }
 
-    /// `GET /api/credits`, for the org's admins: what it bought and spent,
-    /// never the key. OpenRouter's numbers are fetched off the request's
-    /// thread.
-    async fn credits_page(&self, request: &Request) -> Response {
+    /// `/api/credits…`, for the org's admins (ADR 0039): the page, buying
+    /// credits on Stripe's page, and accepting the providers' terms.
+    async fn credits_api(&self, rest: &str, request: &Request) -> Response {
         if let Err(response) = check_origin(request) {
             return response;
         }
@@ -317,9 +348,48 @@ impl Console {
         if !self.access(&user).allows(Need::Admin) {
             return error(403, "Only the org's IT admins can do that.");
         }
-        if request.method != "GET" {
-            return error(405, "method not allowed");
+        let post = request.method == "POST";
+        if post
+            && request
+                .header("content-type")
+                .is_none_or(|c| !c.starts_with("application/json"))
+        {
+            return error(415, "send JSON");
         }
+        match (request.method.as_str(), rest) {
+            ("GET", "") => self.credits_page().await,
+            ("POST", "checkout") => {
+                let buy: BuyCredits = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                self.checkout(buy.usd).await
+            }
+            ("POST", "terms") => {
+                let terms: AcceptTerms = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                if !terms.accept {
+                    return error(400, "Accepting is the only choice here.");
+                }
+                let mut state = self.state();
+                let dir = state.dir().to_owned();
+                match state.credits.accept_terms(&dir, &user) {
+                    Ok(()) => {
+                        tracing::info!(%user, "credits: model terms accepted");
+                        ok(json!({}))
+                    }
+                    Err(e) => error(500, &format!("{e:#}")),
+                }
+            }
+            _ => error(404, "no such page"),
+        }
+    }
+
+    /// The Model credits page: what the org bought and spent, never the
+    /// key. OpenRouter's numbers are fetched off the request's thread.
+    async fn credits_page(&self) -> Response {
         let (hash, on) = {
             let state = self.state();
             let on = state.draft().is_ok_and(|d| crate::edits::credits_on(&d));
@@ -338,7 +408,150 @@ impl Console {
         };
         let mut view = self.state().credits.view(usage, on);
         view["offered"] = json!(self.credits.get().is_some());
+        view["can_buy"] = json!(self.credits.get().is_some_and(|c| c.payments.is_some()));
+        view["min_usd"] = json!(crate::credits::MIN_PURCHASE_USD);
+        view["max_usd"] = json!(crate::credits::MAX_GRANT_USD);
         ok(view)
+    }
+
+    /// A Stripe checkout for `usd` of credits: the page the admin pays on.
+    /// Paying it is Stripe's webhook's to say, not the admin's return.
+    async fn checkout(&self, usd: f64) -> Response {
+        let Some(payments) = self.credits.get().and_then(|c| c.payments.clone()) else {
+            return error(404, "Buying credits isn't offered by this console.");
+        };
+        let max = crate::credits::MAX_GRANT_USD;
+        let min = crate::credits::MIN_PURCHASE_USD;
+        if !usd.is_finite() || usd < min || usd > max {
+            return error(
+                400,
+                &format!("Buy from ${min:.0} to ${max:.0} of credits at a time."),
+            );
+        }
+        let (org, accepted) = {
+            let state = self.state();
+            (state.org.id.clone(), state.credits.terms.is_some())
+        };
+        if !accepted {
+            return error(409, "Accept the model providers' terms first.");
+        }
+        let base = self.url.trim_end_matches('/').to_owned();
+        let cents = (usd * 100.0).round() as u64;
+        let made = tokio::task::spawn_blocking(move || {
+            payments.checkout(
+                &org,
+                cents,
+                &format!("{base}/#/credits/paid"),
+                &format!("{base}/#/credits/cancelled"),
+            )
+        })
+        .await;
+        match made {
+            Ok(Ok(checkout)) => {
+                tracing::info!(session = %checkout.id, usd, "credits: checkout made");
+                ok(json!({ "url": checkout.url }))
+            }
+            Ok(Err(e)) => error(502, &e),
+            Err(e) => error(500, &e.to_string()),
+        }
+    }
+
+    /// `POST /stripe/webhook`, from Stripe, verified by its signature
+    /// (ADR 0039): a paid checkout for this org adds what was paid, less
+    /// our markup, once however often Stripe sends it. Anything else is
+    /// acknowledged and left; a grant that fails asks Stripe to retry.
+    async fn stripe_webhook(&self, request: &Request) -> Response {
+        let Some(payments) = self.credits.get().and_then(|c| c.payments.clone()) else {
+            return error(404, "no such page");
+        };
+        if request.method != "POST" {
+            return error(405, "method not allowed");
+        }
+        let signature = request.header("stripe-signature").unwrap_or_default();
+        let now = glass_types::Timestamp::now().unix_seconds();
+        if let Err(e) = glass_gateway_providers::stripe::verify_webhook(
+            payments.webhook_secret(),
+            signature,
+            &request.body,
+            now,
+        ) {
+            tracing::warn!("credits: a webhook refused: {e}");
+            return error(400, &e);
+        }
+        let paid = match glass_gateway_providers::stripe::paid_checkout(&request.body) {
+            Ok(Some(paid)) => paid,
+            Ok(None) => return ok(json!({})),
+            Err(e) => return error(400, &e),
+        };
+        let org = self.state().org.id.clone();
+        if paid.org.as_deref() != Some(org.as_str()) {
+            // One Stripe account sends every org's payments to every
+            // console: this one takes only its own.
+            return ok(json!({}));
+        }
+        let usd = paid.cents as f64 / 100.0;
+        match self
+            .add_credits(usd, "Paid by card", Some(paid.session.clone()))
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(session = %paid.session, usd, "credits: paid by card");
+                ok(json!({}))
+            }
+            Err((status, e)) => {
+                tracing::warn!(session = %paid.session, "credits: a paid checkout not granted yet: {e}");
+                error(status.max(500), &e)
+            }
+        }
+    }
+
+    /// Adds `usd` of credits (less our markup) to the org, one grant at a
+    /// time; the page's view after it. Computers waiting on a sync hear of
+    /// a new key at once.
+    async fn add_credits(
+        &self,
+        usd: f64,
+        note: &str,
+        payment: Option<String>,
+    ) -> Result<Value, (u16, String)> {
+        let Some(service) = self.credits.get() else {
+            return Err((404, "Model credits aren't offered by this console.".into()));
+        };
+        let _one = self.granting.lock().await;
+        let (mut credits, dir, org) = {
+            let state = self.state();
+            (
+                state.credits.clone(),
+                state.dir().to_owned(),
+                state.org.id.clone(),
+            )
+        };
+        let keys = Arc::clone(&service.keys);
+        let markup = service.markup;
+        let note = note.to_owned();
+        let done = tokio::task::spawn_blocking(move || {
+            let result = credits.grant(&dir, &*keys, &org, usd, markup, &note, payment.as_deref());
+            (credits, result)
+        })
+        .await;
+        match done {
+            Ok((credits, Ok(usage))) => {
+                tracing::info!(
+                    granted = credits.granted(),
+                    version = credits.version,
+                    "credits: added"
+                );
+                let mut state = self.state();
+                state.credits = credits;
+                let on = state.draft().is_ok_and(|d| crate::edits::credits_on(&d));
+                let view = state.credits.view(Some(Ok(usage)), on);
+                drop(state);
+                self.released();
+                Ok(view)
+            }
+            Ok((_, Err(e))) => Err((400, e)),
+            Err(e) => Err((500, e.to_string())),
+        }
     }
 
     /// `POST /ops/credits`, for our operators with their token, never an
@@ -363,38 +576,9 @@ impl Console {
             Ok(b) => b,
             Err(r) => return r,
         };
-        let _one = self.granting.lock().await;
-        let (mut credits, dir, org) = {
-            let state = self.state();
-            (
-                state.credits.clone(),
-                state.dir().to_owned(),
-                state.org.id.clone(),
-            )
-        };
-        let keys = Arc::clone(&service.keys);
-        let done = tokio::task::spawn_blocking(move || {
-            let result = credits.grant(&dir, &*keys, &org, grant.usd, &grant.note);
-            (credits, result)
-        })
-        .await;
-        match done {
-            Ok((credits, Ok(usage))) => {
-                tracing::info!(
-                    granted = credits.granted(),
-                    version = credits.version,
-                    "credits: added"
-                );
-                let mut state = self.state();
-                state.credits = credits;
-                let on = state.draft().is_ok_and(|d| crate::edits::credits_on(&d));
-                let view = state.credits.view(Some(Ok(usage)), on);
-                drop(state);
-                self.released();
-                ok(view)
-            }
-            Ok((_, Err(e))) => error(400, &e),
-            Err(e) => error(500, &e.to_string()),
+        match self.add_credits(grant.usd, &grant.note, None).await {
+            Ok(view) => ok(view),
+            Err((status, e)) => error(status, &e),
         }
     }
 
@@ -468,11 +652,15 @@ impl Console {
         }
         // Model credits (ADR 0039): their calls to OpenRouter don't hold
         // up the request thread.
-        if path == "/api/credits" {
-            return self.credits_page(request).await;
+        if let Some(rest) = path.strip_prefix("/api/credits") {
+            let rest = rest.trim_start_matches('/');
+            return self.credits_api(rest, request).await;
         }
         if path == "/ops/credits" {
             return self.grant_credits(request).await;
+        }
+        if path == "/stripe/webhook" {
+            return self.stripe_webhook(request).await;
         }
         if let Some(rest) = path.strip_prefix("/api/") {
             if let Err(response) = check_origin(request) {
@@ -681,6 +869,16 @@ impl Console {
                     Ok(b) => b,
                     Err(r) => return r,
                 };
+                // Agents use credits only once an admin accepted the
+                // providers' terms for the org (ADR 0039).
+                if matches!(edit, Edit::Credits { on: true })
+                    && self.state().credits.terms.is_none()
+                {
+                    return error(
+                        409,
+                        "Accept the model providers' terms on Model credits first.",
+                    );
+                }
                 match self.state().edit_draft(edit) {
                     Ok(()) => ok(json!({})),
                     Err(r) => refused(r),
@@ -1546,7 +1744,8 @@ mod tests {
         let (status, page) = t.call("GET", "/api/credits", Value::Null).await;
         assert_eq!((status, &page["offered"]), (200, &json!(false)));
         let keys = Arc::new(crate::credits::MemoryKeys::default());
-        t.console.set_credits(keys.clone(), OPERATOR.into());
+        t.console
+            .set_credits(keys.clone(), OPERATOR.into(), 0.0, None);
         let grant = |token: &str, usd: f64| {
             let auth = format!("Bearer {token}");
             request(
@@ -1608,9 +1807,22 @@ mod tests {
         assert_eq!(json_of(&r)["remaining_usd"], 125.0);
         assert_eq!(t.console.state().credits.version, 1, "the same key");
 
-        // Turning them on for agents is a policy edit, published like any;
-        // off takes the provider and its model out.
+        // Turning them on for agents is a policy edit, published like any,
+        // once an admin accepted the providers' terms; off takes the
+        // provider and its model out.
         assert_eq!(page["on"], false);
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/policy/edit",
+                json!({ "edit": "credits", "on": true }),
+            )
+            .await;
+        assert_eq!(status, 409, "the terms first");
+        let (status, _) = t
+            .call("POST", "/api/credits/terms", json!({ "accept": true }))
+            .await;
+        assert_eq!(status, 200);
         let (status, _) = t
             .call(
                 "POST",
@@ -1633,6 +1845,92 @@ mod tests {
         .await;
         let draft = t.console.state().draft().unwrap();
         assert!(!crate::edits::credits_on(&draft) && draft.models.default.is_none());
+    }
+
+    #[tokio::test]
+    async fn adr0039_an_admin_pays_by_card_and_stripes_signed_webhook_adds_credits_less_our_markup()
+    {
+        const SECRET: &str = "whsec_test_for_console";
+        let t = console().await;
+        let keys = Arc::new(crate::credits::MemoryKeys::default());
+        t.console.set_credits(
+            keys.clone(),
+            "operator-token-for-tests-only-0123456789".into(),
+            0.25,
+            Some(Arc::new(crate::credits::DevPayments::new(SECRET))),
+        );
+        let (_, page) = t.call("GET", "/api/credits", Value::Null).await;
+        assert_eq!(
+            (&page["can_buy"], &page["terms_accepted"]),
+            (&json!(true), &json!(false))
+        );
+
+        // Not before the terms, nor too little or too much.
+        let (status, _) = t
+            .call("POST", "/api/credits/checkout", json!({ "usd": 100 }))
+            .await;
+        assert_eq!(status, 409);
+        t.call("POST", "/api/credits/terms", json!({ "accept": true }))
+            .await;
+        for usd in [1.0, 1e9] {
+            let (status, _) = t
+                .call("POST", "/api/credits/checkout", json!({ "usd": usd }))
+                .await;
+            assert_eq!(status, 400, "{usd}");
+        }
+        let (status, made) = t
+            .call("POST", "/api/credits/checkout", json!({ "usd": 100 }))
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(made["url"], "http://127.0.0.1:7400/#/credits/paid");
+        // Coming back from the page adds nothing: the webhook does.
+        assert!(t.console.state().credits.grants.is_empty());
+
+        let event = |org: &str| {
+            format!(
+                r#"{{"id":"evt_1","type":"checkout.session.completed","data":{{"object":{{"id":"cs_dev_1","mode":"payment","payment_status":"paid","amount_total":10000,"currency":"usd","metadata":{{"org":"{org}","kind":"model_credits"}}}}}}}}"#
+            )
+        };
+        let webhook = |body: &str, secret: &str| {
+            let at = glass_types::Timestamp::now().unix_seconds();
+            let signature =
+                glass_gateway_providers::stripe::signature_header(secret, at, body.as_bytes());
+            Request {
+                method: "POST".into(),
+                path: "/stripe/webhook".into(),
+                query: String::new(),
+                headers: vec![
+                    ("stripe-signature".into(), signature),
+                    ("content-type".into(), "application/json".into()),
+                ],
+                body: body.as_bytes().to_vec(),
+            }
+        };
+        // A forged one changes nothing; another org's is left alone.
+        let r = t
+            .console
+            .handle(&webhook(&event("acme"), "whsec_guess"))
+            .await;
+        assert_eq!(r.status, 400);
+        let r = t.console.handle(&webhook(&event("globex"), SECRET)).await;
+        assert_eq!(r.status, 200);
+        assert!(t.console.state().credits.grants.is_empty());
+
+        // Ours: $100 paid buys $80 at OpenRouter, once however often it comes.
+        for _ in 0..2 {
+            let r = t.console.handle(&webhook(&event("acme"), SECRET)).await;
+            assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        }
+        let credits = t.console.state().credits.clone();
+        assert_eq!(credits.grants.len(), 1);
+        assert_eq!((credits.granted(), credits.limit()), (100.0, 80.0));
+        let (_, page) = t.call("GET", "/api/credits", Value::Null).await;
+        assert_eq!(
+            (&page["granted_usd"], &page["remaining_usd"]),
+            (&json!(100.0), &json!(100.0))
+        );
+        assert_eq!(page["grants"][0]["paid"], true);
+        assert!(t.sync("lab-1", None, 0).await.credits.is_some());
     }
 
     #[tokio::test]

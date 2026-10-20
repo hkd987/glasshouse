@@ -848,3 +848,11 @@ details.file[open] summary {
 .grant:last-child {
   border-bottom: none;
 }
+
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 12px 0 8px;
+  font-size: 13px;
+}

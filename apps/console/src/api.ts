@@ -252,7 +252,13 @@ export interface CreditsPage {
   granted_usd: number;
   spent_usd: number | null;
   remaining_usd: number | null;
-  grants: { at: string; usd: number; note: string }[];
+  grants: { at: string; usd: number; note: string; paid: boolean }[];
+  /** An admin accepted the model providers' terms for the org. */
+  terms_accepted: boolean;
+  /** Admins may buy credits here, by card. */
+  can_buy: boolean;
+  min_usd: number;
+  max_usd: number;
   /** Why usage couldn't be read, if it couldn't. */
   problem: string | null;
 }

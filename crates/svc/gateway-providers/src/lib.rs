@@ -1,6 +1,7 @@
 //! The model providers that leave the machine (ADR 0018): the Anthropic
 //! Messages API (MP-4), Amazon Bedrock (MP-1, MP-2) and OpenRouter (model
-//! credits and individuals' own keys, ADR 0039), over HTTPS; the
+//! credits and individuals' own keys, ADR 0039), over HTTPS; Stripe, which
+//! takes payment for model credits ([`stripe`]); the
 //! org's admin console, for managed settings ([`ConsoleClient`], ADR
 //! 0023); and the person's mail servers, over IMAP and SMTP submission
 //! ([`ImapLink`], ADR 0037).
@@ -21,6 +22,7 @@ mod http;
 pub mod mail;
 mod openrouter;
 mod sigv4;
+pub mod stripe;
 
 use std::sync::Arc;
 

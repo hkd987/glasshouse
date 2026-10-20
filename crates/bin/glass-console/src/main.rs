@@ -77,9 +77,13 @@ struct Args {
     #[arg(long)]
     relay: Option<String>,
     /// Model credits (ADR 0039): a TOML file, mode 0600, with our
-    /// OpenRouter `management_key` and the `operator_token` our staff add
-    /// credits with (`endpoint` optional). With `--dev` and no file,
-    /// credits are kept in memory and reach no model.
+    /// OpenRouter `management_key`, the `operator_token` our staff add
+    /// credits with, our `markup` over OpenRouter's price (0.25 is 25 %)
+    /// and, for admins to pay by card, `stripe_secret_key` and
+    /// `stripe_webhook_secret` (`endpoint`, `stripe_endpoint` optional).
+    /// With `--dev` and no file, credits are kept in memory, reach no
+    /// model, cost 25 % over and are paid by webhooks signed with
+    /// `GLASS_CONSOLE_STRIPE_WEBHOOK` (or a fixed development secret).
     #[arg(long)]
     credits: Option<PathBuf>,
 }
@@ -90,9 +94,20 @@ struct Args {
 struct CreditsConfig {
     management_key: String,
     operator_token: String,
+    /// Required: pricing is never a default.
+    markup: f64,
     #[serde(default)]
     endpoint: Option<String>,
+    #[serde(default)]
+    stripe_secret_key: Option<String>,
+    #[serde(default)]
+    stripe_webhook_secret: Option<String>,
+    #[serde(default)]
+    stripe_endpoint: Option<String>,
 }
+
+/// The markup `--dev` sells credits at.
+const DEV_MARKUP: f64 = 0.25;
 
 /// The credits config at `path`, if only its owner can read it.
 fn credits_config(path: &std::path::Path) -> anyhow::Result<CreditsConfig> {
@@ -109,6 +124,18 @@ fn credits_config(path: &std::path::Path) -> anyhow::Result<CreditsConfig> {
     if config.operator_token.len() < 32 {
         anyhow::bail!(
             "the operator token in {} is too short to guess at",
+            path.display()
+        );
+    }
+    if !config.markup.is_finite() || !(0.0..=10.0).contains(&config.markup) {
+        anyhow::bail!(
+            "the markup in {} is a fraction, such as 0.25",
+            path.display()
+        );
+    }
+    if config.stripe_secret_key.is_some() != config.stripe_webhook_secret.is_some() {
+        anyhow::bail!(
+            "{} needs both stripe_secret_key and stripe_webhook_secret, or neither",
             path.display()
         );
     }
@@ -209,18 +236,38 @@ async fn run(args: Args) -> anyhow::Result<()> {
     match &args.credits {
         Some(path) => {
             let config = credits_config(path)?;
+            let payments = match (&config.stripe_secret_key, &config.stripe_webhook_secret) {
+                (Some(key), Some(webhook)) => Some(std::sync::Arc::new(credits::StripePayments {
+                    stripe: glass_gateway_providers::stripe::Stripe::new(
+                        config.stripe_endpoint.as_deref(),
+                        key,
+                    ),
+                    webhook_secret: webhook.clone(),
+                })
+                    as std::sync::Arc<dyn credits::Payments>),
+                _ => None,
+            };
             console.set_credits(
                 std::sync::Arc::new(glass_gateway_providers::OpenRouterKeys::new(
                     config.endpoint.as_deref(),
                     &config.management_key,
                 )),
                 config.operator_token,
+                config.markup,
+                payments,
             );
         }
         None if args.dev => {
             let token = std::env::var("GLASS_CONSOLE_OPERATOR")
                 .unwrap_or_else(|_| "dev-operator-token-not-a-secret".into());
-            console.set_credits(std::sync::Arc::new(credits::MemoryKeys::default()), token);
+            let webhook = std::env::var("GLASS_CONSOLE_STRIPE_WEBHOOK")
+                .unwrap_or_else(|_| "whsec_dev_not_a_secret".into());
+            console.set_credits(
+                std::sync::Arc::new(credits::MemoryKeys::default()),
+                token,
+                DEV_MARKUP,
+                Some(std::sync::Arc::new(credits::DevPayments::new(webhook))),
+            );
         }
         None => {}
     }

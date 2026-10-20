@@ -285,11 +285,7 @@ async fn main() -> ExitCode {
             Want::Denied,
             mail_keys_and_ports(),
         ),
-        attempt(
-            "models: read the model keys",
-            Want::Denied,
-            model_keys(),
-        ),
+        attempt("models: read the model keys", Want::Denied, model_keys()),
         attempt(
             "files: read the computer's own key",
             Want::Denied,

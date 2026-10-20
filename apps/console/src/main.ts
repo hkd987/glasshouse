@@ -123,7 +123,7 @@ async function route(): Promise<void> {
     else if (section === "catalog") await catalogPage(content);
     else if (section === "devices") await devicesPage(content);
     else if (section === "mail") await mailPage(content);
-    else if (section === "credits") await creditsPage(content);
+    else if (section === "credits") await creditsPage(content, arg);
     else await policyPage(content, arg ? decodeURIComponent(arg) : "ap-ops");
     document.documentElement.dataset.page = section;
     performance.mark(`console:${section}`);

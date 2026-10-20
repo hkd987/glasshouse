@@ -4,9 +4,14 @@ Status: **Accepted** (2026-10-20). Built: the OpenRouter provider; the
 cost and model on the record; a gateway that follows its keys; the
 console's credits (one capped key per org, grants by our operators, the
 Model credits page, the policy edit) and the key's delivery to computers;
-individuals' own keys in Settings. Next: rotating the key; payments. PRD MP-1, MP-4, MP-8, GT-3. The owner asked for a path for
+individuals' own keys in Settings; payment by card through Stripe at our
+markup, and the providers' terms accepted for each org. Next: whether
+credits' requests go through our servers (open, below); rotating the key.
+PRD MP-1, MP-4, MP-8, MP-10, MP-11, GT-3. The owner asked for a path for
 orgs that use neither Bedrock nor Claude Code: admins buy model usage
 from us in bulk, and we route it with OpenRouter's auto mode
+(2026-10-20). The owner chose Stripe for payments and a markup over
+OpenRouter's price, with requests passed through to OpenRouter
 (2026-10-20).
 
 ## Context
@@ -24,10 +29,18 @@ from us in bulk, and we route it with OpenRouter's auto mode
   creates API keys with a credit `limit` that OpenRouter enforces, and
   reports each key's `usage` and `limit_remaining`. Used-up credits answer
   HTTP 402.
-- OpenRouter's consumer terms forbid reselling API access (§7(4)). Its
-  enterprise terms license the service for a customer's own end
-  customers (§2.1). Credits expire after 365 days (§4.2) and can't be
-  moved (§4.4).
+- OpenRouter's terms (openrouter.ai/terms, read 2026-10-20):
+  - forbid using it "for purposes of reselling API access to Models"
+    (§7, item 4) and to "sell or otherwise transfer the access granted"
+    (§7, item 14);
+  - provide for giving "your customers (to the extent you incorporate
+    the Service into your own products and services) access to Models"
+    (§5.1), with those customers bound by the model providers' terms and
+    us answerable for them (§5.1, §5.2, §5.5);
+  - let credits expire 365 days after purchase (§4.2); they aren't
+    refundable after 24 hours (§4.1) nor transferable (§4.4).
+  Which of those Glasshouse credits are is for the owner and counsel; the
+  design below decides what they look like.
 
 ## Decision
 1. **OpenRouter is a provider kind (`openrouter`).**
@@ -62,13 +75,25 @@ from us in bulk, and we route it with OpenRouter's auto mode
    - The default covers public and internal data. Confidential data goes
      to credits only if IT adds them to its route (GT-3).
    - Agents still need `model.complete` in their allowed actions.
-5. **Adding credits is ours until payments exist.**
-   - The console page shows the org its balance, what it has used, and
-     whether credits are on.
-   - Credits are added by Glasshouse, through an operator route with its
-     own token, not by an org admin's session.
-   - Card payments, invoices and a markup come with a payment processor,
-     the owner's to choose.
+5. **Admins pay by card through Stripe, at our markup.**
+   - The console makes a Stripe Checkout Session and sends the admin to
+     Stripe's page; card details never reach us. Each session names the
+     org in its metadata.
+   - Stripe's webhook (`/stripe/webhook`) says it was paid. The console
+     takes it only with a valid `Stripe-Signature` for the endpoint's
+     secret, at most 5 minutes old, for its own org, and grants what the
+     event says was paid, once per session however often Stripe sends it.
+     Coming back from Stripe's page grants nothing.
+   - Our `markup` (in the console's credits file, required: 0.25 is 25 %)
+     is taken at the grant: $100 paid raises the key's OpenRouter limit by
+     $80. The org sees its own dollars throughout: bought, spent and left
+     are OpenRouter's numbers at the rate it paid. The markup is never
+     shown.
+   - Our operators can still add credits (an invoice, a gift) with their
+     own token, at the same markup. Admins can't.
+   - Before an org buys, or agents use credits, an admin accepts
+     OpenRouter's terms and the model providers' for the org (§5.1); the
+     console records who and when.
 6. **Individuals use the same provider with their own key.**
    - On a computer no organization manages, its owner (ADR 0038) connects
      an OpenRouter or Anthropic key in Settings. glassd keeps it root
@@ -88,12 +113,24 @@ from us in bulk, and we route it with OpenRouter's auto mode
 - A computer that leaves the org keeps a key until it's rotated. Rotating
   (create, push, disable the old one) is the next step, and so is
   rotating when IT removes a computer.
+- **Open: should credits' requests go through our servers?** Today the
+  org's OpenRouter key is on each of its computers, readable by root, so
+  an org's IT could use it outside Glasshouse: that is close to the
+  "transfer the access granted" §7 forbids. Passing requests through our
+  servers keeps the key with us (the computer signs each request with its
+  own key, ADR 0030 slice P), makes rotation moot and meters each call
+  exactly, but prompts (redacted on the computer) would cross our
+  servers, which GT-3 says they don't. The owner decides; until then
+  credits stay as built.
 
 ## What no code supplies
-- **An OpenRouter enterprise agreement.** The consumer terms forbid
-  reselling access. No paying org can use credits until one is signed.
-- A payment processor, pricing and our markup, and what we say about
-  credits that expire after 365 days.
+- Whether Glasshouse credits are "incorporated into our product" (§5.1)
+  or "reselling API access" (§7): the owner's and counsel's call, best
+  confirmed with OpenRouter in writing before the first paying org.
+- Our markup, the Stripe account (its secret key and the webhook
+  endpoint's secret, in the console's credits file), our refund terms
+  against OpenRouter's 24 hours, and what we say about credits that
+  expire after 365 days.
 - Our OpenRouter balance must always cover the sum of every org's limits.
   The limits are slices of one balance. Low-balance alerts to us are part
   of the console work.
