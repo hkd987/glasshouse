@@ -357,7 +357,7 @@ impl Managed {
                     toml::Value::String(key.clone()),
                     credits.version
                 );
-                write_root_only(&path, text.as_bytes())
+                crate::write_root_only(&path, text.as_bytes())
                     .map_err(|e| format!("{}: {e}", path.display()))?;
             }
             None => match std::fs::remove_file(&path) {
@@ -778,28 +778,6 @@ fn kept_credits_version(path: &Path) -> Option<u64> {
     let text = std::fs::read_to_string(path).ok()?;
     let table: toml::Table = toml::from_str(&text).ok()?;
     table.get("credits")?.get("version")?.as_str()?.parse().ok()
-}
-
-/// Writes `bytes` to `path` whole, readable by root alone, in a folder
-/// only root can enter.
-fn write_root_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
-    let tmp = path.with_extension("toml.new");
-    let _ = std::fs::remove_file(&tmp);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]

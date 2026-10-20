@@ -3,8 +3,8 @@
 Status: **Accepted** (2026-10-20). Built: the OpenRouter provider; the
 cost and model on the record; a gateway that follows its keys; the
 console's credits (one capped key per org, grants by our operators, the
-Model credits page, the policy edit) and the key's delivery to computers.
-Next: individuals' own keys in Settings; rotating the key. PRD MP-1, MP-4, MP-8, GT-3. The owner asked for a path for
+Model credits page, the policy edit) and the key's delivery to computers;
+individuals' own keys in Settings. Next: rotating the key; payments. PRD MP-1, MP-4, MP-8, GT-3. The owner asked for a path for
 orgs that use neither Bedrock nor Claude Code: admins buy model usage
 from us in bulk, and we route it with OpenRouter's auto mode
 (2026-10-20).

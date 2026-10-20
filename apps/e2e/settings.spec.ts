@@ -4,11 +4,11 @@
 // The suite's computer is the suite user's own (ADR 0038): they change its
 // own settings too, for everyone on it.
 
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 
-import { SHOTS, appUrl, audit, control } from "./env.ts";
+import { DEV, SHOTS, appUrl, audit, control } from "./env.ts";
 
 interface SettingsView {
   settings: { id: string; value: unknown }[];
@@ -71,4 +71,32 @@ test("adr0038 the owner of a computer no organization manages turns its own sett
 
   await usb.getByRole("button", { name: "Use default" }).click();
   await expect(usb.locator("input.switch")).toBeChecked();
+});
+
+test("adr0039 the owner connects their own AI models in Settings, and the key stays with the system", async ({ page }) => {
+  const key = "sk-or-v1-e2e-own-key-not-real";
+  await page.goto(appUrl("settings"));
+  await expect(page.locator("html[data-ready=true]")).toHaveCount(1);
+  const row = page.locator('[data-setting="models"]');
+  await row.scrollIntoViewIfNeeded();
+  await row.locator("select[name=service]").selectOption("openrouter");
+  await row.locator("input[name=key]").fill(key);
+  await row.locator("[data-test=connect]").click();
+  await expect(page.locator(".banner")).toContainText("your OpenRouter account");
+  await expect(row).toContainText("Your OpenRouter account");
+  await page.screenshot({ path: join(SHOTS, "settings-ai-models.png") });
+
+  // Kept where only the system reads it; never on the record or in a log.
+  const file = join(DEV, "state/models/personal.toml");
+  expect(statSync(file).mode & 0o077).toBe(0);
+  expect(JSON.stringify(audit())).not.toContain("e2e-own-key");
+  expect(audit().some((r) => r.event.action === "settings.models_connect")).toBe(true);
+  for (const log of ["glassd.log", "bridge.log"]) {
+    const path = join(DEV, log);
+    if (existsSync(path)) expect(readFileSync(path, "utf8")).not.toContain("e2e-own-key");
+  }
+
+  await row.locator("[data-test=disconnect]").click();
+  await expect(row.locator("[data-test=connect]")).toBeVisible();
+  expect(existsSync(file)).toBe(false);
 });

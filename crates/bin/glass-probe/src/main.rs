@@ -128,6 +128,27 @@ fn mail_keys_and_ports() -> Result<String, String> {
     Err(seen.join("; "))
 }
 
+/// The model keys glassd keeps (ADR 0018, ADR 0039): IT's secrets file,
+/// and in glassd's state the org's credits key and an owner's own. An
+/// agent reaches models only through `model.complete`.
+fn model_keys() -> Result<String, String> {
+    let mut seen = Vec::new();
+    for file in [
+        "/usr/local/etc/glasshouse/model-secrets.toml",
+        "/var/db/glasshouse/models/credits.toml",
+        "/var/db/glasshouse/models/personal.toml",
+    ] {
+        match std::fs::read(file) {
+            Ok(_) => return Ok(format!("read {file}")),
+            Err(e) => seen.push(format!("{file}: {e}")),
+        }
+    }
+    if std::fs::read_dir("/var/db/glasshouse/models").is_ok() {
+        return Ok("opened /var/db/glasshouse/models".into());
+    }
+    Err(seen.join("; "))
+}
+
 /// Connecting to the app bridge of the person this agent works for, on
 /// the port their uid gives it.
 fn app_bridge() -> Result<String, String> {
@@ -263,6 +284,11 @@ async fn main() -> ExitCode {
             "mail: open mail sign-ins or reach a mail port",
             Want::Denied,
             mail_keys_and_ports(),
+        ),
+        attempt(
+            "models: read the model keys",
+            Want::Denied,
+            model_keys(),
         ),
         attempt(
             "files: read the computer's own key",

@@ -14,6 +14,7 @@ mod config;
 mod device;
 mod managed;
 mod org_apps;
+mod personal;
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -126,13 +127,17 @@ fn gateway(config: &Config, policy: &Policy) -> Models {
             Secrets::default()
         }
     };
-    // On a managed computer, the org's model credits key as its console
-    // sent it (ADR 0039); IT's own file wins any clash.
-    if config.managed.is_some() {
-        match Secrets::load(&credits_path(config), uid) {
-            Ok(credits) => secrets.merge(credits),
-            Err(e) => notes.push(e.to_string()),
-        }
+    // The org's model credits key as its console sent it, on a managed
+    // computer; on one nobody manages, its owner's own key (ADR 0039).
+    // IT's own file wins any clash.
+    let extra = if config.managed.is_some() {
+        credits_path(config)
+    } else {
+        personal::path(config)
+    };
+    match Secrets::load(&extra, uid) {
+        Ok(more) => secrets.merge(more),
+        Err(e) => notes.push(e.to_string()),
     }
     let (gateway, more) =
         glass_gateway_providers::connect(&policy.document().models.providers, &secrets);
@@ -162,6 +167,8 @@ struct Models {
 struct Prepared {
     config: Config,
     loaded: Loaded,
+    /// The policy file's, before an owner's AI models are added (ADR 0039).
+    base_policy: Policy,
     store: PolicyStore,
     registry: Registry,
     models: Models,
@@ -246,6 +253,14 @@ fn prepare(args: &Args) -> anyhow::Result<Prepared> {
         }
     }
     let org = OrgData::new(&config);
+    // On a computer nobody manages, its owner's AI models join its policy
+    // (ADR 0039).
+    let mut loaded = loaded;
+    let base_policy = loaded.policy.clone();
+    if config.managed.is_none() {
+        loaded.policy =
+            personal::with_models(loaded.policy, personal::connected(&config).as_deref());
+    }
     let registry = registry(&config, &loaded.policy, &org)?;
     for warning in loaded.policy.lint(&registry.lint_info()) {
         tracing::warn!("policy: {warning}");
@@ -258,6 +273,7 @@ fn prepare(args: &Args) -> anyhow::Result<Prepared> {
     Ok(Prepared {
         config,
         loaded,
+        base_policy,
         store,
         registry,
         models,
@@ -367,6 +383,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     let Prepared {
         config,
         loaded,
+        base_policy,
         store,
         registry,
         models,
@@ -620,6 +637,18 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // What IT sets for the computer that glassd applies itself: the time
     // zone, and USB drives for whoever is signed in (ADR 0031).
     device::watch(&org.settings, &runtime, config.studio.source.clone());
+    // The owner of a computer nobody manages connects their AI models in
+    // Settings (ADR 0039).
+    if config.managed.is_none() {
+        let personal = personal::PersonalModels::new(
+            config.clone(),
+            org.clone(),
+            base_policy,
+            policy_source.clone(),
+        );
+        personal.attach(&runtime);
+        org.settings.set_model_keys(personal);
+    }
 
     let listener = bind_control_socket(&config.control_socket)?;
     // The app socket (ADR 0024): world-connectable too, authorized by uid,
@@ -711,6 +740,28 @@ fn bind_control_socket(path: &Path) -> anyhow::Result<UnixListener> {
         UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
     Ok(listener)
+}
+
+/// Writes `bytes` to `path` whole, readable by root alone, in a folder only
+/// root can enter: the model keys glassd keeps (ADR 0039).
+pub(crate) fn write_root_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let tmp = path.with_extension("toml.new");
+    let _ = std::fs::remove_file(&tmp);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]

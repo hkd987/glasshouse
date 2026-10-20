@@ -23,8 +23,8 @@ pub use glass_app_mail::{
 pub use glass_app_meet::MeetHandle;
 use glass_app_meet::MeetProvider;
 use glass_app_people::PeopleProvider;
-pub use glass_app_settings::SettingsHandle;
 use glass_app_settings::SettingsProvider;
+pub use glass_app_settings::{ModelKeys, SettingsHandle};
 use glass_app_skills::SkillsProvider;
 pub use glass_app_studio::Studio;
 use glass_app_studio::StudioProvider;

@@ -394,11 +394,11 @@ pub fn people_only(action: &ActionName) -> bool {
 /// Actions only the person takes, in their own app, because they carry a
 /// secret only the person has (ADR 0037): an agent's call is Never,
 /// whatever its rules say.
-pub const PERSONS_OWN: &[&str] = &["mail.connect"];
+pub const PERSONS_OWN: &[&str] = &["mail.connect", "settings.models_connect"];
 
-const PERSONS_OWN_WHY: &str = "only the person connects their mail, with their password, in \
-     Mail (ADR 0037); no agent ever does, and the Mail app's own [[app]] tiers say what the \
-     person does there";
+const PERSONS_OWN_WHY: &str = "only the person connects their mail or their AI models, with \
+     their password or key, in Mail or Settings (ADR 0037, ADR 0039); no agent ever does, and \
+     those apps' own [[app]] tiers say what the person does there";
 
 fn is_persons_own(name: &str) -> bool {
     PERSONS_OWN.contains(&name)
@@ -911,6 +911,41 @@ mod tests {
         // `*` names no app, and "meeting.*" isn't meetings.
         with_default("[[agent]]\nid = \"anything\"\nallowed_actions = [\"*\", \"meeting.*\"]\n")
             .unwrap();
+    }
+
+    #[test]
+    fn adr0039_no_agent_connects_ai_models_whatever_its_rules_and_settings_does() {
+        let everything = "[[agent]]\nid = \"anything\"\nallowed_actions = [\"*\", \"settings.*\"]\n\
+                          [[group]]\nname = \"all\"\nmembers = [\"dana\"]\nagents = [\"anything\"]\n\
+                          [group.tiers]\n\"*\" = \"auto\"\n";
+        let policy = with_default(everything).unwrap();
+        let agent = policy
+            .effective("dana", &"anything".parse().unwrap())
+            .unwrap();
+        let connect = agent.tier_for(&name("settings.models_connect"), Tier::Auto);
+        assert_eq!(
+            (connect.tier, connect.source),
+            (Tier::Never, RuleSource::PersonsOwn)
+        );
+        let err = with_default(
+            "[[group]]\nname = \"sales\"\nmembers = [\"dana\"]\n[group.tiers]\n\"settings.models_connect\" = \"auto\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("settings.models_connect"), "{err}");
+        let policy = Policy::from_toml(crate::DEFAULT_POLICY).unwrap();
+        let settings = policy.for_app(
+            "dana",
+            &"settings".parse().unwrap(),
+            &[name("settings.models_connect"), name("settings.models")],
+            Label::Internal,
+        );
+        assert_eq!(
+            settings
+                .tier_for(&name("settings.models_connect"), Tier::Never)
+                .tier,
+            Tier::Auto
+        );
     }
 
     #[test]

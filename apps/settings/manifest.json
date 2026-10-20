@@ -3,7 +3,16 @@
   "name": "Settings",
   "version": "0.1.0",
   "description": "How this computer is set up for you: the clock, the lock screen and the browser. What IT locked shows as set by IT.",
-  "actions": ["settings.list", "settings.set"],
-  "permissions": ["offline"],
-  "labels": ["public"]
+  "actions": [
+    "settings.list",
+    "settings.set",
+    "settings.models",
+    "settings.models_connect"
+  ],
+  "permissions": [
+    "offline"
+  ],
+  "labels": [
+    "public"
+  ]
 }

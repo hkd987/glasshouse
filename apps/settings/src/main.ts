@@ -27,9 +27,23 @@ interface Setting {
   editable?: boolean;
 }
 
+/** How agents reach AI models (ADR 0039): the service, never the key. */
+interface Models {
+  connected: string | null;
+  setup_choice: string | null;
+  /** IT decides on a managed computer. */
+  managed: boolean;
+  /** The person is this computer's owner. */
+  editable: boolean;
+  services: { id: string; name: string }[];
+}
+
 const bridge = new Bridge({ app: "settings" });
 const state = {
   settings: [] as Setting[],
+  models: null as Models | null,
+  /** What the owner is connecting: the key is typed here and sent once. */
+  connecting: { service: "openrouter", key: "" },
   /** The names of the apps settings list, by id, as this computer offers them. */
   appNames: {} as Record<string, string>,
   notice: null as { text: string; tone: "ok" | "bad" } | null,
@@ -47,6 +61,8 @@ async function load(): Promise<void> {
       state.appNames = read.result.data.app_names ?? {};
     }
     else state.notice = { text: read.result.text, tone: "bad" };
+    const models = await bridge.read<Models>("settings.models", {});
+    if (models.result.ok) state.models = models.result.data;
   } catch (error) {
     state.notice = { text: error instanceof Offline ? "Settings haven't been loaded on this computer yet." : String(error), tone: "bad" };
   }
@@ -216,6 +232,88 @@ function control(setting: Setting): HTMLElement {
   return h("span", { class: "muted" }, words(setting));
 }
 
+/** Connects the owner's own AI models, or disconnects them (ADR 0039). */
+async function connect(service: string | null): Promise<void> {
+  state.busy = "models";
+  state.notice = null;
+  render();
+  try {
+    const key = state.connecting.key;
+    state.connecting.key = "";
+    const result = await bridge.call("settings.models_connect", service ? { service, key } : { service: null });
+    state.notice = { text: result.text, tone: result.ok ? "ok" : "bad" };
+  } catch (error) {
+    state.notice = { text: error instanceof BridgeError ? error.message : String(error), tone: "bad" };
+  }
+  state.busy = null;
+  await load();
+}
+
+/** How agents reach AI models: the owner's to connect, IT's when managed. */
+function models(m: Models): HTMLElement {
+  const name = (id: string | null) => m.services.find((s) => s.id === id)?.name ?? id ?? "";
+  const busy = state.busy === "models" || state.offline;
+  let control: HTMLElement;
+  let who: string | null = null;
+  if (m.managed) {
+    control = h("span", { class: "muted" }, "Set by your organization");
+  } else if (m.connected) {
+    control = h(
+      "span",
+      { class: "control" },
+      h("span", {}, `Your ${name(m.connected)} account`),
+      m.editable ? h("button", { class: "link", disabled: busy, "data-test": "disconnect", onclick: () => connect(null) }, "Disconnect") : null,
+    );
+    if (!m.editable) who = "Connected by this computer's owner";
+  } else if (m.editable) {
+    control = h(
+      "span",
+      { class: "control" },
+      h(
+        "select",
+        { name: "service", "aria-label": "Service", disabled: busy, onchange: (e: Event) => (state.connecting.service = (e.target as HTMLSelectElement).value) },
+        ...m.services.map((s) => h("option", { value: s.id, selected: state.connecting.service === s.id }, s.name)),
+      ),
+      h("input", {
+        class: "text",
+        type: "password",
+        name: "key",
+        autocomplete: "off",
+        "aria-label": "Key",
+        placeholder: "Your API key",
+        disabled: busy,
+        oninput: (e: Event) => (state.connecting.key = (e.target as HTMLInputElement).value),
+      }),
+      h("button", { class: "button", disabled: busy, "data-test": "connect", onclick: () => connect(state.connecting.service) }, "Connect"),
+    );
+    if (m.setup_choice === "api-key") who = "You chose to use an API key when you set up this computer.";
+  } else {
+    control = h("span", { class: "muted" }, "None");
+    who = "This computer's owner connects them";
+  }
+  return h(
+    "section",
+    { class: "group" },
+    h("h2", {}, "AI models"),
+    h(
+      "div",
+      { class: "rows" },
+      h(
+        "div",
+        { class: "setting", "data-setting": "models" },
+        h(
+          "div",
+          {},
+          h("div", { class: "title" }, "How agents reach AI models"),
+          h("div", { class: "help" }, "Your own OpenRouter or Anthropic account. The key stays on this computer, where only the system can read it, and is never shown again."),
+          who ? h("div", { class: "who" }, who) : null,
+        ),
+        control,
+      ),
+    ),
+  );
+}
+
 function row(setting: Setting): HTMLElement {
   return h(
     "div",
@@ -240,6 +338,7 @@ function render(): void {
       ...sections.map((section) =>
         h("section", { class: "group" }, h("h2", {}, section), h("div", { class: "rows" }, ...state.settings.filter((s) => s.section === section).map(row))),
       ),
+      state.models ? models(state.models) : null,
     ),
   );
   const page = root.querySelector(".page");

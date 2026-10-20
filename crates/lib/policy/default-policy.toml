@@ -68,6 +68,11 @@ approval_timeout_secs = 900
 # any agent's allowed actions.
 "settings.list" = "auto"
 "settings.set" = "auto"
+# AI models (ADR 0039): which service the computer's owner connected is
+# readable; connecting one, with its key, is the owner's alone, in
+# Settings (its [[app]] below), never an agent's whatever its rules say.
+"settings.models" = "auto"
+"settings.models_connect" = "never"
 # Chat (CF-91, ADR 0030): reading the person's conversations is quiet;
 # posting and making a channel leave the machine and can't be taken back,
 # so they ask. What the person types in Chat itself is the [[app]] below.
@@ -234,6 +239,11 @@ tiers = { "meet.list" = "auto", "meet.join" = "auto", "meet.keys" = "auto", "mee
 [[app]]
 id = "calendar"
 tiers = { "meet.list" = "auto" }
+
+# The computer's owner connects their own AI models in Settings (ADR 0039).
+[[app]]
+id = "settings"
+tiers = { "settings.models_connect" = "auto" }
 
 # IT self-service (AE-4): diagnoses this computer and fixes what's on IT's
 # list. The only agent allowed the system actions, which glassd runs with its

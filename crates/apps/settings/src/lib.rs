@@ -27,8 +27,30 @@ use serde_json::{Value, json};
 
 pub const LIST: &str = "settings.list";
 pub const SET: &str = "settings.set";
+/// Which AI models service the computer's owner connected, never the key.
+pub const MODELS: &str = "settings.models";
+/// The owner connects their own models service with its key (ADR 0039).
+/// The person's own, in Settings alone: never an agent's.
+pub const MODELS_CONNECT: &str = "settings.models_connect";
 /// The Settings app: the one place the computer's own settings change.
 pub const APP: &str = "settings";
+
+/// The services an owner can connect: id, name, and how a key starts.
+pub const MODEL_SERVICES: [(&str, &str, &str); 2] = [
+    ("openrouter", "OpenRouter", "sk-or-"),
+    ("anthropic", "Anthropic", "sk-ant-"),
+];
+
+/// Where a computer's owner keeps the AI models they connected (ADR 0039):
+/// glassd, root only. It never hands the key back.
+pub trait ModelKeys: Send + Sync {
+    /// The service connected, if any: `openrouter` or `anthropic`.
+    fn connected(&self) -> Option<String>;
+    /// Connects `service` with `key`, or forgets it with `None`.
+    fn connect(&self, choice: Option<(&str, &str)>) -> Result<(), String>;
+    /// How setup said agents should reach models, if it was asked.
+    fn setup_choice(&self) -> Option<String>;
+}
 
 /// A setting as someone's computer applies it.
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +91,8 @@ struct Inner {
     /// The computer's owner (ADR 0038), on a computer no organization
     /// manages: they set its own settings, kept in `computer.json`.
     owner: RwLock<Option<String>>,
+    /// Where the owner's AI models key goes (ADR 0039).
+    model_keys: RwLock<Option<Arc<dyn ModelKeys>>>,
 }
 
 /// Device settings on this computer: policy's, and each person's choices.
@@ -106,7 +130,88 @@ impl SettingsHandle {
             listeners: Mutex::new(Vec::new()),
             app_names: RwLock::new(None),
             owner: RwLock::new(None),
+            model_keys: RwLock::new(None),
         }))
+    }
+
+    /// Where the owner's AI models key is kept (glassd's, ADR 0039).
+    pub fn set_model_keys(&self, keys: Arc<dyn ModelKeys>) {
+        *self
+            .0
+            .model_keys
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(keys);
+    }
+
+    fn model_keys(&self) -> Option<Arc<dyn ModelKeys>> {
+        self.0
+            .model_keys
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// What Settings shows about AI models for `user` (ADR 0039).
+    pub fn models_view(&self, user: &str) -> Value {
+        let keys = self.model_keys();
+        let owner = self.owner();
+        json!({
+            "connected": keys.as_ref().and_then(|k| k.connected()),
+            "setup_choice": keys.as_ref().and_then(|k| k.setup_choice()),
+            "managed": owner.is_none(),
+            "editable": keys.is_some() && owner.as_deref() == Some(user),
+            "services": MODEL_SERVICES.iter().map(|(id, name, _)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// The owner connects `service` with `key`, or forgets theirs (ADR
+    /// 0039). Refused, in words, to anyone else, on a managed computer,
+    /// and for a key that isn't the service's.
+    pub fn connect_models(
+        &self,
+        user: &str,
+        choice: Option<(&str, &str)>,
+    ) -> Result<String, ActionError> {
+        let Some(keys) = self.model_keys() else {
+            return Err(ActionError::Failed(
+                "This computer can't keep a models key.".into(),
+            ));
+        };
+        match self.owner() {
+            None => {
+                return Err(ActionError::Failed(
+                    "Your organization sets how agents reach AI models.".into(),
+                ));
+            }
+            Some(owner) if owner != user => {
+                return Err(ActionError::Failed(format!(
+                    "Only this computer's owner, {owner}, connects AI models."
+                )));
+            }
+            Some(_) => {}
+        }
+        let Some((service, key)) = choice else {
+            keys.connect(None).map_err(ActionError::Failed)?;
+            return Ok("AI models are disconnected; agents can't reach any now.".into());
+        };
+        let Some((_, name, prefix)) = MODEL_SERVICES.iter().find(|(id, _, _)| *id == service)
+        else {
+            return Err(ActionError::InvalidInput(format!("no service {service:?}")));
+        };
+        let key = key.trim();
+        if !key.starts_with(prefix)
+            || key.len() > 512
+            || key.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(ActionError::InvalidInput(format!(
+                "That isn't an {name} key: they start with {prefix}."
+            )));
+        }
+        keys.connect(Some((service, key)))
+            .map_err(ActionError::Failed)?;
+        Ok(format!(
+            "Agents on this computer reach AI models through your {name} account."
+        ))
     }
 
     /// Who owns this computer (ADR 0038): the person who set up a computer
@@ -523,6 +628,14 @@ struct NoInput {}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ConnectInput {
+    service: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SetInput {
     id: String,
     /// The new value; leave it out to go back to IT's default.
@@ -565,6 +678,36 @@ impl ActionProvider for SettingsProvider {
                 default_tier: Tier::Auto,
                 ask: AskLabels::default(),
             },
+            ActionDef {
+                name: MODELS.parse().expect("static name"),
+                title: "Read how agents reach AI models".into(),
+                description: "Which AI models service the computer's owner connected, if any. \
+                              Never the key."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                side_effect: SideEffect::None,
+                default_tier: Tier::Auto,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: MODELS_CONNECT.parse().expect("static name"),
+                title: "Connect AI models".into(),
+                description: "The computer's owner connects their own OpenRouter or Anthropic \
+                              account, with its key, in Settings. Never an agent."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "service": { "type": ["string", "null"], "enum": ["openrouter", "anthropic", null] },
+                        "key": { "type": "string" }
+                    },
+                    "required": ["service"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
         ]
     }
 
@@ -593,6 +736,26 @@ impl ActionProvider for SettingsProvider {
                         None => format!("Put {} back to IT's default", def.title),
                     },
                     targets: vec![format!("Settings: {}", def.title)],
+                    ..Preview::default()
+                })
+            }
+            MODELS => {
+                let _: NoInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: "Read how agents reach AI models".into(),
+                    targets: vec!["Settings: AI models".into()],
+                    ..Preview::default()
+                })
+            }
+            MODELS_CONNECT => {
+                // Never the key: the summary and targets are audited.
+                let input: ConnectInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: match &input.service {
+                        Some(service) => format!("Connect {service} for AI models"),
+                        None => "Disconnect AI models".into(),
+                    },
+                    targets: vec!["Settings: AI models".into()],
                     ..Preview::default()
                 })
             }
@@ -663,6 +826,42 @@ impl ActionProvider for SettingsProvider {
                 Ok(ActionOutput {
                     text,
                     data: json!({ "setting": now }),
+                    changes: Vec::new(),
+                })
+            }
+            MODELS => {
+                let _: NoInput = glass_actions::parse_input(input)?;
+                let view = self.handle.models_view(&who.name);
+                Ok(ActionOutput {
+                    text: match view["connected"].as_str() {
+                        Some(service) => format!("AI models: {service}."),
+                        None => "No AI models are connected.".into(),
+                    },
+                    data: view,
+                    changes: Vec::new(),
+                })
+            }
+            MODELS_CONNECT => {
+                // The person's own, in Settings: policy makes it Never for
+                // every agent, and anything but Settings is refused here too.
+                if ctx.principal.agent.as_str() != APP {
+                    return Err(ActionError::Failed(
+                        "Only the computer's owner connects AI models, in Settings; never an agent."
+                            .into(),
+                    ));
+                }
+                let input: ConnectInput = glass_actions::parse_input(input)?;
+                let choice = match (&input.service, &input.key) {
+                    (Some(service), Some(key)) => Some((service.as_str(), key.as_str())),
+                    (Some(_), None) => {
+                        return Err(ActionError::InvalidInput("the key is missing".into()));
+                    }
+                    (None, _) => None,
+                };
+                let text = self.handle.connect_models(&who.name, choice)?;
+                Ok(ActionOutput {
+                    text,
+                    data: self.handle.models_view(&who.name),
                     changes: Vec::new(),
                 })
             }
@@ -1024,5 +1223,106 @@ members = ["dana"]
             .unwrap_err()
             .to_string();
         assert!(locked.contains("locked"), "{locked}");
+    }
+
+    /// A key store as glassd's, in memory: it remembers the key so the
+    /// test can check it went there and nowhere else.
+    #[derive(Default)]
+    struct Keys(Mutex<Option<(String, String)>>);
+
+    impl ModelKeys for Keys {
+        fn connected(&self) -> Option<String> {
+            self.0.lock().unwrap().as_ref().map(|(s, _)| s.clone())
+        }
+        fn connect(&self, choice: Option<(&str, &str)>) -> Result<(), String> {
+            *self.0.lock().unwrap() = choice.map(|(s, k)| (s.to_owned(), k.to_owned()));
+            Ok(())
+        }
+        fn setup_choice(&self) -> Option<String> {
+            Some("api-key".into())
+        }
+    }
+
+    #[test]
+    fn adr0039_the_owner_connects_their_own_models_in_settings_and_no_agent_can() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SettingsHandle::new(dir.path());
+        let keys = Arc::new(Keys::default());
+        handle.set_model_keys(keys.clone());
+        let provider = SettingsProvider::new(handle.clone());
+        let connect = MODELS_CONNECT.parse().unwrap();
+        let openrouter = json!({ "service": "openrouter", "key": "sk-or-v1-own-key-not-real" });
+
+        // A managed computer: IT decides.
+        let it = provider
+            .invoke(&ctx("dana", 1001, APP), &connect, &openrouter)
+            .unwrap_err()
+            .to_string();
+        assert!(it.contains("Your organization"), "{it}");
+
+        handle.set_owner(Some("dana".into()));
+        // Sam isn't the owner; an agent never connects, even for Dana.
+        let sam = provider
+            .invoke(&ctx("sam", 1002, APP), &connect, &openrouter)
+            .unwrap_err()
+            .to_string();
+        assert!(sam.contains("owner, dana"), "{sam}");
+        let agent = provider
+            .invoke(&ctx("dana", 1001, "claude-code"), &connect, &openrouter)
+            .unwrap_err()
+            .to_string();
+        assert!(agent.contains("never an agent"), "{agent}");
+        // A key that isn't the service's.
+        let wrong = provider
+            .invoke(
+                &ctx("dana", 1001, APP),
+                &connect,
+                &json!({ "service": "anthropic", "key": "sk-or-v1-x" }),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(wrong.contains("start with sk-ant-"), "{wrong}");
+        assert_eq!(keys.connected(), None);
+
+        // Dana connects hers: kept, and never said back.
+        let done = provider
+            .invoke(&ctx("dana", 1001, APP), &connect, &openrouter)
+            .unwrap();
+        assert!(done.text.contains("OpenRouter"), "{}", done.text);
+        assert_eq!(
+            keys.0.lock().unwrap().as_ref().unwrap().1,
+            "sk-or-v1-own-key-not-real"
+        );
+        let read = provider
+            .invoke(
+                &ctx("sam", 1002, "claude-code"),
+                &MODELS.parse().unwrap(),
+                &json!({}),
+            )
+            .unwrap();
+        assert_eq!(read.data["connected"], "openrouter");
+        assert_eq!(read.data["editable"], false);
+        assert_eq!(read.data["setup_choice"], "api-key");
+        let preview = provider
+            .preview(&ctx("dana", 1001, APP), &connect, &openrouter)
+            .unwrap();
+        for shown in [
+            done.text,
+            done.data.to_string(),
+            read.data.to_string(),
+            format!("{preview:?}"),
+        ] {
+            assert!(!shown.contains("own-key"), "{shown}");
+        }
+
+        // And disconnects.
+        provider
+            .invoke(
+                &ctx("dana", 1001, APP),
+                &connect,
+                &json!({ "service": null }),
+            )
+            .unwrap();
+        assert_eq!(keys.connected(), None);
     }
 }
