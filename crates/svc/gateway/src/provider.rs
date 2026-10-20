@@ -15,7 +15,7 @@ pub struct ProviderRequest<'a> {
     pub max_tokens: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProviderReply {
     pub text: String,
     pub input_tokens: u64,
@@ -23,6 +23,12 @@ pub struct ProviderReply {
     /// Why the model stopped, as the provider says it ("end_turn",
     /// "max_tokens").
     pub stop_reason: Option<String>,
+    /// What the provider charged for the call, in dollars, when it says
+    /// (OpenRouter does); otherwise the gateway estimates from policy.
+    pub cost_usd: Option<f64>,
+    /// The model that answered, when the provider chose it (OpenRouter's
+    /// auto router picks one per call).
+    pub served_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -300,6 +300,11 @@ pub enum ProviderKind {
     Bedrock,
     /// The Anthropic API with an org or team key (MP-4).
     Anthropic,
+    /// OpenRouter, with a key: the org's model credits bought from us, or
+    /// an individual's own (ADR 0039). Every call asks for providers that
+    /// keep no data and don't train on it.
+    #[serde(rename = "openrouter")]
+    OpenRouter,
     /// Canned, deterministic replies made on this machine; nothing leaves.
     /// For development and tests.
     Scripted,

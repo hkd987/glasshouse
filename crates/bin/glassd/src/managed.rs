@@ -365,7 +365,10 @@ impl Managed {
             origin: glass_policy::store::Origin::File(self.config.policy.clone()),
         });
         self.policy_version = Some(signed.version);
+        // Its model providers, with the keys this computer has (ADR 0039).
+        let models = crate::gateway(&self.config, &policy);
         self.runtime.apply_policy(policy, registry, self.source());
+        self.runtime.set_gateway(models.gateway);
         let mut event = AuditEvent::new(
             EventKind::PolicyLoaded,
             format!(

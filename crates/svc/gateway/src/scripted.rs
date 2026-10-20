@@ -98,6 +98,8 @@ impl ModelProvider for ScriptedProvider {
             input_tokens: tokens(chars),
             output_tokens: output,
             stop_reason: Some("end_turn".into()),
+            cost_usd: None,
+            served_by: None,
             text,
         })
     }

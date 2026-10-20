@@ -62,7 +62,8 @@ pub struct Runtime {
     pub(crate) desk: ApprovalDesk,
     pub(crate) sandbox: Arc<dyn Sandbox>,
     pub(crate) snapshots: Arc<dyn Snapshotter>,
-    pub(crate) gateway: Arc<Gateway>,
+    /// Built anew when policy's providers or their keys change (ADR 0039).
+    gateway: RwLock<Arc<Gateway>>,
     /// Device settings (UX-1, ADR 0029).
     pub(crate) device_settings: SettingsHandle,
     /// Users' layers on catalog agents (TL-2).
@@ -155,7 +156,7 @@ impl Runtime {
             desk: ApprovalDesk::new(),
             sandbox: parts.sandbox,
             snapshots: parts.snapshots,
-            gateway: parts.gateway,
+            gateway: RwLock::new(parts.gateway),
             audit: parts.audit,
             audit_ok: AtomicBool::new(true),
             events,
@@ -262,6 +263,18 @@ impl Runtime {
 
     fn settings(&self) -> Arc<Settings> {
         Arc::clone(&self.settings.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// The model gateway calls go through now.
+    pub(crate) fn gateway(&self) -> Arc<Gateway> {
+        Arc::clone(&self.gateway.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Puts a gateway built anew in force, when policy's providers or the
+    /// keys for them changed (ADR 0039): calls from now on use it, and a
+    /// call already sent finishes on the one it started with.
+    pub fn set_gateway(&self, gateway: Arc<Gateway>) {
+        *self.gateway.write().unwrap_or_else(PoisonError::into_inner) = gateway;
     }
 
     /// The policy in force for tasks starting now.

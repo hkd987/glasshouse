@@ -1,5 +1,6 @@
 //! The model providers that leave the machine (ADR 0018): the Anthropic
-//! Messages API (MP-4) and Amazon Bedrock (MP-1, MP-2), over HTTPS; the
+//! Messages API (MP-4), Amazon Bedrock (MP-1, MP-2) and OpenRouter (model
+//! credits and individuals' own keys, ADR 0039), over HTTPS; the
 //! org's admin console, for managed settings ([`ConsoleClient`], ADR
 //! 0023); and the person's mail servers, over IMAP and SMTP submission
 //! ([`ImapLink`], ADR 0037).
@@ -18,6 +19,7 @@ mod bedrock;
 mod console;
 mod http;
 pub mod mail;
+mod openrouter;
 mod sigv4;
 
 use std::sync::Arc;
@@ -29,6 +31,7 @@ pub use anthropic::AnthropicProvider;
 pub use bedrock::{AwsCredentials, BedrockProvider};
 pub use console::ConsoleClient;
 pub use mail::ImapLink;
+pub use openrouter::{AUTO as OPENROUTER_AUTO, OpenRouterProvider};
 
 /// A gateway with a provider for each policy entry this machine can use,
 /// and a note for each it can't. Notes never contain a credential.
@@ -42,6 +45,19 @@ pub fn connect(providers: &[ProviderEntry], secrets: &Secrets) -> (Gateway, Vec<
                 Some(key) => gateway.add(
                     &entry.id,
                     Arc::new(AnthropicProvider::new(
+                        entry.endpoint.as_deref(),
+                        key.clone(),
+                    )),
+                ),
+                None => notes.push(format!(
+                    "model provider {}: no api_key in the secrets file, so calls skip it",
+                    entry.id
+                )),
+            },
+            ProviderKind::OpenRouter => match secrets.get(&entry.id, "api_key") {
+                Some(key) => gateway.add(
+                    &entry.id,
+                    Arc::new(OpenRouterProvider::new(
                         entry.endpoint.as_deref(),
                         key.clone(),
                     )),
@@ -94,18 +110,26 @@ mod tests {
             kind = "bedrock"
             name = "Amazon Bedrock"
             region = "us-east-1"
+            [[models.provider]]
+            id = "credits"
+            kind = "openrouter"
+            name = "Glasshouse model credits"
             "#,
         )
         .unwrap();
         let providers = &policy.document().models.providers;
-        let secrets = Secrets::parse("[anthropic]\napi_key = \"not-a-real-key\"\n").unwrap();
+        let secrets = Secrets::parse(
+            "[anthropic]\napi_key = \"not-a-real-key\"\n[credits]\napi_key = \"sk-or-not-real\"\n",
+        )
+        .unwrap();
         let (gateway, notes) = connect(providers, &secrets);
         assert_eq!(
             gateway.providers().collect::<Vec<_>>(),
-            ["anthropic", "scripted"]
+            ["anthropic", "credits", "scripted"]
         );
         assert_eq!(notes.len(), 1);
         assert!(notes[0].starts_with("model provider bedrock: no access_key_id"));
-        assert!(!format!("{gateway:?} {notes:?}").contains("not-a-real-key"));
+        let shown = format!("{gateway:?} {notes:?}");
+        assert!(!shown.contains("not-a-real-key") && !shown.contains("sk-or-not-real"));
     }
 }

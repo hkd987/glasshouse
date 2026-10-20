@@ -70,7 +70,12 @@ pub struct CallRecord {
     pub input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
-    /// Estimated from policy's prices; absent when a price isn't set.
+    /// The model a router chose to answer, such as OpenRouter's auto
+    /// router (ADR 0039).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub served_by: Option<String>,
+    /// What the provider charged, when it says; otherwise estimated from
+    /// policy's prices, and absent when a price isn't set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
     /// Replacements by kind (DP-3).
@@ -163,6 +168,7 @@ impl Gateway {
             region: None,
             input_tokens: None,
             output_tokens: None,
+            served_by: None,
             cost_usd: None,
             redacted: vault.counts().clone(),
             request: Digest::of(&sent.to_string()),
@@ -193,7 +199,10 @@ impl Gateway {
                     record.region.clone_from(&step.region);
                     record.input_tokens = Some(reply.input_tokens);
                     record.output_tokens = Some(reply.output_tokens);
-                    record.cost_usd = cost(step, reply.input_tokens, reply.output_tokens);
+                    record.cost_usd = reply
+                        .cost_usd
+                        .or_else(|| cost(step, reply.input_tokens, reply.output_tokens));
+                    record.served_by.clone_from(&reply.served_by);
                     record.response = Some(Digest::of(&reply.text));
                     if call.log_prompts {
                         record.reply = Some(reply.text.clone());
@@ -245,7 +254,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::{Role, ScriptedProvider};
+    use crate::{ProviderReply, Role, ScriptedProvider};
 
     fn step(model: &str, provider: &str) -> RouteStep {
         RouteStep {
@@ -287,6 +296,44 @@ mod tests {
             pii: vec![PiiKind::Email],
             patterns: Vec::new(),
         })
+    }
+
+    /// A router: it names the model it chose and what the call cost.
+    #[derive(Debug)]
+    struct Router;
+
+    impl ModelProvider for Router {
+        fn complete(&self, _: &ProviderRequest<'_>) -> Result<ProviderReply, ProviderError> {
+            Ok(ProviderReply {
+                text: "ok".into(),
+                input_tokens: 1_000_000,
+                output_tokens: 0,
+                stop_reason: Some("stop".into()),
+                cost_usd: Some(0.42),
+                served_by: Some("anthropic/claude-sonnet-4.5".into()),
+            })
+        }
+    }
+
+    #[test]
+    fn adr0039_what_the_provider_charged_and_who_answered_go_on_the_record() {
+        let gateway = Gateway::new().with("credits", Arc::new(Router));
+        let input = input("hello");
+        let route = route(vec![step("auto", "credits")]);
+        let done = gateway
+            .complete(Call {
+                input: &input,
+                route: &route,
+                redactor: &redactor(),
+                log_prompts: false,
+            })
+            .unwrap();
+        // Policy's price would say $3.00; the provider's charge wins.
+        assert_eq!(done.record.cost_usd, Some(0.42));
+        assert_eq!(
+            done.record.served_by.as_deref(),
+            Some("anthropic/claude-sonnet-4.5")
+        );
     }
 
     #[test]

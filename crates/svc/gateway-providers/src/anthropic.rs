@@ -106,6 +106,8 @@ impl ModelProvider for AnthropicProvider {
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
             stop_reason: response.stop_reason,
+            cost_usd: None,
+            served_by: None,
         })
     }
 }

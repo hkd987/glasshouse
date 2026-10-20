@@ -269,7 +269,7 @@ impl Runtime {
         let (result, seen, sent) = if let Some(call) = routed {
             let (rt, task) = (Arc::clone(self), Arc::clone(task));
             let sent = tokio::task::spawn_blocking(move || {
-                Runtime::send_model(&rt.gateway, &task.policy(), &call)
+                Runtime::send_model(&rt.gateway(), &task.policy(), &call)
             })
             .await;
             match sent {
