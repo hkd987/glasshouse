@@ -26,6 +26,7 @@ fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
         ids(&h),
         [
             ("activity-monitor".into(), ProfileAppKind::Native),
+            ("artifacts".into(), ProfileAppKind::Web),
             ("browser".into(), ProfileAppKind::Native),
             ("calendar".into(), ProfileAppKind::Web),
             ("chat".into(), ProfileAppKind::Web),
@@ -53,6 +54,7 @@ fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
         names,
         [
             "Activity Monitor",
+            "Artifacts",
             "Browser",
             "Calendar",
             "Chat",

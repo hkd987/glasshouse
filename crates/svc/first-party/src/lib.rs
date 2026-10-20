@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use glass_actions::{Registry, RegistryError};
+use glass_app_artifacts::ArtifactsProvider;
 use glass_app_calendar::CalendarProvider;
 use glass_app_catalog::{CatalogHandle, CatalogProvider};
 use glass_app_chat::ChatProvider;
@@ -26,6 +27,7 @@ use glass_app_system::{HostSystem, SystemOps, SystemProvider};
 use glass_gateway::ModelAction;
 use glass_managed::DirectoryHandle;
 use glass_managed::meet::Meetings;
+use glass_managed::shared::Shared;
 
 /// What the apps need from the machine's configuration and policy.
 #[derive(Debug, Clone)]
@@ -90,6 +92,12 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
     // reach them through it, never through Chat (ADR 0013).
     let chat = ChatProvider::new(setup.chat, setup.directory.clone());
     let meetings: Arc<dyn Meetings> = Arc::new(chat.clone());
+    // So are artifacts (ADR 0033), in the shared space chat's store keeps.
+    let shared: Arc<dyn Shared> = Arc::new(chat.clone());
+    registry.register(Arc::new(ArtifactsProvider::new(
+        shared,
+        setup.directory.clone(),
+    )))?;
     registry.register(Arc::new(
         CalendarProvider::new(setup.directory.clone()).meetings(meetings.clone()),
     ))?;
@@ -143,6 +151,8 @@ mod tests {
             "meet.join",
             "meet.keys",
             "meet.leave",
+            "artifact.share",
+            "artifact.comment",
             "apps.source",
             "apps.save",
             "apps.create",

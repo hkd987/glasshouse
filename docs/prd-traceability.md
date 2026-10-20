@@ -6,10 +6,12 @@ OS — PRD"), plus engineering notes on P1 work that shapes today's design.
 what's missing. Update this file in the same change that moves a
 requirement; the `prd-sync` skill re-reads the PRD and diffs it.
 
-PRD revision last synced: 2026-10-19, seventh sync ("Building the base
-system": pkgbase with a thin fork, BS-1 … BS-6, and "A thin platform
-layer", PL-1 … PL-4; BS-1 … BS-6, PL-1 and PL-2 are P0; ADR 0022). The
-sixth brought "Future direction: always-on agents with local hands", with
+PRD revision last synced: 2026-10-20, eighth sync ("Working together":
+artifacts AR, skills SK, Docs DC, Sheets SH, scheduling SC, Microsoft 365
+IN and Glasshouse Mail EM, proposed; NV-3 changed so Docs and Sheets are
+built in; ADR 0033). The seventh brought "Building the base system":
+pkgbase with a thin fork, BS-1 … BS-6, and "A thin platform layer", PL-1 …
+PL-4 (BS-1 … BS-6, PL-1 and PL-2 are P0; ADR 0022). The sixth brought "Future direction: always-on agents with local hands", with
 architecture commitments FD-1 … FD-4 in P0 and always-on cloud agents a
 non-goal for Pilot 1. The fifth
 brought the Mac-like desktop (UX-1 … UX-40) and the boot, sign-in,
@@ -293,6 +295,27 @@ architecture from blocking it; ADR 0020 has the rules for new code.
 | FD-2 Work checkpoints and moves mid-task; the same mechanism handles sleep | Not started | Sleep (PM-5) holds agents at their next call in memory | Checkpoint call in the task API (ADR 0020) |
 | FD-3 Agent identity not tied to one machine | Not started | Catalog id + version | Directory identities (PA-7, ADR 0008) |
 | FD-4 Snapshots and undo history follow a task across machines | Not started | Change records (ADR 0017) are in memory; snapshots are local ZFS | Persist change records with the task; per-task snapshots can be sent |
+
+## Working together
+
+Proposed 2026-10-20; ADR 0033 is the shared space under artifacts, Docs
+and Sheets. *artifacts* = `crates/apps/artifacts` unit tests, *runtime
+artifacts* = `crates/svc/runtime/tests/artifacts.rs`.
+
+| Id | Status | Where | Verified by / missing |
+|---|---|---|---|
+| AR-1 Share gives an artifact a home | Partial | `glass-app-artifacts` (`artifact.share`, from HTML or a granted file); sealed conversation + sealed blob (`glass-managed::shared`); console blob store | artifacts `ar1_an_agent_shares_a_page…`, `ar1_a_share_that_fails_partway…`; runtime artifacts `ar1_an_agents_share_asks…`. Missing: the Artifacts app, Share from Files and tiles |
+| AR-2 Sandboxed viewer, own origin, no network | Partial | bridge `<hex>.artifact.localhost` with a CSP sandbox (`glass-app-bridge`) | bridge `ar1_each_artifact_is_its_own_origin…`, `ar1_an_artifact_runs_sandboxed…`. Missing: the viewer, the navigation guard, the under-a-second budget, CF-15 refusing WebRTC |
+| AR-3 Feedback on the artifact | Partial | `artifact.comment` (pinned to an element path or a point), `artifact.resolve`; reads Auto | artifacts tests. A new version from an agent asks rather than notifies: irreversible actions sit at Ask (policy lint); IT can lower it. Missing: reactions, the viewer's pins |
+| AR-4 Versions; comments marked by version | Partial | `artifact.update` (owner only; versions only from the maker count) | artifacts `ar1_…version_2_follows`, `ar2_only_its_people…`. Missing: what changed between versions |
+| AR-5 People, groups or a conversation; card in Chat | Partial | `with` and `conversation`; `Part::Shared` card, `chat.read` `shared` | artifacts `ar3_shared_to_a_conversation…`. Missing: groups, the card in the Chat app, links outside the org (P1) |
+| AR-6 IT's inventory and controls | Not started | Clear metadata kept for it (ADR 0033 §3) | Slice A2 |
+| SK-1 … SK-6 Skills with versions and evals | Not started | Plan: catalog items reviewed like apps (ADR 0032), evals through the gateway | — |
+| DC-1 … DC-6 Docs | Not started | Plan: CRDT updates as sealed messages (ADR 0033 §8) | — |
+| SH-1 … SH-3 Sheets | Not started | Same as Docs; formulas are ours (GPL engines are refused) | — |
+| SC-1 … SC-5 Scheduling | Not started | — | — |
+| IN-1 … IN-4 Microsoft 365 as provider | Not started | Plan: a Graph adapter in `glass-gateway-providers`, a provider setting per service | — |
+| EM-1 … EM-4 Glasshouse Mail | Not started | P1 | — |
 
 ## Pilot readiness
 

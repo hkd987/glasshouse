@@ -513,16 +513,19 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     }
 
     // Chat's keys and the records it kept out go in the audit log (AU-1);
-    // news wakes the person's Chat (ADR 0030).
+    // news wakes the app that shows it: Chat, Calendar or Artifacts (ADR
+    // 0030, 0033).
     {
         let runtime = Arc::downgrade(&runtime);
         org.chat.on_notice(move |notice| {
             let Some(runtime) = runtime.upgrade() else {
                 return;
             };
-            if let glass_first_party::ChatNotice::Changed { logins } = notice {
+            if let glass_first_party::ChatNotice::Changed { logins, kinds } = notice {
                 for login in logins {
-                    runtime.app_changed(login, "chat");
+                    for kind in kinds {
+                        runtime.app_changed(login, kind.app());
+                    }
                 }
             }
             if let Some(event) = managed::chat_event(notice) {

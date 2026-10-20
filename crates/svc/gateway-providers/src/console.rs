@@ -163,6 +163,20 @@ impl MeetLink for ConsoleClient {
     }
 }
 
+/// The shared space's sealed blobs (ADR 0033).
+impl glass_managed::shared::BlobLink for ConsoleClient {
+    fn put(&self, request: &glass_managed::shared::PutBlob) -> Result<(), LinkError> {
+        self.request("/device/v1/blobs", request).map(drop)
+    }
+
+    fn get(
+        &self,
+        request: &glass_managed::shared::GetBlob,
+    ) -> Result<glass_managed::shared::SealedBlob, LinkError> {
+        Self::answer(&self.request("/device/v1/blobs/get", request)?)
+    }
+}
+
 /// Sharing apps back to the org's store (ADR 0032): submissions, and the
 /// bundles of approved apps, which glassd checks against the signed
 /// catalog before serving.

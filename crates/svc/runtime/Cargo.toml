@@ -28,6 +28,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+glass-app-artifacts.workspace = true
 glass-app-calendar.workspace = true
 glass-app-catalog.workspace = true
 glass-app-chat.workspace = true

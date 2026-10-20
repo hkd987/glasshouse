@@ -435,6 +435,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-app-artifacts"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-app-chat",
+ "glass-crypto",
+ "glass-managed",
+ "glass-platform",
+ "glass-types",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "glass-app-bridge"
 version = "0.1.0"
 dependencies = [
@@ -703,6 +720,7 @@ name = "glass-first-party"
 version = "0.1.0"
 dependencies = [
  "glass-actions",
+ "glass-app-artifacts",
  "glass-app-calendar",
  "glass-app-catalog",
  "glass-app-chat",
@@ -861,6 +879,7 @@ version = "0.1.0"
 dependencies = [
  "glass-actions",
  "glass-api",
+ "glass-app-artifacts",
  "glass-app-calendar",
  "glass-app-catalog",
  "glass-app-chat",

@@ -69,6 +69,16 @@ approval_timeout_secs = 900
 "chat.read" = "auto"
 "chat.post" = "ask"
 "chat.create" = "ask"
+# Artifacts (AR-1, ADR 0033): pages shared in the org's sealed shared space.
+# Reading what was shared with the person is quiet; sharing, a new version,
+# a comment or a resolve reach other people and can't be taken back, so
+# they ask. What the person does in the Artifacts app is its [[app]] below.
+"artifact.list" = "auto"
+"artifact.read" = "auto"
+"artifact.share" = "ask"
+"artifact.update" = "ask"
+"artifact.comment" = "ask"
+"artifact.resolve" = "ask"
 # Glasshouse meetings (CF-21, ADR 0030) are for people: no agent joins one or
 # lists them, whatever its rules allow, and a group or agent rule that names
 # them doesn't validate. The person joins in Meet and sees their meetings in
@@ -132,7 +142,7 @@ services = ["cron", "ntpd", "openvpn", "cupsd"]
 [[group]]
 name = "everyone"
 agents = ["it-agent", "invoice-demo", "containment-probe", "claude-code"]
-apps = ["browser", "mail", "calendar", "chat", "meet", "store", "settings", "activity-monitor", "terminal"]
+apps = ["browser", "mail", "calendar", "chat", "artifacts", "meet", "store", "settings", "activity-monitor", "terminal"]
 
 [[group]]
 name = "it-admins"
@@ -146,6 +156,12 @@ apps = ["console"]
 [[app]]
 id = "chat"
 tiers = { "chat.post" = "auto", "chat.create" = "auto" }
+
+# What the person does in Artifacts is theirs, as in Chat (ADR 0033), and
+# waits on the same presence check before a pilot org.
+[[app]]
+id = "artifacts"
+tiers = { "artifact.share" = "auto", "artifact.update" = "auto", "artifact.comment" = "auto", "artifact.resolve" = "auto" }
 
 # The person joins a meeting in Meet, which fetches its media keys and
 # leaves (CF-21); Calendar lists the meetings they're in, with Join. The
@@ -181,7 +197,7 @@ allowed_actions = ["files.*", "mail.*"]
 # stays out of harnesses that send model traffic to their own provider (HX-7).
 [[agent]]
 id = "claude-code"
-allowed_actions = ["files.*", "mail.*", "calendar.*", "catalog.search", "people.search", "settings.list", "chat.list", "chat.read", "chat.post", "apps.*"]
+allowed_actions = ["files.*", "mail.*", "calendar.*", "catalog.search", "people.search", "settings.list", "chat.list", "chat.read", "chat.post", "artifact.*", "apps.*"]
 max_label = "internal"
 
 # Diagnostics agent that tries to break out of its sandbox and reports what it

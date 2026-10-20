@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 glass-actions.workspace = true
+glass-app-artifacts.workspace = true
 glass-app-calendar.workspace = true
 glass-app-catalog.workspace = true
 glass-app-chat.workspace = true

@@ -22,6 +22,11 @@
 //! Either way the Host header names the app, so any of the person's own
 //! processes can act as any of their apps; our own browser build will let
 //! the bridge name the app from the installed copy it launched (ADR 0024).
+//!
+//! Artifacts (ADR 0033) are served on origins of their own,
+//! `http://<id>.artifact.localhost:<port>`, read through the Artifacts
+//! app's session and sandboxed by their CSP: no network, no storage, no
+//! bridge, framed only by the Artifacts app.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -72,6 +77,12 @@ struct Args {
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; \
      img-src 'self' data:; connect-src 'self'; worker-src 'self'; font-src 'self'; \
      object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// The app that shows artifacts (ADR 0033), the only one that frames them.
+const ARTIFACTS: &str = "artifacts";
+
+/// Added to every artifact page: where a person clicked to pin a comment.
+const ARTIFACT_SHIM: &str = include_str!("artifact-shim.js");
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt().with_target(false).init();
@@ -243,6 +254,9 @@ impl Bridge {
     }
 
     async fn handle(&self, request: &Request) -> Response {
+        if let Some(artifact) = artifact_for_host(request.header("host"), self.port) {
+            return self.artifact(request, &artifact).await;
+        }
         let Some(app) = app_for_host(request.header("host"), self.port, &self.apps) else {
             return Response::text(421, "no app is served at this address");
         };
@@ -277,7 +291,7 @@ impl Bridge {
         // 0032): glassd says, with each page; everyone else gets ours.
         if let Some(files) = self.edition(app, &rel).await {
             return match files.files.get(&rel) {
-                Some(text) => page(&rel, text.clone().into_bytes()),
+                Some(text) => page(app, self.port, &rel, text.clone().into_bytes()),
                 None => Response::text(404, "not found"),
             };
         }
@@ -297,7 +311,42 @@ impl Bridge {
         let Some(body) = body else {
             return Response::text(404, "not found (build the apps with make apps-build)");
         };
-        page(&rel, body)
+        page(app, self.port, &rel, body)
+    }
+
+    /// An artifact's page (ADR 0033): the version the path names, as
+    /// `artifact.read` opens it for the person through the Artifacts app's
+    /// session, so the read is decided and audited like any.
+    async fn artifact(&self, request: &Request, id: &str) -> Response {
+        if request.method != "GET" && request.method != "HEAD" {
+            return Response::text(405, "artifacts are read-only");
+        }
+        let Some(version) = artifact_version(&request.path) else {
+            return Response::text(404, "not found");
+        };
+        if !self.apps.contains_key(ARTIFACTS) {
+            return Response::text(404, "Artifacts isn't installed");
+        }
+        let input = match version {
+            Some(v) => json!({ "artifact": id, "version": v }),
+            None => json!({ "artifact": id }),
+        };
+        let read: Result<AppCallResult, Relay> = self
+            .relay(
+                ARTIFACTS,
+                app_methods::APP_CALL,
+                |session| json!({ "session": session, "action": "artifact.read", "input": input }),
+            )
+            .await;
+        match read {
+            Ok(result) if result.ok => match result.data["html"].as_str() {
+                Some(html) => artifact_page(html, self.port),
+                None => Response::text(404, "not found"),
+            },
+            Ok(result) => Response::text(404, &result.text),
+            Err(Relay::Down) => Response::text(503, "The system isn't answering right now."),
+            Err(Relay::Refused(why)) => Response::text(502, &why),
+        }
     }
 
     /// A file of one of the person's own apps (ADR 0032): what glassd built
@@ -317,7 +366,7 @@ impl Bridge {
             },
         };
         match files.files.get(rel) {
-            Some(text) => page(rel, text.clone().into_bytes()),
+            Some(text) => page(app, self.port, rel, text.clone().into_bytes()),
             None => Response::text(404, "not found"),
         }
     }
@@ -447,15 +496,75 @@ impl Bridge {
 
 /// A file as the bridge serves it: pages with the CSP that keeps them to
 /// their own files and bridge.
-fn page(rel: &str, body: Vec<u8>) -> Response {
+fn page(app: &str, port: u16, rel: &str, body: Vec<u8>) -> Response {
     let mut response =
         Response::new(200, content_type(rel), body).with("Cache-Control", "no-cache");
     if rel.ends_with(".html") {
         response = response
-            .with("Content-Security-Policy", CSP)
+            .with("Content-Security-Policy", app_csp(app, port))
             .with("Cross-Origin-Opener-Policy", "same-origin");
     }
     response
+}
+
+/// An app's CSP: [`CSP`], and for Artifacts, frames of artifacts' pages.
+fn app_csp(app: &str, port: u16) -> String {
+    if app == ARTIFACTS {
+        format!("{CSP}; frame-src http://*.artifact.localhost:{port}")
+    } else {
+        CSP.to_owned()
+    }
+}
+
+/// What an artifact's page may do: run its own inline scripts and styles
+/// and show its own inline images and fonts. `sandbox` without
+/// `allow-same-origin` gives it an origin that is no one's, framed or not
+/// (no cookies, no storage, no bridge); nothing it loads or sends leaves
+/// the machine; only the Artifacts app may frame it. Navigating itself
+/// away isn't something CSP governs; the viewer reloads it (ADR 0033).
+fn artifact_csp(port: u16) -> String {
+    format!(
+        "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; \
+         style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; \
+         connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; \
+         base-uri 'none'; form-action 'none'; \
+         frame-ancestors http://{ARTIFACTS}.localhost:{port}"
+    )
+}
+
+/// An artifact's HTML with the pin script after it, under its CSP.
+fn artifact_page(html: &str, port: u16) -> Response {
+    let mut body = String::with_capacity(html.len() + ARTIFACT_SHIM.len() + 20);
+    body.push_str(html);
+    body.push_str("\n<script>");
+    body.push_str(ARTIFACT_SHIM);
+    body.push_str("</script>\n");
+    Response::new(200, "text/html; charset=utf-8", body)
+        .with("Content-Security-Policy", artifact_csp(port))
+        .with("Cache-Control", "no-store")
+        .with("Referrer-Policy", "no-referrer")
+        .with("X-Content-Type-Options", "nosniff")
+}
+
+/// The artifact a Host names: `<32 hex>.artifact.localhost:<port>`
+/// exactly, as its conversation id `cv-<hex>`.
+fn artifact_for_host(host: Option<&str>, port: u16) -> Option<String> {
+    let host = host?.to_ascii_lowercase();
+    let hex = host.strip_suffix(&format!(".artifact.localhost:{port}"))?;
+    let ok = hex.len() == 32
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    ok.then(|| format!("cv-{hex}"))
+}
+
+/// The version an artifact's path names: `/` the latest, `/v<n>` the nth.
+fn artifact_version(path: &str) -> Option<Option<u32>> {
+    if path == "/" {
+        return Some(None);
+    }
+    let n: u32 = path.strip_prefix("/v")?.parse().ok()?;
+    (n > 0 && !path.starts_with("/v+")).then_some(Some(n))
 }
 
 fn relay_error(e: ClientError) -> Relay {
@@ -636,6 +745,83 @@ mod tests {
             .headers
             .push(("sec-fetch-site".into(), "cross-site".into()));
         assert_eq!(check_call(&cross, "mail", 7300).unwrap_err().0, 403);
+    }
+
+    #[test]
+    fn ar1_each_artifact_is_its_own_origin_and_no_app() {
+        let hex = "0123456789abcdef0123456789abcdef";
+        let named = |host: &str| artifact_for_host(Some(host), 7300);
+        assert_eq!(
+            named(&format!("{hex}.artifact.localhost:7300")),
+            Some(format!("cv-{hex}"))
+        );
+        assert_eq!(
+            named(&format!("{}.artifact.localhost:7300", hex.to_uppercase())),
+            Some(format!("cv-{hex}"))
+        );
+        for bad in [
+            format!("{hex}.artifact.localhost:7301"),
+            format!("{hex}0.artifact.localhost:7300"),
+            format!("x.{hex}.artifact.localhost:7300"),
+            format!("{}g.artifact.localhost:7300", &hex[..31]),
+            format!("{hex}.artifact.localhost.evil.example:7300"),
+            "artifact.localhost:7300".into(),
+            "artifacts.localhost:7300".into(),
+        ] {
+            assert_eq!(named(&bad), None, "{bad}");
+        }
+        // No artifact's host names an app, so its page can't call a bridge.
+        assert_eq!(
+            app_for_host(
+                Some(&format!("{hex}.artifact.localhost:7300")),
+                7300,
+                &apps()
+            ),
+            None
+        );
+        assert_eq!(artifact_version("/"), Some(None));
+        assert_eq!(artifact_version("/v2"), Some(Some(2)));
+        for bad in ["/v0", "/v+2", "/v-1", "/v", "/index.html", "/v2/x", ""] {
+            assert_eq!(artifact_version(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn ar1_an_artifact_runs_sandboxed_with_no_network() {
+        let response = artifact_page("<h1>Q3</h1>", 7300);
+        let header = |name: &str| {
+            response
+                .headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        let csp = header("content-security-policy");
+        assert!(csp.starts_with("sandbox allow-scripts;"), "{csp}");
+        assert!(!csp.contains("allow-same-origin"), "{csp}");
+        for directive in [
+            "default-src 'none'",
+            "connect-src 'none'",
+            "frame-src 'none'",
+            "form-action 'none'",
+            "base-uri 'none'",
+            "frame-ancestors http://artifacts.localhost:7300",
+        ] {
+            assert!(csp.contains(directive), "{directive}: {csp}");
+        }
+        // The only place it names is who may frame it.
+        assert_eq!(csp.matches("http").count(), 1, "{csp}");
+        assert_eq!(header("referrer-policy"), "no-referrer");
+        assert_eq!(header("cache-control"), "no-store");
+        let body = String::from_utf8(response.body.clone()).unwrap();
+        assert!(body.starts_with("<h1>Q3</h1>"));
+        assert!(body.trim_end().ends_with("</script>"));
+        assert!(body.contains("glass: TAG"));
+        // Only the Artifacts app frames them.
+        assert!(app_csp("artifacts", 7300).ends_with("frame-src http://*.artifact.localhost:7300"));
+        assert_eq!(app_csp("mail", 7300), CSP);
+        assert!(CSP.contains("frame-ancestors 'none'"));
     }
 
     #[test]

@@ -21,6 +21,7 @@
 //! POST /device/v1/report              a device's report (bearer token)
 //! POST /device/v1/chat/{keys,keys/lookup,conversations,messages,sync}
 //!                                     chat, sealed (ADR 0030)
+//! POST /device/v1/blobs{,/get}         sealed blobs of the shared space (ADR 0033)
 //! POST /device/v1/apps/submit          share an app for review (ADR 0032)
 //! POST /device/v1/apps/bundle          an approved app's bundle, as signed
 //! ```
@@ -753,6 +754,26 @@ impl Console {
                 // Long poll: answer as soon as chat changes.
                 let _ = tokio::time::timeout(wait, changed.changed()).await;
                 ok(serde_json::to_value(self.state().chat.sync(&sync)).unwrap_or_default())
+            }
+            "blobs" => {
+                let put: glass_managed::shared::PutBlob = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                match self.state().put_blob(&put) {
+                    Ok(()) => ok(json!({})),
+                    Err(r) => refused(r),
+                }
+            }
+            "blobs/get" => {
+                let get: glass_managed::shared::GetBlob = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                match self.state().get_blob(&get) {
+                    Ok(blob) => ok(serde_json::to_value(blob).unwrap_or_default()),
+                    Err(r) => refused(r),
+                }
             }
             "apps/submit" => self.apps_submit(request).await,
             "apps/bundle" => {

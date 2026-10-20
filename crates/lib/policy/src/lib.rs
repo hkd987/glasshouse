@@ -100,6 +100,7 @@ mod tests {
             ids("anyone"),
             [
                 "activity-monitor",
+                "artifacts",
                 "browser",
                 "calendar",
                 "chat",
@@ -124,6 +125,7 @@ mod tests {
             pat,
             [
                 "activity-monitor",
+                "artifacts",
                 "browser",
                 "calendar",
                 "chat",

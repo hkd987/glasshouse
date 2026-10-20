@@ -42,7 +42,7 @@ impl From<CryptoError> for ChatError {
     }
 }
 
-type Result<T> = std::result::Result<T, ChatError>;
+pub type Result<T> = std::result::Result<T, ChatError>;
 
 fn unhex(s: &str, what: &str) -> Result<Vec<u8>> {
     hex::decode(s).map_err(|_| ChatError::Invalid(format!("{what} isn't hex")))
@@ -185,6 +185,26 @@ pub enum ConversationKind {
     /// ([`crate::meet::MeetingDetails`]). Calendar and Meet show it; Chat
     /// doesn't.
     Meeting,
+    /// An artifact in the shared space (ADR 0033): its audience, its
+    /// versions and the feedback on it. The Artifacts app shows it; Chat
+    /// doesn't.
+    Artifact,
+}
+
+impl ConversationKind {
+    /// Whether the Chat app shows conversations of this kind.
+    pub fn is_chat(self) -> bool {
+        matches!(self, Self::Direct | Self::Group | Self::Channel)
+    }
+
+    /// The app that shows it, which news in it wakes.
+    pub fn app(self) -> &'static str {
+        match self {
+            Self::Direct | Self::Group | Self::Channel => "chat",
+            Self::Meeting => "calendar",
+            Self::Artifact => "artifacts",
+        }
+    }
 }
 
 /// An epoch's key sealed to one member key, or to IT's.
@@ -399,6 +419,10 @@ pub struct Body {
     #[serde(default)]
     pub reply_to: Option<String>,
     pub sent_at: String,
+    /// What a message in a shared item carries (ADR 0033): a version, a
+    /// comment, a reaction or a resolve; in chat, an item shared there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<crate::shared::Part>,
 }
 
 /// A sealed message as it travels and as the console keeps it.
@@ -639,7 +663,7 @@ impl From<CryptoError> for ChatFailure {
 /// How a computer reaches its console for chat: the device API's chat
 /// routes (ADR 0030). glassd's goes through `ConsoleClient`, the one crate
 /// that leaves the machine; tests use a fake. Every method blocks.
-pub trait ChatLink: Send + Sync + std::fmt::Debug {
+pub trait ChatLink: crate::shared::BlobLink + Send + Sync + std::fmt::Debug {
     fn register(&self, request: &RegisterKey) -> std::result::Result<(), LinkError>;
     fn lookup(&self, request: &LookupKeys) -> std::result::Result<Keys, LinkError>;
     /// The new conversation's sequence number.
@@ -663,6 +687,7 @@ pub mod testing {
         conversations: Vec<(Conversation, Vec<Epoch>)>,
         messages: Vec<Message>,
         seq: u64,
+        blobs: Vec<crate::shared::SealedBlob>,
     }
 
     #[derive(Debug)]
@@ -719,6 +744,14 @@ pub mod testing {
             }
         }
 
+        /// Every blob kept, as the console keeps it.
+        pub fn blobs(&self) -> Vec<crate::shared::SealedBlob> {
+            self.kept
+                .lock()
+                .map(|k| k.blobs.clone())
+                .unwrap_or_default()
+        }
+
         /// Every conversation made, with its epochs.
         pub fn conversations(&self) -> Vec<(Conversation, Vec<Epoch>)> {
             self.kept
@@ -747,6 +780,70 @@ pub mod testing {
                 .iter()
                 .find(|(c, _)| c.id == id)
                 .map(|(c, _)| c.clone())
+        }
+    }
+
+    impl MemoryLink {
+        /// Whether `login`, on `device` with a registered key, is in
+        /// `conversation`: the console's check for blobs.
+        fn member_here(
+            kept: &Kept,
+            device: &str,
+            login: &str,
+            conversation: &str,
+        ) -> std::result::Result<(), LinkError> {
+            if !kept
+                .keys
+                .iter()
+                .any(|k| k.login == login && k.device == device)
+            {
+                return refused("That person has no key on this computer.");
+            }
+            let member = kept
+                .conversations
+                .iter()
+                .any(|(c, _)| c.id == conversation && c.members.iter().any(|m| m == login));
+            if member {
+                Ok(())
+            } else {
+                refused("You aren't in it.")
+            }
+        }
+    }
+
+    impl crate::shared::BlobLink for MemoryLink {
+        fn put(&self, request: &crate::shared::PutBlob) -> std::result::Result<(), LinkError> {
+            let mut kept = self.kept()?;
+            request.blob.check().map_err(LinkError::Refused)?;
+            Self::member_here(
+                &kept,
+                &request.device,
+                &request.login,
+                &request.blob.conversation,
+            )?;
+            if kept.blobs.iter().any(|b| b.id == request.blob.id) {
+                return refused("That blob is kept already.");
+            }
+            kept.blobs.push(request.blob.clone());
+            Ok(())
+        }
+
+        fn get(
+            &self,
+            request: &crate::shared::GetBlob,
+        ) -> std::result::Result<crate::shared::SealedBlob, LinkError> {
+            let kept = self.kept()?;
+            Self::member_here(
+                &kept,
+                &request.device,
+                &request.login,
+                &request.conversation,
+            )?;
+            kept.blobs
+                .iter()
+                .find(|b| b.id == request.id && b.conversation == request.conversation)
+                .cloned()
+                .ok_or_else(|| LinkError::Refused("No such blob.".into()))
         }
     }
 
@@ -934,6 +1031,7 @@ mod tests {
             attribution: None,
             reply_to: None,
             sent_at: "2026-10-19T14:02:11Z".into(),
+            part: None,
         };
         let message = Message::seal(&header, &body, &key, &priya_s).unwrap();
         message.verify(&priya).unwrap();

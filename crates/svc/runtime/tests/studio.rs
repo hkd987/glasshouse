@@ -168,8 +168,8 @@ async fn tl5_a_remix_goes_when_the_app_it_remixes_leaves_the_profile() {
 
     // IT takes Chat out of everyone's apps: the remix closes and won't open.
     h.apply_policy_replacing(
-        r#""calendar", "chat", "meet","#,
-        r#""calendar", "meet","#,
+        r#""calendar", "chat", "artifacts","#,
+        r#""calendar", "artifacts","#,
         "",
     );
     eventually(|| {

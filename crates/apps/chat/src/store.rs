@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use glass_crypto::{EpochKey, PublicKey};
 pub use glass_managed::chat::ChatFailure;
 use glass_managed::chat::{
-    ChatLink, ChatSyncRequest, ChatSyncResponse, Conversation, Epoch, LinkError, MemberKey,
-    MemberSecret, Message, RegisterKey, is_conversation_id,
+    ChatLink, ChatSyncRequest, ChatSyncResponse, Conversation, ConversationKind, Epoch, LinkError,
+    MemberKey, MemberSecret, Message, RegisterKey, is_conversation_id,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,8 +30,12 @@ pub enum Notice {
         conversation: Option<String>,
         reason: String,
     },
-    /// New conversations or messages arrived for these people.
-    Changed { logins: Vec<String> },
+    /// New conversations or messages arrived for these people, in
+    /// conversations of these kinds.
+    Changed {
+        logins: Vec<String>,
+        kinds: Vec<ConversationKind>,
+    },
 }
 
 pub(crate) const NOT_MANAGED: &str =
@@ -194,9 +198,10 @@ impl ChatHandle {
 
     /// `login`'s chat changed on this computer, such as a post from an
     /// agent: their Chat hears of it.
-    pub(crate) fn changed(&self, login: &str) {
+    pub(crate) fn changed(&self, login: &str, kind: ConversationKind) {
         self.notify(&Notice::Changed {
             logins: vec![login.to_owned()],
+            kinds: vec![kind],
         });
     }
 
@@ -365,12 +370,19 @@ impl ChatHandle {
         })?;
         let mut notices = Vec::new();
         let mut changed = Vec::new();
+        let mut kinds = Vec::new();
         {
             let _write = self.lock();
             for login in &logins {
                 let mut store = self.load(login);
                 let mut refused = Vec::new();
                 let news = store.absorb(&connection.org, login, &response, &mut refused);
+                for kind in &news {
+                    if !kinds.contains(kind) {
+                        kinds.push(*kind);
+                    }
+                }
+                let news = !news.is_empty();
                 if news || !refused.is_empty() {
                     if let Err(e) = self.save(login, &store) {
                         refused.push((None, e.to_string()));
@@ -397,6 +409,7 @@ impl ChatHandle {
         if !changed.is_empty() {
             notices.push(Notice::Changed {
                 logins: changed.clone(),
+                kinds,
             });
         }
         for notice in &notices {
@@ -497,15 +510,21 @@ impl Store {
     }
 
     /// Keeps what in `response` is `login`'s and checks out; adds what
-    /// doesn't to `refused`. Whether anything new was kept.
+    /// doesn't to `refused`. The kinds of conversation something new was
+    /// kept in.
     pub(crate) fn absorb(
         &mut self,
         org: &str,
         login: &str,
         response: &ChatSyncResponse,
         refused: &mut Vec<(Option<String>, String)>,
-    ) -> bool {
-        let mut news = false;
+    ) -> Vec<ConversationKind> {
+        let mut news = Vec::new();
+        let mut note = |kind: ConversationKind| {
+            if !news.contains(&kind) {
+                news.push(kind);
+            }
+        };
         for key in &response.keys {
             // An id is its keys' hash, so the first record for one stands.
             if key.keys().is_ok() && !self.keys.contains_key(&key.id) {
@@ -545,7 +564,7 @@ impl Store {
                 _ => {
                     self.conversations
                         .insert(conversation.id.clone(), conversation.clone());
-                    news = true;
+                    note(conversation.kind);
                 }
             }
         }
@@ -563,11 +582,11 @@ impl Store {
                     && epoch.verify(maker).is_ok()
             });
             if signed {
+                note(conversation.kind);
                 self.epochs
                     .entry(id.to_owned())
                     .or_default()
                     .push(epoch.clone());
-                news = true;
             } else {
                 let id = id.to_owned();
                 self.refuse(
@@ -609,8 +628,8 @@ impl Store {
                     .get(&header.key)
                     .is_some_and(|k| message.verify(k).is_ok());
             if checks {
+                note(conversation.kind);
                 self.keep(&header.conversation, message.clone());
-                news = true;
             } else {
                 self.refuse(
                     refused,

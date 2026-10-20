@@ -101,6 +101,27 @@ impl ChatState {
         Ok(())
     }
 
+    /// Whether `login` has a key registered on `device` and is in
+    /// `conversation`: who may keep and fetch its blobs (ADR 0033).
+    pub fn member_here(
+        &self,
+        device: &str,
+        login: &str,
+        conversation: &str,
+    ) -> Result<(), Refused> {
+        if !self
+            .keys
+            .iter()
+            .any(|k| k.login == login && k.device == device)
+        {
+            return Err(rule("That person has no key on this computer."));
+        }
+        match self.conversations.get(conversation) {
+            Some(stored) if stored.conversation.members.iter().any(|m| m == login) => Ok(()),
+            _ => Err(rule("You aren't in it.")),
+        }
+    }
+
     pub fn lookup(&self, logins: &[String], compliance: &str) -> Keys {
         Keys {
             keys: self
@@ -132,11 +153,20 @@ impl ChatState {
             return Err(rule("That conversation exists already."));
         }
         let members: BTreeSet<&str> = conversation.members.iter().map(String::as_str).collect();
+        // An artifact may be its maker's alone until they share it
+        // (ADR 0033); a conversation is two people at least.
+        let fewest = if conversation.kind == ConversationKind::Artifact {
+            1
+        } else {
+            2
+        };
         if members.len() != conversation.members.len()
-            || members.len() < 2
+            || members.len() < fewest
             || members.len() > MAX_MEMBERS
         {
-            return Err(invalid(format!("2 to {MAX_MEMBERS} people, each once")));
+            return Err(invalid(format!(
+                "{fewest} to {MAX_MEMBERS} people, each once"
+            )));
         }
         if conversation.kind == ConversationKind::Direct && members.len() != 2 {
             return Err(invalid("a direct message is between two people"));
@@ -537,6 +567,7 @@ mod tests {
                 attribution: None,
                 reply_to: None,
                 sent_at: "2026-10-19T14:02:11Z".into(),
+                part: None,
             };
             let message = Message::seal(&header, &body, key, &from.secret).unwrap();
             self.post(
@@ -726,6 +757,67 @@ mod tests {
             );
         }
         assert!(found_in(base64(key.as_bytes()).as_bytes(), key.as_bytes()));
+    }
+
+    #[tokio::test]
+    async fn ar2_a_blob_goes_only_to_its_peoples_computers_and_is_never_replaced() {
+        use glass_managed::shared::{BlobKey, new_blob_id};
+        let org = Org::new().await;
+        let priya = org.computer("laptop-priya", "priya").await;
+        let dana = org.computer("laptop-dana", "dana").await;
+        let sam = org.computer("laptop-sam", "sam").await;
+        let (status, cv, _) = org.channel(&priya, &["priya", "dana"], "Q3 forecast").await;
+        assert_eq!(status, 200);
+        let key = BlobKey::generate().unwrap();
+        let id = new_blob_id().unwrap();
+        let page = b"<h1>CANARY-BLOB Northwind 42k</h1>";
+        let blob = key.seal(&cv, &id, page).unwrap();
+        let put = |who: &Computer, blob| json!({ "device": who.name, "login": who.key.login, "blob": blob });
+        let (status, body) = org.post("blobs", &put(&priya, &blob)).await;
+        assert_eq!(status, 200, "{body}");
+
+        // Dana's computer fetches it and opens it; Sam's can't, and nobody
+        // can fetch it as someone else from their own computer.
+        let get = |who: &Computer, login: &str| json!({ "device": who.name, "login": login, "conversation": cv, "id": id });
+        let (status, got) = org.post("blobs/get", &get(&dana, "dana")).await;
+        assert_eq!(status, 200, "{got}");
+        let got: glass_managed::shared::SealedBlob = serde_json::from_value(got).unwrap();
+        let sha = hex::encode(glass_crypto::sha256(page));
+        assert_eq!(key.open(&got, &sha).unwrap(), page);
+        for (who, login) in [(&sam, "sam"), (&sam, "dana")] {
+            let (status, _) = org.post("blobs/get", &get(who, login)).await;
+            assert_ne!(status, 200, "{login} from {}", who.name);
+        }
+        // Nor fetched under another conversation.
+        let (_, other, _) = org.channel(&sam, &["sam", "dana"], "Other").await;
+        let (status, _) = org
+            .post(
+                "blobs/get",
+                &json!({ "device": dana.name, "login": "dana", "conversation": other, "id": id }),
+            )
+            .await;
+        assert_ne!(status, 200);
+
+        // A member can't replace it, and an outsider can't keep one there.
+        let forged = BlobKey::generate()
+            .unwrap()
+            .seal(&cv, &id, b"<h1>mine</h1>")
+            .unwrap();
+        let (status, _) = org.post("blobs", &put(&dana, &forged)).await;
+        assert_eq!(status, 409);
+        let fresh = BlobKey::generate()
+            .unwrap()
+            .seal(&cv, &new_blob_id().unwrap(), b"x")
+            .unwrap();
+        let (status, _) = org.post("blobs", &put(&sam, &fresh)).await;
+        assert_ne!(status, 200);
+
+        // On disk: ciphertext only.
+        for entry in std::fs::read_dir(org.dir.path().join("blobs")).unwrap() {
+            let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+            assert!(!text.contains("CANARY-BLOB"));
+            assert!(!text.contains(&hex::encode(b"CANARY-BLOB")));
+        }
     }
 
     #[tokio::test]

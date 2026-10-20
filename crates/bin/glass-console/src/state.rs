@@ -989,6 +989,48 @@ impl State {
         self.save_chat()
     }
 
+    // ---- the shared space's blobs (ADR 0033) ----------------------------
+
+    fn blob_path(&self, id: &str) -> PathBuf {
+        self.dir.join("blobs").join(format!("{id}.json"))
+    }
+
+    /// Keeps a sealed blob for a conversation its sender's computer is in.
+    /// The console stores its ciphertext and can't open it.
+    pub fn put_blob(&self, request: &glass_managed::shared::PutBlob) -> Result<(), Refused> {
+        request
+            .blob
+            .check()
+            .map_err(|e| Refused::Invalid(vec![e]))?;
+        self.chat
+            .member_here(&request.device, &request.login, &request.blob.conversation)?;
+        let path = self.blob_path(&request.blob.id);
+        if path.exists() {
+            return Err(Refused::Rule("That blob is kept already.".into()));
+        }
+        std::fs::create_dir_all(self.dir.join("blobs")).map_err(internal)?;
+        write_json(&path, &request.blob).map_err(internal)
+    }
+
+    /// A blob, for a computer of someone in its conversation.
+    pub fn get_blob(
+        &self,
+        request: &glass_managed::shared::GetBlob,
+    ) -> Result<glass_managed::shared::SealedBlob, Refused> {
+        if !glass_managed::shared::is_blob_id(&request.id) {
+            return Err(Refused::Invalid(vec![
+                "a blob's id is bl- and 32 hex digits".into(),
+            ]));
+        }
+        self.chat
+            .member_here(&request.device, &request.login, &request.conversation)?;
+        read_json::<glass_managed::shared::SealedBlob>(&self.blob_path(&request.id))
+            .ok()
+            .flatten()
+            .filter(|b| b.conversation == request.conversation)
+            .ok_or_else(|| Refused::NotFound("No such blob.".into()))
+    }
+
     pub fn save_chat(&self) -> anyhow::Result<()> {
         write_json(&self.dir.join("chat.json"), &self.chat)
     }

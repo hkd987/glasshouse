@@ -266,6 +266,14 @@ pipeline refuses further side effects (fail closed).
 - **Our cloud services run on AWS (GT-21)** and hold only licensing, policy
   and telemetry metadata; customer data stays on devices and in the
   customer's own Bedrock account (GT-3).
+- **What people make together is a sealed conversation (AR, DC, SH,
+  ADR 0033).** Artifacts, docs and sheets are chat conversations of their
+  own kinds, reached through `glass-managed::shared::Shared` (no app
+  depends on Chat). Large content goes in sealed blobs whose keys travel
+  only inside sealed messages; nothing on our servers reads content, so
+  search, AI and export run on the computer. An artifact is shown on an
+  origin of its own under a CSP sandbox with no network, never
+  downloaded.
 
 ## Code map
 
@@ -281,7 +289,7 @@ pipeline refuses further side effects (fail closed).
 | `glass-actions` | lib | The action contract: providers, previews, task context, registry |
 | `glass-managed` | lib | Managed settings between the admin console and devices: signed releases, catalog items and the store rule, catalog-first search, sync and reports (ADR 0023) |
 | `glass-http` | lib | Just enough HTTP/1.1 for our small servers: the bridge's dev mode and the console |
-| `glass-app-files`, `-mail`, `-calendar`, `-system`, `-helpdesk`, `-catalog` | apps | Each app's actions (ADR 0013); `catalog.search` is catalog first (GA-2) |
+| `glass-app-files`, `-mail`, `-calendar`, `-system`, `-helpdesk`, `-catalog`, `-artifacts` | apps | Each app's actions (ADR 0013); `catalog.search` is catalog first (GA-2); artifacts live in the shared space (ADR 0033) |
 | `glass-first-party` | svc | The apps the OS ships, as one registry |
 | `glass-broker` | svc | Decisions and the approval desk |
 | `glass-gateway` | svc | The model gateway: the `model.complete` action, redaction, routing over providers with failover, the call record, the secrets stand-in (ADR 0018) |

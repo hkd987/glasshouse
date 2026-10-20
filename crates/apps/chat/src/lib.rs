@@ -149,7 +149,7 @@ fn now_ms() -> u64 {
 
 /// Whether Chat shows `c`: meetings are Calendar's and Meet's (CF-21).
 fn in_chat(c: &Conversation) -> bool {
-    c.kind != ConversationKind::Meeting
+    c.kind.is_chat()
 }
 
 /// `me` and `people`, each once, sorted: a conversation's members.
@@ -390,7 +390,7 @@ impl ChatProvider {
             }
             self.handle.save(me, &store)?;
         }
-        self.handle.changed(me);
+        self.handle.changed(me, conversation.kind);
         Ok(conversation)
     }
 
@@ -440,6 +440,7 @@ impl ChatProvider {
             attribution,
             reply_to: post.reply_to.clone(),
             sent_at: Timestamp::now().to_string(),
+            part: None,
         };
         let mut message = Message::seal(&header, &body, &key, &member.secret)?;
         let seq = connection
@@ -457,7 +458,7 @@ impl ChatProvider {
             store.keep(&conversation.id, message);
             self.handle.save(me, &store)?;
         }
-        self.handle.changed(me);
+        self.handle.changed(me, conversation.kind);
         Ok((conversation, title, header.id, seq))
     }
 
@@ -603,14 +604,30 @@ impl ChatProvider {
             };
             let at = message.at.clone().unwrap_or_else(|| body.sent_at.clone());
             let name = self.name(&header.sender);
+            // An item shared here shows as a card (ADR 0033); no other part
+            // belongs in a chat conversation.
+            let shared = match &body.part {
+                Some(glass_managed::shared::Part::Shared { item, kind, title }) => {
+                    Some(json!({ "item": item, "kind": kind, "title": title }))
+                }
+                _ => None,
+            };
             lines.push(format!(
-                "[{}] {name}{}: {}",
+                "[{}] {name}{}: {}{}",
                 clock(&at),
                 body.attribution
                     .as_deref()
                     .map(|a| format!(" ({a})"))
                     .unwrap_or_default(),
-                body.text
+                body.text,
+                shared
+                    .as_ref()
+                    .map(|s| format!(
+                        " [{} {}]",
+                        s["kind"].as_str().unwrap_or_default(),
+                        s["item"].as_str().unwrap_or_default()
+                    ))
+                    .unwrap_or_default()
             ));
             views.push(json!({
                 "id": header.id,
@@ -622,6 +639,7 @@ impl ChatProvider {
                 "text": body.text,
                 "attribution": body.attribution,
                 "reply_to": body.reply_to,
+                "shared": shared,
             }));
         }
         // What the person reads in Chat is read; an agent reading for
@@ -771,6 +789,202 @@ impl ChatProvider {
 
 /// Meetings (CF-21) are conversations in chat's store: Calendar and Meet
 /// reach them through this, so neither depends on Chat (ADR 0013).
+/// The shared space (ADR 0033): artifacts, and next docs and sheets, are
+/// conversations of their own kinds, which Chat doesn't show.
+/// Conversation `c` as a shared item, its messages opened with `member`'s
+/// keys; what this computer can't open is left out.
+fn open_item(store: &Store, member: &Member, c: &Conversation) -> glass_managed::shared::Item {
+    let mut keys: BTreeMap<u32, Option<EpochKey>> = BTreeMap::new();
+    let messages = store
+        .messages
+        .get(&c.id)
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .filter_map(|message| {
+            let header = message.header().ok()?;
+            let key = keys
+                .entry(header.epoch)
+                .or_insert_with(|| store.epoch_key(member, &c.id, header.epoch))
+                .as_ref()?;
+            let body = message.open(key).ok()?;
+            Some(glass_managed::shared::ItemMessage {
+                id: header.id,
+                seq: message.seq,
+                sender: header.sender,
+                at: message.at.clone().unwrap_or(body.sent_at),
+                text: body.text,
+                attribution: body.attribution,
+                reply_to: body.reply_to,
+                part: body.part,
+            })
+        })
+        .collect();
+    glass_managed::shared::Item {
+        id: c.id.clone(),
+        kind: c.kind,
+        title: store.name(member, c).unwrap_or_default(),
+        members: c.members.clone(),
+        created_by: c.created_by.clone(),
+        messages,
+    }
+}
+
+impl glass_managed::shared::Shared for ChatProvider {
+    fn ready(&self, login: &str, make: bool) -> Result<(), ChatFailure> {
+        self.handle.compliance()?;
+        if make {
+            self.handle.member(login)?;
+            return Ok(());
+        }
+        self.handle.connection()?;
+        self.handle.existing(login).map(|_| ()).ok_or_else(|| {
+            ChatFailure::NotSetUp(format!(
+                "{login} hasn't opened Artifacts or Chat on this computer yet; it makes their keys the first time it opens"
+            ))
+        })
+    }
+
+    fn items(&self, login: &str, kind: ConversationKind) -> Vec<glass_managed::shared::Item> {
+        let Some(member) = self.handle.existing(login) else {
+            return Vec::new();
+        };
+        let store = self.handle.load(login);
+        store
+            .conversations
+            .values()
+            .filter(|c| c.kind == kind && c.members.iter().any(|m| m == login))
+            .map(|c| open_item(&store, &member, c))
+            .collect()
+    }
+
+    fn item(&self, login: &str, id: &str) -> Option<glass_managed::shared::Item> {
+        let member = self.handle.existing(login)?;
+        let store = self.handle.load(login);
+        store
+            .conversations
+            .get(id)
+            .filter(|c| c.members.iter().any(|m| m == login))
+            .map(|c| open_item(&store, &member, c))
+    }
+
+    fn create(
+        &self,
+        login: &str,
+        kind: ConversationKind,
+        title: &str,
+        people: &[String],
+    ) -> Result<String, ChatFailure> {
+        let connection = self.handle.connection()?;
+        let compliance = self.handle.compliance()?;
+        let member = self.handle.existing(login).ok_or_else(|| {
+            ChatFailure::NotSetUp(format!("{login} has no chat keys on this computer yet"))
+        })?;
+        let conversation = self.open_conversation(
+            &connection,
+            &compliance,
+            &member,
+            login,
+            members(login, people),
+            kind,
+            Some(title),
+            None,
+        )?;
+        Ok(conversation.id)
+    }
+
+    fn post(
+        &self,
+        login: &str,
+        to: &str,
+        text: &str,
+        part: Option<glass_managed::shared::Part>,
+        attribution: Option<String>,
+        reply_to: Option<String>,
+    ) -> Result<String, ChatFailure> {
+        let connection = self.handle.connection()?;
+        let member = self.handle.existing(login).ok_or_else(|| {
+            ChatFailure::NotSetUp(format!("{login} has no chat keys on this computer yet"))
+        })?;
+        let store = self.handle.load(login);
+        let conversation = store
+            .conversations
+            .get(to)
+            .filter(|c| c.members.iter().any(|m| m == login))
+            .cloned()
+            .ok_or_else(|| ChatFailure::Local(format!("{login} isn't in {to}")))?;
+        let key = store
+            .epoch_key(&member, &conversation.id, conversation.epoch)
+            .ok_or_else(|| ChatFailure::Local("this computer can't open its key".into()))?;
+        let header = Header {
+            v: 1,
+            org: connection.org.clone(),
+            conversation: conversation.id.clone(),
+            epoch: conversation.epoch,
+            id: new_message_id(now_ms())?,
+            sender: login.to_owned(),
+            key: member.key.id.clone(),
+        };
+        let body = Body {
+            text: text.to_owned(),
+            attribution,
+            reply_to,
+            sent_at: Timestamp::now().to_string(),
+            part,
+        };
+        let mut message = Message::seal(&header, &body, &key, &member.secret)?;
+        message.seq = connection
+            .link
+            .post(&PostMessage {
+                device: connection.device.clone(),
+                message: message.clone(),
+            })
+            .map_err(ChatFailure::Link)?;
+        message.at = Some(Timestamp::now().to_string());
+        {
+            let _write = self.handle.lock();
+            let mut store = self.handle.load(login);
+            store.keep(&conversation.id, message);
+            self.handle.save(login, &store)?;
+        }
+        self.handle.changed(login, conversation.kind);
+        Ok(header.id)
+    }
+
+    fn put_blob(
+        &self,
+        login: &str,
+        blob: &glass_managed::shared::SealedBlob,
+    ) -> Result<(), ChatFailure> {
+        let connection = self.handle.connection()?;
+        connection
+            .link
+            .put(&glass_managed::shared::PutBlob {
+                device: connection.device.clone(),
+                login: login.to_owned(),
+                blob: blob.clone(),
+            })
+            .map_err(ChatFailure::Link)
+    }
+
+    fn get_blob(
+        &self,
+        login: &str,
+        item: &str,
+        id: &str,
+    ) -> Result<glass_managed::shared::SealedBlob, ChatFailure> {
+        let connection = self.handle.connection()?;
+        connection
+            .link
+            .get(&glass_managed::shared::GetBlob {
+                device: connection.device.clone(),
+                login: login.to_owned(),
+                conversation: item.to_owned(),
+                id: id.to_owned(),
+            })
+            .map_err(ChatFailure::Link)
+    }
+}
+
 impl Meetings for ChatProvider {
     fn ready(&self) -> Result<(), ChatFailure> {
         self.handle.compliance().map(|_| ())

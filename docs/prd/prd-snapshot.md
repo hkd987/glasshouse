@@ -1,5 +1,5 @@
 # Agent-Safe Enterprise Desktop OS — PRD
-2026-10-18 · @Lundin
+2026-10-20 · @Lundin
 
 ## Summary and problem
 We are building a FreeBSD-based enterprise desktop where employees can safely hand real work to AI agents. The OS contains, shows, logs and can undo everything an agent does. That lets security teams say yes to agents that Windows and macOS force them to block.
@@ -133,7 +133,7 @@ Agents use the most structured interface available, in a fixed order: app action
 **App actions**
 - NV-1. The OS ships an action registry. Apps declare actions with a name, typed inputs, outputs, side effects and default approval tier.
 - NV-2. The registry speaks MCP, so existing MCP servers and tools work without rewriting.
-- NV-3. Every first-party app ships with full action coverage at launch: files, mail, calendar, browser and settings. Glasshouse doesn't build its own document or spreadsheet editors; agents work in Microsoft 365 and Google Workspace through their APIs.
+- NV-3. Every first-party app ships with full action coverage at launch: files, mail, calendar, browser and settings. Glasshouse builds its own Docs and Sheets with AI built in (DC, SH; owner decision 2026-10-20), and agents also work in Microsoft 365 and Google Workspace through their APIs.
 - NV-4. An adapter SDK lets IT or vendors wrap a web or SaaS app's API as actions.
 **Accessibility tree**
 - NV-10. The UI toolkit refuses to build a control without a role and label. That serves agents and Section 508 compliance at once.
@@ -152,8 +152,8 @@ Glasshouse is for all the work people do on a computer, not just back-office wor
 | Category | Example task | How the agent does it | Typical approval moment |
 | Email and scheduling | "Triage my inbox and draft replies to anything from clients" | App actions in mail and calendar | Ask before sending outside the team |
 | Meetings | "Prep me for my 2:00 PM with Northwind" | App actions plus the shared context index | None, read-only |
-| Documents and decks | "Turn the Q3 forecast into a six-slide deck" | Microsoft 365 or Google Workspace through adapters | Notify when files are created |
-| Spreadsheets and data | "Combine these three exports and flag duplicates" | App actions, with scripts in a sandbox | Notify |
+| Documents and decks | "Turn the Q3 forecast into a six-slide deck" | Glasshouse Docs, or Microsoft 365 and Google Workspace through adapters | Notify when files are created |
+| Spreadsheets and data | "Combine these three exports and flag duplicates" | Glasshouse Sheets, or Excel and Google Sheets through adapters; scripts in a sandbox | Notify |
 | Forms and portals | "File my expense report from these receipts" | Screen control and recorded flows | Ask before submitting |
 | Research and monitoring | "Watch the vendor's status page and tell me if it changes" | Browser, on the remote runtime (PA-9) | None |
 | Files | "Find the signed MSA and share it with Legal" | File actions, respecting data labels | Ask before sharing outside the org |
@@ -181,6 +181,55 @@ When no app exists for what someone needs, Glasshouse builds one for them in min
 - GA-10. Admins set who can build apps, which data labels generated apps may use, how far they can be shared, and see an inventory of every generated app.
 - GA-11. IT or developers can take an app's TypeScript source and turn a popular app into a supported one.
 - GA-14. The Store credits the people who make things: a "Made at [org]" shelf, each app's maker, what it's based on, how many remixes and installs it has, and what changed between versions. IT sees the popular remixes and can adopt one as supported (GA-11).
+
+## Working together
+People and their agents now make things all day: pages, docs, sheets, skills. Glasshouse gives each a proper home in the org's shared space, one way to share it with the right people, and one place to collect feedback. Nothing is passed around as a loose file in chat. Everything people make is sealed like chat (ADR 0030), shared by the same rules, found through the same search, and covered by the same audit, retention and labels. An org that already runs on Microsoft 365 keeps it, and an org with no mail of its own gets ours.
+**Artifacts**
+An artifact is anything an agent or a person made to be looked at: an HTML page, a chart, a small interactive tool, a report. Today people drop them into chat as HTML files that others download and open in a browser. That is unsafe and loses every comment.
+- AR-1. Share gives an artifact a home: one action from Files, Chat, an agent's tile or the Share menu puts it in the org's shared space and gives it a link that opens it in the viewer. It never travels as a file to download and double-click.
+- AR-2. The viewer shows an artifact sandboxed: its own origin, no network of its own, no access to the viewer's data, scripts only inside its frame. It opens in under a second and reads like a page.
+- AR-3. Feedback lives on the artifact: comments pinned to a spot or an element, replies, reactions and resolving. The author sees every comment in one list, and an agent can read the feedback (Auto) and answer it with a new version (Notify).
+- AR-4. Sharing again makes a new version. Viewers see what changed, and comments carry over or are marked as about an older version.
+- AR-5. Shared with people, groups or a conversation. In Chat an artifact shows as a card that opens the viewer, never as a raw attachment. Inside the org by default; IT can allow view-only links outside it, with an expiry.
+- AR-6. IT sees every shared artifact (title, owner, audience, label, views), can take one down, and sets in policy who may share how far. An artifact's data follows its label (DP).
+**Skills**
+Skills (instructions, examples and scripts that teach an agent a task, AE-1) are how an org's know-how reaches its agents. They need the same care as code: an owner, versions, tests and a way for anyone to improve them.
+- SK-1. A skill is a first-class item: an owner, versions, a description and a listing in the org's catalog. People and agents find skills the way they find apps, by need (GA-2).
+- SK-2. Every skill carries evals: cases with expected results and graders. Each version's score is recorded with the model and settings it ran on.
+- SK-3. Anyone can propose a change to a skill, like a pull request. The proposal runs the skill's evals and shows the scores before and after, case by case. The owner merges it. A change that lowers a score is flagged, and one that breaks a case can't merge without the owner saying why.
+- SK-4. The catalog shows each skill's score, how many people use it, its versions and who improved it. People who use a skill hear when a new version scores better.
+- SK-5. Evals run in a sandbox through the model gateway, so data labels and model routing hold (DP). Eval cases are data, labeled like any other.
+- SK-6. Agents use catalog skills at a pinned version. Tailoring layers can add skills (TL-1), and a personal skill can be shared back through review (GA-8).
+**Docs and Sheets**
+Glasshouse builds its own Docs and Sheets (owner decision 2026-10-20, changing NV-3). They are clean and fast, AI is part of them rather than a sidebar, and sharing is as easy as typing a name.
+- DC-1. Docs is a clean block editor: headings, lists, checklists, tables, code, callouts, links between docs, and embedded artifacts and sheets. It opens in under a second.
+- DC-2. AI is built in: write, rewrite, shorten, summarize or fill a section from a prompt, in place. It runs through the model gateway under the doc's label, and every AI edit is marked and can be undone.
+- DC-3. Several people edit at once and see each other. Comments, suggested edits and version history are built in.
+- DC-4. Sharing: with people or groups, to view, comment or edit. Typing a colleague's name fills in their email from the directory (AD-1); @mentions notify them.
+- DC-5. Word and PDF out, Word in.
+- SH-1. Sheets is a fast grid with formulas (the common Excel functions), formatting, sort, filter, pivot tables and charts. Excel and CSV in and out.
+- SH-2. AI is built in: a formula from words, cleaning and reshaping data, explaining a sheet, a chart from a question. Same gateway rules and undo as Docs.
+- SH-3. Sheets shares, co-edits, comments and keeps history the way Docs does.
+- DC-6. Agents read and edit docs and sheets through actions: reading is Auto, editing is Notify, and sharing outside the org asks. Docs and sheets are sealed like chat, with IT's compliance key for retention and holds.
+**Scheduling**
+Calendar does what people use Calendly for, inside the org's rules.
+- SC-1. Booking links: a person shares a link, and others pick a free time from their real calendar. Meeting lengths, working hours, buffers, minimum notice, a daily limit and questions to answer when booking. Confirmations, and links to reschedule or cancel.
+- SC-2. Team scheduling: round robin across a team, a time when everyone in a group is free, and polls for picking a time.
+- SC-3. Finding a time inside the org from Calendar, from colleagues' free and busy times. An agent can do it; sending the invitations asks (CF-20).
+- SC-4. IT's controls in the console: who may make booking links, whether people outside the org may use them, which email domains may book, the longest meeting and the buffers required, what outsiders see of a person's calendar, and branding.
+- SC-5. It works the same on Glasshouse calendars and on Microsoft 365 (IN-1).
+**Microsoft 365 as the provider**
+Many orgs live in Microsoft 365. For them our apps are the front end and Microsoft holds the data.
+- IN-1. IT chooses the provider per service in the console: Glasshouse or Microsoft 365 for mail, calendar, chat and meetings, and Google Workspace later. With Microsoft 365, Mail, Calendar, Chat and Meet work against Exchange Online and Teams through Microsoft Graph, and our servers hold none of that data.
+- IN-2. Agents' actions stay the same (mail.send, calendar.create, chat.post). The provider sits behind them, so policy, tiers, audit and undo hold whichever is chosen.
+- IN-3. People sign in once with Entra ID (AD-10). IT grants the Graph permissions once in the console, and the console shows what each one is for.
+- IN-4. Providers mix: Microsoft 365 for mail and calendar with Glasshouse docs and sheets, for example. A Teams meeting opens in its web app; Glasshouse meetings (CF-21) stay org only.
+**Mail for teams that have none**
+A team starting fresh shouldn't have to buy Gmail or Microsoft 365 just to have email.
+- EM-1. An org without mail gets Glasshouse Mail: a mailbox for everyone in the directory on the org's own domain. The console shows the DNS records to add and checks them live. A new org can start on an address under a Glasshouse domain and move to its own later.
+- EM-2. Mail gets delivered: SPF, DKIM and DMARC are set up for the org; incoming mail is filtered for spam and malware; outgoing mail has sending limits that protect the domain's reputation.
+- EM-3. Standard access (IMAP and SMTP, then JMAP), so phones and other mail apps work. The Mail app behaves the same on any provider.
+- EM-4. IT manages aliases, groups and shared mailboxes, retention and legal hold, and imports mail from an old provider.
 
 ## Tailoring catalog items
 Users adapt catalog apps and agents with layers, not copies. A small change is saved as a thin layer on top of the published version, so the original keeps getting updates and the change rides along. A full copy is only for changes too big for a layer. See the Tailoring a catalog agent artboard on the [mockups canvas](https://claude.ai/artifact/Y5fH2vFk3fWUvWumZTRATC).
@@ -620,6 +669,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Desktop experience: UX-1, UX-2, UX-10, UX-20 to UX-22, UX-30
 - Architecture commitments: FD-1 to FD-4
 - Base system and portability: BS-1 to BS-6, PL-1, PL-2
+- Working together (proposed 2026-10-20): AR-1 to AR-4, AR-5 inside the org, SK-1 to SK-3, DC-1 to DC-4, DC-6, SH-1 to SH-3, SC-1, SC-3, SC-4, and IN-1 and IN-2 for mail and calendar
 **P1 · V1 GA**
 - AW-6, DA-4, DA-14, NV-4, NV-21, NV-22, NV-30 to NV-32
 - DP-6, DP-11, DP-20, DP-30, AU-4, AU-11, AU-22
@@ -635,6 +685,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Agent engine: AE-2 (remaining agents), AE-20 to AE-25
 - Tailoring catalog items: TL-12, TL-14
 - Desktop experience: UX-3, UX-11, UX-31, UX-40
+- Working together (proposed 2026-10-20): AR-5 links outside the org, AR-6, SK-4 to SK-6, DC-5, SC-2, SC-5, IN-1 for chat and meetings, IN-3, IN-4, EM-1 to EM-4
 **P2 · Later**
 - Undo into third-party SaaS through compensating actions at scale
 - A public agent and adapter marketplace
@@ -687,6 +738,9 @@ The biggest risks are distribution and hardware, not the agent technology. Micro
 - Fee for paid listings once DV-30 launches, and whether internal-only items ever carry a fee.
 - Support lifecycle: how many years each release is supported, and the battery-life target versus Windows.
 - Confirm the first two Pilot 1 workflows with design partners, and the accuracy bar each agent must clear.
+- Hosted mail (EM): run our own mail servers on AWS, or a mail partner behind our console? Deliverability and abuse handling are an operations commitment.
+- Links outside the org (AR-5, SC-1 booking pages) are public pages on our servers. Which orgs may turn them on, and with what review?
+- Microsoft 365 (IN): Teams chat messages need Microsoft's approval for protected APIs. Until then, is Teams chat read-only, or opened in its web app?
 **Decisions already made**
 - Build on FreeBSD rather than writing a kernel.
 - The agent is a first-class principal with its own identity, sandbox and audit.
@@ -694,4 +748,5 @@ The biggest risks are distribution and hardware, not the agent technology. Micro
 - Structured actions first, screen control as fallback.
 - Build on pkgbase with a thin fork. Never replace the kernel; keep Glasshouse portable above it through a thin platform layer.
 - Our web apps ship their TypeScript source on customers' computers so people can remix them, under a license that allows changes for the customer's own use and no redistribution. Suggestions to us are off unless IT turns them on.
+- We build our own Docs and Sheets with AI built in, which replaces NV-3's earlier rule of building no editors (2026-10-20). Artifacts, skills, docs and sheets live in one sealed shared space. Microsoft 365 can be the provider for mail, calendar, chat and meetings, and orgs without mail get Glasshouse Mail.
 - Amazon Bedrock is the default model provider at launch. Claude subscribers drive the OS through Claude Code plus our plugin, and ChatGPT subscribers through Sign in with ChatGPT.

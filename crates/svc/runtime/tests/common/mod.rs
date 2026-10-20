@@ -235,6 +235,13 @@ fn test_registry(
     // Meetings are conversations in chat's store (CF-21), as glassd wires it.
     let chat = ChatProvider::new(chat.clone(), directory.clone());
     let meetings: Arc<dyn glass_managed::meet::Meetings> = Arc::new(chat.clone());
+    let shared: Arc<dyn glass_managed::shared::Shared> = Arc::new(chat.clone());
+    registry
+        .register(Arc::new(glass_app_artifacts::ArtifactsProvider::new(
+            shared,
+            directory.clone(),
+        )))
+        .unwrap();
     registry
         .register(Arc::new(
             CalendarProvider::new(directory.clone()).meetings(meetings.clone()),
@@ -347,6 +354,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
                 settings_app(),
                 chat_app(),
                 meet_app(),
+                artifacts_app(),
             ],
             // The app socket resolves callers by uid; their app data is
             // here, never in the real account's home.
@@ -371,13 +379,17 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         &rt,
         |_groups, _need| Vec::new(),
     )));
-    // News in chat wakes the person's Chat, as glassd wires it.
+    // News in chat wakes the app that shows it, as glassd wires it.
     {
         let rt = Arc::downgrade(&rt);
         chat.on_notice(move |notice| {
-            if let (Some(rt), glass_app_chat::Notice::Changed { logins }) = (rt.upgrade(), notice) {
+            if let (Some(rt), glass_app_chat::Notice::Changed { logins, kinds }) =
+                (rt.upgrade(), notice)
+            {
                 for login in logins {
-                    rt.app_changed(login, "chat");
+                    for kind in kinds {
+                        rt.app_changed(login, kind.app());
+                    }
                 }
             }
         });
@@ -629,6 +641,16 @@ pub fn chat_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "chat", "name": "Chat", "version": "0.1.0",
         "actions": ["chat.list", "chat.read", "chat.post", "chat.create", "people.search"],
+        "permissions": [], "labels": ["public", "internal"]
+    }))
+    .unwrap()
+}
+
+/// Artifacts as ADR 0033 declares it (apps/artifacts/manifest.json).
+pub fn artifacts_app() -> AppManifest {
+    serde_json::from_value(json!({
+        "id": "artifacts", "name": "Artifacts", "version": "0.1.0",
+        "actions": ["artifact.list", "artifact.read", "artifact.share", "artifact.update", "artifact.comment", "artifact.resolve", "people.search", "chat.list"],
         "permissions": [], "labels": ["public", "internal"]
     }))
     .unwrap()

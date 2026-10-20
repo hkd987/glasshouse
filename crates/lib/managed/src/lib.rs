@@ -26,6 +26,7 @@ pub mod catalog;
 pub mod chat;
 pub mod directory;
 pub mod meet;
+pub mod shared;
 pub mod signing;
 pub mod store;
 pub mod studio;
