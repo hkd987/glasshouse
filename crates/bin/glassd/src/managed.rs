@@ -216,7 +216,7 @@ impl Managed {
         }
         // Model calls on the org's credits (ADR 0039) go to the console too,
         // on a client of their own: a long answer mustn't hold up the rest.
-        match console(&token) {
+        match console(&token).map(ConsoleClient::for_model_calls) {
             Ok(models) => self.org.credits.connect(Arc::new(models), &self.device),
             Err(e) => tracing::error!("managed: model credits: {e}"),
         }

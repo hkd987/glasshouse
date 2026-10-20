@@ -66,7 +66,10 @@ only, this amends ADR 0018: their prompts cross our servers.
    - Policy names the provider with kind `credits`. On a managed computer
      glassd's `credits` provider sends each call to the console
      (`/device/v1/models/complete`), signed with the computer's own key
-     (ADR 0030 slice P), on a connection of its own.
+     (ADR 0030 slice P), on a connection of its own. It waits 30 s longer
+    than the console's own call to OpenRouter (idle and in all), so a slow
+    model times out at the console and the computer hears why, rather than
+    failing over while the console still pays for the first answer.
    - The console forwards it to OpenRouter with the org's key, for a model
      the org's published policy runs on credits, at most 32,768 tokens out
      and 64 calls at once. Used-up credits are refused in words, and the

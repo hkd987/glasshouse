@@ -21,6 +21,12 @@ const MAX_REPLY: usize = 8 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Long replies take a while; a stuck call fails over eventually.
 const CALL_TIMEOUT: Duration = Duration::from_secs(300);
+/// The longest a connection may sit silent.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// How much longer a hop in front of a provider waits than the provider's
+/// own call (ADR 0039: a computer's call through its console), so the far
+/// end gives up first and the near end hears why.
+const HOP_SLACK: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub(crate) struct Http {
@@ -28,6 +34,8 @@ pub(crate) struct Http {
     tls: Result<native_tls::TlsConnector, String>,
     https_only: bool,
     proxy: Option<Proxy>,
+    pub(crate) idle: Duration,
+    pub(crate) total: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +97,18 @@ impl Http {
             tls,
             https_only,
             proxy,
+            idle: IDLE_TIMEOUT,
+            total: CALL_TIMEOUT,
         }
+    }
+
+    /// Waits longer than a provider's own call does, for requests that
+    /// another server forwards to one.
+    #[must_use]
+    pub fn outwaiting_providers(mut self) -> Self {
+        self.idle = IDLE_TIMEOUT + HOP_SLACK;
+        self.total = CALL_TIMEOUT + HOP_SLACK;
+        self
     }
 
     /// POSTs `body` with `headers` and reads the reply. Network and TLS
@@ -124,7 +143,7 @@ impl Http {
                 "model endpoints must use HTTPS".into(),
             ));
         }
-        let deadline = Instant::now() + CALL_TIMEOUT;
+        let deadline = Instant::now() + self.total;
         let mut head = format!(
             "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Glasshouse model gateway\r\nContent-Length: {}\r\nConnection: close\r\n",
             target.path,
@@ -155,11 +174,11 @@ impl Http {
             .filter(|p| target.tls && !p.bypasses(&target.host));
         let tcp = match via {
             Some(proxy) => {
-                let mut tcp = dial(&proxy.authority)?;
+                let mut tcp = dial(&proxy.authority, self.idle)?;
                 tunnel(&mut tcp, target)?;
                 tcp
             }
-            None => dial(&target.address())?,
+            None => dial(&target.address(), self.idle)?,
         };
         if !target.tls {
             return Ok(Box::new(tcp));
@@ -183,7 +202,7 @@ fn outage(doing: &str, e: &std::io::Error) -> ProviderError {
     }
 }
 
-fn dial(authority: &str) -> Result<TcpStream, ProviderError> {
+fn dial(authority: &str, idle: Duration) -> Result<TcpStream, ProviderError> {
     let addrs = authority
         .to_socket_addrs()
         .map_err(|_| ProviderError::Unavailable(format!("can't resolve {authority}")))?;
@@ -191,9 +210,8 @@ fn dial(authority: &str) -> Result<TcpStream, ProviderError> {
     for addr in addrs {
         match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
             Ok(tcp) => {
-                let idle = Some(Duration::from_secs(120));
-                tcp.set_read_timeout(idle)
-                    .and_then(|()| tcp.set_write_timeout(idle))
+                tcp.set_read_timeout(Some(idle))
+                    .and_then(|()| tcp.set_write_timeout(Some(idle)))
                     .map_err(|e| outage("connecting", &e))?;
                 return Ok(tcp);
             }

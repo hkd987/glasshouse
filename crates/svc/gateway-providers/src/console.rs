@@ -61,6 +61,15 @@ impl ConsoleClient {
         })
     }
 
+    /// For model calls on credits (ADR 0039): waits longer than the
+    /// console's own call to OpenRouter, so a slow model times out there,
+    /// not here while the console is still paying for the answer.
+    #[must_use]
+    pub fn for_model_calls(mut self) -> Self {
+        self.http = self.http.outwaiting_providers();
+        self
+    }
+
     /// Signs every request with `key`, the computer's own.
     #[must_use]
     pub fn signed_by(mut self, key: Arc<DeviceKey>) -> Self {
@@ -330,6 +339,16 @@ mod tests {
         assert!(ConsoleClient::new("https://console.example", "t", false).is_ok());
         assert!(ConsoleClient::new("ftp://x", "t", true).is_err());
         assert!(ConsoleClient::new("https://console.example", "a\nb", false).is_err());
+    }
+
+    #[test]
+    fn adr0039_a_call_through_the_console_outwaits_the_consoles_own_call() {
+        let direct = Http::new();
+        let models = ConsoleClient::new("https://console.example", "t", false)
+            .unwrap()
+            .for_model_calls();
+        assert!(models.http.idle > direct.idle, "{models:?}");
+        assert!(models.http.total > direct.total, "{models:?}");
     }
 
     fn signed(url: &str, token: &str) -> ConsoleClient {
