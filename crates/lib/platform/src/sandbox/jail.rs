@@ -368,10 +368,6 @@ impl Sandbox for JailSandbox {
         }
         Ok(cleaned)
     }
-
-    fn run_tool(&self, run: &super::ToolRun) -> Result<super::ToolOutput> {
-        super::tool::run_jailed(run)
-    }
 }
 
 fn strip_root(path: &Path) -> Result<&Path> {
@@ -403,6 +399,12 @@ fn serde_json_string(spec: &SandboxSpec) -> Result<String> {
 
 fn serde_json_parse(text: &str) -> Option<SandboxSpec> {
     serde_json::from_str(text).ok()
+}
+
+impl super::ToolRunner for JailSandbox {
+    fn run_tool(&self, run: &super::ToolRun) -> Result<super::ToolOutput> {
+        super::tool::run_jailed(run)
+    }
 }
 
 #[cfg(test)]

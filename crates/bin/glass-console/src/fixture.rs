@@ -140,6 +140,7 @@ fn item(
         groups: BTreeMap::new(),
         pinned: false,
         provenance: Provenance::default(),
+        app: None,
     }
 }
 
@@ -172,6 +173,8 @@ fn catalog(count: usize) -> Vec<ConsoleItem> {
             "Behavior matches declaration".into(),
         ],
         decided_by: None,
+        shared: None,
+        approved: None,
     }];
     let kinds = [ItemKind::App, ItemKind::Agent, ItemKind::Flow];
     let topics = [
@@ -271,6 +274,8 @@ fn catalog(count: usize) -> Vec<ConsoleItem> {
             requested_by: ["AP Operations", "Finance", "Legal Operations"][n % 3].into(),
             checks: vec!["Malware scan clean".into(), "No critical CVEs".into()],
             decided_by: (review != Review::Waiting).then(|| "pat".to_owned()),
+            shared: None,
+            approved: None,
         });
     }
     items

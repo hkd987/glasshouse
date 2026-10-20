@@ -9,6 +9,7 @@
 //! POST /api/policy/edit               one edit to the draft
 //! POST /api/policy/{preview,publish,promote,rollback,discard}
 //! GET  /api/catalog                   the catalog page
+//! GET  /api/catalog/<id>                an item; a shared app's review (GA-8)
 //! POST /api/catalog/<id>/{approve,block,public}
 //! GET  /api/fleet                     the fleet page
 //! POST /api/fleet/<device>/ring       move a device to another ring
@@ -20,6 +21,8 @@
 //! POST /device/v1/report              a device's report (bearer token)
 //! POST /device/v1/chat/{keys,keys/lookup,conversations,messages,sync}
 //!                                     chat, sealed (ADR 0030)
+//! POST /device/v1/apps/submit          share an app for review (ADR 0032)
+//! POST /device/v1/apps/bundle          an approved app's bundle, as signed
 //! ```
 //!
 //! Admins are the directory's `it-admins`; support staff are the members of
@@ -50,9 +53,13 @@ use crate::directory::Directory;
 use crate::edits::Edit;
 use crate::impact::{self, Titles};
 use crate::state::{Refused, State};
+use crate::studio::Builder;
 use crate::views;
 
 const COOKIE: &str = "glass_console";
+/// Largest request body: a shared app's source is up to a megabyte, more
+/// once written as JSON (ADR 0032).
+const MAX_BODY: usize = 4 * glass_http::MAX_BODY;
 /// Pages carry nothing but the console's own files.
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
                    connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
@@ -70,6 +77,8 @@ pub struct Console {
     rooms: Mutex<crate::meet::Rooms>,
     /// The relay that carries meetings' media, beside the console.
     relay: std::sync::OnceLock<crate::relay::Relay>,
+    /// What checks and builds the apps people share (ADR 0032).
+    builder: std::sync::OnceLock<Arc<Builder>>,
     /// The built web app (`apps/console/dist`).
     web: PathBuf,
     /// The console's address, as devices reach it.
@@ -176,6 +185,7 @@ impl Console {
             chat_changed,
             rooms: Mutex::new(crate::meet::Rooms::default()),
             relay: std::sync::OnceLock::new(),
+            builder: std::sync::OnceLock::new(),
             web,
             url,
         })
@@ -184,6 +194,27 @@ impl Console {
     /// The relay meetings' media goes through (`--relay`).
     pub fn set_relay(&self, relay: crate::relay::Relay) {
         let _ = self.relay.set(relay);
+    }
+
+    /// Shared apps are checked against our apps in `apps` and built with
+    /// `tools` running `program`, in `work` (ADR 0032, R2). Without it,
+    /// the console refuses them.
+    pub fn set_builder(
+        &self,
+        tools: Arc<dyn glass_platform::sandbox::ToolRunner>,
+        apps: PathBuf,
+        program: PathBuf,
+        work: PathBuf,
+    ) {
+        let actions = self
+            .titles
+            .lint_info
+            .iter()
+            .map(|(action, effect, _)| (action.clone(), *effect))
+            .collect();
+        let _ = self.builder.set(Arc::new(Builder::with_tools(
+            tools, apps, program, work, actions,
+        )));
     }
 
     pub fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -214,11 +245,12 @@ impl Console {
     }
 
     async fn connection(&self, mut stream: TcpStream) {
-        let (response, head_only) = match glass_http::read_request(&mut stream).await {
-            Ok(request) => (self.handle(&request).await, request.method == "HEAD"),
-            Err(ReadError::Gone) => return,
-            Err(ReadError::Bad(status, why)) => (Response::text(status, why), false),
-        };
+        let (response, head_only) =
+            match glass_http::read_request_up_to(&mut stream, MAX_BODY).await {
+                Ok(request) => (self.handle(&request).await, request.method == "HEAD"),
+                Err(ReadError::Gone) => return,
+                Err(ReadError::Bad(status, why)) => (Response::text(status, why), false),
+            };
         let _ = glass_http::write_response(&mut stream, response, head_only).await;
     }
 
@@ -505,8 +537,16 @@ impl Console {
             }
             ("GET", ["catalog"]) => ok(views::catalog(&self.state(), directory, &self.titles)),
             ("GET", ["catalog", id]) => {
-                match views::item(&self.state(), directory, &self.titles, id) {
-                    Some(v) => ok(v),
+                let state = self.state();
+                match views::item(&state, directory, &self.titles, id) {
+                    Some(mut v) => {
+                        // What a shared app changes, file by file (GA-8).
+                        if v["shared"].is_object() {
+                            v["changes"] =
+                                serde_json::to_value(state.changes(id)).unwrap_or_default();
+                        }
+                        ok(v)
+                    }
                     None => error(404, "no such item"),
                 }
             }
@@ -714,8 +754,69 @@ impl Console {
                 let _ = tokio::time::timeout(wait, changed.changed()).await;
                 ok(serde_json::to_value(self.state().chat.sync(&sync)).unwrap_or_default())
             }
+            "apps/submit" => self.apps_submit(request).await,
+            "apps/bundle" => {
+                let wanted: glass_managed::studio::BundleRequest = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                match self.state().org_bundle(&wanted) {
+                    Ok(bundle) => ok(serde_json::to_value(bundle).unwrap_or_default()),
+                    Err(r) => refused(r),
+                }
+            }
             meet if meet.starts_with("meet/") => self.meet(meet, request).await,
             _ => error(404, "not found"),
+        }
+    }
+
+    // ---- apps people share (ADR 0032, R2) -------------------------------
+
+    /// A computer shares one of a person's own apps: the console checks it
+    /// and builds it itself, then keeps it for IT's review.
+    async fn apps_submit(&self, request: &Request) -> Response {
+        let submission: glass_managed::studio::Submission = match body(request) {
+            Ok(b) => b,
+            Err(r) => return r,
+        };
+        let Some(builder) = self.builder.get().cloned() else {
+            return refused(Refused::Rule(
+                "The organization's console can't check apps people make yet.".into(),
+            ));
+        };
+        let plan = self
+            .state()
+            .share_plan(&submission, &builder, self.directory.as_ref());
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(r) => return refused(r),
+        };
+        let started = std::time::Instant::now();
+        let (checking, manifest, base) =
+            (submission.clone(), plan.manifest.clone(), plan.base.clone());
+        let checked =
+            tokio::task::spawn_blocking(move || builder.check(&checking, &manifest, base.as_ref()))
+                .await;
+        let checked = match checked {
+            Ok(checked) => checked,
+            Err(e) => return error(500, &format!("checking it: {e}")),
+        };
+        let (maker, app, passed) = (
+            submission.maker.clone(),
+            submission.app.clone(),
+            checked.passed(),
+        );
+        let result = self
+            .state()
+            .take_share(plan, submission, checked, self.directory.as_ref());
+        tracing::info!(
+            %maker, %app, passed,
+            ms = started.elapsed().as_millis() as u64,
+            "studio: an app was shared for review"
+        );
+        match result {
+            Ok(submitted) => ok(serde_json::to_value(submitted).unwrap_or_default()),
+            Err(r) => refused(r),
         }
     }
 
@@ -936,6 +1037,14 @@ mod tests {
         }
 
         /// A device's sync.
+        /// A device's call, with the org's enrollment token.
+        async fn device(&self, path: &str, body: Value) -> Response {
+            let auth = format!("Bearer {}", self.token);
+            self.console
+                .handle(&request("POST", path, &body, &[("authorization", &auth)]))
+                .await
+        }
+
         async fn sync(&self, device: &str, policy: Option<u64>, wait: u64) -> SyncResponse {
             let auth = format!("Bearer {}", self.token);
             let body = json!({ "device": device, "policy": policy, "wait_secs": wait });
@@ -1688,6 +1797,155 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ga8_ga13_a_shared_app_is_reviewed_then_delivered_as_the_console_built_it() {
+        use glass_managed::studio::{Bundle, Submission, Submitted};
+
+        let t = console().await;
+        t.console.set_builder(
+            Arc::new(glass_app_studio::testing::FakeBundler::default()),
+            crate::studio::tests::repo().join("apps"),
+            "/nonexistent/esbuild".into(),
+            t._dir.path().join("builds"),
+        );
+        let builder = t.console.builder.get().unwrap().clone();
+        let submit =
+            |s: &Submission| t.device("/device/v1/apps/submit", serde_json::to_value(s).unwrap());
+        let bundle = |version: &str| {
+            t.device(
+                "/device/v1/apps/bundle",
+                json!({ "app": "mail-with-write", "version": version }),
+            )
+        };
+        let (submission, _) = crate::studio::tests::remix(&builder, &["chat.post"]);
+        let r = submit(&submission).await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let submitted: Submitted = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(submitted.id.as_str(), "mail-with-write");
+        assert!(
+            submitted.text.contains("AP Operations"),
+            "{}",
+            submitted.text
+        );
+        // Nothing reaches computers before IT's review.
+        assert_eq!(bundle("1").await.status, 404);
+        assert!(t.sync("d", None, 0).await.catalog.is_none());
+
+        // The review: who made it from what, the change, the delta, DV-4.
+        let (status, item) = t
+            .call("GET", "/api/catalog/mail-with-write", Value::Null)
+            .await;
+        assert_eq!(status, 200, "{item}");
+        assert_eq!(item["review"], "waiting");
+        assert_eq!(item["publisher"], "Dana Ruiz");
+        let shared = &item["shared"];
+        assert_eq!(
+            (shared["maker"].as_str(), shared["group"].as_str()),
+            (Some("Dana Ruiz"), Some("ap-ops"))
+        );
+        assert_eq!(shared["passed"], true, "{shared}");
+        assert_eq!(
+            shared["needs_person"], true,
+            "mail.send and chat.post can't be undone"
+        );
+        assert_eq!(shared["beyond_base"][0]["action"], "chat.post");
+        assert_eq!(item["changes"][0]["path"], "src/main.ts");
+        assert!(
+            item["changes"][0]["unified"]
+                .as_str()
+                .unwrap()
+                .contains("+")
+        );
+
+        // Approved for AP Ops: in the signed catalog, with the bundle's hash.
+        let (status, approved) = t
+            .call(
+                "POST",
+                "/api/catalog/mail-with-write/approve",
+                json!({ "group": "ap-ops", "mode": "available", "pin": false }),
+            )
+            .await;
+        assert_eq!(status, 200, "{approved}");
+        let release: CatalogRelease = t
+            .sync("d", None, 0)
+            .await
+            .catalog
+            .unwrap()
+            .open(DocKind::Catalog, "acme", &[t.key], None)
+            .unwrap();
+        let app = release.items[0].app.clone().unwrap();
+        assert_eq!(
+            (app.manifest.id.as_str(), app.manifest.version.as_str()),
+            ("mail-with-write", "1")
+        );
+        assert_eq!(app.made_by, "dana");
+        let r = bundle("1").await;
+        assert_eq!(r.status, 200);
+        let built: Bundle = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(
+            built.digest(),
+            app.bundle_sha256,
+            "computers get what was signed"
+        );
+        assert!(built.files["index.html"].contains("<title>Mail, with Write</title>"));
+
+        // A new version waits; computers keep the approved one meanwhile.
+        let mut next = submission.clone();
+        next.version = 3;
+        next.note = "Write, and a quieter list".into();
+        let r = submit(&next).await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let (_, item) = t
+            .call("GET", "/api/catalog/mail-with-write", Value::Null)
+            .await;
+        assert_eq!(
+            (item["version"].as_str(), item["approved_version"].as_str()),
+            (Some("2"), Some("1"))
+        );
+        assert_eq!(bundle("1").await.status, 200);
+        assert_eq!(bundle("2").await.status, 404);
+
+        // Someone else's app named like another one is refused.
+        let mut copy = submission.clone();
+        copy.maker = "sam".into();
+        copy.name = "Mail".into();
+        let r = submit(&copy).await;
+        assert_eq!(r.status, 409, "{}", String::from_utf8_lossy(&r.body));
+        // A team its maker isn't in, or a maker the org doesn't have.
+        let mut outside = submission.clone();
+        outside.share = glass_managed::studio::ShareTo::Team {
+            group: "legal-ops".into(),
+        };
+        assert_eq!(submit(&outside).await.status, 400);
+        let mut stranger = submission.clone();
+        stranger.maker = "mallory".into();
+        assert_eq!(submit(&stranger).await.status, 400);
+        // The console's own checks refuse what a computer let through.
+        let mut sneaky = submission.clone();
+        sneaky.app = "my-other".parse().unwrap();
+        sneaky.manifest.id = sneaky.app.clone();
+        sneaky.name = "Mail, quietly".into();
+        sneaky
+            .files
+            .get_mut(glass_app_studio::checks::MAIN)
+            .unwrap()
+            .push_str("\nnew WebSocket('wss://example.com');\n");
+        let r = submit(&sneaky).await;
+        assert_eq!(r.status, 400);
+        assert!(
+            json_of(&r)["error"]
+                .as_str()
+                .unwrap()
+                .contains("its own connection"),
+            "{}",
+            json_of(&r)
+        );
+        assert!(
+            t.console.state().item("mail-quietly").is_err(),
+            "nothing failing is kept"
+        );
+    }
+
+    #[tokio::test]
     async fn dv11_approve_for_a_group_and_dv13_never_to_the_public_store() {
         let t = console().await;
         {
@@ -1708,11 +1966,14 @@ mod tests {
                         groups: Default::default(),
                         pinned: false,
                         provenance: Default::default(),
+                        app: None,
                     },
                     review: crate::state::Review::Waiting,
                     requested_by: "Legal Operations".into(),
                     checks: Vec::new(),
                     decided_by: None,
+                    shared: None,
+                    approved: None,
                 })
                 .unwrap();
         }

@@ -90,6 +90,18 @@ impl Runtime {
     /// a person's apps from glassd, never from a folder they could change.
     pub fn app_files(&self, caller: &Caller, app: &AgentId) -> Result<AppFiles> {
         let not_found = || RuntimeError::NotFound(format!("no app {app} of yours"));
+        if !app.is_personal() {
+            // An org app (R2), to someone the catalog lets it reach.
+            if !self.org_apps(caller).iter().any(|m| &m.id == app) {
+                return Err(not_found());
+            }
+            let (version, files) = self.config.org_apps.files(app).ok_or_else(not_found)?;
+            return Ok(AppFiles {
+                app: app.clone(),
+                version: version.parse().unwrap_or(0),
+                files,
+            });
+        }
         if !self
             .own_apps(caller)
             .iter()
@@ -107,6 +119,21 @@ impl Runtime {
             version,
             files,
         })
+    }
+
+    /// The org apps (ADR 0032, R2) that reach `caller`: those the catalog
+    /// requires for their groups, or offers and they installed (DV-11).
+    /// One the catalog doesn't list reaches nobody.
+    pub(crate) fn org_apps(&self, caller: &Caller) -> Vec<AppManifest> {
+        let reaches = self.catalog_reach(caller);
+        let listed = self.config.org_catalog.lists();
+        self.config
+            .org_apps
+            .apps()
+            .into_iter()
+            .filter(|m| !m.id.is_personal() && self.installed_app(&m.id).is_none())
+            .filter(|m| listed.contains(&m.id) && reaches(&m.id))
+            .collect()
     }
 
     /// The apps in `caller`'s profile, as the launcher offers them: web
@@ -154,6 +181,14 @@ impl Runtime {
                 })
             })
             .collect();
+        // Apps people made that IT approved (R2).
+        apps.extend(self.org_apps(caller).into_iter().map(|m| ProfileApp {
+            id: m.id,
+            name: m.name,
+            kind: ProfileAppKind::Web,
+            url: None,
+            based_on: None,
+        }));
         // Their own apps, after the org's (ADR 0032).
         apps.extend(self.own_apps(caller).into_iter().map(|own| ProfileApp {
             id: own.manifest.id,
@@ -180,6 +215,21 @@ impl Runtime {
                 .ok_or_else(|| RuntimeError::NotFound(format!("no app {app} of yours")))?;
             let allowed = self.own_apps(caller).iter().any(|o| &o.manifest.id == app);
             (Arc::new(own.manifest), allowed)
+        } else if let Some(org) = self
+            .installed_app(app)
+            .is_none()
+            .then(|| {
+                self.config
+                    .org_apps
+                    .apps()
+                    .into_iter()
+                    .find(|m| &m.id == app)
+            })
+            .flatten()
+        {
+            // An org app (R2): the catalog decides who it reaches.
+            let allowed = self.org_apps(caller).iter().any(|m| &m.id == app);
+            (Arc::new(org), allowed)
         } else {
             let manifest = self
                 .installed_app(app)

@@ -164,6 +164,10 @@ pub struct CatalogItem {
     pub pinned: bool,
     #[serde(default)]
     pub provenance: Provenance,
+    /// An app people made and IT approved (ADR 0032): what computers
+    /// install, by the bundle's digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<crate::studio::OrgApp>,
 }
 
 impl CatalogItem {
@@ -404,6 +408,7 @@ mod tests {
             groups: groups.iter().map(|(g, m)| ((*g).to_owned(), *m)).collect(),
             pinned: false,
             provenance: Provenance::default(),
+            app: None,
         }
     }
 

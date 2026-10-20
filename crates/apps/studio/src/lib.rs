@@ -18,6 +18,7 @@
 
 pub mod bundle;
 pub mod checks;
+pub mod diff;
 pub mod store;
 pub mod testing;
 
@@ -31,11 +32,11 @@ use glass_actions::{
 };
 use glass_api::{AppManifest, AppPermission, ChangeKind};
 use glass_managed::catalog::relevance;
-use glass_platform::sandbox::Sandbox;
+use glass_managed::studio::{ShareLink, ShareTo, SharedBase, Submission, digest};
+use glass_platform::sandbox::ToolRunner;
 use glass_types::{ActionName, AgentId, Label, PERSONAL_PREFIX, SideEffect, Tier, Timestamp};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 pub use bundle::Bundler;
 pub use checks::Findings;
@@ -47,6 +48,7 @@ pub const SAVE: &str = "apps.save";
 pub const CREATE: &str = "apps.create";
 pub const VERSIONS: &str = "apps.versions";
 pub const REVERT: &str = "apps.revert";
+pub const SHARE: &str = "apps.share";
 
 /// What the studio needs from the rest of the system, which glassd gives it
 /// once the runtime is up.
@@ -92,6 +94,9 @@ struct Inner {
     store: Store,
     bundler: OnceLock<Bundler>,
     surroundings: OnceLock<Arc<dyn Surroundings>>,
+    /// The org's console, and this computer's name in its fleet: where
+    /// sharing goes (R2). Unset on a computer no org manages.
+    share: OnceLock<(Arc<dyn ShareLink>, String)>,
     /// One save at a time on this computer: versions are numbered.
     saving: Mutex<()>,
 }
@@ -111,6 +116,7 @@ impl Studio {
                 paths,
                 bundler: OnceLock::new(),
                 surroundings: OnceLock::new(),
+                share: OnceLock::new(),
                 saving: Mutex::new(()),
             }),
         }
@@ -126,10 +132,10 @@ impl Studio {
         })
     }
 
-    /// Bundles with `sandbox`'s confinement, in the store's build folder.
-    pub fn set_sandbox(&self, sandbox: Arc<dyn Sandbox>) {
+    /// Bundles with `tools`' confinement, in the store's build folder.
+    pub fn set_tools(&self, tools: Arc<dyn ToolRunner>) {
         let _ = self.inner.bundler.set(Bundler::new(
-            sandbox,
+            tools,
             self.inner.paths.bundler.clone(),
             self.inner.paths.source.join("sdk"),
             self.inner.paths.store.join(".build"),
@@ -138,6 +144,12 @@ impl Studio {
 
     pub fn set_surroundings(&self, surroundings: Arc<dyn Surroundings>) {
         let _ = self.inner.surroundings.set(surroundings);
+    }
+
+    /// Shares go to the org's console through `link`, from computer
+    /// `device` (R2, GA-8).
+    pub fn set_share(&self, link: Arc<dyn ShareLink>, device: String) {
+        let _ = self.inner.share.set((link, device));
     }
 
     pub fn store(&self) -> &Store {
@@ -355,6 +367,28 @@ struct VersionsInput {
     app: Option<AgentId>,
 }
 
+/// Who a share is for, as an agent names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Audience {
+    Team,
+    Org,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShareInput {
+    app: AgentId,
+    to: Audience,
+    /// The person's group, for `to: team`.
+    #[serde(default)]
+    team: Option<String>,
+    /// What colleagues see it as in the Store; its own name by default.
+    #[serde(default)]
+    name: Option<String>,
+    note: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RevertInput {
@@ -381,8 +415,10 @@ fn invalid(why: impl Into<String>) -> ActionError {
     ActionError::InvalidInput(why.into())
 }
 
-/// A name's id among `login`'s apps: `my-` and the name's words.
-fn id_for(name: &str, taken: &[AgentId]) -> Result<AgentId, ActionError> {
+/// A name as an id's words: lowercase letters and digits joined by `-`,
+/// 40 at most, without a leading `my-`. Empty when the name has no letters
+/// or digits.
+pub fn slug(name: &str) -> String {
     let mut slug = String::new();
     for c in name.to_lowercase().chars() {
         if c.is_ascii_alphanumeric() {
@@ -395,33 +431,31 @@ fn id_for(name: &str, taken: &[AgentId]) -> Result<AgentId, ActionError> {
     // "My Mail" is my-mail, not my-my-mail.
     let slug = slug.strip_prefix("my-").unwrap_or(slug);
     let slug: String = slug.chars().take(40).collect();
-    let slug = slug.trim_matches('-');
-    let stem = format!(
-        "{PERSONAL_PREFIX}{}",
-        if slug.is_empty() { "app" } else { slug }
-    );
+    slug.trim_matches('-').to_owned()
+}
+
+/// The first of `stem`, `stem-2`, `stem-3`… that isn't `taken`.
+pub fn unique_id(stem: &str, taken: &[AgentId]) -> Option<AgentId> {
     (1..100)
         .map(|n| {
             if n == 1 {
-                stem.clone()
+                stem.to_owned()
             } else {
                 format!("{stem}-{n}")
             }
         })
         .filter_map(|id| id.parse::<AgentId>().ok())
         .find(|id| !taken.contains(id))
-        .ok_or_else(|| invalid("pick another name: that one is taken"))
 }
 
-fn digest(files: &BTreeMap<String, String>) -> String {
-    let mut hash = Sha256::new();
-    for (path, text) in files {
-        hash.update(path.as_bytes());
-        hash.update([0]);
-        hash.update(text.as_bytes());
-        hash.update([0]);
-    }
-    hex::encode(hash.finalize())
+/// A name's id among `login`'s apps: `my-` and the name's words.
+fn id_for(name: &str, taken: &[AgentId]) -> Result<AgentId, ActionError> {
+    let slug = slug(name);
+    let stem = format!(
+        "{PERSONAL_PREFIX}{}",
+        if slug.is_empty() { "app" } else { &slug }
+    );
+    unique_id(&stem, taken).ok_or_else(|| invalid("pick another name: that one is taken"))
 }
 
 impl StudioProvider {
@@ -910,6 +944,100 @@ impl StudioProvider {
     }
 }
 
+impl StudioProvider {
+    /// What sharing `input` would send: the submission and who it's for.
+    fn submission(&self, ctx: &TaskContext, input: &ShareInput) -> Result<Submission, ActionError> {
+        let login = ctx.principal.on_behalf_of.name.as_str();
+        let Some((_, device)) = self.studio.inner.share.get() else {
+            return Err(ActionError::Failed(
+                "this computer isn't managed by an organization, so there is no store to share to"
+                    .into(),
+            ));
+        };
+        let version = *store::chosen(&ctx.home)
+            .get(&input.app)
+            .ok_or_else(|| invalid(format!("{} isn't an app of yours", input.app)))?;
+        let store = self.studio.store();
+        let (Some(manifest), Some(record)) = (
+            store.manifest(login, &input.app, version),
+            store.record(login, &input.app, version),
+        ) else {
+            return Err(invalid(format!("{} has no version {version}", input.app)));
+        };
+        let files = store
+            .source(login, &input.app, version)
+            .map_err(|e| ActionError::io("its source", e))?;
+        let share = match input.to {
+            Audience::Org => ShareTo::Org,
+            Audience::Team => {
+                let group = input
+                    .team
+                    .clone()
+                    .ok_or_else(|| invalid("name the team (one of your groups) to share with"))?;
+                if !ctx.groups.contains(&group) {
+                    return Err(invalid(format!(
+                        "{group} isn't one of your groups; share with your own team or the whole organization"
+                    )));
+                }
+                ShareTo::Team { group }
+            }
+        };
+        if input.note.trim().is_empty() {
+            return Err(invalid(
+                "say in a sentence what it's for: reviewers and colleagues read it",
+            ));
+        }
+        let mut manifest = manifest;
+        if let Some(name) = input.name.as_deref().map(str::trim) {
+            manifest.name = name.to_owned();
+            manifest
+                .check()
+                .map_err(|why| invalid(format!("that name won't do: {why}")))?;
+        }
+        Ok(Submission {
+            app: input.app.clone(),
+            name: manifest.name.clone(),
+            version,
+            maker: login.to_owned(),
+            device: device.clone(),
+            manifest,
+            files,
+            based_on: record.based_on.map(|b| SharedBase {
+                id: b.id,
+                version: b.version,
+            }),
+            note: input.note.trim().to_owned(),
+            share,
+            notes: record.notes,
+        })
+    }
+
+    fn share(&self, ctx: &TaskContext, input: ShareInput) -> Result<ActionOutput, ActionError> {
+        let submission = self.submission(ctx, &input)?;
+        let Some((link, _)) = self.studio.inner.share.get() else {
+            return Err(ActionError::Failed("there is no store to share to".into()));
+        };
+        let submitted = link.submit(&submission).map_err(ActionError::Failed)?;
+        Ok(ActionOutput {
+            text: submitted.text.clone(),
+            data: json!({
+                "app": submission.app,
+                "version": submission.version,
+                "id": submitted.id,
+                "to": submission.share,
+            }),
+            changes: Vec::new(),
+        })
+    }
+}
+
+fn audience(share: &ShareTo) -> String {
+    match share {
+        ShareTo::Team { group } => format!("the {group} team"),
+        ShareTo::Org => "everyone in your organization".into(),
+    }
+}
+
 fn declares_json(manifest: &AppManifest) -> Value {
     json!({
         "name": manifest.name,
@@ -1023,6 +1151,29 @@ impl ActionProvider for StudioProvider {
                 }),
             ),
             def(
+                SHARE,
+                "Share an app through the store",
+                "Sends one of the person's own apps, at the version they use, to their \
+                 organization's store for review, for their team (one of their groups) or \
+                 everyone. IT sees what changed and what it can do; once approved, colleagues \
+                 install it from the Store. Nothing reaches anyone without that review.",
+                SideEffect::Irreversible,
+                Tier::Ask,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "app": app,
+                        "to": { "enum": ["team", "org"] },
+                        "team": { "type": "string", "description": "One of the person's groups, for to: team." },
+                        "name": { "type": "string", "description": "What colleagues see it as in the Store, for what it does (\"Mail, with Write\"); its own name by default." },
+                        "note": { "type": "string", "description": "What it's for, in a sentence." }
+                    },
+                    "required": ["app", "to", "note"],
+                    "additionalProperties": false
+                }),
+            )
+            .asking("Review the share", "Share"),
+            def(
                 VERSIONS,
                 "Your apps and their versions",
                 "Without app: the apps this person made. With app: its versions, newest first, \
@@ -1125,6 +1276,27 @@ impl ActionProvider for StudioProvider {
                     items,
                 ))
             }
+            SHARE => {
+                let input: ShareInput = parse_input(input)?;
+                let submission = self.submission(ctx, &input)?;
+                let mut items = vec![
+                    format!(
+                        "Sends its source to your organization's store, for {}",
+                        audience(&submission.share)
+                    ),
+                    format!("Does: {}", names(&submission.manifest.actions)),
+                ];
+                if let Some(base) = &submission.based_on {
+                    items.push(format!("Based on {} {}", base.id, base.version));
+                }
+                items.push(format!("Note: {}", submission.note));
+                Ok(Preview {
+                    summary: format!("Share {} for review", submission.name),
+                    targets: vec![submission.name.clone()],
+                    items,
+                    ..Preview::default()
+                })
+            }
             REVERT => {
                 let input: RevertInput = parse_input(input)?;
                 Ok(choice_preview(
@@ -1188,6 +1360,7 @@ impl ActionProvider for StudioProvider {
             }
             VERSIONS => self.versions(ctx, parse_input(input)?),
             REVERT => self.revert(ctx, parse_input(input)?),
+            SHARE => self.share(ctx, parse_input(input)?),
             other => Err(ActionError::NotFound(format!("no action {other}"))),
         }
     }

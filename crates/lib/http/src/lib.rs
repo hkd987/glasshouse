@@ -97,14 +97,22 @@ pub enum ReadError {
     Bad(u16, &'static str),
 }
 
-/// Reads one request.
+/// Reads one request, its body [`MAX_BODY`] at most.
 pub async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Request, ReadError> {
-    tokio::time::timeout(READ_TIMEOUT, read(stream))
+    read_request_up_to(stream, MAX_BODY).await
+}
+
+/// Reads one request, its body `max_body` bytes at most.
+pub async fn read_request_up_to<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    max_body: usize,
+) -> Result<Request, ReadError> {
+    tokio::time::timeout(READ_TIMEOUT, read(stream, max_body))
         .await
         .unwrap_or(Err(ReadError::Gone))
 }
 
-async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Request, ReadError> {
+async fn read<S: AsyncRead + Unpin>(stream: &mut S, max_body: usize) -> Result<Request, ReadError> {
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 4096];
     let (head_len, method, path, query, headers) = loop {
@@ -152,7 +160,7 @@ async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Request, ReadError
     if headers.iter().any(|(n, _)| n == "transfer-encoding") {
         return Err(ReadError::Bad(400, "send a Content-Length"));
     }
-    if length > MAX_BODY {
+    if length > max_body {
         return Err(ReadError::Bad(413, "request body too large"));
     }
     let mut body = buf.split_off(head_len);

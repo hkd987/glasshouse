@@ -194,8 +194,8 @@ struct Bridge {
     apps: BTreeMap<String, PathBuf>,
     /// One session per app, opened on first use.
     sessions: Mutex<BTreeMap<String, Arc<Open>>>,
-    /// The person's own apps' files (ADR 0032), from glassd: asked for
-    /// again with each page, so a new version shows on reload.
+    /// The person's own apps' and org apps' files (ADR 0032), from glassd:
+    /// asked for again with each page, so a new version shows on reload.
     own: Mutex<BTreeMap<String, Arc<AppFiles>>>,
 }
 
@@ -431,16 +431,16 @@ fn relay_error(e: ClientError) -> Relay {
 }
 
 /// The app this request is for: its own origin, `<app>.localhost:<port>`,
-/// exactly, for an installed app or one of the person's own (`my-…`, which
-/// glassd says whether they have). Any other Host (another name pointed at
-/// loopback, a bare IP) is refused, which also keeps DNS rebinding out.
+/// exactly. An installed app's files come from its folder; any other app
+/// id is one of the person's own or an org app (ADR 0032), whose files
+/// glassd gives only if it is theirs to open. Any other Host (another name
+/// pointed at loopback, a bare IP) is refused, which also keeps DNS
+/// rebinding out.
 fn app_for_host(host: Option<&str>, port: u16, apps: &BTreeMap<String, PathBuf>) -> Option<String> {
     let host = host?.to_ascii_lowercase();
     let name = host.strip_suffix(&format!(".localhost:{port}"))?;
-    let own = name
-        .parse::<glass_types::AgentId>()
-        .is_ok_and(|id| id.is_personal());
-    (apps.contains_key(name) || own).then(|| name.to_owned())
+    let id = name.parse::<glass_types::AgentId>().is_ok();
+    (apps.contains_key(name) || id).then(|| name.to_owned())
 }
 
 /// A call must come from the app's own page: a JSON POST (which a page on
@@ -541,13 +541,14 @@ mod tests {
             named("Calendar.LOCALHOST:7300").as_deref(),
             Some("calendar")
         );
-        // A person's own app: glassd says whether it's theirs (ADR 0032).
+        // A person's own app or an org app: glassd says whether it's
+        // theirs (ADR 0032).
         assert_eq!(named("my-mail.localhost:7300").as_deref(), Some("my-mail"));
+        assert_eq!(named("notes.localhost:7300").as_deref(), Some("notes"));
         for host in [
             "mail.localhost:7301",
             "127.0.0.1:7300",
             "localhost:7300",
-            "notes.localhost:7300",
             "my-.localhost:7300",
             "my_mail.localhost:7300",
             "a.my-mail.localhost:7300",

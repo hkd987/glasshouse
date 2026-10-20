@@ -172,8 +172,87 @@ pub(crate) fn run_jailed(run: &ToolRun) -> Result<ToolOutput> {
     out
 }
 
+/// Our servers' confinement for a tool, on Linux, where there are no
+/// jails: the base system's `prlimit` caps its memory, CPU time, file size
+/// and open files, and `unshare` gives it user, mount, network, IPC and PID
+/// namespaces with the build folder as its root and the tool copied in
+/// beside its files. No network, nothing outside the folder, nobody's
+/// privileges. The admin console bundles the apps people share this way
+/// (ADR 0032); where `unshare` can't, the run fails, never runs unconfined.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UnshareTools;
+
+impl super::ToolRunner for UnshareTools {
+    fn run_tool(&self, run: &ToolRun) -> Result<ToolOutput> {
+        run_unshared(run)
+    }
+
+    /// It runs as its caller, who is root only of a namespace that holds
+    /// nothing but the tool's folder.
+    fn runs_as_user(&self) -> bool {
+        false
+    }
+}
+
+/// Where the tool is copied in its folder.
+const UNSHARED_TOOL: &str = ".tool";
+
+/// `prlimit … -- unshare … --root=<dir> /.tool <args>`.
+pub(crate) fn unshare_args(run: &ToolRun) -> Result<Vec<String>> {
+    super::check_name(&run.name)?;
+    let root = run.dir.to_string_lossy();
+    let mut args = vec![
+        "--as=4294967296".to_owned(),
+        format!("--cpu={}", run.limit.as_secs().max(1)),
+        "--fsize=67108864".to_owned(),
+        "--nofile=256".to_owned(),
+        "--".to_owned(),
+        "unshare".to_owned(),
+        "--user".to_owned(),
+        "--map-root-user".to_owned(),
+        "--net".to_owned(),
+        "--mount".to_owned(),
+        "--ipc".to_owned(),
+        "--pid".to_owned(),
+        "--fork".to_owned(),
+        "--kill-child".to_owned(),
+        format!("--root={root}"),
+        "--wd=/".to_owned(),
+        format!("/{UNSHARED_TOOL}"),
+    ];
+    args.extend(run.args.iter().cloned());
+    Ok(args)
+}
+
+fn run_unshared(run: &ToolRun) -> Result<ToolOutput> {
+    if !cfg!(target_os = "linux") {
+        return Err(PlatformError::Unsupported(
+            "unshare confines tools on Linux only".into(),
+        ));
+    }
+    let args = unshare_args(run)?;
+    let tool = run.dir.join(UNSHARED_TOOL);
+    std::fs::copy(&run.program, &tool)
+        .map_err(|e| PlatformError::io(format!("copying {} in", run.program.display()), e))?;
+    let child = Command::new("prlimit")
+        .args(&args)
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| PlatformError::io("running prlimit and unshare", e))?;
+    let out = wait(child, run.limit, |child| {
+        let _ = child.kill();
+    });
+    let _ = std::fs::remove_file(&tool);
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::ToolRunner;
     use super::*;
 
     fn run() -> ToolRun {
@@ -216,6 +295,68 @@ mod tests {
         let mut named = run();
         named.name = "glass build".into();
         assert!(jail_args(&named).is_err());
+    }
+
+    #[test]
+    fn on_our_servers_a_tool_runs_rooted_in_its_folder_with_no_network() {
+        let args = unshare_args(&run()).unwrap();
+        for expected in [
+            "--net",
+            "--user",
+            "--mount",
+            "--pid",
+            "--root=/var/db/glasshouse/apps/.build/1",
+            "--wd=/",
+            "/.tool",
+            "--cpu=30",
+            "app=app/src/main.ts",
+        ] {
+            assert!(args.iter().any(|a| a == expected), "{expected}: {args:?}");
+        }
+    }
+
+    /// The real thing, where this machine can: esbuild (the apps
+    /// workspace's) bundles in its folder and sees nothing else.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unshared_esbuild_bundles_and_reads_nothing_outside() {
+        let esbuild = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/node_modules/@esbuild/linux-x64/bin/esbuild");
+        if !esbuild.exists() {
+            eprintln!("skipped: no esbuild in apps/node_modules");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("out")).unwrap();
+        std::fs::write(
+            dir.path().join("main.ts"),
+            "import secret from \"/etc/hostname\";\nconsole.log(secret);\n",
+        )
+        .unwrap();
+        let run = ToolRun {
+            name: "unshared".into(),
+            program: esbuild,
+            dir: dir.path().to_owned(),
+            args: vec![
+                "main.ts".into(),
+                "--bundle".into(),
+                "--loader:.txt=text".into(),
+                "--outdir=out".into(),
+                "--log-level=error".into(),
+            ],
+            limit: Duration::from_secs(30),
+            user: "nobody".into(),
+        };
+        let out = UnshareTools.run_tool(&run).unwrap();
+        // /etc/hostname isn't in its world.
+        assert!(!out.success, "{out:?}");
+        assert!(out.stderr.contains("Could not resolve"), "{}", out.stderr);
+        assert!(!dir.path().join(UNSHARED_TOOL).exists());
+
+        std::fs::write(dir.path().join("main.ts"), "console.log(1 + 1);\n").unwrap();
+        let out = UnshareTools.run_tool(&run).unwrap();
+        assert!(out.success, "{}", out.stderr);
+        assert!(dir.path().join("out/main.js").exists());
     }
 
     #[test]

@@ -18,6 +18,7 @@ mod meet;
 mod relay;
 mod server;
 mod state;
+mod studio;
 mod views;
 
 use std::net::SocketAddr;
@@ -59,6 +60,17 @@ struct Args {
     /// items: `500,50`.
     #[arg(long)]
     fixture: Option<String>,
+    /// Our apps (manifests and source) and the SDK: what apps people share
+    /// are compared with and built against (ADR 0032).
+    #[arg(long, default_value = "apps")]
+    apps: PathBuf,
+    /// The pinned bundler (esbuild) the console builds shared apps with,
+    /// confined by `unshare`.
+    #[arg(
+        long,
+        default_value = "apps/node_modules/@esbuild/linux-x64/bin/esbuild"
+    )]
+    bundler: PathBuf,
     /// The meeting relay's API (`glass-sfu --api`), on this machine.
     /// Without it, meetings can't be joined (ADR 0030 §6).
     #[arg(long)]
@@ -153,6 +165,20 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let console = server::Console::new(state, Box::new(directory), args.web, url);
     if let Some(api) = &args.relay {
         console.set_relay(relay::Relay::new(api)?);
+    }
+    // Apps people share are checked and built here, confined, or refused.
+    if args.bundler.is_file() && args.apps.join("sdk").is_dir() {
+        console.set_builder(
+            std::sync::Arc::new(glass_platform::sandbox::UnshareTools),
+            args.apps.clone(),
+            std::path::absolute(&args.bundler)?,
+            std::path::absolute(args.state.join("builds"))?,
+        );
+    } else {
+        tracing::warn!(
+            bundler = %args.bundler.display(),
+            "apps people share can't be checked here: no bundler or SDK"
+        );
     }
     console.serve(listener).await
 }

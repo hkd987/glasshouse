@@ -1,7 +1,8 @@
 //! Bundling an app's checked source into what the bridge serves (ADR 0032):
 //! esbuild, as the apps workspace builds ours (`apps/build.mjs`), run once
-//! in a folder of its own through the sandbox ([`Sandbox::run_tool`]): in a
-//! jail on the computer, no network, as nobody, for a minute at most.
+//! in a folder of its own ([`ToolRunner::run_tool`]): in a jail on the
+//! computer, in its own namespaces on our servers, with no network, for a
+//! minute at most.
 //!
 //! The folder holds the app's source under [`APP_DIR`] and a copy of the
 //! SDK under [`SDK_DIR`], with `node_modules/@glasshouse/sdk` pointing at
@@ -18,7 +19,7 @@ use std::time::Duration;
 
 use glass_api::{AppManifest, AppPermission};
 use glass_platform::fs::ConfinedDir;
-use glass_platform::sandbox::{Sandbox, ToolRun};
+use glass_platform::sandbox::{ToolRun, ToolRunner};
 
 use crate::checks::{self, Findings};
 
@@ -38,7 +39,7 @@ pub type Dist = BTreeMap<String, String>;
 /// Bundles apps' source; cheap to clone.
 #[derive(Debug, Clone)]
 pub struct Bundler {
-    sandbox: Arc<dyn Sandbox>,
+    tools: Arc<dyn ToolRunner>,
     /// esbuild: one statically linked program.
     program: PathBuf,
     /// The SDK's installed copy: `package.json` and `src/`.
@@ -50,9 +51,9 @@ pub struct Bundler {
 static BUILDS: AtomicU64 = AtomicU64::new(0);
 
 impl Bundler {
-    pub fn new(sandbox: Arc<dyn Sandbox>, program: PathBuf, sdk: PathBuf, work: PathBuf) -> Self {
+    pub fn new(tools: Arc<dyn ToolRunner>, program: PathBuf, sdk: PathBuf, work: PathBuf) -> Self {
         Self {
-            sandbox,
+            tools,
             program,
             sdk,
             work,
@@ -120,7 +121,7 @@ impl Bundler {
             .map_err(|e| failed("modules", e))?;
         // In a jail the bundler is nobody: the folder is theirs to read and
         // write, inside glassd's own folder, which they can't reach.
-        if glass_platform::users::effective_uid() == 0 {
+        if glass_platform::users::effective_uid() == 0 && self.tools.runs_as_user() {
             let user = glass_platform::users::by_name(BUILD_USER)
                 .ok_or_else(|| failed("the build user", std::io::ErrorKind::NotFound.into()))?;
             give(dir, user.uid, user.gid).map_err(|e| failed("build folder", e))?;
@@ -154,7 +155,7 @@ impl Bundler {
             .map(str::to_owned),
         );
         let out = self
-            .sandbox
+            .tools
             .run_tool(&ToolRun {
                 name: name.to_owned(),
                 program: self.program.clone(),

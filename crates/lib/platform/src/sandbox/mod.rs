@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 pub use host::HostSandbox;
 pub use jail::{JailConfig, JailSandbox};
-pub use tool::{ToolOutput, ToolRun};
+pub use tool::{ToolOutput, ToolRun, UnshareTools};
 
 use crate::Result;
 
@@ -136,7 +136,20 @@ pub struct ProcessSpec {
 ///
 /// Methods block (they run base-system tools); call them from a blocking
 /// context.
-pub trait Sandbox: Send + Sync + fmt::Debug {
+/// Runs a tool once on files in its folder, as tightly confined as it
+/// can: glassd and the admin console bundle the apps people make this way
+/// (ADR 0032). Every sandbox is one; so is [`UnshareTools`] on our servers.
+pub trait ToolRunner: Send + Sync + fmt::Debug {
+    fn run_tool(&self, run: &ToolRun) -> Result<ToolOutput>;
+
+    /// Whether the tool runs as [`ToolRun::user`], so that its folder must
+    /// be theirs when the caller is root.
+    fn runs_as_user(&self) -> bool {
+        true
+    }
+}
+
+pub trait Sandbox: ToolRunner + Send + Sync + fmt::Debug {
     /// A short name for status output and audit records.
     fn kind(&self) -> &'static str;
 
@@ -164,11 +177,6 @@ pub trait Sandbox: Send + Sync + fmt::Debug {
 
     /// Destroys sandboxes left behind by an earlier daemon run.
     fn cleanup_stale(&self) -> Result<Vec<String>>;
-
-    /// Runs a tool once on files in its folder, as tightly confined as
-    /// this backend can: glassd bundles the apps people make this way
-    /// (ADR 0032).
-    fn run_tool(&self, run: &ToolRun) -> Result<ToolOutput>;
 }
 
 /// Validates a sandbox name: it doubles as a jail name and a file name.

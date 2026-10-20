@@ -354,7 +354,56 @@ pub fn item(state: &State, directory: &dyn Directory, titles: &Titles, id: &str)
             "egress": i.declares.egress,
         },
         "public_store": i.public_store_check().err().map(|e| e.to_string()),
+        "approved_version": entry.approved.as_ref().map(|a| &a.version),
+        "shared": entry.shared.as_ref().map(|s| shared(s, directory, titles, &doc, i)),
     }))
+}
+
+/// A shared app's review (ADR 0032, R2; GA-8): who made it from what, the
+/// console's checks, what it may do beyond its base, and whether a person
+/// must review it (DV-4).
+fn shared(
+    s: &crate::state::Shared,
+    directory: &dyn Directory,
+    titles: &Titles,
+    doc: &PolicyDocument,
+    item: &CatalogItem,
+) -> Value {
+    let titled = |actions: &[glass_types::ActionName]| -> Vec<Value> {
+        actions
+            .iter()
+            .map(|a| {
+                let title = a
+                    .as_str()
+                    .parse::<ActionPattern>()
+                    .map_or_else(|_| a.to_string(), |p| titles.of(doc, &p));
+                json!({ "action": a, "title": title })
+            })
+            .collect()
+    };
+    let (to, group) = match &s.share {
+        glass_managed::studio::ShareTo::Team { group } => ("team", Some(group)),
+        glass_managed::studio::ShareTo::Org => ("org", None),
+    };
+    json!({
+        "maker": directory.display_name(&s.maker),
+        "maker_login": s.maker,
+        "maker_version": s.maker_version,
+        "device": s.device,
+        "to": to,
+        "group": group,
+        "group_name": group.map(|g| directory.group_display(g)),
+        "note": s.note,
+        "based_on": s.based_on.as_ref().map(|b| json!({ "id": b.id, "version": b.version })),
+        "device_notes": s.device_notes,
+        "checks": s.checks,
+        "passed": s.checks.iter().all(|c| c.ok),
+        "beyond_base": titled(&s.beyond_base),
+        "irreversible": titled(&s.irreversible),
+        "needs_person": !s.irreversible.is_empty(),
+        "submitted_at": s.submitted_at,
+        "bundle_sha256": item.app.as_ref().map(|a| &a.bundle_sha256),
+    })
 }
 
 /// The catalog page (AD-5, DV-10, DV-11).

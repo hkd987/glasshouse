@@ -159,6 +159,35 @@ impl MeetLink for ConsoleClient {
     }
 }
 
+/// Sharing apps back to the org's store (ADR 0032): submissions, and the
+/// bundles of approved apps, which glassd checks against the signed
+/// catalog before serving.
+impl glass_managed::studio::ShareLink for ConsoleClient {
+    fn submit(
+        &self,
+        submission: &glass_managed::studio::Submission,
+    ) -> Result<glass_managed::studio::Submitted, String> {
+        Self::answer(
+            &self
+                .request("/device/v1/apps/submit", submission)
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    fn bundle(
+        &self,
+        request: &glass_managed::studio::BundleRequest,
+    ) -> Result<glass_managed::studio::Bundle, String> {
+        Self::answer(
+            &self
+                .request("/device/v1/apps/bundle", request)
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
 /// `/device/v1/meet/<id>/<op>`, for a meeting id that is a conversation's.
 fn meet_path(request: &MeetRequest, op: &str) -> Result<String, LinkError> {
     let id = &request.body.meeting;

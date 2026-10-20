@@ -12,16 +12,22 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use glass_api::AppManifest;
+use glass_app_studio::diff::FileChange;
+use glass_managed::studio::{
+    Bundle, BundleRequest, OrgApp, ShareTo, SharedBase, Submission, Submitted,
+};
 use glass_managed::{
     CatalogItem, CatalogRelease, DeviceReport, DocKind, InstallMode, OrgKey, PolicyRelease, Ring,
     Signed, StoreRefusal, SyncRequest, SyncResponse,
 };
 use glass_policy::Policy;
 use glass_policy::document::PolicyDocument;
-use glass_types::Timestamp;
+use glass_types::{ActionName, AgentId, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::directory::{Directory, EVERYONE};
+use crate::studio::{Base, Builder, Check, Checked};
 
 /// The org this console serves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +84,64 @@ pub struct ConsoleItem {
     pub checks: Vec<String>,
     #[serde(default)]
     pub decided_by: Option<String>,
+    /// An app someone made and shared: what the console made of it
+    /// (ADR 0032, R2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared: Option<Shared>,
+    /// The version computers have while a newer one waits for review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved: Option<CatalogItem>,
+}
+
+impl ConsoleItem {
+    /// The version computers get, if any.
+    pub fn live(&self) -> Option<&CatalogItem> {
+        match self.review {
+            Review::Approved => Some(&self.item),
+            Review::Waiting => self.approved.as_ref(),
+            Review::Blocked => None,
+        }
+    }
+}
+
+/// An app someone made and shared to the store, as the console checked it
+/// (ADR 0032, R2). Its source, the console's bundle and the change from
+/// what it remixes are kept beside the catalog, by version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Shared {
+    /// The login of whoever made it.
+    pub maker: String,
+    /// Their own id and version for it.
+    pub maker_app: AgentId,
+    pub maker_version: u32,
+    pub device: String,
+    pub share: ShareTo,
+    /// What it's for, in the maker's words.
+    pub note: String,
+    #[serde(default)]
+    pub based_on: Option<SharedBase>,
+    /// What the computer's own checks noted.
+    #[serde(default)]
+    pub device_notes: Vec<String>,
+    /// The console's checks.
+    pub checks: Vec<Check>,
+    /// The privilege delta.
+    pub beyond_base: Vec<ActionName>,
+    /// What can't be undone: a person must review it (DV-4).
+    pub irreversible: Vec<ActionName>,
+    pub submitted_at: Timestamp,
+}
+
+/// What a shared app will be in the catalog, worked out before the console
+/// checks it.
+#[derive(Debug, Clone)]
+pub struct SharePlan {
+    pub id: AgentId,
+    pub version: u32,
+    /// Its manifest with its catalog id, version and name.
+    pub manifest: AppManifest,
+    /// What it remixes, as the console has it.
+    pub base: Option<Base>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -451,6 +515,7 @@ impl State {
     ) -> Result<u64, Refused> {
         let entry = self.item_mut(id)?;
         entry.review = Review::Approved;
+        entry.approved = None;
         entry.item.groups.insert(group.to_owned(), mode);
         entry.item.pinned = pin;
         entry.decided_by = Some(by.to_owned());
@@ -461,6 +526,7 @@ impl State {
     pub fn block(&mut self, id: &str, by: &str) -> Result<u64, Refused> {
         let entry = self.item_mut(id)?;
         entry.review = Review::Blocked;
+        entry.approved = None;
         entry.decided_by = Some(by.to_owned());
         self.release_catalog()
     }
@@ -480,8 +546,8 @@ impl State {
                 .catalog
                 .items
                 .iter()
-                .filter(|i| i.review == Review::Approved)
-                .map(|i| i.item.clone())
+                .filter_map(ConsoleItem::live)
+                .cloned()
                 .collect(),
         };
         release.check().map_err(Refused::Rule)?;
@@ -498,6 +564,310 @@ impl State {
 
     pub fn save_catalog(&self) -> anyhow::Result<()> {
         write_json(&self.dir.join("catalog.json"), &self.catalog)
+    }
+
+    // ---- apps people share (ADR 0032, R2; GA-8, GA-13) ------------------
+
+    /// Where a shared app's version keeps its source, the console's bundle
+    /// and the change from what it remixes.
+    fn shared_dir(&self, id: &AgentId, version: &str) -> PathBuf {
+        self.dir.join("apps").join(id.as_str()).join(version)
+    }
+
+    /// The item `maker` shared their app `app` as, if they shared it before.
+    fn shared_as(&self, maker: &str, app: &AgentId) -> Option<&ConsoleItem> {
+        self.catalog.items.iter().find(|i| {
+            i.shared
+                .as_ref()
+                .is_some_and(|s| s.maker == maker && s.maker_app == *app)
+        })
+    }
+
+    /// What `submission` will be in the catalog: the next version of the
+    /// item its maker shared it as before, or a new item named for it.
+    pub fn share_plan(
+        &self,
+        submission: &Submission,
+        builder: &Builder,
+        directory: &dyn Directory,
+    ) -> Result<SharePlan, Refused> {
+        let invalid = |why: String| Refused::Invalid(vec![why]);
+        if !submission.app.is_personal() || submission.manifest.id != submission.app {
+            return Err(invalid("only people's own apps are shared this way".into()));
+        }
+        if !directory.users().iter().any(|u| u.name == submission.maker) {
+            return Err(invalid(format!(
+                "{} isn't in the organization's directory",
+                submission.maker
+            )));
+        }
+        if let ShareTo::Team { group } = &submission.share
+            && !directory
+                .members(group)
+                .contains(&submission.maker.as_str())
+        {
+            return Err(invalid(format!(
+                "{} isn't in the {group} group",
+                submission.maker
+            )));
+        }
+        let name = submission.name.trim();
+        if submission.note.trim().is_empty() {
+            return Err(invalid("say what it's for".into()));
+        }
+        let before = self.shared_as(&submission.maker, &submission.app);
+        let ours = builder.our_apps();
+        // A name colleagues could take for another app's is refused.
+        let same = |other: &str| other.trim().eq_ignore_ascii_case(name);
+        let taken_name = ours
+            .iter()
+            .map(|m| m.name.as_str())
+            .chain(
+                self.catalog
+                    .items
+                    .iter()
+                    .filter(|i| before.is_none_or(|b| b.item.id != i.item.id))
+                    .map(|i| i.item.name.as_str()),
+            )
+            .find(|other| same(other));
+        if let Some(other) = taken_name {
+            return Err(Refused::Rule(format!(
+                "The store already has an app called {other}; name it for what it does, like \
+                 \"{other}, with …\"."
+            )));
+        }
+        let (id, version) = match before {
+            Some(item) => (
+                item.item.id.clone(),
+                item.item.version.parse::<u32>().unwrap_or(0) + 1,
+            ),
+            None => {
+                let mut taken: Vec<AgentId> = self
+                    .catalog
+                    .items
+                    .iter()
+                    .map(|i| i.item.id.clone())
+                    .collect();
+                taken.extend(ours.iter().map(|m| m.id.clone()));
+                if let Ok(doc) = self.draft() {
+                    taken.extend(doc.agents.iter().map(|a| a.id.clone()));
+                }
+                let stem = glass_app_studio::slug(name);
+                let stem = if stem.is_empty() {
+                    "shared-app".to_owned()
+                } else {
+                    stem
+                };
+                let id = glass_app_studio::unique_id(&stem, &taken)
+                    .ok_or_else(|| Refused::Rule("Name it something more its own.".into()))?;
+                (id, 1)
+            }
+        };
+        let mut manifest = submission.manifest.clone();
+        manifest.id = id.clone();
+        manifest.version = version.to_string();
+        manifest.name = name.to_owned();
+        let base = submission
+            .based_on
+            .as_ref()
+            .and_then(|b| builder.ours(&b.id).or_else(|| self.org_base(&b.id)));
+        Ok(SharePlan {
+            id,
+            version,
+            manifest,
+            base,
+        })
+    }
+
+    /// An app shared earlier, as computers have it, to remix again.
+    fn org_base(&self, id: &AgentId) -> Option<Base> {
+        let live = self
+            .catalog
+            .items
+            .iter()
+            .find(|i| i.item.id == *id)?
+            .live()?;
+        let app = live.app.as_ref()?;
+        let files = read_json(&self.shared_dir(id, &live.version).join("source.json"))
+            .ok()
+            .flatten()?;
+        Some(Base {
+            manifest: app.manifest.clone(),
+            files,
+        })
+    }
+
+    /// Keeps a submission the console checked as `plan`, waiting for IT's
+    /// review. A new version of an approved app leaves the approved one
+    /// with computers until IT decides.
+    pub fn take_share(
+        &mut self,
+        plan: SharePlan,
+        submission: Submission,
+        checked: Checked,
+        directory: &dyn Directory,
+    ) -> Result<Submitted, Refused> {
+        let Some(bundle) = checked.bundle.clone().filter(|_| checked.passed()) else {
+            return Err(Refused::Invalid(checked.failures()));
+        };
+        // Another submission of it may have come in while this one built.
+        let current = self.catalog.items.iter().find(|i| i.item.id == plan.id);
+        let expected = current.map_or(1, |i| i.item.version.parse::<u32>().unwrap_or(0) + 1);
+        let same_maker = current.is_none_or(|i| {
+            i.shared
+                .as_ref()
+                .is_some_and(|s| s.maker == submission.maker && s.maker_app == submission.app)
+        });
+        if expected != plan.version || !same_maker {
+            return Err(Refused::Rule(
+                "It changed while the console checked it; share it again.".into(),
+            ));
+        }
+        let version = plan.version.to_string();
+        let dir = self.shared_dir(&plan.id, &version);
+        let keep = || -> anyhow::Result<()> {
+            std::fs::create_dir_all(&dir)?;
+            write_json(&dir.join("source.json"), &submission.files)?;
+            write_json(&dir.join("changes.json"), &checked.changes)?;
+            write_json(
+                &dir.join("bundle.json"),
+                &Bundle {
+                    app: plan.id.clone(),
+                    version: version.clone(),
+                    files: bundle.clone(),
+                },
+            )
+        };
+        keep().map_err(internal)?;
+        let app = OrgApp {
+            manifest: plan.manifest.clone(),
+            bundle_sha256: glass_managed::studio::digest(&bundle),
+            source_sha256: glass_managed::studio::digest(&submission.files),
+            made_by: submission.maker.clone(),
+            based_on: submission
+                .based_on
+                .as_ref()
+                .map(|b| format!("{}@{}", b.id, b.version)),
+        };
+        let maker = directory.display_name(&submission.maker);
+        let shared = Shared {
+            maker: submission.maker.clone(),
+            maker_app: submission.app.clone(),
+            maker_version: submission.version,
+            device: submission.device.clone(),
+            share: submission.share.clone(),
+            note: submission.note.trim().to_owned(),
+            based_on: submission.based_on.clone(),
+            device_notes: submission.notes.clone(),
+            checks: checked.checks.clone(),
+            beyond_base: checked.beyond_base.clone(),
+            irreversible: checked.irreversible.clone(),
+            submitted_at: Timestamp::now(),
+        };
+        let item = CatalogItem {
+            id: plan.id.clone(),
+            kind: glass_managed::ItemKind::App,
+            name: plan.manifest.name.clone(),
+            version: version.clone(),
+            publisher: maker.clone(),
+            publisher_verified: false,
+            internal: true,
+            summary: shared.note.clone(),
+            keywords: Vec::new(),
+            declares: glass_managed::Declared {
+                actions: plan
+                    .manifest
+                    .actions
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                default_tiers: BTreeMap::new(),
+                max_label: plan.manifest.max_label(),
+                egress: Vec::new(),
+            },
+            groups: BTreeMap::new(),
+            pinned: false,
+            provenance: Default::default(),
+            app: Some(app),
+        };
+        match self.catalog.items.iter_mut().find(|i| i.item.id == plan.id) {
+            Some(entry) => {
+                if entry.review == Review::Approved {
+                    entry.approved = Some(entry.item.clone());
+                }
+                // Who it reaches carries over; IT may change it on approval.
+                let (groups, pinned) = (entry.item.groups.clone(), entry.item.pinned);
+                entry.item = CatalogItem {
+                    groups,
+                    pinned,
+                    ..item
+                };
+                entry.review = Review::Waiting;
+                entry.requested_by = maker.clone();
+                entry.decided_by = None;
+                entry.shared = Some(shared);
+            }
+            None => self.catalog.items.push(ConsoleItem {
+                item,
+                review: Review::Waiting,
+                requested_by: maker.clone(),
+                checks: Vec::new(),
+                decided_by: None,
+                shared: Some(shared),
+                approved: None,
+            }),
+        }
+        self.save_catalog().map_err(internal)?;
+        let audience = match &submission.share {
+            ShareTo::Team { group } => format!("the {} team", directory.group_display(group)),
+            ShareTo::Org => "everyone in the organization".into(),
+        };
+        Ok(Submitted {
+            id: plan.id,
+            text: format!(
+                "Sent {} to IT for review as version {version}. Once they approve it, {audience} \
+                 can install it from the Store.",
+                plan.manifest.name
+            ),
+        })
+    }
+
+    /// The change a shared app's waiting version makes, file by file.
+    pub fn changes(&self, id: &str) -> Vec<FileChange> {
+        let Ok(entry) = self.item(id) else {
+            return Vec::new();
+        };
+        read_json(
+            &self
+                .shared_dir(&entry.item.id, &entry.item.version)
+                .join("changes.json"),
+        )
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    }
+
+    /// The console's bundle of a shared app, for a computer, only at the
+    /// version the signed catalog gives computers.
+    pub fn org_bundle(&self, request: &BundleRequest) -> Result<Bundle, Refused> {
+        let gone = || {
+            Refused::NotFound(format!(
+                "{} {} isn't in the catalog",
+                request.app, request.version
+            ))
+        };
+        let live = self
+            .catalog
+            .items
+            .iter()
+            .find(|i| i.item.id == request.app)
+            .and_then(ConsoleItem::live)
+            .filter(|live| live.app.is_some() && live.version == request.version)
+            .ok_or_else(gone)?;
+        read_json(&self.shared_dir(&live.id, &live.version).join("bundle.json"))
+            .ok()
+            .flatten()
+            .ok_or_else(gone)
     }
 
     // ---- people (AD-1) ---------------------------------------------------

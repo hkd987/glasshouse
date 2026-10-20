@@ -1,10 +1,9 @@
 //! A stand-in for the bundler, for tests here and in the runtime: no
 //! esbuild needed.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
-use glass_platform::sandbox::{ProcessSpec, Sandbox, SandboxSpec, ToolOutput, ToolRun};
+use glass_platform::sandbox::{ToolOutput, ToolRun, ToolRunner};
 use serde_json::json;
 
 use crate::store;
@@ -20,28 +19,7 @@ pub struct FakeBundler {
     pub link: Option<PathBuf>,
 }
 
-impl Sandbox for FakeBundler {
-    fn kind(&self) -> &'static str {
-        "fake"
-    }
-    fn is_security_boundary(&self) -> bool {
-        false
-    }
-    fn create(&self, _: &SandboxSpec) -> glass_platform::Result<()> {
-        unimplemented!()
-    }
-    fn command(&self, _: &SandboxSpec, _: &ProcessSpec) -> Command {
-        unimplemented!()
-    }
-    fn destroy(&self, _: &SandboxSpec) -> glass_platform::Result<()> {
-        unimplemented!()
-    }
-    fn agent_path(&self, _: &SandboxSpec, inside: &Path) -> PathBuf {
-        inside.to_owned()
-    }
-    fn cleanup_stale(&self) -> glass_platform::Result<Vec<String>> {
-        Ok(Vec::new())
-    }
+impl ToolRunner for FakeBundler {
     fn run_tool(&self, run: &ToolRun) -> glass_platform::Result<ToolOutput> {
         let failed = |source| glass_platform::PlatformError::Io {
             context: "the stand-in bundler".into(),

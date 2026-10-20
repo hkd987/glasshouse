@@ -308,7 +308,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         source,
         bundler: "/nonexistent".into(),
     });
-    studio.set_sandbox(Arc::new(glass_app_studio::testing::FakeBundler::default()));
+    studio.set_tools(Arc::new(glass_app_studio::testing::FakeBundler::default()));
     let registry = test_registry(
         dir.path(),
         &machine,
@@ -351,6 +351,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
             dev_home: Some(home.clone()),
             org_catalog: Arc::new(OrgCatalog(catalog.clone())),
             personal: Arc::new(studio.clone()),
+            org_apps: Arc::new(glass_runtime::NoOrgApps),
         },
         policy,
         policy_source: "test".into(),
@@ -436,6 +437,7 @@ pub fn rebuild_with(h: &Harness, policy: &str, catalog: Vec<CatalogEntry>) -> Ar
             dev_home: None,
             org_catalog: Arc::new(glass_runtime::OpenCatalog),
             personal: Arc::new(glass_runtime::NoPersonalApps),
+            org_apps: Arc::new(glass_runtime::NoOrgApps),
         },
         policy: Policy::from_toml(policy).unwrap(),
         policy_source: "test".into(),

@@ -40,6 +40,7 @@ fn item(id: &str, name: &str, groups: &[(&str, InstallMode)]) -> CatalogItem {
         groups: groups.iter().map(|(g, m)| ((*g).to_owned(), *m)).collect(),
         pinned: false,
         provenance: Default::default(),
+        app: None,
     }
 }
 

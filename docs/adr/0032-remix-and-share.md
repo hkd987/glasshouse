@@ -187,6 +187,73 @@ Builds on ADRs 0013, 0014, 0023, 0024 and 0026.
   - the Store's Yours shelf;
   - the remix's own window title, which comes from its source.
 
+## R2, as built: sharing back to the store
+- **The device's side.** `apps.share` (Ask; it sends the app's source
+  off the computer) submits one of the person's own apps to the
+  console, for their team (a directory group) or the whole org. The
+  submission carries:
+  - the source;
+  - the manifest;
+  - what it remixes, at which version;
+  - the maker's note;
+  - the computer's check notes.
+
+  An unmanaged computer has nowhere to share to and says so.
+- **Nothing is taken on trust.** The console runs the same checks
+  (`glass-app-studio::checks`, against the same action registry) and
+  rebuilds the bundle itself. The submitted app's bundle is the
+  console's, not the computer's.
+- **The console's confinement.** The console bundles with the same
+  pinned esbuild, confined the way a jail confines it on a computer.
+  On our Linux servers:
+  - `prlimit` caps memory, CPU time and files;
+  - `unshare` gives it user, mount, network, IPC and PID namespaces;
+  - `--root` makes the build folder its root, with esbuild copied in.
+
+  There is no network and nothing outside the folder. These are the
+  base system's own commands, as ADR 0007 asks. A console that can't
+  confine refuses to build rather than building unconfined.
+- **The reviewer sees:**
+  - the change from what it remixes, file by file (the console holds
+    our apps' source, so the base it compares against is ours, never
+    the computer's word for it);
+  - the privilege delta: actions beyond the base, or everything for a
+    new app;
+  - every check's result;
+  - who made it, from what and on which computer.
+
+  An app that declares anything irreversible (sends, posts, deletes,
+  money: `SideEffect::Irreversible` in the registry) is marked "a
+  person must review this" (DV-4). Approving it is that review.
+- **Approved, it is an org app.** Its id is its own (never `my-`). It
+  joins the signed catalog release as an item that carries the app:
+  its manifest, the bundle's SHA-256, the maker and what it remixes.
+  Computers fetch the bundle from the console, check its hash against
+  the signed release, and keep it root-only. glassd serves it like a
+  person's own app (`app.files`), so what runs is what was signed. It
+  reaches people by the catalog's per-group rules (DV-11): required,
+  or available and installed from the Store.
+- **Names, ids and versions.**
+  - A share may name the app for the Store ("Mail, with Write"); by
+    default it keeps its own name. The console refuses a name another
+    app in the store, or one of ours, already has.
+  - Its catalog id comes from the name, never `my-`, and no catalog
+    item, app of ours or agent in policy has it.
+  - The same person sharing the same app again makes the next version
+    of the same item. It waits for review while computers keep the
+    approved version.
+  - Its maker must be in the directory; a team share must go to a group
+    they are in.
+- **What the console keeps.** Beside the catalog, per version: the
+  source, the console's bundle and the change from the base. It serves
+  a bundle only at the version the signed catalog gives computers.
+- **The device's word for who made it.** Devices share one enrollment
+  token for now (ADR 0023), so the console takes a computer's word for
+  its user. Device keys (ADR 0030, the chat pilot gate) will sign
+  submissions.
+- **Team owners.** IT approves both team and org shares until
+  directory groups have owners; GA-8's delegated approval waits on that.
+
 ## Slices
 - **R1, remix on the computer:**
   - the source in the image, and esbuild;

@@ -62,7 +62,7 @@ struct Fixture {
     ctx: TaskContext,
 }
 
-fn fixture_with(world: World, bundler: Arc<dyn Sandbox>, program: PathBuf) -> Fixture {
+fn fixture_with(world: World, bundler: Arc<dyn ToolRunner>, program: PathBuf) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -72,7 +72,7 @@ fn fixture_with(world: World, bundler: Arc<dyn Sandbox>, program: PathBuf) -> Fi
         source: source_root(dir.path()),
         bundler: program,
     });
-    studio.set_sandbox(bundler);
+    studio.set_tools(bundler);
     studio.set_surroundings(Arc::new(world));
     let mut ctx = glass_actions::testing::context(&home);
     ctx.principal.agent = "claude-code".parse().unwrap();
@@ -407,4 +407,71 @@ fn ga4_mail_remixed_builds_with_esbuild() {
     remix["manifest"]["actions"] = json!(["mail.list"]);
     let err = f.call(SAVE, remix).unwrap_err().to_string();
     assert!(err.contains("Could not resolve \"left-pad\""), "{err}");
+}
+
+/// The console, as far as sharing goes: what was submitted.
+#[derive(Debug, Default)]
+struct FakeConsole {
+    got: std::sync::Mutex<Vec<glass_managed::studio::Submission>>,
+}
+
+impl glass_managed::studio::ShareLink for FakeConsole {
+    fn submit(
+        &self,
+        submission: &glass_managed::studio::Submission,
+    ) -> Result<glass_managed::studio::Submitted, String> {
+        self.got.lock().unwrap().push(submission.clone());
+        Ok(glass_managed::studio::Submitted {
+            id: "mail-with-write".parse().unwrap(),
+            text: "Sent for review.".into(),
+        })
+    }
+
+    fn bundle(
+        &self,
+        _request: &glass_managed::studio::BundleRequest,
+    ) -> Result<glass_managed::studio::Bundle, String> {
+        Err("not here".into())
+    }
+}
+
+#[test]
+fn ga8_ga13_a_person_shares_their_app_through_the_store_only() {
+    let f = fixture(World::default());
+    f.call(SAVE, mail_remix(&f)).unwrap();
+    let share = json!({ "app": "my-mail", "to": "org", "note": "Write instead of New message" });
+    // No org manages this computer yet: nowhere to share to.
+    let err = f.call(SHARE, share.clone()).unwrap_err().to_string();
+    assert!(err.contains("isn't managed by an organization"), "{err}");
+
+    let console = Arc::new(FakeConsole::default());
+    f.studio.set_share(console.clone(), "dev-1".into());
+    let preview = f
+        .provider
+        .preview(&f.ctx, &SHARE.parse().unwrap(), &share)
+        .unwrap();
+    assert!(preview.items[0].contains("Sends its source to your organization's store"));
+    let out = f.call(SHARE, share).unwrap();
+    assert_eq!(out.data["id"], "mail-with-write");
+    let got = console.got.lock().unwrap()[0].clone();
+    assert_eq!((got.maker.as_str(), got.device.as_str()), ("demo", "dev-1"));
+    assert_eq!(got.based_on.unwrap().id.as_str(), "mail");
+    assert!(got.files["src/main.ts"].contains("Unread count in the title"));
+
+    // A team is one of the person's own groups.
+    let err = f
+        .call(
+            SHARE,
+            json!({ "app": "my-mail", "to": "team", "team": "finance", "note": "x" }),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("finance isn't one of your groups"), "{err}");
+    assert!(
+        f.call(
+            SHARE,
+            json!({ "app": "my-other", "to": "org", "note": "x" })
+        )
+        .is_err()
+    );
 }

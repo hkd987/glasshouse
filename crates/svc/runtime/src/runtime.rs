@@ -260,6 +260,11 @@ impl Runtime {
                     self.own_apps(&task.user)
                         .iter()
                         .any(|own| own.manifest.id == manifest.id)
+                } else if !self.config.apps.iter().any(|m| m.id == manifest.id) {
+                    // An org app: while the catalog still reaches them.
+                    self.org_apps(&task.user)
+                        .iter()
+                        .any(|m| m.id == manifest.id)
                 } else {
                     policy.apps_for(&task.user.name).contains(&manifest.id)
                 };

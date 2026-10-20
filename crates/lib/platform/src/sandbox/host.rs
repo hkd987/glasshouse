@@ -78,7 +78,9 @@ impl Sandbox for HostSandbox {
     fn cleanup_stale(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
+}
 
+impl super::ToolRunner for HostSandbox {
     fn run_tool(&self, run: &super::ToolRun) -> Result<super::ToolOutput> {
         super::tool::run_unconfined(run)
     }

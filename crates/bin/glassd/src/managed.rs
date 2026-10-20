@@ -201,6 +201,18 @@ impl Managed {
             Ok(meet) => self.org.meet.connect(Arc::new(meet)),
             Err(e) => tracing::error!("managed: meetings: {e}"),
         }
+        // Sharing apps, and the approved ones' bundles (ADR 0032, R2).
+        match ConsoleClient::new(&self.managed.url, &token, self.managed.allow_insecure_http) {
+            Ok(share) => {
+                let share: Arc<dyn glass_managed::studio::ShareLink> = Arc::new(share);
+                self.org
+                    .studio
+                    .set_share(Arc::clone(&share), self.device.clone());
+                self.org.org_apps.connect(share);
+                self.fetch_org_apps();
+            }
+            Err(e) => tracing::error!("managed: sharing apps: {e}"),
+        }
         let mut retry = FIRST_RETRY;
         let mut reported: Option<Instant> = None;
         loop {
@@ -247,7 +259,10 @@ impl Managed {
         }
         if let Some(signed) = response.catalog {
             match self.apply_catalog(&signed, false) {
-                Ok(()) => changed = true,
+                Ok(()) => {
+                    changed = true;
+                    self.fetch_org_apps();
+                }
                 Err(e) => self.refused(DocKind::Catalog, &signed, &e),
             }
         }
@@ -331,6 +346,35 @@ impl Managed {
         self.runtime.append_audit(event);
         tracing::info!(version = signed.version, "managed: policy applied");
         Ok(())
+    }
+
+    /// Fetches the bundles of the org apps the catalog lists (R2): each
+    /// kept only if it matches the signed digest, and on the record.
+    fn fetch_org_apps(&self) {
+        for fetched in self.org.org_apps.fetch() {
+            let event = match fetched {
+                crate::org_apps::Fetched::Installed { app, version } => {
+                    tracing::info!(%app, %version, "managed: org app installed");
+                    let mut event = AuditEvent::new(
+                        EventKind::CatalogLoaded,
+                        format!("App {app} {version} from the org's catalog installed"),
+                    );
+                    event.detail = serde_json::json!({ "app": app, "version": version });
+                    event
+                }
+                crate::org_apps::Fetched::Refused { app, why } => {
+                    tracing::warn!(%app, "managed: org app refused: {why}");
+                    let mut event = AuditEvent::new(
+                        EventKind::ManagedRefused,
+                        format!("App {app} from the org's catalog refused: {why}"),
+                    );
+                    event.outcome = Some(Outcome::Blocked);
+                    event.detail = serde_json::json!({ "app": app, "reason": why });
+                    event
+                }
+            };
+            self.runtime.append_audit(event);
+        }
     }
 
     /// Verifies, checks and swaps in a catalog release.
@@ -691,6 +735,7 @@ mod tests {
                 dev_home: None,
                 org_catalog: Arc::new(crate::OrgCatalog(org.catalog.clone())),
                 personal: Arc::new(org.studio.clone()),
+                org_apps: Arc::new(org.org_apps.clone()),
             },
             policy,
             policy_source: "policy file".into(),
@@ -744,6 +789,7 @@ mod tests {
                 groups: [("everyone".to_owned(), InstallMode::Available)].into(),
                 pinned: false,
                 provenance: Default::default(),
+                app: None,
             }],
         };
         key.sign(

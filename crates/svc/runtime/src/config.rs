@@ -103,6 +103,9 @@ pub struct RuntimeConfig {
     /// The apps people made for themselves (ADR 0032); glassd's are the
     /// studio's.
     pub personal: Arc<dyn PersonalApps>,
+    /// Apps people made that IT approved, fetched and checked (ADR 0032);
+    /// they reach people by the catalog's rules (DV-11).
+    pub org_apps: Arc<dyn OrgApps>,
 }
 
 /// Whether the org's catalog lets an agent or app reach a person, asked
@@ -111,6 +114,11 @@ pub struct RuntimeConfig {
 pub trait CatalogGate: Send + Sync + std::fmt::Debug {
     /// For someone in `groups` whose home is `home`.
     fn reaches(&self, groups: &[String], home: &Path, id: &AgentId) -> bool;
+    /// The ids the catalog lists: an org app it doesn't list reaches
+    /// nobody, whatever `reaches` says of ids it doesn't know.
+    fn lists(&self) -> std::collections::BTreeSet<AgentId> {
+        std::collections::BTreeSet::new()
+    }
 }
 
 /// The apps people make for themselves (ADR 0032), which glassd keeps:
@@ -152,6 +160,30 @@ impl PersonalApps for NoPersonalApps {
         _home: &Path,
         _app: &AgentId,
     ) -> Option<(u32, BTreeMap<String, String>)> {
+        None
+    }
+}
+
+/// Apps people made that IT approved into the org's catalog (ADR 0032,
+/// R2), as this computer fetched and checked them: glassd serves them from
+/// here, never from a folder anyone can change.
+pub trait OrgApps: Send + Sync + std::fmt::Debug {
+    /// Every org app this computer holds a checked bundle of.
+    fn apps(&self) -> Vec<AppManifest>;
+    /// What `app` serves: its version and files by name.
+    fn files(&self, app: &AgentId) -> Option<(String, BTreeMap<String, String>)>;
+}
+
+/// No org apps here.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoOrgApps;
+
+impl OrgApps for NoOrgApps {
+    fn apps(&self) -> Vec<AppManifest> {
+        Vec::new()
+    }
+
+    fn files(&self, _app: &AgentId) -> Option<(String, BTreeMap<String, String>)> {
         None
     }
 }

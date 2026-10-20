@@ -43,8 +43,8 @@ pub use app_api::AppApi;
 pub use apps::MAX_OPEN_APPS_PER_USER;
 pub use caller::Caller;
 pub use config::{
-    CatalogEntry, CatalogGate, NoPersonalApps, OpenCatalog, PersonalApp, PersonalApps,
-    RuntimeConfig,
+    CatalogEntry, CatalogGate, NoOrgApps, NoPersonalApps, OpenCatalog, OrgApps, PersonalApp,
+    PersonalApps, RuntimeConfig,
 };
 pub use control_api::ControlApi;
 pub use error::RuntimeError;

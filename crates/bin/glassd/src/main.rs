@@ -13,6 +13,7 @@ mod browser;
 mod config;
 mod device;
 mod managed;
+mod org_apps;
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -178,13 +179,18 @@ pub(crate) struct OrgData {
     /// The apps people make (ADR 0032), kept root only in the state
     /// directory; bundled in jails once the sandbox is up.
     pub(crate) studio: glass_first_party::Studio,
+    /// Apps people made that IT approved (R2): bundles fetched from the
+    /// console and checked against the signed catalog.
+    pub(crate) org_apps: org_apps::OrgAppStore,
 }
 
 impl OrgData {
     pub(crate) fn new(config: &Config) -> Self {
         let state_dir = &config.state_dir;
+        let catalog = CatalogHandle::new();
         Self {
-            catalog: CatalogHandle::new(),
+            org_apps: org_apps::OrgAppStore::new(state_dir.join("apps/.org"), catalog.clone()),
+            catalog,
             directory: glass_managed::DirectoryHandle::new(),
             settings: glass_runtime::SettingsHandle::new(state_dir.join("settings")),
             chat: glass_first_party::ChatHandle::new(state_dir.join("chat")),
@@ -262,6 +268,13 @@ impl glass_runtime::CatalogGate for OrgCatalog {
         };
         let installed = glass_app_catalog::installed(home);
         glass_app_catalog::reaches(Some(&catalog), groups, &installed, id)
+    }
+
+    fn lists(&self) -> std::collections::BTreeSet<glass_types::AgentId> {
+        self.0
+            .current()
+            .map(|c| c.release.items.iter().map(|i| i.id.clone()).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -427,6 +440,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             dev_home: config.dev_home.clone(),
             org_catalog: Arc::new(OrgCatalog(org.catalog.clone())),
             personal: Arc::new(org.studio.clone()),
+            org_apps: Arc::new(org.org_apps.clone()),
         },
         policy: loaded.policy.clone(),
         policy_source: policy_source.clone(),
@@ -440,7 +454,8 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
 
     // Apps people make are bundled in jails like agents' (ADR 0032), and
     // checked against the policy in force and the org's catalog.
-    org.studio.set_sandbox(Arc::clone(&sandbox));
+    org.studio
+        .set_tools(Arc::clone(&sandbox) as Arc<dyn glass_platform::sandbox::ToolRunner>);
     {
         let catalog = org.catalog.clone();
         org.studio
