@@ -48,6 +48,20 @@ test("dv3 what an item may do reads in one line", () => {
   assert.equal(publisherLine(item("x", { publisher_verified: true })), "Acme IT · verified publisher");
 });
 
+test("ga13 an app someone at the org made says who, and what it remixes", () => {
+  const listing = [item("mail-with-write", { publisher: "Dana Ruiz", internal: true, app: { made_by: "dana", based_on: "mail@0.1.0" } })];
+  assert.equal(publisherLine(listing[0]!, listing), "Made by Dana Ruiz · remix of mail");
+  // The listing's name for what it remixes, when the catalog has it.
+  const both = [...listing, item("mail", { name: "Mail" })];
+  assert.equal(publisherLine(listing[0]!, both), "Made by Dana Ruiz · remix of Mail");
+  assert.equal(
+    publisherLine(item("expenses", { publisher: "", app: { made_by: "sam", based_on: null } })),
+    "Made by sam · a new app",
+  );
+  // What nobody at the org made reads as before.
+  assert.equal(publisherLine(item("x", { internal: true, app: null })), "Acme IT · built by your organization");
+});
+
 test("dv13 the empty pages say why", () => {
   assert.match(emptyText({ catalog_version: null, managed: false, items: [] }) ?? "", /isn't managed/);
   assert.match(emptyText({ catalog_version: null, managed: true, items: [] }) ?? "", /No catalog from IT/);

@@ -23,6 +23,14 @@ export interface Item {
   installed: boolean;
   summary: string;
   declares: Declares;
+  /** An app someone at the org made and IT approved (ADR 0032, R2). */
+  app?: Made | null;
+}
+
+/** Who at the org made an app, by login, and what it remixes (`mail@0.1.0`), if anything. */
+export interface Made {
+  made_by: string;
+  based_on: string | null;
 }
 
 /** What `catalog.list` answers. */
@@ -48,8 +56,19 @@ export function sections(items: Item[], query = ""): { yours: Item[]; available:
   };
 }
 
-/** Who made it: built by the org, a verified publisher, or neither. */
-export function publisherLine(item: Item): string {
+/**
+ * Who made it: someone at the org (and what it remixes), the org, a
+ * verified publisher, or neither. `items` is the listing, for the name of
+ * what it remixes; failing that, its id.
+ */
+export function publisherLine(item: Item, items: Item[] = []): string {
+  if (item.app) {
+    // The catalog's publisher is the maker's name; their login otherwise.
+    const by = item.publisher || item.app.made_by;
+    const base = item.app.based_on?.split("@")[0];
+    if (!base) return `Made by ${by} · a new app`;
+    return `Made by ${by} · remix of ${items.find((i) => i.id === base)?.name ?? base}`;
+  }
   if (item.internal) return `${item.publisher} · built by your organization`;
   if (item.publisher_verified) return `${item.publisher} · verified publisher`;
   return item.publisher;

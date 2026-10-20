@@ -623,3 +623,197 @@ textarea.text {
   color: var(--muted);
   text-decoration: none;
 }
+
+/* A shared app's review (ADR 0032, R2; GA-8). The diff's colours are
+   tokens, each pair at least 4.5:1 (most near 8:1), with their own values
+   when the computer asks for dark. */
+:root {
+  --diff-bg: #fafbfc;
+  --diff-border: var(--card-border);
+  --diff-text: #2b3138;
+  --diff-add-bg: #e7f5ec;
+  --diff-add-text: #14532d;
+  --diff-del-bg: #fdecec;
+  --diff-del-text: #8a1c1c;
+  --diff-hunk-bg: #eef1f5;
+  --diff-hunk-text: #5f6875;
+  --count-add: #1f6b3f;
+  --count-del: #b42318;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --diff-bg: #15181d;
+    --diff-border: #2c323b;
+    --diff-text: #d5dae1;
+    --diff-add-bg: #12321f;
+    --diff-add-text: #9be3b4;
+    --diff-del-bg: #3d1517;
+    --diff-del-text: #ffb4ae;
+    --diff-hunk-bg: #1e232a;
+    --diff-hunk-text: #9aa4b1;
+  }
+}
+
+/* DV-4: a person must review it. */
+.dv4 {
+  margin: 0 0 20px 0;
+  padding: 12px 16px;
+  border: 1px solid #f5c79a;
+  border-left: 4px solid var(--attention);
+  border-radius: 8px;
+  background: var(--attention-soft);
+  color: var(--ink);
+}
+
+.dv4 strong {
+  color: var(--attention-text);
+}
+
+.maker-note {
+  margin: 0;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid var(--divider);
+  font-size: 15px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.checks li {
+  display: flex;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--divider);
+}
+
+.checks li:last-child {
+  border-bottom: none;
+}
+
+.checks .mark {
+  width: 16px;
+  flex: none;
+  font-weight: 700;
+  text-align: center;
+}
+
+.checks .ok .mark {
+  color: var(--count-add);
+}
+
+.checks .bad .mark,
+.checks .bad {
+  color: var(--danger);
+}
+
+.device-notes ul {
+  margin: 4px 0 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: #3c434d;
+}
+
+.device-notes .hint {
+  margin: 12px 0 0 0;
+}
+
+/* Visually hidden, read by screen readers. */
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+details.file {
+  border: 1px solid var(--diff-border);
+  border-radius: 8px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+
+details.file summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  cursor: pointer;
+  background: #fff;
+}
+
+details.file summary .path {
+  color: var(--ink);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+details.file summary .chip {
+  margin-left: auto;
+}
+
+details.file[open] summary {
+  border-bottom: 1px solid var(--diff-border);
+}
+
+.adds,
+.dels {
+  font-family: ui-monospace, "Geist Mono", "SF Mono", Menlo, monospace;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.adds {
+  color: var(--count-add);
+}
+
+.dels {
+  color: var(--count-del);
+}
+
+.diff {
+  overflow-x: auto;
+  background: var(--diff-bg);
+  color: var(--diff-text);
+  font-family: ui-monospace, "Geist Mono", "SF Mono", Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  padding: 4px 0;
+}
+
+.diff .ln {
+  min-width: max-content;
+  padding: 0 12px;
+  white-space: pre;
+}
+
+.diff .add {
+  background: var(--diff-add-bg);
+  color: var(--diff-add-text);
+}
+
+.diff .del {
+  background: var(--diff-del-bg);
+  color: var(--diff-del-text);
+}
+
+.diff .hunk {
+  background: var(--diff-hunk-bg);
+  color: var(--diff-hunk-text);
+}
+
+/* A newer version waits; computers keep the approved one. */
+.kept {
+  margin: 4px 0 0 0;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  font-size: 13px;
+}

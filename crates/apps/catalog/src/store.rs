@@ -248,6 +248,12 @@ fn list(catalog: Option<&Applied>, ctx: &TaskContext, kind: Option<ItemKind>) ->
                 "installed": m.mode == InstallMode::Required || mine.contains(&item.id),
                 "summary": item.summary,
                 "declares": item.declares,
+                // An app someone at the org made (ADR 0032, R2): who, and
+                // what it remixes (`mail@0.1.0`), for the Store to say so.
+                "app": item.app.as_ref().map(|a| json!({
+                    "made_by": a.made_by,
+                    "based_on": a.based_on,
+                })),
             })
         })
         .collect();

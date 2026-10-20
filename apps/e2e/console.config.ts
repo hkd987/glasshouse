@@ -19,8 +19,9 @@ process.env.GLASS_APPS_E2E_RUN ??= join(tmpdir(), `glass-console-e2e-${userInfo(
 export default defineConfig({
   testDir: ".",
   // Chat's tests need only what the setup brings up: the org's first policy
-  // and its Chat release.
-  testMatch: ["console.e2e.ts", "chat.e2e.ts", "meetings.e2e.ts"],
+  // and its Chat release. Sharing an app (studio.e2e.ts) needs the console's
+  // confined bundler too, which it finds in apps/node_modules.
+  testMatch: ["console.e2e.ts", "chat.e2e.ts", "meetings.e2e.ts", "studio.e2e.ts"],
   globalSetup: "./console-setup.ts",
   outputDir: "results/console-artifacts",
   workers: 1,

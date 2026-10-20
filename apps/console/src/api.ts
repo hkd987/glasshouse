@@ -123,6 +123,56 @@ export interface Item {
   groups: { group: string; display: string; users: number; mode: Mode }[];
   declares: { actions: { action: string; title: string; tier: Tier | null }[]; max_label: string; egress: string[] };
   public_store: string | null;
+  /** A shared app's version computers keep while a newer one waits (ADR 0032, R2). */
+  approved_version?: string | null;
+  /** An app someone at the org made and shared, for IT's review (GA-8). */
+  shared?: Shared | null;
+  /** What a shared app changes from its base, file by file: on the item's own page only. */
+  changes?: FileChange[];
+}
+
+/** An action, as IT reads it. */
+export interface Titled {
+  action: string;
+  title: string;
+}
+
+/** A shared app's review (ADR 0032, R2): who made it from what, and the console's own checks. */
+export interface Shared {
+  /** Their display name, and their login. */
+  maker: string;
+  maker_login: string;
+  /** The version of their own app they shared. */
+  maker_version: number;
+  device: string;
+  /** For their team (a directory group), or everyone in the organization. */
+  to: "team" | "org";
+  group: string | null;
+  group_name: string | null;
+  note: string;
+  /** What it remixes; none for a new app. */
+  based_on: { id: string; version: string } | null;
+  /** What the computer's own checks noted. */
+  device_notes: string[];
+  checks: { ok: boolean; text: string }[];
+  passed: boolean;
+  /** The privilege delta: every action for a new app. */
+  beyond_base: Titled[];
+  /** What it declares that can't be undone. */
+  irreversible: Titled[];
+  /** DV-4: a person must review it; approving it is that review. */
+  needs_person: boolean;
+  submitted_at: string;
+  bundle_sha256: string | null;
+}
+
+/** One file a shared app changes. `unified`: `@@ -a,b +c,d @@` hunks of ` `, `-` and `+` lines. */
+export interface FileChange {
+  path: string;
+  status: "added" | "removed" | "changed";
+  added: number;
+  removed: number;
+  unified: string;
 }
 
 export interface CatalogPage {
