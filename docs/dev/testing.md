@@ -8,6 +8,14 @@ Three levels, each proving something the one below can't.
 | Pipeline integration | `crates/svc/runtime/tests/` (`pipeline.rs`, `models.rs`, …) | any host, `make test` | The whole action pipeline (tiers, asks, labels, snapshots, undo, pause, sleep, take over, isolation, model calls through the gateway with a scripted provider) on development backends, with the test playing the agent over the real MCP socket |
 | End to end | `tests/e2e` + `tests/e2e/run-vm.sh` | the FreeBSD VM, `make e2e-vm` | Real jails, real ZFS, real users: containment (PA-1), teardown (PA-2), xattr labels, cross-user isolation, sleep through the rc.d hooks (PM-5), crash recovery |
 
+Mail against a real server (ADR 0037): the tests that need IMAP and SMTP
+(`glass-gateway-providers`' `mail::tests`, `crates/svc/runtime/tests/mail.rs`)
+each start their own `mox localserve` on a loopback address of their own.
+mox (0.0.17, MIT) is a build-time test tool, never in the image:
+`tools/dev/mox.sh build` builds it from Go's module proxy into the main
+checkout's `build/tools/mox-0.0.17/` (`MOX` names another binary), and the
+tests skip, saying so, without it.
+
 ## The FreeBSD VM
 
 Set it up with `make test-env`; see [test-environment.md](test-environment.md).
@@ -52,7 +60,7 @@ glassctl approvals
 glassctl approve <id>       # or: deny, --for-task
 glassctl show <task>        # Now, Activity, Changes, Can't touch, Timeline
 glassctl undo <task> --dry-run
-glassctl run containment-probe "Try to escape"   # must end Done, 23/23
+glassctl run containment-probe "Try to escape"   # must end Done, 25/25
 ```
 
 As root: `glassctl verify`, `jls`, `zfs list -t snapshot`, `tail /var/log/glassd.log`.
@@ -68,7 +76,7 @@ of a sequence of commands (host or VM, as any user) as a PNG. The
 
 - A change to containment, the broker or the audit log needs an e2e run.
 - The probe must stay honest: it ends Failed on the host backend (13/22) and
-  Done in a jail (23/23). If you add a sandbox surface, add a probe check.
+  Done in a jail (25/25). If you add a sandbox surface, add a probe check.
   The two socket checks ("reach the control socket", "reach the app
   socket") look where an image keeps glassd's sockets
   (`/var/run/glasshouse`), so on the host backend, whose sockets are in

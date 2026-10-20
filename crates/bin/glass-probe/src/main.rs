@@ -99,6 +99,35 @@ fn tcp(addr: &str) -> Result<String, String> {
     )
 }
 
+/// `mail_ports_and_keys_are_unreachable_from_a_jail` (ADR 0037): the mail
+/// sign-ins glassd keeps, and the ports it reaches mail servers on (IMAPS
+/// 993, submissions 465, submission 587), here and on the VM's host. A
+/// connection refused counts as reached: the network got there and back.
+/// Only glassd talks to mail servers; an agent reads mail through actions.
+fn mail_keys_and_ports() -> Result<String, String> {
+    if std::fs::read_dir("/var/db/glasshouse/mail").is_ok() {
+        return Ok("opened /var/db/glasshouse/mail".into());
+    }
+    let mut seen = Vec::new();
+    for host in ["127.0.0.1", "10.0.2.2"] {
+        for port in [993, 465, 587] {
+            let addr = SocketAddr::from((
+                host.parse::<std::net::IpAddr>()
+                    .map_err(|e| e.to_string())?,
+                port,
+            ));
+            match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+                Ok(_) => return Ok(format!("connected to {addr}")),
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    return Ok(format!("reached {addr} (refused)"));
+                }
+                Err(e) => seen.push(format!("{addr}: {e}")),
+            }
+        }
+    }
+    Err(seen.join("; "))
+}
+
 /// Connecting to the app bridge of the person this agent works for, on
 /// the port their uid gives it.
 fn app_bridge() -> Result<String, String> {
@@ -227,6 +256,13 @@ async fn main() -> ExitCode {
                 std::fs::read_dir("/var/db/glasshouse/chat").map(drop),
                 |()| "opened /var/db/glasshouse/chat".into(),
             ),
+        ),
+        // Mail (ADR 0037): the sign-ins glassd keeps for people, and the
+        // mail servers' ports it alone reaches.
+        attempt(
+            "mail: open mail sign-ins or reach a mail port",
+            Want::Denied,
+            mail_keys_and_ports(),
         ),
         attempt(
             "files: open the apps people made",
@@ -396,5 +432,20 @@ async fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mail_ports_and_keys_are_unreachable_from_a_jail_and_reached_unconfined() {
+        // Here, unconfined (as the insecure host backend runs agents), the
+        // check must find a way through: loopback answers on a mail port,
+        // even if only to refuse. In a jail, with no network and no state
+        // folder, it finds none (the VM's containment scenario).
+        let reached = mail_keys_and_ports();
+        assert!(reached.is_ok(), "{reached:?}");
     }
 }
