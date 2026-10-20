@@ -119,20 +119,6 @@ function line(connection: RTCPeerConnection, what: MediaStreamTrack | Kind, kind
   return transceiver;
 }
 
-/** Waits until the offer carries this computer's candidates (bounded). */
-function gathered(connection: RTCPeerConnection): Promise<void> {
-  if (connection.iceGatheringState === "complete") return Promise.resolve();
-  return new Promise((done) => {
-    const timer = setTimeout(done, 1000);
-    connection.addEventListener("icegatheringstatechange", () => {
-      if (connection.iceGatheringState === "complete") {
-        clearTimeout(timer);
-        done();
-      }
-    });
-  });
-}
-
 function bytes(base64: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 }
@@ -261,8 +247,10 @@ async function join(): Promise<void> {
   screenSender = line(connection, "video", "video", "sendonly").sender;
   line(connection, "audio", "audio", "recvonly");
   line(connection, "video", "video", "recvonly");
+  // The offer goes without waiting for this computer's candidates: the
+  // relay is ICE-lite and learns the page's address from its checks
+  // (media-relay's lib.rs), which saves up to a second of joining.
   await connection.setLocalDescription(await connection.createOffer());
-  await gathered(connection);
 
   let joined: Joined;
   try {

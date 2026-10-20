@@ -42,6 +42,13 @@ const IDLE: Duration = Duration::from_secs(1);
 const DATAGRAM: usize = 2048;
 /// The longest display name the relay keeps, in characters.
 const NAME_MAX: usize = 64;
+/// How often the relay asks again for a key frame a slot still waits for.
+/// The engine's encoder ignores requests within 300 ms of the last, so a
+/// second viewer's request can be lost; and a slot that waits forwards
+/// nothing, so that viewer's decoder never asks itself.
+const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
+/// How often the loop looks for slots still waiting for a key frame.
+const KEYFRAME_CHECK: Duration = Duration::from_millis(100);
 
 /// What the API asks of the loop. Each command gets one reply.
 #[derive(Debug)]
@@ -181,6 +188,9 @@ struct Peer {
     /// keyframe with its next packet (its receive stream may not exist
     /// yet).
     keyframe_due: [bool; 2],
+    /// When the relay last asked for a key frame of the camera and of the
+    /// screen.
+    asked: [Option<Instant>; 2],
     /// The last `peers` line sent, so an unchanged one isn't sent again.
     told: Option<String>,
     timeout: Instant,
@@ -232,6 +242,8 @@ pub(crate) struct Media {
     peers: HashMap<PeerId, Peer>,
     next_id: u64,
     work: VecDeque<Work>,
+    /// When the loop last looked for slots waiting for a key frame.
+    checked: Instant,
 }
 
 enum Wake {
@@ -250,6 +262,7 @@ impl Media {
             peers: HashMap::new(),
             next_id: 0,
             work: VecDeque::new(),
+            checked: Instant::now(),
         }
     }
 
@@ -346,6 +359,7 @@ impl Media {
                 channel: None,
                 connected: false,
                 keyframe_due: [false; 2],
+                asked: [None; 2],
                 told: None,
                 timeout,
             },
@@ -473,7 +487,40 @@ impl Media {
             }
             drain(&self.socket, id, peer, &mut self.work);
         }
+        if now.saturating_duration_since(self.checked) >= KEYFRAME_CHECK {
+            self.checked = now;
+            self.ask_again(now);
+        }
         self.process();
+    }
+
+    /// Asks again for each key frame a connected viewer's slot still waits
+    /// for, at most every [`KEYFRAME_RETRY`] per sender and track.
+    fn ask_again(&mut self, now: Instant) {
+        let mut waiting: Vec<(String, u32, Track)> = Vec::new();
+        for peer in self.peers.values().filter(|p| p.connected) {
+            for slot in peer.slots.iter().filter(|s| s.waiting) {
+                if let Some((participant, track)) = slot.source
+                    && track.kind() == MediaKind::Video
+                {
+                    let wanted = (peer.room.clone(), participant, track);
+                    if !waiting.contains(&wanted) {
+                        waiting.push(wanted);
+                    }
+                }
+            }
+        }
+        for (room, participant, track) in waiting {
+            let asked = self
+                .rooms
+                .get(&room)
+                .and_then(|seats| seats.get(&participant))
+                .and_then(|id| self.peers.get(id))
+                .and_then(|p| p.asked[due_index(track)?]);
+            if asked.is_none_or(|t| now.saturating_duration_since(t) >= KEYFRAME_RETRY) {
+                self.request_keyframe(&room, participant, track, KeyframeRequestKind::Pli);
+            }
+        }
     }
 
     fn process(&mut self) {
@@ -631,6 +678,7 @@ impl Media {
         let (Some(mid), Some(due)) = (peer.incoming.mid(track), due_index(track)) else {
             return;
         };
+        peer.asked[due] = Some(Instant::now());
         let mut api = peer.rtc.direct_api();
         match api.stream_rx_by_mid(mid, None) {
             Some(stream) if peer.connected => {
@@ -691,6 +739,7 @@ impl Media {
             slot.source = Some(want);
             slot.last = Some(want);
             slot.fed_by = None;
+            slot.waiting = true;
             if kind == MediaKind::Video && peer.connected {
                 watch.push(want);
             }

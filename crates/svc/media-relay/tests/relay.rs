@@ -27,6 +27,9 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 
 /// How long a test waits for something that should take well under a second.
 const PATIENCE: Duration = Duration::from_secs(10);
+/// The engine's encoder ignores key frame requests this soon after the
+/// last one it honoured.
+const ENGINE_KEYFRAME_GAP: Duration = Duration::from_millis(300);
 
 struct Harness {
     // Dropped before the runtime it runs on.
@@ -127,6 +130,11 @@ struct Page {
     sharing: bool,
     /// Offers more slots when it lacks them, as the Meet page does.
     renegotiates: bool,
+    /// Sends key frames like the engine's encoder: only when asked, and
+    /// not again within [`ENGINE_KEYFRAME_GAP`] of the last request it
+    /// honoured.
+    engine_like: bool,
+    honoured: Option<Instant>,
     /// Offers it sent over the data channel.
     offers: usize,
     sent: u64,
@@ -213,6 +221,8 @@ impl Page {
             sending: true,
             sharing: false,
             renegotiates: true,
+            engine_like: false,
+            honoured: None,
             offers: 0,
             sent: 0,
             last_sent: None,
@@ -297,7 +307,8 @@ impl Page {
                 let text = format!("{}:{kind}:{n}", self.name);
                 let payload = if video {
                     let i = usize::from(kind == "screen");
-                    let key = std::mem::take(&mut self.key_due[i]) || n.is_multiple_of(50);
+                    let periodic = !self.engine_like && n.is_multiple_of(50);
+                    let key = std::mem::take(&mut self.key_due[i]) || periodic;
                     vp8(key, &text)
                 } else {
                     text.into_bytes()
@@ -375,12 +386,18 @@ impl Page {
                 });
             }
             Event::KeyframeRequest(request) => {
+                self.keyframe_requests.push(request.mid);
+                let now = Instant::now();
+                if self.engine_like && self.honoured.is_some_and(|t| now - t < ENGINE_KEYFRAME_GAP)
+                {
+                    return;
+                }
+                self.honoured = Some(now);
                 if request.mid == self.send[1] {
                     self.key_due[0] = true;
                 } else if Some(request.mid) == self.screen {
                     self.key_due[1] = true;
                 }
-                self.keyframe_requests.push(request.mid);
             }
             _ => {}
         }
@@ -768,6 +785,36 @@ fn cf21_three_people_each_get_the_other_twos_audio_and_video() {
     // a and b were there first: one offer each for c; c came with room
     // for one person and offered for the second.
     assert_eq!([a.offers, b.offers, c.offers], [1, 1, 1]);
+}
+
+#[test]
+fn cf21_a_line_waiting_for_a_key_frame_asks_again() {
+    let harness = relay();
+    let api = harness.relay.api_addr();
+    // a's encoder is like the engine's: a key frame only when asked, and
+    // a request soon after the last ignored.
+    let mut a = Page::new("a", Numbering::Default);
+    a.engine_like = true;
+    let mut b = Page::new("b", Numbering::Default);
+    let mut c = Page::new("c", Numbering::Default);
+    assert_eq!(admit(api, "r", 0, &mut a), 200);
+    assert!(run_until(&mut [&mut a], PATIENCE, |p| p[0].sent >= 10));
+    assert_eq!(admit(api, "r", 1, &mut b), 200);
+    assert!(run_until(&mut [&mut a, &mut b], PATIENCE, |p| p[1]
+        .from("a", "video")
+        > 0));
+    // c arrives while a ignores requests: the relay's first one for c is
+    // lost, and c's line forwards nothing until a key frame, so only the
+    // relay asking again gets c a's video.
+    assert_eq!(admit(api, "r", 2, &mut c), 200);
+    let mut pages = [&mut a, &mut b, &mut c];
+    assert!(
+        run_until(&mut pages, PATIENCE, |p| p[2].from("a", "video") > 0),
+        "c never got a's video"
+    );
+    let [a, _, c] = pages;
+    assert!(a.keyframe_requests.len() >= 3, "{:?}", a.keyframe_requests);
+    check_received(c, &[("a", 0), ("b", 1)], false);
 }
 
 #[test]

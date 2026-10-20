@@ -329,6 +329,8 @@ test("cf21 a shared screen reaches the others and is shown large", async ({ brow
   const ana = await person(browser, { room: "review", participant: 0, mediaKey, name: "Ana Lima" });
   const bo = await person(browser, { room: "review", participant: 1, mediaKey, name: "Bo Chen" });
   const cy = await person(browser, { room: "review", participant: 2, mediaKey, name: "Cy Okafor" });
+  // All three at once: their renegotiations overlap, and the relay asks
+  // a sender again for a key frame its encoder ignored as too soon.
   for (const page of [ana, bo, cy]) await page.click("[data-test=join]");
   for (const page of [ana, bo, cy]) await expect.poll(async () => (await decoding(page)).videos, { timeout: 10_000 }).toBe(2);
 
