@@ -1,7 +1,14 @@
-// Mail (UI-5, NV-3): mailboxes, a reading pane, reply and compose. Every
-// read and send is an action through the bridge; sends that ask wait for
-// the user on the desktop, and the app says so while they do. What an
-// agent wrote carries "by [agent] for [user]" inline (AU-10).
+// Mail (UI-5, NV-3, ADR 0037): mailboxes, a reading pane, reply and
+// compose. Every read and send is an action through the bridge; sends that
+// ask wait for the user on the desktop, and the app says so while they do.
+// What an agent wrote carries "by [agent] for [user]" inline (AU-10).
+//
+// With IT's mail service, the person connects once with their password
+// (mail.connect, theirs alone: glassd keeps it, the page never does), and
+// files mail in Archive, Junk or Trash (mail.move). A message's HTML is
+// shown in a frame on its own origin with no scripts and no network, so no
+// remote image tells the sender it was read; everything else is text. New
+// mail arrives through app.status waits, ids only.
 
 import {
   type AppStatus,
@@ -19,6 +26,7 @@ import {
   showAttribution,
 } from "@glasshouse/sdk";
 import {
+  type Destination,
   FOLDERS,
   type Folder,
   type Message,
@@ -29,11 +37,21 @@ import {
   fullDate,
   initials,
   listDate,
+  moves,
   parseRecipients,
   problems,
   replyTo,
+  viewUrl,
   wasSent,
 } from "./mail.ts";
+
+/** Connecting mail: the form, until it's done. The password lives here only while typed. */
+interface Connect {
+  user: string;
+  password: string;
+  error: string | null;
+  busy: boolean;
+}
 
 /** A send this window started, until it's done. */
 interface Pending {
@@ -59,25 +77,30 @@ interface Compose {
 const bridge = new Bridge({ app: "mail" });
 const state = {
   folder: "inbox" as Folder,
-  lists: { inbox: [], drafts: [], sent: [] } as Record<Folder, Summary[]>,
+  lists: { inbox: [], drafts: [], sent: [], archive: [], junk: [], trash: [] } as Record<Folder, Summary[]>,
   selected: null as string | null,
   message: null as Message | null,
   compose: null as Compose | null,
+  connect: null as Connect | null,
   outbox: [] as Pending[],
   offline: false,
   loadedAt: null as number | null,
   notice: null as string | null,
   user: "",
   account: null as Account | null,
+  /** Where app.status waits pick up (ids only). */
+  cursor: 0,
 };
 
 /** Who mail goes as and through which service (`mail.account`, NV-3). */
 interface Account {
   name: string;
   address: string | null;
-  service_title?: string;
+  service_title?: string | null;
   tenant?: string | null;
   connected: boolean;
+  /** IT's service is one this computer connects to with the person's password. */
+  connectable?: boolean;
 }
 let nextKey = 1;
 
@@ -111,13 +134,79 @@ async function open(id: string): Promise<void> {
   render();
 }
 
+/** The folders on screen: the Inbox, Drafts and Sent (replies and sends read them), and the one open. */
 async function refresh(): Promise<void> {
+  const folders = new Set<Folder>(["inbox", "drafts", "sent", state.folder]);
   try {
-    await Promise.all(FOLDERS.map((f) => loadFolder(f.id)));
+    await Promise.all([...folders].map((f) => loadFolder(f)));
   } catch (error) {
     state.notice = error instanceof Offline ? "Mail hasn't been loaded on this device yet." : String(error);
   }
   render();
+}
+
+/** Files the message on screen (mail.move); undo on the desktop moves it back. */
+async function moveTo(message: Message, to: Destination, label: string): Promise<void> {
+  try {
+    const result = await bridge.call("mail.move", { ids: [message.id], to });
+    if (!result.ok) {
+      state.notice = result.text;
+      return render();
+    }
+    state.notice = label === "Not junk" ? "Moved to Inbox, and marked as not junk." : result.text;
+    state.selected = null;
+    state.message = null;
+    await Promise.all([loadFolder(message.folder), loadFolder(to)]);
+  } catch (error) {
+    state.notice = error instanceof Offline ? "Moving needs the system; it isn't answering." : String(error);
+  }
+  render();
+}
+
+function startConnect(): void {
+  state.compose = null;
+  state.connect = { user: state.account?.address ?? "", password: "", error: null, busy: false };
+  render();
+  root.querySelector<HTMLInputElement>("input[name=password]")?.focus();
+}
+
+/** mail.connect: the person's own, with their mail password, which only glassd keeps. */
+async function connect(form: Connect): Promise<void> {
+  form.busy = true;
+  form.error = null;
+  render();
+  try {
+    const input: { password: string; user?: string } = { password: form.password };
+    if (form.user.trim()) input.user = form.user.trim();
+    const result = await bridge.call("mail.connect", input);
+    form.password = "";
+    if (!result.ok) {
+      form.error = result.text;
+      form.busy = false;
+      return render();
+    }
+    state.connect = null;
+    state.notice = result.text;
+    await Promise.all([loadAccount(), refresh()]);
+  } catch (error) {
+    form.password = "";
+    form.busy = false;
+    form.error = error instanceof Offline ? "Connecting needs the system; it isn't answering." : String(error);
+  }
+  render();
+}
+
+/** New mail, from app.status waits (ids only): the folders on screen reload. */
+async function live(): Promise<void> {
+  for (;;) {
+    try {
+      const status = await bridge.status({ waitSecs: 25, since: state.cursor });
+      state.cursor = status.cursor;
+      if (status.changed.includes("mail")) await refresh();
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  }
 }
 
 function startCompose(from?: Outgoing, draft: string | null = null): void {
@@ -257,7 +346,11 @@ function sidebar(): HTMLElement {
             state.selected = null;
             state.message = null;
             state.compose = null;
+            state.connect = null;
             render();
+            void loadFolder(f.id)
+              .catch(() => undefined)
+              .then(render);
           },
           "data-folder": f.id,
         },
@@ -277,6 +370,13 @@ function sidebar(): HTMLElement {
               ? `${state.account.service_title}${state.account.tenant ? ` · ${state.account.tenant}` : ""}${state.account.connected ? "" : " · not connected yet"}`
               : "No mail service from IT yet",
           ),
+          state.account.connectable && !state.account.connected
+            ? h(
+                "button",
+                { class: "button primary connect", disabled: state.offline, onclick: () => startConnect(), "data-test": "connect" },
+                "Connect mail",
+              )
+            : null,
         )
       : null,
     waiting.length || done.length
@@ -395,8 +495,88 @@ function pane(): HTMLElement {
     banner,
     refused,
     notice,
-    state.compose ? composer(state.compose) : state.message ? reading(state.message) : h("div", { class: "empty" }, "Select a message"),
+    state.connect
+      ? connector(state.connect)
+      : state.compose
+        ? composer(state.compose)
+        : state.message
+          ? reading(state.message)
+          : h("div", { class: "empty" }, "Select a message"),
   );
+}
+
+/** Connecting mail with the person's password (mail.connect). */
+function connector(form: Connect): HTMLElement {
+  const service = state.account?.service_title ?? "your mail service";
+  const user = h("input", {
+    name: "user",
+    value: form.user,
+    autocomplete: "username",
+    oninput: (e: Event) => {
+      form.user = (e.target as HTMLInputElement).value;
+    },
+  });
+  const password = h("input", {
+    name: "password",
+    type: "password",
+    autocomplete: "current-password",
+    oninput: (e: Event) => {
+      form.password = (e.target as HTMLInputElement).value;
+    },
+  });
+  password.value = form.password;
+  return h(
+    "form",
+    {
+      class: "composer connect-form",
+      "data-test": "connect-form",
+      onsubmit: (e: Event) => {
+        e.preventDefault();
+        if (!form.password || form.busy) return;
+        void connect(form);
+      },
+    },
+    h("h2", {}, "Connect mail"),
+    h(
+      "p",
+      { class: "muted" },
+      `Your password for ${service}, once. It stays with this computer's system, never in Mail, and no agent can use it to connect.`,
+    ),
+    h("label", { class: "field" }, h("span", {}, "Sign in as"), user),
+    h("label", { class: "field" }, h("span", {}, "Password"), password),
+    form.error ? h("div", { class: "banner refused", "data-test": "connect-error" }, form.error) : null,
+    h(
+      "div",
+      { class: "actions" },
+      h("button", { class: "button primary", type: "submit", disabled: form.busy, "data-test": "connect-submit" }, form.busy ? "Connecting…" : "Connect"),
+      h(
+        "button",
+        {
+          class: "button",
+          type: "button",
+          onclick: () => {
+            state.connect = null;
+            render();
+          },
+        },
+        "Cancel",
+      ),
+    ),
+  );
+}
+
+/** The message itself: its HTML framed with no scripts and no network, else its text. */
+function body(message: Message): HTMLElement {
+  const url = message.html ? viewUrl(location, message.id) : null;
+  if (!url) return h("div", { class: "text" }, message.body);
+  return h("iframe", {
+    class: "html",
+    src: url,
+    sandbox: true,
+    referrerpolicy: "no-referrer",
+    title: `${message.subject || "The message"}, as sent`,
+    "data-test": "html",
+  });
 }
 
 function reading(message: Message): HTMLElement {
@@ -426,10 +606,17 @@ function reading(message: Message): HTMLElement {
       h("span", { class: "spacer" }),
       showAttribution(message.attribution, "mail") && message.attribution ? attributionChip(message.attribution.text) : null,
     ),
-    h("div", { class: "text" }, message.body),
+    body(message),
     h(
       "div",
       { class: "actions" },
+      ...moves(message.folder).map((m) =>
+        h(
+          "button",
+          { class: "button", disabled: state.offline, onclick: () => void moveTo(message, m.to, m.label), "data-test": `move-${m.to}` },
+          m.label,
+        ),
+      ),
       isDraft
         ? h(
             "button",
@@ -570,6 +757,13 @@ async function start(): Promise<void> {
   // The account may answer after the mail is drawn: draw it too.
   render();
   ready();
+  // From here, new mail wakes the page (ADR 0037).
+  try {
+    state.cursor = (await bridge.status()).cursor;
+    void live();
+  } catch {
+    // Offline: what was loaded is what there is.
+  }
 }
 
 void start();

@@ -249,6 +249,18 @@
   max-width: 720px;
 }
 
+/* A message's own HTML, framed with no scripts and no network (ADR 0037). */
+.html {
+  display: block;
+  width: 100%;
+  max-width: 760px;
+  height: 420px;
+  margin: 14px 0 8px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: #fff;
+}
+
 .actions {
   display: flex;
   align-items: center;
@@ -333,6 +345,15 @@
 }
 .account-service {
   color: var(--muted);
+}
+.account .connect {
+  margin-top: 8px;
+  width: 100%;
+}
+.connect-form p {
+  max-width: 520px;
+  margin: 0 0 6px;
+  line-height: 1.5;
 }
 .field.from {
   height: 38px;

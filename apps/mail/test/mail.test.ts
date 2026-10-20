@@ -12,11 +12,39 @@ import {
   draftFor,
   initials,
   listDate,
+  moves,
   parseRecipients,
   problems,
   replyTo,
+  viewUrl,
   wasSent,
 } from "../src/mail.ts";
+
+test("nv3 a message's HTML is framed on its own origin, and only a plain id gets one", () => {
+  const here = { protocol: "http:", port: "7300" };
+  assert.equal(
+    viewUrl(here, "inbox/0896246782-0000000042.eml"),
+    "http://view.mail.localhost:7300/inbox/0896246782-0000000042.eml",
+  );
+  for (const id of ["inbox/../x.eml", "inbox/.x.eml", "inbox/x.txt", "x.eml", "inbox/a/b.eml", "Inbox/x.eml"]) {
+    assert.equal(viewUrl(here, id), null, id);
+  }
+});
+
+test("em0 mail is filed in inbox, archive, junk or trash, and drafts stay put", () => {
+  assert.deepEqual(
+    moves("inbox").map((m) => m.to),
+    ["archive", "junk", "trash"],
+  );
+  assert.deepEqual(moves("junk")[0], { to: "inbox", label: "Not junk" });
+  assert.deepEqual(moves("drafts"), []);
+  for (const folder of ["inbox", "sent", "archive", "junk", "trash"] as const) {
+    assert.ok(
+      moves(folder).every((m) => m.to !== folder),
+      folder,
+    );
+  }
+});
 
 const dana: Message = {
   id: "inbox/1792400000-0-renewal-terms.eml",

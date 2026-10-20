@@ -3,11 +3,14 @@
 // so, a decline comes back as a result, the app can call only what its
 // manifest declares, and what was loaded reads offline.
 
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { userInfo } from "node:os";
 import { join } from "node:path";
 import { type Page, expect, test } from "@playwright/test";
 
-import { type ApprovalView, SHOTS, appUrl, audit, glassctl, glassctlJson, outcome } from "./env.ts";
+import { type ApprovalView, DEV, SHOTS, appUrl, audit, glassctl, glassctlJson, outcome } from "./env.ts";
 
 async function openMail(page: Page): Promise<void> {
   await page.goto(appUrl("mail"));
@@ -149,4 +152,81 @@ test("ui5 what was loaded reads offline", async ({ page, context }) => {
   await expect(page.locator("[data-test=message]")).toContainText("before 2:30 tomorrow");
   await expect(page.locator("[data-test=compose]")).toBeDisabled();
   await context.setOffline(false);
+});
+
+test("em0 mail is archived and rescued from junk, each a move the app makes", async ({ page }) => {
+  await openMail(page);
+  await page.locator(".row", { hasText: "Laptop updates tonight" }).click();
+  await page.click("[data-test=move-junk]");
+  await expect(page.locator(".row", { hasText: "Laptop updates tonight" })).toHaveCount(0);
+  await page.click("[data-folder=junk]");
+  await page.locator(".row", { hasText: "Laptop updates tonight" }).click();
+  await expect(page.locator("[data-test=move-inbox]")).toHaveText("Not junk");
+  await page.click("[data-test=move-inbox]");
+  await page.click("[data-folder=inbox]");
+  await page.locator(".row", { hasText: "Laptop updates tonight" }).click();
+  await page.click("[data-test=move-archive]");
+  await page.click("[data-folder=archive]");
+  await expect(page.locator(".row", { hasText: "Laptop updates tonight" })).toHaveCount(1);
+  // The person's own moves, in Mail: run without asking, audited.
+  const moved = audit().filter((r) => r.event.action === "mail.move" && r.event.agent === "mail");
+  expect(moved.map(outcome)).toEqual(["completed", "completed", "completed"]);
+});
+
+test("nv3 an html message runs no script and loads no remote image", async ({ page }) => {
+  // A server that notes whatever reaches it: a remote image, stylesheet,
+  // background, script, redirect, form or link would (ADR 0037).
+  const hits: string[] = [];
+  const beacon = createServer((req, res) => {
+    hits.push(req.url ?? "");
+    res.end("x");
+  });
+  await new Promise<void>((resolve) => beacon.listen(0, "127.0.0.1", resolve));
+  const remote = `http://127.0.0.1:${(beacon.address() as AddressInfo).port}`;
+  try {
+    const stamp = Math.floor(Date.now() / 1000);
+    writeFileSync(
+      join(DEV, "home/Mail/Inbox", `${stamp}-0-quarterly-numbers.eml`),
+      [
+        "From: Vendor News <news@vendor.example>",
+        `To: ${userInfo().username}@corp.example`,
+        "Subject: Quarterly numbers",
+        `Date: ${new Date().toISOString().replace(/\.\d+Z$/, "Z")}`,
+        "MIME-Version: 1.0",
+        "Content-Type: text/html; charset=utf-8",
+        "",
+        `<html><head><meta http-equiv="refresh" content="0;url=${remote}/refresh">`,
+        `<link rel="stylesheet" href="${remote}/style.css"></head>`,
+        `<body style="background-image: url(${remote}/background.png)">`,
+        `<h1 id="headline">Quarterly numbers are in</h1>`,
+        `<img src="${remote}/pixel.gif" width="1" height="1" alt="">`,
+        `<script>parent.postMessage("ran", "*"); fetch("${remote}/script");`,
+        `document.getElementById("headline").textContent = "SCRIPT RAN";</script>`,
+        `<form action="${remote}/form"><button id="go">Confirm</button></form>`,
+        `<p><a id="link" href="${remote}/link">Read more</a></p></body></html>`,
+        "",
+      ].join("\r\n"),
+    );
+    await page.addInitScript(() => {
+      const seen: unknown[] = [];
+      (window as unknown as { seen: unknown[] }).seen = seen;
+      window.addEventListener("message", (e) => seen.push(e.data));
+    });
+    await openMail(page);
+    await page.locator(".row", { hasText: "Quarterly numbers" }).click();
+    const frame = page.frameLocator("[data-test=html]");
+    // The HTML shows, as it was sent, and its script never ran.
+    await expect(frame.locator("#headline")).toHaveText("Quarterly numbers are in");
+    await expect(page.locator("[data-test=html]")).toHaveAttribute("sandbox", "");
+    await page.screenshot({ path: join(SHOTS, "mail-html-sandboxed.png") });
+    // Its form and link go nowhere.
+    await frame.locator("#go").click();
+    await frame.locator("#link").click();
+    await page.waitForTimeout(1500);
+    await expect(frame.locator("#headline")).toHaveText("Quarterly numbers are in");
+    expect(hits).toEqual([]);
+    expect(await page.evaluate(() => (window as unknown as { seen: unknown[] }).seen)).toEqual([]);
+  } finally {
+    beacon.close();
+  }
 });

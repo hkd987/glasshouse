@@ -404,6 +404,13 @@ fn is_persons_own(name: &str) -> bool {
     PERSONS_OWN.contains(&name)
 }
 
+/// Whether `action` is the person's own ([`PERSONS_OWN`]): Never for every
+/// agent, and for apps people make, which may carry it from the app they
+/// remix but never run it (only the shipped app's [[app]] tiers do).
+pub fn persons_own(action: &ActionName) -> bool {
+    is_persons_own(action.as_str())
+}
+
 /// Whether `pattern` names a people-only app's actions: `meet.*` or one of
 /// them. `*` names no app.
 fn names_people_only(pattern: &ActionPattern) -> bool {
