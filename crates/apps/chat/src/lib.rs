@@ -27,7 +27,7 @@ use glass_api::{AskLabels, ChangeKind, display_line};
 use glass_crypto::EpochKey;
 use glass_managed::DirectoryHandle;
 use glass_managed::chat::{
-    Body, Conversation, ConversationKind, CreateConversation, Epoch, Header, LookupKeys,
+    Body, Conversation, ConversationKind, CreateConversation, Epoch, Header, LinkError, LookupKeys,
     MAX_MEMBERS, MAX_TEXT_CHARS, MemberKey, MemberSecret, Message, PostMessage, is_conversation_id,
     is_message_id, new_conversation_id, new_message_id, seal_name,
 };
@@ -429,20 +429,7 @@ impl ChatProvider {
                 )?
             }
         };
-        let store = self.handle.load(me);
-        let title = self.title(&store, Some(member), me, &conversation);
-        let key = store
-            .epoch_key(member, &conversation.id, conversation.epoch)
-            .ok_or_else(|| ChatFailure::Local(format!("this computer can't open {title}'s key")))?;
-        let header = Header {
-            v: 1,
-            org: connection.org.clone(),
-            conversation: conversation.id.clone(),
-            epoch: conversation.epoch,
-            id: new_message_id(now_ms())?,
-            sender: me.to_owned(),
-            key: member.key.id.clone(),
-        };
+        let title = self.title(&self.handle.load(me), Some(member), me, &conversation);
         let body = Body {
             text: post.text.clone(),
             attribution,
@@ -451,24 +438,69 @@ impl ChatProvider {
             part: None,
             mentions: fold::mentions(&post.text, &conversation.members, me),
         };
-        let mut message = Message::seal(&header, &body, &key, &member.secret)?;
-        let seq = connection
-            .link
-            .post(&PostMessage {
+        let (conversation, id, seq) =
+            self.send_body(connection, member, me, &conversation.id, &body)?;
+        Ok((conversation, title, id, seq))
+    }
+
+    /// Seals `body` in conversation `id` as `me` and posts it. When someone
+    /// changed who is in it meanwhile, the console refuses the old epoch:
+    /// this computer catches up and seals it again, once, without the
+    /// person seeing (ADR 0030 §1). The conversation, the message's id and
+    /// its sequence number.
+    fn send_body(
+        &self,
+        connection: &Connection,
+        member: &Member,
+        me: &str,
+        id: &str,
+        body: &Body,
+    ) -> Result<(Conversation, String, u64), ChatFailure> {
+        let mut again = true;
+        loop {
+            let store = self.handle.load(me);
+            let conversation = store
+                .conversations
+                .get(id)
+                .filter(|c| c.members.iter().any(|m| m == me))
+                .cloned()
+                .ok_or_else(|| ChatFailure::Local(format!("{me} isn't in {id}")))?;
+            let key = store
+                .epoch_key(member, &conversation.id, conversation.epoch)
+                .ok_or_else(|| ChatFailure::Local("this computer can't open its key".into()))?;
+            let header = Header {
+                v: 1,
+                org: connection.org.clone(),
+                conversation: conversation.id.clone(),
+                epoch: conversation.epoch,
+                id: new_message_id(now_ms())?,
+                sender: me.to_owned(),
+                key: member.key.id.clone(),
+            };
+            let mut message = Message::seal(&header, body, &key, &member.secret)?;
+            match connection.link.post(&PostMessage {
                 device: connection.device.clone(),
                 message: message.clone(),
-            })
-            .map_err(ChatFailure::Link)?;
-        message.seq = seq;
-        message.at = Some(Timestamp::now().to_string());
-        {
-            let _write = self.handle.lock();
-            let mut store = self.handle.load(me);
-            store.keep(&conversation.id, message);
-            self.handle.save(me, &store)?;
+            }) {
+                Ok(seq) => {
+                    message.seq = seq;
+                    message.at = Some(Timestamp::now().to_string());
+                    {
+                        let _write = self.handle.lock();
+                        let mut store = self.handle.load(me);
+                        store.keep(&conversation.id, message);
+                        self.handle.save(me, &store)?;
+                    }
+                    self.handle.changed(me, conversation.kind);
+                    return Ok((conversation, header.id, seq));
+                }
+                Err(LinkError::Refused(m)) if again && m.contains("old epoch") => {
+                    again = false;
+                    self.handle.sync_once(0).map_err(ChatFailure::Link)?;
+                }
+                Err(e) => return Err(ChatFailure::Link(e)),
+            }
         }
-        self.handle.changed(me, conversation.kind);
-        Ok((conversation, title, header.id, seq))
     }
 
     /// Seals and posts a message in conversation or item `to`, which
@@ -488,25 +520,6 @@ impl ChatProvider {
         let member = self.handle.existing(login).ok_or_else(|| {
             ChatFailure::NotSetUp(format!("{login} has no chat keys on this computer yet"))
         })?;
-        let store = self.handle.load(login);
-        let conversation = store
-            .conversations
-            .get(to)
-            .filter(|c| c.members.iter().any(|m| m == login))
-            .cloned()
-            .ok_or_else(|| ChatFailure::Local(format!("{login} isn't in {to}")))?;
-        let key = store
-            .epoch_key(&member, &conversation.id, conversation.epoch)
-            .ok_or_else(|| ChatFailure::Local("this computer can't open its key".into()))?;
-        let header = Header {
-            v: 1,
-            org: connection.org.clone(),
-            conversation: conversation.id.clone(),
-            epoch: conversation.epoch,
-            id: new_message_id(now_ms())?,
-            sender: login.to_owned(),
-            key: member.key.id.clone(),
-        };
         let body = Body {
             text: text.to_owned(),
             attribution,
@@ -515,23 +528,7 @@ impl ChatProvider {
             part,
             mentions,
         };
-        let mut message = Message::seal(&header, &body, &key, &member.secret)?;
-        message.seq = connection
-            .link
-            .post(&PostMessage {
-                device: connection.device.clone(),
-                message: message.clone(),
-            })
-            .map_err(ChatFailure::Link)?;
-        message.at = Some(Timestamp::now().to_string());
-        {
-            let _write = self.handle.lock();
-            let mut store = self.handle.load(login);
-            store.keep(&conversation.id, message);
-            self.handle.save(login, &store)?;
-        }
-        self.handle.changed(login, conversation.kind);
-        Ok(header.id)
+        Ok(self.send_body(&connection, &member, login, to, &body)?.1)
     }
 
     /// The person's keys. Chat makes and registers them the first time
@@ -2225,5 +2222,189 @@ mod tests {
             }
         }
         out
+    }
+    #[test]
+    fn cf91_someone_added_reads_the_history_and_a_stale_post_is_sealed_again() {
+        let org = org();
+        let (a, b, id) = launch_channel(&org);
+        let c = org.computer("dev-c");
+        c.call("sam", LIST, json!({})).unwrap();
+        say(&a, "dana", &id, "Kickoff notes: ship Monday", None);
+        sync(&[&b]);
+        let preview = a.preview(
+            "dana",
+            everyday::MEMBERS,
+            json!({ "conversation": id, "add": ["sam"] }),
+        );
+        assert_eq!(preview.summary, "Add 1 person to #launch");
+        assert_eq!(preview.items, ["Sam Lee (reads its history)"]);
+        let added = a
+            .call(
+                "dana",
+                everyday::MEMBERS,
+                json!({ "conversation": id, "add": ["sam"] }),
+            )
+            .unwrap();
+        assert_eq!(
+            added.text,
+            "Added Sam Lee to #launch. They can read its history."
+        );
+        // Sam's computer checks the signed chain, opens epoch 2 and through
+        // it epoch 1, and reads what was said before he came.
+        sync(&[&c]);
+        let read = c.call("sam", READ, json!({ "conversation": id })).unwrap();
+        assert_eq!(
+            read.data["conversation"]["title"], "#launch",
+            "the name opens too"
+        );
+        assert_eq!(
+            read.data["messages"][0]["text"],
+            "Kickoff notes: ship Monday"
+        );
+        // Priya's computer hasn't heard of the change; her post is refused
+        // for the old epoch, caught up and sealed again without her seeing.
+        let posted = say(&b, "priya", &id, "Welcome Sam", None);
+        sync(&[&a, &c]);
+        for (comp, login) in [(&a, "dana"), (&c, "sam")] {
+            let read = comp
+                .call(login, READ, json!({ "conversation": id }))
+                .unwrap();
+            let last = read.data["messages"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()
+                .clone();
+            assert_eq!(
+                (last["id"].as_str(), last["text"].as_str()),
+                (Some(posted.as_str()), Some("Welcome Sam")),
+                "{login}"
+            );
+        }
+        assert_eq!(b.handle.load("priya").conversations[&id].epoch, 2);
+        // IT's key opens the new epoch as every other.
+        let store = a.handle.load("dana");
+        assert!(store.epochs[&id][1].open(COMPLIANCE, &org.it).is_ok());
+        // Adding someone already in it changes nothing.
+        let again = a
+            .call(
+                "dana",
+                everyday::MEMBERS,
+                json!({ "conversation": id, "add": ["sam"] }),
+            )
+            .unwrap();
+        assert!(again.changes.is_empty());
+    }
+
+    #[test]
+    fn cf91_a_member_the_console_adds_without_a_members_signature_gets_no_key() {
+        use glass_managed::chat::{ChatSyncResponse, MemberOp};
+        let org = org();
+        let (a, b, id) = launch_channel(&org);
+        let c = org.computer("dev-c");
+        c.call("sam", LIST, json!({})).unwrap();
+        // Sam, who isn't in #launch, makes an epoch adding himself, and a
+        // console that would collude offers it to Priya's computer.
+        let sam = c.handle.member("sam").unwrap();
+        let store = a.handle.load("dana");
+        let conversation = store.conversations[&id].clone();
+        let key = glass_crypto::EpochKey::generate().unwrap();
+        let mut forged = conversation.clone();
+        forged.members = vec!["dana".into(), "priya".into(), "sam".into()];
+        forged.epoch = 2;
+        let keys: Vec<_> = store
+            .keys
+            .values()
+            .cloned()
+            .chain([sam.key.clone()])
+            .collect();
+        let epoch = Epoch::change(
+            &id,
+            2,
+            &key,
+            &glass_crypto::EpochKey::generate().unwrap(),
+            &keys,
+            &org.it.public().unwrap(),
+            (&sam.key, &sam.secret),
+            (
+                forged.members.clone(),
+                MemberOp::Add {
+                    people: vec!["sam".into()],
+                },
+            ),
+        )
+        .unwrap();
+        let response = ChatSyncResponse {
+            conversations: vec![forged.clone()],
+            epochs: vec![epoch],
+            messages: Vec::new(),
+            keys: keys.clone(),
+            cursor: 0,
+        };
+        let mut refused = Vec::new();
+        let mut store = b.handle.load("priya");
+        store.absorb("acme", "priya", &response, &mut refused);
+        assert_eq!(
+            store.conversations[&id].members,
+            ["dana", "priya"],
+            "{refused:?}"
+        );
+        assert_eq!(store.conversations[&id].epoch, 1);
+        assert!(
+            refused
+                .iter()
+                .any(|(_, why)| why.contains("someone in a conversation")),
+            "{refused:?}"
+        );
+        // Members changed with no epoch at all are refused too.
+        let mut bare = conversation;
+        bare.members.push("sam".into());
+        let response = ChatSyncResponse {
+            conversations: vec![bare],
+            cursor: 0,
+            ..Default::default()
+        };
+        let mut refused = Vec::new();
+        store.absorb("acme", "priya", &response, &mut refused);
+        assert_eq!(store.conversations[&id].members, ["dana", "priya"]);
+        assert!(
+            refused
+                .iter()
+                .any(|(_, why)| why.contains("without a member's signature")),
+            "{refused:?}"
+        );
+        // And the console refuses Sam's epoch outright.
+        let refused = glass_managed::chat::ChatLink::rotate(
+            org.link.as_ref(),
+            &glass_managed::chat::RotateEpoch {
+                device: "dev-c".into(),
+                epoch: response_epoch(&id, &sam, &keys, &org),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("someone in a conversation"),
+            "{refused}"
+        );
+    }
+
+    /// An epoch 2 for `id` made by `sam`, adding himself.
+    fn response_epoch(id: &str, sam: &Member, keys: &[MemberKey], org: &Org) -> Epoch {
+        Epoch::change(
+            id,
+            2,
+            &glass_crypto::EpochKey::generate().unwrap(),
+            &glass_crypto::EpochKey::generate().unwrap(),
+            keys,
+            &org.it.public().unwrap(),
+            (&sam.key, &sam.secret),
+            (
+                vec!["dana".into(), "priya".into(), "sam".into()],
+                glass_managed::chat::MemberOp::Add {
+                    people: vec!["sam".into()],
+                },
+            ),
+        )
+        .unwrap()
     }
 }

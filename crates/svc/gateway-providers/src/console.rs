@@ -137,6 +137,10 @@ impl ChatLink for ConsoleClient {
         Self::seq(&self.request("/device/v1/chat/messages", request)?)
     }
 
+    fn rotate(&self, request: &glass_managed::chat::RotateEpoch) -> Result<u64, LinkError> {
+        Self::seq(&self.request("/device/v1/chat/rotate", request)?)
+    }
+
     fn sync(&self, request: &ChatSyncRequest) -> Result<ChatSyncResponse, LinkError> {
         Self::answer(&self.request("/device/v1/chat/sync", request)?)
     }

@@ -32,6 +32,13 @@ pub struct Stored {
     /// The sequence number its creation took, so a waiting computer hears
     /// of it.
     pub created_seq: u64,
+    /// The sequence number of its last change of members, likewise.
+    #[serde(default)]
+    pub changed_seq: u64,
+    /// People added after it was made, with the sequence number they were
+    /// added at: their computers get the whole history (ADR 0030 C2).
+    #[serde(default)]
+    pub joined: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -201,8 +208,70 @@ impl ChatState {
                 conversation,
                 epochs: vec![epoch],
                 created_seq: seq,
+                changed_seq: seq,
+                joined: BTreeMap::new(),
             },
         );
+        Ok(seq)
+    }
+
+    /// A conversation's next epoch from `device`, changing who is in it
+    /// (ADR 0030 C2): the first one based on the current epoch wins, made
+    /// on a member's own computer, checked as every computer checks it, and
+    /// sealed to exactly the members after it and IT. Its sequence number.
+    pub fn rotate(
+        &mut self,
+        request: glass_managed::chat::RotateEpoch,
+        directory: &dyn Directory,
+    ) -> Result<u64, Refused> {
+        let glass_managed::chat::RotateEpoch { device, epoch } = request;
+        let stored = self
+            .conversations
+            .get(&epoch.body.conversation)
+            .ok_or_else(|| Refused::NotFound("No such conversation.".into()))?;
+        let maker = self
+            .key(&epoch.body.made_by)
+            .filter(|k| k.device == device)
+            .ok_or_else(|| rule("The epoch must be made on a member's own computer."))?;
+        epoch
+            .verify(maker)
+            .map_err(|_| rule("The epoch's signature doesn't check."))?;
+        if epoch.body.based_on != Some(stored.conversation.epoch) {
+            return Err(rule("Someone changed it first; fetch the newest epoch."));
+        }
+        let after = glass_managed::chat::check_change(
+            stored.conversation.kind,
+            &stored.conversation.members,
+            stored.conversation.epoch,
+            &epoch,
+            &maker.login,
+        )
+        .map_err(|e| rule(e.to_string()))?;
+        for login in &after {
+            if !directory.users().iter().any(|u| u.name == *login) {
+                return Err(rule(format!("{login} isn't in the org's directory.")));
+            }
+        }
+        let members: BTreeSet<&str> = after.iter().map(String::as_str).collect();
+        self.check_envelopes(&epoch, &members)?;
+        let added: Vec<String> = after
+            .iter()
+            .filter(|l| !stored.conversation.members.contains(l))
+            .cloned()
+            .collect();
+        self.seq += 1;
+        let seq = self.seq;
+        let stored = self
+            .conversations
+            .get_mut(&epoch.body.conversation)
+            .ok_or_else(|| Refused::NotFound("No such conversation.".into()))?;
+        stored.conversation.members = after;
+        stored.conversation.epoch = epoch.body.number;
+        stored.changed_seq = seq;
+        for login in added {
+            stored.joined.insert(login, seq);
+        }
+        stored.epochs.push(epoch);
         Ok(seq)
     }
 
@@ -299,13 +368,24 @@ impl ChatState {
         let ids: BTreeSet<&str> = theirs.iter().map(|s| s.conversation.id.as_str()).collect();
         // Whole: the maker's signature covers every envelope.
         let epochs = theirs.iter().flat_map(|s| s.epochs.clone()).collect();
+        // Someone added since the cursor gets the conversation's history.
+        let joined: BTreeSet<&str> = theirs
+            .iter()
+            .filter(|s| {
+                s.joined
+                    .iter()
+                    .any(|(l, at)| logins.contains(l.as_str()) && *at > request.since)
+            })
+            .map(|s| s.conversation.id.as_str())
+            .collect();
         let messages: Vec<Message> = self
             .messages
             .iter()
-            .filter(|m| m.seq > request.since)
             .filter(|m| {
-                m.header()
-                    .is_ok_and(|h| ids.contains(h.conversation.as_str()))
+                m.header().is_ok_and(|h| {
+                    ids.contains(h.conversation.as_str())
+                        && (m.seq > request.since || joined.contains(h.conversation.as_str()))
+                })
             })
             .cloned()
             .collect();
@@ -332,7 +412,7 @@ impl ChatState {
         let answer = self.sync(request);
         !answer.messages.is_empty()
             || self.conversations.values().any(|s| {
-                s.created_seq > request.since
+                s.created_seq.max(s.changed_seq) > request.since
                     && answer
                         .conversations
                         .iter()
@@ -821,6 +901,119 @@ mod tests {
             assert!(!text.contains("CANARY-BLOB"));
             assert!(!text.contains(&hex::encode(b"CANARY-BLOB")));
         }
+    }
+
+    /// Epoch `number` of `cv` from `by`, changing its people to `after`
+    /// by adding `add`, sealed to `sealed_to`'s keys and IT.
+    #[allow(clippy::too_many_arguments)]
+    async fn change(
+        org: &Org,
+        by: &Computer,
+        cv: &str,
+        number: u32,
+        previous: &EpochKey,
+        after: &[&str],
+        add: &[&str],
+        sealed_to: &[&str],
+    ) -> (u16, Value, EpochKey) {
+        let keys = org.keys(sealed_to).await;
+        let compliance =
+            glass_crypto::PublicKey::from_bytes(&hex::decode(&keys.compliance).unwrap()).unwrap();
+        let key = EpochKey::generate().unwrap();
+        let epoch = Epoch::change(
+            cv,
+            number,
+            &key,
+            previous,
+            &keys.keys,
+            &compliance,
+            (&by.key, &by.secret),
+            (
+                after.iter().map(|m| (*m).to_owned()).collect(),
+                glass_managed::chat::MemberOp::Add {
+                    people: add.iter().map(|m| (*m).to_owned()).collect(),
+                },
+            ),
+        )
+        .unwrap();
+        let (status, body) = org
+            .post("chat/rotate", &json!({ "device": by.name, "epoch": epoch }))
+            .await;
+        (status, body, key)
+    }
+
+    #[tokio::test]
+    async fn cf91_a_change_of_people_is_one_epoch_from_a_member_and_the_newcomer_gets_the_history()
+    {
+        let org = Org::new().await;
+        let priya = org.computer("laptop-priya", "priya").await;
+        let dana = org.computer("laptop-dana", "dana").await;
+        let sam = org.computer("laptop-sam", "sam").await;
+        let (_, cv, key) = org.channel(&priya, &["dana", "priya"], "#deal").await;
+        let (status, _) = org.say(&priya, &cv, 1, &key, "the terms").await;
+        assert_eq!(status, 200);
+        let before = org.sync(&sam, 0, 0).await.cursor;
+        let all = ["dana", "priya", "sam"];
+
+        // Sam isn't in it, so he can't add himself.
+        let (status, body, _) = change(&org, &sam, &cv, 2, &key, &all, &["sam"], &all).await;
+        assert_eq!(status, 409, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("someone in a conversation"),
+            "{body}"
+        );
+        // Sealed to someone short, it's refused.
+        let (status, body, _) = change(
+            &org,
+            &priya,
+            &cv,
+            2,
+            &key,
+            &all,
+            &["sam"],
+            &["dana", "priya"],
+        )
+        .await;
+        assert_eq!(status, 409, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("exactly its members"),
+            "{body}"
+        );
+        // A member adds him; a second change on the same epoch loses.
+        let (status, body, two) = change(&org, &priya, &cv, 2, &key, &all, &["sam"], &all).await;
+        assert_eq!(status, 200, "{body}");
+        let (status, body, _) = change(&org, &dana, &cv, 2, &key, &all, &["sam"], &all).await;
+        assert_eq!(status, 409, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("changed it first"),
+            "{body}"
+        );
+
+        // Sam's computer hears of it and gets what was said before.
+        let got = org.sync(&sam, before, 0).await;
+        assert_eq!(got.conversations[0].members, all);
+        assert_eq!(got.epochs.len(), 2);
+        assert_eq!(
+            got.messages.len(),
+            1,
+            "the history, though older than his cursor"
+        );
+        let newest = got.epochs[1].open(&sam.key.id, &sam.secret.agree).unwrap();
+        assert_eq!(newest.as_bytes(), two.as_bytes());
+        // Dana's, already caught up, isn't sent it again.
+        let cursor = org.sync(&dana, 0, 0).await.cursor;
+        assert!(org.sync(&dana, cursor, 0).await.messages.is_empty());
+        // The old epoch is closed for posting.
+        let (status, body) = org.say(&dana, &cv, 1, &key, "late").await;
+        assert_eq!(status, 409, "{body}");
+        let (status, _) = org.say(&sam, &cv, 2, &two, "thanks for adding me").await;
+        assert_eq!(status, 200);
     }
 
     #[tokio::test]

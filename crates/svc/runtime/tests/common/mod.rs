@@ -674,7 +674,7 @@ pub fn settings_app() -> AppManifest {
 pub fn chat_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "chat", "name": "Chat", "version": "0.1.0",
-        "actions": ["chat.list", "chat.read", "chat.post", "chat.create", "chat.react", "chat.edit", "chat.delete", "chat.pin", "chat.topic", "chat.search", "chat.draft", "chat.notify", "people.search"],
+        "actions": ["chat.list", "chat.read", "chat.post", "chat.create", "chat.react", "chat.edit", "chat.delete", "chat.pin", "chat.topic", "chat.search", "chat.draft", "chat.notify", "chat.members", "people.search"],
         "permissions": [], "labels": ["public", "internal"]
     }))
     .unwrap()

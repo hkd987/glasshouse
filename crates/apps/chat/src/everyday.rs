@@ -32,8 +32,12 @@ pub const SEARCH: &str = "chat.search";
 pub const DRAFT: &str = "chat.draft";
 pub const NOTIFY: &str = "chat.notify";
 
+pub const MEMBERS: &str = "chat.members";
+
 /// Every action this module serves.
-pub const ACTIONS: [&str; 8] = [REACT, EDIT, DELETE, PIN, TOPIC, SEARCH, DRAFT, NOTIFY];
+pub const ACTIONS: [&str; 9] = [
+    REACT, EDIT, DELETE, PIN, TOPIC, SEARCH, DRAFT, NOTIFY, MEMBERS,
+];
 
 const MAX_TOPIC_CHARS: usize = 250;
 const SEARCH_DEFAULT: usize = 20;
@@ -112,6 +116,14 @@ pub(crate) struct DraftInput {
 pub(crate) struct NotifyInput {
     conversation: String,
     level: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MembersInput {
+    conversation: String,
+    /// People to add, by login.
+    add: Vec<String>,
 }
 
 /// A short emoji: a few characters, none of them letters, digits, spaces
@@ -681,6 +693,144 @@ impl ChatProvider {
         })
     }
 
+    /// Adds people to a channel or group (ADR 0030 C2): a new epoch, sealed
+    /// to everyone in it after and to IT, with the key before it sealed
+    /// under it, so the people added read the whole history, as in Slack.
+    pub(crate) fn add_members(
+        &self,
+        ctx: &TaskContext,
+        input: MembersInput,
+    ) -> Result<ActionOutput, ActionError> {
+        use glass_crypto::EpochKey;
+        use glass_managed::chat::{Epoch, LookupKeys, MemberOp, RotateEpoch};
+
+        let me = &ctx.principal.on_behalf_of.name;
+        let not_added = |e: String| ActionError::Failed(format!("Nobody was added: {e}."));
+        let connection = self
+            .handle
+            .connection()
+            .map_err(|e| not_added(e.to_string()))?;
+        let compliance = self
+            .handle
+            .compliance()
+            .map_err(|e| not_added(e.to_string()))?;
+        let member = self.keys(ctx)?;
+        self.check_people(me, &input.add)?;
+        let store = self.handle.load(me);
+        let c = self.mine(&store, me, &input.conversation)?;
+        let title = self.title(&store, Some(&member), me, &c);
+        if !matches!(c.kind, ConversationKind::Channel | ConversationKind::Group) {
+            return Err(invalid(
+                "people are added to channels and groups; a direct message stays between two",
+            ));
+        }
+        let mut add: Vec<String> = input
+            .add
+            .iter()
+            .filter(|l| !c.members.contains(l))
+            .cloned()
+            .collect();
+        add.sort();
+        add.dedup();
+        if add.is_empty() {
+            return Ok(ActionOutput {
+                text: format!("They're in {title} already."),
+                data: json!({ "conversation": c.id, "added": [] }),
+                changes: Vec::new(),
+            });
+        }
+        let mut after: Vec<String> = c.members.iter().chain(&add).cloned().collect();
+        after.sort();
+        let found = connection
+            .link
+            .lookup(&LookupKeys {
+                logins: after.clone(),
+            })
+            .map_err(|e| not_added(e.to_string()))?;
+        if found.compliance != compliance.hex {
+            return Err(not_added(
+                "your organization's server offered a compliance key that isn't the one IT signed"
+                    .into(),
+            ));
+        }
+        let keys: Vec<_> = found
+            .keys
+            .into_iter()
+            .filter(|k| after.contains(&k.login) && k.keys().is_ok())
+            .collect();
+        let missing: Vec<String> = add
+            .iter()
+            .filter(|l| !keys.iter().any(|k| &k.login == *l))
+            .map(|l| self.name(l))
+            .collect();
+        if !missing.is_empty() {
+            return Err(not_added(format!(
+                "{} {} opened Chat yet, so there's no key to seal to; ask them to open Chat once",
+                missing.join(", "),
+                if missing.len() == 1 {
+                    "hasn't"
+                } else {
+                    "haven't"
+                }
+            )));
+        }
+        let current = store
+            .epoch_key(&member, &c.id, c.epoch)
+            .ok_or_else(|| not_added("this computer can't open the conversation's key".into()))?;
+        let key = EpochKey::generate().map_err(|e| not_added(e.to_string()))?;
+        let epoch = Epoch::change(
+            &c.id,
+            c.epoch + 1,
+            &key,
+            &current,
+            &keys,
+            &compliance.key,
+            (&member.key, &member.secret),
+            (
+                after.clone(),
+                MemberOp::Add {
+                    people: add.clone(),
+                },
+            ),
+        )
+        .map_err(|e| not_added(e.to_string()))?;
+        connection
+            .link
+            .rotate(&RotateEpoch {
+                device: connection.device.clone(),
+                epoch: epoch.clone(),
+            })
+            .map_err(|e| not_added(e.to_string()))?;
+        {
+            let _write = self.handle.lock();
+            let mut store = self.handle.load(me);
+            if let Some(kept) = store.conversations.get_mut(&c.id) {
+                kept.members.clone_from(&after);
+                kept.epoch = epoch.body.number;
+            }
+            store.epochs.entry(c.id.clone()).or_default().push(epoch);
+            for k in keys {
+                store.keys.entry(k.id.clone()).or_insert(k);
+            }
+            self.handle.save(me, &store).map_err(failed)?;
+        }
+        self.handle.changed(me, c.kind);
+        let names: Vec<String> = add.iter().map(|l| self.name(l)).collect();
+        Ok(ActionOutput {
+            text: format!(
+                "Added {} to {title}. They can read its history.",
+                names.join(", ")
+            ),
+            data: json!({ "conversation": c.id, "added": add }),
+            changes: vec![Change {
+                kind: ChangeKind::Sent,
+                target: format!("People added to {title}"),
+                reversible: false,
+                paths: Vec::new(),
+            }],
+        })
+    }
+
     /// Checks an input before its preview or its call.
     pub(crate) fn check(&self, action: &str, input: &Value) -> Result<(), ActionError> {
         match action {
@@ -753,6 +903,10 @@ impl ChatProvider {
                 }
                 Ok(())
             }
+            MEMBERS => {
+                let i: MembersInput = parse_input(input)?;
+                check_ids(&i.conversation, None)
+            }
             other => Err(invalid(format!("chat has no action {other}"))),
         }
     }
@@ -781,6 +935,7 @@ impl ChatProvider {
             SEARCH => self.search(ctx, parse_input(input)?),
             DRAFT => self.draft(ctx, parse_input(input)?),
             NOTIFY => self.notify(ctx, parse_input(input)?),
+            MEMBERS => self.add_members(ctx, parse_input(input)?),
             other => Err(invalid(format!("chat has no action {other}"))),
         }
     }
@@ -886,6 +1041,24 @@ impl ChatProvider {
                     format!("Notifications for {title}: {}", i.level),
                     title,
                     Vec::new(),
+                )
+            }
+            MEMBERS => {
+                let i: MembersInput = parse_input(input)?;
+                self.check_people(me, &i.add)?;
+                let (_, title) = titled(&i.conversation)?;
+                let names: Vec<String> = i
+                    .add
+                    .iter()
+                    .map(|l| display_line(&self.name(l)).into_owned())
+                    .collect();
+                preview(
+                    format!("Add {} to {title}", plural(names.len(), "person", "people")),
+                    title,
+                    names
+                        .iter()
+                        .map(|n| format!("{n} (reads its history)"))
+                        .collect(),
                 )
             }
             other => return Err(invalid(format!("chat has no action {other}"))),
@@ -1033,6 +1206,24 @@ pub(crate) fn defs() -> Vec<ActionDef> {
             SideEffect::None,
             Tier::Auto,
             AskLabels::default(),
+        ),
+        def(
+            MEMBERS,
+            "Add people to a chat channel or group",
+            "Adds people (by login) to a channel or group the person is in. They read its whole \
+             history, as in Slack, and everyone in it sees they were added.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "conversation": conversation,
+                    "add": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "People's logins, from people.search" }
+                },
+                "required": ["conversation", "add"],
+                "additionalProperties": false
+            }),
+            SideEffect::Irreversible,
+            Tier::Ask,
+            AskLabels::new("Review people", "Approve and add"),
         ),
         def(
             NOTIFY,

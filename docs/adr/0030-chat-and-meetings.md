@@ -562,6 +562,28 @@ Every test name carries its PRD id. Nothing reaches a pilot org before slices C2
 - `app.status` waits: `cf91_chat_hears_of_a_new_message_without_reading_it` in `crates/svc/runtime/tests/chat.rs`.
 
 **C2. Several computers, membership, presence.** Pilot gate, part one.
+- Built (2026-10-20), adding people:
+  - `EpochBody` carries `members` and `op` (`MemberOp::Add`), so the epochs
+    are the signed membership chain. `check_change` is the one check that
+    the console, `MemoryLink` and every computer run.
+  - The console's `chat/rotate` takes the first epoch based on the current
+    one (compare and swap), made on a member's own computer and sealed to
+    exactly the members after and IT. People added get the conversation's
+    history in their next sync.
+  - Computers replay the chain before accepting a change of members, or a
+    conversation they're added to, and open older epochs through the
+    backward chain. A post refused for an old epoch is sealed again, once.
+  - `chat.members {conversation, add}` (agents ask; Auto in Chat).
+  - Tests: `cf91_someone_added_reads_the_history_and_a_stale_post_is_sealed_again`,
+    `cf91_a_member_the_console_adds_without_a_members_signature_gets_no_key`,
+    and the console's
+    `cf91_a_change_of_people_is_one_epoch_from_a_member_and_the_newcomer_gets_the_history`.
+  - Next, in this order: a queue of pending work that a remaining member's
+    computer does (leave, remove, IT's offboarding, join requests), never the
+    leaver's; several computers per person through the same queue; the org
+    conversation with public channels to browse and join; the presence stub.
+  - `EpochBody` refuses unknown fields like `Body`, so older computers can't
+    read the new epochs. Nothing has shipped, so that is accepted now.
 - Scope:
   - Several member keys per person.
   - Gap filling for new and replacement computers (CF-41).

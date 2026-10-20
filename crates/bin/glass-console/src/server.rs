@@ -719,6 +719,25 @@ impl Console {
                     Err(r) => refused(r),
                 }
             }
+            "chat/rotate" => {
+                let rotate: glass_managed::chat::RotateEpoch = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                let mut state = self.state();
+                let result = state.chat.rotate(rotate, self.directory.as_ref());
+                match result {
+                    Ok(seq) => {
+                        if let Err(e) = state.save_chat() {
+                            return error(500, &format!("{e:#}"));
+                        }
+                        drop(state);
+                        self.chat_changed.send_modify(|n| *n += 1);
+                        ok(json!({ "seq": seq }))
+                    }
+                    Err(r) => refused(r),
+                }
+            }
             "chat/messages" => {
                 let post: chat::PostMessage = match body(request) {
                     Ok(b) => b,

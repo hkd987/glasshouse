@@ -80,6 +80,9 @@ approval_timeout_secs = 900
 "chat.delete" = "ask"
 "chat.pin" = "ask"
 "chat.topic" = "ask"
+# Adding people to a channel or group gives them its whole history (ADR 0030
+# C2), so an agent asks.
+"chat.members" = "ask"
 "chat.draft" = "auto"
 "chat.notify" = "auto"
 # Artifacts (AR-1, ADR 0033): pages shared in the org's sealed shared space.
@@ -191,7 +194,7 @@ apps = ["console"]
 # 0030 slice C2); until that lands, nothing reaches a pilot org.
 [[app]]
 id = "chat"
-tiers = { "chat.post" = "auto", "chat.create" = "auto", "chat.react" = "auto", "chat.edit" = "auto", "chat.delete" = "auto", "chat.pin" = "auto", "chat.topic" = "auto", "chat.draft" = "auto", "chat.notify" = "auto" }
+tiers = { "chat.post" = "auto", "chat.create" = "auto", "chat.react" = "auto", "chat.edit" = "auto", "chat.delete" = "auto", "chat.pin" = "auto", "chat.topic" = "auto", "chat.draft" = "auto", "chat.notify" = "auto", "chat.members" = "auto" }
 
 # What the person does in Artifacts is theirs, as in Chat (ADR 0033), and
 # waits on the same presence check before a pilot org.

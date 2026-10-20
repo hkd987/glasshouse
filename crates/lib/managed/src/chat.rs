@@ -251,6 +251,75 @@ pub struct EpochBody {
     pub envelopes: Vec<Envelope>,
     /// The member key that made it.
     pub made_by: String,
+    /// Who is in the conversation from this epoch on, when it was made by
+    /// a change of members (ADR 0030 C2). The epochs are the signed
+    /// membership chain: each change is signed by a member who was in it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+    /// The change this epoch makes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<MemberOp>,
+}
+
+/// A change to who is in a conversation, made by a new epoch, so people
+/// added see the whole history through the epochs' backward chain, as in
+/// Slack (ADR 0030 §1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemberOp {
+    /// People added by a member.
+    Add { people: Vec<String> },
+}
+
+/// Checks epoch `next` as the change after epoch `number` of a
+/// conversation of `kind` whose members were `before`, made by member
+/// `maker`. The members after it, sorted. Every computer and the console
+/// run the same check (ADR 0030 C2).
+pub fn check_change(
+    kind: ConversationKind,
+    before: &[String],
+    number: u32,
+    next: &Epoch,
+    maker: &str,
+) -> Result<Vec<String>> {
+    let bad = |m: &str| Err(ChatError::Invalid(m.into()));
+    if !matches!(kind, ConversationKind::Channel | ConversationKind::Group) {
+        return bad("only channels and groups change who is in them");
+    }
+    if next.body.number != number + 1
+        || next.body.based_on != Some(number)
+        || next.body.previous.is_none()
+    {
+        return bad("a change follows the conversation's current epoch, sealing it");
+    }
+    if !before.iter().any(|m| m == maker) {
+        return bad("only someone in a conversation changes who is in it");
+    }
+    let Some(MemberOp::Add { people }) = &next.body.op else {
+        return bad("an epoch after the first says what changed");
+    };
+    if people.is_empty() || people.iter().any(|p| before.contains(p)) {
+        return bad("add people who aren't in it yet");
+    }
+    let mut after: Vec<String> = before.iter().chain(people).cloned().collect();
+    after.sort();
+    after.dedup();
+    if after.len() != before.len() + people.len() || after.len() > MAX_MEMBERS {
+        return bad("each person once, and not too many");
+    }
+    if next.body.members != after {
+        return bad("the epoch's members aren't the change it says");
+    }
+    Ok(after)
+}
+
+/// `POST /device/v1/chat/rotate`: a conversation's next epoch, made by a
+/// change of members.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RotateEpoch {
+    pub device: String,
+    pub epoch: Epoch,
 }
 
 impl EpochBody {
@@ -279,6 +348,54 @@ impl Epoch {
         members: &[MemberKey],
         compliance: &PublicKey,
         maker: (&MemberKey, &MemberSecret),
+    ) -> Result<Self> {
+        Self::sealed(
+            conversation,
+            number,
+            key,
+            previous,
+            members,
+            compliance,
+            maker,
+            (Vec::new(), None),
+        )
+    }
+
+    /// Makes the epoch after `previous`'s that changes who is in
+    /// `conversation`: `change` is who is in it after and what changed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn change(
+        conversation: &str,
+        number: u32,
+        key: &EpochKey,
+        previous: &EpochKey,
+        members: &[MemberKey],
+        compliance: &PublicKey,
+        maker: (&MemberKey, &MemberSecret),
+        change: (Vec<String>, MemberOp),
+    ) -> Result<Self> {
+        Self::sealed(
+            conversation,
+            number,
+            key,
+            Some(previous),
+            members,
+            compliance,
+            maker,
+            (change.0, Some(change.1)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sealed(
+        conversation: &str,
+        number: u32,
+        key: &EpochKey,
+        previous: Option<&EpochKey>,
+        members: &[MemberKey],
+        compliance: &PublicKey,
+        maker: (&MemberKey, &MemberSecret),
+        change: (Vec<String>, Option<MemberOp>),
     ) -> Result<Self> {
         let mut envelopes = Vec::with_capacity(members.len() + 1);
         for member in members {
@@ -319,6 +436,8 @@ impl Epoch {
             previous,
             envelopes,
             made_by: maker.0.id.clone(),
+            members: change.0,
+            op: change.1,
         };
         let signature = hex::encode(maker.1.sign.sign(&body.signed_bytes())?);
         Ok(Self { body, signature })
@@ -338,6 +457,19 @@ impl Epoch {
         } else {
             Err(ChatError::Signature)
         }
+    }
+
+    /// The key of the epoch before this one, opened with this one's `key`
+    /// (the backward chain, ADR 0030 §1).
+    pub fn open_previous(&self, key: &EpochKey) -> Result<EpochKey> {
+        let sealed = unhex(
+            self.body.previous.as_deref().ok_or(ChatError::Open)?,
+            "a previous key",
+        )?;
+        Ok(key.open_previous(
+            &sealed,
+            &envelope_aad(&self.body.conversation, self.body.number, "previous"),
+        )?)
     }
 
     /// Opens the envelope sealed to `key_id` with `secret` (a member's
@@ -693,6 +825,10 @@ pub trait ChatLink: crate::shared::BlobLink + Send + Sync + std::fmt::Debug {
     fn create(&self, request: &CreateConversation) -> std::result::Result<u64, LinkError>;
     /// The message's sequence number.
     fn post(&self, request: &PostMessage) -> std::result::Result<u64, LinkError>;
+    /// A conversation's next epoch, changing who is in it; its sequence
+    /// number. The console takes the first one based on the current epoch
+    /// and refuses the rest.
+    fn rotate(&self, request: &RotateEpoch) -> std::result::Result<u64, LinkError>;
     fn sync(&self, request: &ChatSyncRequest) -> std::result::Result<ChatSyncResponse, LinkError>;
 }
 
@@ -711,6 +847,8 @@ pub mod testing {
         messages: Vec<Message>,
         seq: u64,
         blobs: Vec<crate::shared::SealedBlob>,
+        /// (conversation, login, sequence number) for each person added.
+        joined: Vec<(String, String, u64)>,
     }
 
     #[derive(Debug)]
@@ -950,6 +1088,9 @@ pub mod testing {
             if !conversation.members.contains(&header.sender) {
                 return refused("The sender isn't in this conversation.");
             }
+            if header.epoch != conversation.epoch {
+                return refused("The message is sealed under an old epoch; seal it again.");
+            }
             let key = kept.keys.iter().find(|k| {
                 k.id == header.key && k.login == header.sender && k.device == request.device
             });
@@ -962,6 +1103,72 @@ pub mod testing {
             message.at = Some("2026-10-19T14:02:11Z".into());
             kept.messages.push(message);
             Ok(kept.seq)
+        }
+
+        fn rotate(&self, request: &RotateEpoch) -> std::result::Result<u64, LinkError> {
+            let mut kept = self.kept()?;
+            let epoch = &request.epoch;
+            let maker = kept
+                .keys
+                .iter()
+                .find(|k| k.id == epoch.body.made_by && k.device == request.device)
+                .cloned();
+            let Some(maker) = maker.filter(|k| epoch.verify(k).is_ok()) else {
+                return refused("The epoch's signature doesn't check.");
+            };
+            let Some(at) = kept
+                .conversations
+                .iter()
+                .position(|(c, _)| c.id == epoch.body.conversation)
+            else {
+                return refused("No such conversation.");
+            };
+            let (conversation, _) = &kept.conversations[at];
+            if epoch.body.based_on != Some(conversation.epoch) {
+                return refused("Someone changed it first; fetch the newest epoch.");
+            }
+            let after = check_change(
+                conversation.kind,
+                &conversation.members,
+                conversation.epoch,
+                epoch,
+                &maker.login,
+            )
+            .map_err(|e| LinkError::Refused(e.to_string()))?;
+            let want: std::collections::BTreeSet<&str> = kept
+                .keys
+                .iter()
+                .filter(|k| after.contains(&k.login))
+                .map(|k| k.id.as_str())
+                .chain([COMPLIANCE])
+                .collect();
+            let have: std::collections::BTreeSet<&str> = epoch
+                .body
+                .envelopes
+                .iter()
+                .map(|e| e.key.as_str())
+                .collect();
+            if have != want || have.len() != epoch.body.envelopes.len() {
+                return refused(
+                    "The epoch must be sealed to exactly its members' computers and IT.",
+                );
+            }
+            let added: Vec<String> = after
+                .iter()
+                .filter(|l| !conversation.members.contains(l))
+                .cloned()
+                .collect();
+            kept.seq += 1;
+            let seq = kept.seq;
+            let id = epoch.body.conversation.clone();
+            for login in added {
+                kept.joined.push((id.clone(), login, seq));
+            }
+            let (conversation, epochs) = &mut kept.conversations[at];
+            conversation.members = after;
+            conversation.epoch = epoch.body.number;
+            epochs.push(epoch.clone());
+            Ok(seq)
         }
 
         fn sync(
@@ -988,10 +1195,17 @@ pub mod testing {
                 messages: kept
                     .messages
                     .iter()
-                    .filter(|m| m.seq > request.since)
                     .filter(|m| {
-                        m.header()
-                            .is_ok_and(|h| ids.contains(&h.conversation.as_str()))
+                        m.header().is_ok_and(|h| {
+                            ids.contains(&h.conversation.as_str())
+                                && (m.seq > request.since
+                                    // Someone added since gets the history.
+                                    || kept.joined.iter().any(|(c, l, at)| {
+                                        *c == h.conversation
+                                            && logins.contains(&l)
+                                            && *at > request.since
+                                    }))
+                        })
                     })
                     .cloned()
                     .collect(),

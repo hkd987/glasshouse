@@ -632,9 +632,112 @@ impl Store {
         conversation: &str,
         number: u32,
     ) -> Option<EpochKey> {
-        self.epoch(conversation, number)?
+        if let Ok(key) = self
+            .epoch(conversation, number)?
             .open(&member.key.id, &member.secret.agree)
-            .ok()
+        {
+            return Some(key);
+        }
+        // Someone added later holds a later epoch's key, which opens every
+        // earlier one through the backward chain (ADR 0030 §1).
+        let mut later: Vec<&Epoch> = self
+            .epochs
+            .get(conversation)?
+            .iter()
+            .filter(|e| e.body.number > number)
+            .collect();
+        later.sort_by_key(|e| e.body.number);
+        let start = later.iter().find_map(|e| {
+            e.open(&member.key.id, &member.secret.agree)
+                .ok()
+                .map(|k| (e.body.number, k))
+        })?;
+        let (mut at, mut key) = start;
+        while at > number {
+            key = self.epoch(conversation, at)?.open_previous(&key).ok()?;
+            at -= 1;
+        }
+        Some(key)
+    }
+
+    /// Checks the signed membership chain that takes `target` from what
+    /// this computer has (or from its first epoch, for someone added) to
+    /// the members and epoch the console says, through `offered` and the
+    /// epochs kept (ADR 0030 C2). The epochs up to `target`'s, whole.
+    fn replay(&self, target: &Conversation, offered: &[Epoch]) -> Result<Vec<Epoch>, String> {
+        let mut all: BTreeMap<u32, Epoch> = BTreeMap::new();
+        for e in self
+            .epochs
+            .get(&target.id)
+            .into_iter()
+            .flatten()
+            .chain(offered.iter().filter(|e| e.body.conversation == target.id))
+        {
+            match all.get(&e.body.number) {
+                Some(have) if have != e => {
+                    return Err(format!(
+                        "two different epochs {} were offered",
+                        e.body.number
+                    ));
+                }
+                _ => {
+                    all.insert(e.body.number, e.clone());
+                }
+            }
+        }
+        let (mut members, mut number) = match self.conversations.get(&target.id) {
+            Some(have) => (have.members.clone(), have.epoch),
+            None => {
+                let first = all.get(&1).ok_or("its first epoch is missing")?;
+                let maker = self
+                    .keys
+                    .get(&first.body.made_by)
+                    .ok_or("its first epoch's maker is unknown")?;
+                if maker.login != target.created_by || first.verify(maker).is_err() {
+                    return Err("its first epoch isn't its maker's".into());
+                }
+                let mut m = first
+                    .body
+                    .envelopes
+                    .iter()
+                    .filter(|e| e.key != glass_managed::chat::COMPLIANCE)
+                    .map(|e| self.keys.get(&e.key).map(|k| k.login.clone()))
+                    .collect::<Option<Vec<String>>>()
+                    .ok_or("this computer can't tell who was in it first")?;
+                m.sort();
+                m.dedup();
+                (m, 1)
+            }
+        };
+        while number < target.epoch {
+            let next = all
+                .get(&(number + 1))
+                .ok_or("an epoch in its chain is missing")?;
+            let maker = self
+                .keys
+                .get(&next.body.made_by)
+                .ok_or("an epoch's maker is unknown")?;
+            next.verify(maker)
+                .map_err(|_| "an epoch's signature doesn't check".to_owned())?;
+            members = glass_managed::chat::check_change(
+                target.kind,
+                &members,
+                number,
+                next,
+                &maker.login,
+            )
+            .map_err(|e| e.to_string())?;
+            number += 1;
+        }
+        let mut want = target.members.clone();
+        want.sort();
+        if members != want || number != target.epoch {
+            return Err("the console changed who is in it without a member's signature".into());
+        }
+        Ok(all
+            .into_values()
+            .filter(|e| e.body.number <= number)
+            .collect())
     }
 
     /// A channel's name, opened.
@@ -719,6 +822,7 @@ impl Store {
                 self.keys.insert(key.id.clone(), key.clone());
             }
         }
+        let mut changed: Vec<&Conversation> = Vec::new();
         for conversation in &response.conversations {
             if !conversation.members.iter().any(|m| m == login) {
                 continue;
@@ -734,11 +838,10 @@ impl Store {
             }
             match self.conversations.get(&conversation.id) {
                 Some(have) if have == conversation => {}
-                // People are fixed when a conversation is made (slice C1);
-                // the console changing them alone is refused (ADR 0030).
+                // What a conversation is never changes; who is in it changes
+                // only by a member's signed epoch (ADR 0030 C2).
                 Some(have)
-                    if have.members != conversation.members
-                        || have.kind != conversation.kind
+                    if have.kind != conversation.kind
                         || have.created_by != conversation.created_by
                         || have.name != conversation.name
                         || have.label != conversation.label =>
@@ -747,14 +850,17 @@ impl Store {
                         refused,
                         format!("c:{}:{}", conversation.id, conversation.members.join(",")),
                         Some(&conversation.id),
-                        "the console changed who is in it without a member's signature".into(),
+                        "the console changed what a conversation is".into(),
                     );
                 }
-                _ => {
+                Some(_) => changed.push(conversation),
+                None if conversation.epoch == 1 => {
                     self.conversations
                         .insert(conversation.id.clone(), conversation.clone());
                     note(conversation.kind);
                 }
+                // Someone added later checks the chain from the start.
+                None => changed.push(conversation),
             }
         }
         for epoch in &response.epochs {
@@ -762,7 +868,9 @@ impl Store {
             let Some(conversation) = self.conversations.get(id) else {
                 continue;
             };
-            if self.epoch(id, epoch.body.number).is_some() {
+            // A change is checked with its chain, below.
+            if self.epoch(id, epoch.body.number).is_some() || epoch.body.number > conversation.epoch
+            {
                 continue;
             }
             let signed = self.keys.get(&epoch.body.made_by).is_some_and(|maker| {
@@ -787,6 +895,27 @@ impl Store {
                         epoch.body.number
                     ),
                 );
+            }
+        }
+        for conversation in changed {
+            match self.replay(conversation, &response.epochs) {
+                Ok(epochs) => {
+                    self.epochs.insert(conversation.id.clone(), epochs);
+                    self.conversations
+                        .insert(conversation.id.clone(), conversation.clone());
+                    note(conversation.kind);
+                }
+                Err(reason) => self.refuse(
+                    refused,
+                    format!(
+                        "c:{}:{}:{}",
+                        conversation.id,
+                        conversation.epoch,
+                        conversation.members.join(",")
+                    ),
+                    Some(&conversation.id),
+                    reason,
+                ),
             }
         }
         for message in &response.messages {
