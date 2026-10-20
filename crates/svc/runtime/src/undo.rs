@@ -19,6 +19,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use glass_actions::ActionProvider;
 use glass_api::{
     ActivityKind, ChangeEntry, ChangeKind, DisplaySafe, TileState, UndoReport, UndoRequest,
 };
@@ -88,12 +89,11 @@ impl Runtime {
         report.not_undone = not_undone;
 
         if !dry_run {
-            {
-                let mut state = task.lock();
-                // A change stays undoable while any of its files was left
-                // as it is.
-                let blocked: BTreeSet<u32> = ids
-                    .iter()
+            // A change stays undoable while any of its files was left as
+            // it is.
+            let mut blocked: BTreeSet<u32> = {
+                let state = task.lock();
+                ids.iter()
                     .copied()
                     .filter(|id| {
                         state.written.change(*id).is_some_and(|t| {
@@ -102,7 +102,17 @@ impl Runtime {
                                 .any(|p| done.left_alone.iter().any(|f| f.starts_with(p)))
                         })
                     })
-                    .collect();
+                    .collect()
+            };
+            // Then what the files don't hold goes back through the app
+            // that made the change, such as a message moved on the mail
+            // server (ADR 0037); if it can't, the change stays undoable.
+            for (id, why) in self.revert(&task, &ids, &blocked).await {
+                blocked.insert(id);
+                report.not_undone.push(why);
+            }
+            {
+                let mut state = task.lock();
                 for change in state.changes.iter_mut() {
                     if change.reversible
                         && ids.contains(&change.id)
@@ -151,6 +161,48 @@ impl Runtime {
         // shows them, and a file name is whatever the agent called it.
         report.make_display_safe();
         Ok(report)
+    }
+
+    /// Calls each undone change's app to put back what its files don't hold
+    /// ([`ActionProvider::revert`]); the changes it couldn't, and why.
+    async fn revert(
+        &self,
+        task: &Arc<Task>,
+        ids: &BTreeSet<u32>,
+        blocked: &BTreeSet<u32>,
+    ) -> Vec<(u32, String)> {
+        let registry = self.registry();
+        let work: Vec<(u32, String, ActionName, Vec<PathBuf>)> = {
+            let state = task.lock();
+            state
+                .changes
+                .iter()
+                .filter(|c| c.reversible && ids.contains(&c.id) && !blocked.contains(&c.id))
+                .map(|c| {
+                    let paths = state
+                        .written
+                        .change(c.id)
+                        .map(|t| t.paths.clone())
+                        .unwrap_or_default();
+                    (c.id, c.target.clone(), c.action.clone(), paths)
+                })
+                .collect()
+        };
+        let ctx = task.call_ctx();
+        tokio::task::spawn_blocking(move || {
+            work.into_iter()
+                .filter_map(|(id, target, action, paths)| {
+                    let (_, provider) = registry.get(&action)?;
+                    let provider: Arc<dyn ActionProvider> = Arc::clone(provider);
+                    provider
+                        .revert(&ctx, &action, &paths)
+                        .err()
+                        .map(|e| (id, format!("{target} — {e}")))
+                })
+                .collect()
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// Hand back (AW-21): the files the user changed while driving become

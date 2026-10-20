@@ -243,8 +243,12 @@ outgoing = { host = "smtp.acme.example", port = 587, security = "starttls" }
     let template = format!("{}@acme.example", h.me.name);
     assert_eq!(account.data["address"], template.as_str());
     assert_eq!(account.data["source"], "template");
+    // IMAP is reached since EM0 (ADR 0037): the person connects in Mail.
+    assert_eq!(account.data["connectable"], true);
     assert!(
-        account.text.contains("aren't connected"),
+        account
+            .text
+            .contains("connect in Mail with your mail password"),
         "{}",
         account.text
     );

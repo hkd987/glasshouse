@@ -313,8 +313,19 @@ impl Runtime {
         };
         let sent = sent.as_ref().map(model::audit_detail);
         match result {
-            Ok(output) => {
-                self.record(
+            Ok(mut output) => {
+                // What the app keeps for the record only, such as a sent
+                // message's SHA-256 (AU-1, ADR 0037): into the audit record
+                // under the app's name, and out of the result.
+                let provided = output
+                    .data
+                    .as_object_mut()
+                    .and_then(|data| data.remove(glass_actions::AUDIT_DETAIL))
+                    .map(|detail| {
+                        let app = def.name.as_str().split('.').next().unwrap_or_default();
+                        (app.to_owned(), detail)
+                    });
+                self.record_with(
                     task,
                     &def,
                     &preview,
@@ -324,6 +335,7 @@ impl Runtime {
                     AuditOutcome::Completed,
                     started,
                     sent,
+                    provided,
                 );
                 {
                     let mut state = task.lock();
@@ -604,6 +616,27 @@ impl Runtime {
         started: Instant,
         model: Option<Value>,
     ) {
+        self.record_with(
+            task, def, preview, verdict, approval, snapshot, outcome, started, model, None,
+        );
+    }
+
+    /// [`record`](Self::record), with what the app gave for the record
+    /// (`detail.<app>`).
+    #[allow(clippy::too_many_arguments)]
+    fn record_with(
+        &self,
+        task: &Task,
+        def: &ActionDef,
+        preview: &Preview,
+        verdict: &Verdict,
+        approval: Option<ApprovalRef>,
+        snapshot: Option<glass_types::SnapshotId>,
+        outcome: AuditOutcome,
+        started: Instant,
+        model: Option<Value>,
+        provided: Option<(String, Value)>,
+    ) {
         let mut event: AuditEvent =
             self.task_event(task, EventKind::Action, preview.summary.clone());
         // How long the OS took, from the call to its outcome, for the
@@ -615,6 +648,11 @@ impl Runtime {
         // and the sizes and hashes of what crossed (DP-5).
         if let Some(model) = model {
             event.detail["model"] = model;
+        }
+        if let Some((app, detail)) = provided
+            && !matches!(app.as_str(), "elapsed_ms" | "model")
+        {
+            event.detail[app] = detail;
         }
         event.action = Some(def.name.clone());
         event.targets = preview.targets.clone();

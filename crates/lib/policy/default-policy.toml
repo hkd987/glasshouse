@@ -28,6 +28,12 @@ approval_timeout_secs = 900
 "mail.read" = "auto"
 "mail.draft" = "auto"
 "mail.send" = "ask"
+# Filing mail in Inbox, Archive, Junk or Trash runs and stays undoable: undo
+# moves it back on the mail server too (ADR 0037).
+"mail.move" = "notify"
+# Connecting mail takes the person's mail password: theirs to type, in Mail
+# (its [[app]] below), never an agent's whatever its rules say (ADR 0037).
+"mail.connect" = "never"
 # Calendar (NV-3): reading is quiet; holds and events on the user's own
 # calendar run and stay undoable; deleting one and sending invitations ask.
 "calendar.list" = "auto"
@@ -201,6 +207,13 @@ tiers = { "chat.post" = "auto", "chat.create" = "auto", "chat.react" = "auto", "
 [[app]]
 id = "artifacts"
 tiers = { "artifact.share" = "auto", "artifact.update" = "auto", "artifact.comment" = "auto", "artifact.resolve" = "auto" }
+
+# In Mail the person connects their mail with their password, and files
+# the mail they're reading (ADR 0037). Sending still asks: presence comes
+# with ADR 0030 slice C2.
+[[app]]
+id = "mail"
+tiers = { "mail.connect" = "auto", "mail.move" = "auto" }
 
 # And in Docs, with the same presence check to come.
 [[app]]

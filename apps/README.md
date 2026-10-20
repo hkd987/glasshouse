@@ -13,7 +13,13 @@ apps/
               and the address field that suggests people as they're typed
               (address-field.ts, people.ts: the org's directory through
               people.search, then people from recent mail; AD-1)
-  mail/       manifest.json, index.html, src/ (main.ts: the page; mail.ts: logic)
+  mail/       manifest.json, index.html, src/ (main.ts: the page; mail.ts: logic).
+              With IT's IMAP service (ADR 0037): "Connect mail" (mail.connect,
+              the person's password, kept by glassd, never by the page); Archive,
+              Junk, Delete and Not junk (mail.move); a message's HTML framed from
+              view.mail.localhost, which the bridge serves through mail.read
+              under a CSP with no scripts and no network (no remote images);
+              new mail from app.status waits
   calendar/   manifest.json, index.html, src/ (main.ts; week.ts: the week's logic)
   store/      manifest.json, index.html, src/ (main.ts; store.ts: what the org's
               catalog offers you, DV-10, DV-11)

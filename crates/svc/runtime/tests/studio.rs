@@ -159,6 +159,47 @@ async fn tl5_ga5_a_remix_is_its_makers_alone_and_never_has_its_bases_rules() {
 }
 
 #[tokio::test]
+async fn em0_a_remix_of_mail_saves_as_is_and_never_takes_the_mail_password() {
+    // ADR 0037: Mail's connect flow comes along in a remix, inert. Only
+    // the shipped Mail runs mail.connect; a page an agent wrote can't
+    // collect the person's password.
+    let h = harness();
+    let (_task, client) = claude_code(&h).await;
+    let source = tool(&client, "apps_source", json!({ "app": "mail" })).await;
+    let data = source.structured_content.unwrap();
+    assert!(
+        data["manifest"]["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("mail.connect"))
+    );
+    let saved = tool(
+        &client,
+        "apps_save",
+        json!({ "base": "mail", "manifest": data["manifest"], "files": data["files"], "note": "Mine" }),
+    )
+    .await;
+    assert!(!saved.is_error, "{}", saved.text());
+    let apps = Client::connect(h.serve_apps()).await.unwrap();
+    let mail = open(&apps, "mail").await.unwrap();
+    let remix = open(&apps, "my-mail").await.unwrap();
+    assert_eq!(tier(&mail, "mail.connect"), Tier::Auto);
+    assert_eq!(tier(&remix, "mail.connect"), Tier::Never);
+    let tried: glass_api::AppCallResult = apps
+        .call(
+            app_methods::APP_CALL,
+            json!({ "session": remix.session, "action": "mail.connect", "input": { "password": "canary-9931" } }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !tried.ok && tried.text.contains("Blocked by policy"),
+        "{}",
+        tried.text
+    );
+}
+
+#[tokio::test]
 async fn tl5_a_remix_goes_when_the_app_it_remixes_leaves_the_profile() {
     let h = harness();
     let (_task, client) = claude_code(&h).await;

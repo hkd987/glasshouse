@@ -88,6 +88,10 @@ impl Surroundings for StudioSurroundings {
         for action in &manifest.actions {
             match registry.get(action) {
                 None => refusals.push(format!("{action} isn't an action on this computer")),
+                // A remix of Mail keeps Mail's connect flow but can never
+                // run it: the password goes only to the shipped Mail, so
+                // a page an agent wrote can't collect it (ADR 0037).
+                Some(_) if glass_policy::persons_own(action) => {}
                 Some((def, _))
                     if effective.tier_for(action, def.default_tier).tier == Tier::Never =>
                 {

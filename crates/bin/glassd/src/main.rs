@@ -176,6 +176,9 @@ pub(crate) struct OrgData {
     /// How meetings reach the console's meeting routes (CF-21). Meetings
     /// are conversations in `chat`'s store; the media key is never kept.
     pub(crate) meet: glass_first_party::MeetHandle,
+    /// Mail (ADR 0037): the link `[mail]` names, and each person's sign-in
+    /// and sync state, root only in the state directory.
+    pub(crate) mail: glass_first_party::MailHandle,
     /// The apps people make (ADR 0032), kept root only in the state
     /// directory; bundled in jails once the sandbox is up.
     pub(crate) studio: glass_first_party::Studio,
@@ -195,6 +198,7 @@ impl OrgData {
             settings: glass_runtime::SettingsHandle::new(state_dir.join("settings")),
             chat: glass_first_party::ChatHandle::new(state_dir.join("chat")),
             meet: glass_first_party::MeetHandle::new(),
+            mail: glass_first_party::MailHandle::new(state_dir.join("mail")),
             studio: glass_first_party::Studio::new(glass_app_studio::StudioPaths {
                 store: state_dir.join("apps"),
                 installed: config.apps_dir.clone(),
@@ -295,7 +299,31 @@ fn studio_offers(
         .collect()
 }
 
+/// Mail's link from `[mail]` (ADR 0037, EM0): IMAP and SMTP submission
+/// for `service = "imap"`, to the hosts the signed policy names; the local
+/// store in `~/Mail` for anything else, until its link lands.
+fn connect_mail(mail: &glass_first_party::MailHandle, policy: &Policy) {
+    use glass_policy::document::MailService;
+    match policy.mail() {
+        Some(settings) if settings.service == MailService::Imap => {
+            match (&settings.incoming, &settings.outgoing) {
+                (Some(incoming), Some(outgoing)) => {
+                    mail.connect(glass_first_party::MailRemote {
+                        link: Arc::new(glass_gateway_providers::ImapLink::new()),
+                        incoming: glass_first_party::mail_server(incoming),
+                        outgoing: glass_first_party::mail_server(outgoing),
+                    });
+                }
+                _ => mail.disconnect(),
+            }
+        }
+        _ => mail.disconnect(),
+    }
+}
+
 fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<Registry> {
+    // The link and the actions come from the same policy.
+    connect_mail(&org.mail, policy);
     Ok(glass_first_party::registry(glass_first_party::Setup {
         // IT's fix list decides what the IT agent may restart (AE-4).
         restartable_services: policy.fixes().services.clone(),
@@ -306,6 +334,7 @@ fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<R
         // Mail's service from IT (NV-3): a new policy brings it, with the
         // registry rebuilt around it.
         mail: policy.mail().cloned(),
+        mail_handle: org.mail.clone(),
         settings: org.settings.clone(),
         chat: org.chat.clone(),
         meet: org.meet.clone(),
@@ -331,13 +360,16 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         .parent()
         .context("control socket needs a parent directory")?;
     // Chat's member keys live under the state folder, root only (ADR 0030);
-    // made here so the containment probe has something to try.
+    // made here so the containment probe has something to try. So do mail
+    // sign-ins (ADR 0037).
     let chat_dir = config.state_dir.join("chat");
+    let mail_dir = config.state_dir.join("mail");
     // Drafts and eval results of skills, per person (ADR 0034), root only.
     let skills_dir = config.state_dir.join("skills");
     for (dir, mode) in [
         (config.state_dir.as_path(), 0o700),
         (chat_dir.as_path(), 0o700),
+        (mail_dir.as_path(), 0o700),
         (skills_dir.as_path(), 0o700),
         (run_dir, 0o755),
     ] {
@@ -538,6 +570,19 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         });
     }
 
+    // New mail wakes Mail (ADR 0037): a watcher per person signed in waits
+    // on their Inbox (IMAP IDLE) and syncs it into ~/Mail.
+    {
+        let runtime = Arc::downgrade(&runtime);
+        org.mail.on_notice(move |notice| {
+            let glass_first_party::MailNotice::Changed { login } = notice;
+            if let Some(runtime) = runtime.upgrade() {
+                runtime.app_changed(login, "mail");
+            }
+        });
+        mail_watcher(org.mail.clone());
+    }
+
     // Who is at the screen outlasts a restart of glassd, not a reboot; taken
     // back before anything that follows them is applied (ADR 0031).
     runtime.keep_seat_in(run_dir.join("seat"));
@@ -602,6 +647,36 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&config.control_socket);
     let _ = std::fs::remove_file(&config.app_socket);
     served
+}
+
+/// How long one wait on an Inbox lasts before it starts again (servers
+/// may end IDLE after 30 minutes, RFC 2177).
+const MAIL_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// Starts a thread per person whose mail is connected, as they appear,
+/// each waiting on their Inbox and syncing it when it changes. A failure
+/// (offline, a changed password) is retried a minute later.
+fn mail_watcher(mail: glass_first_party::MailHandle) {
+    std::thread::spawn(move || {
+        let mut watching = std::collections::BTreeSet::new();
+        loop {
+            for login in mail.watched() {
+                if !watching.insert(login.clone()) {
+                    continue;
+                }
+                let mail = mail.clone();
+                std::thread::spawn(move || {
+                    loop {
+                        if let Err(e) = mail.watch(&login, MAIL_WAIT) {
+                            tracing::debug!(%login, "mail: not watching the Inbox for now: {e}");
+                            std::thread::sleep(std::time::Duration::from_secs(60));
+                        }
+                    }
+                });
+            }
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+    });
 }
 
 /// The control socket is world-connectable; every call is authorized by the

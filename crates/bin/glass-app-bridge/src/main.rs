@@ -87,6 +87,11 @@ const MAX_BODY: usize = 4 * glass_http::MAX_BODY;
 /// The app that shows artifacts (ADR 0033), the only one that frames them.
 const ARTIFACTS: &str = "artifacts";
 
+/// Mail (ADR 0037), the only app that frames messages' HTML, on
+/// `view.mail.localhost`.
+const MAIL: &str = "mail";
+const MAIL_VIEW: &str = "view.mail";
+
 /// Added to every artifact page: where a person clicked to pin a comment.
 const ARTIFACT_SHIM: &str = include_str!("artifact-shim.js");
 
@@ -281,6 +286,9 @@ impl Bridge {
         if let Some(artifact) = artifact_for_host(request.header("host"), self.port) {
             return self.artifact(request, &artifact).await;
         }
+        if is_mail_view(request.header("host"), self.port) {
+            return self.mail_view(request).await;
+        }
         let Some(app) = app_for_host(request.header("host"), self.port, &self.apps) else {
             return Response::text(421, "no app is served at this address");
         };
@@ -366,6 +374,45 @@ impl Bridge {
             Ok(result) if result.ok => match result.data["html"].as_str() {
                 Some(html) => artifact_page(html, self.port),
                 None => Response::text(404, "not found"),
+            },
+            Ok(result) => Response::text(404, &result.text),
+            Err(Relay::Down) => Response::text(503, "The system isn't answering right now."),
+            Err(Relay::Refused(why)) => Response::text(502, &why),
+        }
+    }
+
+    /// A message's HTML (ADR 0037): as `mail.read` hands it to Mail, through
+    /// Mail's session, so the read is decided and audited like any; served
+    /// on its own origin under a CSP with no scripts and no network, framed
+    /// only by Mail.
+    async fn mail_view(&self, request: &Request) -> Response {
+        if request.method != "GET" && request.method != "HEAD" {
+            return Response::text(405, "mail is read-only here");
+        }
+        // Only into a frame: a browser says what it loads a response
+        // into, so an image, script or fetch on another page can't make a
+        // read happen.
+        if request
+            .header("sec-fetch-dest")
+            .is_some_and(|dest| !dest.eq_ignore_ascii_case("iframe"))
+        {
+            return Response::text(403, "a message is only shown in Mail");
+        }
+        let Some(id) = mail_view_id(&request.path) else {
+            return Response::text(404, "not found");
+        };
+        if !self.apps.contains_key(MAIL) {
+            return Response::text(404, "Mail isn't installed");
+        }
+        let read: Result<AppCallResult, Relay> = self
+            .relay(MAIL, app_methods::APP_CALL, |session| {
+                json!({ "session": session, "action": "mail.read", "input": { "id": id } })
+            })
+            .await;
+        match read {
+            Ok(result) if result.ok => match result.data["message"]["html"].as_str() {
+                Some(html) => mail_page(html, self.port),
+                None => Response::text(404, "this message has no HTML"),
             },
             Ok(result) => Response::text(404, &result.text),
             Err(Relay::Down) => Response::text(503, "The system isn't answering right now."),
@@ -549,13 +596,63 @@ fn page(app: &str, port: u16, rel: &str, body: Vec<u8>) -> Response {
     response
 }
 
-/// An app's CSP: [`CSP`], and for Artifacts, frames of artifacts' pages.
+/// An app's CSP: [`CSP`], and for Artifacts, frames of artifacts' pages;
+/// for Mail, frames of messages' HTML.
 fn app_csp(app: &str, port: u16) -> String {
     if app == ARTIFACTS {
         format!("{CSP}; frame-src http://*.artifact.localhost:{port}")
+    } else if app == MAIL {
+        format!("{CSP}; frame-src http://{MAIL_VIEW}.localhost:{port}")
     } else {
         CSP.to_owned()
     }
+}
+
+/// What a message's HTML may do: show itself, with its own inline styles
+/// and inline (`data:`) images. `sandbox` with no allowances: no scripts,
+/// no forms, no popups, an origin that is no one's. Nothing it names
+/// loads, so no remote image or stylesheet tells the sender it was read;
+/// only Mail may frame it (ADR 0037).
+fn mail_view_csp(port: u16) -> String {
+    format!(
+        "sandbox; default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; \
+         img-src data:; font-src data:; media-src 'none'; connect-src 'none'; \
+         frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; \
+         form-action 'none'; frame-ancestors http://{MAIL}.localhost:{port}"
+    )
+}
+
+/// A message's HTML under its CSP. Links open nowhere: a new window is
+/// what they'd target, and the sandbox allows none.
+fn mail_page(html: &str, port: u16) -> Response {
+    let mut body = String::with_capacity(html.len() + 64);
+    body.push_str("<!doctype html><base target=\"_blank\">");
+    body.push_str(html);
+    Response::new(200, "text/html; charset=utf-8", body)
+        .with("Content-Security-Policy", mail_view_csp(port))
+        .with("Cache-Control", "no-store")
+        .with("Referrer-Policy", "no-referrer")
+        .with("X-Content-Type-Options", "nosniff")
+}
+
+/// Whether a Host is Mail's message view, `view.mail.localhost:<port>`
+/// exactly: a name no app's origin can have.
+fn is_mail_view(host: Option<&str>, port: u16) -> bool {
+    host.is_some_and(|h| h.eq_ignore_ascii_case(&format!("{MAIL_VIEW}.localhost:{port}")))
+}
+
+/// The message a view's path names: `/<folder>/<file>.eml`, plain names
+/// only, as `mail.read` takes them.
+fn mail_view_id(path: &str) -> Option<String> {
+    let (folder, file) = path.strip_prefix('/')?.split_once('/')?;
+    let folder_ok = !folder.is_empty() && folder.bytes().all(|b| b.is_ascii_lowercase());
+    let file_ok = file.len() <= 200
+        && file.ends_with(".eml")
+        && !file.starts_with('.')
+        && file
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    (folder_ok && file_ok).then(|| format!("{folder}/{file}"))
 }
 
 /// What an artifact's page may do: run its own inline scripts and styles
@@ -790,6 +887,56 @@ mod tests {
     }
 
     #[test]
+    fn nv3_a_messages_html_is_its_own_origin_with_no_scripts_or_network() {
+        assert!(is_mail_view(Some("view.mail.localhost:7300"), 7300));
+        assert!(is_mail_view(Some("VIEW.MAIL.localhost:7300"), 7300));
+        for host in [
+            "view.mail.localhost:7301",
+            "mail.localhost:7300",
+            "x.view.mail.localhost:7300",
+            "view.mail.localhost.evil.example:7300",
+        ] {
+            assert!(!is_mail_view(Some(host), 7300), "{host}");
+        }
+        assert_eq!(
+            mail_view_id("/inbox/0896246782-0000000042.eml").as_deref(),
+            Some("inbox/0896246782-0000000042.eml")
+        );
+        for path in [
+            "/inbox/../x.eml",
+            "/inbox/.x.eml",
+            "/inbox/x.txt",
+            "/Inbox/x.eml",
+            "/inbox/a/b.eml",
+            "/x.eml",
+        ] {
+            assert_eq!(mail_view_id(path), None, "{path}");
+        }
+        let csp = mail_view_csp(7300);
+        for part in [
+            "sandbox;",
+            "default-src 'none'",
+            "script-src 'none'",
+            "img-src data:;",
+            "connect-src 'none'",
+            "form-action 'none'",
+            "frame-ancestors http://mail.localhost:7300",
+        ] {
+            assert!(csp.contains(part), "{part}: {csp}");
+        }
+        assert!(!csp.contains("allow-"), "no allowances: {csp}");
+        assert!(app_csp("mail", 7300).ends_with("frame-src http://view.mail.localhost:7300"));
+        assert!(!app_csp("calendar", 7300).contains("frame-src"));
+        let page = mail_page("<p>Hi</p>", 7300);
+        assert!(
+            page.headers
+                .iter()
+                .any(|(n, v)| *n == "Content-Security-Policy" && *v == csp)
+        );
+        assert!(String::from_utf8_lossy(&page.body).ends_with("<p>Hi</p>"));
+    }
+
+    #[test]
     fn ar1_each_artifact_is_its_own_origin_and_no_app() {
         let hex = "0123456789abcdef0123456789abcdef";
         let named = |host: &str| artifact_for_host(Some(host), 7300);
@@ -862,7 +1009,9 @@ mod tests {
         assert!(body.contains("glass: TAG"));
         // Only the Artifacts app frames them.
         assert!(app_csp("artifacts", 7300).ends_with("frame-src http://*.artifact.localhost:7300"));
-        assert_eq!(app_csp("mail", 7300), CSP);
+        assert_eq!(app_csp("calendar", 7300), CSP);
+        // Mail frames messages' HTML (ADR 0037), never an artifact.
+        assert!(!app_csp("mail", 7300).contains("artifact"));
         assert!(CSP.contains("frame-ancestors 'none'"));
     }
 

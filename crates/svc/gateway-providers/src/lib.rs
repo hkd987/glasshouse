@@ -1,7 +1,8 @@
 //! The model providers that leave the machine (ADR 0018): the Anthropic
-//! Messages API (MP-4) and Amazon Bedrock (MP-1, MP-2), over HTTPS; and
-//! the org's admin console, for managed settings ([`ConsoleClient`], ADR
-//! 0023).
+//! Messages API (MP-4) and Amazon Bedrock (MP-1, MP-2), over HTTPS; the
+//! org's admin console, for managed settings ([`ConsoleClient`], ADR
+//! 0023); and the person's mail servers, over IMAP and SMTP submission
+//! ([`ImapLink`], ADR 0037).
 //!
 //! This is the only crate with an HTTP and TLS stack: ureq on the base
 //! system's OpenSSL, through native-tls, verifying servers against the
@@ -16,6 +17,7 @@ mod anthropic;
 mod bedrock;
 mod console;
 mod http;
+pub mod mail;
 mod sigv4;
 
 use std::sync::Arc;
@@ -26,6 +28,7 @@ use glass_policy::document::{ProviderEntry, ProviderKind};
 pub use anthropic::AnthropicProvider;
 pub use bedrock::{AwsCredentials, BedrockProvider};
 pub use console::ConsoleClient;
+pub use mail::ImapLink;
 
 /// A gateway with a provider for each policy entry this machine can use,
 /// and a note for each it can't. Notes never contain a credential.

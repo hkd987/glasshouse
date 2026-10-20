@@ -1,6 +1,6 @@
 [package]
 name = "glass-app-mail"
-description = "The mail app: drafts and batched sends from the first-party mail store."
+description = "The mail app's actions: reading, drafts, batched sends and moves, through the person's mail service (a MailLink) and its cache in ~/Mail."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,8 +14,12 @@ glass-actions.workspace = true
 glass-api.workspace = true
 glass-platform.workspace = true
 glass-types.workspace = true
+mail-builder.workspace = true
+mail-parser.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+time.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

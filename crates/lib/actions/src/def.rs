@@ -133,6 +133,20 @@ pub trait ActionProvider: Send + Sync + fmt::Debug {
         action: &ActionName,
         input: &Value,
     ) -> Result<ActionOutput, ActionError>;
+
+    /// Puts back what undo can't restore from snapshots, for one reversible
+    /// change `action` made: a message moved on the person's mail server
+    /// (ADR 0037). Undo calls it after the change's files are back, with
+    /// the change's host paths, and lists the change as not undone when it
+    /// fails. The default has nothing more to put back.
+    fn revert(
+        &self,
+        _ctx: &TaskContext,
+        _action: &ActionName,
+        _paths: &[PathBuf],
+    ) -> Result<(), ActionError> {
+        Ok(())
+    }
 }
 
 /// Deserializes an action's input, mapping errors to `InvalidInput`.

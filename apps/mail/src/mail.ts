@@ -3,12 +3,64 @@
 
 import { type Attribution, parseAddresses } from "@glasshouse/sdk";
 
-export type Folder = "inbox" | "drafts" | "sent";
+export type Folder = "inbox" | "drafts" | "sent" | "archive" | "junk" | "trash";
 export const FOLDERS: readonly { id: Folder; title: string }[] = [
   { id: "inbox", title: "Inbox" },
   { id: "drafts", title: "Drafts" },
   { id: "sent", title: "Sent" },
+  { id: "archive", title: "Archive" },
+  { id: "junk", title: "Junk" },
+  { id: "trash", title: "Trash" },
 ];
+
+/** Where mail.move files a message (ADR 0037). */
+export type Destination = "inbox" | "archive" | "junk" | "trash";
+
+/** The moves a message in `folder` offers, as buttons read: drafts stay put. */
+export function moves(folder: Folder): { to: Destination; label: string }[] {
+  switch (folder) {
+    case "inbox":
+      return [
+        { to: "archive", label: "Archive" },
+        { to: "junk", label: "Junk" },
+        { to: "trash", label: "Delete" },
+      ];
+    case "archive":
+      return [
+        { to: "inbox", label: "Move to Inbox" },
+        { to: "junk", label: "Junk" },
+        { to: "trash", label: "Delete" },
+      ];
+    case "junk":
+      return [
+        { to: "inbox", label: "Not junk" },
+        { to: "trash", label: "Delete" },
+      ];
+    case "trash":
+      return [
+        { to: "inbox", label: "Move to Inbox" },
+        { to: "archive", label: "Archive" },
+      ];
+    case "sent":
+      return [
+        { to: "archive", label: "Archive" },
+        { to: "trash", label: "Delete" },
+      ];
+    case "drafts":
+      return [];
+  }
+}
+
+/**
+ * Where a message's HTML is shown: its own origin, `view.mail.localhost`
+ * on the bridge's port, under a CSP with no scripts and no network (ADR
+ * 0037). Null for an id that isn't a plain `<folder>/<file>.eml`.
+ */
+export function viewUrl(location: { protocol: string; port: string }, id: string): string | null {
+  if (!/^[a-z]+\/[A-Za-z0-9_-][A-Za-z0-9._-]*\.eml$/.test(id) || id.length > 210) return null;
+  const port = location.port ? `:${location.port}` : "";
+  return `${location.protocol}//view.mail.localhost${port}/${id}`;
+}
 
 /** One message as mail.list returns it. */
 export interface Summary {
@@ -26,6 +78,8 @@ export interface Summary {
 /** One message as mail.read returns it. */
 export interface Message extends Summary {
   body: string;
+  /** Its HTML, handed to Mail only; shown framed, never as markup here. */
+  html?: string | null;
 }
 
 /** What mail.draft and mail.send take. */
