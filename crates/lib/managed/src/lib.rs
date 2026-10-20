@@ -28,6 +28,7 @@ pub mod directory;
 pub mod meet;
 pub mod shared;
 pub mod signing;
+pub mod skills;
 pub mod store;
 pub mod studio;
 pub mod sync;

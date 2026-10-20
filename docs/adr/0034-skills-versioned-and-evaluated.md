@@ -44,8 +44,9 @@ share).
 3. **Evals travel with the skill.** `evals.json` holds cases:
    - each case has an `id`, a `prompt`, optional `files` (text the case
      gives the model) and `graders`;
-   - deterministic graders are `contains`, `not_contains`, `regex`,
-     `equals` and `json_path`;
+   - deterministic graders are `contains`, `not_contains`, `equals`,
+     `matches` (a glob: `*` and `?`, so no regex engine joins the build)
+     and `json_path`;
    - `rubric` is graded by a second model call against the criteria it
      gives;
    - each case runs `runs` times (default 3, at most 5) and passes on a

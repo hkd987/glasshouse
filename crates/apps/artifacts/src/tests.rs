@@ -282,6 +282,8 @@ fn ar2_only_its_people_open_it_and_the_console_reads_none_of_it() {
         sha256: "0".repeat(64),
         bytes: 1,
         mime: HTML.into(),
+        merged: None,
+        scores: None,
     };
     b.shared()
         .post("priya", &id, "", Some(forged), None, None)
@@ -335,7 +337,10 @@ fn ar1_an_agent_waits_for_the_person_to_open_artifacts_once() {
     let Err(ActionError::Failed(why)) = share else {
         panic!("{share:?}");
     };
-    assert!(why.contains("hasn't opened Artifacts"), "{why}");
+    assert!(
+        why.contains("hasn't opened Chat, Artifacts or Skills"),
+        "{why}"
+    );
     // Once she has, it saves; shared with nobody, only she sees it.
     a.call("dana", APP, LIST, json!({})).unwrap();
     let out = a

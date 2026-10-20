@@ -12,7 +12,7 @@ SHELL := /bin/bash
 REPO_ROOT := $(CURDIR)
 FREEBSD_TARGET := x86_64-unknown-freebsd
 # Binaries shipped in the OS image (see os/freebsd/dist.manifest).
-SHIPPED := glassd glassctl glass-mcp glass-demo-agent glass-it-agent glass-probe glass-app-bridge
+SHIPPED := glassd glassctl glass-mcp glass-demo-agent glass-it-agent glass-skill-evals glass-probe glass-app-bridge
 # The sign-in screen and the desktop, from the shell workspace (shell/).
 SHIPPED_SHELL := glass-greeter glass-shell-fb glass-compositor glass-terminal glass-activity
 # Cargo profile for FreeBSD builds. `vm` rebuilds in seconds for the VM loop;

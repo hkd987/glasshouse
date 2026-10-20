@@ -28,7 +28,8 @@ impl Default for ScriptedProvider {
 
 impl ScriptedProvider {
     /// Replies by describing what it received, including the last user
-    /// message as it arrived, so a test can see what left the machine.
+    /// message and the instructions as they arrived, so a test can see
+    /// what left the machine.
     pub fn echo() -> Self {
         Self {
             fails: None,
@@ -82,12 +83,16 @@ impl ModelProvider for ScriptedProvider {
             .find(|m| m.role == crate::Role::User)
             .map(|m| m.content.chars().take(2000).collect())
             .unwrap_or_default();
-        let text = format!(
+        let mut text = format!(
             "Scripted reply from {model} (nothing left this computer). You sent {n} message(s), \
              {chars} characters. Your last message read: {last}",
             model = request.model,
             n = request.messages.len(),
         );
+        if let Some(system) = request.system {
+            let system: String = system.chars().take(2000).collect();
+            text.push_str(&format!(" Your instructions read: {system}"));
+        }
         let output = tokens(text.chars().count()).min(u64::from(request.max_tokens));
         Ok(ProviderReply {
             input_tokens: tokens(chars),

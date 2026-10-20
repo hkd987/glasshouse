@@ -21,6 +21,7 @@ use glass_app_meet::MeetProvider;
 use glass_app_people::PeopleProvider;
 pub use glass_app_settings::SettingsHandle;
 use glass_app_settings::SettingsProvider;
+use glass_app_skills::SkillsProvider;
 pub use glass_app_studio::Studio;
 use glass_app_studio::StudioProvider;
 use glass_app_system::{HostSystem, SystemOps, SystemProvider};
@@ -60,6 +61,8 @@ pub struct Setup {
     pub managed: bool,
     /// The apps people make (ADR 0032): their source, checks and versions.
     pub studio: Studio,
+    /// Each person's skill drafts and eval results (ADR 0034), root's.
+    pub skills: PathBuf,
 }
 
 impl Setup {
@@ -77,6 +80,7 @@ impl Setup {
             meet: MeetHandle::new(),
             managed: false,
             studio: Studio::offline(),
+            skills: PathBuf::from("/nonexistent"),
         }
     }
 }
@@ -95,8 +99,13 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
     // So are artifacts (ADR 0033), in the shared space chat's store keeps.
     let shared: Arc<dyn Shared> = Arc::new(chat.clone());
     registry.register(Arc::new(ArtifactsProvider::new(
+        shared.clone(),
+        setup.directory.clone(),
+    )))?;
+    registry.register(Arc::new(SkillsProvider::new(
         shared,
         setup.directory.clone(),
+        setup.skills,
     )))?;
     registry.register(Arc::new(
         CalendarProvider::new(setup.directory.clone()).meetings(meetings.clone()),
@@ -153,6 +162,8 @@ mod tests {
             "meet.leave",
             "artifact.share",
             "artifact.comment",
+            "skill.propose",
+            "skill.results",
             "apps.source",
             "apps.save",
             "apps.create",

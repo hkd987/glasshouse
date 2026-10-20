@@ -600,6 +600,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-app-skills"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-app-chat",
+ "glass-crypto",
+ "glass-managed",
+ "glass-types",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "glass-app-studio"
 version = "0.1.0"
 dependencies = [
@@ -730,6 +746,7 @@ dependencies = [
  "glass-app-meet",
  "glass-app-people",
  "glass-app-settings",
+ "glass-app-skills",
  "glass-app-studio",
  "glass-app-system",
  "glass-gateway",
@@ -889,6 +906,7 @@ dependencies = [
  "glass-app-meet",
  "glass-app-people",
  "glass-app-settings",
+ "glass-app-skills",
  "glass-app-studio",
  "glass-app-system",
  "glass-audit",
@@ -920,6 +938,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "glass-skill-evals"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glass-agent-sdk",
+ "glass-managed",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

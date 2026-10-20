@@ -82,8 +82,28 @@ pub enum Part {
         /// SHA-256 of the content, hex.
         sha256: String,
         bytes: u64,
-        /// `text/html` for an artifact.
+        /// `text/html` for an artifact, [`crate::skills::SKILL_MIME`] for a
+        /// skill.
         mime: String,
+        /// A skill's merged proposal (ADR 0034 §7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merged: Option<String>,
+        /// A skill version's scores, from the run its owner kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scores: Option<crate::skills::Scores>,
+    },
+    /// A proposed change to a skill (ADR 0034 §6): its bundle, as a
+    /// version names one, and the base's and its scores from one run. The
+    /// message's text says what changed and why.
+    Proposal {
+        blob: String,
+        key: String,
+        sha256: String,
+        bytes: u64,
+        /// The version it changes.
+        base: u32,
+        before: crate::skills::Scores,
+        after: crate::skills::Scores,
     },
     /// A comment, on the version it was made on, pinned when `anchor` is
     /// given. The message's text is the comment.

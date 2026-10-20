@@ -862,7 +862,7 @@ impl glass_managed::shared::Shared for ChatProvider {
         self.handle.connection()?;
         self.handle.existing(login).map(|_| ()).ok_or_else(|| {
             ChatFailure::NotSetUp(format!(
-                "{login} hasn't opened Artifacts or Chat on this computer yet; it makes their keys the first time it opens"
+                "{login} hasn't opened Chat, Artifacts or Skills on this computer yet; each makes their keys the first time it opens"
             ))
         })
     }

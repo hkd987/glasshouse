@@ -627,7 +627,8 @@ mod tests {
                 "claude-code",
                 "containment-probe",
                 "invoice-demo",
-                "it-agent"
+                "it-agent",
+                "skill-evals"
             ],
             "every agent AP's people may run, by any of their groups"
         );

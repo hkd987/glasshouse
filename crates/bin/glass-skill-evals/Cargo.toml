@@ -1,0 +1,18 @@
+[package]
+name = "glass-skill-evals"
+description = "The skill-evals agent (ADR 0034): runs a skill's evals through the model gateway, in a jail, and reports the scores."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glass-agent-sdk.workspace = true
+glass-managed.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

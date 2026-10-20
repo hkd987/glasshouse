@@ -59,6 +59,19 @@ plan = [
 ]
 
 [[agent]]
+id = "skill-evals"
+name = "Skill evals"
+version = "0.1"
+description = "Runs a skill's evals and keeps the scores on this computer, so a change to a skill shows whether it is better."
+mode = "actions"
+program = "/usr/local/libexec/glasshouse/glass-skill-evals"
+plan = [
+  "Read the skill, and the change to it if there is one",
+  "Ask the model each eval case, as many times as the evals say, through IT's approved models",
+  "Grade the answers and keep the scores on this computer",
+]
+
+[[agent]]
 id = "invoice-demo"
 name = "Invoice demo"
 version = "0.1"

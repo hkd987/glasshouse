@@ -311,6 +311,7 @@ fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<R
         meet: org.meet.clone(),
         managed: config.managed.is_some(),
         studio: org.studio.clone(),
+        skills: config.state_dir.join("skills"),
     })?)
 }
 
@@ -332,9 +333,12 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // Chat's member keys live under the state folder, root only (ADR 0030);
     // made here so the containment probe has something to try.
     let chat_dir = config.state_dir.join("chat");
+    // Drafts and eval results of skills, per person (ADR 0034), root only.
+    let skills_dir = config.state_dir.join("skills");
     for (dir, mode) in [
         (config.state_dir.as_path(), 0o700),
         (chat_dir.as_path(), 0o700),
+        (skills_dir.as_path(), 0o700),
         (run_dir, 0o755),
     ] {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

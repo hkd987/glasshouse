@@ -238,8 +238,15 @@ fn test_registry(
     let shared: Arc<dyn glass_managed::shared::Shared> = Arc::new(chat.clone());
     registry
         .register(Arc::new(glass_app_artifacts::ArtifactsProvider::new(
+            shared.clone(),
+            directory.clone(),
+        )))
+        .unwrap();
+    registry
+        .register(Arc::new(glass_app_skills::SkillsProvider::new(
             shared,
             directory.clone(),
+            dir.join("skills"),
         )))
         .unwrap();
     registry
@@ -342,7 +349,13 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     let rt = Runtime::new(RuntimeParts {
         config: RuntimeConfig {
             state_dir: dir.path().join("state"),
-            catalog: vec![it_agent(), invoice_demo(), claude_code(), writer()],
+            catalog: vec![
+                it_agent(),
+                invoice_demo(),
+                claude_code(),
+                writer(),
+                skill_evals(),
+            ],
             agent_dirs: Vec::new(),
             max_live_tasks_per_user: 4,
             harness: Some("claude-code".parse().unwrap()),
@@ -556,6 +569,23 @@ pub fn writer() -> CatalogEntry {
             choices: Vec::new(),
             default: None,
         }],
+    }
+}
+
+/// The skill-evals agent (ADR 0034); the test plays it over its socket.
+pub fn skill_evals() -> CatalogEntry {
+    CatalogEntry {
+        id: "skill-evals".parse().unwrap(),
+        name: "Skill evals".into(),
+        version: "1".into(),
+        model: String::new(),
+        description: String::new(),
+        mode: glass_api::AgentMode::Actions,
+        program: "/bin/sleep".into(),
+        attended: false,
+        args: vec!["30".into()],
+        plan: vec!["Read the skill".into(), "Run its cases".into()],
+        customize: Vec::new(),
     }
 }
 

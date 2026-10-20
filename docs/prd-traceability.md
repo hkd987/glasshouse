@@ -310,7 +310,12 @@ artifacts* = `crates/svc/runtime/tests/artifacts.rs`.
 | AR-4 Versions; comments marked by version | Partial | `artifact.update` (owner only; versions only from the maker count) | artifacts `ar1_…version_2_follows`, `ar2_only_its_people…`. Missing: what changed between versions |
 | AR-5 People, groups or a conversation; card in Chat | Partial | `with` and `conversation`; `Part::Shared` card, `chat.read` `shared` | artifacts `ar3_shared_to_a_conversation…`. Missing: groups, the card in the Chat app, links outside the org (P1) |
 | AR-6 IT's inventory and controls | Not started | Clear metadata kept for it (ADR 0033 §3) | Slice A2 |
-| SK-1 … SK-6 Skills with versions and evals | Not started | Plan: catalog items reviewed like apps (ADR 0032), evals through the gateway | — |
+| SK-1 A skill is an item with an owner, versions and a listing | Partial | `glass-app-skills` (skill items, ADR 0034); `skill.list`/`read`/`share` | skills `sk1_a_skill_is_shared_with_its_evals_and_its_score`, `sk1_what_a_skill_holds_is_checked…`. Missing: the org catalog listing (K3, needs chat C2), the Skills app (K2) |
+| SK-2 Evals with cases and graders; scores with model and settings | **Done** (K1) | `glass-managed::skills` (bundle, evals, graders, scores); `skill-evals` agent | managed `sk2_graders_grade…`; runtime skills `sk5_evals_run_through_the_gateway…` |
+| SK-3 Proposals with before and after scores; owner merges; a broken case needs a reason | **Done** (K1) | `skill.draft`, `skill.results`, `skill.propose`, `skill.merge` | skills `sk3_a_change_that_fixes_a_case…`, `sk3_a_change_that_breaks_a_case…` |
+| SK-4 Catalog shows score, use, versions, contributors; better versions announced | Partial | `skill.list` shows score, versions, contributors | Missing: usage counts and notices (K2/K3) |
+| SK-5 Evals in a sandbox through the gateway; cases labeled | **Done** (K1) | the jailed `skill-evals` agent; item labels (ADR 0034 §5) | runtime skills `sk5_a_confidential_skills_evals_go_only_where…`; skills `sk5_only_the_eval_agent_reports_results…`. VM e2e waits for the Skills app (K2) |
+| SK-6 Agents use pinned versions; tailoring layers add skills | Not started | ADR 0034 §10 (K2: read-only mount, probe check) | — |
 | DC-1 … DC-6 Docs | Not started | Plan: CRDT updates as sealed messages (ADR 0033 §8) | — |
 | SH-1 … SH-3 Sheets | Not started | Same as Docs; formulas are ours (GPL engines are refused) | — |
 | SC-1 … SC-5 Scheduling | Not started | — | — |

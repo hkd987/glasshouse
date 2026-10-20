@@ -124,6 +124,7 @@ impl Artifact {
                     sha256,
                     bytes,
                     mime,
+                    ..
                 }) if mime == HTML && sender == item.created_by => versions.push(Version {
                     number,
                     blob,
@@ -442,6 +443,8 @@ impl ArtifactsProvider {
             sha256: hex::encode(glass_crypto::sha256(html.as_bytes())),
             bytes: html.len() as u64,
             mime: HTML.into(),
+            merged: None,
+            scores: None,
         };
         self.shared
             .post(me, id, note, Some(part), Self::attribution(ctx), None)

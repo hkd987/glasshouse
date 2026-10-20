@@ -8,6 +8,7 @@ glassctl          usr/local/bin/glassctl                             0755
 glass-mcp         usr/local/bin/glass-mcp                            0755
 glass-demo-agent  usr/local/libexec/glasshouse/glass-demo-agent      0755
 glass-it-agent    usr/local/libexec/glasshouse/glass-it-agent        0755
+glass-skill-evals usr/local/libexec/glasshouse/glass-skill-evals     0755
 glass-probe       usr/local/libexec/glasshouse/glass-probe           0755
 glass-app-bridge  usr/local/bin/glass-app-bridge                     0755
 shell/glass-greeter   usr/local/bin/glass-greeter                        0755

@@ -23,7 +23,7 @@ bin="${CARGO_TARGET_DIR:-$repo/target}/debug"
 
 if [ -z "${GLASS_DEV_SKIP_BUILD:-}" ]; then
 	cargo build --manifest-path "$repo/Cargo.toml" -p glassd -p glassctl -p glass-demo-agent -p glass-probe \
-		-p glass-mcp -p glass-app-bridge
+		-p glass-mcp -p glass-app-bridge -p glass-skill-evals
 fi
 
 mkdir -p "$dev/home" "$dev/state" "$run"
@@ -71,6 +71,13 @@ name = "Invoice demo"
 description = "Scripted demo agent."
 program = "$bin/glass-demo-agent"
 plan = ["Read invoices", "Write the summary", "Draft a note to AP", "Ask before reminding vendors"]
+
+[[agent]]
+id = "skill-evals"
+name = "Skill evals"
+description = "Runs a skill's evals and keeps the scores on this computer."
+program = "$bin/glass-skill-evals"
+plan = ["Read the skill", "Ask the model each case", "Keep the scores"]
 
 [[agent]]
 id = "claude-code"
