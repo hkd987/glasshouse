@@ -25,6 +25,7 @@
 pub mod base64;
 pub mod catalog;
 pub mod chat;
+pub mod device;
 pub mod directory;
 pub mod meet;
 pub mod shared;

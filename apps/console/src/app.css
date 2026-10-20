@@ -253,7 +253,7 @@ th {
   font-weight: 400;
   color: var(--muted);
   font-size: 12.5px;
-  padding: 8px 0;
+  padding: 8px 8px 8px 0;
   border-bottom: 1px solid var(--divider);
 }
 
@@ -478,6 +478,10 @@ select {
 
 .devices select {
   height: 30px;
+}
+
+.devices td:first-child {
+  white-space: nowrap;
 }
 
 .stats {
@@ -816,4 +820,18 @@ details.file[open] summary {
   border-radius: 8px;
   background: var(--accent-soft);
   font-size: 13px;
+}
+
+/* Removing a computer from the organization (ADR 0030 slice P). */
+.row-actions {
+  white-space: nowrap;
+  text-align: right;
+}
+.row-actions > * + * {
+  margin-left: 6px;
+}
+.button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
 }

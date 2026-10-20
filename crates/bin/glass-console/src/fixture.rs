@@ -359,6 +359,8 @@ pub fn fill(
                 kind: None,
                 enrolled: now,
                 last_seen: now,
+                key: None,
+                revoked: None,
                 report: Some(DeviceReport {
                     device: id.clone(),
                     name: id,

@@ -312,6 +312,33 @@ A new app crate, `glass-app-chat` (`crates/apps/chat`), is registered in `glass-
   - The time must be within two minutes, and a replay cache stops reuse.
 - IT can revoke a computer on the Devices page.
 
+As built (slice P, 2026-10-20; `glass_managed::device`):
+- **The key.** glassd makes a P-256 pair the first time it reaches its
+  console and keeps the secret half in `/var/db/glasshouse/device.key`,
+  mode 0600. One others can read is refused, not replaced.
+- **Registering.** `RegisterDevice` carries the device id, the public key
+  and a proof: the key's signature over both. The first key under an id is
+  the one. The same key again is fine. Another key under that id is
+  refused (409) until IT forgets the old computer, and a revoked computer
+  is refused (403).
+- **What the token reaches.** Only `/device/v1/register`. A leaked token can
+  enroll a computer IT will see on the Devices page; it can't speak as one
+  that exists.
+- **Signing.** Headers `Glasshouse-Device`, `Glasshouse-Time` (seconds since
+  1970) and `Glasshouse-Signature` (hex) over the lines
+  `glasshouse-device-request-v1`, the method, the path, the device id, the
+  time and the body's SHA-256. The console refuses a time more than 120
+  seconds from its own, a signature it has seen in the last four minutes,
+  and a body whose `device` (or member key's, or meeting request's) isn't
+  the signer's. The replay cache is in memory: a request captured before a
+  console restart could be sent again inside its two minutes.
+- **Revoking.** "Remove…" on the Devices page, asked twice, marks the
+  computer removed; the console refuses everything it sends from then on.
+  "Forget" deletes a removed computer's record, so a computer set up again
+  can enroll under the same name. Both are IT's, and logged with who did
+  it. A new epoch for the conversations a removed computer could read is
+  C2's pending work.
+
 | Route | What it does |
 |---|---|
 | `POST /device/v1/register` | Registers a computer's device key (enrollment token) |
@@ -508,12 +535,14 @@ So we start with the scheme above.
 ## Building it
 Every test name carries its PRD id. Nothing reaches a pilot org before slices C2 and C3.
 
-**P. Device keys.** Built with ADR 0028 step 1, which also registers the desktop's pid.
+**P. Device keys.** Built 2026-10-20 (§5 "As built"). ADR 0028 step 1, the desktop's pid, is its own work.
 - Scope: `/device/v1/register`, signed device requests, and revocation on the Devices page.
 - Tests:
-  - `adr0030_device_requests_signed_by_another_key_are_refused`
-  - `adr0030_a_revoked_computer_is_refused`
-  - `adr0030_the_device_key_is_root_only`
+  - `adr0030_device_requests_signed_by_another_key_are_refused` (another key under the name, a key never registered, a body or member key naming another computer)
+  - `adr0030_a_revoked_computer_is_refused` (and forgetting it lets a computer set up again enroll)
+  - `adr0030_the_device_key_is_root_only`, and the probe's "files: read the computer's own key"
+  - `adr0030_the_enrollment_token_alone_reaches_only_registering`, `adr0030_a_replayed_or_stale_request_is_refused`, `adr0030_another_key_under_an_enrolled_id_is_refused`
+  - `glass_managed::device` (what a signature covers), the console client's, and `console.e2e.ts` `adr0030 IT removes a computer…`
 
 **C1. A usable chat, sealed end to end.** On the development host and the VM only.
 - Scope:

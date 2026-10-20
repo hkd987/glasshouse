@@ -5,14 +5,18 @@
 //! HTTPS only, through the environment's proxy like the model providers,
 //! except plain HTTP to a loopback address when the config allows it
 //! (development and tests): the org's signature, not the channel, is what
-//! a device trusts. The enrollment token is sent as a bearer token and
-//! never appears in an error.
+//! a device trusts. The enrollment token is sent as a bearer token to one
+//! route, where the computer registers its own key (ADR 0030 slice P); every
+//! other request is signed with that key. Neither ever appears in an error.
+
+use std::sync::Arc;
 
 use glass_gateway::ProviderError;
 use glass_managed::chat::{
     ChatLink, ChatSyncRequest, ChatSyncResponse, CreateConversation, Keys, LinkError, LookupKeys,
     PostMessage, RegisterKey,
 };
+use glass_managed::device::{DeviceKey, REGISTER_PATH};
 use glass_managed::meet::{Joined, MediaKeys, MeetLink, MeetRequest};
 use glass_managed::{DeviceReport, SyncRequest, SyncResponse};
 
@@ -24,6 +28,8 @@ pub struct ConsoleClient {
     http: Http,
     base: String,
     token: String,
+    /// The computer's key, which signs every request but registering it.
+    key: Option<Arc<DeviceKey>>,
 }
 
 impl ConsoleClient {
@@ -50,7 +56,24 @@ impl ConsoleClient {
             http,
             base,
             token: token.to_owned(),
+            key: None,
         })
+    }
+
+    /// Signs every request with `key`, the computer's own.
+    #[must_use]
+    pub fn signed_by(mut self, key: Arc<DeviceKey>) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// Registers the computer's key with the console, with the enrollment
+    /// token: the first thing an enrolled computer does, and harmless again
+    /// with the same key.
+    pub fn register_device(&self) -> Result<(), String> {
+        let key = self.key.as_ref().ok_or("this computer has no device key")?;
+        let registration = key.registration()?;
+        self.post(REGISTER_PATH, &registration).map(drop)
     }
 
     /// Asks for releases newer than what the device has in force, waiting
@@ -73,17 +96,26 @@ impl ConsoleClient {
     /// console's own reason when it refused the request.
     fn request<T: serde::Serialize>(&self, path: &str, body: &T) -> Result<String, LinkError> {
         let body = serde_json::to_vec(body).map_err(|e| LinkError::Unreachable(e.to_string()))?;
-        let auth = format!("Bearer {}", self.token);
+        // The token registers the key; the key signs everything else.
+        let mut headers = vec![("Content-Type", "application/json".to_owned())];
+        if path == REGISTER_PATH {
+            headers.push(("Authorization", format!("Bearer {}", self.token)));
+        } else {
+            let key = self.key.as_ref().ok_or_else(|| {
+                LinkError::Unreachable("this computer has no device key yet".into())
+            })?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+            headers.extend(
+                key.sign("POST", path, now, &body)
+                    .map_err(LinkError::Unreachable)?,
+            );
+        }
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let reply = self
             .http
-            .post(
-                &format!("{}{path}", self.base),
-                &[
-                    ("Authorization", auth.as_str()),
-                    ("Content-Type", "application/json"),
-                ],
-                &body,
-            )
+            .post(&format!("{}{path}", self.base), &headers, &body)
             .map_err(|e| match e {
                 ProviderError::Unavailable(m)
                 | ProviderError::NotConfigured(m)
@@ -92,18 +124,24 @@ impl ConsoleClient {
         match reply.status {
             200 => Ok(reply.body),
             401 | 403 => Err(LinkError::Unreachable(
-                "the console didn't accept this device's enrollment".into(),
+                Self::reason(&reply.body)
+                    .unwrap_or_else(|| "the console didn't accept this device".into()),
             )),
             400 | 404 | 409 => Err(LinkError::Refused(
-                serde_json::from_str::<serde_json::Value>(&reply.body)
-                    .ok()
-                    .and_then(|v| v["error"].as_str().map(str::to_owned))
+                Self::reason(&reply.body)
                     .unwrap_or_else(|| format!("the console answered {}", reply.status)),
             )),
             status => Err(LinkError::Unreachable(format!(
                 "the console answered {status}"
             ))),
         }
+    }
+
+    /// The console's own words for a refusal.
+    fn reason(body: &str) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_owned))
     }
 
     fn answer<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, LinkError> {
@@ -242,10 +280,17 @@ mod tests {
         assert!(ConsoleClient::new("https://console.example", "a\nb", false).is_err());
     }
 
+    fn signed(url: &str, token: &str) -> ConsoleClient {
+        let key = DeviceKey::generate("dev-1").unwrap();
+        ConsoleClient::new(url, token, true)
+            .unwrap()
+            .signed_by(Arc::new(key))
+    }
+
     #[test]
-    fn a_sync_posts_the_versions_with_the_token_and_reads_the_answer() {
+    fn adr0030_a_sync_is_signed_by_the_computers_key_and_carries_no_token() {
         let (url, got) = fake::serve(200, r#"{"ring":"pilot","policy":null,"catalog":null}"#);
-        let client = ConsoleClient::new(&url, "enroll-123", true).unwrap();
+        let client = signed(&url, "enroll-123");
         let answer = client
             .sync(&SyncRequest {
                 device: "dev-1".into(),
@@ -263,14 +308,38 @@ mod tests {
             "{}",
             request.head
         );
-        assert!(request.head.contains("Authorization: Bearer enroll-123"));
+        assert!(!request.head.contains("enroll-123"), "{}", request.head);
+        assert!(!request.head.contains("Authorization"), "{}", request.head);
+        assert!(request.head.contains("Glasshouse-Device: dev-1"));
+        assert!(request.head.contains("Glasshouse-Signature: "));
         assert!(request.body.contains("\"policy\":3"), "{}", request.body);
+    }
+
+    #[test]
+    fn adr0030_registering_sends_the_token_and_a_proof_of_the_key() {
+        let (url, got) = fake::serve(200, "{}");
+        signed(&url, "enroll-123").register_device().unwrap();
+        let request = got.recv().unwrap();
+        assert!(request.head.starts_with("POST /device/v1/register "));
+        assert!(request.head.contains("Authorization: Bearer enroll-123"));
+        let registration: glass_managed::device::RegisterDevice =
+            serde_json::from_str(&request.body).unwrap();
+        assert_eq!(registration.device, "dev-1");
+        assert!(registration.verify().is_ok());
+    }
+
+    #[test]
+    fn adr0030_without_a_key_nothing_but_registering_is_sent() {
+        let client = ConsoleClient::new("http://127.0.0.1:9", "t", true).unwrap();
+        let err = ChatLink::lookup(&client, &LookupKeys { logins: vec![] }).unwrap_err();
+        assert!(err.to_string().contains("no device key"), "{err}");
+        assert!(client.register_device().is_err());
     }
 
     #[test]
     fn cf91_a_refused_chat_request_carries_the_consoles_reason() {
         let (url, got) = fake::serve(409, r#"{"error":"sam isn't in this conversation."}"#);
-        let client = ConsoleClient::new(&url, "enroll-123", true).unwrap();
+        let client = signed(&url, "enroll-123");
         let err = ChatLink::lookup(
             &client,
             &LookupKeys {
@@ -291,9 +360,12 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_enrollment_says_so_without_the_token() {
-        let (url, _got) = fake::serve(401, "{}");
-        let client = ConsoleClient::new(&url, "secret-token", true).unwrap();
+    fn a_refused_computer_says_why_without_the_token() {
+        let (url, _got) = fake::serve(
+            403,
+            r#"{"error":"This computer was removed from the organization."}"#,
+        );
+        let client = signed(&url, "secret-token");
         let err = client
             .sync(&SyncRequest {
                 device: "d".into(),
@@ -304,7 +376,7 @@ mod tests {
                 wait_secs: 0,
             })
             .unwrap_err();
-        assert!(err.contains("enrollment"), "{err}");
+        assert!(err.contains("removed from the organization"), "{err}");
         assert!(!err.contains("secret-token"));
     }
 }

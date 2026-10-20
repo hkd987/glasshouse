@@ -91,7 +91,17 @@ fn run(args: Vec<String>) -> Result<String, String> {
         e["org"].as_str().unwrap_or_default(),
         e["token"].as_str().unwrap_or_default(),
     );
-    let client = ConsoleClient::new(url, token, true)?;
+    // A computer of its own: its key in the state folder, registered with
+    // the enrollment token, signs the rest (ADR 0030 slice P).
+    let computer = format!("colleague-{login}");
+    std::fs::create_dir_all(&state).map_err(|e| format!("{state}: {e}"))?;
+    let key = Arc::new(glass_managed::device::kept(
+        &Path::new(&state).join("device.key"),
+        &computer,
+    )?);
+    let console = || ConsoleClient::new(url, token, true).map(|c| c.signed_by(Arc::clone(&key)));
+    let client = console()?;
+    client.register_device()?;
     let compliance = client
         .lookup(&LookupKeys { logins: Vec::new() })
         .map_err(|e| e.to_string())?
@@ -102,7 +112,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
     .map_err(|e| e.to_string())?;
     let release = ChatRelease::new(&key);
     let handle = ChatHandle::new(state);
-    handle.connect(org, &format!("colleague-{login}"), Arc::new(client));
+    handle.connect(org, &computer, Arc::new(client));
     handle.set_compliance(&release.compliance, &release.fingerprint)?;
     let chat = ChatProvider::new(handle.clone(), DirectoryHandle::new());
     let call = |action: &str, input: Value| {

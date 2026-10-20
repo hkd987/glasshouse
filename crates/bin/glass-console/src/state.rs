@@ -172,11 +172,40 @@ pub struct Device {
     pub last_seen: Timestamp,
     #[serde(default)]
     pub report: Option<DeviceReport>,
+    /// The computer's own key (ADR 0030 slice P), uncompressed SEC1 in
+    /// hex: every request but registering it is signed with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// When IT removed it from the organization: refused from then on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked: Option<Timestamp>,
+}
+
+/// Who a signed request comes from, as far as the fleet knows.
+#[derive(Debug)]
+pub enum Computer {
+    /// Registered, with this key.
+    Key(glass_crypto::PublicKey),
+    /// IT removed it.
+    Revoked,
+    /// No key registered under that id.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FleetState {
     pub devices: BTreeMap<String, Device>,
+}
+
+/// Why a computer's key wasn't registered.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RegisterRefused {
+    /// Bad input or a proof that doesn't hold: 400.
+    Invalid(String),
+    /// IT removed this computer: 403.
+    Revoked,
+    /// A rule says no: 409.
+    Rule(String),
 }
 
 /// Why IT's request didn't go through, in words for the page.
@@ -919,6 +948,8 @@ impl State {
                 enrolled: Timestamp::now(),
                 last_seen: Timestamp::now(),
                 report: None,
+                key: None,
+                revoked: None,
             })
     }
 
@@ -1033,6 +1064,90 @@ impl State {
 
     pub fn save_chat(&self) -> anyhow::Result<()> {
         write_json(&self.dir.join("chat.json"), &self.chat)
+    }
+
+    /// Registers a computer's key (ADR 0030 slice P), with the proof that
+    /// it holds it. The first key under an id is the one; the same key
+    /// again is fine; another key is refused until IT forgets the old
+    /// computer, and a removed computer is refused.
+    pub fn register_device(
+        &mut self,
+        registration: &glass_managed::device::RegisterDevice,
+    ) -> Result<(), RegisterRefused> {
+        let id = registration.device.as_str();
+        if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
+            return Err(RegisterRefused::Invalid("name the device".into()));
+        }
+        registration.verify().map_err(RegisterRefused::Invalid)?;
+        if let Some(existing) = self.fleet.devices.get(id) {
+            if existing.revoked.is_some() {
+                return Err(RegisterRefused::Revoked);
+            }
+            match &existing.key {
+                Some(key) if *key == registration.key => return Ok(()),
+                Some(_) => {
+                    return Err(RegisterRefused::Rule(format!(
+                        "{id} is enrolled with another key. If this is the same computer, \
+                         set up again, IT can remove {id} on the Devices page and it can \
+                         enroll again."
+                    )));
+                }
+                None => {}
+            }
+        }
+        let device = self.device(id);
+        device.key = Some(registration.key.clone());
+        device.last_seen = Timestamp::now();
+        Ok(())
+    }
+
+    /// The key a computer signs with, if it may still sign.
+    pub fn computer(&self, id: &str) -> Computer {
+        let Some(device) = self.fleet.devices.get(id) else {
+            return Computer::Unknown;
+        };
+        if device.revoked.is_some() {
+            return Computer::Revoked;
+        }
+        device
+            .key
+            .as_deref()
+            .and_then(|k| hex::decode(k).ok())
+            .and_then(|k| glass_crypto::PublicKey::from_bytes(&k).ok())
+            .map_or(Computer::Unknown, Computer::Key)
+    }
+
+    /// IT removes a computer from the organization (ADR 0030 slice P):
+    /// from now on the console refuses everything it sends.
+    pub fn revoke_device(&mut self, id: &str) -> Result<(), Refused> {
+        let device = self
+            .fleet
+            .devices
+            .get_mut(id)
+            .ok_or_else(|| Refused::NotFound(format!("No device {id}.")))?;
+        if device.revoked.is_none() {
+            device.revoked = Some(Timestamp::now());
+            self.fleet_dirty = true;
+        }
+        Ok(())
+    }
+
+    /// IT forgets a removed computer, so a computer can enroll under its
+    /// id again (one set up again from scratch).
+    pub fn forget_device(&mut self, id: &str) -> Result<(), Refused> {
+        let device = self
+            .fleet
+            .devices
+            .get(id)
+            .ok_or_else(|| Refused::NotFound(format!("No device {id}.")))?;
+        if device.revoked.is_none() {
+            return Err(Refused::Rule(format!(
+                "Remove {id} from the organization first."
+            )));
+        }
+        self.fleet.devices.remove(id);
+        self.fleet_dirty = true;
+        Ok(())
     }
 
     pub fn report(&mut self, report: DeviceReport) {

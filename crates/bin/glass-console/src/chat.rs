@@ -432,7 +432,6 @@ mod tests {
     use std::time::Duration;
 
     use glass_crypto::{EpochKey, SecretKey};
-    use glass_http::Request;
     use glass_managed::chat::{
         Body, ChatSyncResponse, Conversation, ConversationKind, Epoch, Header, Keys, MemberKey,
         MemberSecret, Message, new_conversation_id, new_message_id, open_name, seal_name,
@@ -453,6 +452,8 @@ mod tests {
         console: Arc<Console>,
         token: String,
         it: SecretKey,
+        /// The keys of the computers tests sign as.
+        keys: Mutex<std::collections::HashMap<String, glass_managed::device::DeviceKey>>,
     }
 
     /// A computer with one person's chat, scripted.
@@ -488,24 +489,21 @@ mod tests {
                 console,
                 token,
                 it,
+                keys: Mutex::new(std::collections::HashMap::new()),
             }
         }
 
+        /// A computer's request, signed by the computer it names.
         async fn post(&self, path: &str, body: &impl serde::Serialize) -> (u16, Value) {
-            let auth = format!("Bearer {}", self.token);
-            let r = self
-                .console
-                .handle(&Request {
-                    method: "POST".into(),
-                    path: format!("/device/v1/{path}"),
-                    query: String::new(),
-                    headers: vec![
-                        ("content-type".into(), "application/json".into()),
-                        ("authorization".into(), auth),
-                    ],
-                    body: serde_json::to_vec(body).unwrap(),
-                })
-                .await;
+            let request = crate::server::signed_for_tests(
+                &self.console,
+                &self.keys,
+                &self.token,
+                &format!("/device/v1/{path}"),
+                serde_json::to_vec(body).unwrap(),
+            )
+            .await;
+            let r = self.console.handle(&request).await;
             (
                 r.status,
                 serde_json::from_slice(&r.body).unwrap_or(Value::Null),
@@ -1344,8 +1342,11 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             let computer = |name: &str| {
                 let handle = ChatHandle::new(dir.join(name));
-                let client =
-                    glass_gateway_providers::ConsoleClient::new(&url, &token, true).unwrap();
+                let key = glass_managed::device::DeviceKey::generate(name).unwrap();
+                let client = glass_gateway_providers::ConsoleClient::new(&url, &token, true)
+                    .unwrap()
+                    .signed_by(Arc::new(key));
+                client.register_device().unwrap();
                 handle.connect("acme", name, Arc::new(client));
                 let key = glass_crypto::PublicKey::from_bytes(&hex::decode(&compliance).unwrap())
                     .unwrap();

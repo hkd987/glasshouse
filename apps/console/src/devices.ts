@@ -4,14 +4,20 @@
 
 import { h, show } from "@glasshouse/sdk";
 
-import { type FleetPage, type Ring, api } from "./api.ts";
+import { type DeviceRow, type FleetPage, type Ring, api } from "./api.ts";
 import { ago, capital, card, chip, mono, notice, plural, stat } from "./ui.ts";
 
 const RINGS: Ring[] = ["pilot", "early", "broad"];
 
 export async function devicesPage(root: HTMLElement): Promise<void> {
   let message: string | null = null;
-  const draw = (page: FleetPage) => show(root, render(page, message, setRing, setKind));
+  // The computer a Remove is waiting on a second click for.
+  let confirming: string | null = null;
+  let last: FleetPage | null = null;
+  const draw = (page: FleetPage) => {
+    last = page;
+    show(root, render(page, message, setRing, setKind, { confirming, ask, remove, forget }));
+  };
   async function change(device: string, what: "ring" | "kind", value: string | null): Promise<void> {
     try {
       await api("POST", `/api/fleet/${encodeURIComponent(device)}/${what}`, { [what]: value });
@@ -23,7 +29,58 @@ export async function devicesPage(root: HTMLElement): Promise<void> {
   }
   const setRing = (device: string, ring: Ring) => change(device, "ring", ring);
   const setKind = (device: string, kind: string | null) => change(device, "kind", kind);
+  // Removing a computer (ADR 0030 slice P) asks once more, on its row.
+  const ask = (device: string | null) => {
+    confirming = device;
+    if (last) draw(last);
+  };
+  async function act(device: string, name: string, what: "revoke" | "forget"): Promise<void> {
+    confirming = null;
+    try {
+      await api("POST", `/api/fleet/${encodeURIComponent(device)}/${what}`, {});
+      message =
+        what === "revoke"
+          ? `${name} was removed from the organization. It can't reach the console until it enrolls again.`
+          : `${name} is forgotten. Set up again, it can enroll under the same name.`;
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    draw(await api<FleetPage>("GET", "/api/fleet"));
+  }
+  const remove = (device: string, name: string) => act(device, name, "revoke");
+  const forget = (device: string, name: string) => act(device, name, "forget");
   draw(await api<FleetPage>("GET", "/api/fleet"));
+}
+
+/** Removing a computer from the organization, from its row. */
+interface Removing {
+  confirming: string | null;
+  ask: (device: string | null) => void;
+  remove: (device: string, name: string) => Promise<void>;
+  forget: (device: string, name: string) => Promise<void>;
+}
+
+/** The row's last cell: Remove, its confirmation, or a removed computer's
+ * Forget. */
+function removal(d: DeviceRow, r: Removing): HTMLElement {
+  if (d.removed) {
+    return h(
+      "td",
+      { class: "row-actions" },
+      chip("Removed", "bad"),
+      h("button", { class: "button small", "data-test": "forget", title: "Let a computer set up again enroll under this name", onclick: () => void r.forget(d.id, d.name) }, "Forget"),
+    );
+  }
+  if (r.confirming === d.id) {
+    return h(
+      "td",
+      { class: "row-actions" },
+      h("span", { class: "hint" }, `Remove ${d.name}? It stops syncing at once.`),
+      h("button", { class: "button small danger", "data-test": "confirm-remove", onclick: () => void r.remove(d.id, d.name) }, "Remove"),
+      h("button", { class: "button small", onclick: () => r.ask(null) }, "Cancel"),
+    );
+  }
+  return h("td", { class: "row-actions" }, h("button", { class: "button small", "data-test": "remove", "aria-label": `Remove ${d.name} from the organization`, onclick: () => r.ask(d.id) }, "Remove…"));
 }
 
 function render(
@@ -31,6 +88,7 @@ function render(
   message: string | null,
   setRing: (device: string, ring: Ring) => Promise<void>,
   setKind: (device: string, kind: string | null) => Promise<void>,
+  removing: Removing,
 ): HTMLElement {
   const t = page.totals;
   return h(
@@ -78,6 +136,7 @@ function render(
                 ...["Device", "People", "Ring", "Kind", "Policy", "Catalog"].map((x) => h("th", {}, x)),
                 ...["Agents", "Waiting", "Blocked 24h"].map((x) => h("th", { class: "num" }, x)),
                 h("th", {}, "Last seen"),
+                h("th", {}, ""),
               ),
             ),
             h(
@@ -123,6 +182,7 @@ function render(
                   h("td", { class: "num" }, d.waiting ? chip(String(d.waiting), "wait") : "0"),
                   h("td", { class: "num" }, String(d.blocked_24h)),
                   h("td", { class: "hint" }, ago(d.last_seen)),
+                  removal(d, removing),
                 ),
               ),
             ),

@@ -17,8 +17,9 @@
 //! GET  /api/settings?group=<g>        device settings for a group (UX-1)
 //! GET  /api/roles                     remote help's roles (CF-81)
 //! GET  /api/support                   support staff's page (CF-80)
-//! POST /device/v1/sync                a device's long poll (bearer token)
-//! POST /device/v1/report              a device's report (bearer token)
+//! POST /device/v1/register            a computer's key (the enrollment token)
+//! POST /device/v1/sync                a device's long poll (signed, as all below)
+//! POST /device/v1/report              a device's report
 //! POST /device/v1/chat/{keys,keys/lookup,conversations,messages,sync}
 //!                                     chat, sealed (ADR 0030)
 //! POST /device/v1/blobs{,/get}         sealed blobs of the shared space (ADR 0033)
@@ -40,6 +41,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use glass_http::{ReadError, Request, Response};
+use glass_managed::device::{
+    DEVICE_HEADER, MAX_SKEW_SECS, SIGNATURE_HEADER, TIME_HEADER, verify_request,
+};
 use glass_managed::meet::{Joined, MAX_SDP_BYTES, MeetOp, MeetRequest};
 use glass_managed::{DeviceReport, InstallMode, MAX_WAIT_SECS, Ring, SyncRequest, chat};
 
@@ -53,7 +57,7 @@ use crate::access::{Access, Need};
 use crate::directory::Directory;
 use crate::edits::Edit;
 use crate::impact::{self, Titles};
-use crate::state::{Refused, State};
+use crate::state::{Computer, Refused, RegisterRefused, State};
 use crate::studio::Builder;
 use crate::views;
 
@@ -76,6 +80,9 @@ pub struct Console {
     chat_changed: watch::Sender<u64>,
     /// Meetings' sessions, in memory only (ADR 0030 §6).
     rooms: Mutex<crate::meet::Rooms>,
+    /// Signatures of device requests seen lately, with their times: one
+    /// sent again is refused (ADR 0030 slice P).
+    seen: Mutex<HashMap<String, i64>>,
     /// The relay that carries meetings' media, beside the console.
     relay: std::sync::OnceLock<crate::relay::Relay>,
     /// What checks and builds the apps people share (ADR 0032).
@@ -84,6 +91,70 @@ pub struct Console {
     web: PathBuf,
     /// The console's address, as devices reach it.
     pub url: String,
+}
+
+/// Test support: `body` to `path`, signed by the computer it names (ADR
+/// 0030 slice P), whose key is registered in `keys`, with `token`, the
+/// first time.
+#[cfg(test)]
+pub(crate) async fn signed_for_tests(
+    console: &Console,
+    keys: &Mutex<HashMap<String, glass_managed::device::DeviceKey>>,
+    token: &str,
+    path: &str,
+    body: Vec<u8>,
+) -> Request {
+    let json = |headers: Vec<(String, String)>, path: &str, body: Vec<u8>| Request {
+        method: "POST".into(),
+        path: path.into(),
+        query: String::new(),
+        headers: [("content-type".to_owned(), "application/json".to_owned())]
+            .into_iter()
+            .chain(headers)
+            .collect(),
+        body,
+    };
+    let device = named_device(&body).unwrap_or_else(|| "test-computer".into());
+    if !lock(keys).contains_key(&device) {
+        let key = glass_managed::device::DeviceKey::generate(&device).unwrap();
+        let registration = serde_json::to_vec(&key.registration().unwrap()).unwrap();
+        let r = console
+            .handle(&json(
+                vec![("authorization".into(), format!("Bearer {token}"))],
+                "/device/v1/register",
+                registration,
+            ))
+            .await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        lock(keys).insert(device.clone(), key);
+    }
+    let time = glass_types::Timestamp::now().unix_seconds();
+    let headers = lock(keys)[&device].sign("POST", path, time, &body).unwrap();
+    json(
+        headers
+            .into_iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v))
+            .collect(),
+        path,
+        body,
+    )
+}
+
+/// What a removed computer is told.
+const REMOVED: &str = "This computer was removed from the organization.";
+
+/// The computer a device request's body names, wherever its kind of
+/// request keeps it: a sync's or a post's `device`, a member key's, a
+/// meeting request's body's.
+fn named_device(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    [
+        &value["device"],
+        &value["key"]["device"],
+        &value["body"]["device"],
+    ]
+    .into_iter()
+    .find_map(|v| v.as_str().map(str::to_owned))
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -185,6 +256,7 @@ impl Console {
             releases,
             chat_changed,
             rooms: Mutex::new(crate::meet::Rooms::default()),
+            seen: Mutex::new(HashMap::new()),
             relay: std::sync::OnceLock::new(),
             builder: std::sync::OnceLock::new(),
             web,
@@ -601,6 +673,32 @@ impl Console {
                     Err(r) => refused(r),
                 }
             }
+            ("POST", ["fleet", device, "revoke"]) => {
+                let mut state = self.state();
+                match state.revoke_device(device) {
+                    Ok(()) => {
+                        if let Err(e) = state.save_fleet() {
+                            return error(500, &format!("{e:#}"));
+                        }
+                        tracing::info!(%device, by = %user, "fleet: a computer was removed from the organization");
+                        ok(json!({}))
+                    }
+                    Err(r) => refused(r),
+                }
+            }
+            ("POST", ["fleet", device, "forget"]) => {
+                let mut state = self.state();
+                match state.forget_device(device) {
+                    Ok(()) => {
+                        if let Err(e) = state.save_fleet() {
+                            return error(500, &format!("{e:#}"));
+                        }
+                        tracing::info!(%device, by = %user, "fleet: a removed computer was forgotten");
+                        ok(json!({}))
+                    }
+                    Err(r) => refused(r),
+                }
+            }
             ("POST", ["fleet", device, "kind"]) => {
                 let set: SetKind = match body(request) {
                     Ok(b) => b,
@@ -629,8 +727,22 @@ impl Console {
         if request.method != "POST" {
             return error(405, "method not allowed");
         }
-        if !self.enrolled(request) {
-            return error(401, "not enrolled in this org");
+        // The enrollment token reaches one route: registering the
+        // computer's key. The key signs everything else (ADR 0030 slice P).
+        if path == "register" {
+            return self.register_device(request);
+        }
+        let device = match self.signed_by(path, request) {
+            Ok(device) => device,
+            Err(response) => return response,
+        };
+        if let Some(named) = named_device(&request.body)
+            && named != device
+        {
+            return error(
+                403,
+                "This request names another computer than the one that signed it.",
+            );
         }
         match path {
             "sync" => {
@@ -808,6 +920,79 @@ impl Console {
             meet if meet.starts_with("meet/") => self.meet(meet, request).await,
             _ => error(404, "not found"),
         }
+    }
+
+    /// `POST /device/v1/register`: a computer's key, with the org's
+    /// enrollment token and the key's proof.
+    fn register_device(&self, request: &Request) -> Response {
+        if !self.enrolled(request) {
+            return error(401, "not enrolled in this org");
+        }
+        let registration: glass_managed::device::RegisterDevice = match body(request) {
+            Ok(b) => b,
+            Err(r) => return r,
+        };
+        let mut state = self.state();
+        match state.register_device(&registration) {
+            Ok(()) => {
+                if let Err(e) = state.save_fleet() {
+                    return error(500, &format!("{e:#}"));
+                }
+                tracing::info!(device = %registration.device, "fleet: a computer registered its key");
+                ok(json!({}))
+            }
+            Err(RegisterRefused::Invalid(m)) => error(400, &m),
+            Err(RegisterRefused::Revoked) => error(403, REMOVED),
+            Err(RegisterRefused::Rule(m)) => refused(Refused::Rule(m)),
+        }
+    }
+
+    /// The computer that signed `request`, or the response refusing it: a
+    /// registered key's signature over this route and body, from within
+    /// [`MAX_SKEW_SECS`] of now, not seen before.
+    fn signed_by(&self, path: &str, request: &Request) -> Result<String, Response> {
+        let unsigned = || {
+            error(
+                401,
+                "This request isn't signed by a computer of this organization.",
+            )
+        };
+        // Header names arrive in lower case.
+        let header = |name: &str| request.header(&name.to_ascii_lowercase());
+        let device = header(DEVICE_HEADER).ok_or_else(unsigned)?;
+        let signature = header(SIGNATURE_HEADER).ok_or_else(unsigned)?;
+        let time: i64 = header(TIME_HEADER)
+            .and_then(|t| t.parse().ok())
+            .ok_or_else(unsigned)?;
+        let now = glass_types::Timestamp::now().unix_seconds();
+        if (now - time).abs() > MAX_SKEW_SECS {
+            return Err(error(
+                401,
+                "This request's time is too far from the console's. Check the computer's clock.",
+            ));
+        }
+        let key = match self.state().computer(device) {
+            Computer::Key(key) => key,
+            Computer::Revoked => return Err(error(403, REMOVED)),
+            Computer::Unknown => {
+                return Err(error(
+                    401,
+                    "This computer isn't registered with this organization.",
+                ));
+            }
+        };
+        let full = format!("/device/v1/{path}");
+        if !verify_request(&key, "POST", &full, device, time, &request.body, signature) {
+            return Err(unsigned());
+        }
+        // Each signature is good once: within the window, a copy of a
+        // request someone saw is refused.
+        let mut seen = lock(&self.seen);
+        seen.retain(|_, at| (now - *at).abs() <= 2 * MAX_SKEW_SECS);
+        if seen.insert(signature.to_owned(), time).is_some() {
+            return Err(error(401, "This request was already received."));
+        }
+        Ok(device.to_owned())
     }
 
     // ---- apps people share (ADR 0032, R2) -------------------------------
@@ -1006,13 +1191,16 @@ mod tests {
         cookie: String,
         token: String,
         key: PublicKey,
+        /// The keys of the computers tests sign as, by id.
+        devices: Mutex<HashMap<String, glass_managed::device::DeviceKey>>,
     }
 
     fn request(method: &str, path: &str, body: &Value, headers: &[(&str, &str)]) -> Request {
         let (path, query) = path.split_once('?').unwrap_or((path, ""));
+        // As the parser hands them over: names in lower case.
         let mut all: Vec<(String, String)> = headers
             .iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .map(|(k, v)| (k.to_ascii_lowercase(), (*v).to_owned()))
             .collect();
         all.push(("content-type".into(), "application/json".into()));
         all.push(("host".into(), "127.0.0.1:7400".into()));
@@ -1089,27 +1277,55 @@ mod tests {
             (r.status, json_of(&r))
         }
 
-        /// A device's sync.
-        /// A device's call, with the org's enrollment token.
+        /// A device's call, signed by the computer it names (ADR 0030
+        /// slice P), whose key is registered on its first call.
         async fn device(&self, path: &str, body: Value) -> Response {
-            let auth = format!("Bearer {}", self.token);
-            self.console
-                .handle(&request("POST", path, &body, &[("authorization", &auth)]))
-                .await
+            let request = self.signed(path, &body).await;
+            self.console.handle(&request).await
         }
 
-        async fn sync(&self, device: &str, policy: Option<u64>, wait: u64) -> SyncResponse {
+        /// Registers `device`'s key with the enrollment token, once.
+        async fn enroll(&self, device: &str) {
+            if lock(&self.devices).contains_key(device) {
+                return;
+            }
+            let key = glass_managed::device::DeviceKey::generate(device).unwrap();
             let auth = format!("Bearer {}", self.token);
-            let body = json!({ "device": device, "policy": policy, "wait_secs": wait });
+            let registration = serde_json::to_value(key.registration().unwrap()).unwrap();
             let r = self
                 .console
                 .handle(&request(
                     "POST",
-                    "/device/v1/sync",
-                    &body,
+                    "/device/v1/register",
+                    &registration,
                     &[("authorization", &auth)],
                 ))
                 .await;
+            assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+            lock(&self.devices).insert(device.to_owned(), key);
+        }
+
+        /// `body` to `path`, signed by the computer it names, now.
+        async fn signed(&self, path: &str, body: &Value) -> Request {
+            let bytes = if body.is_null() {
+                Vec::new()
+            } else {
+                body.to_string().into_bytes()
+            };
+            let device = named_device(&bytes).unwrap_or_else(|| "test-computer".into());
+            self.enroll(&device).await;
+            let time = glass_types::Timestamp::now().unix_seconds();
+            let headers = lock(&self.devices)[&device]
+                .sign("POST", path, time, &bytes)
+                .unwrap();
+            let headers: Vec<(&str, &str)> =
+                headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            request("POST", path, body, &headers)
+        }
+
+        async fn sync(&self, device: &str, policy: Option<u64>, wait: u64) -> SyncResponse {
+            let body = json!({ "device": device, "policy": policy, "wait_secs": wait });
+            let r = self.device("/device/v1/sync", body).await;
             assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
             serde_json::from_slice(&r.body).unwrap()
         }
@@ -1175,6 +1391,7 @@ mod tests {
             cookie,
             token,
             key,
+            devices: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1475,16 +1692,7 @@ mod tests {
             }],
             "reported_at": "2026-10-19T23:00:00Z",
         });
-        let auth = format!("Bearer {}", t.token);
-        let r = t
-            .console
-            .handle(&request(
-                "POST",
-                "/device/v1/report",
-                &report,
-                &[("authorization", &auth)],
-            ))
-            .await;
+        let r = t.device("/device/v1/report", report).await;
         assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
         let (_, fleet) = t.call("GET", "/api/fleet", Value::Null).await;
         let made = &fleet["made"][0];
@@ -1835,18 +2043,232 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn devices_need_the_orgs_enrollment_token() {
+    async fn adr0030_the_enrollment_token_alone_reaches_only_registering() {
         let t = console().await;
+        let token = format!("Bearer {}", t.token);
+        let sync = json!({ "device": "d" });
+        // Even the right token doesn't sync: only a computer's key does.
+        for auth in [token.as_str(), "Bearer wrong"] {
+            let r = t
+                .console
+                .handle(&request(
+                    "POST",
+                    "/device/v1/sync",
+                    &sync,
+                    &[("authorization", auth)],
+                ))
+                .await;
+            assert_eq!(r.status, 401, "{auth}");
+        }
+        // Registering needs the right one.
+        let key = glass_managed::device::DeviceKey::generate("d").unwrap();
+        let registration = serde_json::to_value(key.registration().unwrap()).unwrap();
         let r = t
             .console
             .handle(&request(
                 "POST",
-                "/device/v1/sync",
-                &json!({ "device": "d" }),
+                "/device/v1/register",
+                &registration,
                 &[("authorization", "Bearer wrong")],
             ))
             .await;
         assert_eq!(r.status, 401);
+        // A proof for another key is refused.
+        let mut forged = registration.clone();
+        forged["key"] = serde_json::to_value(
+            glass_managed::device::DeviceKey::generate("d")
+                .unwrap()
+                .registration()
+                .unwrap()
+                .key,
+        )
+        .unwrap();
+        let r = t
+            .console
+            .handle(&request(
+                "POST",
+                "/device/v1/register",
+                &forged,
+                &[("authorization", &token)],
+            ))
+            .await;
+        assert_eq!(r.status, 400, "{}", String::from_utf8_lossy(&r.body));
+    }
+
+    #[tokio::test]
+    async fn adr0030_device_requests_signed_by_another_key_are_refused() {
+        let t = console().await;
+        t.enroll("lab-07").await;
+        t.enroll("lab-08").await;
+        let body = json!({ "device": "lab-07" });
+        let bytes = body.to_string().into_bytes();
+        let now = glass_types::Timestamp::now().unix_seconds();
+        let send = |headers: Vec<(&'static str, String)>| {
+            let console = Arc::clone(&t.console);
+            let body = body.clone();
+            async move {
+                let refs: Vec<(&str, &str)> =
+                    headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                console
+                    .handle(&request("POST", "/device/v1/sync", &body, &refs))
+                    .await
+            }
+        };
+        // lab-08's key, claiming to be lab-07.
+        let mut headers = lock(&t.devices)["lab-08"]
+            .sign("POST", "/device/v1/sync", now, &bytes)
+            .unwrap()
+            .to_vec();
+        headers[0].1 = "lab-07".into();
+        assert_eq!(send(headers).await.status, 401);
+        // A key never registered, under lab-07's name.
+        let stranger = glass_managed::device::DeviceKey::generate("lab-07").unwrap();
+        let headers = stranger
+            .sign("POST", "/device/v1/sync", now, &bytes)
+            .unwrap();
+        assert_eq!(send(headers.to_vec()).await.status, 401);
+        // lab-08 signing honestly, for a request that names lab-07.
+        let r = t
+            .device("/device/v1/sync", json!({ "device": "lab-08" }))
+            .await;
+        assert_eq!(r.status, 200);
+        let headers = lock(&t.devices)["lab-08"]
+            .sign("POST", "/device/v1/sync", now, &bytes)
+            .unwrap();
+        let r = send(headers.to_vec()).await;
+        assert_eq!(r.status, 403, "{}", String::from_utf8_lossy(&r.body));
+        // A member key for another computer: the same.
+        let member = json!({ "key": { "id": "mk-0", "login": "dana", "device": "lab-07",
+                                       "agree": "00", "sign": "00" } });
+        let member_bytes = member.to_string().into_bytes();
+        let headers = lock(&t.devices)["lab-08"]
+            .sign("POST", "/device/v1/chat/keys", now, &member_bytes)
+            .unwrap();
+        let refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let r = t
+            .console
+            .handle(&request("POST", "/device/v1/chat/keys", &member, &refs))
+            .await;
+        assert_eq!(r.status, 403, "{}", String::from_utf8_lossy(&r.body));
+        // lab-07 itself is fine.
+        let r = t.device("/device/v1/sync", body.clone()).await;
+        assert_eq!(r.status, 200);
+    }
+
+    #[tokio::test]
+    async fn adr0030_a_replayed_or_stale_request_is_refused() {
+        let t = console().await;
+        let body = json!({ "device": "lab-07" });
+        let first = t.signed("/device/v1/sync", &body).await;
+        assert_eq!(t.console.handle(&first).await.status, 200);
+        let again = t.console.handle(&first).await;
+        assert_eq!(again.status, 401, "the same request twice");
+        assert!(String::from_utf8_lossy(&again.body).contains("already received"));
+        // Signed ten minutes ago.
+        let bytes = body.to_string().into_bytes();
+        let old = glass_types::Timestamp::now().unix_seconds() - 600;
+        let headers = lock(&t.devices)["lab-07"]
+            .sign("POST", "/device/v1/sync", old, &bytes)
+            .unwrap();
+        let refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let r = t
+            .console
+            .handle(&request("POST", "/device/v1/sync", &body, &refs))
+            .await;
+        assert_eq!(r.status, 401);
+        assert!(String::from_utf8_lossy(&r.body).contains("clock"));
+        // Moved to another route, the signature no longer holds.
+        let moved = t.signed("/device/v1/sync", &body).await;
+        let moved = Request {
+            path: "/device/v1/report".into(),
+            ..moved
+        };
+        assert_eq!(t.console.handle(&moved).await.status, 401);
+    }
+
+    #[tokio::test]
+    async fn adr0030_a_revoked_computer_is_refused() {
+        let t = console().await;
+        let body = json!({ "device": "lab-07" });
+        assert_eq!(t.device("/device/v1/sync", body.clone()).await.status, 200);
+        // Forgetting a computer still in the org is refused.
+        let (status, _) = t.call("POST", "/api/fleet/lab-07/forget", json!({})).await;
+        assert_eq!(status, 409);
+        let (status, _) = t.call("POST", "/api/fleet/lab-07/revoke", json!({})).await;
+        assert_eq!(status, 200);
+        let r = t.device("/device/v1/sync", body.clone()).await;
+        assert_eq!(r.status, 403);
+        assert!(String::from_utf8_lossy(&r.body).contains("removed from the organization"));
+        // Its key can't come back with the token.
+        let key = glass_managed::device::DeviceKey::generate("lab-07").unwrap();
+        let registration = serde_json::to_value(key.registration().unwrap()).unwrap();
+        let auth = format!("Bearer {}", t.token);
+        let register = |registration: Value| {
+            let console = Arc::clone(&t.console);
+            let auth = auth.clone();
+            async move {
+                console
+                    .handle(&request(
+                        "POST",
+                        "/device/v1/register",
+                        &registration,
+                        &[("authorization", &auth)],
+                    ))
+                    .await
+            }
+        };
+        assert_eq!(register(registration.clone()).await.status, 403);
+        let (_, fleet) = t.call("GET", "/api/fleet", Value::Null).await;
+        let row = fleet["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "lab-07")
+            .unwrap()
+            .clone();
+        assert!(row["removed"].is_string(), "{row}");
+        // Forgotten, a computer set up again enrolls under the same id.
+        let (status, _) = t.call("POST", "/api/fleet/lab-07/forget", json!({})).await;
+        assert_eq!(status, 200);
+        assert_eq!(register(registration).await.status, 200);
+        // Only IT does either.
+        let (status, _) = t
+            .call_as("nobody", "POST", "/api/fleet/lab-07/revoke", json!({}))
+            .await;
+        assert_eq!(status, 401);
+    }
+
+    #[tokio::test]
+    async fn adr0030_another_key_under_an_enrolled_id_is_refused() {
+        let t = console().await;
+        t.enroll("lab-07").await;
+        let other = glass_managed::device::DeviceKey::generate("lab-07").unwrap();
+        let registration = serde_json::to_value(other.registration().unwrap()).unwrap();
+        let auth = format!("Bearer {}", t.token);
+        let r = t
+            .console
+            .handle(&request(
+                "POST",
+                "/device/v1/register",
+                &registration,
+                &[("authorization", &auth)],
+            ))
+            .await;
+        assert_eq!(r.status, 409, "{}", String::from_utf8_lossy(&r.body));
+        assert!(String::from_utf8_lossy(&r.body).contains("Devices page"));
+        // The same key again is fine.
+        let same =
+            serde_json::to_value(lock(&t.devices)["lab-07"].registration().unwrap()).unwrap();
+        let r = t
+            .console
+            .handle(&request(
+                "POST",
+                "/device/v1/register",
+                &same,
+                &[("authorization", &auth)],
+            ))
+            .await;
+        assert_eq!(r.status, 200);
     }
 
     #[tokio::test]

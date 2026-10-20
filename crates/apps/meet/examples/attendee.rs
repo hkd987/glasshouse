@@ -69,7 +69,17 @@ fn run(args: Vec<String>) -> Result<String, String> {
         e["org"].as_str().unwrap_or_default(),
         e["token"].as_str().unwrap_or_default(),
     );
-    let client = ConsoleClient::new(url, token, true)?;
+    // A computer of its own: its key in the state folder, registered with
+    // the enrollment token, signs the rest (ADR 0030 slice P).
+    let computer = format!("colleague-{login}");
+    std::fs::create_dir_all(&state).map_err(|e| format!("{state}: {e}"))?;
+    let key = Arc::new(glass_managed::device::kept(
+        &Path::new(&state).join("device.key"),
+        &computer,
+    )?);
+    let console = || ConsoleClient::new(url, token, true).map(|c| c.signed_by(Arc::clone(&key)));
+    let client = console()?;
+    client.register_device()?;
     let compliance = client
         .lookup(&LookupKeys { logins: Vec::new() })
         .map_err(|e| e.to_string())?
@@ -81,13 +91,13 @@ fn run(args: Vec<String>) -> Result<String, String> {
     let release = ChatRelease::new(&key);
     let chat = ChatHandle::new(state);
     // The same computer name as `colleague`, so the member key's checks hold.
-    chat.connect(org, &format!("colleague-{login}"), Arc::new(client));
+    chat.connect(org, &computer, Arc::new(client));
     chat.set_compliance(&release.compliance, &release.fingerprint)?;
     // Catch up first: the meeting is a conversation like any other.
     chat.sync_once(0).map_err(|e| e.to_string())?;
     let meetings = Arc::new(ChatProvider::new(chat, DirectoryHandle::new()));
     let link = MeetHandle::new();
-    link.connect(Arc::new(ConsoleClient::new(url, token, true)?));
+    link.connect(Arc::new(console()?));
     let meet = MeetProvider::new(meetings, link, DirectoryHandle::new());
     let call = |action: &str, input: Value| {
         let mut ctx = glass_actions::testing::context(Path::new("/nonexistent"));

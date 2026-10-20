@@ -80,7 +80,9 @@ test("ad4 every page is interactive in under 1 s with 500 devices and 50 items",
       // A fresh context each time: nothing cached but the session.
       const { page, close } = await session(browser);
       runs.push(await open(page, hash, section));
-      if (name === "devices") await expect(page.locator("tr[data-device]")).toHaveCount(501);
+      // The fixture's 500, the enrolled computer, and any other computer
+      // that registered its key (the chat tests' colleagues, ADR 0030 P).
+      if (name === "devices") expect(await page.locator("tr[data-device]").count()).toBeGreaterThanOrEqual(501);
       await close();
     }
     const median = [...runs].sort((a, b) => a - b)[Math.floor(RUNS / 2)] ?? Number.POSITIVE_INFINITY;
@@ -399,5 +401,28 @@ test("ad4 the fleet shows the device on the new versions", async ({ browser }) =
   await shot(page, "fleet");
   const text = (await page.locator("body").innerText()).toLowerCase();
   expect(text).not.toContain("freebsd");
+  await close();
+});
+
+test("adr0030 IT removes a computer from the organization, then forgets it", async ({ browser }) => {
+  const { page, close } = await session(browser);
+  await open(page, "#/devices", "devices");
+  // A computer of the fixture's (NW-LT-…), not the enrolled one the other
+  // tests use.
+  const row = page.locator('tr[data-device^="NW-LT-"]').nth(3);
+  const id = await row.getAttribute("data-device");
+  expect(id).not.toBe(DEVICE);
+  const mine = page.locator(`tr[data-device="${id}"]`);
+  await mine.locator("[data-test=remove]").click();
+  // It asks once more, on the row.
+  await expect(mine).toContainText("Remove");
+  await expect(mine).toContainText("It stops syncing at once.");
+  await mine.locator("[data-test=confirm-remove]").click();
+  await expect(page.locator(".notice")).toContainText("was removed from the organization");
+  await expect(mine).toContainText("Removed");
+  await shot(page, "device-removed");
+  await mine.locator("[data-test=forget]").click();
+  await expect(page.locator(".notice")).toContainText("is forgotten");
+  await expect(page.locator(`tr[data-device="${id}"]`)).toHaveCount(0);
   await close();
 });

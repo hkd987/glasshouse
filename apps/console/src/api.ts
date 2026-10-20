@@ -198,6 +198,10 @@ export interface DeviceRow {
   waiting: number;
   blocked_24h: number;
   last_error: string | null;
+  /** Whether it signs with a key of its own (ADR 0030 slice P). */
+  registered: boolean;
+  /** When IT removed it from the organization: refused since. */
+  removed: string | null;
 }
 
 /** An app someone made on a computer (GA-10, ADR 0032). */

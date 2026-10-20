@@ -229,6 +229,11 @@ async fn main() -> ExitCode {
             ),
         ),
         attempt(
+            "files: read the computer's own key",
+            Want::Denied,
+            read_file("/var/db/glasshouse/device.key"),
+        ),
+        attempt(
             "files: open the apps people made",
             Want::Denied,
             io(

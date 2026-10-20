@@ -21,6 +21,7 @@ use glass_app_catalog::Applied;
 use glass_audit::{AuditEvent, EventKind, Outcome};
 use glass_first_party::{ChatHandle, ChatNotice};
 use glass_gateway_providers::ConsoleClient;
+use glass_managed::device;
 use glass_managed::directory::{self, DirectoryRelease};
 use glass_managed::{
     CatalogRelease, ChatRelease, DeviceReport, DocKind, MAX_WAIT_SECS, PolicyRelease, PublicKey,
@@ -174,18 +175,32 @@ impl Managed {
                 return;
             }
         };
-        let client =
-            match ConsoleClient::new(&self.managed.url, &token, self.managed.allow_insecure_http) {
-                Ok(client) => client,
-                Err(e) => {
-                    tracing::error!("managed: {e}");
-                    self.runtime
-                        .set_policy_source(format!("{} ({e})", self.source()));
-                    return;
-                }
-            };
+        // The computer's own key signs every request but registering it
+        // (ADR 0030 slice P).
+        let key = match device::kept(&self.config.state_dir.join(DEVICE_KEY), &self.device) {
+            Ok(key) => Arc::new(key),
+            Err(e) => {
+                tracing::error!("managed: {e}; this device won't sync until it is fixed");
+                self.runtime
+                    .set_policy_source(format!("{} ({e})", self.source()));
+                return;
+            }
+        };
+        let console = |token: &str| {
+            ConsoleClient::new(&self.managed.url, token, self.managed.allow_insecure_http)
+                .map(|c| c.signed_by(Arc::clone(&key)))
+        };
+        let client = match console(&token) {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::error!("managed: {e}");
+                self.runtime
+                    .set_policy_source(format!("{} ({e})", self.source()));
+                return;
+            }
+        };
         // Chat long-polls on a connection of its own (ADR 0030).
-        match ConsoleClient::new(&self.managed.url, &token, self.managed.allow_insecure_http) {
+        match console(&token) {
             Ok(chat) => {
                 self.org
                     .chat
@@ -197,12 +212,12 @@ impl Managed {
         }
         // Meetings (CF-21) go to the same console, on a client of their
         // own: a join mustn't wait behind chat's long poll.
-        match ConsoleClient::new(&self.managed.url, &token, self.managed.allow_insecure_http) {
+        match console(&token) {
             Ok(meet) => self.org.meet.connect(Arc::new(meet)),
             Err(e) => tracing::error!("managed: meetings: {e}"),
         }
         // Sharing apps, and the approved ones' bundles (ADR 0032, R2).
-        match ConsoleClient::new(&self.managed.url, &token, self.managed.allow_insecure_http) {
+        match console(&token) {
             Ok(share) => {
                 let share: Arc<dyn glass_managed::studio::ShareLink> = Arc::new(share);
                 self.org
@@ -215,7 +230,24 @@ impl Managed {
         }
         let mut retry = FIRST_RETRY;
         let mut reported: Option<Instant> = None;
+        let mut registered = false;
         loop {
+            // Registering the key comes first, and again whenever the
+            // console says it doesn't know this computer.
+            if !registered {
+                match client.register_device() {
+                    Ok(()) => {
+                        tracing::info!(device = %self.device, "managed: this computer's key is registered");
+                        registered = true;
+                    }
+                    Err(e) => {
+                        self.offline(&e);
+                        std::thread::sleep(retry);
+                        retry = (retry * 2).min(LAST_RETRY);
+                        continue;
+                    }
+                }
+            }
             let request = SyncRequest {
                 device: self.device.clone(),
                 policy: self.policy_version,
@@ -236,6 +268,7 @@ impl Managed {
                     }
                 }
                 Err(e) => {
+                    registered &= !e.contains("isn't registered");
                     self.offline(&e);
                     std::thread::sleep(retry);
                     retry = (retry * 2).min(LAST_RETRY);
@@ -284,13 +317,21 @@ impl Managed {
 
     /// The console couldn't be reached: nothing changes.
     pub fn offline(&mut self, why: &str) {
+        // The console answering no to this computer (ADR 0030 slice P) is
+        // not the console being out of reach.
+        let refused = why.contains("removed from the organization")
+            || why.contains("isn't registered")
+            || why.contains("enrolled with another key");
+        let what = if refused {
+            "the console refused this computer"
+        } else {
+            "the console can't be reached"
+        };
         if self.offline_since.is_none() {
-            tracing::warn!(
-                "managed: the console can't be reached ({why}); keeping what's in force"
-            );
+            tracing::warn!("managed: {what} ({why}); keeping what's in force");
             self.offline_since = Some(Timestamp::now());
         }
-        self.last_error = Some(format!("the console can't be reached: {why}"));
+        self.last_error = Some(format!("{what}: {why}"));
         self.runtime.set_policy_source(self.source());
     }
 
@@ -653,6 +694,9 @@ fn hostname() -> String {
 }
 
 /// The enrollment token, from a file nobody but glassd's user can read.
+/// The computer's key, in glassd's state directory, root only.
+const DEVICE_KEY: &str = "device.key";
+
 fn read_token(path: &Path) -> Result<String, String> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(path)
@@ -987,5 +1031,29 @@ mod tests {
         let again = d.managed();
         assert_eq!(d.policy_text(), with_tier("ask"));
         assert_eq!(again.policy_version, Some(3));
+    }
+
+    #[test]
+    fn adr0030_the_device_key_is_root_only() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(super::DEVICE_KEY);
+        let key = glass_managed::device::kept(&path, "lab-07").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().mode() & 0o777,
+            0o600,
+            "made for root alone"
+        );
+        // The same key comes back after a restart.
+        let again = glass_managed::device::kept(&path, "lab-07").unwrap();
+        assert_eq!(
+            again.registration().unwrap().key,
+            key.registration().unwrap().key
+        );
+        // One others could read isn't used, and isn't replaced either.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = glass_managed::device::kept(&path, "lab-07").unwrap_err();
+        assert!(err.contains("read by others"), "{err}");
+        assert!(!err.contains(&hex::encode(key.to_bytes().unwrap())));
     }
 }

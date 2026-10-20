@@ -447,7 +447,8 @@ pub fn fleet(state: &State, directory: &dyn Directory, console_url: &str) -> Val
     let devices: Vec<Value> = sorted
         .into_iter()
         .map(|d| {
-            let online = now - d.last_seen.unix_seconds() <= ONLINE_SECS;
+            // A removed computer is never counted online (ADR 0030 P).
+            let online = d.revoked.is_none() && now - d.last_seen.unix_seconds() <= ONLINE_SECS;
             let r = d.report.as_ref();
             let agents = r.map_or(0, |r| r.agents.len());
             let waiting = r.map_or(0, |r| r.agents.iter().filter(|a| a.waiting).count());
@@ -487,6 +488,10 @@ pub fn fleet(state: &State, directory: &dyn Directory, console_url: &str) -> Val
                 "waiting": waiting,
                 "blocked_24h": blocked,
                 "last_error": r.and_then(|r| r.last_error.clone()),
+                // ADR 0030 slice P: whether it signs with a key of its own,
+                // and when IT removed it.
+                "registered": d.key.is_some(),
+                "removed": d.revoked,
             })
         })
         .collect();
