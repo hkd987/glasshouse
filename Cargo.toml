@@ -52,6 +52,7 @@ glass-app-chat = { path = "crates/apps/chat" }
 glass-app-meet = { path = "crates/apps/meet" }
 glass-app-artifacts = { path = "crates/apps/artifacts" }
 glass-app-skills = { path = "crates/apps/skills" }
+glass-app-docs = { path = "crates/apps/docs" }
 glass-media-relay = { path = "crates/svc/media-relay" }
 
 # Third-party crates. Licenses must pass `deny.toml` (no copyleft).
@@ -90,6 +91,9 @@ tracing = "0.1.44"
 # `target=level` syntax (docs/dev/build-performance.md).
 tracing-subscriber = "0.3.23"
 uuid = { version = "1.28.0", features = ["v7", "serde"] }
+# Docs and sheets (ADR 0035): Yjs documents on the computer, so agents read
+# and edit what pages edit. Only glass-app-docs may use it.
+yrs = "0.28.0"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

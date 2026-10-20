@@ -289,7 +289,7 @@ pipeline refuses further side effects (fail closed).
 | `glass-actions` | lib | The action contract: providers, previews, task context, registry |
 | `glass-managed` | lib | Managed settings between the admin console and devices: signed releases, catalog items and the store rule, catalog-first search, sync and reports (ADR 0023) |
 | `glass-http` | lib | Just enough HTTP/1.1 for our small servers: the bridge's dev mode and the console |
-| `glass-app-files`, `-mail`, `-calendar`, `-system`, `-helpdesk`, `-catalog`, `-artifacts`, `-skills` | apps | Each app's actions (ADR 0013); `catalog.search` is catalog first (GA-2); artifacts and skills live in the shared space (ADR 0033, 0034) |
+| `glass-app-files`, `-mail`, `-calendar`, `-system`, `-helpdesk`, `-catalog`, `-artifacts`, `-skills`, `-docs` | apps | Each app's actions (ADR 0013); `catalog.search` is catalog first (GA-2); artifacts, skills and docs live in the shared space (ADR 0033, 0034, 0035); Docs also edits live (`glass_actions::Live`, `app.live`) |
 | `glass-first-party` | svc | The apps the OS ships, as one registry |
 | `glass-broker` | svc | Decisions and the approval desk |
 | `glass-gateway` | svc | The model gateway: the `model.complete` action, redaction, routing over providers with failover, the call record, the secrets stand-in (ADR 0018) |

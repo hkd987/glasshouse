@@ -17,6 +17,7 @@
 
 mod context;
 mod def;
+mod live;
 mod registry;
 pub mod testing;
 
@@ -24,6 +25,7 @@ use std::path::Path;
 
 pub use context::{Grant, Resolved, TaskContext};
 pub use def::{ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, parse_input};
+pub use live::{Live, Pulled};
 pub use registry::{Registry, RegistryError};
 
 /// Tags a file the agent changed with "by [agent] for [user]" (AU-10).

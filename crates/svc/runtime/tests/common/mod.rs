@@ -244,11 +244,14 @@ fn test_registry(
         .unwrap();
     registry
         .register(Arc::new(glass_app_skills::SkillsProvider::new(
-            shared,
+            shared.clone(),
             directory.clone(),
             dir.join("skills"),
         )))
         .unwrap();
+    let docs = Arc::new(glass_app_docs::DocsProvider::new(shared, directory.clone()));
+    registry.register(docs.clone()).unwrap();
+    registry.register_live(docs);
     registry
         .register(Arc::new(
             CalendarProvider::new(directory.clone()).meetings(meetings.clone()),
@@ -368,6 +371,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
                 chat_app(),
                 meet_app(),
                 artifacts_app(),
+                docs_app(),
             ],
             // The app socket resolves callers by uid; their app data is
             // here, never in the real account's home.
@@ -681,6 +685,17 @@ pub fn artifacts_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "artifacts", "name": "Artifacts", "version": "0.1.0",
         "actions": ["artifact.list", "artifact.read", "artifact.share", "artifact.update", "artifact.comment", "artifact.resolve", "people.search", "chat.list"],
+        "permissions": [], "labels": ["public", "internal", "confidential"]
+    }))
+    .unwrap()
+}
+
+/// Docs as ADR 0035 declares it (apps/docs/manifest.json): no
+/// `doc.write`, since the page edits live (`app.live`).
+pub fn docs_app() -> AppManifest {
+    serde_json::from_value(json!({
+        "id": "docs", "name": "Docs", "version": "0.1.0",
+        "actions": ["doc.list", "doc.read", "doc.create", "doc.open", "doc.comment", "doc.resolve", "doc.version", "doc.roles", "people.search"],
         "permissions": [], "labels": ["public", "internal", "confidential"]
     }))
     .unwrap()

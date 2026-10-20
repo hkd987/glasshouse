@@ -1,0 +1,26 @@
+[package]
+name = "glass-app-docs"
+description = "Docs (ADR 0035): shared-space items holding one Yjs document each, edited live by pages and read and written by agents as Markdown."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-actions.workspace = true
+glass-api.workspace = true
+glass-crypto.workspace = true
+glass-managed.workspace = true
+glass-types.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+yrs.workspace = true
+
+[dev-dependencies]
+glass-app-chat.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -933,6 +933,9 @@ impl Runtime {
         if let Some(stop) = task.stop.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = stop.send(());
         }
+        if task.is_app() {
+            self.close_live(task);
+        }
         self.state_change(task, note);
     }
 

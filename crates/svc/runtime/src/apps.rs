@@ -13,11 +13,12 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use glass_actions::ActionError;
 use glass_actions::TaskContext;
 use glass_api::{
     APP_STATUS_MAX_WAIT_SECS, ActivityKind, AgentMode, AppAction, AppCall, AppCallResult, AppFiles,
-    AppManifest, AppSession, AppStatus, AppStatusRequest, AppWaiting, DisplaySafe, ProfileApp,
-    ProfileAppKind, ScopeRequest, TileState,
+    AppLive, AppLiveResult, AppManifest, AppSession, AppStatus, AppStatusRequest, AppWaiting,
+    DisplaySafe, LiveOp, ProfileApp, ProfileAppKind, ScopeRequest, TileState,
 };
 use glass_audit::{AuditEvent, EventKind, Outcome as AuditOutcome, PolicyDecision};
 use glass_platform::fs::Owner;
@@ -565,6 +566,81 @@ impl Runtime {
         Ok(status)
     }
 
+    /// Live edits to a shared item the session opened (`app.live`, ADR
+    /// 0035 §3). Not an action, so no call is audited: the provider holds
+    /// the session to the items and roles it opened with an action, and
+    /// [`Self::close_live`] audits what the session changed, once. A
+    /// refused push is audited, since a page that tries one is misbehaving.
+    pub async fn app_live(&self, caller: &Caller, request: AppLive) -> Result<AppLiveResult> {
+        let task = self.app_session(caller, request.session)?;
+        if !task.lock().tile.is_live() {
+            return Err(RuntimeError::Invalid("This app session has closed.".into()));
+        }
+        let live = self
+            .registry()
+            .live(task.entry.id.as_str())
+            .ok_or_else(|| {
+                RuntimeError::Invalid(format!("{} doesn't edit anything live", task.entry.id))
+            })?;
+        let ctx = task.call_ctx();
+        let AppLive {
+            op,
+            item,
+            update,
+            since,
+            wait_secs,
+            ..
+        } = request;
+        if op == LiveOp::Push {
+            let update =
+                update.ok_or_else(|| RuntimeError::Invalid("A push needs an update.".into()))?;
+            let pushed = {
+                let item = item.clone();
+                tokio::task::spawn_blocking(move || live.push(&ctx, &item, &update))
+                    .await
+                    .map_err(|e| RuntimeError::Internal(e.to_string()))?
+            };
+            let cursor = pushed.map_err(|e| {
+                let mut event = self.task_event(
+                    &task,
+                    EventKind::Edited,
+                    format!("Refused a live edit: {e}"),
+                );
+                event.outcome = Some(AuditOutcome::Blocked);
+                event.targets = vec![item];
+                self.audit(event);
+                live_error(e)
+            })?;
+            return Ok(AppLiveResult {
+                cursor,
+                updates: Vec::new(),
+            });
+        }
+        // A pull waits, like `app.status`, until someone else's change to
+        // this person's items in the app arrives.
+        let key = (caller.name.clone(), live.app().to_owned());
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(wait_secs.min(APP_STATUS_MAX_WAIT_SECS));
+        loop {
+            let mut changes = self.app_changes.subscribe();
+            let seen = changes.borrow().last.get(&key).copied();
+            let (live, ctx, item) = (Arc::clone(&live), ctx.clone(), item.clone());
+            let pulled = tokio::task::spawn_blocking(move || live.pull(&ctx, &item, since))
+                .await
+                .map_err(|e| RuntimeError::Internal(e.to_string()))?
+                .map_err(live_error)?;
+            let now = tokio::time::Instant::now();
+            if !pulled.updates.is_empty() || now >= deadline {
+                return Ok(AppLiveResult {
+                    cursor: pulled.cursor,
+                    updates: pulled.updates,
+                });
+            }
+            let changed = changes.wait_for(|c| c.last.get(&key).copied() != seen);
+            let _ = tokio::time::timeout_at(deadline, changed).await;
+        }
+    }
+
     /// Closes the caller's app session (`app.close`).
     pub fn close_app(&self, caller: &Caller, session: TaskId) -> Result<()> {
         let task = self.app_session(caller, session)?;
@@ -578,6 +654,19 @@ impl Runtime {
     pub(crate) fn end_app(&self, task: &Task) {
         if task.lock().tile.is_live() {
             self.end_task(task, TileState::Done, "Closing");
+        }
+    }
+
+    /// An app session ended, however it did (closed, dropped, stopped, or
+    /// IT took the app away): one record per item it edited live, with
+    /// what it changed (ADR 0035 §3).
+    pub(crate) fn close_live(&self, task: &Task) {
+        for live in self.registry().lives() {
+            for line in live.closed(&task.id) {
+                let mut event = self.task_event(task, EventKind::Edited, line);
+                event.outcome = Some(AuditOutcome::Completed);
+                self.audit(event);
+            }
         }
     }
 
@@ -595,5 +684,15 @@ impl Runtime {
         if task.is_app() && task.lock().changes.is_empty() {
             self.tasks().remove(&task.id);
         }
+    }
+}
+
+/// A live provider's refusal as the caller's error. Never "not found":
+/// that means the session itself is gone, and the bridge opens a new one.
+fn live_error(e: ActionError) -> RuntimeError {
+    match e {
+        ActionError::InvalidInput(m) | ActionError::NotFound(m) => RuntimeError::Invalid(m),
+        ActionError::OutOfScope(m) => RuntimeError::PermissionDenied(m),
+        ActionError::Failed(m) => RuntimeError::Internal(m),
     }
 }

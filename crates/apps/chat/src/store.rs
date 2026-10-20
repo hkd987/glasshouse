@@ -109,7 +109,18 @@ pub(crate) struct Store {
     /// Records already refused, so each is audited once.
     #[serde(default)]
     pub refused: BTreeSet<String>,
+    /// The newest message ids kept per shared item, so a message echoed
+    /// back by sync isn't logged twice (ADR 0035 §4).
+    #[serde(default)]
+    pub item_recent: BTreeMap<String, Vec<String>>,
+    /// Items' messages kept since this store was loaded, appended to their
+    /// logs when it is saved.
+    #[serde(skip)]
+    pub item_pending: Vec<(String, Message)>,
 }
+
+/// Message ids remembered per item for [`Store::item_recent`].
+const ITEM_RECENT: usize = 256;
 
 /// A login that is safe as a folder name.
 pub(crate) fn plain_login(login: &str) -> bool {
@@ -240,11 +251,76 @@ impl ChatHandle {
             .unwrap_or_default()
     }
 
-    /// Saves `login`'s store. Call with [`Self::lock`] held.
+    /// Saves `login`'s store, and appends what it kept for shared items to
+    /// their logs first. Call with [`Self::lock`] held.
     pub(crate) fn save(&self, login: &str, store: &Store) -> Result<(), ChatFailure> {
+        let mut logs: BTreeMap<&str, Vec<u8>> = BTreeMap::new();
+        for (item, message) in &store.item_pending {
+            let line = logs.entry(item.as_str()).or_default();
+            serde_json::to_writer(&mut *line, message)
+                .map_err(|e| ChatFailure::Local(e.to_string()))?;
+            line.push(b'\n');
+        }
+        for (item, lines) in logs {
+            if !glass_managed::chat::is_conversation_id(item) {
+                continue;
+            }
+            self.append_private(&self.item_log(login, item), &lines)
+                .map_err(|e| {
+                    ChatFailure::Local(format!("keeping a shared item on this computer: {e}"))
+                })?;
+        }
         let bytes = serde_json::to_vec(store).map_err(|e| ChatFailure::Local(e.to_string()))?;
         self.write_private(&self.person_dir(login).join("store.json"), &bytes)
             .map_err(|e| ChatFailure::Local(format!("keeping chat on this computer: {e}")))
+    }
+
+    fn item_log(&self, login: &str, item: &str) -> PathBuf {
+        self.person_dir(login)
+            .join("items")
+            .join(format!("{item}.log"))
+    }
+
+    /// Item `item`'s messages on this computer for `login`, each once, in
+    /// order, with any from before items had logs.
+    pub(crate) fn item_messages(&self, login: &str, item: &str, store: &Store) -> Vec<Message> {
+        let mut seen = BTreeSet::new();
+        let mut out: Vec<Message> = store.messages.get(item).cloned().unwrap_or_default();
+        for m in &out {
+            if let Ok(h) = m.header() {
+                seen.insert(h.id);
+            }
+        }
+        if is_conversation_id(item)
+            && let Ok(text) = fs::read_to_string(self.item_log(login, item))
+        {
+            for line in text.lines() {
+                let Ok(message) = serde_json::from_str::<Message>(line) else {
+                    continue;
+                };
+                if message.header().is_ok_and(|h| seen.insert(h.id)) {
+                    out.push(message);
+                }
+            }
+        }
+        out.sort_by_key(|m| m.seq);
+        out
+    }
+
+    /// Appends `bytes` to `path`, root only, in folders only root can open.
+    fn append_private(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        let dir = path.parent().unwrap_or(Path::new("."));
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(bytes)?;
+        file.sync_data()
     }
 
     fn cursor(&self) -> u64 {
@@ -489,6 +565,26 @@ impl Store {
 
     /// Keeps `message`, in sequence order, once.
     pub(crate) fn keep(&mut self, conversation: &str, message: Message) {
+        // A shared item's messages go to its own log (ADR 0035 §4).
+        if self
+            .conversations
+            .get(conversation)
+            .is_some_and(|c| c.kind.is_item())
+        {
+            let Ok(header) = message.header() else {
+                return;
+            };
+            let recent = self.item_recent.entry(conversation.to_owned()).or_default();
+            if recent.contains(&header.id) {
+                return;
+            }
+            recent.push(header.id);
+            if recent.len() > ITEM_RECENT {
+                recent.remove(0);
+            }
+            self.item_pending.push((conversation.to_owned(), message));
+            return;
+        }
         let list = self.messages.entry(conversation.to_owned()).or_default();
         if list.iter().any(|m| m.header == message.header) {
             return;

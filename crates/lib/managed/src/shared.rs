@@ -122,6 +122,32 @@ pub enum Part {
         kind: String,
         title: String,
     },
+    /// A doc's edit (ADR 0035 §2): a Yjs v1 update, base64.
+    Update { data: String },
+    /// An edit too large for a message, in a sealed blob.
+    UpdateBlob {
+        blob: String,
+        key: String,
+        sha256: String,
+        bytes: u64,
+    },
+    /// The whole document, in a sealed blob, covering the log up to
+    /// sequence number `upto`; a version in its history when named.
+    Snapshot {
+        blob: String,
+        key: String,
+        sha256: String,
+        bytes: u64,
+        upto: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Who edits and who comments, from the item's owner; everyone else in
+    /// it views.
+    Roles {
+        editors: Vec<String>,
+        commenters: Vec<String>,
+    },
 }
 
 /// A blob's key: a fresh random key per blob, never reused.
@@ -288,6 +314,13 @@ pub trait Shared: Send + Sync + std::fmt::Debug {
     fn items(&self, login: &str, kind: ConversationKind) -> Vec<Item>;
     /// `login`'s item `id`, its messages opened; only that one is opened.
     fn item(&self, login: &str, id: &str) -> Option<Item>;
+    /// Item `id` with only its messages after sequence number `seq`
+    /// opened: what is new since a reader last looked.
+    fn since(&self, login: &str, id: &str, seq: u64) -> Option<Item> {
+        let mut item = self.item(login, id)?;
+        item.messages.retain(|m| m.seq > seq);
+        Some(item)
+    }
     /// A new item of `kind` titled `title` and labeled `label`, for
     /// `login` and `members`, sealed to their computers and IT's
     /// compliance key. Its id.

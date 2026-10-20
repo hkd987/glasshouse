@@ -22,6 +22,7 @@
 //! It does no network I/O: the console serves HTTP and glassd fetches
 //! through `glass-gateway-providers`, the one crate that leaves the machine.
 
+pub mod base64;
 pub mod catalog;
 pub mod chat;
 pub mod directory;

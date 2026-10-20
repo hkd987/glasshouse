@@ -20,11 +20,29 @@ pub enum RegistryError {
 pub struct Registry {
     actions: BTreeMap<ActionName, (ActionDef, Arc<dyn ActionProvider>)>,
     by_mcp: BTreeMap<String, ActionName>,
+    /// Live editing's providers, by the app whose sessions use them (ADR
+    /// 0035 §3).
+    live: BTreeMap<&'static str, Arc<dyn crate::Live>>,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Adds a provider of live edits for its app's sessions.
+    pub fn register_live(&mut self, live: Arc<dyn crate::Live>) {
+        self.live.insert(live.app(), live);
+    }
+
+    /// The live provider for app `app`'s sessions.
+    pub fn live(&self, app: &str) -> Option<Arc<dyn crate::Live>> {
+        self.live.get(app).cloned()
+    }
+
+    /// Every live provider, to tell each when a session ends.
+    pub fn lives(&self) -> Vec<Arc<dyn crate::Live>> {
+        self.live.values().cloned().collect()
     }
 
     pub fn register(&mut self, provider: Arc<dyn ActionProvider>) -> Result<(), RegistryError> {

@@ -802,6 +802,7 @@ fn open_item(
     store: &Store,
     member: &Member,
     c: &Conversation,
+    messages: &[Message],
 ) -> Option<glass_managed::shared::Item> {
     let (title, label) = if c.kind.is_item() {
         let key = store.epoch_key(member, &c.id, 1)?;
@@ -817,10 +818,7 @@ fn open_item(
         )
     };
     let mut keys: BTreeMap<u32, Option<EpochKey>> = BTreeMap::new();
-    let messages = store
-        .messages
-        .get(&c.id)
-        .map_or(&[][..], Vec::as_slice)
+    let messages = messages
         .iter()
         .filter_map(|message| {
             let header = message.header().ok()?;
@@ -852,6 +850,17 @@ fn open_item(
     })
 }
 
+impl ChatProvider {
+    /// Conversation `c`'s messages here: a shared item's from its log.
+    fn messages_of(&self, login: &str, store: &Store, c: &Conversation) -> Vec<Message> {
+        if c.kind.is_item() {
+            self.handle.item_messages(login, &c.id, store)
+        } else {
+            store.messages.get(&c.id).cloned().unwrap_or_default()
+        }
+    }
+}
+
 impl glass_managed::shared::Shared for ChatProvider {
     fn ready(&self, login: &str, make: bool) -> Result<(), ChatFailure> {
         self.handle.compliance()?;
@@ -876,7 +885,10 @@ impl glass_managed::shared::Shared for ChatProvider {
             .conversations
             .values()
             .filter(|c| c.kind == kind && c.members.iter().any(|m| m == login))
-            .filter_map(|c| open_item(&store, &member, c))
+            .filter_map(|c| {
+                let messages = self.messages_of(login, &store, c);
+                open_item(&store, &member, c, &messages)
+            })
             .collect()
     }
 
@@ -887,7 +899,22 @@ impl glass_managed::shared::Shared for ChatProvider {
             .conversations
             .get(id)
             .filter(|c| c.members.iter().any(|m| m == login))
-            .and_then(|c| open_item(&store, &member, c))
+            .and_then(|c| {
+                let messages = self.messages_of(login, &store, c);
+                open_item(&store, &member, c, &messages)
+            })
+    }
+
+    fn since(&self, login: &str, id: &str, seq: u64) -> Option<glass_managed::shared::Item> {
+        let member = self.handle.existing(login)?;
+        let store = self.handle.load(login);
+        let c = store
+            .conversations
+            .get(id)
+            .filter(|c| c.members.iter().any(|m| m == login))?;
+        let mut messages = self.messages_of(login, &store, c);
+        messages.retain(|m| m.seq > seq);
+        open_item(&store, &member, c, &messages)
     }
 
     fn create(

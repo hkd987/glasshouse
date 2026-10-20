@@ -13,6 +13,7 @@ use glass_app_calendar::CalendarProvider;
 use glass_app_catalog::{CatalogHandle, CatalogProvider};
 use glass_app_chat::ChatProvider;
 pub use glass_app_chat::{ChatHandle, Notice as ChatNotice};
+use glass_app_docs::DocsProvider;
 use glass_app_files::FilesProvider;
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
@@ -103,10 +104,14 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
         setup.directory.clone(),
     )))?;
     registry.register(Arc::new(SkillsProvider::new(
-        shared,
+        shared.clone(),
         setup.directory.clone(),
         setup.skills,
     )))?;
+    // And docs (ADR 0035), which pages also edit live.
+    let docs = Arc::new(DocsProvider::new(shared, setup.directory.clone()));
+    registry.register(docs.clone())?;
+    registry.register_live(docs);
     registry.register(Arc::new(
         CalendarProvider::new(setup.directory.clone()).meetings(meetings.clone()),
     ))?;

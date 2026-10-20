@@ -36,7 +36,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use glass_api::{AppCallResult, AppFiles, AppManifest, AppSession, AppStatus, app_methods};
+use glass_api::{
+    AppCallResult, AppFiles, AppLiveResult, AppManifest, AppSession, AppStatus, LiveOp, app_methods,
+};
 use glass_rpc::{Client, ClientError, codes};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -226,6 +228,21 @@ struct StatusBody {
     wait_secs: u64,
     #[serde(default)]
     since: u64,
+}
+
+/// What a page sends `/_bridge/live` (ADR 0035 §3): an update it made to
+/// a doc it opened, or a wait for others'.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveBody {
+    op: LiveOp,
+    doc: String,
+    #[serde(default)]
+    update: Option<String>,
+    #[serde(default)]
+    since: u64,
+    #[serde(default)]
+    wait_secs: u64,
 }
 
 #[derive(Deserialize)]
@@ -449,6 +466,23 @@ impl Bridge {
                     })
                     .await?;
                 Ok(serde_json::to_value(status).unwrap_or_default())
+            }
+            "live" => {
+                let live: LiveBody = serde_json::from_slice(body)
+                    .map_err(|e| Relay::Refused(format!("bad live request: {e}")))?;
+                let result: AppLiveResult = self
+                    .relay(app, app_methods::APP_LIVE, |session| {
+                        json!({
+                            "session": session,
+                            "op": live.op,
+                            "item": live.doc,
+                            "update": live.update,
+                            "since": live.since,
+                            "wait_secs": live.wait_secs,
+                        })
+                    })
+                    .await?;
+                Ok(serde_json::to_value(result).unwrap_or_default())
             }
             _ => Err(Relay::Refused(format!("no bridge endpoint {endpoint:?}"))),
         }

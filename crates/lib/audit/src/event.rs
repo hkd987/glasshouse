@@ -101,6 +101,9 @@ pub enum EventKind {
     Slept,
     /// Snapshots past their time were removed (AU-20: kept 30 days).
     SnapshotsRemoved,
+    /// An app session closed after editing a shared item live, such as a
+    /// doc: what it changed and for how long (ADR 0035 §3).
+    Edited,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

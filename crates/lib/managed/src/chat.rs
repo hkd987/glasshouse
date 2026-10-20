@@ -192,6 +192,8 @@ pub enum ConversationKind {
     /// A skill in the shared space (ADR 0034): who may use it and propose
     /// changes, its versions with their evals, and the proposals.
     Skill,
+    /// A doc (ADR 0035): one Yjs document, edited live by its editors.
+    Doc,
 }
 
 impl ConversationKind {
@@ -203,7 +205,7 @@ impl ConversationKind {
     /// Whether it is an item of the shared space, whose sealed name is an
     /// [`crate::shared::ItemName`].
     pub fn is_item(self) -> bool {
-        matches!(self, Self::Artifact | Self::Skill)
+        matches!(self, Self::Artifact | Self::Skill | Self::Doc)
     }
 
     /// The app that shows it, which news in it wakes.
@@ -213,6 +215,7 @@ impl ConversationKind {
             Self::Meeting => "calendar",
             Self::Artifact => "artifacts",
             Self::Skill => "skills",
+            Self::Doc => "docs",
         }
     }
 }

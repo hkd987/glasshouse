@@ -47,6 +47,10 @@ pub mod app_methods {
     /// own apps serves now (ADR 0032). The bridge serves those from here,
     /// never from a folder.
     pub const APP_FILES: &str = "app.files";
+    /// [`crate::AppLive`] → [`crate::AppLiveResult`]: live edits to a
+    /// shared item the session opened (ADR 0035 §3). Not an action: the
+    /// open was one, and the session's close is audited with what changed.
+    pub const APP_LIVE: &str = "app.live";
 }
 
 /// An app in the caller's profile (`apps.list`), which is what the
@@ -283,6 +287,42 @@ pub struct AppStatusRequest {
 
 /// The longest an `app.status` waits for a change.
 pub const APP_STATUS_MAX_WAIT_SECS: u64 = 25;
+
+/// What an `app.live` call does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveOp {
+    /// Posts `update`.
+    Push,
+    /// Returns what others changed after `since`, waiting up to
+    /// `wait_secs` for something new.
+    Pull,
+}
+
+/// `app.live` (ADR 0035 §3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppLive {
+    pub session: TaskId,
+    pub op: LiveOp,
+    /// The shared item, which the session opened with an action.
+    pub item: String,
+    /// A Yjs update, base64.
+    #[serde(default)]
+    pub update: Option<String>,
+    #[serde(default)]
+    pub since: u64,
+    #[serde(default)]
+    pub wait_secs: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppLiveResult {
+    pub cursor: u64,
+    /// For a pull: each `{ update, by, by_name }`.
+    #[serde(default)]
+    pub updates: Vec<serde_json::Value>,
+}
 
 /// What the user is being asked, so the app can show it is waiting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
