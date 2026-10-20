@@ -1642,7 +1642,7 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-        assert!(refused.contains("hasn't set chat up"), "{refused}");
+        assert!(refused.contains("hasn't set up chat"), "{refused}");
 
         let a = org.computer("dev-a");
         let post = json!({ "posts": [{ "to": ["sam"], "text": "hi" }] });

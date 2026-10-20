@@ -289,7 +289,7 @@ impl ArtifactsProvider {
     fn ready(&self, ctx: &TaskContext) -> Result<(), ActionError> {
         self.shared
             .ready(Self::me(ctx), ctx.principal.agent.as_str() == APP)
-            .map_err(|e| failed(format!("The shared space isn't ready: {e}")))
+            .map_err(|e| failed(e.to_string()))
     }
 
     fn name(&self, login: &str) -> String {

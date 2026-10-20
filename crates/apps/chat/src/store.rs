@@ -38,9 +38,10 @@ pub enum Notice {
     },
 }
 
-pub(crate) const NOT_MANAGED: &str =
-    "This computer isn't managed by an organization, so there's no chat.";
-pub(crate) const NOT_SET_UP: &str = "Your organization hasn't set chat up yet: IT makes its compliance key in the admin console first.";
+// Chat, docs, sheets and artifacts all say these (ADR 0033), so they name
+// what's shared, not chat alone.
+pub(crate) const NOT_MANAGED: &str = "This computer isn't managed by an organization, so nothing here is shared with colleagues: no chat, docs or shared pages.";
+pub(crate) const NOT_SET_UP: &str = "Your organization hasn't set up chat and sharing yet: IT makes its compliance key in the admin console first.";
 
 /// A person's keys on this computer.
 pub(crate) struct Member {
