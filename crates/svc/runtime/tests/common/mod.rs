@@ -297,10 +297,15 @@ pub fn harness_with(policy_extra: &str) -> Harness {
     let chat = ChatHandle::new(dir.path().join("state/chat"));
     let meet = MeetHandle::new();
     let apps_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps");
+    // Our apps' source as images lay it out, linked to the repository's.
+    let source = dir.path().join("source");
+    fs::create_dir_all(&source).unwrap();
+    std::os::unix::fs::symlink(&apps_dir, source.join("apps")).unwrap();
+    std::os::unix::fs::symlink(apps_dir.join("sdk"), source.join("sdk")).unwrap();
     let studio = Studio::new(StudioPaths {
         store: dir.path().join("state/apps"),
         installed: apps_dir.clone(),
-        sdk: apps_dir.join("sdk"),
+        source,
         bundler: "/nonexistent".into(),
     });
     studio.set_sandbox(Arc::new(glass_app_studio::testing::FakeBundler::default()));

@@ -190,6 +190,7 @@ Users adapt catalog apps and agents with layers, not copies. A small change is s
 - TL-3. Team layers: a team owner can share a layer with their team, reviewed the same way as sharing a generated app (GA-8).
 - TL-4. Make my own version: when a change is too big for a layer, the user copies the item into a generated app they own. It stops receiving the publisher's updates and is clearly marked as a copy.
 - TL-5. Every app can be remixed, our built-in apps included. Each web app ships its TypeScript source, and "Make my own version" of Mail is a remix its maker owns, marked with the original it's based on and its changes. A remix can only do what its maker can, never keeps the original's lowered approval tiers, and says when the original has a new version so the maker's agent can carry the changes over.
+- TL-6. Everyone may remix by default. IT can turn remixing off for the organization, which also removes our apps' source from its computers; people's existing remixes stop opening until it is turned back on.
 **Keeping it safe**
 - TL-10. Layers can only narrow permissions, never widen them. A change that needs new data or actions goes back through catalog review as a new version or a copy.
 - TL-11. Before an agent layer turns on, the agent is re-run against its evaluation suite with the layer applied and must still clear its release bar (AE-11).
@@ -615,7 +616,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - UI stack: UI-1 to UI-6, UI-8, UI-9
 - Agent engine: AE-1, AE-2 (invoice reconciliation), AE-3, AE-4, AE-10 to AE-12, AE-30
 - Tailoring, minimal for Pilot 1: TL-1, TL-2, TL-10, TL-11 and TL-13 on our first-party agents, with undo
-- Remix and share, the owner's focus from 2026-10-19: GA-1 to GA-14, TL-3 to TL-5, TL-20 to TL-22
+- Remix and share, the owner's focus from 2026-10-19: GA-1 to GA-14, TL-3 to TL-6, TL-20 to TL-22
 - Desktop experience: UX-1, UX-2, UX-10, UX-20 to UX-22, UX-30
 - Architecture commitments: FD-1 to FD-4
 - Base system and portability: BS-1 to BS-6, PL-1, PL-2
@@ -692,4 +693,5 @@ The biggest risks are distribution and hardware, not the agent technology. Micro
 - Visible tiles for every running agent, with take over and rewind.
 - Structured actions first, screen control as fallback.
 - Build on pkgbase with a thin fork. Never replace the kernel; keep Glasshouse portable above it through a thin platform layer.
+- Our web apps ship their TypeScript source on customers' computers so people can remix them, under a license that allows changes for the customer's own use and no redistribution. Suggestions to us are off unless IT turns them on.
 - Amazon Bedrock is the default model provider at launch. Claude subscribers drive the OS through Claude Code plus our plugin, and ChatGPT subscribers through Sign in with ChatGPT.

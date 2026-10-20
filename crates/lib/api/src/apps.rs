@@ -61,6 +61,10 @@ pub struct ProfileApp {
     /// settings. It reads from the console's servers, not from this device.
     #[serde(default)]
     pub url: Option<String>,
+    /// One of the person's own apps (ADR 0032): the installed app it
+    /// remixes, whose icon the launcher shows it with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub based_on: Option<AgentId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

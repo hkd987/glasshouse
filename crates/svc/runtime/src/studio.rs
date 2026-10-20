@@ -64,6 +64,10 @@ impl fmt::Debug for StudioSurroundings {
 }
 
 impl Surroundings for StudioSurroundings {
+    fn remixing(&self) -> bool {
+        self.rt.upgrade().is_some_and(|rt| rt.policy().remixing())
+    }
+
     fn profile(&self, login: &str) -> BTreeSet<AgentId> {
         self.rt.upgrade().map_or_else(BTreeSet::new, |rt| {
             rt.policy().apps_for(login).into_iter().cloned().collect()

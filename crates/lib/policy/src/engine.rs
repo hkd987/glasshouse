@@ -183,6 +183,15 @@ impl Policy {
         crate::settings::computer(&self.doc, seat)
     }
 
+    /// Whether people may remix apps on this org's computers (TL-6, ADR
+    /// 0032): everyone may unless IT turned `apps.remix` off.
+    pub fn remixing(&self) -> bool {
+        !self
+            .computer_settings(None)
+            .iter()
+            .any(|r| r.id == "apps.remix" && r.value == crate::document::SettingValue::Bool(false))
+    }
+
     /// Remote help's roles (CF-81, ADR 0028).
     pub fn support(&self) -> &crate::document::Support {
         &self.doc.support

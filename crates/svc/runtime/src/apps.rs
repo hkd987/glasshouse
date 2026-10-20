@@ -64,9 +64,13 @@ impl Runtime {
 
     /// `caller`'s own apps they may open now (ADR 0032): a remix while the
     /// app it remixes is in their profile; an app built from the template
-    /// always.
+    /// always; none while IT has remixing off (TL-6).
     pub(crate) fn own_apps(&self, caller: &Caller) -> Vec<PersonalApp> {
         let policy = self.policy();
+        // TL-6: IT turned remixing off; their apps wait until it's back on.
+        if !policy.remixing() {
+            return Vec::new();
+        }
         let profile = policy.apps_for(&caller.name);
         let reaches = self.catalog_reach(caller);
         self.config
@@ -122,6 +126,7 @@ impl Runtime {
                         name: manifest.name.clone(),
                         kind: ProfileAppKind::Web,
                         url: None,
+                        based_on: None,
                     });
                 }
                 if id.as_str() == CONSOLE_APP {
@@ -131,6 +136,7 @@ impl Runtime {
                         name: "Admin console".into(),
                         kind: ProfileAppKind::Console,
                         url: Some(url.clone()),
+                        based_on: None,
                     });
                 }
                 // A first-party native app; anything else the profile names
@@ -144,6 +150,7 @@ impl Runtime {
                     name: (*name).to_owned(),
                     kind: ProfileAppKind::Native,
                     url: None,
+                    based_on: None,
                 })
             })
             .collect();
@@ -153,6 +160,7 @@ impl Runtime {
             name: own.manifest.name,
             kind: ProfileAppKind::Web,
             url: None,
+            based_on: own.based_on,
         }));
         apps
     }

@@ -8,9 +8,21 @@ fn apps() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps")
 }
 
+/// Our apps' source as images lay it out: `apps/<app>` and `sdk`, here
+/// links into the repository's.
+pub(crate) fn source_root(dir: &Path) -> PathBuf {
+    let root = dir.join("source");
+    std::fs::create_dir_all(&root).unwrap();
+    std::os::unix::fs::symlink(apps(), root.join("apps")).unwrap();
+    std::os::unix::fs::symlink(apps().join("sdk"), root.join("sdk")).unwrap();
+    root
+}
+
 /// What policy and the catalog say, as the tests set them.
 #[derive(Debug, Default)]
 struct World {
+    /// IT turned remixing off (TL-6).
+    off: bool,
     /// Actions an app the person makes may never have.
     never: Vec<&'static str>,
     /// What the catalog offers, for any need.
@@ -18,6 +30,9 @@ struct World {
 }
 
 impl Surroundings for World {
+    fn remixing(&self) -> bool {
+        !self.off
+    }
     fn profile(&self, _login: &str) -> BTreeSet<AgentId> {
         ["mail", "calendar", "settings"]
             .iter()
@@ -54,7 +69,7 @@ fn fixture_with(world: World, bundler: Arc<dyn Sandbox>, program: PathBuf) -> Fi
     let studio = Studio::new(StudioPaths {
         store: dir.path().join("state/apps"),
         installed: apps(),
-        sdk: apps().join("sdk"),
+        source: source_root(dir.path()),
         bundler: program,
     });
     studio.set_sandbox(bundler);
@@ -316,6 +331,25 @@ fn ga12_the_store_first_then_a_remix_then_a_new_app() {
     assert!(err.contains("Mail (mail), which you can remix"), "{err}");
     mailish["declined"] = json!(["mail"]);
     assert!(f.call(CREATE, mailish).is_ok());
+}
+
+#[test]
+fn tl6_with_remixing_off_nothing_is_remixed_or_made() {
+    let f = fixture(World {
+        off: true,
+        ..World::default()
+    });
+    for (action, input) in [
+        (BASES, json!({})),
+        (SOURCE, json!({ "app": "mail" })),
+        (VERSIONS, json!({})),
+    ] {
+        let err = f.call(action, input).unwrap_err().to_string();
+        assert!(
+            err.contains("IT turned remixing apps off"),
+            "{action}: {err}"
+        );
+    }
 }
 
 #[test]

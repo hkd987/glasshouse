@@ -192,7 +192,7 @@ impl OrgData {
             studio: glass_first_party::Studio::new(glass_app_studio::StudioPaths {
                 store: state_dir.join("apps"),
                 installed: config.apps_dir.clone(),
-                sdk: config.studio.sdk.clone(),
+                source: config.studio.source.clone(),
                 bundler: config.studio.bundler.clone(),
             }),
         }
@@ -533,7 +533,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
 
     // What IT sets for the computer that glassd applies itself: the time
     // zone, and USB drives for whoever is signed in (ADR 0031).
-    device::watch(&org.settings, &runtime);
+    device::watch(&org.settings, &runtime, config.studio.source.clone());
 
     let listener = bind_control_socket(&config.control_socket)?;
     // The app socket (ADR 0024): world-connectable too, authorized by uid,

@@ -1,7 +1,7 @@
 # 0032. Remix and share: every app is source, every change is checked, the store is the only way between people
 
-Status: **Proposed** (2026-10-19), for the owner's review. Slice R1 is
-built (below, "What R1 built"). PRD GA-1 to GA-11, TL-3, TL-4, TL-10, TL-20 to TL-22, DV-2
+Status: **Accepted** (2026-10-19, the owner's decisions below). Slice R1
+is built (below, "What R1 built"). PRD GA-1 to GA-11, TL-3, TL-4, TL-10, TL-20 to TL-22, DV-2
 to DV-4, DV-10, UX-40. The owner asked (2026-10-19) that every piece of
 software on the computer be hackable and customizable, that people share
 what they make, that it never become shadow IT because it goes back into
@@ -161,8 +161,14 @@ Builds on ADRs 0013, 0014, 0023, 0024 and 0026.
   name one. So do catalog releases and installed apps.
 - The bridge serves `my-` origins from `app.files`, asking again with
   each page.
-- Images carry each app's `src/`, the SDK with its template, and
-  esbuild.
+- Images carry our apps' source in a folder of its own
+  (`/usr/local/share/glasshouse/source`: `apps/<app>/src`, and `sdk`
+  with its template) and esbuild.
+- TL-6: the device setting `apps.remix` (everyone's, on by default).
+  Off, glassd removes the source folder (links removed, never followed),
+  the studio refuses, and people's own apps leave their launchers and
+  close; their versions stay in glassd's store, so on again brings them
+  back. The source returns with the next update.
 - Every computer's report lists what was made there. The console's
   Devices page shows it as "Apps people made".
 - Tests:
@@ -208,14 +214,17 @@ Builds on ADRs 0013, 0014, 0023, 0024 and 0026.
   labels, retention and legal hold, behind actions. Until then a new
   app can only work through existing actions.
 
-## Open questions (owner)
-1. First-party apps' source goes to customers' computers, under a license
-   that lets them change it for their own use and never redistribute it.
-   Recommended: yes, since the bundles are already there and minified.
-2. Suggestions forwarded to us: off by default, IT turns them on.
-   Recommended: yes.
-3. Who may remix and build by default: everyone, since GA-5 confines it
-   (recommended), or only groups IT names.
+## Owner decisions (2026-10-19)
+1. Our web apps' source ships on customers' computers for remixing, under
+   a license that allows changes for the customer's own use and no
+   redistribution.
+2. Everyone may remix by default. IT can turn remixing off for the org
+   (TL-6). Off, the apps' source is removed from its computers, the
+   studio refuses, and people's remixes stop opening until it is on again;
+   the source comes back with the next update. The source therefore lives
+   in a folder of its own (`/usr/local/share/glasshouse/source`) that
+   glassd can remove, apart from what the apps run.
+3. Suggestions to us are off unless IT turns them on.
 
 ## Consequences
 - An app's power is its actions. Remixing is safe to offer everyone

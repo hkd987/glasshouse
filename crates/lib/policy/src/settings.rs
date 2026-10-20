@@ -197,6 +197,17 @@ pub fn table() -> &'static [SettingDef] {
                 Scope::Seat,
                 true,
             ),
+            // ADR 0032, TL-6: off, glassd removes our apps' source from
+            // the computer, the studio refuses and people's own apps don't
+            // open; their versions are kept for when it's on again.
+            toggle(
+                "apps.remix",
+                "Apps",
+                "Remixing apps",
+                "People and their agents may make their own versions of the organization's apps. Off removes the apps' source from the computer, and the versions people made don't open until it's on again.",
+                Scope::Device,
+                true,
+            ),
             toggle(
                 "browser.microphone",
                 "Privacy",

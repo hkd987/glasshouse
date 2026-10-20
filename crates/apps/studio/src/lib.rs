@@ -53,6 +53,8 @@ pub const REVERT: &str = "apps.revert";
 pub trait Surroundings: Send + Sync + fmt::Debug {
     /// The apps in `login`'s profile: the ones they may remix.
     fn profile(&self, login: &str) -> BTreeSet<AgentId>;
+    /// Whether IT lets people remix and make apps here (TL-6).
+    fn remixing(&self) -> bool;
     /// Why an app of `login`'s declaring `manifest` couldn't work for them:
     /// actions that don't exist or that their policy never allows an app
     /// they make, labels beyond theirs (GA-5). Empty when it fits.
@@ -67,10 +69,12 @@ pub trait Surroundings: Send + Sync + fmt::Debug {
 pub struct StudioPaths {
     /// glassd's own folder for the apps people make (root only).
     pub store: PathBuf,
-    /// The installed apps: each one's manifest, `src/` and `dist/`.
+    /// The installed apps: each one's manifest and `dist/`.
     pub installed: PathBuf,
-    /// The SDK's installed copy: `package.json`, `src/` and `template/`.
-    pub sdk: PathBuf,
+    /// Our apps' source, which people remix: `apps/<app>/src` and the SDK
+    /// (`sdk/`: `package.json`, `src/`, `template/`). A folder of its own,
+    /// which glassd removes when IT turns remixing off (TL-6).
+    pub source: PathBuf,
     /// esbuild.
     pub bundler: PathBuf,
 }
@@ -117,7 +121,7 @@ impl Studio {
         Self::new(StudioPaths {
             store: "/nonexistent".into(),
             installed: "/nonexistent".into(),
-            sdk: "/nonexistent".into(),
+            source: "/nonexistent".into(),
             bundler: "/nonexistent".into(),
         })
     }
@@ -127,7 +131,7 @@ impl Studio {
         let _ = self.inner.bundler.set(Bundler::new(
             sandbox,
             self.inner.paths.bundler.clone(),
-            self.inner.paths.sdk.clone(),
+            self.inner.paths.source.join("sdk"),
             self.inner.paths.store.join(".build"),
         ));
     }
@@ -192,12 +196,16 @@ impl Studio {
             .ok_or_else(|| ActionError::Failed("apps can't be made here yet".into()))
     }
 
-    /// An installed app's manifest and source, if it has its source.
+    /// An installed app's manifest and source, if its source is here.
     fn installed(&self, id: &AgentId) -> Option<(AppManifest, BTreeMap<String, String>)> {
         let dir = self.inner.paths.installed.join(id.as_str());
         let manifest: AppManifest =
             serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).ok()?).ok()?;
-        let source = store::read_tree(&dir, "src").ok()?;
+        let source = store::read_tree(
+            &self.inner.paths.source.join("apps").join(id.as_str()),
+            "src",
+        )
+        .ok()?;
         (manifest.id == *id && !id.is_personal()).then_some((manifest, source))
     }
 
@@ -223,6 +231,19 @@ pub struct StudioProvider {
 impl StudioProvider {
     pub fn new(studio: Studio) -> Self {
         Self { studio }
+    }
+
+    /// TL-6: nothing is remixed or made while IT has it off.
+    fn allowed(&self) -> Result<(), ActionError> {
+        if self.studio.surroundings()?.remixing() {
+            Ok(())
+        } else {
+            Err(ActionError::Failed(
+                "IT turned remixing apps off for your organization's computers, so apps can't \
+                 be remixed or made here"
+                    .into(),
+            ))
+        }
     }
 }
 
@@ -741,7 +762,7 @@ impl StudioProvider {
     fn source(&self, ctx: &TaskContext, input: SourceInput) -> Result<ActionOutput, ActionError> {
         let login = ctx.principal.on_behalf_of.name.as_str();
         if input.template {
-            let sdk = &self.studio.inner.paths.sdk;
+            let sdk = &self.studio.inner.paths.source.join("sdk");
             let manifest: Value = serde_json::from_slice(
                 &std::fs::read(sdk.join("template/manifest.json"))
                     .map_err(|e| ActionError::io("the template", e))?,
@@ -1046,6 +1067,7 @@ impl ActionProvider for StudioProvider {
         action: &ActionName,
         input: &Value,
     ) -> Result<Preview, ActionError> {
+        self.allowed()?;
         match action.as_str() {
             BASES | SOURCE | VERSIONS => Ok(Preview {
                 summary: match action.as_str() {
@@ -1121,6 +1143,7 @@ impl ActionProvider for StudioProvider {
         action: &ActionName,
         input: &Value,
     ) -> Result<ActionOutput, ActionError> {
+        self.allowed()?;
         match action.as_str() {
             BASES => {
                 let BasesInput { need } = parse_input(input)?;

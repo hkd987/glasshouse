@@ -1,9 +1,11 @@
 //! What IT sets for the computer that glassd applies itself (ADR 0031):
-//! the time zone, with the base system's `tzsetup`, and USB drives, with a
-//! devd rule. Applied at start and again whenever a policy changes them or
+//! the time zone, with the base system's `tzsetup`; USB drives, with a
+//! devd rule; and remixing apps, by removing our apps' source when it's
+//! off (TL-6, ADR 0032). Applied at start and again whenever a policy changes them or
 //! someone signs in or out: USB drives, like the browser's settings, follow
 //! whoever is signed in. Desktops hear of a new time zone, for their clock.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use glass_audit::{AuditEvent, EventKind, Outcome};
@@ -17,6 +19,7 @@ use glass_runtime::{Runtime, SettingsHandle};
 struct Applied {
     zone: String,
     usb_storage: Option<bool>,
+    remix: Option<bool>,
 }
 
 /// Runs `apply` with the computer's settings for whoever is signed in at
@@ -59,20 +62,39 @@ pub(crate) fn follow(
     });
 }
 
-/// Applies the time zone and USB drives now and whenever they change.
-pub(crate) fn watch(settings: &SettingsHandle, runtime: &Arc<Runtime>) {
+/// Applies the time zone, USB drives and remixing now and whenever they
+/// change. `source` is our apps' source folder (`[studio] source`).
+pub(crate) fn watch(settings: &SettingsHandle, runtime: &Arc<Runtime>, source: PathBuf) {
     let applied = Mutex::new(Applied::default());
     let weak = Arc::downgrade(runtime);
     follow(settings, runtime, move |computer, seat| {
         let mut applied = applied.lock().unwrap_or_else(|p| p.into_inner());
-        apply(computer, seat, weak.upgrade().as_deref(), &mut applied);
+        apply(
+            computer,
+            seat,
+            weak.upgrade().as_deref(),
+            &source,
+            &mut applied,
+        );
     });
+}
+
+/// TL-6: with remixing off, our apps' source leaves the computer. Removed
+/// whole (links are removed, never followed); the next update brings it
+/// back. Whether it removed anything.
+fn remove_source(source: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(source) {
+        Ok(_) => std::fs::remove_dir_all(source).map(|()| true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 fn apply(
     computer: &[Resolved],
     seat: Option<&str>,
     runtime: Option<&Runtime>,
+    source: &Path,
     applied: &mut Applied,
 ) {
     let value = |id: &str| {
@@ -131,6 +153,27 @@ fn apply(
             }
         }
     }
+
+    let remix = !matches!(value("apps.remix"), Some(SettingValue::Bool(false)));
+    if applied.remix != Some(remix) {
+        if remix {
+            applied.remix = Some(true);
+        } else {
+            match remove_source(source) {
+                Ok(removed) => {
+                    if removed {
+                        tracing::info!(source = %source.display(), "remixing is off: our apps' source removed");
+                        record("apps.remix", false.into(), Ok(()));
+                    }
+                    applied.remix = Some(false);
+                }
+                Err(e) => {
+                    tracing::warn!("removing {}: {e}", source.display());
+                    record("apps.remix", false.into(), Err(e.to_string()));
+                }
+            }
+        }
+    }
 }
 
 /// The audit record of a computer setting glassd applied, or failed to,
@@ -165,6 +208,47 @@ fn setting_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn computer(remix: bool) -> Vec<Resolved> {
+        vec![Resolved {
+            id: "apps.remix",
+            value: SettingValue::Bool(remix),
+            locked: true,
+            source: glass_policy::settings::Source::Everyone,
+        }]
+    }
+
+    /// TL-6: off, the source goes, whole, and what it linked to stays;
+    /// on again, nothing is removed.
+    #[test]
+    fn tl6_remixing_off_removes_our_apps_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("keep.ts"), "kept").unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(source.join("apps/mail/src")).unwrap();
+        std::fs::write(source.join("apps/mail/src/main.ts"), "mail").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, source.join("sdk")).unwrap();
+
+        let mut applied = Applied::default();
+        apply(&computer(true), None, None, &source, &mut applied);
+        assert!(source.exists(), "on: nothing removed");
+        apply(&computer(false), None, None, &source, &mut applied);
+        assert!(!source.exists());
+        assert!(elsewhere.join("keep.ts").exists(), "links aren't followed");
+        assert_eq!(applied.remix, Some(false));
+        // Off with nothing there, then on: nothing to do, nothing fails.
+        apply(
+            &computer(false),
+            None,
+            None,
+            &source,
+            &mut Applied::default(),
+        );
+        apply(&computer(true), None, None, &source, &mut applied);
+        assert_eq!(applied.remix, Some(true));
+    }
 
     #[test]
     fn adr0031_a_setting_applied_or_not_is_on_the_record() {

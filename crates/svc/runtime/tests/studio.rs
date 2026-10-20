@@ -102,6 +102,7 @@ async fn tl5_ga5_a_remix_is_its_makers_alone_and_never_has_its_bases_rules() {
     let profile = h.rt.profile_apps(&h.me);
     let mine = profile.iter().find(|a| a.id.as_str() == "my-chat").unwrap();
     assert_eq!(mine.name, "My Chat");
+    assert_eq!(mine.based_on.as_ref().map(|b| b.as_str()), Some("chat"));
     assert_eq!(profile.last().unwrap().id.as_str(), "my-chat");
 
     // Opened, it posts only after asking: Chat's own rule is Chat's.
@@ -210,4 +211,46 @@ async fn ga5_policy_decides_what_an_app_someone_makes_may_declare() {
         "{}",
         saved.text()
     );
+}
+
+/// TL-6: IT turns remixing off for the org's computers. People's own apps
+/// close and won't open, the studio refuses, and their versions are kept:
+/// back on, they open again.
+#[tokio::test]
+async fn tl6_it_turns_remixing_off_and_peoples_apps_wait_for_it() {
+    let h = harness();
+    let (_task, client) = claude_code(&h).await;
+    remix_chat(&client).await;
+    let apps = Client::connect(h.serve_apps()).await.unwrap();
+    let remix = open(&apps, "my-chat").await.unwrap();
+
+    let line = r#""meet", "store", "settings", "activity-monitor", "terminal"]"#;
+    let off =
+        format!("{line}\n[group.settings]\n\"apps.remix\" = {{ value = false, locked = true }}");
+    h.apply_policy_replacing(line, &off, "");
+    eventually(|| {
+        !h.rt
+            .list(&h.me)
+            .iter()
+            .any(|t| t.id == remix.session && t.state.is_live())
+    })
+    .await;
+    let mine = |h: &Harness| {
+        h.rt.profile_apps(&h.me)
+            .iter()
+            .any(|a| a.id.as_str() == "my-chat")
+    };
+    assert!(!mine(&h));
+    assert!(open(&apps, "my-chat").await.is_err());
+    let refused = tool(&client, "apps_source", json!({ "app": "chat" })).await;
+    assert!(refused.is_error);
+    assert!(
+        refused.text().contains("IT turned remixing apps off"),
+        "{}",
+        refused.text()
+    );
+
+    h.apply_policy_replacing(line, line, "");
+    assert!(mine(&h), "kept while off, back when on");
+    assert!(open(&apps, "my-chat").await.is_ok());
 }

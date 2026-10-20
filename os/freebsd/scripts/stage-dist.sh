@@ -68,18 +68,20 @@ done
 
 # The web apps (UI-5): each one's manifest, which glassd installs it from, and its built files,
 # which the person's app bridge serves (make apps-build). The admin console isn't a device app.
-# Each ships its source beside them, which people remix into their own (ADR 0032).
+# Their source goes in a folder of its own, which people remix into their own versions
+# (ADR 0032) and glassd removes when IT turns remixing off (TL-6).
+source=$DIST_DIR/usr/local/share/glasshouse/source
 for manifest in "$REPO_ROOT"/apps/*/manifest.json; do
 	app=$(basename "$(dirname "$manifest")")
 	[[ -f $REPO_ROOT/apps/$app/dist/app.js ]] || die "apps/$app isn't built (make apps-build)"
 	install -D -m 0644 "$manifest" "$DIST_DIR/usr/local/share/glasshouse/apps/$app/manifest.json"
 	cp -Rp "$REPO_ROOT/apps/$app/dist" "$DIST_DIR/usr/local/share/glasshouse/apps/$app/dist"
-	cp -Rp "$REPO_ROOT/apps/$app/src" "$DIST_DIR/usr/local/share/glasshouse/apps/$app/src"
+	install -d "$source/apps/$app"
+	cp -Rp "$REPO_ROOT/apps/$app/src" "$source/apps/$app/src"
 done
 # The SDK every remix builds on, and the template a new app starts from.
-sdk=$DIST_DIR/usr/local/share/glasshouse/sdk
-install -D -m 0644 "$REPO_ROOT/apps/sdk/package.json" "$sdk/package.json"
-cp -Rp "$REPO_ROOT/apps/sdk/src" "$REPO_ROOT/apps/sdk/template" "$sdk/"
+install -D -m 0644 "$REPO_ROOT/apps/sdk/package.json" "$source/sdk/package.json"
+cp -Rp "$REPO_ROOT/apps/sdk/src" "$REPO_ROOT/apps/sdk/template" "$source/sdk/"
 # The bundler glassd builds them with, in a jail: esbuild for this platform, the version and
 # checksum the apps' lockfile pins, so the computer builds people's apps as we build ours. Alone
 # in its folder, which the jail mounts; its license goes in the notices.

@@ -27,6 +27,11 @@ if [ -z "${GLASS_DEV_SKIP_BUILD:-}" ]; then
 fi
 
 mkdir -p "$dev/home" "$dev/state" "$run"
+# Our apps' source as images lay it out (ADR 0032), linked to the workspace's;
+# remixing off removes the links, never what they point at.
+mkdir -p "$dev/source"
+ln -sfn "$repo/apps" "$dev/source/apps"
+ln -sfn "$repo/apps/sdk" "$dev/source/sdk"
 if [ ! -d "$dev/home/Invoices" ]; then
 	mkdir -p "$dev/home/Invoices" "$dev/home/Reports" "$dev/home/Finance"
 	cp "$repo"/os/freebsd/overlay/usr/local/share/glasshouse/demo/Invoices/*.txt "$dev/home/Invoices/"
@@ -54,10 +59,11 @@ agent_dirs = ["$bin"]
 [snapshots]
 backend = "copy"
 
-# Remixing and making apps (ADR 0032): the apps workspace's esbuild and SDK.
+# Remixing and making apps (ADR 0032): the apps workspace's esbuild, and
+# its source in the layout images have.
 [studio]
 bundler = "$repo/apps/node_modules/@esbuild/linux-x64/bin/esbuild"
-sdk = "$repo/apps/sdk"
+source = "$dev/source"
 
 [[agent]]
 id = "invoice-demo"

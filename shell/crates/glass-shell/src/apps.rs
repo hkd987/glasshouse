@@ -150,6 +150,7 @@ mod tests {
                 name: id.to_owned(),
                 kind,
                 url: (kind == ProfileAppKind::Console).then(|| "https://console.example".into()),
+                based_on: None,
             })
             .collect()
     }

@@ -71,9 +71,8 @@ pub struct Config {
     pub agents: Vec<CatalogEntry>,
 }
 
-/// `[studio]`: what remixing and making apps needs (ADR 0032). The apps'
-/// source comes with each installed app in `apps_dir`; glassd keeps the
-/// apps people make in `<state_dir>/apps`.
+/// `[studio]`: what remixing and making apps needs (ADR 0032). glassd
+/// keeps the apps people make in `<state_dir>/apps`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StudioConfig {
@@ -81,16 +80,18 @@ pub struct StudioConfig {
     /// a jail mounts read-only to bundle in.
     #[serde(default = "default_bundler")]
     pub bundler: PathBuf,
-    /// The SDK's installed copy: `package.json`, `src/` and the template.
-    #[serde(default = "default_sdk")]
-    pub sdk: PathBuf,
+    /// Our apps' source, which people remix: `apps/<app>/src` and `sdk/`.
+    /// A folder of its own: glassd removes it when IT turns remixing off
+    /// (TL-6), and the next update brings it back.
+    #[serde(default = "default_source")]
+    pub source: PathBuf,
 }
 
 impl Default for StudioConfig {
     fn default() -> Self {
         Self {
             bundler: default_bundler(),
-            sdk: default_sdk(),
+            source: default_source(),
         }
     }
 }
@@ -99,8 +100,8 @@ fn default_bundler() -> PathBuf {
     "/usr/local/lib/glasshouse/bundler/esbuild".into()
 }
 
-fn default_sdk() -> PathBuf {
-    "/usr/local/share/glasshouse/sdk".into()
+fn default_source() -> PathBuf {
+    "/usr/local/share/glasshouse/source".into()
 }
 
 /// `[managed]`: where this device gets its org's policy and catalog, and

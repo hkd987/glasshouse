@@ -34,7 +34,9 @@ apps/
 
 ## Apps people make (ADR 0032)
 
-Every app here ships its `src/` in images, and people remix it, usually by
+Every app here ships its `src/` in images (in a folder of their own,
+`/usr/local/share/glasshouse/source`, which glassd removes when IT turns
+remixing off, TL-6), and people remix it, usually by
 asking their agent: `apps.bases` lists what they can start from,
 `apps.source` hands out an app's files, `apps.save` checks, bundles and
 keeps their version (`crates/apps/studio`). Their app's id starts `my-`,
