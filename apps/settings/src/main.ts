@@ -14,7 +14,7 @@ interface Setting {
   section: string;
   title: string;
   help: string;
-  kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" } | { type: "time_zone" };
+  kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" } | { type: "time_zone" } | { type: "apps" };
   scope: "person" | "device" | "seat";
   default: Value;
   value: Value;
@@ -26,6 +26,8 @@ interface Setting {
 const bridge = new Bridge({ app: "settings" });
 const state = {
   settings: [] as Setting[],
+  /** The names of the apps settings list, by id, as this computer offers them. */
+  appNames: {} as Record<string, string>,
   notice: null as { text: string; tone: "ok" | "bad" } | null,
   offline: false,
   busy: null as string | null,
@@ -34,9 +36,12 @@ const root = document.getElementById("app") as HTMLElement;
 
 async function load(): Promise<void> {
   try {
-    const read = await bridge.read<{ settings: Setting[] }>("settings.list", {});
+    const read = await bridge.read<{ settings: Setting[]; app_names?: Record<string, string> }>("settings.list", {});
     state.offline = read.offline;
-    if (read.result.ok) state.settings = read.result.data.settings;
+    if (read.result.ok) {
+      state.settings = read.result.data.settings;
+      state.appNames = read.result.data.app_names ?? {};
+    }
     else state.notice = { text: read.result.text, tone: "bad" };
   } catch (error) {
     state.notice = { text: error instanceof Offline ? "Settings haven't been loaded on this computer yet." : String(error), tone: "bad" };
@@ -62,12 +67,17 @@ async function change(setting: Setting, value: Value | undefined): Promise<void>
   await load();
 }
 
+/** An app's name as this computer offers it; its id for one it no longer has. */
+function appName(id: string): string {
+  return state.appNames[id] ?? id;
+}
+
 /** A value in words, for what the person can't change here. */
 function words(setting: Setting): string {
   const v = setting.value;
   if (typeof v === "boolean") return v ? "On" : "Off";
   if (typeof v === "number") return setting.kind.type === "number" ? `${v} ${setting.kind.unit}` : String(v);
-  if (Array.isArray(v)) return v.length ? v.join(", ") : "None";
+  if (Array.isArray(v)) return v.length ? (setting.kind.type === "apps" ? v.map(appName) : v).join(", ") : "None";
   return v || "None";
 }
 
@@ -124,6 +134,28 @@ function control(setting: Setting): HTMLElement {
         onchange: (e: Event) => change(setting, Number((e.target as HTMLInputElement).value)),
       }),
       h("span", { class: "muted" }, unit),
+    );
+  }
+  if (setting.kind.type === "apps") {
+    // Apps hidden from Ctrl Space (DK-1): hidden from the search's own
+    // rows, shown again here one at a time, IT's default ones too.
+    const hidden = Array.isArray(setting.value) ? setting.value : [];
+    if (!hidden.length) return h("span", { class: "muted" }, "None");
+    return h(
+      "span",
+      { class: "control hidden-apps" },
+      ...hidden.map((id) =>
+        h(
+          "span",
+          { class: "hidden-app", "data-app": id },
+          h("span", {}, appName(id)),
+          h(
+            "button",
+            { class: "link", disabled: busy, onclick: () => change(setting, hidden.filter((other) => other !== id)) },
+            "Show in search",
+          ),
+        ),
+      ),
     );
   }
   return h("span", { class: "muted" }, words(setting));

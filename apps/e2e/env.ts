@@ -50,6 +50,7 @@ export interface AuditRecord {
     outcome?: { status: string };
     decision?: { tier: string; rule: string };
     summary: string;
+    detail?: unknown;
   };
 }
 
@@ -102,4 +103,27 @@ export async function mcp(socket: string, calls: { name: string; arguments: unkn
   for (const call of calls) results.push(await request("tools/call", call));
   conn.end();
   return results;
+}
+
+/** One call on the control socket, as the desktop makes it. */
+export async function control<T>(method: string, params: unknown): Promise<T> {
+  const conn = createConnection(join(RUN, "control.sock"));
+  await new Promise<void>((resolve, reject) => conn.once("connect", resolve).once("error", reject));
+  let buffer = "";
+  const reply = new Promise<T>((resolve, reject) =>
+    conn.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      const message = JSON.parse(buffer.slice(0, newline)) as { result?: T; error?: { message: string } };
+      if (message.error) reject(new Error(message.error.message));
+      else resolve(message.result as T);
+    }),
+  );
+  conn.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })}\n`);
+  try {
+    return await reply;
+  } finally {
+    conn.end();
+  }
 }

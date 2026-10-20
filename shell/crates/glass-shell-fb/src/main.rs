@@ -1152,6 +1152,15 @@ impl Shell {
                 }
                 Vec::new()
             }
+            Effect::ChooseSetting(choice) => {
+                let result: Result<SettingsView, _> =
+                    client.call(methods::SETTINGS_SET, &choice).await;
+                match result {
+                    Ok(settings) => self.dirty |= self.live.set_settings(settings),
+                    Err(e) => eprintln!("settings.set {}: {e}", choice.id),
+                }
+                Vec::new()
+            }
             Effect::ListApps => {
                 let result: Result<Vec<glass_api::ProfileApp>, _> =
                     client.call(methods::APPS_LIST, ()).await;

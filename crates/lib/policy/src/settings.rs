@@ -45,6 +45,8 @@ pub enum Kind {
     /// A time zone's name, such as `America/New_York`; empty is the
     /// computer's own.
     TimeZone,
+    /// Apps, by id, such as `my-mail`.
+    Apps,
 }
 
 /// One setting a computer has.
@@ -208,6 +210,17 @@ pub fn table() -> &'static [SettingDef] {
                 Scope::Device,
                 true,
             ),
+            // The command bar finds apps as Spotlight does (DK-1); a person
+            // hides the ones they don't want there, from the bar itself.
+            SettingDef {
+                id: "search.hidden_apps",
+                section: "Search",
+                title: "Hidden from search",
+                help: "Apps Ctrl Space doesn't list. Hide one from its row in the search; show it again here. It stays in the launcher and the dock.",
+                kind: Kind::Apps,
+                scope: Scope::Person,
+                default: SettingValue::List(Vec::new()),
+            },
             toggle(
                 "browser.microphone",
                 "Privacy",
@@ -307,6 +320,7 @@ pub fn describe(def: &SettingDef, value: &SettingValue) -> String {
         (_, SettingValue::Number(n)) => n.to_string(),
         (_, SettingValue::Text(t)) if t.is_empty() => "none".into(),
         (_, SettingValue::Text(t)) => t.clone(),
+        (Kind::Apps, SettingValue::List(l)) if l.len() > 3 => format!("{} apps", l.len()),
         (_, SettingValue::List(l)) if l.is_empty() => "none".into(),
         (_, SettingValue::List(l)) if l.len() <= 3 => l.join(", "),
         (_, SettingValue::List(l)) => format!("{} sites", l.len()),
@@ -367,6 +381,15 @@ pub fn check(def: &SettingDef, value: &SettingValue) -> Result<(), String> {
                 None => Ok(()),
             }
         }
+        (Kind::Apps, SettingValue::List(apps)) => {
+            if apps.len() > 200 {
+                return Err("at most 200 apps".into());
+            }
+            match apps.iter().find(|a| !app_id_ok(a)) {
+                Some(bad) => Err(format!("{bad:?} isn't an app's id such as my-mail")),
+                None => Ok(()),
+            }
+        }
         (Kind::TimeZone, SettingValue::Text(zone)) => {
             if zone.is_empty() || time_zone_ok(zone) {
                 Ok(())
@@ -381,7 +404,18 @@ pub fn check(def: &SettingDef, value: &SettingValue) -> Result<(), String> {
         (Kind::Url, _) => Err("a web address".into()),
         (Kind::Sites, _) => Err("a list of sites".into()),
         (Kind::TimeZone, _) => Err("a time zone's name".into()),
+        (Kind::Apps, _) => Err("a list of apps".into()),
     }
+}
+
+/// An app's id: lowercase letters, digits and `-`, as agent and app ids
+/// are.
+fn app_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 pub(crate) fn validate(doc: &PolicyDocument, errors: &mut Vec<String>) {
@@ -592,5 +626,22 @@ members = [\"dana\"]
             .unwrap_err()
             .contains("https://")
         );
+    }
+
+    #[test]
+    fn dk1_hidden_from_search_is_a_persons_list_of_app_ids() {
+        let def = def("search.hidden_apps").unwrap();
+        assert_eq!(def.scope, Scope::Person);
+        let list =
+            |apps: &[&str]| SettingValue::List(apps.iter().map(|a| (*a).to_owned()).collect());
+        assert!(check(def, &list(&[])).is_ok());
+        assert!(check(def, &list(&["mail", "my-mail", "dispute-tracker"])).is_ok());
+        assert!(check(def, &list(&["My Mail"])).is_err());
+        assert!(check(def, &list(&["../etc"])).is_err());
+        assert!(check(def, &list(&[""])).is_err());
+        assert!(check(def, &SettingValue::Bool(true)).is_err());
+        assert_eq!(describe(def, &list(&["a", "b", "c", "d"])), "4 apps");
+        let many: Vec<String> = (0..201).map(|n| format!("app-{n}")).collect();
+        assert!(check(def, &SettingValue::List(many)).is_err());
     }
 }

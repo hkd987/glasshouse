@@ -54,4 +54,44 @@ impl SettingsView {
     pub fn number(&self, id: &str, default: i64) -> i64 {
         self.value(id).and_then(Value::as_i64).unwrap_or(default)
     }
+
+    /// A list's entries; none when it isn't there.
+    pub fn list(&self, id: &str) -> Vec<String> {
+        self.value(id)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Sets a setting's value as the computer now has it.
+    pub fn put(&mut self, id: &str, value: Value) {
+        match self.settings.iter_mut().find(|s| s.id == id) {
+            Some(s) => {
+                s.value = value;
+                s.from = SettingFrom::You;
+            }
+            None => self.settings.push(SettingView {
+                id: id.to_owned(),
+                value,
+                locked: false,
+                from: SettingFrom::You,
+            }),
+        }
+    }
+}
+
+/// `settings.set` on the control socket: the person's own choice for a
+/// setting IT left to them, from their desktop (hiding an app from the
+/// command bar's search, DK-1). `None` goes back to the default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingChoice {
+    pub id: String,
+    #[serde(default)]
+    pub value: Option<Value>,
 }

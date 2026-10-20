@@ -92,6 +92,9 @@ const LOCK_AFTER_MINUTES: i64 = 10;
 /// And blanks after this long (`display.blank_after_minutes`); 0 is never.
 const BLANK_AFTER_MINUTES: i64 = 5;
 
+/// The person's setting that names the apps hidden from search (DK-1).
+const HIDDEN_FROM_SEARCH: &str = "search.hidden_apps";
+
 /// A list the arrows move through and Enter chooses from (UX-20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum List {
@@ -223,6 +226,10 @@ pub enum Effect {
     /// Ask for the person's device settings again (`settings.get`) and
     /// hand them to [`Live::set_settings`] (UX-1).
     LoadSettings,
+    /// Change one of the person's own settings (`settings.set`), such as
+    /// the apps hidden from search, and hand back what the computer then
+    /// has to [`Live::set_settings`].
+    ChooseSetting(glass_api::settings::SettingChoice),
 }
 
 impl Effect {
@@ -349,9 +356,19 @@ impl Live {
     /// The person's device settings, from `settings.get` (UX-1). True when
     /// it changes what's drawn.
     pub fn set_settings(&mut self, settings: SettingsView) -> bool {
-        let redraw = settings.flag("clock.hour24", false) != self.hour24();
+        let hidden = settings.list(HIDDEN_FROM_SEARCH) != self.hidden_from_search();
+        let redraw = settings.flag("clock.hour24", false) != self.hour24()
+            || (hidden && self.command.is_some());
         self.settings = settings;
+        if hidden && self.command.is_some() {
+            self.select_top_hit();
+        }
         redraw
+    }
+
+    /// The apps the person hid from the command bar's search (DK-1).
+    fn hidden_from_search(&self) -> Vec<String> {
+        self.settings.list(HIDDEN_FROM_SEARCH)
     }
 
     fn hour24(&self) -> bool {
@@ -996,6 +1013,22 @@ impl Live {
                 let password = std::mem::take(&mut locked.password);
                 Some(Effect::Unlock(Password::new(password)))
             }
+            // Hidden at once, and kept by glassd as the person's own
+            // setting; Settings shows it again (DK-1).
+            Message::HideFromSearch(id) => {
+                let mut hidden = self.hidden_from_search();
+                if hidden.contains(&id) {
+                    return None;
+                }
+                hidden.push(id);
+                let value = serde_json::json!(hidden);
+                self.settings.put(HIDDEN_FROM_SEARCH, value.clone());
+                self.select_top_hit();
+                Some(Effect::ChooseSetting(glass_api::settings::SettingChoice {
+                    id: HIDDEN_FROM_SEARCH.into(),
+                    value: Some(value),
+                }))
+            }
             Message::RunSuggestion(_) | Message::AcceptAnswer | Message::SwitchUser => None,
             // First-run setup is the sign-in screen's, before any desktop.
             Message::SetupName(_)
@@ -1049,9 +1082,10 @@ impl Live {
 
     /// The apps the command bar's query finds (DK-1).
     fn hits(&self) -> Vec<&AppEntry> {
+        let hidden = self.hidden_from_search();
         self.command
             .as_deref()
-            .map(|query| command_bar::find_apps(&self.apps, query))
+            .map(|query| command_bar::find_apps(&self.apps, query, &hidden))
             .unwrap_or_default()
     }
 
@@ -1216,7 +1250,7 @@ impl Live {
     pub fn command_bar(&self) -> Option<CommandBar<'_>> {
         self.command.as_ref().map(|query| CommandBar {
             query: query.clone(),
-            hits: command_bar::find_apps(&self.apps, query)
+            hits: command_bar::find_apps(&self.apps, query, &self.hidden_from_search())
                 .into_iter()
                 .map(|app| Hit::new(app, &self.apps))
                 .collect(),

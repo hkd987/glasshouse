@@ -148,7 +148,7 @@ impl Runtime {
     }
 
     /// Like actions, layer changes stop when they can't be recorded.
-    fn refuse_unrecorded(&self) -> Result<()> {
+    pub(crate) fn refuse_unrecorded(&self) -> Result<()> {
         if self.audit_healthy() {
             Ok(())
         } else {

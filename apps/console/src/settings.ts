@@ -34,7 +34,7 @@ type State = "unset" | "default" | "locked";
 function words(row: SettingRow, value: SettingValue): string {
   if (typeof value === "boolean") return value ? "On" : "Off";
   if (typeof value === "number") return row.kind.type === "number" ? `${value} ${row.kind.unit}` : String(value);
-  if (Array.isArray(value)) return value.length ? (value.length <= 3 ? value.join(", ") : plural(value.length, "site")) : "None";
+  if (Array.isArray(value)) return value.length ? (value.length <= 3 ? value.join(", ") : plural(value.length, row.kind.type === "apps" ? "app" : "site")) : "None";
   return value || "None";
 }
 
@@ -112,13 +112,14 @@ export async function settingsPage(root: HTMLElement, group: string): Promise<vo
       case "url":
         return h("input", { class: "text", name: row.id, value: String(f.value), placeholder: "https://intranet.example", disabled, oninput: (e: Event) => set((e.target as HTMLInputElement).value.trim()) });
       case "sites":
+      case "apps":
         return h(
           "textarea",
           {
             class: "text",
             name: row.id,
             rows: 3,
-            placeholder: "One per line: games.example, *.social.example",
+            placeholder: row.kind.type === "apps" ? "One per line, by id: my-mail, notes" : "One per line: games.example, *.social.example",
             disabled,
             oninput: (e: Event) =>
               set(

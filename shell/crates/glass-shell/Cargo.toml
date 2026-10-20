@@ -20,8 +20,6 @@ tiny-skia.workspace = true
 kurbo.workspace = true
 png.workspace = true
 softbuffer.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
 
 [lints]

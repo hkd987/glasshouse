@@ -231,7 +231,7 @@ fn render_command_bar_apps() -> Frame {
     let apps = fixtures::apps();
     let bar = command_bar::CommandBar {
         query: "ma".into(),
-        hits: command_bar::find_apps(&apps, "ma")
+        hits: command_bar::find_apps(&apps, "ma", &[])
             .into_iter()
             .map(|app| command_bar::Hit::new(app, &apps))
             .collect(),

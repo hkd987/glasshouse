@@ -148,7 +148,7 @@ async fn ux1_the_desktop_reads_its_settings_hears_of_changes_and_the_app_changes
 
     let list = call(&apps, settings.session, "settings.list", json!({})).await;
     assert!(list.ok, "{}", list.text);
-    assert_eq!(list.text, "13 settings; IT locked 1.");
+    assert_eq!(list.text, "14 settings; IT locked 1.");
     assert!(
         list.data["device"]
             .as_array()
@@ -217,4 +217,65 @@ agents = ["claude-code"]
     assert!(refused.is_error, "a readable refusal, not a protocol error");
     let mine: SettingsView = h.rt.settings_view(&h.me);
     assert!(!mine.flag("clock.hour24", false), "nothing changed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dk1_the_desktop_hides_an_app_from_search_as_the_person_and_on_the_record() {
+    let h = harness();
+    let desktop = Client::connect(h.serve_control()).await.unwrap();
+    let hidden: SettingsView = desktop
+        .call(
+            methods::SETTINGS_SET,
+            json!({ "id": "search.hidden_apps", "value": ["my-mail"] }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hidden.list("search.hidden_apps"), ["my-mail"]);
+    // The Settings app sees it, as the person's own.
+    let apps = Client::connect(h.serve_apps()).await.unwrap();
+    let settings = open(&apps, "settings").await;
+    let list = call(&apps, settings.session, "settings.list", json!({})).await;
+    assert!(list.ok, "{}", list.text);
+    let row = list.data["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "search.hidden_apps")
+        .unwrap()
+        .clone();
+    assert_eq!(row["value"], json!(["my-mail"]), "{row}");
+    // On the record, with what it was set to.
+    let records = glass_audit::read(&h.audit_path(), |r| {
+        r.event.kind == glass_audit::EventKind::SettingChosen
+    })
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].event.user.as_deref(), Some(h.me.name.as_str()));
+    assert_eq!(records[0].event.detail["value"], json!(["my-mail"]));
+    // Shown again: back to nothing hidden.
+    let shown: SettingsView = desktop
+        .call(methods::SETTINGS_SET, json!({ "id": "search.hidden_apps" }))
+        .await
+        .unwrap();
+    assert!(shown.list("search.hidden_apps").is_empty());
+    // Not a valid entry, or the computer's setting: refused, in words.
+    let bad = desktop
+        .call::<SettingsView>(
+            methods::SETTINGS_SET,
+            json!({ "id": "search.hidden_apps", "value": ["My Mail"] }),
+        )
+        .await
+        .unwrap_err();
+    assert!(bad.to_string().contains("app's id"), "{bad}");
+    let computers = desktop
+        .call::<SettingsView>(
+            methods::SETTINGS_SET,
+            json!({ "id": "region.time_zone", "value": "Europe/Paris" }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        computers.to_string().contains("computer's setting"),
+        "{computers}"
+    );
 }

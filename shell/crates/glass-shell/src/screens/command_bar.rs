@@ -65,14 +65,16 @@ pub const MOST_HITS: usize = 6;
 /// (DK-1): the name starting with it, then one of its words, then anywhere
 /// in it, then the words' initials ("am" finds Activity Monitor). Case and
 /// the spaces around the query don't matter; among equals the shorter name
-/// comes first, then the alphabet. At most [`MOST_HITS`].
-pub fn find_apps<'a>(apps: &'a [AppEntry], query: &str) -> Vec<&'a AppEntry> {
+/// comes first, then the alphabet. Apps the person hid from search
+/// (`hidden`, by id) never show. At most [`MOST_HITS`].
+pub fn find_apps<'a>(apps: &'a [AppEntry], query: &str, hidden: &[String]) -> Vec<&'a AppEntry> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
         return Vec::new();
     }
     let mut found: Vec<(u8, &AppEntry)> = apps
         .iter()
+        .filter(|app| !hidden.contains(&app.id))
         .filter_map(|app| rank(&app.name.to_lowercase(), &query).map(|r| (r, app)))
         .collect();
     found.sort_by(|(r1, a1), (r2, a2)| {
@@ -268,7 +270,7 @@ fn hits<'a>(bar: &'a CommandBar<'a>) -> Element<'a, Message> {
         } else {
             iced_widget::space().width(Length::Shrink).into()
         };
-        button(
+        let open_it = button(
             row![
                 launcher::small_icon(hit.look, 32.0),
                 column![
@@ -305,8 +307,29 @@ fn hits<'a>(bar: &'a CommandBar<'a>) -> Element<'a, Message> {
                 shadow: look.shadow,
                 snap: true,
             }
-        })
-        .into()
+        });
+        // Beside the row, not in it: one click hides the app from search
+        // (DK-1), and Settings shows it again.
+        let hide = button(text("Hide").size(12))
+            .on_press(Message::HideFromSearch(hit.app.id.clone()))
+            .padding(Padding::from([6.0, 10.0]))
+            .style(|_, status| {
+                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: hovered.then(|| hexa(0xFFFFFF, 0.08).into()),
+                    text_color: if hovered { INK } else { QUIET },
+                    border: iced_core::Border {
+                        radius: 8.0.into(),
+                        ..Default::default()
+                    },
+                    shadow: iced_core::Shadow::default(),
+                    snap: true,
+                }
+            });
+        row![open_it, hide]
+            .spacing(4)
+            .align_y(Vertical::Center)
+            .into()
     });
     column![
         section("Apps"),
@@ -481,24 +504,27 @@ mod tests {
             "Terminal",
         ]);
         // The start of the name first, the shorter of equals first.
-        assert_eq!(names(&find_apps(&all, "ma")), ["Mail", "My Mail"]);
+        assert_eq!(names(&find_apps(&all, "ma", &[])), ["Mail", "My Mail"]);
         assert_eq!(
-            names(&find_apps(&all, "m")),
+            names(&find_apps(&all, "m", &[])),
             ["Mail", "Meet", "My Mail", "Activity Monitor", "Terminal"]
         );
         // Case and the spaces around it don't matter.
-        assert_eq!(names(&find_apps(&all, "  DOC ")), ["Docs"]);
+        assert_eq!(names(&find_apps(&all, "  DOC ", &[])), ["Docs"]);
         // A word of the name, then anywhere in it.
-        assert_eq!(names(&find_apps(&all, "mon")), ["Activity Monitor"]);
-        assert_eq!(names(&find_apps(&all, "ett")), ["Settings"]);
+        assert_eq!(names(&find_apps(&all, "mon", &[])), ["Activity Monitor"]);
+        assert_eq!(names(&find_apps(&all, "ett", &[])), ["Settings"]);
         // The words' initials, from two letters.
-        assert_eq!(names(&find_apps(&all, "am")), ["Activity Monitor"]);
+        assert_eq!(names(&find_apps(&all, "am", &[])), ["Activity Monitor"]);
         // Nothing for nothing, or for what no name has.
-        assert!(find_apps(&all, "").is_empty());
-        assert!(find_apps(&all, "   ").is_empty());
-        assert!(find_apps(&all, "prep me for the call").is_empty());
+        assert!(find_apps(&all, "", &[]).is_empty());
+        assert!(find_apps(&all, "   ", &[]).is_empty());
+        assert!(find_apps(&all, "prep me for the call", &[]).is_empty());
         // At most six.
-        assert_eq!(find_apps(&all, "a").len(), super::MOST_HITS);
+        assert_eq!(find_apps(&all, "a", &[]).len(), super::MOST_HITS);
+        // What the person hid never shows.
+        assert_eq!(names(&find_apps(&all, "ma", &["my-mail".into()])), ["Mail"]);
+        assert!(find_apps(&all, "doc", &["docs".into()]).is_empty());
     }
 
     #[test]

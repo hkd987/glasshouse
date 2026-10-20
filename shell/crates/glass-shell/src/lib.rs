@@ -116,6 +116,8 @@ pub enum Message {
     CommandChanged(String),
     /// A "for what's on your screen" suggestion.
     RunSuggestion(String),
+    /// Hide this app (by id) from the command bar's search (DK-1).
+    HideFromSearch(String),
     /// The answer's primary action, such as "Build the brief" (`task.plan`).
     AcceptAnswer,
     CloseCommandBar,

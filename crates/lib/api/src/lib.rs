@@ -124,6 +124,10 @@ pub mod methods {
     /// `()` → [`crate::settings::SettingsView`]: the caller's device
     /// settings (UX-1), as their desktop applies them.
     pub const SETTINGS_GET: &str = "settings.get";
+    /// [`crate::settings::SettingChoice`] → [`crate::settings::SettingsView`]:
+    /// the caller changes one of their own settings, as the Settings app's
+    /// `settings.set` does, from their desktop. Audited.
+    pub const SETTINGS_SET: &str = "settings.set";
     /// [`crate::SeatBegin`] → `()`. Root only: the sign-in screen says who
     /// is at the screen and which `su` runs their desktop (ADR 0031).
     pub const SEAT_BEGIN: &str = "seat.begin";

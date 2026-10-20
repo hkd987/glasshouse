@@ -104,6 +104,9 @@ pub enum EventKind {
     /// An app session closed after editing a shared item live, such as a
     /// doc: what it changed and for how long (ADR 0035 §3).
     Edited,
+    /// A person changed one of their own settings from their desktop, such
+    /// as hiding an app from the command bar's search (UX-1, DK-1).
+    SettingChosen,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

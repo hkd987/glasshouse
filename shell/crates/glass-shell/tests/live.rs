@@ -1411,3 +1411,40 @@ fn dk1_an_app_the_command_bar_found_opens_with_a_click() {
         "the bar closes as the app opens"
     );
 }
+
+#[test]
+fn dk1_an_app_hidden_from_search_leaves_the_results_and_is_kept_as_the_persons_setting() {
+    let theme = Theme::glass();
+    let mut live = Live::new(fixtures::tasks()).with_apps(fixtures::apps());
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    live.update(Message::OpenCommandBar);
+    type_query(&mut live, "ma");
+    {
+        let bar = live.command_bar();
+        let view = live.view(&theme, bar.as_ref(), artboard_time(), SIZE);
+        screen.update(view, &[], None);
+    }
+    // The second row's Hide, at the right end of the bar's left column.
+    let hide = (250..420)
+        .step_by(6)
+        .flat_map(|y| (640..840).step_by(12).map(move |x| (x, y)))
+        .flat_map(|(x, y)| click(&mut screen, &live, Point::new(x as f32, y as f32)))
+        .find(|m| matches!(m, Message::HideFromSearch(id) if id == "my-mail"));
+    assert_eq!(hide, Some(Message::HideFromSearch("my-mail".into())));
+    let Some(Effect::ChooseSetting(choice)) = live.update(hide.unwrap()) else {
+        panic!("hiding is kept by glassd");
+    };
+    assert_eq!(choice.id, "search.hidden_apps");
+    assert_eq!(choice.value, Some(serde_json::json!(["my-mail"])));
+    // Gone at once; Mail stays and is lit.
+    let bar = live.command_bar().unwrap();
+    let names: Vec<&str> = bar.hits.iter().map(|h| h.app.name.as_str()).collect();
+    assert_eq!(names, ["Mail"]);
+    assert_eq!(bar.selected, Some(0));
+    // Hiding it again changes nothing.
+    assert_eq!(live.update(Message::HideFromSearch("my-mail".into())), None);
+    // Shown again in Settings: glassd's settings come back without it.
+    live.set_settings(glass_api::settings::SettingsView::default());
+    let bar = live.command_bar().unwrap();
+    assert_eq!(bar.hits.len(), 2, "My Mail is back");
+}

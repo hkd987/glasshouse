@@ -143,7 +143,7 @@ impl Runtime {
         parts.settings.on_change(move |uid| {
             let _ = tell.send((uid.unwrap_or(EVERYONE_UID), Event::SettingsChanged));
         });
-        Arc::new(Self {
+        let rt = Arc::new(Self {
             device_settings: parts.settings,
             layers: LayerStore::new(parts.config.state_dir.join("layers")),
             config: parts.config,
@@ -167,7 +167,23 @@ impl Runtime {
             wakes: tokio::sync::watch::Sender::new(0),
             seat_file: std::sync::OnceLock::new(),
             seat_user: tokio::sync::watch::Sender::new(None),
-        })
+        });
+        // Settings that list apps by id (DK-1) show them by the names the
+        // person's computer offers them under.
+        let weak = Arc::downgrade(&rt);
+        rt.device_settings.name_apps(move |uid| {
+            let Some((rt, caller)) = weak
+                .upgrade()
+                .and_then(|rt| rt.caller(uid).map(|c| (rt, c)))
+            else {
+                return BTreeMap::new();
+            };
+            rt.profile_apps(&caller)
+                .into_iter()
+                .map(|app| (app.id.to_string(), app.name))
+                .collect()
+        });
+        rt
     }
 
     /// Stops every live task and waits (bounded) for their sandboxes to be
@@ -205,6 +221,37 @@ impl Runtime {
                 .collect(),
             utc_offset_secs: glass_platform::system::utc_offset_secs(),
         }
+    }
+
+    /// The caller changes one of their own settings from their desktop
+    /// (`settings.set`, DK-1): the Settings app's checks (theirs, not
+    /// locked, a valid value), and on the record.
+    pub fn choose_setting(
+        &self,
+        caller: &Caller,
+        choice: glass_api::settings::SettingChoice,
+    ) -> Result<SettingsView> {
+        self.refuse_unrecorded()?;
+        let value = choice
+            .value
+            .map(serde_json::from_value::<glass_policy::document::SettingValue>)
+            .transpose()
+            .map_err(|_| RuntimeError::Invalid(format!("{}: not a setting's value", choice.id)))?;
+        self.device_settings
+            .choose(&caller.name, caller.uid, &choice.id, value.clone())
+            .map_err(|e| match e {
+                glass_actions::ActionError::InvalidInput(m) => RuntimeError::Invalid(m),
+                glass_actions::ActionError::Failed(m) => RuntimeError::Conflict(m),
+                other => RuntimeError::Internal(other.to_string()),
+            })?;
+        let mut event = AuditEvent::new(
+            EventKind::SettingChosen,
+            format!("{} changed {} from their desktop", caller.name, choice.id),
+        );
+        event.user = Some(caller.name.clone());
+        event.detail = serde_json::json!({ "setting": choice.id, "value": value });
+        self.audit(event);
+        Ok(self.settings_view(caller))
     }
 
     /// Something every desktop reads with its settings changed, such as the

@@ -47,6 +47,10 @@ impl Handler for ControlApi {
             methods::AGENTS_LIST => to_result(&rt.agents_for(&caller)),
             methods::APPS_LIST => to_result(&rt.profile_apps(&caller)),
             methods::SETTINGS_GET => to_result(&blocking(|| rt.settings_view(&caller))),
+            methods::SETTINGS_SET => {
+                let choice: glass_api::settings::SettingChoice = parse_params(params)?;
+                to_result(&blocking(|| rt.choose_setting(&caller, choice))?)
+            }
             methods::TASK_PLAN => {
                 let request: TaskRequest = parse_params(params)?;
                 to_result(&blocking(|| rt.plan(&caller, &request))?)

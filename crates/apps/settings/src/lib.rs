@@ -51,12 +51,15 @@ impl Effective {
 }
 
 type Listener = Box<dyn Fn(Option<u32>) + Send + Sync>;
+type AppNames = Box<dyn Fn(u32) -> BTreeMap<String, String> + Send + Sync>;
 
 struct Inner {
     /// Each person's choices: `<uid>.json`.
     dir: PathBuf,
     policy: RwLock<Option<Arc<Policy>>>,
     listeners: Mutex<Vec<Listener>>,
+    /// The names of a person's apps, by id, for settings that list apps.
+    app_names: RwLock<Option<AppNames>>,
 }
 
 /// Device settings on this computer: policy's, and each person's choices.
@@ -92,7 +95,46 @@ impl SettingsHandle {
             dir: dir.into(),
             policy: RwLock::new(None),
             listeners: Mutex::new(Vec::new()),
+            app_names: RwLock::new(None),
         }))
+    }
+
+    /// Where the names of a person's apps come from (by uid), so a setting
+    /// that lists apps by id shows them as the person knows them.
+    pub fn name_apps(&self, f: impl Fn(u32) -> BTreeMap<String, String> + Send + Sync + 'static) {
+        *self
+            .0
+            .app_names
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(f));
+    }
+
+    /// The names of the apps `settings` list (DK-1: those hidden from
+    /// search), as the person's computer offers them.
+    fn app_names(&self, uid: u32, settings: &[Effective]) -> BTreeMap<String, String> {
+        let listed: Vec<&String> = settings
+            .iter()
+            .filter(|e| e.def.kind == settings::Kind::Apps)
+            .flat_map(|e| match &e.value {
+                SettingValue::List(ids) => ids.iter().collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        if listed.is_empty() {
+            return BTreeMap::new();
+        }
+        let names = self
+            .0
+            .app_names
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|f| f(uid))
+            .unwrap_or_default();
+        names
+            .into_iter()
+            .filter(|(id, _)| listed.contains(&id))
+            .collect()
     }
 
     /// The policy in force. Tells listeners when it changes anyone's
@@ -415,7 +457,11 @@ impl ActionProvider for SettingsProvider {
                 let locked = all.iter().filter(|e| e.locked).count();
                 Ok(ActionOutput {
                     text: format!("{} settings; IT locked {locked}.", all.len()),
-                    data: json!({ "settings": all, "device": self.handle.computer(Some(&who.name)) }),
+                    data: json!({
+                        "settings": all,
+                        "device": self.handle.computer(Some(&who.name)),
+                        "app_names": self.handle.app_names(who.uid, &all),
+                    }),
                     changes: Vec::new(),
                 })
             }
@@ -424,12 +470,28 @@ impl ActionProvider for SettingsProvider {
                 let now = self
                     .handle
                     .choose(&who.name, who.uid, &input.id, input.value)?;
-                Ok(ActionOutput {
-                    text: format!(
+                let text = match &now.value {
+                    // Apps hidden from search (DK-1), by their names.
+                    SettingValue::List(ids) if now.def.kind == settings::Kind::Apps => {
+                        let names = self.handle.app_names(who.uid, std::slice::from_ref(&now));
+                        if ids.is_empty() {
+                            "Every app shows in search.".to_owned()
+                        } else {
+                            let named: Vec<&str> = ids
+                                .iter()
+                                .map(|id| names.get(id).unwrap_or(id).as_str())
+                                .collect();
+                            format!("Hidden from search: {}.", named.join(", "))
+                        }
+                    }
+                    _ => format!(
                         "{} is {}.",
                         now.def.title,
                         settings::describe(now.def, &now.value)
                     ),
+                };
+                Ok(ActionOutput {
+                    text,
                     data: json!({ "setting": now }),
                     changes: Vec::new(),
                 })
@@ -573,5 +635,47 @@ members = ["dana"]
         fs::write(&path, r#"{"clock.hour24": 7, "browser.camera": false}"#).unwrap();
         let all = handle.person("sam", 1002);
         assert!(all.iter().all(|e| e.from == SettingFrom::Default));
+    }
+
+    #[test]
+    fn dk1_apps_hidden_from_search_come_with_their_names_and_no_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SettingsHandle::new(dir.path());
+        let names = |uid: u32| -> BTreeMap<String, String> {
+            assert_eq!(uid, 1001);
+            [
+                ("mail", "Mail"),
+                ("my-mail-3", "My Mail"),
+                ("notes", "Notes"),
+            ]
+            .into_iter()
+            .map(|(id, name)| (id.to_owned(), name.to_owned()))
+            .collect()
+        };
+        // Nothing hidden: no names asked for.
+        assert!(
+            handle
+                .app_names(1001, &handle.person("dana", 1001))
+                .is_empty()
+        );
+        handle.name_apps(names);
+        assert!(
+            handle
+                .app_names(1001, &handle.person("dana", 1001))
+                .is_empty()
+        );
+        handle
+            .choose(
+                "dana",
+                1001,
+                "search.hidden_apps",
+                Some(SettingValue::List(vec!["my-mail-3".into(), "gone".into()])),
+            )
+            .unwrap();
+        let named = handle.app_names(1001, &handle.person("dana", 1001));
+        assert_eq!(
+            named,
+            BTreeMap::from([("my-mail-3".to_owned(), "My Mail".to_owned())])
+        );
     }
 }
