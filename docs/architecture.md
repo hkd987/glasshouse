@@ -221,6 +221,9 @@ pipeline refuses further side effects (fail closed).
 - **Signed software only (EP-2) and a read-only signed base (EP-1).** Agent
   programs already come only from read-only directories; new components
   must not assume they can write to the base system at runtime.
+  Developer tools are the exception by place, not by trust: they install
+  into the person's developer jail, whose files the base never runs
+  (DW-7, DW-8, ADR 0036).
 - **Agents are directory identities (PA-7) with declared privileges (DV-3).**
   See ADR 0008 for how that layers onto today's policy.
 - **Telemetry in OCSF (EP-7, AU-2).** Audit events will need an OCSF

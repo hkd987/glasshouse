@@ -224,6 +224,7 @@ Many orgs live in Microsoft 365. For them our apps are the front end and Microso
 - IN-2. Agents' actions stay the same (mail.send, calendar.create, chat.post). The provider sits behind them, so policy, tiers, audit and undo hold whichever is chosen.
 - IN-3. People sign in once with Entra ID (AD-10). IT grants the Graph permissions once in the console, and the console shows what each one is for.
 - IN-4. Providers mix: Microsoft 365 for mail and calendar with Glasshouse docs and sheets, for example. A Teams meeting opens in its web app; Glasshouse meetings (CF-21) stay org only.
+- IN-5. Microsoft 365 needs no approval from Microsoft. Mail, Calendar, Chat and Meet call Graph with each person's own sign-in (delegated OAuth), and we complete Microsoft's publisher verification once. Whether people can connect on their own is the tenant's setting: Microsoft's default consent policy now asks an admin to approve apps that read mail, calendars or Teams content, so most orgs grant once (IN-3), and tenants that allow user consent let people connect themselves. We use no protected Teams APIs, which would need Microsoft's sign-off.
 **Mail for teams that have none**
 A team starting fresh shouldn't have to buy Gmail or Microsoft 365 just to have email.
 - EM-1. An org without mail gets Glasshouse Mail: a mailbox for everyone in the directory on the org's own domain. The console shows the DNS records to add and checks them live. A new org can start on an address under a Glasshouse domain and move to its own later.
@@ -541,6 +542,8 @@ These are the everyday basics enterprise buyers check before anything AI-related
 **Corporate networking**
 - CF-10. Enterprise Wi-Fi and wired authentication (802.1X), device certificates issued through SCEP or PKCS, and proxy auto-configuration.
 - CF-11. A built-in VPN using open standards (IPsec IKEv2 and WireGuard) at launch. Vendor zero-trust clients such as Zscaler, Palo Alto GlobalProtect and Cisco Secure Client come through partnerships once a design partner needs them, the same path as EDR.
+- CF-12. Settings has a Wi-Fi pane: nearby networks, joining with a password or the org's 802.1X (CF-10), and saved networks people can forget. Networks IT pushes join on their own and can't be removed, and IT can block networks. Certified laptops use Wi-Fi chips the base system supports (Intel iwlwifi, Realtek rtw88 and rtw89).
+- CF-13. Settings has a Bluetooth pane: pair, see and remove keyboards, mice and other classic Bluetooth devices. IT can turn Bluetooth off or allow only input devices. Headsets and Bluetooth LE devices need base-system work first, which we fund or contribute as for sleep (PM-10).
 **Browser**
 - CF-15. We ship and maintain our own Chromium-based browser build, because the apps our customers depend on run through it. It supports Chrome enterprise policies and IT-managed extensions.
 - CF-16. Browser security fixes ship within 3 days of an upstream Chrome security release, and within 48 hours for actively exploited vulnerabilities.
@@ -591,6 +594,10 @@ Sleep and battery life are the likeliest reasons a Glasshouse pilot fails, becau
 **Working with people**
 - CF-90. Users can hand agent work to a colleague: send flagged items, delegate an approval to a manager or request a review. These arrive in Teams or Slack, so colleagues who aren't on Glasshouse can act.
 - CF-91. Glasshouse includes its own chat app: channels and direct messages for people in the org. Messages are end-to-end encrypted between the org's computers, so our servers store only ciphertext. IT holds a compliance key, so retention, legal hold and eDiscovery (CF-61 to CF-64) still work. Agents read chat without asking and post only with the person's yes. Teams and Slack still integrate through CF-20, CF-71 and CF-90.
+- CF-92. Chat has the everyday features teams know from Slack: threads, reactions, @mentions that notify, editing and deleting your own messages, pinned messages, channel topics, browsing and joining public channels, unread markers, drafts and notification settings per channel.
+- CF-93. Search across every conversation a person is in. It runs on their own computers, because our servers hold only ciphertext (CF-91).
+- CF-94. Presence and a status (available, in a meeting, away or a custom line), set from Calendar and Do Not Disturb. A huddle starts a Glasshouse meeting (CF-21) from any channel or direct message in one click.
+- CF-95. @-mentions of directory groups, and agents in channels: an agent can join a channel and answer when mentioned, posting with its owner's yes (CF-91). Docs, sheets and artifacts shared in a conversation show as cards (AR-5). Shared channels with other orgs come later.
 
 ## Developer workspace
 Developers run unsigned code and Linux containers all day, which collides with signed-only software (EP-2) and a FreeBSD base. Glasshouse solves this the way macOS does with Docker Desktop: a managed Linux environment built into the OS, fenced off from corporate data and fully visible to security.
@@ -601,6 +608,9 @@ Developers run unsigned code and Linux containers all day, which collides with s
 - DW-4. SSH keys and commit-signing keys are stored in the TPM and can't be copied off the machine.
 - DW-5. Claude Code, Codex and other coding agents run in the workspace with the same tiles, approvals and undo, through the harness plugin (HX-1 to HX-7).
 - DW-6. Fast file sharing between the host and the workspace, and localhost networking so the host browser reaches services running in it. A higher-spec certified laptop tier for developers.
+- DW-7. The Store offers developer tools to people with developer mode (DW-10): VS Code, git, the GitHub CLI, a desktop git client, and the core languages (Node.js, Go, Python, Rust, Java, .NET, Ruby, PHP, Swift and Zig). Each installs in one click from signed packages, several versions side by side, and a project's pinned version is honored (.nvmrc, go.mod, .python-version, rust-toolchain.toml).
+- DW-8. Developer tools install into the person's developer jail (DW-1), never the signed base system, because what they build and download is unsigned (EP-2). Node versions come from our signed builds, since Node publishes no FreeBSD binaries; nvm itself, GitHub Desktop and other Linux-only tools run in the Linux workspace (DW-2).
+- DW-9. The native VS Code is the open-source build, which installs extensions from Open VSX. Extensions Microsoft publishes only to its own marketplace, such as Pylance and Remote Development, need Microsoft's build in the Linux workspace.
 **For security and IT**
 - DW-10. Developer mode is granted by role: only members of a developer group in Entra or Okta get a workspace.
 - DW-11. By default the workspace can't open Confidential or Restricted data, and its network access is limited to approved package sources, repos and cloud endpoints.
@@ -670,6 +680,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Architecture commitments: FD-1 to FD-4
 - Base system and portability: BS-1 to BS-6, PL-1, PL-2
 - Working together (proposed 2026-10-20): AR-1 to AR-4, AR-5 inside the org, SK-1 to SK-3, DC-1 to DC-4, DC-6, SH-1 to SH-3, SC-1, SC-3, SC-4, and IN-1 and IN-2 for mail and calendar
+- Chat, settings and developer tools (proposed 2026-10-20): CF-12, CF-92, CF-94, DW-7 and DW-8 for tools with a native build, IN-5
 **P1 · V1 GA**
 - AW-6, DA-4, DA-14, NV-4, NV-21, NV-22, NV-30 to NV-32
 - DP-6, DP-11, DP-20, DP-30, AU-4, AU-11, AU-22
@@ -686,6 +697,7 @@ Each phase starts only when the gate before it passes. Timing assumes a founding
 - Tailoring catalog items: TL-12, TL-14
 - Desktop experience: UX-3, UX-11, UX-31, UX-40
 - Working together (proposed 2026-10-20): AR-5 links outside the org, AR-6, SK-4 to SK-6, DC-5, SC-2, SC-5, IN-1 for chat and meetings, IN-3, IN-4, EM-1 to EM-4
+- Chat, settings and developer tools (proposed 2026-10-20): CF-13, CF-93, CF-95, DW-8 for Linux-only tools, DW-9
 **P2 · Later**
 - Undo into third-party SaaS through compensating actions at scale
 - A public agent and adapter marketplace
