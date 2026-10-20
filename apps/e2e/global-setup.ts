@@ -116,6 +116,10 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   const home = join(DEV, "home");
   seedInbox(home, user);
   seedCalendar(home, user);
+  // The suite's user set up this computer, which no organization manages:
+  // its owner (ADR 0038), as first-run setup records.
+  mkdirSync(join(DEV, "state"), { recursive: true });
+  writeFileSync(join(DEV, "state/setup.toml"), `owner = "${user}"\nmodels = "later"\n`);
 
   const glassd = start("glassd", join(REPO, "tools/dev/host-run.sh"), [], {
     GLASS_DEV_DIR: DEV,

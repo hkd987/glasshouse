@@ -638,7 +638,7 @@ async fn setup(tty: &Path) -> anyhow::Result<String> {
                             match created {
                                 Ok(()) => {
                                     eprintln!("glass-greeter: set up {login}");
-                                    record_setup(models.map(ModelChoice::id));
+                                    record_setup(&login, models.map(ModelChoice::id));
                                     display.hand_over();
                                     return Ok(login);
                                 }
@@ -670,10 +670,11 @@ async fn setup(tty: &Path) -> anyhow::Result<String> {
 }
 
 /// Records what setup asked that the account doesn't hold: how agents
-/// should reach AI models (MP-1), for Settings and the model gateway.
-fn record_setup(models: Option<&str>) {
+/// should reach AI models (MP-1), for Settings and the model gateway, and
+/// whose computer it is (ADR 0038): its owner changes its own settings.
+fn record_setup(owner: &str, models: Option<&str>) {
     let record = format!(
-        "# First-run setup (UX-2), {}\nmodels = \"{}\"\n",
+        "# First-run setup (UX-2), {}\nowner = \"{owner}\"\nmodels = \"{}\"\n",
         OffsetDateTime::now_utc().date(),
         models.unwrap_or("later")
     );

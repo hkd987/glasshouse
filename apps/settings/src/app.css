@@ -88,6 +88,21 @@
   border-radius: var(--radius-small);
 }
 
+.control .text {
+  width: 220px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  font: inherit;
+}
+
+.control textarea.text {
+  height: auto;
+  padding: 4px 8px;
+  resize: vertical;
+}
+
 .switch {
   width: 20px;
   height: 20px;
@@ -99,4 +114,11 @@
   color: var(--accent);
   font-size: 12px;
   padding: 0;
+}
+
+/* What a change did stays in view wherever the person is on the page. */
+.page > .banner {
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }

@@ -13,6 +13,9 @@ pub enum SettingFrom {
     It,
     /// The person, for a setting IT left to them.
     You,
+    /// The computer's owner, for one of the computer's own settings on a
+    /// computer no organization manages (ADR 0038).
+    Owner,
     /// Nobody: the computer's own default.
     Default,
 }
@@ -28,6 +31,10 @@ pub struct SettingView {
     #[serde(default)]
     pub locked: bool,
     pub from: SettingFrom,
+    /// The caller may change it: one of their own IT left to them, or the
+    /// computer's own when it's theirs (ADR 0038).
+    #[serde(default)]
+    pub editable: bool,
 }
 
 /// The result of `settings.get`.
@@ -80,6 +87,7 @@ impl SettingsView {
                 value,
                 locked: false,
                 from: SettingFrom::You,
+                editable: true,
             }),
         }
     }

@@ -244,6 +244,9 @@ pub enum Source {
     /// A group of theirs.
     Group(String),
     Everyone,
+    /// The computer's owner, on a computer no organization manages
+    /// (ADR 0038).
+    Owner,
     /// Nobody set it: the computer's default.
     Default,
 }

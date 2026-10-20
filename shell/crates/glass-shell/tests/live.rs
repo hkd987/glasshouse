@@ -1196,6 +1196,7 @@ fn ux1_the_clock_and_the_lock_follow_the_persons_settings() {
         value,
         locked: true,
         from: SettingFrom::It,
+        editable: false,
     };
     let mut live = Live::new(fixtures::tasks()).lockable();
     // A new policy or the person's own change: ask glassd again.
@@ -1265,6 +1266,7 @@ fn adr0031_the_screen_blanks_after_the_persons_minutes_and_the_next_input_only_w
             value: serde_json::json!(0),
             locked: true,
             from: SettingFrom::It,
+            editable: false,
         }],
         utc_offset_secs: None,
     });
@@ -1282,6 +1284,7 @@ fn adr0031_do_not_disturb_keeps_banners_from_popping_up_and_the_lock_clock_follo
         value: serde_json::json!(on),
         locked: false,
         from: SettingFrom::You,
+        editable: true,
     };
     let mut live = Live::new(Vec::new());
     live.set_settings(SettingsView {

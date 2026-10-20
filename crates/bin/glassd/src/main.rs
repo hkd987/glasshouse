@@ -195,7 +195,14 @@ impl OrgData {
             org_apps: org_apps::OrgAppStore::new(state_dir.join("apps/.org"), catalog.clone()),
             catalog,
             directory: glass_managed::DirectoryHandle::new(),
-            settings: glass_runtime::SettingsHandle::new(state_dir.join("settings")),
+            settings: {
+                let settings = glass_runtime::SettingsHandle::new(state_dir.join("settings"));
+                // A computer no organization manages is its owner's (ADR 0038).
+                if config.managed.is_none() {
+                    settings.set_owner(device::owner(state_dir));
+                }
+                settings
+            },
             chat: glass_first_party::ChatHandle::new(state_dir.join("chat")),
             meet: glass_first_party::MeetHandle::new(),
             mail: glass_first_party::MailHandle::new(state_dir.join("mail")),

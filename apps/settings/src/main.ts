@@ -2,8 +2,10 @@
 // IT sets some for their groups, as defaults they can change or locked;
 // the rest are theirs. Locked ones show as set by IT and can't be changed
 // here; the computer's (the browser's, USB drives, the time zone) are IT's
-// alone, those for the person at the screen from their groups. Every
-// change goes through the bridge and the audit log like any action.
+// alone, those for the person at the screen from their groups. On a
+// computer no organization manages, its owner sets those (ADR 0038).
+// glassd says which the person may change. Every change goes through the
+// bridge and the audit log like any action.
 
 import { Bridge, BridgeError, Offline, h, ready, show } from "@glasshouse/sdk";
 
@@ -19,8 +21,10 @@ interface Setting {
   default: Value;
   value: Value;
   locked: boolean;
-  /** Who decided it: IT, the person, or nobody (the computer's default). */
-  from: "it" | "you" | "default";
+  /** Who decided it: IT, the person, the computer's owner, or nobody (the computer's default). */
+  from: "it" | "you" | "owner" | "default";
+  /** The person may change it here: glassd decides (ADR 0038). */
+  editable?: boolean;
 }
 
 const bridge = new Bridge({ app: "settings" });
@@ -83,6 +87,10 @@ function words(setting: Setting): string {
 
 function who(setting: Setting): HTMLElement | null {
   if (setting.locked) return h("div", { class: "who it", "data-test": "locked" }, "🔒 Set by your organization");
+  if (setting.scope !== "person" && setting.from === "owner") return h("div", { class: "who" }, "Chosen by this computer's owner");
+  if (setting.scope !== "person" && setting.editable) {
+    return h("div", { class: "who" }, setting.from === "you" ? "Your choice, for everyone on this computer" : "This computer's default; you choose for everyone on it");
+  }
   if (setting.scope === "device") {
     return h("div", { class: "who" }, setting.from === "it" ? "Your organization's default for this computer" : "This computer's default");
   }
@@ -95,8 +103,10 @@ function who(setting: Setting): HTMLElement | null {
 
 function control(setting: Setting): HTMLElement {
   const busy = state.busy === setting.id || state.offline;
-  // The computer's, and what IT locked, show their value only.
-  if (setting.locked || setting.scope !== "person") return h("span", { class: "muted" }, words(setting));
+  // What the person can't change shows its value only: glassd says which
+  // (an older glassd doesn't, and then only their own unlocked ones).
+  const editable = setting.editable ?? (!setting.locked && setting.scope === "person");
+  if (!editable) return h("span", { class: "muted" }, words(setting));
   const reset =
     setting.from === "you"
       ? h("button", { class: "link", disabled: busy, onclick: () => change(setting, undefined) }, "Use default")
@@ -136,6 +146,51 @@ function control(setting: Setting): HTMLElement {
       h("span", { class: "muted" }, unit),
     );
   }
+  if (setting.kind.type === "url" || setting.kind.type === "time_zone") {
+    return h(
+      "span",
+      { class: "control" },
+      reset,
+      h("input", {
+        class: "text",
+        type: setting.kind.type === "url" ? "url" : "text",
+        name: setting.id,
+        "aria-label": setting.title,
+        placeholder: setting.kind.type === "url" ? "https://example.com" : "America/New_York",
+        value: String(setting.value),
+        disabled: busy,
+        onchange: (e: Event) => change(setting, (e.target as HTMLInputElement).value.trim()),
+      }),
+    );
+  }
+  if (setting.kind.type === "sites") {
+    const list = Array.isArray(setting.value) ? setting.value : [];
+    return h(
+      "span",
+      { class: "control" },
+      reset,
+      h(
+        "textarea",
+        {
+          class: "text",
+          name: setting.id,
+          "aria-label": setting.title,
+          rows: 2,
+          placeholder: "One per line: games.example",
+          disabled: busy,
+          onchange: (e: Event) =>
+            change(
+              setting,
+              (e.target as HTMLTextAreaElement).value
+                .split(/[\n,]+/)
+                .map((site) => site.trim())
+                .filter(Boolean),
+            ),
+        },
+        list.join("\n"),
+      ),
+    );
+  }
   if (setting.kind.type === "apps") {
     // Apps hidden from Ctrl Space (DK-1): hidden from the search's own
     // rows, shown again here one at a time, IT's default ones too.
@@ -172,6 +227,8 @@ function row(setting: Setting): HTMLElement {
 
 function render(): void {
   const sections = [...new Set(state.settings.map((s) => s.section))];
+  // A change redraws the page: it stays where the person was.
+  const scrolled = root.querySelector(".page")?.scrollTop ?? 0;
   show(
     root,
     h("header", { class: "titlebar" }, h("h1", {}, "Settings")),
@@ -185,6 +242,8 @@ function render(): void {
       ),
     ),
   );
+  const page = root.querySelector(".page");
+  if (page) page.scrollTop = scrolled;
 }
 
 void load();

@@ -95,7 +95,7 @@ impl Runtime {
     pub(crate) fn own_apps(&self, caller: &Caller) -> Vec<PersonalApp> {
         let policy = self.policy();
         // TL-6: IT turned remixing off; their apps wait until it's back on.
-        if !policy.remixing() {
+        if !self.device_settings.remixing() {
             return Vec::new();
         }
         let profile = policy.apps_for(&caller.name);

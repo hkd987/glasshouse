@@ -27,6 +27,8 @@ use serde_json::{Value, json};
 
 pub const LIST: &str = "settings.list";
 pub const SET: &str = "settings.set";
+/// The Settings app: the one place the computer's own settings change.
+pub const APP: &str = "settings";
 
 /// A setting as someone's computer applies it.
 #[derive(Debug, Clone, Serialize)]
@@ -37,6 +39,9 @@ pub struct Effective {
     /// IT locked it: the person can't change it.
     pub locked: bool,
     pub from: SettingFrom,
+    /// The person may change it: one of their own IT left to them, or one
+    /// of the computer's own on a computer they own (ADR 0038).
+    pub editable: bool,
 }
 
 impl Effective {
@@ -46,6 +51,7 @@ impl Effective {
             value: serde_json::to_value(&self.value).unwrap_or(Value::Null),
             locked: self.locked,
             from: self.from,
+            editable: self.editable,
         }
     }
 }
@@ -60,6 +66,9 @@ struct Inner {
     listeners: Mutex<Vec<Listener>>,
     /// The names of a person's apps, by id, for settings that list apps.
     app_names: RwLock<Option<AppNames>>,
+    /// The computer's owner (ADR 0038), on a computer no organization
+    /// manages: they set its own settings, kept in `computer.json`.
+    owner: RwLock<Option<String>>,
 }
 
 /// Device settings on this computer: policy's, and each person's choices.
@@ -96,7 +105,62 @@ impl SettingsHandle {
             policy: RwLock::new(None),
             listeners: Mutex::new(Vec::new()),
             app_names: RwLock::new(None),
+            owner: RwLock::new(None),
         }))
+    }
+
+    /// Who owns this computer (ADR 0038): the person who set up a computer
+    /// no organization manages, who changes its own settings as IT would
+    /// on a managed one. `None` on a managed computer: IT does.
+    pub fn set_owner(&self, owner: Option<String>) {
+        let changed = {
+            let mut slot = self.0.owner.write().unwrap_or_else(PoisonError::into_inner);
+            let changed = *slot != owner;
+            *slot = owner;
+            changed
+        };
+        if changed {
+            self.notify(None);
+        }
+    }
+
+    pub fn owner(&self) -> Option<String> {
+        self.0
+            .owner
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn computer_path(&self) -> PathBuf {
+        self.0.dir.join("computer.json")
+    }
+
+    /// The owner's choices for the computer's own settings, those still
+    /// valid; none on a computer with no owner, whatever the file says.
+    fn computer_choices(&self) -> BTreeMap<String, SettingValue> {
+        if self.owner().is_none() {
+            return BTreeMap::new();
+        }
+        let Ok(text) = fs::read_to_string(self.computer_path()) else {
+            return BTreeMap::new();
+        };
+        let all: BTreeMap<String, SettingValue> = serde_json::from_str(&text).unwrap_or_default();
+        all.into_iter()
+            .filter(|(id, value)| {
+                settings::def(id)
+                    .is_some_and(|d| d.scope != Scope::Person && settings::check(d, value).is_ok())
+            })
+            .collect()
+    }
+
+    /// Whether people may remix apps here (TL-6): unless IT, or the
+    /// computer's owner, turned `apps.remix` off.
+    pub fn remixing(&self) -> bool {
+        !self
+            .computer(None)
+            .iter()
+            .any(|r| r.id == "apps.remix" && r.value == SettingValue::Bool(false))
     }
 
     /// Where the names of a person's apps come from (by uid), so a setting
@@ -204,13 +268,17 @@ impl SettingsHandle {
     }
 
     /// What `user`'s computer is set to: IT's locked settings, then their
-    /// own choices, then IT's defaults, then the computer's.
+    /// own choices (the owner's, for the computer's own settings), then
+    /// IT's defaults, then the computer's.
     pub fn person(&self, user: &str, uid: u32) -> Vec<Effective> {
         let policy = self.policy();
         let choices = self.choices(uid);
+        let computer = self.computer_choices();
+        let owns = self.owner().as_deref() == Some(user);
         settings::table()
             .iter()
             .map(|def| {
+                let theirs = def.scope == Scope::Person || owns;
                 let it = policy
                     .as_ref()
                     .and_then(|p| p.settings_for(user).into_iter().find(|r| r.id == def.id));
@@ -220,24 +288,39 @@ impl SettingsHandle {
                         value: r.value,
                         locked: true,
                         from: SettingFrom::It,
+                        editable: false,
+                    },
+                    _ if def.scope != Scope::Person && computer.contains_key(def.id) => Effective {
+                        def,
+                        value: computer[def.id].clone(),
+                        locked: false,
+                        from: if owns {
+                            SettingFrom::You
+                        } else {
+                            SettingFrom::Owner
+                        },
+                        editable: owns,
                     },
                     _ if choices.contains_key(def.id) => Effective {
                         def,
                         value: choices[def.id].clone(),
                         locked: false,
                         from: SettingFrom::You,
+                        editable: true,
                     },
                     Some(r) if r.source != settings::Source::Default => Effective {
                         def,
                         value: r.value,
                         locked: false,
                         from: SettingFrom::It,
+                        editable: theirs,
                     },
                     _ => Effective {
                         def,
                         value: def.default.clone(),
                         locked: false,
                         from: SettingFrom::Default,
+                        editable: theirs,
                     },
                 }
             })
@@ -245,9 +328,11 @@ impl SettingsHandle {
     }
 
     /// The computer's own settings, such as the browser's, as policy sets
-    /// them with `seat` signed in at the screen, or nobody (ADR 0031).
+    /// them with `seat` signed in at the screen, or nobody (ADR 0031), and
+    /// as its owner chose where policy didn't lock them (ADR 0038).
     pub fn computer(&self, seat: Option<&str>) -> Vec<settings::Resolved> {
-        self.policy()
+        let mut all = self
+            .policy()
             .map(|p| p.computer_settings(seat))
             .unwrap_or_else(|| {
                 settings::table()
@@ -260,11 +345,24 @@ impl SettingsHandle {
                         source: settings::Source::Default,
                     })
                     .collect()
-            })
+            });
+        // The owner's choice is enforced for whoever is at the screen, as
+        // IT's locked ones are: the browser gets it as managed, and only
+        // the owner changes it, in Settings.
+        let chosen = self.computer_choices();
+        for r in all.iter_mut().filter(|r| !r.locked) {
+            if let Some(value) = chosen.get(r.id) {
+                r.value = value.clone();
+                r.locked = true;
+                r.source = settings::Source::Owner;
+            }
+        }
+        all
     }
 
     /// Sets `user`'s own choice for `id`, or takes it back with `None`.
-    /// Refused, in words, for a setting IT locked or the computer's.
+    /// Refused, in words, for a setting IT locked, or one of the computer's
+    /// own unless `user` owns the computer (ADR 0038).
     pub fn choose(
         &self,
         user: &str,
@@ -275,10 +373,7 @@ impl SettingsHandle {
         let def = settings::def(id)
             .ok_or_else(|| ActionError::InvalidInput(format!("no setting {id}")))?;
         if def.scope != Scope::Person {
-            return Err(ActionError::Failed(format!(
-                "{} is the computer's setting; IT sets it in the admin console.",
-                def.title
-            )));
+            return self.choose_for_computer(user, uid, def, value);
         }
         let now = self.person(user, uid);
         let current = now.iter().find(|e| e.def.id == id).expect("in the table");
@@ -313,6 +408,70 @@ impl SettingsHandle {
             .into_iter()
             .find(|e| e.def.id == id)
             .expect("in the table"))
+    }
+}
+
+impl SettingsHandle {
+    /// The owner's choice for one of the computer's own settings (ADR
+    /// 0038): it applies to whoever uses the computer.
+    fn choose_for_computer(
+        &self,
+        user: &str,
+        uid: u32,
+        def: &'static SettingDef,
+        value: Option<SettingValue>,
+    ) -> Result<Effective, ActionError> {
+        match self.owner() {
+            None => {
+                return Err(ActionError::Failed(format!(
+                    "{} is the computer's setting; IT sets it in the admin console.",
+                    def.title
+                )));
+            }
+            Some(owner) if owner != user => {
+                return Err(ActionError::Failed(format!(
+                    "{} is this computer's own setting; its owner, {owner}, changes it in Settings.",
+                    def.title
+                )));
+            }
+            Some(_) => {}
+        }
+        let current = |handle: &Self| {
+            handle
+                .person(user, uid)
+                .into_iter()
+                .find(|e| e.def.id == def.id)
+                .expect("in the table")
+        };
+        let now = current(self);
+        if now.locked {
+            return Err(ActionError::Failed(format!(
+                "{} is locked at {} by this computer's policy.",
+                def.title,
+                settings::describe(def, &now.value)
+            )));
+        }
+        if let Some(v) = &value {
+            settings::check(def, v)
+                .map_err(|e| ActionError::InvalidInput(format!("{}: {e}", def.title)))?;
+        }
+        let mut choices = self.computer_choices();
+        match value {
+            Some(v) => {
+                choices.insert(def.id.to_owned(), v);
+            }
+            None => {
+                choices.remove(def.id);
+            }
+        }
+        write_private(
+            &self.computer_path(),
+            &serde_json::to_vec_pretty(&choices).unwrap_or_default(),
+        )
+        .map_err(|e| ActionError::io("saving the computer's settings", e))?;
+        // Everyone's: the computer applies it for whoever is at the screen.
+        self.notify(None);
+        Ok(current(self))
     }
 }
 
@@ -467,6 +626,17 @@ impl ActionProvider for SettingsProvider {
             }
             SET => {
                 let input: SetInput = glass_actions::parse_input(input)?;
+                // The computer's own settings change only in Settings, by
+                // its owner's hand: never an agent's call (ADR 0038).
+                if let Some(def) = settings::def(&input.id)
+                    && def.scope != Scope::Person
+                    && ctx.principal.agent.as_str() != APP
+                {
+                    return Err(ActionError::Failed(format!(
+                        "{} is this computer's own setting: its owner changes it in Settings, never an agent.",
+                        def.title
+                    )));
+                }
                 let now = self
                     .handle
                     .choose(&who.name, who.uid, &input.id, input.value)?;
@@ -677,5 +847,182 @@ members = ["dana"]
             named,
             BTreeMap::from([("my-mail-3".to_owned(), "My Mail".to_owned())])
         );
+    }
+
+    fn ctx(login: &str, uid: u32, app: &str) -> TaskContext {
+        let mut ctx = glass_actions::testing::context(Path::new("/nonexistent"));
+        ctx.principal.on_behalf_of.name = login.into();
+        ctx.principal.on_behalf_of.uid = uid;
+        ctx.principal.agent = app.parse().unwrap();
+        ctx
+    }
+
+    #[test]
+    fn adr0038_the_owner_of_an_unmanaged_computer_sets_its_own_settings_for_everyone() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SettingsHandle::new(dir.path());
+        handle.set_policy(&policy(""));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let h = Arc::clone(&heard);
+        handle.on_change(move |uid| h.lock().unwrap().push(uid));
+        let get = |user: &str, uid, id: &str| {
+            handle
+                .person(user, uid)
+                .into_iter()
+                .find(|e| e.def.id == id)
+                .unwrap()
+        };
+        let usb = |handle: &SettingsHandle, seat| {
+            handle
+                .computer(seat)
+                .into_iter()
+                .find(|r| r.id == "devices.usb_storage")
+                .unwrap()
+        };
+
+        // Managed (no owner): the computer's settings are IT's alone.
+        assert!(!get("dana", 1001, "devices.usb_storage").editable);
+        let it = handle
+            .choose(
+                "dana",
+                1001,
+                "devices.usb_storage",
+                Some(SettingValue::Bool(false)),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(it.contains("IT sets it"), "{it}");
+
+        // Dana owns it: she turns USB drives off and the time zone to Lisbon.
+        handle.set_owner(Some("dana".into()));
+        assert!(get("dana", 1001, "devices.usb_storage").editable);
+        assert!(!get("sam", 1002, "devices.usb_storage").editable);
+        let off = handle
+            .choose(
+                "dana",
+                1001,
+                "devices.usb_storage",
+                Some(SettingValue::Bool(false)),
+            )
+            .unwrap();
+        assert_eq!(
+            (off.value, off.from),
+            (SettingValue::Bool(false), SettingFrom::You)
+        );
+        handle
+            .choose(
+                "dana",
+                1001,
+                "region.time_zone",
+                Some(SettingValue::Text("Europe/Lisbon".into())),
+            )
+            .unwrap();
+        assert_eq!(
+            heard.lock().unwrap().last(),
+            Some(&None),
+            "everyone's changed"
+        );
+        // It applies whoever is at the screen, and Sam sees whose it is.
+        for seat in [None, Some("dana"), Some("sam")] {
+            let r = usb(&handle, seat);
+            assert_eq!(
+                (r.value, r.locked, r.source),
+                (SettingValue::Bool(false), true, settings::Source::Owner)
+            );
+        }
+        let sams = get("sam", 1002, "devices.usb_storage");
+        assert_eq!(
+            (sams.value, sams.from),
+            (SettingValue::Bool(false), SettingFrom::Owner)
+        );
+        // person() and computer() agree on every one of the computer's own.
+        for def in settings::table()
+            .iter()
+            .filter(|d| d.scope != Scope::Person)
+        {
+            let seen = get("sam", 1002, def.id).value;
+            let applied = handle
+                .computer(Some("sam"))
+                .into_iter()
+                .find(|r| r.id == def.id)
+                .unwrap()
+                .value;
+            assert_eq!(seen, applied, "{}", def.id);
+        }
+
+        // Sam isn't the owner; nor is a person's own file a way in.
+        let sam = handle
+            .choose(
+                "sam",
+                1002,
+                "devices.usb_storage",
+                Some(SettingValue::Bool(true)),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(sam.contains("its owner, dana"), "{sam}");
+        fs::write(
+            dir.path().join("1002.json"),
+            r#"{"devices.usb_storage": true}"#,
+        )
+        .unwrap();
+        assert_eq!(usb(&handle, Some("sam")).value, SettingValue::Bool(false));
+
+        // An agent working for Dana can't, even with settings.set; the
+        // Settings app can. Her own settings stay hers to change anywhere.
+        let provider = SettingsProvider::new(handle.clone());
+        let set = SET.parse().unwrap();
+        let input = json!({ "id": "devices.usb_storage", "value": true });
+        let agent = provider
+            .invoke(&ctx("dana", 1001, "claude-code"), &set, &input)
+            .unwrap_err()
+            .to_string();
+        assert!(agent.contains("never an agent"), "{agent}");
+        assert_eq!(usb(&handle, None).value, SettingValue::Bool(false));
+        provider
+            .invoke(&ctx("dana", 1001, APP), &set, &input)
+            .unwrap();
+        assert_eq!(usb(&handle, None).value, SettingValue::Bool(true));
+        provider
+            .invoke(
+                &ctx("dana", 1001, "claude-code"),
+                &set,
+                &json!({ "id": "clock.hour24", "value": true }),
+            )
+            .unwrap();
+
+        // Remixing follows the owner's choice; back to the default with None.
+        assert!(handle.remixing());
+        handle
+            .choose("dana", 1001, "apps.remix", Some(SettingValue::Bool(false)))
+            .unwrap();
+        assert!(!handle.remixing());
+        handle.choose("dana", 1001, "apps.remix", None).unwrap();
+        assert!(handle.remixing());
+
+        // Enrolled later: the owner's choices stop applying, and IT's rule.
+        handle.set_owner(None);
+        assert_eq!(usb(&handle, None).value, SettingValue::Bool(true));
+        assert_eq!(usb(&handle, None).source, settings::Source::Default);
+    }
+
+    #[test]
+    fn adr0038_a_setting_policy_locks_stays_locked_for_the_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SettingsHandle::new(dir.path());
+        handle.set_policy(&policy(
+            "[[group]]\nname = \"family\"\nmembers = [\"dana\"]\n[group.settings]\n\"devices.usb_storage\" = { value = false, locked = true }\n",
+        ));
+        handle.set_owner(Some("dana".into()));
+        let locked = handle
+            .choose(
+                "dana",
+                1001,
+                "devices.usb_storage",
+                Some(SettingValue::Bool(true)),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(locked.contains("locked"), "{locked}");
     }
 }

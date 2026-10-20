@@ -14,6 +14,28 @@ use glass_policy::document::SettingValue;
 use glass_policy::settings::Resolved;
 use glass_runtime::{Runtime, SettingsHandle};
 
+/// Who owns a computer no organization manages (ADR 0038): the account
+/// first-run setup made, as it recorded in `setup.toml` beside glassd's
+/// state, or on a computer set up before it recorded one, its first
+/// person's account (the lowest uid with a login).
+pub(crate) fn owner(state_dir: &Path) -> Option<String> {
+    let recorded = std::fs::read_to_string(state_dir.join("setup.toml")).ok();
+    let people = glass_platform::users::people().unwrap_or_default();
+    owner_of(recorded.as_deref(), &people)
+}
+
+fn owner_of(setup: Option<&str>, people: &[glass_platform::users::Person]) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Setup {
+        owner: Option<String>,
+    }
+    let recorded = setup
+        .and_then(|text| toml::from_str::<Setup>(text).ok())
+        .and_then(|s| s.owner)
+        .filter(|login| glass_platform::users::valid_login(login));
+    recorded.or_else(|| people.first().map(|p| p.name.clone()))
+}
+
 /// What glassd last applied.
 #[derive(Debug, Default)]
 struct Applied {
@@ -208,6 +230,30 @@ fn setting_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adr0038_the_owner_is_whom_setup_recorded_else_the_first_person() {
+        let person = |name: &str, uid| glass_platform::users::Person {
+            name: name.into(),
+            full_name: String::new(),
+            uid,
+        };
+        let people = [person("demo", 1001), person("dana", 1002)];
+        let setup = "# First-run setup (UX-2)\nmodels = \"later\"\nowner = \"dana\"\n";
+        assert_eq!(owner_of(Some(setup), &people).as_deref(), Some("dana"));
+        // Set up before setup recorded one: the first person's.
+        assert_eq!(
+            owner_of(Some("models = \"later\"\n"), &people).as_deref(),
+            Some("demo")
+        );
+        assert_eq!(owner_of(None, &people).as_deref(), Some("demo"));
+        // Nothing a login can't be, and no one at all: no owner.
+        assert_eq!(
+            owner_of(Some("owner = \"../root\"\n"), &people).as_deref(),
+            Some("demo")
+        );
+        assert_eq!(owner_of(None, &[]), None);
+    }
 
     fn computer(remix: bool) -> Vec<Resolved> {
         vec![Resolved {
