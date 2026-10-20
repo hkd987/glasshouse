@@ -3,24 +3,52 @@
 //!
 //! - **Rooms.** The admin console admits each participant over the private
 //!   API (HTTP and JSON on loopback, see `api.rs`): it posts the page's
-//!   WebRTC offer with the participant's index and gets the relay's answer
-//!   back. The answer carries ICE credentials for that participant only, so
-//!   nobody else gets media. M1 has two seats a room ([`SEATS`]).
+//!   WebRTC offer with the participant's index (and, optionally, the name
+//!   the others see) and gets the relay's answer back. The answer carries
+//!   ICE credentials for that participant only, so nobody else gets media.
+//!   A room has [`SEATS`] seats, 25: the 26th is refused.
+//! - **The page's offer.** A data channel; one `sendonly` audio m-line (the
+//!   microphone); one `sendonly` video m-line (the camera) and optionally a
+//!   second (the screen, sent only while shared); and any number of
+//!   `recvonly` audio and video m-lines, in Opus and VP8. The `recvonly`
+//!   lines are the page's *slots*: the relay sends each other participant's
+//!   microphone, camera and shared screen on a free slot of that kind, and
+//!   a slot freed by someone leaving carries the next person.
 //! - **Media.** One UDP socket for everyone, ICE-lite, a host candidate on
 //!   the configured public address. str0m runs in RTP mode: the relay reads
 //!   RTP headers and RTCP and forwards each packet's payload unchanged to
-//!   the other participant's receiving m-line. Frames are sealed end to end
-//!   (SFrame); the relay can't decode them and never tries.
-//! - **Data channel.** The page opens one, labelled `glass`. The relay sends
-//!   one JSON object a message, ending in a newline:
-//!   `{"type":"peers","peers":[0,1]}` (the participants in the room) when
-//!   it opens and whenever that changes.
+//!   each other participant's slot for it. Frames are sealed end to end
+//!   (SFrame); the relay can't decode them and never tries. It reads only
+//!   VP8's payload descriptor and frame tag, which SFrame leaves clear, so a
+//!   slot that changes hands starts on a key frame.
+//! - **Data channel.** The page opens one, labelled `glass`. Each message is
+//!   one JSON object ending in a newline. The relay sends:
+//!   - `{"type":"peers","peers":[0,1,2],"sharing":[2],"names":{"1":"Priya"},
+//!     "tracks":[{"mid":"5","participant":1,"kind":"audio","screen":false},
+//!     {"mid":"6","participant":1,"kind":"video","screen":false},
+//!     {"mid":"7","participant":2,"kind":"video","screen":true}]}`
+//!     when the channel opens and whenever any of it changes: who is in the
+//!     room, who shares a screen, the names the console gave (`names` only
+//!     when there are some), and which of this page's slots carries whose
+//!     microphone, camera or screen. A track without a slot isn't listed.
+//!   - `{"type":"answer","sdp":"…"}` for each offer the page sends, then a
+//!     `peers` line (always, even unchanged) naming its new slots; or
+//!     `{"type":"refused","error":"…"}` if it can't answer, and the page
+//!     rolls back.
+//!
+//!   The page sends:
+//!   - `{"type":"offer","sdp":"…"}` with more `recvonly` m-lines when the
+//!     last `peers` line shows a participant, or a shared screen, without a
+//!     slot. One at a time: the next waits for the answer and the `peers`
+//!     line after it.
+//!   - `{"type":"screen","on":true}` when it starts sending its screen on
+//!     its second video line, `{"type":"screen","on":false}` when it stops.
+//!     Only then do the others get a slot for it.
 //! - **Never recorded.** No code here writes a file: each crate's
 //!   `clippy.toml` disallows the calls that could
 //!   (`cf21_the_relay_never_writes_media`). Logs go to stderr.
 //!
-//! Not here yet (M2): simulcast and layer choice, the active speaker, 25
-//! seats, renegotiation over the data channel.
+//! Not here yet (M2): simulcast and layer choice, and the active speaker.
 
 mod api;
 mod media;

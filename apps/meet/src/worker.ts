@@ -45,7 +45,9 @@ const scope = self as unknown as Scope;
 
 scope.onmessage = ({ data }) => {
   if (data?.type === "key") {
-    cipher.setKey(new Uint8Array(data.key as ArrayBuffer), Number(data.participant));
+    // A media key: this participant's index (its KID) and the key's
+    // generation, higher being newer. The newest seals from now on.
+    cipher.setKey(Number(data.participant), new Uint8Array(data.key as ArrayBuffer), Number(data.generation ?? 0));
   } else if (data?.type === "streams") {
     // The engine's older encoded streams, handed over by the page.
     pipe(data.readable, data.writable, { side: data.side, kind: data.kind });
