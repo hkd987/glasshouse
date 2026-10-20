@@ -189,6 +189,9 @@ pub enum ConversationKind {
     /// versions and the feedback on it. The Artifacts app shows it; Chat
     /// doesn't.
     Artifact,
+    /// A skill in the shared space (ADR 0034): who may use it and propose
+    /// changes, its versions with their evals, and the proposals.
+    Skill,
 }
 
 impl ConversationKind {
@@ -197,12 +200,19 @@ impl ConversationKind {
         matches!(self, Self::Direct | Self::Group | Self::Channel)
     }
 
+    /// Whether it is an item of the shared space, whose sealed name is an
+    /// [`crate::shared::ItemName`].
+    pub fn is_item(self) -> bool {
+        matches!(self, Self::Artifact | Self::Skill)
+    }
+
     /// The app that shows it, which news in it wakes.
     pub fn app(self) -> &'static str {
         match self {
             Self::Direct | Self::Group | Self::Channel => "chat",
             Self::Meeting => "calendar",
             Self::Artifact => "artifacts",
+            Self::Skill => "skills",
         }
     }
 }
@@ -369,6 +379,11 @@ pub struct Conversation {
     pub name: Option<String>,
     /// The epoch messages are sealed under now.
     pub epoch: u32,
+    /// An item's label in the clear, for IT's inventory (ADR 0034 §5).
+    /// Computers trust the copy sealed with its name, and refuse an item
+    /// whose two copies differ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<glass_types::Label>,
 }
 
 fn name_context(conversation: &str, epoch: u32) -> Vec<u8> {

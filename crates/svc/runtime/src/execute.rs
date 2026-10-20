@@ -103,12 +103,27 @@ impl Runtime {
             .chain(&preview.writes)
             .map(PathBuf::as_path);
         let verdict = decide(&policy, &def.name, def.default_tier, paths, &label_of);
+        // An item of the shared space is held to its label like a file
+        // (ADR 0034 §5).
+        let verdict = match (verdict, preview.label) {
+            (verdict @ Verdict::Block { .. }, _) | (verdict, None) => verdict,
+            (_, Some(label)) if !policy.may_open(label) => Verdict::Block {
+                reason: format!(
+                    "{} is labeled {label}; this agent may only open data up to {}",
+                    preview.targets.first().map_or("It", String::as_str),
+                    policy.max_label()
+                ),
+                rule: format!("data label {label}"),
+            },
+            (verdict, _) => verdict,
+        };
         // What the call reads, so a successful one raises the task's label
         // (DP-11).
         let read_label = preview
             .reads
             .iter()
             .filter_map(|path| label_of(path).ok().flatten())
+            .chain(preview.label)
             .max();
 
         // A model call carries the task's data off the machine: the most

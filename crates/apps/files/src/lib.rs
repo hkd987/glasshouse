@@ -185,6 +185,7 @@ impl ActionProvider for FilesProvider {
                     reads: vec![src.host.clone()],
                     writes: vec![src.host.clone(), dst.host.clone()],
                     snapshot_roots: vec![src.grant.root.clone()],
+                    label: None,
                 })
             }
             _ => Err(ActionError::InvalidInput(format!(
@@ -378,6 +379,7 @@ fn write_preview(verb: &str, r: &Resolved<'_>) -> Preview {
         reads: Vec::new(),
         writes: vec![r.host.clone()],
         snapshot_roots: vec![r.grant.root.clone()],
+        label: None,
     }
 }
 

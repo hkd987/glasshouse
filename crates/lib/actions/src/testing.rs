@@ -38,5 +38,6 @@ pub fn context(root: &Path) -> TaskContext {
             },
         ],
         groups: vec!["everyone".into()],
+        data_label: None,
     }
 }

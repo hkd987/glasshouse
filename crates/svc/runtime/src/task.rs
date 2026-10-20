@@ -165,6 +165,7 @@ impl Task {
     pub fn call_ctx(&self) -> TaskContext {
         let mut ctx = self.ctx.clone();
         ctx.groups = self.policy().groups().map(str::to_owned).collect();
+        ctx.data_label = self.lock().data_label;
         ctx
     }
 

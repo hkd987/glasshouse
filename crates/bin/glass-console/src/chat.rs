@@ -478,6 +478,7 @@ mod tests {
                 created_by: by.key.login.clone(),
                 name: Some(seal_name(&key, &id, 1, name).unwrap()),
                 epoch: 1,
+                label: None,
             };
             let (status, _) = self
                 .post(
@@ -514,6 +515,7 @@ mod tests {
                 created_by: by.key.login.clone(),
                 name: Some(seal_name(&key, &id, 1, "Northwind renewal").unwrap()),
                 epoch: 1,
+                label: None,
             };
             let (status, body) = self
                 .post(
@@ -890,6 +892,7 @@ mod tests {
             created_by: "priya".into(),
             name: None,
             epoch: 1,
+            label: None,
         };
         let create = |epoch: Epoch| json!({ "device": "laptop-priya", "conversation": conversation, "epoch": epoch });
 

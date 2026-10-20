@@ -366,6 +366,7 @@ impl ActionProvider for SystemProvider {
                     reads: Vec::new(),
                     writes: vec![root.clone()],
                     snapshot_roots: vec![root],
+                    label: None,
                 })
             }
             "system.service.restart" => {
@@ -553,6 +554,7 @@ mod tests {
             home,
             grants: Vec::new(),
             groups: Vec::new(),
+            data_label: None,
         }
     }
 

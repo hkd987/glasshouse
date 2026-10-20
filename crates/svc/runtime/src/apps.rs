@@ -326,6 +326,7 @@ impl Runtime {
             home: caller.home.clone(),
             grants: Vec::new(),
             groups: policy.groups().map(str::to_owned).collect(),
+            data_label: None,
         };
         // The app's data folders (~/Mail, ~/Calendar) exist before its
         // first call, as they do before an agent's.

@@ -651,7 +651,7 @@ pub fn artifacts_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "artifacts", "name": "Artifacts", "version": "0.1.0",
         "actions": ["artifact.list", "artifact.read", "artifact.share", "artifact.update", "artifact.comment", "artifact.resolve", "people.search", "chat.list"],
-        "permissions": [], "labels": ["public", "internal"]
+        "permissions": [], "labels": ["public", "internal", "confidential"]
     }))
     .unwrap()
 }

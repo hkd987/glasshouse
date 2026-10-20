@@ -1,7 +1,8 @@
 //! Artifacts (AR-1, ADR 0033) through the real pipeline, with an in-memory
 //! console: an agent's share asks and says who will see it, and once
 //! approved the colleague opens the page; what the person does in the
-//! Artifacts app doesn't ask; every read is audited without the page.
+//! Artifacts app doesn't ask; every read is audited without the page; an
+//! artifact's label holds like a file's (ADR 0034 §5).
 
 #![allow(clippy::unwrap_used)]
 
@@ -258,4 +259,46 @@ members = ["{me}"]
         shared.text
     );
     assert!(org.link.blobs().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0034_an_artifacts_label_holds_like_a_files() {
+    let h = harness_with("");
+    // An org that handles confidential data; Claude Code's own rule still
+    // keeps it to internal.
+    h.apply_policy_replacing(
+        "the PRD data labels).\nmax_label = \"internal\"",
+        "the PRD data labels).\nmax_label = \"confidential\"",
+        "",
+    );
+    let org = org(&h);
+    let apps = Client::connect(h.serve_apps()).await.unwrap();
+    let session = open(&apps, "artifacts").await.session;
+    assert!(call(&apps, session, "artifact.list", json!({})).await.ok);
+    // Priya shares a confidential page with the person.
+    let shared = org.priya(
+        "artifact.share",
+        json!({ "title": "Board deck", "html": PAGE, "with": [h.me.name], "label": "confidential" }),
+    );
+    let id = shared["id"].as_str().unwrap().to_owned();
+    h.chat.sync_once(0).unwrap();
+
+    // Claude Code may open internal data at most: refused, readably.
+    let agent = claude_code(&h).await;
+    let refused = tool(&agent, "artifact_read", json!({ "artifact": id })).await;
+    assert!(refused.is_error, "{}", refused.text());
+    assert!(
+        refused
+            .text()
+            .contains("Board deck is labeled confidential"),
+        "{}",
+        refused.text()
+    );
+    let record = audited(&h, "artifact.read").pop().expect("audited");
+    assert_eq!(record.event.outcome, Some(Outcome::Blocked));
+
+    // The person opens it in Artifacts.
+    let read = call(&apps, session, "artifact.read", json!({ "artifact": id })).await;
+    assert!(read.ok, "{}", read.text);
+    assert_eq!(read.data["label"], "confidential");
 }

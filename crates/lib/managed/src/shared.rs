@@ -6,10 +6,12 @@
 //! it; the console keeps the blob's ciphertext and reads none of it.
 
 use glass_crypto::EpochKey;
+use glass_types::Label;
 use serde::{Deserialize, Serialize};
 
 use crate::chat::{
-    ChatError, ChatFailure, ConversationKind, LinkError, Result, is_conversation_id,
+    ChatError, ChatFailure, ConversationKind, LinkError, Result, is_conversation_id, open_name,
+    seal_name,
 };
 
 /// The largest blob: an artifact's HTML with its images inline. Blobs
@@ -43,6 +45,27 @@ pub struct Anchor {
     pub x: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y: Option<u16>,
+}
+
+/// What an item's sealed name holds: its title and its label (ADR 0034
+/// §5). The label sealed here is the one computers trust.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemName {
+    pub title: String,
+    pub label: Label,
+}
+
+impl ItemName {
+    /// Sealed under conversation `id`'s first epoch key.
+    pub fn seal(&self, key: &EpochKey, id: &str) -> Result<String> {
+        let text = serde_json::to_string(self).map_err(|e| ChatError::Invalid(e.to_string()))?;
+        seal_name(key, id, 1, &text)
+    }
+
+    pub fn open(key: &EpochKey, id: &str, sealed: &str) -> Result<Self> {
+        serde_json::from_str(&open_name(key, id, 1, sealed)?).map_err(|_| ChatError::Open)
+    }
 }
 
 /// What a message in a shared item says beyond its text.
@@ -224,6 +247,8 @@ pub struct Item {
     pub id: String,
     pub kind: ConversationKind,
     pub title: String,
+    /// As sealed with its name; chat's own conversations are internal.
+    pub label: Label,
     pub members: Vec<String>,
     pub created_by: String,
     /// In order; what this computer couldn't open is left out.
@@ -243,13 +268,15 @@ pub trait Shared: Send + Sync + std::fmt::Debug {
     fn items(&self, login: &str, kind: ConversationKind) -> Vec<Item>;
     /// `login`'s item `id`, its messages opened; only that one is opened.
     fn item(&self, login: &str, id: &str) -> Option<Item>;
-    /// A new item of `kind` titled `title`, for `login` and `members`,
-    /// sealed to their computers and IT's compliance key. Its id.
+    /// A new item of `kind` titled `title` and labeled `label`, for
+    /// `login` and `members`, sealed to their computers and IT's
+    /// compliance key. Its id.
     fn create(
         &self,
         login: &str,
         kind: ConversationKind,
         title: &str,
+        label: Label,
         members: &[String],
     ) -> std::result::Result<String, ChatFailure>;
     /// Posts a message to item or conversation `to`, which `login` is in.

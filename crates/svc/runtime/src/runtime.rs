@@ -689,6 +689,7 @@ impl Runtime {
             home: caller.home.clone(),
             grants: prepared.grants,
             groups: prepared.policy.groups().map(str::to_owned).collect(),
+            data_label: None,
         };
         let layer_note = prepared.card.layer.as_ref().map(crate::tailor::note);
         let driver_socket = prepared

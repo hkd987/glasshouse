@@ -1,7 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use glass_platform::fs::Owner;
-use glass_types::AgentPrincipal;
+use glass_types::{AgentPrincipal, Label};
 
 use crate::ActionError;
 
@@ -29,6 +29,10 @@ pub struct TaskContext {
     /// from anything the agent sent, for actions that show only what the
     /// user's groups may see, such as `catalog.search` (GA-2, DV-11).
     pub groups: Vec<String>,
+    /// The most sensitive label of what the task has read so far (DP-11),
+    /// set by the runtime: what it puts in the shared space is labeled at
+    /// least this (ADR 0034 §5).
+    pub data_label: Option<Label>,
 }
 
 /// An agent-visible path resolved against the task's grants.

@@ -574,6 +574,7 @@ impl ActionProvider for MailProvider {
                     reads: vec![mail.join(folder.dir())],
                     writes: Vec::new(),
                     snapshot_roots: Vec::new(),
+                    label: None,
                 })
             }
             "mail.read" => {
@@ -586,6 +587,7 @@ impl ActionProvider for MailProvider {
                     reads: vec![mail.join(folder.dir()).join(name)],
                     writes: Vec::new(),
                     snapshot_roots: Vec::new(),
+                    label: None,
                 })
             }
             "mail.draft" => {
@@ -599,6 +601,7 @@ impl ActionProvider for MailProvider {
                     reads: Vec::new(),
                     writes: vec![mail.join(DRAFTS)],
                     snapshot_roots: vec![mail.join(DRAFTS)],
+                    label: None,
                 })
             }
             "mail.send" => {
@@ -621,6 +624,7 @@ impl ActionProvider for MailProvider {
                     reads: Vec::new(),
                     writes: vec![mail.join(SENT)],
                     snapshot_roots: Vec::new(),
+                    label: None,
                 })
             }
             _ => Err(ActionError::InvalidInput(format!(

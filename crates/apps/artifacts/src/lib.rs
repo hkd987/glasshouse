@@ -32,7 +32,7 @@ use glass_managed::shared::{
     Anchor, BlobKey, Item, ItemMessage, MAX_BLOB_BYTES, MAX_TITLE_CHARS, Part, Shared, new_blob_id,
 };
 use glass_platform::fs::ConfinedDir;
-use glass_types::{ActionName, SideEffect, Tier};
+use glass_types::{ActionName, Label, SideEffect, Tier};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -93,6 +93,7 @@ struct Comment {
 struct Artifact {
     id: String,
     title: String,
+    label: Label,
     owner: String,
     members: Vec<String>,
     versions: Vec<Version>,
@@ -163,6 +164,7 @@ impl Artifact {
         Self {
             id: item.id,
             title: item.title,
+            label: item.label,
             owner: item.created_by,
             members: item.members,
             versions,
@@ -222,6 +224,9 @@ struct ShareInput {
     conversation: Option<String>,
     #[serde(default)]
     note: Option<String>,
+    /// Internal unless said; never below what the task has read.
+    #[serde(default)]
+    label: Option<Label>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -394,6 +399,26 @@ impl ArtifactsProvider {
         (agent != APP).then(|| format!("by {agent} for {}", Self::me(ctx)))
     }
 
+    /// A new artifact's label: the one asked for (internal unless said),
+    /// and never below what the task has read (ADR 0034 §5).
+    fn label_for(ctx: &TaskContext, asked: Option<Label>) -> Label {
+        asked
+            .unwrap_or(Label::Internal)
+            .max(ctx.data_label.unwrap_or(Label::Public))
+    }
+
+    /// What a task that has read data labeled above `artifact`'s may not
+    /// put in it (DP-11).
+    fn no_write_down(ctx: &TaskContext, artifact: &Artifact) -> Result<(), ActionError> {
+        match ctx.data_label {
+            Some(read) if read > artifact.label => Err(ActionError::OutOfScope(format!(
+                "this task has read {read} data, and {} is labeled {}; share a new artifact instead",
+                artifact.title, artifact.label
+            ))),
+            _ => Ok(()),
+        }
+    }
+
     /// Seals `html` as the next version of item `id` and posts it.
     fn add_version(
         &self,
@@ -453,6 +478,7 @@ impl ArtifactsProvider {
                 json!({
                     "id": a.id,
                     "title": a.title,
+                    "label": a.label,
                     "owner": a.owner,
                     "owner_name": self.name(&a.owner),
                     "mine": a.owner == me,
@@ -541,6 +567,7 @@ impl ArtifactsProvider {
             data: json!({
                 "id": artifact.id,
                 "title": artifact.title,
+                "label": artifact.label,
                 "owner": artifact.owner,
                 "owner_name": self.name(&artifact.owner),
                 "mine": artifact.owner == me,
@@ -603,9 +630,10 @@ impl ArtifactsProvider {
             people.sort();
             people.dedup();
         }
+        let label = Self::label_for(ctx, input.label);
         let id = self
             .shared
-            .create(me, ConversationKind::Artifact, &title, &people)
+            .create(me, ConversationKind::Artifact, &title, label, &people)
             .map_err(failed)?;
         let note = input.note.as_deref().unwrap_or("").trim().to_owned();
         // Until its first version is posted it is no one's artifact, so a
@@ -636,7 +664,7 @@ impl ArtifactsProvider {
             } else {
                 format!("Shared {title} with {}.", names.join(", "))
             },
-            data: json!({ "id": id, "title": title, "version": 1, "people": people }),
+            data: json!({ "id": id, "title": title, "label": label, "version": 1, "people": people }),
             changes: Vec::new(),
         })
     }
@@ -661,6 +689,7 @@ impl ArtifactsProvider {
                 self.name(&artifact.owner)
             )));
         }
+        Self::no_write_down(ctx, &artifact)?;
         let html = self.content(ctx, &input.content)?;
         let number = artifact.latest().map_or(1, |v| v.number + 1);
         self.add_version(ctx, &artifact.id, number, &html, input.note.trim())?;
@@ -675,6 +704,7 @@ impl ArtifactsProvider {
         self.ready(ctx)?;
         let me = Self::me(ctx);
         let artifact = self.artifact(me, &input.artifact)?;
+        Self::no_write_down(ctx, &artifact)?;
         let text = input.text.trim();
         if text.is_empty() || text.chars().count() > MAX_TEXT_CHARS {
             return Err(invalid(format!(
@@ -760,10 +790,17 @@ impl ArtifactsProvider {
         })
     }
 
-    /// An artifact's title for a preview, when the person is in it.
+    /// An artifact's title and label for a preview, when the person is in
+    /// it.
+    fn about(&self, ctx: &TaskContext, id: &str) -> (String, Option<Label>) {
+        self.artifact(Self::me(ctx), id).map_or_else(
+            |_| ("an artifact".into(), None),
+            |a| (a.title, Some(a.label)),
+        )
+    }
+
     fn title_of(&self, ctx: &TaskContext, id: &str) -> String {
-        self.artifact(Self::me(ctx), id)
-            .map_or_else(|_| "an artifact".into(), |a| a.title)
+        self.about(ctx, id).0
     }
 }
 
@@ -837,7 +874,8 @@ impl ActionProvider for ArtifactsProvider {
                         "path": path,
                         "with": { "type": "array", "items": { "type": "string" }, "description": "Logins of people in the organization" },
                         "conversation": { "type": "string", "pattern": "^cv-[0-9a-f]{32}$", "description": "A chat conversation from chat.list" },
-                        "note": { "type": "string", "maxLength": MAX_TEXT_CHARS }
+                        "note": { "type": "string", "maxLength": MAX_TEXT_CHARS },
+                        "label": { "enum": ["public", "internal", "confidential", "restricted"], "description": "Internal unless said; never below the data the task has read" }
                     },
                     "required": ["title"],
                     "additionalProperties": false
@@ -929,10 +967,12 @@ impl ActionProvider for ArtifactsProvider {
             }
             READ => {
                 let input: ReadInput = parse_input(input)?;
-                let title = self.title_of(ctx, &input.artifact);
+                // Reading it raises the task's label to its own.
+                let (title, label) = self.about(ctx, &input.artifact);
                 Ok(Preview {
                     summary: format!("Read {title}"),
                     targets: vec![title],
+                    label,
                     ..Preview::default()
                 })
             }
@@ -951,9 +991,10 @@ impl ActionProvider for ArtifactsProvider {
                 if people.is_empty() && input.conversation.is_none() {
                     items.push("Only you can see it".into());
                 }
-                items.push(
-                    "Sealed to their computers and your organization's compliance key".into(),
-                );
+                items.push(format!(
+                    "Labeled {}; sealed to their computers and your organization's compliance key",
+                    Self::label_for(ctx, input.label)
+                ));
                 if let Some(note) = input.note.as_deref().filter(|n| !n.trim().is_empty()) {
                     items.push(format!("Note: {note}"));
                 }

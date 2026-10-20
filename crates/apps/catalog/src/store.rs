@@ -156,6 +156,7 @@ pub(crate) fn preview(
         reads: Vec::new(),
         writes: vec![path(ctx)],
         snapshot_roots: vec![folder],
+        label: None,
     })
 }
 

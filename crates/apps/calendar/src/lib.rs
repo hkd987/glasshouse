@@ -791,6 +791,7 @@ impl ActionProvider for CalendarProvider {
             reads: Vec::new(),
             writes: vec![events.clone()],
             snapshot_roots: vec![events.clone()],
+            label: None,
         };
         match action.as_str() {
             "calendar.list" => {
@@ -803,6 +804,7 @@ impl ActionProvider for CalendarProvider {
                     reads: vec![events.clone()],
                     writes: Vec::new(),
                     snapshot_roots: Vec::new(),
+                    label: None,
                 })
             }
             "calendar.read" => {
@@ -815,6 +817,7 @@ impl ActionProvider for CalendarProvider {
                     reads: vec![Self::event_path(ctx, &id)],
                     writes: Vec::new(),
                     snapshot_roots: Vec::new(),
+                    label: None,
                 })
             }
             "calendar.hold" => {
@@ -879,6 +882,7 @@ impl ActionProvider for CalendarProvider {
                     reads: vec![Self::event_path(ctx, &id)],
                     writes: vec![Self::calendar_dir(ctx).join(SENT)],
                     snapshot_roots: Vec::new(),
+                    label: None,
                 })
             }
             _ => Err(ActionError::InvalidInput(format!(

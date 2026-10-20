@@ -313,6 +313,8 @@ fn ar2_only_its_people_open_it_and_the_console_reads_none_of_it() {
         .find(|(c, _)| c.id == id)
         .unwrap();
     assert_eq!(conversation.kind, ConversationKind::Artifact);
+    // Its label is in the clear for IT's inventory, and sealed with its title.
+    assert_eq!(conversation.label, Some(Label::Internal));
     assert!(
         !serde_json::to_string(&conversation)
             .unwrap()
@@ -378,9 +380,10 @@ fn ar1_a_share_that_fails_partway_shares_nothing() {
             l: &str,
             k: ConversationKind,
             t: &str,
+            label: Label,
             m: &[String],
         ) -> Result<String, glass_managed::chat::ChatFailure> {
-            let id = self.inner.create(l, k, t, m);
+            let id = self.inner.create(l, k, t, label, m);
             self.link.offline(true);
             id
         }
@@ -486,14 +489,17 @@ fn ar3_shared_to_a_conversation_it_reaches_its_people_as_a_card() {
     let c = org.computer("dev-c");
     c.call("sam", APP, LIST, json!({})).unwrap();
     let team = a
-        .shared()
-        .create(
-            "dana",
-            ConversationKind::Group,
-            "Planning",
-            &["priya".into(), "sam".into()],
+        .roster
+        .invoke(
+            &a.ctx("dana", "chat"),
+            &"chat.create".parse().unwrap(),
+            &json!({ "name": "Planning", "people": ["priya", "sam"] }),
         )
-        .unwrap();
+        .unwrap()
+        .data["conversation"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let out = a
         .call(
             "dana",
@@ -512,7 +518,7 @@ fn ar3_shared_to_a_conversation_it_reaches_its_people_as_a_card() {
         assert_eq!(read.data["html"], PAGE);
         let planning = computer
             .shared()
-            .items(login, ConversationKind::Group)
+            .items(login, ConversationKind::Channel)
             .into_iter()
             .find(|c| c.id == team)
             .unwrap();
@@ -645,6 +651,78 @@ fn ar_others_see_nothing_until_the_person_says_yes() {
             tiers[action],
             (Tier::Ask, SideEffect::Irreversible),
             "{action}"
+        );
+    }
+}
+
+#[test]
+fn adr0034_an_artifact_is_labeled_at_least_what_its_task_read() {
+    let org = org();
+    let (a, b) = org.pair();
+    // A task that read confidential data shares without saying: the
+    // artifact is confidential, and the preview says so.
+    let mut ctx = a.ctx("dana", AGENT);
+    ctx.data_label = Some(Label::Confidential);
+    let input = json!({ "title": "Board deck", "html": PAGE, "with": ["priya"] });
+    let preview = a
+        .artifacts
+        .preview(&ctx, &SHARE.parse().unwrap(), &input)
+        .unwrap();
+    assert!(
+        preview
+            .items
+            .iter()
+            .any(|i| i.starts_with("Labeled confidential")),
+        "{:?}",
+        preview.items
+    );
+    let out = a
+        .artifacts
+        .invoke(&ctx, &SHARE.parse().unwrap(), &input)
+        .unwrap();
+    assert_eq!(out.data["label"], "confidential");
+    let id = out.data["id"].as_str().unwrap().to_owned();
+    // Asking for less doesn't lower it.
+    let lower = json!({ "title": "Board deck", "html": PAGE, "label": "public" });
+    let out = a
+        .artifacts
+        .invoke(&ctx, &SHARE.parse().unwrap(), &lower)
+        .unwrap();
+    assert_eq!(out.data["label"], "confidential");
+
+    // Reading it names its label, so the pipeline raises the reader's.
+    b.sync();
+    let read = b
+        .artifacts
+        .preview(
+            &b.ctx("priya", AGENT),
+            &READ.parse().unwrap(),
+            &json!({ "artifact": id }),
+        )
+        .unwrap();
+    assert_eq!(read.label, Some(Label::Confidential));
+    let listed = b.call("priya", APP, LIST, json!({})).unwrap();
+    assert_eq!(listed.data["artifacts"][0]["label"], "confidential");
+
+    // An internal artifact takes nothing from a task that read more.
+    let internal = a
+        .call("dana", AGENT, SHARE, json!({ "title": "Q3", "html": PAGE }))
+        .unwrap();
+    let internal = internal.data["id"].as_str().unwrap();
+    for (action, input) in [
+        (
+            UPDATE,
+            json!({ "artifact": internal, "html": PAGE_2, "note": "more" }),
+        ),
+        (
+            COMMENT,
+            json!({ "artifact": internal, "text": "see the board deck" }),
+        ),
+    ] {
+        let refused = a.artifacts.invoke(&ctx, &action.parse().unwrap(), &input);
+        assert!(
+            matches!(refused, Err(ActionError::OutOfScope(_))),
+            "{action}: {refused:?}"
         );
     }
 }

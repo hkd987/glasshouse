@@ -303,6 +303,7 @@ impl ChatProvider {
         kind: ConversationKind,
         name: Option<&str>,
         id: Option<&str>,
+        label: Option<glass_types::Label>,
     ) -> Result<Conversation, ChatFailure> {
         let found = connection
             .link
@@ -328,11 +329,12 @@ impl ChatProvider {
             .map(|login| self.name(login))
             .collect();
         if !missing.is_empty() {
-            // Calendar makes the person's keys too, for meetings.
-            let app = if kind == ConversationKind::Meeting {
-                "Calendar or Chat"
-            } else {
-                "Chat"
+            // The apps that make the person's keys besides Chat.
+            let app = match kind {
+                ConversationKind::Meeting => "Calendar or Chat",
+                ConversationKind::Artifact => "Artifacts or Chat",
+                ConversationKind::Skill => "Skills or Chat",
+                _ => "Chat",
             };
             return Err(ChatFailure::Local(format!(
                 "{} {} opened {app} yet, so there's no key to seal to; ask them to open {app} once",
@@ -371,6 +373,7 @@ impl ChatProvider {
             created_by: me.to_owned(),
             name: sealed,
             epoch: 1,
+            label,
         };
         connection
             .link
@@ -417,7 +420,7 @@ impl ChatProvider {
                     ConversationKind::Group
                 };
                 self.open_conversation(
-                    connection, compliance, member, me, members, kind, None, None,
+                    connection, compliance, member, me, members, kind, None, None, None,
                 )?
             }
         };
@@ -757,6 +760,7 @@ impl ChatProvider {
                 ConversationKind::Channel,
                 Some(name),
                 None,
+                None,
             )
             .map_err(|e| ActionError::Failed(format!("Not created: {e}.")))?;
         let title = display_line(&format!("#{name}")).into_owned();
@@ -792,8 +796,26 @@ impl ChatProvider {
 /// The shared space (ADR 0033): artifacts, and next docs and sheets, are
 /// conversations of their own kinds, which Chat doesn't show.
 /// Conversation `c` as a shared item, its messages opened with `member`'s
-/// keys; what this computer can't open is left out.
-fn open_item(store: &Store, member: &Member, c: &Conversation) -> glass_managed::shared::Item {
+/// keys; what this computer can't open is left out. None for an item whose
+/// sealed label isn't the one the console keeps in the clear.
+fn open_item(
+    store: &Store,
+    member: &Member,
+    c: &Conversation,
+) -> Option<glass_managed::shared::Item> {
+    let (title, label) = if c.kind.is_item() {
+        let key = store.epoch_key(member, &c.id, 1)?;
+        let name = glass_managed::shared::ItemName::open(&key, &c.id, c.name.as_deref()?).ok()?;
+        if c.label != Some(name.label) {
+            return None;
+        }
+        (name.title, name.label)
+    } else {
+        (
+            store.name(member, c).unwrap_or_default(),
+            glass_types::Label::Internal,
+        )
+    };
     let mut keys: BTreeMap<u32, Option<EpochKey>> = BTreeMap::new();
     let messages = store
         .messages
@@ -819,14 +841,15 @@ fn open_item(store: &Store, member: &Member, c: &Conversation) -> glass_managed:
             })
         })
         .collect();
-    glass_managed::shared::Item {
+    Some(glass_managed::shared::Item {
         id: c.id.clone(),
         kind: c.kind,
-        title: store.name(member, c).unwrap_or_default(),
+        title,
+        label,
         members: c.members.clone(),
         created_by: c.created_by.clone(),
         messages,
-    }
+    })
 }
 
 impl glass_managed::shared::Shared for ChatProvider {
@@ -853,7 +876,7 @@ impl glass_managed::shared::Shared for ChatProvider {
             .conversations
             .values()
             .filter(|c| c.kind == kind && c.members.iter().any(|m| m == login))
-            .map(|c| open_item(&store, &member, c))
+            .filter_map(|c| open_item(&store, &member, c))
             .collect()
     }
 
@@ -864,7 +887,7 @@ impl glass_managed::shared::Shared for ChatProvider {
             .conversations
             .get(id)
             .filter(|c| c.members.iter().any(|m| m == login))
-            .map(|c| open_item(&store, &member, c))
+            .and_then(|c| open_item(&store, &member, c))
     }
 
     fn create(
@@ -872,13 +895,24 @@ impl glass_managed::shared::Shared for ChatProvider {
         login: &str,
         kind: ConversationKind,
         title: &str,
+        label: glass_types::Label,
         people: &[String],
     ) -> Result<String, ChatFailure> {
+        if !kind.is_item() {
+            return Err(ChatFailure::Local(format!("{kind:?} isn't a shared item")));
+        }
         let connection = self.handle.connection()?;
         let compliance = self.handle.compliance()?;
         let member = self.handle.existing(login).ok_or_else(|| {
             ChatFailure::NotSetUp(format!("{login} has no chat keys on this computer yet"))
         })?;
+        // Its title and label are sealed together; the label goes in the
+        // clear too, for IT (ADR 0034 §5).
+        let name = serde_json::to_string(&glass_managed::shared::ItemName {
+            title: title.to_owned(),
+            label,
+        })
+        .map_err(|e| ChatFailure::Local(e.to_string()))?;
         let conversation = self.open_conversation(
             &connection,
             &compliance,
@@ -886,8 +920,9 @@ impl glass_managed::shared::Shared for ChatProvider {
             login,
             members(login, people),
             kind,
-            Some(title),
+            Some(&name),
             None,
+            Some(label),
         )?;
         Ok(conversation.id)
     }
@@ -1063,6 +1098,7 @@ impl Meetings for ChatProvider {
             ConversationKind::Meeting,
             Some(&details.to_name()),
             Some(id),
+            None,
         )?;
         Ok(())
     }

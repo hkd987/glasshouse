@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use glass_api::{AskLabels, ChangeKind};
-use glass_types::{ActionName, SideEffect, Tier};
+use glass_types::{ActionName, Label, SideEffect, Tier};
 use serde_json::Value;
 
 use crate::TaskContext;
@@ -54,6 +54,10 @@ pub struct Preview {
     pub reads: Vec<PathBuf>,
     /// Host paths the call changes. The broker checks their labels.
     pub writes: Vec<PathBuf>,
+    /// The label of what the call reads that isn't a file, such as an item
+    /// in the shared space (ADR 0034 §5): checked against what the agent
+    /// may open, and raising the task's label, as a file's does.
+    pub label: Option<Label>,
     /// Existing directories to snapshot before the call runs, so it can be
     /// undone (AU-20).
     pub snapshot_roots: Vec<PathBuf>,

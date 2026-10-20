@@ -552,7 +552,8 @@ impl Store {
                     if have.members != conversation.members
                         || have.kind != conversation.kind
                         || have.created_by != conversation.created_by
-                        || have.name != conversation.name =>
+                        || have.name != conversation.name
+                        || have.label != conversation.label =>
                 {
                     self.refuse(
                         refused,
