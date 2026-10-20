@@ -843,7 +843,18 @@ impl Console {
                 let keys = lock(&self.rooms).keys(&state.chat, meeting, &meet);
                 match keys {
                     Ok(keys) => ok(serde_json::to_value(keys).unwrap_or_default()),
-                    Err(r) => refused(r),
+                    Err(r) => refused(r.into()),
+                }
+            }
+            "rekey" => {
+                let state = self.state();
+                let keys = lock(&self.rooms).rekey(&state.chat, meeting, &meet);
+                match keys {
+                    Ok(keys) => {
+                        tracing::info!(meeting, login = %meet.body.login, "meet: a new media key");
+                        ok(serde_json::to_value(keys).unwrap_or_default())
+                    }
+                    Err(r) => refused(r.into()),
                 }
             }
             "leave" => self.meet_leave(meeting, &meet).await,
@@ -866,10 +877,12 @@ impl Console {
             let seat = lock(&self.rooms).join(&state.chat, meeting, request);
             match seat {
                 Ok(seat) => seat,
-                Err(r) => return refused(r),
+                Err(r) => return refused(r.into()),
             }
         };
-        match relay.join(meeting, seat.participant, offer).await {
+        // The others see them by name (the directory's), never their login.
+        let name = self.directory.display_name(&request.body.login);
+        match relay.join(meeting, seat.participant, &name, offer).await {
             Ok(answer) => {
                 tracing::info!(meeting, login = %request.body.login, participant = seat.participant, "meet: joined");
                 let joined = Joined {
@@ -901,7 +914,7 @@ impl Console {
             let left = lock(&self.rooms).leave(&state.chat, meeting, request);
             match left {
                 Ok(left) => left,
-                Err(r) => return refused(r),
+                Err(r) => return refused(r.into()),
             }
         };
         tracing::info!(meeting, login = %request.body.login, ended = left.ended, "meet: left");

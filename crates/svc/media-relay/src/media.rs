@@ -49,6 +49,27 @@ const NAME_MAX: usize = 64;
 const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
 /// How often the loop looks for slots still waiting for a key frame.
 const KEYFRAME_CHECK: Duration = Duration::from_millis(100);
+/// The most m-lines one page's offer may name: the data channel, its
+/// microphone, camera and screen, and a receiving line for each other
+/// person's three. Offers are answered on the one media loop, so one page
+/// can't make everyone wait on a huge one.
+pub const MAX_LINES: usize = 4 + 3 * (SEATS - 1);
+/// The largest offer the relay reads, as the console caps a join's.
+pub const MAX_OFFER_BYTES: usize = 64 * 1024;
+
+/// Whether `sdp` is small enough to answer: its size and m-lines.
+fn within_limits(sdp: &str) -> Result<(), String> {
+    if sdp.len() > MAX_OFFER_BYTES {
+        return Err(format!("the offer is larger than {MAX_OFFER_BYTES} bytes"));
+    }
+    let lines = sdp.lines().filter(|l| l.starts_with("m=")).count();
+    if lines > MAX_LINES {
+        return Err(format!(
+            "the offer names {lines} m-lines; a page needs {MAX_LINES} at most"
+        ));
+    }
+    Ok(())
+}
 
 /// What the API asks of the loop. Each command gets one reply.
 #[derive(Debug)]
@@ -383,6 +404,7 @@ impl Media {
         offer: &str,
     ) -> Result<(Rtc, SdpAnswer, Incoming, Vec<Slot>, Instant), JoinError> {
         let bad = |why: String| JoinError::Offer(why);
+        within_limits(offer).map_err(bad)?;
         if !offer.lines().any(|l| l.starts_with("m=application")) {
             return Err(bad("the offer has no data channel".into()));
         }
@@ -839,8 +861,11 @@ impl Media {
         let Some(peer) = self.peers.get_mut(&id) else {
             return;
         };
-        let answered = SdpOffer::from_sdp_string(&without_unresolved_candidates(sdp))
-            .map_err(|e| format!("the offer isn't SDP the relay reads: {e}"))
+        let answered = within_limits(sdp)
+            .and_then(|()| {
+                SdpOffer::from_sdp_string(&without_unresolved_candidates(sdp))
+                    .map_err(|e| format!("the offer isn't SDP the relay reads: {e}"))
+            })
             .and_then(|offer| {
                 peer.rtc
                     .sdp_api()
@@ -1246,6 +1271,28 @@ mod tests {
         let mut c = Continuity::default();
         c.map(a, 5, u32::MAX - 10, 960);
         assert_eq!(c.map(b, 7, 0, 960), (6, 949));
+    }
+
+    #[test]
+    fn cf21_a_page_can_offer_no_more_lines_than_a_full_room_needs() {
+        let offer = |lines: usize| {
+            let mut sdp = String::from("v=0\r\n");
+            for _ in 0..lines {
+                sdp.push_str("m=video 9 UDP/TLS/RTP/SAVPF 96\r\n");
+            }
+            sdp
+        };
+        assert_eq!(
+            MAX_LINES, 76,
+            "data, microphone, camera, screen and 24 people's three"
+        );
+        assert!(within_limits(&offer(MAX_LINES)).is_ok());
+        assert!(
+            within_limits(&offer(MAX_LINES + 1))
+                .unwrap_err()
+                .contains("m-lines")
+        );
+        assert!(within_limits(&"a".repeat(MAX_OFFER_BYTES + 1)).is_err());
     }
 
     #[test]

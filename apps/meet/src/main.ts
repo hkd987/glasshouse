@@ -28,6 +28,8 @@ interface Joined {
 /** `meet.keys`: the session's media keys, current first. */
 interface Keys {
   media_keys: { id: string; key: string }[];
+  /** A new key is still due; ask again shortly. */
+  due?: boolean;
 }
 
 /** One of this page's receiving lines, as the relay's `peers` line says. */
@@ -150,8 +152,10 @@ function useKeys(keys: { id: string; key: string }[]): boolean {
 }
 
 /**
- * Someone left: a remaining computer makes a new media key (ADR 0030 §6).
- * Asks glassd for it a few times, backing off, until it's there.
+ * Someone joined or left: someone who left mustn't read what follows, and
+ * a computer whose key came late brings a new media key. The first
+ * computer to ask makes the new key (ADR 0030 §6). Asks glassd, backing
+ * off, until there is a new key or none is due.
  */
 async function awaitNewKey(): Promise<void> {
   const mine = (rekeying += 1);
@@ -160,7 +164,7 @@ async function awaitNewKey(): Promise<void> {
     if (mine !== rekeying || state.phase !== "in") return;
     try {
       const result = await bridge.call<Keys>("meet.keys", { meeting });
-      if (result.ok && useKeys(result.data?.media_keys ?? [])) return;
+      if (result.ok && (useKeys(result.data?.media_keys ?? []) || result.data?.due === false)) return;
     } catch {
       // Not reachable right now: try again.
     }
@@ -196,11 +200,12 @@ async function handle(message: FromRelay): Promise<void> {
   if (!connection) return;
   if (message.type === "peers") {
     const gone = state.peers.some((p) => p !== state.me && !message.peers.includes(p));
+    const came = state.peers.length > 0 && message.peers.some((p) => p !== state.me && !state.peers.includes(p));
     state.peers = message.peers;
     state.sharers = message.sharing ?? [];
     state.names = message.names ?? {};
     state.tracks = message.tracks ?? [];
-    if (gone) void awaitNewKey();
+    if (gone || came) void awaitNewKey();
     draw();
     await offerLines();
   } else if (message.type === "answer") {

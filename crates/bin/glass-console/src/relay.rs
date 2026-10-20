@@ -44,21 +44,23 @@ impl Relay {
         Ok(Self { api })
     }
 
-    /// Admits participant `participant` to `room` with `offer`: the answer.
+    /// Admits participant `participant`, whom the others see as `name`,
+    /// to `room` with `offer`: the answer.
     pub async fn join(
         &self,
         room: &str,
         participant: u32,
+        name: &str,
         offer: &str,
     ) -> Result<String, RelayError> {
-        let body = json!({ "participant": participant, "offer": offer });
+        let body = json!({ "participant": participant, "name": name, "offer": offer });
         let (status, reply) = self
             .call("POST", &format!("/rooms/{room}/participants"), Some(&body))
             .await?;
         match (status, reply["answer"].as_str()) {
             (200, Some(answer)) => Ok(answer.to_owned()),
             (409, _) => Err(RelayError::Refused(
-                "This meeting is full: meetings hold two people for now.".into(),
+                "This meeting is full: 25 people are in it.".into(),
             )),
             _ => Err(refusal(status, &reply)),
         }

@@ -153,6 +153,10 @@ impl MeetLink for ConsoleClient {
         Self::answer(&self.request(&meet_path(request, "keys")?, request)?)
     }
 
+    fn rekey(&self, request: &MeetRequest) -> Result<MediaKeys, LinkError> {
+        Self::answer(&self.request(&meet_path(request, "rekey")?, request)?)
+    }
+
     fn leave(&self, request: &MeetRequest) -> Result<(), LinkError> {
         self.request(&meet_path(request, "leave")?, request)
             .map(drop)

@@ -374,7 +374,11 @@ A new app crate, `glass-app-chat` (`crates/apps/chat`), is registered in `glass-
     - It is sealed to the participants' member keys only, never to the compliance key.
     - The console deletes those envelopes when the session ends.
   - Each sender's frame key is derived from the media key (HKDF), with the participant's index as SFrame's key id.
-  - When someone leaves, a remaining participant's computer makes a new media key, through the console's job lease as for chat. The old key is kept for two seconds, for frames in flight.
+  - When someone leaves, a remaining participant's computer makes a new media key, sealed to exactly the people still in the session. The old key is kept for two seconds, for frames in flight.
+    - As built: the console remembers who left holding the current key, and answers `meet.keys` with whether a new key is `due` and who is present. The first participant's computer to ask makes it and sends it to `…/rekey`. The console takes it only from someone present, sealed to exactly the people present and to nobody else (never IT), and only while one is due; later ones are refused and those computers ask again.
+    - A computer that can't open the session's key (it came back after a new key was made, or its key was registered after the session's) brings a new one with its join, sealed to everyone present and itself.
+    - Pages ask for keys whenever someone joins or leaves, until there is a new key or none is due.
+    - The rooms are one piece of code (`glass_managed::meet::rooms`) that the console runs and tests run behind `MemoryMeet`.
   - All participants hold the media key, so any of them could forge another's frames. This is SFrame without signatures.
 - **Joining.**
   1. Calendar's Join opens the Meet app on the meeting.
@@ -666,7 +670,7 @@ Every test name carries its PRD id. Nothing reaches a pilot org before slices C2
   - Not done:
     - Simulcast and layer choice.
     - The active speaker.
-    - Making the new media key when someone leaves (key records, the console's job lease). The page takes it when `meet.keys` has it.
+    - Done since: the new media key when someone leaves or someone comes back (above); the console passes each person's display name to the relay; the relay refuses an offer over 64 KB or with more m-lines than a full room needs (76). Tests: console `cf21_someone_who_left_cannot_decrypt_after_the_new_key`, `glass-app-meet` `cf21_someone_who_left_cannot_decrypt_after_the_new_key`, relay `cf21_a_page_can_offer_no_more_lines_than_a_full_room_needs`.
     - `cf21_twenty_five_people_with_fake_media_stay_within_budget`: 25 seats are checked at the relay's API, and live media with three engine pages and four stand-in pages.
     - `cf20_cf21_screen_sharing_asks_on_the_desktop_first` (the desktop's prompt).
     - A budget for glass-to-glass delay.

@@ -500,6 +500,7 @@ mod tests {
             let path = match &op {
                 MeetOp::Join { .. } => "join",
                 MeetOp::Keys => "keys",
+                MeetOp::Rekey { .. } => "rekey",
                 MeetOp::Leave => "leave",
             };
             let body = MeetBody {
@@ -861,6 +862,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cf21_someone_who_left_cannot_decrypt_after_the_new_key() {
+        let org = Org::new().await;
+        let (relay, _calls) = fake_relay(25).await;
+        org.console.set_relay(Relay::new(&relay).unwrap());
+        let dana = org.computer("laptop-dana", "dana").await;
+        let priya = org.computer("laptop-priya", "priya").await;
+        // Sam hasn't used chat yet when the meeting starts.
+        let meeting = org.meeting(&dana, &["dana", "priya", "sam"]).await;
+        let make = |by: &Computer, to: &[&Computer]| {
+            let keys: Vec<MemberKey> = to.iter().map(|c| c.key.clone()).collect();
+            MediaKeyRecord::make(
+                &meeting,
+                &MediaKey::generate().unwrap(),
+                &keys,
+                (&by.key, &by.secret),
+            )
+            .unwrap()
+        };
+        let join = |media: Option<MediaKeyRecord>| MeetOp::Join {
+            offer: "v=0".into(),
+            media,
+        };
+        let keys = |body: Value| serde_json::from_value::<MediaKeys>(body).unwrap();
+        let first = make(&dana, &[&dana, &priya]);
+        for (who, media) in [(&dana, Some(first.clone())), (&priya, None)] {
+            let (status, body) = org.meet(who, &meeting, join(media)).await;
+            assert_eq!(status, 200, "{body}");
+        }
+        let (_, body) = org.meet(&dana, &meeting, MeetOp::Keys).await;
+        assert!(!keys(body).due, "everyone present holds the key");
+
+        // Sam's computer, registered after the key was made, can't open it:
+        // it brings a new one, sealed to everyone present and itself.
+        let sam = org.computer("laptop-sam", "sam").await;
+        let (status, body) = org.meet(&sam, &meeting, join(None)).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (
+                409,
+                Some("The meeting's media key isn't sealed to this computer; bring a new one.")
+            )
+        );
+        let (status, _) = org
+            .meet(&sam, &meeting, join(Some(make(&sam, &[&dana, &sam]))))
+            .await;
+        assert_eq!(status, 409, "sealed to everyone present, priya included");
+        let late = make(&sam, &[&dana, &priya, &sam]);
+        let (status, body) = org.meet(&sam, &meeting, join(Some(late.clone()))).await;
+        assert_eq!(status, 200, "{body}");
+        let joined: Joined = serde_json::from_value(body).unwrap();
+        assert_eq!(joined.media, [late.clone(), first.clone()]);
+        let (_, body) = org.meet(&dana, &meeting, MeetOp::Keys).await;
+        let seen = keys(body);
+        assert_eq!((&seen.media[0], seen.due), (&late, false));
+
+        // Sam leaves: a new key is due, for dana and priya only.
+        let (status, _) = org.meet(&sam, &meeting, MeetOp::Leave).await;
+        assert_eq!(status, 200);
+        let (_, body) = org.meet(&priya, &meeting, MeetOp::Keys).await;
+        let now = keys(body);
+        assert!(now.due);
+        let mut present: Vec<&str> = now.participants.iter().map(|k| k.login.as_str()).collect();
+        present.sort_unstable();
+        assert_eq!(present, ["dana", "priya"]);
+
+        // Sealed to sam too, or brought by sam: refused.
+        let rekey = |media| MeetOp::Rekey { media };
+        let (status, _) = org
+            .meet(
+                &priya,
+                &meeting,
+                rekey(make(&priya, &[&dana, &priya, &sam])),
+            )
+            .await;
+        assert_eq!(status, 409);
+        let (status, _) = org
+            .meet(&sam, &meeting, rekey(make(&sam, &[&dana, &priya])))
+            .await;
+        assert_eq!(status, 409);
+        // Priya's computer makes it; the first wins.
+        let next = make(&priya, &[&dana, &priya]);
+        let (status, body) = org.meet(&priya, &meeting, rekey(next.clone())).await;
+        assert_eq!(status, 200, "{body}");
+        let after = keys(body);
+        assert!(!after.due);
+        assert_eq!(
+            after.media,
+            [next.clone(), late],
+            "the one before kept for frames in flight"
+        );
+        assert!(
+            next.open(&sam.key.id, &sam.secret.agree).is_err(),
+            "sam can't open it"
+        );
+        assert!(next.open(&dana.key.id, &dana.secret.agree).is_ok());
+        let (status, body) = org
+            .meet(&dana, &meeting, rekey(make(&dana, &[&dana, &priya])))
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (
+                409,
+                Some("The meeting's media key is new already; ask for keys again.")
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn cf91_a_post_wakes_waiting_computers_within_a_second() {
         let org = Arc::new(Org::new().await);
         let priya = org.computer("laptop-priya", "priya").await;
@@ -970,7 +1079,8 @@ mod tests {
 
     /// A stand-in for glass-sfu's private API: two seats a room, answers
     /// naming the participant, and every call written down.
-    async fn fake_relay() -> (String, Arc<Mutex<Vec<String>>>) {
+    /// A relay on loopback that seats `room_size` people a room.
+    async fn fake_relay(room_size: usize) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -995,10 +1105,10 @@ mod tests {
                         let body: Value = serde_json::from_slice(&request.body).unwrap();
                         let n = body["participant"].as_u64().unwrap();
                         let taken = seats.entry(room).or_default();
-                        if taken.len() >= 2 && !taken.contains(&n) {
+                        if taken.len() >= room_size && !taken.contains(&n) {
                             glass_http::Response::json(
                                 409,
-                                &json!({ "error": "the room has its 2 participants already" }),
+                                &json!({ "error": format!("the room has its {room_size} participants already") }),
                             )
                         } else {
                             taken.insert(n);
@@ -1031,7 +1141,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cf21_two_computers_meet_through_the_console_which_keeps_no_media_key() {
         let org = Org::new().await;
-        let (relay, calls) = fake_relay().await;
+        let (relay, calls) = fake_relay(2).await;
         org.console.set_relay(Relay::new(&relay).unwrap());
         let dana = org.computer("laptop-dana", "dana").await;
         let priya = org.computer("laptop-priya", "priya").await;
@@ -1157,8 +1267,8 @@ mod tests {
             (409, Some("The request's signature doesn't check."))
         );
 
-        // A third person: the relay holds two for now, and says so; the
-        // seat it didn't take is given back.
+        // A relay that seats fewer than the console thinks refuses the
+        // third, and the seat it didn't take is given back.
         let three = org.meeting(&dana, &["dana", "priya", "mei"]).await;
         let record3 = MediaKeyRecord::make(
             &three,
@@ -1192,10 +1302,7 @@ mod tests {
             .await;
         assert_eq!(
             (status, body["error"].as_str()),
-            (
-                409,
-                Some("This meeting is full: meetings hold two people for now.")
-            )
+            (409, Some("This meeting is full: 25 people are in it."))
         );
 
         // Leaving frees the seat; the last one out ends the session, and

@@ -29,6 +29,8 @@ use crate::chat::{
 };
 use glass_crypto::EpochKey;
 
+pub mod rooms;
+
 /// The most people in a meeting, the organizer included (ADR 0030).
 pub const MAX_PEOPLE: usize = 25;
 /// The most people an organizer invites: everyone else.
@@ -278,6 +280,10 @@ pub enum MeetOp {
     /// The session's current media keys (several while one replaces
     /// another).
     Keys,
+    /// The new media key that was due, sealed to exactly the people in
+    /// the session now (someone who held the last one left, or someone
+    /// present can't open it).
+    Rekey { media: MediaKeyRecord },
     /// Leave the session.
     Leave,
 }
@@ -358,6 +364,14 @@ pub struct MediaKeys {
     /// The member keys that made them.
     #[serde(default)]
     pub keys: Vec<MemberKey>,
+    /// The member keys of the people in the session now: what a new
+    /// media key is sealed to.
+    #[serde(default)]
+    pub participants: Vec<MemberKey>,
+    /// A new media key is due: someone who held the current one left, or
+    /// someone present can't open it.
+    #[serde(default)]
+    pub due: bool,
 }
 
 /// How a computer reaches its console for meetings: the device API's
@@ -378,6 +392,9 @@ pub trait MeetLink: Send + Sync + fmt::Debug {
     /// `POST /device/v1/meet/<id>/keys`: the session's media keys, for a
     /// member; none before anyone joins.
     fn keys(&self, request: &MeetRequest) -> std::result::Result<MediaKeys, LinkError>;
+    /// `POST /device/v1/meet/<id>/rekey`: the new media key that was due;
+    /// the session's keys back.
+    fn rekey(&self, request: &MeetRequest) -> std::result::Result<MediaKeys, LinkError>;
     /// `POST /device/v1/meet/<id>/leave`.
     fn leave(&self, request: &MeetRequest) -> std::result::Result<(), LinkError>;
 }
@@ -438,32 +455,40 @@ pub trait Meetings: Send + Sync + fmt::Debug {
 /// console's checks and answers at once, beside the chat console whose
 /// keys and conversations it reads.
 pub mod testing {
-    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
 
+    use super::rooms::{Facts, RoomRefusal, Rooms};
     use super::*;
     use crate::chat::ConversationKind;
     use crate::chat::testing::MemoryLink;
 
-    #[derive(Debug, Default)]
-    struct Session {
-        media: Vec<MediaKeyRecord>,
-        /// (login, member key) → participant index.
-        participants: BTreeMap<(String, String), u32>,
-        next: u32,
-    }
-
+    /// The console's meetings in memory: the same [`Rooms`] the console
+    /// runs, beside a [`MemoryLink`]'s chat.
     #[derive(Debug)]
     pub struct MemoryMeet {
         chat: Arc<MemoryLink>,
-        sessions: Mutex<BTreeMap<String, Session>>,
+        rooms: Mutex<Rooms>,
         offers: Mutex<Vec<String>>,
         offline: AtomicBool,
     }
 
-    fn refused<T>(m: &str) -> std::result::Result<T, LinkError> {
-        Err(LinkError::Refused(m.into()))
+    struct ChatFacts<'a>(&'a MemoryLink);
+
+    impl Facts for ChatFacts<'_> {
+        fn key(&self, id: &str) -> Option<MemberKey> {
+            self.0.key(id)
+        }
+        fn meeting(&self, id: &str) -> Option<Vec<String>> {
+            self.0
+                .conversation(id)
+                .filter(|c| c.kind == ConversationKind::Meeting)
+                .map(|c| c.members)
+        }
+    }
+
+    fn refused(r: RoomRefusal) -> LinkError {
+        LinkError::Refused(r.to_string())
     }
 
     impl MemoryMeet {
@@ -471,7 +496,7 @@ pub mod testing {
         pub fn new(chat: Arc<MemoryLink>) -> Self {
             Self {
                 chat,
-                sessions: Mutex::new(BTreeMap::new()),
+                rooms: Mutex::new(Rooms::default()),
                 offers: Mutex::new(Vec::new()),
                 offline: AtomicBool::new(false),
             }
@@ -482,29 +507,25 @@ pub mod testing {
             self.offline.store(offline, Ordering::SeqCst);
         }
 
+        fn rooms(&self) -> std::sync::MutexGuard<'_, Rooms> {
+            self.rooms.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        fn online(&self) -> std::result::Result<(), LinkError> {
+            if self.offline.load(Ordering::SeqCst) {
+                return Err(LinkError::Unreachable("connection refused".into()));
+            }
+            Ok(())
+        }
+
         /// The media keys meeting `id`'s session keeps; none once it ends.
         pub fn media(&self, id: &str) -> Vec<MediaKeyRecord> {
-            self.sessions
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(id)
-                .map(|s| s.media.clone())
-                .unwrap_or_default()
+            self.rooms().media(id)
         }
 
         /// Who is in meeting `id`'s session, with their indexes.
         pub fn participants(&self, id: &str) -> Vec<(String, u32)> {
-            self.sessions
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(id)
-                .map(|s| {
-                    s.participants
-                        .iter()
-                        .map(|((login, _), n)| (login.clone(), *n))
-                        .collect()
-                })
-                .unwrap_or_default()
+            self.rooms().participants(id)
         }
 
         /// Every offer a join carried, in order.
@@ -514,118 +535,54 @@ pub mod testing {
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
         }
-
-        /// Checks `request` as the console does: online, signed by the
-        /// login's registered key on that computer, a member of a meeting.
-        fn check(&self, request: &MeetRequest) -> std::result::Result<Vec<String>, LinkError> {
-            if self.offline.load(Ordering::SeqCst) {
-                return Err(LinkError::Unreachable("connection refused".into()));
-            }
-            let body = &request.body;
-            let signed = self
-                .chat
-                .key(&body.key)
-                .is_some_and(|k| request.verify(&k).is_ok());
-            if !signed {
-                return refused("The request's signature doesn't check.");
-            }
-            match self.chat.conversation(&body.meeting) {
-                Some(c)
-                    if c.kind == ConversationKind::Meeting && c.members.contains(&body.login) =>
-                {
-                    Ok(c.members)
-                }
-                _ => refused("You aren't in this meeting."),
-            }
-        }
-
-        fn makers(&self, media: &[MediaKeyRecord]) -> Vec<MemberKey> {
-            media
-                .iter()
-                .filter_map(|m| self.chat.key(&m.body.made_by))
-                .collect()
-        }
     }
 
     impl MeetLink for MemoryMeet {
         fn join(&self, request: &MeetRequest) -> std::result::Result<Joined, LinkError> {
-            let members = self.check(request)?;
-            let body = &request.body;
-            let MeetOp::Join { offer, media } = &body.op else {
-                return refused("This route joins.");
+            self.online()?;
+            let MeetOp::Join { offer, .. } = &request.body.op else {
+                return Err(LinkError::Refused("This route joins.".into()));
             };
-            let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
-            let session = sessions.entry(body.meeting.clone()).or_default();
-            if session.media.is_empty() {
-                let Some(media) = media else {
-                    return refused("The meeting has no media key yet; send one.");
-                };
-                let maker = self
-                    .chat
-                    .key(&media.body.made_by)
-                    .filter(|k| members.contains(&k.login));
-                if media.body.meeting != body.meeting
-                    || !maker.is_some_and(|k| media.verify(&k).is_ok())
-                {
-                    return refused("The media key isn't signed by someone in the meeting.");
-                }
-                session.media.push(media.clone());
-            }
-            let who = (body.login.clone(), body.key.clone());
-            let participant = match session.participants.get(&who) {
-                Some(n) => *n,
-                None if session.participants.len() >= MAX_PEOPLE => {
-                    return refused("The meeting is full: 25 people are in it.");
-                }
-                None => {
-                    session.next += 1;
-                    session.participants.insert(who, session.next);
-                    session.next
-                }
-            };
+            let meeting = &request.body.meeting;
+            let seat = self
+                .rooms()
+                .join(&ChatFacts(&self.chat), meeting, request)
+                .map_err(refused)?;
             self.offers
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(offer.clone());
-            let media = session.media.clone();
-            drop(sessions);
             Ok(Joined {
-                answer: format!("v=0\r\ns=glass-sfu answer for participant {participant}\r\n"),
-                participant,
-                keys: self.makers(&media),
-                media,
+                answer: format!(
+                    "v=0\r\ns=glass-sfu answer for participant {}\r\n",
+                    seat.participant
+                ),
+                participant: seat.participant,
+                media: seat.media,
+                keys: seat.keys,
             })
         }
 
         fn keys(&self, request: &MeetRequest) -> std::result::Result<MediaKeys, LinkError> {
-            self.check(request)?;
-            if request.body.op != MeetOp::Keys {
-                return refused("This route gives keys.");
-            }
-            let media = self.media(&request.body.meeting);
-            Ok(MediaKeys {
-                keys: self.makers(&media),
-                media,
-            })
+            self.online()?;
+            self.rooms()
+                .keys(&ChatFacts(&self.chat), &request.body.meeting, request)
+                .map_err(refused)
+        }
+
+        fn rekey(&self, request: &MeetRequest) -> std::result::Result<MediaKeys, LinkError> {
+            self.online()?;
+            self.rooms()
+                .rekey(&ChatFacts(&self.chat), &request.body.meeting, request)
+                .map_err(refused)
         }
 
         fn leave(&self, request: &MeetRequest) -> std::result::Result<(), LinkError> {
-            self.check(request)?;
-            let body = &request.body;
-            if body.op != MeetOp::Leave {
-                return refused("This route leaves.");
-            }
-            let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(session) = sessions.get_mut(&body.meeting) {
-                session
-                    .participants
-                    .remove(&(body.login.clone(), body.key.clone()));
-                // The last one out ends the session, and its keys with it.
-                if session.participants.is_empty() {
-                    sessions.remove(&body.meeting);
-                }
-            }
-            Ok(())
+            self.online()?;
+            self.rooms()
+                .leave(&ChatFacts(&self.chat), &request.body.meeting, request)
+                .map(|_| ())
+                .map_err(refused)
         }
     }
 }

@@ -198,6 +198,86 @@ fn cf21_two_people_join_one_session_with_one_media_key_and_leave() {
     );
 }
 
+/// Dana's meeting with Priya and Sam, everyone's computer synced.
+fn three(org: &Org) -> (Computer, Computer, Computer, String) {
+    let (a, b, c) = (
+        org.computer("dev-a"),
+        org.computer("dev-b"),
+        org.computer("dev-c"),
+    );
+    b.call("priya", LIST, json!({})).unwrap();
+    c.call("sam", LIST, json!({})).unwrap();
+    let id = new_conversation_id().unwrap();
+    let meetings: &dyn Meetings = &a.roster;
+    meetings
+        .create(
+            "dana",
+            true,
+            &id,
+            &["priya".into(), "sam".into()],
+            &details(),
+        )
+        .unwrap();
+    b.chat.sync_once(0).unwrap();
+    c.chat.sync_once(0).unwrap();
+    (a, b, c, id)
+}
+
+#[test]
+fn cf21_someone_who_left_cannot_decrypt_after_the_new_key() {
+    let org = org();
+    let (a, b, c, id) = three(&org);
+    a.join("dana", &id);
+    b.join("priya", &id);
+    let sam = c.join("sam", &id);
+    let held = sam.data["media_key"].as_str().unwrap().to_owned();
+    c.call("sam", LEAVE, json!({ "meeting": id })).unwrap();
+
+    // The first computer to ask makes the new key; the other gets it.
+    let priya = b.call("priya", KEYS, json!({ "meeting": id })).unwrap();
+    let new = priya.data["media_keys"][0]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(new, held);
+    assert_eq!(priya.data["due"], false);
+    assert_eq!(
+        priya.data["media_keys"][1]["key"],
+        held.as_str(),
+        "kept for frames in flight"
+    );
+    let dana = a.call("dana", KEYS, json!({ "meeting": id })).unwrap();
+    assert_eq!(dana.data["media_keys"][0]["key"], new.as_str());
+    // Sam's computer can't open it: he is in the meeting, not the session.
+    let sams_key = Meetings::member(&c.roster, "sam", false)
+        .unwrap()
+        .unwrap()
+        .0;
+    assert!(
+        org.meet.media(&id)[0]
+            .body
+            .envelopes
+            .iter()
+            .all(|e| e.key != sams_key.id),
+        "not sealed to the one who left"
+    );
+
+    // He comes back: his computer can't open the session's key, so it
+    // brings a new one for everyone present, and they switch to it. The
+    // same happens for a computer whose key was registered after the
+    // session's key was made.
+    let back = c.join("sam", &id);
+    let theirs = back.data["media_key"].as_str().unwrap().to_owned();
+    assert_ne!(theirs, new);
+    for (computer, login) in [(&a, "dana"), (&b, "priya")] {
+        let keys = computer
+            .call(login, KEYS, json!({ "meeting": id }))
+            .unwrap();
+        assert_eq!(keys.data["media_keys"][0]["key"], theirs.as_str());
+        assert_eq!(keys.data["due"], false);
+    }
+}
+
 #[test]
 fn cf21_the_media_key_is_never_sealed_to_the_compliance_key() {
     let org = org();
@@ -328,7 +408,11 @@ impl MeetLink for Swapping {
         Ok(MediaKeys {
             media: vec![self.0.clone()],
             keys: vec![self.1.clone()],
+            ..MediaKeys::default()
         })
+    }
+    fn rekey(&self, request: &MeetRequest) -> Result<MediaKeys, LinkError> {
+        self.keys(request)
     }
     fn leave(&self, _: &MeetRequest) -> Result<(), LinkError> {
         Ok(())

@@ -24,8 +24,8 @@ use glass_api::{AskLabels, display_line};
 use glass_managed::DirectoryHandle;
 use glass_managed::chat::{ChatFailure, LinkError, MemberKey, MemberSecret, is_conversation_id};
 use glass_managed::meet::{
-    MAX_SDP_BYTES, MediaKey, MediaKeyRecord, MeetBody, MeetLink, MeetOp, MeetRequest, MeetingInfo,
-    Meetings,
+    MAX_SDP_BYTES, MediaKey, MediaKeyRecord, MediaKeys, MeetBody, MeetLink, MeetOp, MeetRequest,
+    MeetingInfo, Meetings,
 };
 use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::Deserialize;
@@ -217,7 +217,7 @@ impl MeetProvider {
         MeetRequest::sign(body, secret).map_err(|e| failed(doing, e))
     }
 
-    /// A new media key for `meeting`'s session, sealed to its people's
+    /// The first media key for `meeting`'s session, sealed to its people's
     /// member keys and to nothing else (ADR 0030).
     fn make_media(
         &self,
@@ -226,12 +226,26 @@ impl MeetProvider {
         secret: &MemberSecret,
         doing: &str,
     ) -> Result<MediaKeyRecord, ActionError> {
-        let mut keys: Vec<MemberKey> = self
+        let keys = self
             .meetings
             .lookup(&meeting.members)
-            .map_err(|e| failed(doing, e))?
+            .map_err(|e| failed(doing, e))?;
+        Self::seal_new(meeting, keys, key, secret, doing)
+    }
+
+    /// A new media key sealed to `keys` that belong to people in
+    /// `meeting`, and to this computer's: when someone who held the last
+    /// one left, or someone present can't open it.
+    fn seal_new(
+        meeting: &MeetingInfo,
+        keys: Vec<MemberKey>,
+        key: &MemberKey,
+        secret: &MemberSecret,
+        doing: &str,
+    ) -> Result<MediaKeyRecord, ActionError> {
+        let mut keys: Vec<MemberKey> = keys
             .into_iter()
-            .filter(|k| meeting.members.contains(&k.login))
+            .filter(|k| meeting.members.contains(&k.login) && k.keys().is_ok())
             .collect();
         if !keys.iter().any(|k| k.id == key.id) {
             keys.push(key.clone());
@@ -239,6 +253,40 @@ impl MeetProvider {
         let media = MediaKey::generate().map_err(|e| failed(doing, e))?;
         MediaKeyRecord::make(&meeting.id, &media, &keys, (key, secret))
             .map_err(|e| failed(doing, e))
+    }
+
+    /// The session's keys, with the new one made first if one is due and
+    /// this computer is in the session. Another computer may make it
+    /// first; then its key is the one returned.
+    fn current_keys(
+        link: &dyn MeetLink,
+        meeting: &MeetingInfo,
+        key: &MemberKey,
+        secret: &MemberSecret,
+        doing: &str,
+    ) -> Result<MediaKeys, ActionError> {
+        let ask = || -> Result<MediaKeys, ActionError> {
+            link.keys(&Self::request(
+                key,
+                secret,
+                &meeting.id,
+                MeetOp::Keys,
+                doing,
+            )?)
+            .map_err(|e| failed(doing, ChatFailure::Link(e)))
+        };
+        let answer = ask()?;
+        if !answer.due || !answer.participants.iter().any(|p| p.id == key.id) {
+            return Ok(answer);
+        }
+        let media = Self::seal_new(meeting, answer.participants.clone(), key, secret, doing)?;
+        let rekey = Self::request(key, secret, &meeting.id, MeetOp::Rekey { media }, doing)?;
+        match link.rekey(&rekey) {
+            Ok(answer) => Ok(answer),
+            // Someone else's computer made it first, or the room changed.
+            Err(LinkError::Refused(_)) => ask(),
+            Err(e) => Err(failed(doing, ChatFailure::Link(e))),
+        }
     }
 
     /// The media keys in `records` this computer can trust and open:
@@ -270,11 +318,10 @@ impl MeetProvider {
                         .to_owned(),
                 )
             };
-            // Keys aren't given to computers that came later until slice M2.
             match checked.and_then(|()| {
                 record.open(&key.id, &secret.agree).map_err(|_| {
-                    "the meeting started before this computer's key was registered, so its \
-                     media key isn't sealed to it; join once the meeting starts again"
+                    "the meeting's media key isn't sealed to this computer yet; ask again in a \
+                     moment"
                         .to_owned()
                 })
             }) {
@@ -353,29 +400,49 @@ impl MeetProvider {
         let (key, secret) = self.member(ctx, DOING)?;
         let meeting = self.in_it(me, &input.meeting)?;
         let title = title(&meeting);
-        // The session's key, or a new one if nobody has joined: the
-        // console keeps the first it gets and answers everyone with it.
-        let current = link
-            .keys(&Self::request(
-                &key,
-                &secret,
-                &meeting.id,
-                MeetOp::Keys,
-                DOING,
-            )?)
-            .map_err(|e| failed(DOING, ChatFailure::Link(e)))?;
-        let media = if current.media.is_empty() {
-            Some(self.make_media(&meeting, &key, &secret, DOING)?)
-        } else {
-            None
+        let mut attempt = 0;
+        let joined = loop {
+            // The session's key; a new one if nobody has joined (the
+            // console keeps the first it gets), or if the session's isn't
+            // sealed to this computer (its key came later): sealed to the
+            // people in it and this computer, everyone switches to it.
+            let current = link
+                .keys(&Self::request(
+                    &key,
+                    &secret,
+                    &meeting.id,
+                    MeetOp::Keys,
+                    DOING,
+                )?)
+                .map_err(|e| failed(DOING, ChatFailure::Link(e)))?;
+            let sealed_here = current
+                .media
+                .first()
+                .is_some_and(|m| m.body.envelopes.iter().any(|e| e.key == key.id));
+            let media = if current.media.is_empty() {
+                Some(self.make_media(&meeting, &key, &secret, DOING)?)
+            } else if !sealed_here {
+                Some(Self::seal_new(
+                    &meeting,
+                    current.participants.clone(),
+                    &key,
+                    &secret,
+                    DOING,
+                )?)
+            } else {
+                None
+            };
+            let op = MeetOp::Join {
+                offer: input.offer.clone(),
+                media,
+            };
+            match link.join(&Self::request(&key, &secret, &meeting.id, op, DOING)?) {
+                Ok(joined) => break joined,
+                // Someone joined or left while this made its key: once more.
+                Err(LinkError::Refused(_)) if attempt == 0 && !sealed_here => attempt += 1,
+                Err(e) => return Err(failed(DOING, ChatFailure::Link(e))),
+            }
         };
-        let op = MeetOp::Join {
-            offer: input.offer,
-            media,
-        };
-        let joined = link
-            .join(&Self::request(&key, &secret, &meeting.id, op, DOING)?)
-            .map_err(|e| failed(DOING, ChatFailure::Link(e)))?;
         let opened = if joined.answer.trim().is_empty() || joined.answer.len() > MAX_SDP_BYTES {
             Err(failed(DOING, "the relay's answer is malformed"))
         } else {
@@ -412,15 +479,7 @@ impl MeetProvider {
         let (key, secret) = self.member(ctx, DOING)?;
         let meeting = self.in_it(me, &input.meeting)?;
         let title = title(&meeting);
-        let answer = link
-            .keys(&Self::request(
-                &key,
-                &secret,
-                &meeting.id,
-                MeetOp::Keys,
-                DOING,
-            )?)
-            .map_err(|e| failed(DOING, ChatFailure::Link(e)))?;
+        let answer = Self::current_keys(link.as_ref(), &meeting, &key, &secret, DOING)?;
         let opened = if answer.media.is_empty() {
             Vec::new()
         } else {
@@ -435,6 +494,8 @@ impl MeetProvider {
             text,
             data: json!({
                 "meeting": meeting.id,
+                // A new key is still due: ask again shortly.
+                "due": answer.due,
                 "media_keys": opened
                     .iter()
                     .map(|(id, media)| json!({ "id": id, "key": media.to_base64() }))
