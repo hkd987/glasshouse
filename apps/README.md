@@ -21,14 +21,20 @@ apps/
   chat/       the org's chat (CF-91, ADR 0030): glassd seals and opens it; the
               page keeps nothing (bridge.call only, no offline permission) and
               hears of news from app.status waits, ids only
+  artifacts/  pages people and agents share (AR-1 to AR-5, ADR 0033): the list,
+              the viewer (each page framed on its own origin,
+              <hex>.artifact.localhost, sandboxed, put back when it navigates
+              itself), pinned comments drawn by the app from element paths
+              (artifacts.ts checks every frame message), and Share; keeps
+              nothing, like Chat
   sdk/template/ where a new app starts (ADR 0032): a manifest without an
               id and a small src/; apps.source {"template": true} hands it out
   console/    the admin console's web app (ADR 0023): a site glass-console serves,
               not a device app (no manifest, no service worker)
   e2e/        Playwright: the apps against dev-host glassd and the bridge;
               console.config.ts: the console against glass-console and glassd,
-              and Chat with a colleague scripted on another computer
-              (crates/apps/chat/examples/colleague.rs)
+              and Chat and Artifacts with a colleague scripted on another
+              computer (crates/apps/chat/examples/colleague.rs)
   build.mjs   esbuild: each app into <app>/dist (app.js, app.css, sw.js)
 ```
 

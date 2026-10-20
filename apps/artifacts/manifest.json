@@ -1,0 +1,9 @@
+{
+  "id": "artifacts",
+  "name": "Artifacts",
+  "version": "0.1.0",
+  "description": "Pages people and their agents share with you, shown in a sealed frame with everyone's comments pinned beside them.",
+  "actions": ["artifact.list", "artifact.read", "artifact.share", "artifact.update", "artifact.comment", "artifact.resolve", "people.search", "chat.list"],
+  "permissions": [],
+  "labels": ["public", "internal", "confidential"]
+}

@@ -666,7 +666,7 @@ mod tests {
     #[test]
     fn tl5_first_party_apps_pass_their_own_checks() {
         let apps = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps");
-        for app in ["mail", "calendar", "chat", "settings", "store"] {
+        for app in ["mail", "calendar", "chat", "settings", "store", "artifacts"] {
             let dir = apps.join(app);
             let manifest: AppManifest =
                 serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())

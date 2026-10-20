@@ -392,7 +392,7 @@ fn aw10_expanded_view_has_header_panes_and_timeline_in_place() {
 
 #[test]
 fn tl5_the_launcher_badges_a_remix_and_tints_a_tile_for_an_app_without_an_icon() {
-    // Dana's apps: My Mail, based on Mail, last, in the second row's fifth
+    // Dana's apps: My Mail, based on Mail, last, in the second row's sixth
     // column; Dispute Tracker, with no icon, before it.
     let apps = fixtures::apps();
     let f = render_launcher(&apps);
@@ -403,7 +403,7 @@ fn tl5_the_launcher_badges_a_remix_and_tints_a_tile_for_an_app_without_an_icon()
             .filter(|&(x, y)| close(f.pixel(x, y), [61, 107, 255], 12))
             .count()
     };
-    let my_mail = (908, 515);
+    let my_mail = (1028, 515);
     let mail = (428, 378);
     assert!(
         badge(&f, my_mail) > 150,
@@ -412,7 +412,7 @@ fn tl5_the_launcher_badges_a_remix_and_tints_a_tile_for_an_app_without_an_icon()
     );
     assert_eq!(badge(&f, mail), 0, "Mail itself wears no badge");
     // Mail's glyph in both.
-    assert!(close(f.pixel(900, 497), [58, 168, 245], 8));
+    assert!(close(f.pixel(1020, 497), [58, 168, 245], 8));
     assert!(close(f.pixel(420, 360), [58, 168, 245], 8));
     // The same app not based on another is just an app: no badge.
     let mut plain = apps.clone();
@@ -420,7 +420,7 @@ fn tl5_the_launcher_badges_a_remix_and_tints_a_tile_for_an_app_without_an_icon()
     assert_eq!(badge(&render_launcher(&plain), my_mail), 0);
     // Dispute Tracker's initial sits on a tinted tile, not on the dark of
     // every tile.
-    let tinted = f.pixel(770, 495);
+    let tinted = f.pixel(890, 495);
     assert!(!close(tinted, [21, 24, 29], 6), "{tinted:?}");
 }
 

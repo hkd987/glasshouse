@@ -184,8 +184,13 @@ impl Artifact {
         }
     }
 
+    /// Threads still open: a reply belongs to its thread, which is
+    /// resolved or not as a whole.
     fn open_comments(&self) -> usize {
-        self.comments.iter().filter(|c| !c.resolved).count()
+        self.comments
+            .iter()
+            .filter(|c| c.reply_to.is_none() && !c.resolved)
+            .count()
     }
 }
 

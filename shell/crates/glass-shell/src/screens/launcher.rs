@@ -167,6 +167,7 @@ fn glyph(id: &str, name: &str) -> Glyph {
         "browser" => drawn(&icons::GLOBE, 0x2BB5B5),
         "mail" => drawn(&icons::MAIL, 0x3AA8F5),
         "chat" => drawn(&icons::CHAT, 0xF2B84B),
+        "artifacts" => drawn(&icons::ARTIFACT, 0xE07BC6),
         "meet" => drawn(&icons::MEET, 0xF0707A),
         "settings" => drawn(&icons::GEAR, 0xA9B1BC),
         // IT's console: a gear in the accent, apart from Settings'.
@@ -342,8 +343,12 @@ mod tests {
     }
 
     #[test]
-    fn chat_and_meet_have_icons_of_their_own() {
-        for (id, icon) in [("chat", icons::CHAT), ("meet", icons::MEET)] {
+    fn chat_meet_and_artifacts_have_icons_of_their_own() {
+        for (id, icon) in [
+            ("chat", icons::CHAT),
+            ("meet", icons::MEET),
+            ("artifacts", icons::ARTIFACT),
+        ] {
             let app = web(id, id, None);
             assert!(
                 matches!(look(&app, &[]).glyph, Glyph::Drawn { icon: drawn, .. } if *drawn == icon),
@@ -351,15 +356,23 @@ mod tests {
             );
         }
         // Each in its own color among our apps.
-        let colors: Vec<u32> = ["mail", "chat", "meet", "store", "browser", "settings"]
-            .iter()
-            .filter_map(|id| match glyph(id, id) {
-                Glyph::Drawn { color, .. } => Some(color),
-                _ => None,
-            })
-            .collect();
+        let colors: Vec<u32> = [
+            "mail",
+            "chat",
+            "artifacts",
+            "meet",
+            "store",
+            "browser",
+            "settings",
+        ]
+        .iter()
+        .filter_map(|id| match glyph(id, id) {
+            Glyph::Drawn { color, .. } => Some(color),
+            _ => None,
+        })
+        .collect();
         let distinct: std::collections::HashSet<&u32> = colors.iter().collect();
-        assert_eq!((colors.len(), distinct.len()), (6, 6));
+        assert_eq!((colors.len(), distinct.len()), (7, 7));
     }
 
     #[test]

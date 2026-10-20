@@ -19,6 +19,8 @@ export const CALENDAR_URL = `http://calendar.localhost:${STORE_PORT}/`;
 export const SETTINGS_URL = `http://settings.localhost:${STORE_PORT}/`;
 /** Chat on the same bridge: the org's chat, sealed end to end (CF-91). */
 export const CHAT_URL = `http://chat.localhost:${STORE_PORT}/`;
+/** Artifacts on the same bridge, and each artifact's own origin beside it (ADR 0033). */
+export const ARTIFACTS_URL = `http://artifacts.localhost:${STORE_PORT}/`;
 /** Meet on the computer (CF-21). */
 export const MEET_URL = `http://meet.localhost:${STORE_PORT}/`;
 /** The meeting relay's private API, beside the console (ADR 0030 §6). */

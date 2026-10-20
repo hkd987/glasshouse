@@ -502,6 +502,20 @@ pub const CHAT: Icon = Icon {
     ],
 };
 
+/// Artifacts: a page with its corner folded and two lines on it, as the
+/// app draws it (ADR 0033).
+pub const ARTIFACT: Icon = Icon {
+    view_box: (18.0, 18.0),
+    shapes: &[
+        Shape::Path(
+            "M5 2.2h5.6l3.6 3.6v9a1.2 1.2 0 01-1.2 1.2H5a1.2 1.2 0 01-1.2-1.2V3.4A1.2 1.2 0 015 2.2z",
+            Line(1.6),
+        ),
+        Shape::Path("M10.4 2.4v3.6H14", Line(1.4)),
+        Shape::Path("M6.6 9.4h4.8M6.6 12.2h3", StrokeRound(1.5)),
+    ],
+};
+
 /// Meet: a video camera.
 pub const MEET: Icon = Icon {
     view_box: (18.0, 18.0),

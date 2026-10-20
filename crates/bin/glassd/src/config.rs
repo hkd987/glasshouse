@@ -634,7 +634,15 @@ mod tests {
         let ids: Vec<&str> = apps.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(
             ids,
-            ["calendar", "chat", "mail", "meet", "settings", "store"]
+            [
+                "artifacts",
+                "calendar",
+                "chat",
+                "mail",
+                "meet",
+                "settings",
+                "store"
+            ]
         );
     }
 

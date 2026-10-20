@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
 
 const here = dirname(fileURLToPath(import.meta.url));
-export const APPS = ["mail", "calendar", "store", "settings", "chat", "meet"];
+export const APPS = ["mail", "calendar", "store", "settings", "chat", "meet", "artifacts"];
 /** Apps with a worker of their own, built beside the page: Meet's frame
  * transform (ADR 0030 §6). */
 const WORKERS = { meet: "src/worker.ts" };

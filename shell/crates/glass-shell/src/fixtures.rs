@@ -375,6 +375,7 @@ pub fn apps() -> Vec<AppEntry> {
         ("mail", "Mail", Web, None),
         ("calendar", "Calendar", Web, None),
         ("chat", "Chat", Web, None),
+        ("artifacts", "Artifacts", Web, None),
         ("meet", "Meet", Web, None),
         ("store", "Store", Web, None),
         ("settings", "Settings", Web, None),

@@ -78,6 +78,10 @@ const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; \
      img-src 'self' data:; connect-src 'self'; worker-src 'self'; font-src 'self'; \
      object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
+/// The largest call an app sends: an artifact's page (1.5 MB at most, ADR
+/// 0033) as JSON, with room for escaping.
+const MAX_BODY: usize = 4 * glass_http::MAX_BODY;
+
 /// The app that shows artifacts (ADR 0033), the only one that frames them.
 const ARTIFACTS: &str = "artifacts";
 
@@ -242,7 +246,7 @@ enum Relay {
 
 impl Bridge {
     async fn serve(&self, mut stream: TcpStream) {
-        let (response, head_only) = match http::read_request(&mut stream).await {
+        let (response, head_only) = match http::read_request_up_to(&mut stream, MAX_BODY).await {
             Ok(request) => {
                 let head_only = request.method == "HEAD";
                 (self.handle(&request).await, head_only)

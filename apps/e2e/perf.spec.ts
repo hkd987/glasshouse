@@ -60,6 +60,9 @@ for (const [app, use] of [
   // Meet opens on its lobby here; the console suite times joining and a
   // call's memory with two people (meetings.e2e.ts).
   ["meet", async (page: Page) => page.locator("[data-test=join]").hover()],
+  // Unmanaged here too, so Artifacts says the shared space isn't ready; the
+  // console suite times opening one (artifacts.e2e.ts).
+  ["artifacts", async (page: Page) => page.locator("[data-test=share]").click()],
 ] as const) {
   test(`ui7 ${app} launches cold in under 1 s and uses under 150 MB`, async ({ browser }) => {
     const launches: number[] = [];

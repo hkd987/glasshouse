@@ -231,6 +231,33 @@ fn ar1_an_agent_shares_a_page_a_colleague_pins_a_comment_and_version_2_follows()
     assert_eq!((number, html.as_str()), (1, PAGE));
     assert!(b.artifacts.page("priya", &id, Some(3)).is_err());
 
+    // A reply belongs to its thread: one open thread, not two.
+    b.call(
+        "priya",
+        APP,
+        COMMENT,
+        json!({ "artifact": id, "text": "Also Q4?", "reply_to": comment_id }),
+    )
+    .unwrap();
+    b.call(
+        "priya",
+        APP,
+        RESOLVE,
+        json!({ "artifact": id, "comment": comment_id, "resolved": false }),
+    )
+    .unwrap();
+    let list = b.call("priya", APP, LIST, json!({})).unwrap();
+    assert_eq!(list.data["artifacts"][0]["open_comments"], 1);
+    b.call(
+        "priya",
+        APP,
+        RESOLVE,
+        json!({ "artifact": id, "comment": comment_id }),
+    )
+    .unwrap();
+    let list = b.call("priya", APP, LIST, json!({})).unwrap();
+    assert_eq!(list.data["artifacts"][0]["open_comments"], 0);
+
     // Reopened.
     b.call(
         "priya",

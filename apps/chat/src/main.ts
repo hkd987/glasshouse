@@ -34,6 +34,13 @@ interface Conversation {
   last_from: string | null;
 }
 
+/** Something shared into the conversation (ADR 0033): an artifact shows as a card. */
+interface Shared {
+  item: string;
+  kind: string;
+  title: string;
+}
+
 interface Message {
   id: string;
   seq: number;
@@ -43,6 +50,7 @@ interface Message {
   at: string;
   text: string;
   attribution: string | null;
+  shared?: Shared | null;
 }
 
 interface Found {
@@ -441,6 +449,29 @@ function pickerView(p: Picker, label: string, name: string): HTMLElement {
   );
 }
 
+/**
+ * The Artifacts app's page for item `item`: this host with its leading
+ * `<app>.` swapped for `artifacts.`, the same port, and the item in the
+ * hash. Null for anything that isn't an artifact's id.
+ */
+function artifactsUrl(item: string): string | null {
+  const app = /^[a-z][a-z0-9-]*\./;
+  if (!/^cv-[0-9a-f]{32}$/.test(item) || !app.test(location.host)) return null;
+  return `${location.protocol}//${location.host.replace(app, "artifacts.")}/#${item}`;
+}
+
+/** An artifact shared here (AR-5): a card that opens it in Artifacts, never a file. */
+function artifactCard(shared: Shared): HTMLElement {
+  const url = artifactsUrl(shared.item);
+  return h(
+    "div",
+    { class: "card", "data-test": "artifact-card", "data-item": shared.item },
+    h("span", { class: "card-icon", "aria-hidden": "true" }, h("span", { class: "card-page" })),
+    h("span", { class: "card-body" }, h("span", { class: "card-title" }, shared.title), h("span", { class: "card-kind" }, "Artifact · opens in Artifacts")),
+    url ? h("a", { class: "button card-open", href: url, target: "_blank", rel: "noopener" }, "Open") : null,
+  );
+}
+
 function messageView(m: Message, previous: Message | undefined): HTMLElement {
   const by = parseAttribution(m.attribution);
   const agent = showAttribution(by, "chat");
@@ -462,7 +493,7 @@ function messageView(m: Message, previous: Message | undefined): HTMLElement {
             h("span", { class: "time" }, time(m.at)),
             agent && by ? attributionChip(by.text) : null,
           ),
-      h("div", { class: "message-text" }, m.text),
+      m.shared?.kind === "artifact" ? artifactCard(m.shared) : h("div", { class: "message-text" }, m.text),
     ),
   );
 }

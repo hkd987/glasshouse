@@ -54,6 +54,8 @@ fails when one goes over:
 | Chat, memory | 150 MB | UI-7 | 106 MB |
 | Meet, cold launch | 1 s | UI-7 | 108 ms (104, 115, 108); with M2's grid and screen sharing, 142 ms (135, 142, 143) page alone, its bridge played by `meet.e2e.ts` |
 | Meet, memory (before joining) | 150 MB | UI-7 | 100 MB |
+| Artifacts, cold launch | 1 s | UI-7 | 150 ms (150, 175, 132); this suite's computer is unmanaged, so it shows that the shared space isn't ready |
+| Artifacts, memory | 150 MB | UI-7 | 114 MB |
 | Joining a meeting: Join to the other person on screen, through the computer, the console and the relay | 2 s | UI-7, CF-21 | 1427 ms (`meetings.e2e.ts`, before the page stopped waiting up to 1 s for its ICE candidates; not measured since); page to relay alone (`meet.e2e.ts`) 1311 ms then, 258–355 ms now |
 | Joining a three-person meeting: Join to both others on screen, one of them after a renegotiation over the data channel; page to relay alone | 2 s | UI-7, CF-21 | 392–658 ms (`meet.e2e.ts`, five runs); the two already there see the newcomer at 413–711 ms |
 | A page in a two-person call | 250 MB | UI-7, CF-21 | 169 MB |
@@ -116,6 +118,7 @@ with a dev-host glassd enrolled as a pilot device
 | A keystroke in Mail's To to the colleague suggested, from the org's directory | 500 ms | AD-1 | 374 ms (a 120 ms pause in typing included) |
 | Chat open with a conversation, sealed messages opened by glassd | 1 s | UI-7, CF-91 | `chat.e2e.ts` asserts it |
 | A colleague's chat message, posted on their computer, on screen on this one | 1 s | CF-91 (ADR 0030) | 113 ms (loopback) |
+| Open an artifact: the click in Artifacts' list to its page painted in its sealed frame (its own origin, opened by glassd through the bridge, beside the read of its comments) | 1 s | AR-2 (ADR 0033) | 104 ms (median of 3: 110, 104, 104; `artifacts.e2e.ts`) |
 
 *Interactive* is a fresh browser context with the session cookie, from
 navigation to the page drawn with its data (`html[data-ready]`). *In force*
