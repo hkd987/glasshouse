@@ -168,6 +168,7 @@ fn glyph(id: &str, name: &str) -> Glyph {
         "mail" => drawn(&icons::MAIL, 0x3AA8F5),
         "chat" => drawn(&icons::CHAT, 0xF2B84B),
         "artifacts" => drawn(&icons::ARTIFACT, 0xE07BC6),
+        "docs" => drawn(&icons::DOC, 0x7AA2F7),
         "meet" => drawn(&icons::MEET, 0xF0707A),
         "settings" => drawn(&icons::GEAR, 0xA9B1BC),
         // IT's console: a gear in the accent, apart from Settings'.
@@ -343,11 +344,12 @@ mod tests {
     }
 
     #[test]
-    fn chat_meet_and_artifacts_have_icons_of_their_own() {
+    fn chat_meet_artifacts_and_docs_have_icons_of_their_own() {
         for (id, icon) in [
             ("chat", icons::CHAT),
             ("meet", icons::MEET),
             ("artifacts", icons::ARTIFACT),
+            ("docs", icons::DOC),
         ] {
             let app = web(id, id, None);
             assert!(
@@ -360,6 +362,7 @@ mod tests {
             "mail",
             "chat",
             "artifacts",
+            "docs",
             "meet",
             "store",
             "browser",
@@ -372,7 +375,7 @@ mod tests {
         })
         .collect();
         let distinct: std::collections::HashSet<&u32> = colors.iter().collect();
-        assert_eq!((colors.len(), distinct.len()), (7, 7));
+        assert_eq!((colors.len(), distinct.len()), (8, 8));
     }
 
     #[test]

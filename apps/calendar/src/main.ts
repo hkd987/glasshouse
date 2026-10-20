@@ -128,7 +128,8 @@ function newEvent(day = dayKey(new Date()), start = "10:00"): void {
 /** Colleagues in the org's directory whose name or address starts with `query` (AD-1). */
 async function lookup(query: string): Promise<Person[]> {
   const found = await bridge.call<{ people: Person[] }>("people.search", { query, limit: 8 });
-  return found.ok ? found.data.people : [];
+  // Someone with no address can't be mailed or invited.
+  return found.ok ? found.data.people.filter((p) => p.email) : [];
 }
 
 async function create(draft: Draft): Promise<void> {

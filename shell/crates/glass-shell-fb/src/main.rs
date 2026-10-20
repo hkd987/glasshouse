@@ -548,13 +548,15 @@ fn warm_engine() {
         }
     };
     // Ready once it has claimed its data (the lock names its process) and
-    // answers on its socket.
+    // answers on its socket: the socket's name can still lead to the one an
+    // engine before it left behind (after a restart), or to one not yet
+    // listening, and neither takes a connection.
     let started = Instant::now();
     let deadline = started + ENGINE_READY_WITHIN;
     let ready = || {
-        data.join(engine::READY_FILE).exists()
-            && std::fs::read_link(data.join(engine::LOCK_FILE))
-                .is_ok_and(|to| to.to_string_lossy().ends_with(&format!("-{pid}")))
+        std::fs::read_link(data.join(engine::LOCK_FILE))
+            .is_ok_and(|to| to.to_string_lossy().ends_with(&format!("-{pid}")))
+            && std::os::unix::net::UnixStream::connect(data.join(engine::READY_FILE)).is_ok()
     };
     let mut waited = false;
     while !ready() {
@@ -585,7 +587,7 @@ fn hand_to_engine(id: &str, home: &std::path::Path, args: &[String]) -> bool {
     let asked = (|| -> std::io::Result<Vec<u8>> {
         let mut stream = std::os::unix::net::UnixStream::connect(&socket)?;
         stream.set_write_timeout(Some(HAND_OVER_WITHIN))?;
-        stream.set_read_timeout(Some(HAND_OVER_WITHIN))?;
+        stream.set_read_timeout(Some(ANSWER_WITHIN))?;
         stream.write_all(&engine::window_request(home, args))?;
         stream.shutdown(std::net::Shutdown::Write)?;
         let mut answer = Vec::new();
@@ -611,8 +613,14 @@ fn hand_to_engine(id: &str, home: &std::path::Path, args: &[String]) -> bool {
     }
 }
 
-/// How long the engine has to answer for a window.
+/// How long the engine has to take a window request.
 const HAND_OVER_WITHIN: Duration = Duration::from_secs(10);
+
+/// How long it has to answer one it has taken. A busy engine (just
+/// started, or on a slow CPU) answers late and still opens the window, so
+/// starting another engine with the same request would open a second one;
+/// one that hasn't answered by then is taken not to have it.
+const ANSWER_WITHIN: Duration = Duration::from_secs(60);
 
 /// How long a window waits for the engine to be ready before it's handed
 /// over anyway (an engine that's starting still takes it).

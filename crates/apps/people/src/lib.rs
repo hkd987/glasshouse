@@ -142,12 +142,10 @@ impl ActionProvider for PeopleProvider {
             });
         };
         let limit = input.limit.unwrap_or(DEFAULT_LIMIT);
-        // Only people mail can reach: someone with no address isn't an answer.
-        let found: Vec<_> = search(&directory.release.people, &input.query, usize::MAX)
-            .into_iter()
-            .filter(|p| !p.email.is_empty())
-            .take(limit)
-            .collect();
+        // Everyone who matches: an org without mail yet still shares docs
+        // and chats by login. Mail and Calendar keep only those with an
+        // address.
+        let found: Vec<_> = search(&directory.release.people, &input.query, limit);
         let people: Vec<Value> = found
             .iter()
             .map(|p| {
@@ -174,10 +172,15 @@ impl ActionProvider for PeopleProvider {
                             .into_iter()
                             .filter(|s| !s.is_empty())
                             .collect();
-                        if about.is_empty() {
-                            format!("{} <{}>", p.name, p.email)
+                        let who = if p.email.is_empty() {
+                            format!("{} (login {}, no email)", p.name, p.login)
                         } else {
-                            format!("{} <{}> ({})", p.name, p.email, about.join(", "))
+                            format!("{} <{}>", p.name, p.email)
+                        };
+                        if about.is_empty() {
+                            who
+                        } else {
+                            format!("{who} ({})", about.join(", "))
                         }
                     })
                     .collect();
@@ -249,9 +252,19 @@ mod tests {
     fn ad1_search_finds_by_name_email_title_and_department() {
         let p = provider();
         let out = search_for(&p, json!({ "query": "pri" })).unwrap();
-        // Prim has no address, so isn't an answer.
-        assert_eq!(out.data["people"].as_array().unwrap().len(), 1);
-        assert_eq!(out.data["people"][0]["email"], "priya@acme.example");
+        // Prim has no address but is found, to share a doc or a chat with;
+        // Mail and Calendar leave such people out themselves.
+        let people = out.data["people"].as_array().unwrap();
+        assert_eq!(people.len(), 2);
+        let prim = people.iter().find(|x| x["login"] == "prim").unwrap();
+        assert_eq!(prim["email"], "");
+        assert!(
+            out.text.contains("Prim Ode (login prim, no email)"),
+            "{}",
+            out.text
+        );
+        let priya = people.iter().find(|x| x["login"] == "priya").unwrap();
+        assert_eq!(priya["email"], "priya@acme.example");
         assert_eq!(out.data["directory_version"], 4);
         assert!(
             out.text

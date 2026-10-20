@@ -160,9 +160,12 @@ impl ChatState {
             return Err(rule("That conversation exists already."));
         }
         let members: BTreeSet<&str> = conversation.members.iter().map(String::as_str).collect();
-        // An artifact may be its maker's alone until they share it
-        // (ADR 0033); a conversation is two people at least.
-        let fewest = if conversation.kind == ConversationKind::Artifact {
+        // An artifact or a doc may be its maker's alone until they share
+        // it (ADR 0033, 0035); a conversation is two people at least.
+        let fewest = if matches!(
+            conversation.kind,
+            ConversationKind::Artifact | ConversationKind::Doc
+        ) {
             1
         } else {
             2
@@ -940,6 +943,48 @@ mod tests {
             .post("chat/rotate", &json!({ "device": by.name, "epoch": epoch }))
             .await;
         (status, body, key)
+    }
+
+    #[tokio::test]
+    async fn dc4_a_doc_may_be_its_makers_alone_but_a_channel_is_two_people() {
+        let org = Org::new().await;
+        let priya = org.computer("laptop-priya", "priya").await;
+        let keys = org.keys(&["priya"]).await;
+        let compliance =
+            glass_crypto::PublicKey::from_bytes(&hex::decode(&keys.compliance).unwrap()).unwrap();
+        for (kind, want) in [
+            (ConversationKind::Doc, 200),
+            (ConversationKind::Channel, 400),
+        ] {
+            let id = new_conversation_id().unwrap();
+            let key = EpochKey::generate().unwrap();
+            let epoch = Epoch::make(
+                &id,
+                1,
+                &key,
+                None,
+                &keys.keys,
+                &compliance,
+                (&priya.key, &priya.secret),
+            )
+            .unwrap();
+            let conversation = Conversation {
+                id: id.clone(),
+                kind,
+                members: vec!["priya".into()],
+                created_by: "priya".into(),
+                name: Some(seal_name(&key, &id, 1, "Notes").unwrap()),
+                epoch: 1,
+                label: None,
+            };
+            let (status, body) = org
+                .post(
+                    "chat/conversations",
+                    &json!({ "device": priya.name, "conversation": conversation, "epoch": epoch }),
+                )
+                .await;
+            assert_eq!(status, want, "{kind:?}: {body}");
+        }
     }
 
     #[tokio::test]

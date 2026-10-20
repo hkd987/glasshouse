@@ -516,6 +516,22 @@ pub const ARTIFACT: Icon = Icon {
     ],
 };
 
+/// Docs: a page of text, without the Artifact's folded corner.
+pub const DOC: Icon = Icon {
+    view_box: (18.0, 18.0),
+    shapes: &[
+        Shape::Rect {
+            x: 3.4,
+            y: 2.2,
+            w: 11.2,
+            h: 13.6,
+            r: 1.6,
+            ink: Line(1.6),
+        },
+        Shape::Path("M6.2 6.4h5.6M6.2 9h5.6M6.2 11.6h3.4", StrokeRound(1.5)),
+    ],
+};
+
 /// Meet: a video camera.
 pub const MEET: Icon = Icon {
     view_box: (18.0, 18.0),

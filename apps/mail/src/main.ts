@@ -136,7 +136,8 @@ function startCompose(from?: Outgoing, draft: string | null = null): void {
 /** Colleagues in the org's directory whose name or address starts with `query` (AD-1). */
 async function lookup(query: string): Promise<Person[]> {
   const found = await bridge.call<{ people: Person[] }>("people.search", { query, limit: 8 });
-  return found.ok ? found.data.people : [];
+  // Someone with no address can't be mailed or invited.
+  return found.ok ? found.data.people.filter((p) => p.email) : [];
 }
 
 /** People from the mail on this computer: who wrote and who was written to. */

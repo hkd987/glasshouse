@@ -73,7 +73,7 @@ test("tl5 ga3 ga4 claude code remixes mail into the person's own, checked, versi
     note: "Padding",
   });
   expect(library.isError).toBe(true);
-  expect(text(library)).toContain('Could not resolve "left-pad"');
+  expect(text(library)).toContain("src/main.ts:1: imports left-pad; an app made here builds on the Glasshouse SDK and its own files only");
 
   const saved = await tool(socket, "apps_save", {
     base: "mail",
