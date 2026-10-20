@@ -638,6 +638,7 @@ mod tests {
                 "artifacts",
                 "calendar",
                 "chat",
+                "docs",
                 "mail",
                 "meet",
                 "settings",

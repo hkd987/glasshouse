@@ -417,12 +417,13 @@ fn ga4_mail_remixed_builds_with_esbuild() {
     assert!(files["app.js"].len() > 10_000, "{}", files["app.js"].len());
     assert!(files.contains_key("app.css") && files.contains_key("sw.js"));
 
-    // An import from outside the app and the SDK doesn't resolve.
+    // An import from outside the app and the SDK is refused before the
+    // bundler runs (it wouldn't resolve there either).
     let mut remix = mail_remix(&f);
     remix["files"]["src/main.ts"] = json!("import pad from \"left-pad\";\nconsole.log(pad);\n");
     remix["manifest"]["actions"] = json!(["mail.list"]);
     let err = f.call(SAVE, remix).unwrap_err().to_string();
-    assert!(err.contains("Could not resolve \"left-pad\""), "{err}");
+    assert!(err.contains("imports left-pad"), "{err}");
 }
 
 /// The console, as far as sharing goes: what was submitted.

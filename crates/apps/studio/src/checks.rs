@@ -118,6 +118,14 @@ pub fn check_source(manifest: &AppManifest, files: &BTreeMap<String, String>) ->
                 }
                 found.refuse(format!("{path}:{line}: {}", rule.why()));
             }
+            for (line, spec) in &scan.imports {
+                if !importable(spec) {
+                    found.refuse(format!(
+                        "{path}:{line}: imports {spec}; an app made here builds on the Glasshouse \
+                         SDK and its own files only"
+                    ));
+                }
+            }
             called.extend(scan.actions);
             by_name |= scan.by_name;
         }
@@ -337,6 +345,8 @@ struct Scan {
     actions: BTreeSet<String>,
     /// Some call names its action with something other than a literal.
     by_name: bool,
+    /// (line, specifier) of each module imported or re-exported by name.
+    imports: Vec<(usize, String)>,
 }
 
 fn is_action_name(s: &str) -> bool {
@@ -347,6 +357,15 @@ fn is_action_name(s: &str) -> bool {
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
         })
+}
+
+/// What a remix may import: its own files and the SDK, the only modules the
+/// studio's bundler links (ADR 0032).
+fn importable(spec: &str) -> bool {
+    spec.starts_with("./")
+        || spec.starts_with("../")
+        || spec == "@glasshouse/sdk"
+        || spec.starts_with("@glasshouse/sdk/")
 }
 
 fn scan_script(text: &str) -> Scan {
@@ -374,6 +393,13 @@ fn scan_script(text: &str) -> Scan {
                 Some(Rule::CodeFromText)
             }
             "import" if opens => Some(Rule::DynamicImport),
+            // `import "x"`, `import … from "x"`, `export … from "x"`.
+            "import" | "from" if !after_dot => {
+                if let Some((_, Token::Str(spec))) = tokens.get(i + 1) {
+                    scan.imports.push((*line, spec.clone()));
+                }
+                None
+            }
             "innerHTML"
             | "outerHTML"
             | "insertAdjacentHTML"
@@ -660,19 +686,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ga4_a_remix_imports_only_the_sdk_and_its_own_files() {
+        let mut files = source("");
+        files.insert(
+            MAIN.into(),
+            "import { bridge } from \"@glasshouse/sdk\";\nimport \"./app.css\";\n\
+             export { view } from \"./view.ts\";\nconst a = Array.from([1]);\n"
+                .into(),
+        );
+        assert!(check_source(&manifest(&[]), &files).passed());
+        for bad in [
+            "import { EditorState } from \"prosemirror-state\";",
+            "import \"left-pad\";",
+            "export * from \"https://x.example/a.js\";",
+        ] {
+            files.insert(MAIN.into(), bad.into());
+            let found = check_source(&manifest(&[]), &files);
+            assert!(
+                found
+                    .refusals
+                    .iter()
+                    .any(|r| r.contains("SDK and its own files")),
+                "{bad}: {found:?}"
+            );
+        }
+    }
+
     /// Our own apps are what people start from (ADR 0032), so their source
     /// must pass the checks a remix of them gets, unchanged. Meet's worker
-    /// waits for workers in apps people make.
+    /// waits for workers in apps people make; Docs is built on libraries
+    /// the studio doesn't bundle, so it isn't offered as a base.
     #[test]
     fn tl5_first_party_apps_pass_their_own_checks() {
         let apps = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps");
-        for app in ["mail", "calendar", "chat", "settings", "store", "artifacts"] {
+        let load = |app: &str| {
             let dir = apps.join(app);
             let manifest: AppManifest =
                 serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
                     .unwrap();
-            let files = crate::store::read_tree(&dir, "src").unwrap();
-            let found = check_source(&manifest, &files);
+            check_source(&manifest, &crate::store::read_tree(&dir, "src").unwrap())
+        };
+        let docs = load("docs");
+        assert!(
+            !docs.refusals.is_empty()
+                && docs
+                    .refusals
+                    .iter()
+                    .all(|r| r.contains("SDK and its own files")),
+            "{:?}",
+            docs.refusals
+        );
+        for app in ["mail", "calendar", "chat", "settings", "store", "artifacts"] {
+            let found = load(app);
             assert!(found.passed(), "{app}: {:?}", found.refusals);
         }
     }

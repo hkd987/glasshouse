@@ -56,6 +56,8 @@ fails when one goes over:
 | Meet, memory (before joining) | 150 MB | UI-7 | 100 MB |
 | Artifacts, cold launch | 1 s | UI-7 | 150 ms (150, 175, 132); this suite's computer is unmanaged, so it shows that the shared space isn't ready |
 | Artifacts, memory | 150 MB | UI-7 | 114 MB |
+| Docs, cold launch | 1 s | UI-7 | 135 ms (145, 135, 127); this suite's computer is unmanaged, so it has no docs to list |
+| Docs, memory | 150 MB | UI-7 | 108 MB |
 | Joining a meeting: Join to the other person on screen, through the computer, the console and the relay | 2 s | UI-7, CF-21 | 1427 ms (`meetings.e2e.ts`, before the page stopped waiting up to 1 s for its ICE candidates; not measured since); page to relay alone (`meet.e2e.ts`) 1311 ms then, 258–355 ms now |
 | Joining a three-person meeting: Join to both others on screen, one of them after a renegotiation over the data channel; page to relay alone | 2 s | UI-7, CF-21 | 392–658 ms (`meet.e2e.ts`, five runs); the two already there see the newcomer at 413–711 ms |
 | A page in a two-person call | 250 MB | UI-7, CF-21 | 169 MB |
@@ -119,6 +121,8 @@ with a dev-host glassd enrolled as a pilot device
 | Chat open with a conversation, sealed messages opened by glassd | 1 s | UI-7, CF-91 | `chat.e2e.ts` asserts it |
 | A colleague's chat message, posted on their computer, on screen on this one | 1 s | CF-91 (ADR 0030) | 113 ms (loopback) |
 | Open an artifact: the click in Artifacts' list to its page painted in its sealed frame (its own origin, opened by glassd through the bridge, beside the read of its comments) | 1 s | AR-2 (ADR 0033) | 104 ms (median of 3: 110, 104, 104; `artifacts.e2e.ts`) |
+| Open a doc: the click in Docs' list to the doc drawn in the editor (`doc.open`: its whole state as one Yjs update, merged into the page's) | 1 s | DC-1 (ADR 0035 §4) | 138 ms (median of 3: 138, 81, 159; `docs.e2e.ts`, a short doc; a doc of 10,000 updates isn't measured yet) |
+| An edit in one Docs window on screen in another: the last key typed to the line drawn (`/_bridge/live`; pushes go at most every 400 ms) | 1 s | DC-3 (ADR 0035 §3) | 362 ms (median of 3: 111, 869, 362; `docs.e2e.ts`, two windows on one bridge) |
 
 *Interactive* is a fresh browser context with the session cookie, from
 navigation to the page drawn with its data (`html[data-ready]`). *In force*

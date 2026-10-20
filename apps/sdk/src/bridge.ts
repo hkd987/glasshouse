@@ -174,6 +174,45 @@ export class Bridge {
     }
     return status;
   }
+
+  /**
+   * Live editing of an item this session opened (ADR 0035 §3): `push`
+   * sends a Yjs update; `pull` returns the updates after a cursor, waiting
+   * (25 s at most) for new ones. Not an action: glassd allows it only for
+   * an item the session opened, in the role it opened with, and refuses
+   * it otherwise (a `BridgeError`). Throws `Offline` like any request.
+   */
+  async live<T = LivePulled>(body: LiveRequest): Promise<T> {
+    return this.#post<T>("live", body);
+  }
+}
+
+/**
+ * What a page sends `/_bridge/live`: one update, or a wait for others'.
+ * `client` names the page (a random id made once per page load, up to 64
+ * letters, digits and `-`): a pull leaves out only that page's own pushes,
+ * so two windows of one app on one bridge see each other's edits.
+ */
+export type LiveRequest =
+  | { op: "push"; doc: string; update: string; client?: string }
+  | { op: "pull"; doc: string; since: number; wait_secs: number; client?: string };
+
+/** An update someone else's computer (or an agent) made, base64. */
+export interface LiveUpdate {
+  update: string;
+  by: string;
+  by_name: string;
+}
+
+/** A push's answer: where the item's log is now. */
+export interface LivePushed {
+  cursor: number;
+}
+
+/** A pull's answer: the updates after `since`, and the cursor to pass next. */
+export interface LivePulled {
+  updates: LiveUpdate[];
+  cursor: number;
 }
 
 /**

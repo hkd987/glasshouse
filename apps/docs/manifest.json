@@ -1,0 +1,9 @@
+{
+  "id": "docs",
+  "name": "Docs",
+  "version": "0.1.0",
+  "description": "Pages you write with colleagues at the same time, with comments, named versions and sharing, sealed like chat.",
+  "actions": ["doc.list", "doc.read", "doc.create", "doc.open", "doc.comment", "doc.resolve", "doc.version", "doc.roles", "people.search"],
+  "permissions": [],
+  "labels": ["public", "internal", "confidential"]
+}

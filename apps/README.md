@@ -27,6 +27,12 @@ apps/
               itself), pinned comments drawn by the app from element paths
               (artifacts.ts checks every frame message), and Share; keeps
               nothing, like Chat
+  docs/       docs people write together, live (DC-1 to DC-4, ADR 0035):
+              ProseMirror bound by y-prosemirror to the doc's Yjs document,
+              in the schema glassd's yrs reads (schema.ts); the live session
+              over /_bridge/live and comments' anchors without a DOM
+              (live.ts, docs.ts); keeps nothing, like Chat. The one app built
+              on npm libraries (ProseMirror, Yjs: all MIT)
   sdk/template/ where a new app starts (ADR 0032): a manifest without an
               id and a small src/; apps.source {"template": true} hands it out
   console/    the admin console's web app (ADR 0023): a site glass-console serves,
