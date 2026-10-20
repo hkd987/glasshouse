@@ -1315,3 +1315,99 @@ fn adr0031_do_not_disturb_keeps_banners_from_popping_up_and_the_lock_clock_follo
     assert_eq!(glass_shell::greeter::clock_lines(at, false).1, "2:05");
     assert_eq!(glass_shell::greeter::clock_lines(at, true).1, "14:05");
 }
+
+/// Typed into the open command bar, as its text field sends it.
+fn type_query(live: &mut Live, query: &str) {
+    live.update(Message::CommandChanged(query.into()));
+}
+
+fn fixture_app(id: &str) -> AppEntry {
+    fixtures::apps()
+        .into_iter()
+        .find(|a| a.id == id)
+        .unwrap_or_else(|| panic!("{id} isn't among the fixture's apps"))
+}
+
+#[test]
+fn dk1_the_command_bar_opens_the_app_typed_with_enter_as_spotlight_does() {
+    let mut live = Live::new(fixtures::tasks()).with_apps(fixtures::apps());
+    live.update(Message::OpenCommandBar);
+    // Nothing typed: no apps, and Enter is the text field's (the agent's).
+    assert!(live.command_bar().unwrap().hits.is_empty());
+    assert_eq!(press(&mut live, Named::Enter), None);
+    type_query(&mut live, "ma");
+    let bar = live.command_bar().unwrap();
+    let names: Vec<&str> = bar.hits.iter().map(|h| h.app.name.as_str()).collect();
+    assert_eq!(names, ["Mail", "My Mail"]);
+    assert_eq!(bar.selected, Some(0), "the top hit is lit");
+    assert_eq!(
+        bar.hits[1].based_on,
+        Some("Mail"),
+        "the person's own version says whose"
+    );
+    // Enter opens it, and the bar closes.
+    assert_eq!(
+        press(&mut live, Named::Enter),
+        Some(Some(Effect::Launch(fixture_app("mail"))))
+    );
+    assert!(live.command_bar().is_none());
+
+    // Down chooses the next, round the end; Enter opens what's lit.
+    live.update(Message::OpenCommandBar);
+    type_query(&mut live, "ma");
+    assert_eq!(press(&mut live, Named::ArrowDown), Some(None));
+    assert_eq!(live.command_bar().unwrap().selected, Some(1));
+    press(&mut live, Named::ArrowDown);
+    assert_eq!(live.command_bar().unwrap().selected, Some(0));
+    press(&mut live, Named::ArrowUp);
+    assert_eq!(
+        press(&mut live, Named::Enter),
+        Some(Some(Effect::Launch(fixture_app("my-mail"))))
+    );
+
+    // Typing again lights the new top hit; the query keeps Left, Right,
+    // Home and End for its cursor.
+    live.update(Message::OpenCommandBar);
+    type_query(&mut live, "act");
+    assert_eq!(live.command_bar().unwrap().selected, Some(0));
+    for key in [Named::ArrowLeft, Named::ArrowRight, Named::Home, Named::End] {
+        assert_eq!(press(&mut live, key), None, "{key:?} stays the query's");
+    }
+    // What no app is called leaves Enter and the arrows to the agent.
+    type_query(&mut live, "prep me for my 2:00");
+    let bar = live.command_bar().unwrap();
+    assert!(bar.hits.is_empty() && bar.selected.is_none());
+    assert_eq!(press(&mut live, Named::ArrowDown), None);
+    assert_eq!(press(&mut live, Named::Enter), None);
+    assert_eq!(press(&mut live, Named::Escape), Some(None));
+    assert!(live.command_bar().is_none());
+}
+
+#[test]
+fn dk1_an_app_the_command_bar_found_opens_with_a_click() {
+    let theme = Theme::glass();
+    let mut live = Live::new(fixtures::tasks()).with_apps(fixtures::apps());
+    let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
+    live.update(Message::OpenCommandBar);
+    type_query(&mut live, "dis");
+    {
+        let bar = live.command_bar();
+        let view = live.view(&theme, bar.as_ref(), artboard_time(), SIZE);
+        screen.update(view, &[], None);
+    }
+    // The bar sits at (240, 150); its first app is on the left, under the
+    // query and the "Apps" label.
+    let clicked = (250..400)
+        .step_by(10)
+        .flat_map(|y| click(&mut screen, &live, Point::new(500.0, y as f32)))
+        .find(|m| matches!(m, Message::Launch(_)));
+    assert_eq!(clicked, Some(Message::Launch("dispute-tracker".into())));
+    assert_eq!(
+        live.update(clicked.unwrap()),
+        Some(Effect::Launch(fixture_app("dispute-tracker")))
+    );
+    assert!(
+        live.command_bar().is_none(),
+        "the bar closes as the app opens"
+    );
+}

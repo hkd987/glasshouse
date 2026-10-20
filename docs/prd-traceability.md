@@ -51,7 +51,7 @@ Tests: *unit* = crate unit tests, *pipeline* =
 
 | Id | Status | Where | Verified by |
 |---|---|---|---|
-| DA-1 Command bar with context | Partial | `glassctl run` (CLI stand-in); on the VM's screen Ctrl Space opens the shell's command bar, typing works and Recent shows real tasks. Missing: the desktop agent's answers and handing off from the bar | `glass-shell` `tests/live.rs` |
+| DA-1 Command bar with context | Partial | `glassctl run` (CLI stand-in); on the VM's screen Ctrl Space opens the shell's command bar, typing works and Recent shows real tasks. It finds apps by name as Spotlight does (owner, 2026-10-20): the start of the name, a word, anywhere in it, then initials; Enter opens the top one, Up and Down choose, a click opens; with none found, Enter is the agent's. Missing: the desktop agent's answers and handing off from the bar | `glass-shell` `tests/live.rs` (`dk1_the_command_bar_opens_the_app_typed…`, `dk1_an_app_the_command_bar_found…`), `command_bar::tests::dk1_the_bar_finds_apps…`, snapshot `command-bar-apps` |
 | DA-2 Handoff card | **Done** (data + CLI) | `runtime.rs::prepare`, `HandoffCard` (plan, version, touches, asks, can't do, data and model) | pipeline `plan_shows_the_handoff_card…`, `feed_lines_carry_verb_and_target` |
 | DA-3 Edit scope; policy limits locked | Partial | folders + `--block/--ask` restrictions | pipeline `restrictions_tighten…`; inline UI not started |
 | DA-10 IT tiers per agent/group; users stricter only | **Done** | `glass-policy` | unit `engine::*`, pipeline, e2e `scope` |

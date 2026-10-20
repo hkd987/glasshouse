@@ -18,7 +18,7 @@ use time::OffsetDateTime;
 
 use crate::apps::{AppEntry, AppWindow};
 use crate::greeter::{self, initials};
-use crate::screens::command_bar::{self, CommandBar};
+use crate::screens::command_bar::{self, CommandBar, Hit};
 use crate::screens::desktop::{self, Desktop, Tiles};
 use crate::screens::expanded::{self, Expanded, Rollback, Tab};
 use crate::screens::launcher;
@@ -98,6 +98,8 @@ enum List {
     SystemMenu,
     Agents,
     Launcher,
+    /// The apps the command bar found (DK-1).
+    CommandBar,
 }
 
 /// The locked screen: the sign-in screen's look, for the person signed in.
@@ -313,6 +315,9 @@ impl Live {
     pub fn set_apps(&mut self, apps: Vec<AppEntry>) -> bool {
         let changed = self.apps != apps;
         self.apps = apps;
+        if changed && self.command.is_some() {
+            self.select_top_hit();
+        }
         changed
     }
 
@@ -772,7 +777,7 @@ impl Live {
                 let lines = self.lines(list);
                 let next = match list {
                     List::Launcher => launcher::step(at, lines.len(), step),
-                    List::SystemMenu | List::Agents => {
+                    List::SystemMenu | List::Agents | List::CommandBar => {
                         let choosable: Vec<bool> = lines.iter().map(Option::is_some).collect();
                         menu_step(&choosable, at, step)
                     }
@@ -825,6 +830,11 @@ impl Live {
             // first, as a Mac's dock does; otherwise it starts.
             Message::Launch(id) => {
                 self.launcher = false;
+                // Found in the command bar: it closes as the app opens.
+                self.command = None;
+                if self.list_selected(List::CommandBar) {
+                    self.selected = None;
+                }
                 let app = self.apps.iter().find(|a| a.id == id)?;
                 match self.windows.iter().find(|w| app.owns_window(&w.app_id)) {
                     Some(window) => Some(Effect::Activate(window.id)),
@@ -940,16 +950,21 @@ impl Live {
             Message::OpenCommandBar => {
                 self.system_menu = false;
                 self.command.get_or_insert_with(String::new);
+                self.select_top_hit();
                 Some(Effect::Focus(command_bar::INPUT))
             }
             Message::CommandChanged(text) => {
                 if let Some(command) = &mut self.command {
                     *command = text;
+                    self.select_top_hit();
                 }
                 None
             }
             Message::CloseCommandBar => {
                 self.command = None;
+                if self.list_selected(List::CommandBar) {
+                    self.selected = None;
+                }
                 None
             }
             Message::LockScreen => {
@@ -1000,8 +1015,13 @@ impl Live {
     /// The list the arrows move through: the open menu or the launcher,
     /// when nothing of the shell's sits over it.
     fn list(&self) -> Option<List> {
-        if self.window.is_some()
-            || self.command.is_some()
+        // The command bar is over everything but the lock and a leaving
+        // desktop.
+        if self.locked.is_some() || self.leaving.is_some() {
+            None
+        } else if self.command.is_some() {
+            Some(List::CommandBar)
+        } else if self.window.is_some()
             || self.open.is_some()
             || self.switching.is_some()
             || self.locked.is_some()
@@ -1023,6 +1043,24 @@ impl Live {
         self.selected.filter(|(l, _)| *l == list).map(|(_, at)| at)
     }
 
+    fn list_selected(&self, list: List) -> bool {
+        self.selected.is_some_and(|(l, _)| l == list)
+    }
+
+    /// The apps the command bar's query finds (DK-1).
+    fn hits(&self) -> Vec<&AppEntry> {
+        self.command
+            .as_deref()
+            .map(|query| command_bar::find_apps(&self.apps, query))
+            .unwrap_or_default()
+    }
+
+    /// As the query changes, Enter opens the best app it finds, as
+    /// Spotlight's top hit; with none, Enter is the agent's.
+    fn select_top_hit(&mut self) {
+        self.selected = (!self.hits().is_empty()).then_some((List::CommandBar, 0));
+    }
+
     /// What choosing each line of `list` does, in the order it's drawn: the
     /// message its click sends, or none for a line that can't be chosen.
     fn lines(&self, list: List) -> Vec<Option<Message>> {
@@ -1041,6 +1079,11 @@ impl Live {
             List::Launcher => self
                 .apps
                 .iter()
+                .map(|app| Some(Message::Launch(app.id.clone())))
+                .collect(),
+            List::CommandBar => self
+                .hits()
+                .into_iter()
                 .map(|app| Some(Message::Launch(app.id.clone())))
                 .collect(),
         }
@@ -1110,9 +1153,17 @@ impl Live {
             Key::Named(Named::Escape) if self.window.is_some() => Some(Message::CloseSystemWindow),
             Key::Named(Named::Escape) if self.launcher => Some(Message::ToggleLauncher),
             // Only while a menu or the launcher is open: everywhere else
-            // these keys are the focused app's or a text field's.
+            // these keys are the focused app's or a text field's. In the
+            // command bar only Up and Down move, among the apps it found;
+            // with none, and Left, Right, Home and End always, they stay
+            // the query's.
             Key::Named(named)
-                if modifiers.is_empty() && arrow(*named).is_some() && self.list().is_some() =>
+                if modifiers.is_empty()
+                    && arrow(*named).is_some()
+                    && self.list().is_some()
+                    && (!bar
+                        || (matches!(named, Named::ArrowUp | Named::ArrowDown)
+                            && !self.hits().is_empty())) =>
             {
                 arrow(*named).map(Message::Select)
             }
@@ -1165,6 +1216,11 @@ impl Live {
     pub fn command_bar(&self) -> Option<CommandBar<'_>> {
         self.command.as_ref().map(|query| CommandBar {
             query: query.clone(),
+            hits: command_bar::find_apps(&self.apps, query)
+                .into_iter()
+                .map(|app| Hit::new(app, &self.apps))
+                .collect(),
+            selected: self.selected_in(List::CommandBar),
             answer: None,
             suggestions: Vec::new(),
             recent: &self.tasks,

@@ -222,6 +222,35 @@ fn render_command_bar() -> Frame {
     )
 }
 
+/// The command bar with "ma" typed: the apps it found, the top one lit
+/// (DK-1).
+fn render_command_bar_apps() -> Frame {
+    let theme = Theme::glass();
+    let tasks = fixtures::tasks();
+    let recent = fixtures::recent_tasks();
+    let apps = fixtures::apps();
+    let bar = command_bar::CommandBar {
+        query: "ma".into(),
+        hits: command_bar::find_apps(&apps, "ma")
+            .into_iter()
+            .map(|app| command_bar::Hit::new(app, &apps))
+            .collect(),
+        selected: Some(0),
+        answer: None,
+        ..fixtures::command_bar(&recent)
+    };
+    let state = desktop::Desktop {
+        tiles: desktop::Tiles::Hidden,
+        ..fixtures::desktop(&tasks)
+    };
+    let overlay: glass_shell::Element<'_, Message> = command_bar::overlay(&theme, &bar);
+    frame(
+        desktop::view(&theme, &state, Vec::new(), |_| None, Some(overlay), SCREEN),
+        size(),
+        1.0,
+    )
+}
+
 /// A tile opened into the expanded view, over the desktop.
 fn render_expanded_from(detail: &TaskDetail, now: Timestamp) -> Frame {
     let theme = Theme::glass();
@@ -477,6 +506,7 @@ fn screens_match_their_snapshots() {
     snapshot("restart", &render_restart());
     snapshot("launcher", &render_launcher(&fixtures::apps()));
     snapshot("command-bar", &render_command_bar());
+    snapshot("command-bar-apps", &render_command_bar_apps());
     snapshot("expanded", &render_expanded());
     snapshot("expanded-review", &render_expanded_review());
 }

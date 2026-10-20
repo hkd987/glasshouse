@@ -236,6 +236,36 @@ pub(crate) fn icon_tile<'a>(
     .into()
 }
 
+/// An app's icon `side` pixels square, for a row in a list (the command
+/// bar's apps): the glyph scaled down on a tile. A remix wears no badge
+/// here; the row says whose version it is.
+pub(crate) fn small_icon<'a>(look: Look, side: f32) -> Element<'a, Message> {
+    let scale = side / 72.0;
+    let glyph: Element<'a, Message> = match look.glyph {
+        Glyph::Drawn { icon, color, size } => {
+            icons::view(icon, hex(color), size * scale * 1.3, size * scale * 1.3)
+        }
+        Glyph::Text(glyph) => text(glyph)
+            .size(26.0 * scale * 1.3)
+            .font(fonts::MONO)
+            .color(hex(0xE6E8EB))
+            .into(),
+        Glyph::Letter { letter, tint } => text(letter.to_string())
+            .size(24.0 * scale * 1.3)
+            .font(fonts::SEMIBOLD)
+            .color(hex(tint))
+            .into(),
+    };
+    let fill = match look.glyph {
+        Glyph::Letter { tint, .. } => hexa(tint, 0.18),
+        _ => hex(0x23272E),
+    };
+    container(glyph)
+        .center(Length::Fixed(side))
+        .style(move |_| style::panel(fill, side * 0.25))
+        .into()
+}
+
 fn glyph_view<'a>(glyph: Glyph) -> Element<'a, Message> {
     match glyph {
         Glyph::Drawn { icon, color, size } => icons::view(icon, hex(color), size, size),

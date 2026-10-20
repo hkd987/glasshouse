@@ -422,6 +422,8 @@ pub fn command_bar(recent: &[TaskView]) -> CommandBar<'_> {
     let plain = |s: &str| (s.to_owned(), false);
     CommandBar {
         query: "prep me for my 2:00".into(),
+        hits: Vec::new(),
+        selected: None,
         answer: Some(Answer {
             paragraphs: vec![
                 vec![

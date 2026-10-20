@@ -39,7 +39,7 @@ light desktop; accent `#3D6BFF` for working and you're-driving; attention
 | Screen thumbnail with labeled agent cursor (AW-2) | **Not built**: needs screen-control agents |
 | Menu bar: app menus, "3 agents" pill with one dot per tile (a button: it opens the agents menu), Wi-Fi, battery, clock | `task.list` counts and states; app menus come from the focused app (shell), and with none focused the left side is only the mark (product decision, 2026-10-18: the desktop isn't an app). The mark opens the system menu, as a Mac's Apple menu: About Glasshouse, Check for Updates (dimmed until updates ship), "Hand an agent a task…" (Ctrl Space, the command bar), Force Quit (Alt Super Esc, Ctrl Shift Esc), Restart…, Shut Down… (each asked first), then Lock Screen (Ctrl Super Q, Super L) paired with "Sign out <name>…" as on a Mac; apps join it when they have windows. Wi-Fi and battery from the system (PM, CF) |
 | Dock: launcher, apps with open dots, calendar date, Agents with a needs-you badge | Apps from the catalog (shell); the badge is the count of `NeedsYou` tiles. Product decision (2026-10-19): Files always first and the Trash always last, as a Mac's Finder and Trash, with the agents beside the Trash past the separator; the Trash shows full when `~/.local/share/Trash/files` has anything. Arranging the apps between, and opening them, come with app windows (M2b). Product decision (2026-10-19): the dock steps aside while a window is on the screen and comes back at the bottom edge, so windows get the whole height (the mockups show it always up); it lists only the apps in the person's profile |
-| Command bar over everything, Ctrl Space (DA-1) | `task.plan` on enter; see Command bar below |
+| Command bar over everything, Ctrl Space (DA-1) | Apps by name, as Spotlight (owner, 2026-10-20): Enter opens the top one; otherwise `task.plan` on enter. See Command bar below |
 | Live updates | `events.subscribe` → `event` notifications (`TaskUpdated`, `TaskRemoved`) |
 
 ## Expanded · watch, take over, rewind
@@ -254,6 +254,7 @@ opens over everything with Ctrl Space, like Spotlight (DK-1).
 
 | Element | Source |
 |---|---|
+| Apps (not on the artboard) | The launcher's apps (`apps.list`), found by name as Spotlight does: the start of the name, then a word of it, then anywhere in it, then the words' initials; at most six, the top one lit with "↵ Open". Up and Down choose, Enter or a click opens and closes the bar. Owner decision (2026-10-20). When nothing matches, the agent has Enter |
 | "prep me for my 2:00" and the answer | **Not built**: AE-3 needs the model gateway and harness bundles (ADR 0010). Today `glassctl run <agent>` names the agent |
 | "Hands off to a specialist agent when one fits" | **Gap**: routing a request to an agent. `agents.list` has what the router needs (ids, descriptions) |
 | Suggestions for what's on screen | **Not built**: needs the shell and the accessibility tree (NV-11) |
