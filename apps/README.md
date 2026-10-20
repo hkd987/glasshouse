@@ -121,7 +121,7 @@ session cookie.
 
 | Command | What it does |
 |---|---|
-| `make console-test` | the console's Rust tests, then Playwright (`e2e/console.config.ts`) on a 500-device, 50-item fixture and a dev-host glassd enrolled with it: every page interactive in under 1 s, a published change in force on the device in under 5 s, an approved item found by `catalog.search` |
+| `make console-test` | the console's Rust tests, then Playwright (`e2e/console.config.ts`) on a 500-device, 50-item fixture and a dev-host glassd enrolled with it: every page interactive in under 1 s, a published change in force on the device in under 5 s, an approved item found by `catalog.search`, and a remix of Mail shared, reviewed, approved and installed from the Store (`studio.e2e.ts`: the share in under 15 s, approval to the computer in under 5 s) |
 | `make console-lint` | clippy on the server, types, and no base-system name in what IT sees (BR-1); the console's npm packages are the apps' (`make apps-lint` checks their licenses) |
 
 ## Rules

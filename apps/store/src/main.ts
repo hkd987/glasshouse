@@ -145,7 +145,7 @@ function card(item: Item): HTMLElement {
       button,
     ),
     h("p", { class: "summary" }, item.summary),
-    h("p", { class: "publisher muted small" }, publisherLine(item)),
+    h("p", { class: "publisher muted small" }, publisherLine(item, state.listing?.items ?? [])),
     h("p", { class: "can-do small" }, h("span", { class: "label" }, "Can do "), canDo(item.declares)),
   );
 }

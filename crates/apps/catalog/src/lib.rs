@@ -580,6 +580,56 @@ mod tests {
     }
 
     #[test]
+    fn ga13_the_store_lists_who_made_an_org_app_and_what_it_remixes() {
+        let home = tempfile::tempdir().unwrap();
+        let manifest: glass_api::AppManifest = serde_json::from_value(json!({
+            "id": "mail-with-write", "name": "Mail, with Write", "version": "1",
+            "actions": ["mail.list"], "labels": ["internal"],
+        }))
+        .unwrap();
+        let mut made = item(
+            "mail-with-write",
+            "Mail, with Write",
+            "Write instead of New message",
+            &[("everyone", InstallMode::Available)],
+        );
+        made.publisher = "Dana Ruiz".into();
+        made.app = Some(glass_managed::studio::OrgApp {
+            manifest,
+            bundle_sha256: "00".repeat(32),
+            source_sha256: "11".repeat(32),
+            made_by: "dana".into(),
+            based_on: Some("mail@0.1.0".into()),
+        });
+        let handle = CatalogHandle::new();
+        handle.set(Applied {
+            version: 8,
+            release: CatalogRelease {
+                items: vec![
+                    made,
+                    item(
+                        "vendor-disputes",
+                        "Vendor Disputes",
+                        "Track vendor disputes",
+                        &[("everyone", InstallMode::Available)],
+                    ),
+                ],
+            },
+        });
+        let p = CatalogProvider::new(handle);
+        let listed = as_in(&p, home.path(), &["everyone"], LIST, json!({})).unwrap();
+        let items = &listed.data["items"];
+        assert_eq!(items[0]["id"], "mail-with-write");
+        assert_eq!(
+            items[0]["app"],
+            json!({ "made_by": "dana", "based_on": "mail@0.1.0" })
+        );
+        // Not the bundle's digests or manifest: the Store needn't see them.
+        assert!(items[0]["app"].get("bundle_sha256").is_none());
+        assert_eq!(items[1]["app"], Value::Null, "not an app people made");
+    }
+
+    #[test]
     fn dv11_only_what_is_available_to_their_groups_installs() {
         let home = tempfile::tempdir().unwrap();
         let p = provider();
