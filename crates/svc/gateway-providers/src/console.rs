@@ -298,6 +298,7 @@ mod tests {
                 catalog: None,
                 directory: None,
                 chat: None,
+                credits: None,
                 wait_secs: 0,
             })
             .unwrap();
@@ -373,6 +374,7 @@ mod tests {
                 catalog: None,
                 directory: None,
                 chat: None,
+                credits: None,
                 wait_secs: 0,
             })
             .unwrap_err();

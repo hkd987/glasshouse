@@ -56,6 +56,76 @@ pub enum Edit {
         id: String,
         role: Option<SupportRole>,
     },
+    /// Whether agents may use the org's model credits (ADR 0039).
+    Credits { on: bool },
+}
+
+/// The provider model credits run on, in policy (ADR 0039).
+pub const CREDITS_PROVIDER: &str = "credits";
+/// Its one model: OpenRouter's auto router, which picks per request.
+pub const CREDITS_MODEL: &str = "auto";
+
+/// Whether `doc` has model credits on.
+pub fn credits_on(doc: &PolicyDocument) -> bool {
+    doc.models
+        .providers
+        .iter()
+        .any(|p| p.id == CREDITS_PROVIDER)
+}
+
+/// Credits on: the provider, its model, and the default for public and
+/// internal data when the org has none. Confidential data goes to it only
+/// if IT adds it to that route (GT-3). Off takes all of it out, wherever
+/// it is named.
+fn credits(doc: &mut PolicyDocument, on: bool) {
+    use glass_policy::document::{ModelEntry, ProviderEntry, ProviderKind};
+    let models = &mut doc.models;
+    if on {
+        if !models.providers.iter().any(|p| p.id == CREDITS_PROVIDER) {
+            models.providers.push(ProviderEntry {
+                id: CREDITS_PROVIDER.into(),
+                kind: ProviderKind::OpenRouter,
+                name: "Glasshouse model credits".into(),
+                region: None,
+                endpoint: None,
+            });
+        }
+        if !models.models.iter().any(|m| m.id == CREDITS_MODEL) {
+            models.models.push(ModelEntry {
+                id: CREDITS_MODEL.into(),
+                provider: CREDITS_PROVIDER.into(),
+                model: glass_gateway_providers::OPENROUTER_AUTO.into(),
+                name: "The best model for each request".into(),
+                usd_per_mtok_in: None,
+                usd_per_mtok_out: None,
+            });
+        }
+        models.default.get_or_insert_with(|| CREDITS_MODEL.into());
+        return;
+    }
+    let gone: Vec<String> = models
+        .models
+        .iter()
+        .filter(|m| m.provider == CREDITS_PROVIDER)
+        .map(|m| m.id.clone())
+        .collect();
+    models.models.retain(|m| m.provider != CREDITS_PROVIDER);
+    models.providers.retain(|p| p.id != CREDITS_PROVIDER);
+    if models.default.as_ref().is_some_and(|d| gone.contains(d)) {
+        models.default = None;
+    }
+    for route in models.routes.values_mut() {
+        route.retain(|m| !gone.contains(m));
+    }
+    models.routes.retain(|_, route| !route.is_empty());
+    for list in doc
+        .groups
+        .iter_mut()
+        .filter_map(|g| g.models.as_mut())
+        .chain(doc.agents.iter_mut().filter_map(|a| a.models.as_mut()))
+    {
+        list.retain(|m| !gone.contains(m));
+    }
 }
 
 fn group<'a>(doc: &'a mut PolicyDocument, name: &str) -> &'a mut GroupPolicy {
@@ -78,6 +148,7 @@ fn group<'a>(doc: &'a mut PolicyDocument, name: &str) -> &'a mut GroupPolicy {
 /// Applies `edit` to `doc`, or says why it can't.
 pub fn apply(doc: &mut PolicyDocument, edit: Edit) -> Result<(), String> {
     match edit {
+        Edit::Credits { on } => credits(doc, on),
         Edit::Mail { mail } => {
             doc.mail = mail;
         }

@@ -24,8 +24,8 @@ use glass_gateway_providers::ConsoleClient;
 use glass_managed::device;
 use glass_managed::directory::{self, DirectoryRelease};
 use glass_managed::{
-    CatalogRelease, ChatRelease, DeviceReport, DocKind, MAX_WAIT_SECS, PolicyRelease, PublicKey,
-    ReleaseStore, RunningAgent, Signed, SyncRequest, SyncResponse,
+    CatalogRelease, ChatRelease, DeviceReport, DocKind, MAX_WAIT_SECS, ModelCredits, PolicyRelease,
+    PublicKey, ReleaseStore, RunningAgent, Signed, SyncRequest, SyncResponse,
 };
 use glass_policy::Policy;
 use glass_policy::store::PolicyStore;
@@ -56,6 +56,8 @@ pub struct Managed {
     catalog_version: Option<u64>,
     directory_version: Option<u64>,
     chat_version: Option<u64>,
+    /// The org's model credits key this computer has (ADR 0039).
+    credits_version: Option<u64>,
     /// Why the last release was refused or the last sync failed.
     last_error: Option<String>,
     /// Since when the console has been out of reach.
@@ -82,6 +84,7 @@ impl Managed {
             catalog_version: None,
             directory_version: None,
             chat_version: None,
+            credits_version: kept_credits_version(&crate::credits_path(config)),
             last_error: None,
             offline_since: None,
         };
@@ -254,6 +257,7 @@ impl Managed {
                 catalog: self.catalog_version,
                 directory: self.directory_version,
                 chat: self.chat_version,
+                credits: self.credits_version,
                 wait_secs: MAX_WAIT_SECS,
             };
             match client.sync(&request) {
@@ -284,6 +288,12 @@ impl Managed {
             self.last_error = None;
         }
         let mut changed = false;
+        if let Some(credits) = response.credits {
+            match self.apply_credits(&credits) {
+                Ok(()) => changed = true,
+                Err(e) => tracing::warn!("managed: model credits key: {e}"),
+            }
+        }
         if let Some(signed) = response.policy {
             match self.apply_policy(&signed, false) {
                 Ok(()) => changed = true,
@@ -333,6 +343,54 @@ impl Managed {
         }
         self.last_error = Some(format!("{what}: {why}"));
         self.runtime.set_policy_source(self.source());
+    }
+
+    /// Keeps the org's model credits key root only, or forgets it when the
+    /// org has none now, and rebuilds the gateway with it (ADR 0039). The
+    /// key is never in a log or the audit record.
+    fn apply_credits(&mut self, credits: &ModelCredits) -> Result<(), String> {
+        let path = crate::credits_path(&self.config);
+        match &credits.api_key {
+            Some(key) => {
+                let text = format!(
+                    "# The org's model credits key, from its console (ADR 0039).\n[credits]\napi_key = {}\nversion = \"{}\"\n",
+                    toml::Value::String(key.clone()),
+                    credits.version
+                );
+                write_root_only(&path, text.as_bytes())
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+            }
+            None => match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{}: {e}", path.display())),
+            },
+        }
+        self.credits_version = Some(credits.version);
+        let models = crate::gateway(&self.config, &self.runtime.current_policy());
+        self.runtime.set_gateway(models.gateway);
+        let mut event = AuditEvent::new(
+            EventKind::CreditsKeyApplied,
+            if credits.api_key.is_some() {
+                format!(
+                    "The org's model credits key v{} from the admin console is in place",
+                    credits.version
+                )
+            } else {
+                "The org has no model credits key now; this computer's is gone".into()
+            },
+        );
+        event.detail = serde_json::json!({
+            "console": self.managed.url,
+            "version": credits.version,
+            "key": credits.api_key.is_some(),
+        });
+        self.runtime.append_audit(event);
+        tracing::info!(
+            version = credits.version,
+            "managed: model credits key applied"
+        );
+        Ok(())
     }
 
     /// Verifies, validates whole, writes and swaps in a policy release.
@@ -715,6 +773,35 @@ fn read_token(path: &Path) -> Result<String, String> {
     Ok(token.trim().to_owned())
 }
 
+/// The version of the credits key kept at `path`, if one is.
+fn kept_credits_version(path: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let table: toml::Table = toml::from_str(&text).ok()?;
+    table.get("credits")?.get("version")?.as_str()?.parse().ok()
+}
+
+/// Writes `bytes` to `path` whole, readable by root alone, in a folder
+/// only root can enter.
+fn write_root_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let tmp = path.with_extension("toml.new");
+    let _ = std::fs::remove_file(&tmp);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -862,6 +949,7 @@ mod tests {
             catalog,
             directory: None,
             chat: None,
+            credits: None,
         }
     }
 
@@ -980,6 +1068,65 @@ mod tests {
         let again = Managed::start(&d.config, Arc::clone(&d.runtime), fresh.clone()).unwrap();
         assert_eq!(fresh.catalog.current().unwrap().version, 5);
         assert_eq!(again.catalog_version, Some(5));
+    }
+
+    #[test]
+    fn adr0039_the_orgs_credits_key_is_kept_root_only_reaches_the_gateway_and_can_go() {
+        let key = OrgKey::from_seed([7; 32]);
+        let d = device(&key);
+        let policy = Policy::from_toml(&format!(
+            "{}\n[[models.provider]]\nid = \"credits\"\nkind = \"openrouter\"\nname = \"Glasshouse model credits\"\n",
+            glass_policy::DEFAULT_POLICY
+        ))
+        .unwrap();
+        let path = crate::credits_path(&d.config);
+        let providers = |policy: &Policy| {
+            crate::gateway(&d.config, policy)
+                .gateway
+                .providers()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert!(!providers(&policy).contains(&"credits".to_owned()));
+
+        let mut m = d.managed();
+        let response = |api_key: Option<&str>, version| SyncResponse {
+            ring: glass_managed::Ring::Broad,
+            policy: None,
+            catalog: None,
+            directory: None,
+            chat: None,
+            credits: Some(ModelCredits {
+                version,
+                api_key: api_key.map(str::to_owned),
+            }),
+        };
+        assert!(m.handle(response(Some("sk-or-v1-org-key-not-real"), 1)));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "root only");
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(dir_mode & 0o077, 0);
+        assert!(providers(&policy).contains(&"credits".to_owned()));
+        assert_eq!(d.audited(EventKind::CreditsKeyApplied), 1);
+        let log = std::fs::read_to_string(d.dir.path().join("audit.log")).unwrap();
+        assert!(
+            !log.contains("sk-or-v1-org-key"),
+            "the key isn't on the record"
+        );
+
+        // After a restart it asks only for what's newer.
+        drop(m);
+        let mut m = d.managed();
+        assert_eq!(m.credits_version, Some(1));
+
+        // The org has none now: the key goes, and with it the provider.
+        assert!(m.handle(response(None, 2)));
+        assert!(!path.exists());
+        assert!(!providers(&policy).contains(&"credits".to_owned()));
+        assert_eq!(m.credits_version, Some(2));
     }
 
     #[tokio::test]

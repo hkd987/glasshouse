@@ -65,6 +65,9 @@ pub struct SyncRequest {
     /// The chat release it has (ADR 0030).
     #[serde(default)]
     pub chat: Option<u64>,
+    /// The version of the org's model credits key it has (ADR 0039).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<u64>,
     /// How long the console may hold the answer waiting for a release.
     #[serde(default)]
     pub wait_secs: u64,
@@ -89,6 +92,30 @@ pub struct SyncResponse {
     pub directory: Option<Signed>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat: Option<Signed>,
+    /// The org's model credits key, when it changed since the version the
+    /// computer named (ADR 0039). Its own field, never in a release: it
+    /// reaches only a computer whose key signed the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<ModelCredits>,
+}
+
+/// The org's key for its model credits (ADR 0039), at a version; no key
+/// means the org has none now, and the computer forgets its own.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCredits {
+    pub version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for ModelCredits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelCredits")
+            .field("version", &self.version)
+            .field("api_key", &self.api_key.as_ref().map(|_| "…"))
+            .finish()
+    }
 }
 
 /// Chat's settings from IT (ADR 0030, decision 4), signed like the

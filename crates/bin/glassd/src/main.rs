@@ -118,16 +118,22 @@ fn main() -> ExitCode {
 /// Nothing here logs a credential.
 fn gateway(config: &Config, policy: &Policy) -> Models {
     let mut notes = Vec::new();
-    let secrets = match Secrets::load(
-        &config.model_secrets,
-        glass_platform::users::effective_uid(),
-    ) {
+    let uid = glass_platform::users::effective_uid();
+    let mut secrets = match Secrets::load(&config.model_secrets, uid) {
         Ok(secrets) => secrets,
         Err(e) => {
             notes.push(e.to_string());
             Secrets::default()
         }
     };
+    // On a managed computer, the org's model credits key as its console
+    // sent it (ADR 0039); IT's own file wins any clash.
+    if config.managed.is_some() {
+        match Secrets::load(&credits_path(config), uid) {
+            Ok(credits) => secrets.merge(credits),
+            Err(e) => notes.push(e.to_string()),
+        }
+    }
     let (gateway, more) =
         glass_gateway_providers::connect(&policy.document().models.providers, &secrets);
     notes.extend(more);
@@ -138,6 +144,12 @@ fn gateway(config: &Config, policy: &Policy) -> Models {
         gateway: Arc::new(gateway),
         notes,
     }
+}
+
+/// Where glassd keeps the org's model credits key (ADR 0039): root only,
+/// in its state, which no jail mounts.
+pub(crate) fn credits_path(config: &Config) -> PathBuf {
+    config.state_dir.join("models/credits.toml")
 }
 
 struct Models {

@@ -141,6 +141,164 @@ impl ModelProvider for OpenRouterProvider {
     }
 }
 
+/// What OpenRouter says about a key: its credit limit, what is left of
+/// it and what it has spent, in dollars.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct KeyUsage {
+    #[serde(default)]
+    pub limit: Option<f64>,
+    #[serde(default)]
+    pub limit_remaining: Option<f64>,
+    #[serde(default)]
+    pub usage: f64,
+    #[serde(default)]
+    pub usage_monthly: f64,
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+#[derive(Deserialize)]
+struct KeyReply {
+    data: KeyData,
+    /// The key itself: only when it is made, and only that once.
+    #[serde(default)]
+    key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct KeyData {
+    hash: String,
+    #[serde(flatten)]
+    usage: KeyUsage,
+}
+
+/// A key OpenRouter made: its id, for managing it, and the key itself,
+/// which it shows only this once.
+pub struct MadeKey {
+    pub hash: String,
+    pub key: Secret,
+    pub usage: KeyUsage,
+}
+
+impl std::fmt::Debug for MadeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MadeKey")
+            .field("hash", &self.hash)
+            .field("usage", &self.usage)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Our management key's side of OpenRouter (ADR 0039): it makes each
+/// org's key with a credit limit, raises the limit when the org buys
+/// more, and reads what the key has spent. It runs in the console, on our
+/// servers; computers never hold a management key.
+#[derive(Debug)]
+pub struct OpenRouterKeys {
+    http: Http,
+    endpoint: String,
+    management: Secret,
+}
+
+impl OpenRouterKeys {
+    pub fn new(endpoint: Option<&str>, management: &str) -> Self {
+        Self::with_http(Http::new(), endpoint, Secret::new(management))
+    }
+
+    fn with_http(http: Http, endpoint: Option<&str>, management: Secret) -> Self {
+        Self {
+            http,
+            endpoint: endpoint
+                .unwrap_or(DEFAULT_ENDPOINT)
+                .trim_end_matches('/')
+                .to_owned(),
+            management,
+        }
+    }
+
+    fn call(&self, method: &str, path: &str, body: &serde_json::Value) -> Result<KeyReply, String> {
+        let bearer = format!("Bearer {}", self.management.expose());
+        let body = if method == "GET" {
+            Vec::new()
+        } else {
+            body.to_string().into_bytes()
+        };
+        let reply = self
+            .http
+            .send(
+                method,
+                &format!("{}/v1/keys{path}", self.endpoint),
+                &[
+                    ("authorization", bearer.as_str()),
+                    ("content-type", "application/json"),
+                ],
+                &body,
+            )
+            .map_err(|e| format!("OpenRouter {e}"))?;
+        if !(200..300).contains(&reply.status) {
+            let message = serde_json::from_str::<ErrorBody>(&reply.body)
+                .map(|e| e.error.message)
+                .unwrap_or_else(|_| "no details".into());
+            return Err(format!("OpenRouter said HTTP {}: {message}", reply.status));
+        }
+        serde_json::from_str(&reply.body).map_err(|e| format!("OpenRouter's reply: {e}"))
+    }
+
+    /// Makes a key named `name` that may spend `limit` dollars.
+    pub fn create(&self, name: &str, limit: f64) -> Result<MadeKey, String> {
+        let reply = self.call("POST", "", &json!({ "name": name, "limit": limit }))?;
+        let key = reply
+            .key
+            .ok_or("OpenRouter made the key but didn't send it")?;
+        Ok(MadeKey {
+            hash: reply.data.hash,
+            key: Secret::new(key),
+            usage: reply.data.usage,
+        })
+    }
+
+    /// Sets what the key `hash` may spend in all, in dollars.
+    pub fn set_limit(&self, hash: &str, limit: f64) -> Result<KeyUsage, String> {
+        Ok(self
+            .call(
+                "PATCH",
+                &format!("/{}", path_id(hash)?),
+                &json!({ "limit": limit }),
+            )?
+            .data
+            .usage)
+    }
+
+    /// Turns the key `hash` off, as when it's replaced.
+    pub fn disable(&self, hash: &str) -> Result<KeyUsage, String> {
+        Ok(self
+            .call(
+                "PATCH",
+                &format!("/{}", path_id(hash)?),
+                &json!({ "disabled": true }),
+            )?
+            .data
+            .usage)
+    }
+
+    /// What the key `hash` has spent, and what is left of its limit.
+    pub fn usage(&self, hash: &str) -> Result<KeyUsage, String> {
+        Ok(self
+            .call("GET", &format!("/{}", path_id(hash)?), &json!({}))?
+            .data
+            .usage)
+    }
+}
+
+/// A key's hash as a path segment: hex and nothing else.
+fn path_id(hash: &str) -> Result<&str, String> {
+    if !hash.is_empty() && hash.len() <= 128 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(hash)
+    } else {
+        Err(format!("{hash:?} isn't a key's hash"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -262,5 +420,77 @@ mod tests {
         let reply = provider.complete(&request(&messages)).unwrap();
         assert_eq!((reply.cost_usd, reply.served_by), (None, None));
         assert_eq!(reply.stop_reason.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn adr0039_the_console_makes_an_orgs_key_with_a_limit_and_reads_what_it_spent() {
+        let made = r#"{"data":{"hash":"abc123","name":"glasshouse-acme","label":"sk-or-v1-0e6...1c96","disabled":false,"limit":50,"limit_remaining":50,"usage":0,"usage_monthly":0},"key":"sk-or-v1-made-once"}"#;
+        let (url, got) = fake::serve(201, made);
+        let keys = OpenRouterKeys::with_http(
+            Http::insecure_for_tests(),
+            Some(&url),
+            Secret::new("mgmt-not-real"),
+        );
+        let key = keys.create("glasshouse-acme", 50.0).unwrap();
+        assert_eq!(key.hash, "abc123");
+        assert_eq!(key.key.expose(), "sk-or-v1-made-once");
+        assert_eq!(key.usage.limit_remaining, Some(50.0));
+        assert!(!format!("{key:?}").contains("made-once"));
+        let sent = got.recv().unwrap();
+        assert!(
+            sent.head.starts_with("POST /v1/keys HTTP/1.1"),
+            "{}",
+            sent.head
+        );
+        assert!(
+            sent.head
+                .to_ascii_lowercase()
+                .contains("authorization: bearer mgmt-not-real")
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&sent.body).unwrap(),
+            json!({ "name": "glasshouse-acme", "limit": 50.0 })
+        );
+
+        let raised = r#"{"data":{"hash":"abc123","limit":150,"limit_remaining":137.5,"usage":12.5,"usage_monthly":12.5,"disabled":false}}"#;
+        let (url, got) = fake::serve(200, raised);
+        let keys =
+            OpenRouterKeys::with_http(Http::insecure_for_tests(), Some(&url), Secret::new("m"));
+        let usage = keys.set_limit("abc123", 150.0).unwrap();
+        assert_eq!(
+            (usage.limit, usage.limit_remaining, usage.usage),
+            (Some(150.0), Some(137.5), 12.5)
+        );
+        let sent = got.recv().unwrap();
+        assert!(
+            sent.head.starts_with("PATCH /v1/keys/abc123 HTTP/1.1"),
+            "{}",
+            sent.head
+        );
+
+        let (url, got) = fake::serve(200, raised);
+        let keys =
+            OpenRouterKeys::with_http(Http::insecure_for_tests(), Some(&url), Secret::new("m"));
+        assert_eq!(keys.usage("abc123").unwrap().usage, 12.5);
+        assert!(
+            got.recv()
+                .unwrap()
+                .head
+                .starts_with("GET /v1/keys/abc123 HTTP/1.1")
+        );
+
+        // Only a hash goes in the path; errors say what OpenRouter said.
+        assert!(keys.usage("../credits").is_err());
+        let (url, _got) = fake::serve(
+            401,
+            r#"{"error":{"code":401,"message":"No auth credentials found"}}"#,
+        );
+        let keys =
+            OpenRouterKeys::with_http(Http::insecure_for_tests(), Some(&url), Secret::new("m"));
+        let err = keys.usage("abc123").unwrap_err();
+        assert!(
+            err.contains("401") && err.contains("No auth credentials"),
+            "{err}"
+        );
     }
 }

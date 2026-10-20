@@ -10,6 +10,7 @@
 
 mod access;
 mod chat;
+mod credits;
 mod directory;
 mod edits;
 mod fixture;
@@ -75,6 +76,43 @@ struct Args {
     /// Without it, meetings can't be joined (ADR 0030 §6).
     #[arg(long)]
     relay: Option<String>,
+    /// Model credits (ADR 0039): a TOML file, mode 0600, with our
+    /// OpenRouter `management_key` and the `operator_token` our staff add
+    /// credits with (`endpoint` optional). With `--dev` and no file,
+    /// credits are kept in memory and reach no model.
+    #[arg(long)]
+    credits: Option<PathBuf>,
+}
+
+/// What `--credits` names.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreditsConfig {
+    management_key: String,
+    operator_token: String,
+    #[serde(default)]
+    endpoint: Option<String>,
+}
+
+/// The credits config at `path`, if only its owner can read it.
+fn credits_config(path: &std::path::Path) -> anyhow::Result<CreditsConfig> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?;
+    if meta.permissions().mode() & 0o077 != 0 {
+        anyhow::bail!(
+            "{} can be read by others; it must be mode 0600",
+            path.display()
+        );
+    }
+    let config: CreditsConfig = toml::from_str(&std::fs::read_to_string(path)?)
+        .map_err(|_| anyhow::anyhow!("{} isn't a valid credits file", path.display()))?;
+    if config.operator_token.len() < 32 {
+        anyhow::bail!(
+            "the operator token in {} is too short to guess at",
+            path.display()
+        );
+    }
+    Ok(config)
 }
 
 fn main() -> ExitCode {
@@ -165,6 +203,26 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let console = server::Console::new(state, Box::new(directory), args.web, url);
     if let Some(api) = &args.relay {
         console.set_relay(relay::Relay::new(api)?);
+    }
+    // Model credits (ADR 0039): OpenRouter with our management key, or in
+    // memory for development.
+    match &args.credits {
+        Some(path) => {
+            let config = credits_config(path)?;
+            console.set_credits(
+                std::sync::Arc::new(glass_gateway_providers::OpenRouterKeys::new(
+                    config.endpoint.as_deref(),
+                    &config.management_key,
+                )),
+                config.operator_token,
+            );
+        }
+        None if args.dev => {
+            let token = std::env::var("GLASS_CONSOLE_OPERATOR")
+                .unwrap_or_else(|_| "dev-operator-token-not-a-secret".into());
+            console.set_credits(std::sync::Arc::new(credits::MemoryKeys::default()), token);
+        }
+        None => {}
     }
     // Apps people share are checked and built here, confined, or refused.
     if args.bundler.is_file() && args.apps.join("sdk").is_dir() {

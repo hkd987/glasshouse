@@ -237,6 +237,8 @@ pub struct State {
     pub fleet: FleetState,
     /// The fleet changed since it was last written.
     pub fleet_dirty: bool,
+    /// Model credits (ADR 0039): what the org bought, and its key.
+    pub credits: crate::credits::Credits,
 }
 
 impl State {
@@ -288,6 +290,7 @@ impl State {
             chat: read_json(&dir.join("chat.json"))?.unwrap_or_default(),
             fleet: read_json(&dir.join("fleet.json"))?.unwrap_or_default(),
             fleet_dirty: false,
+            credits: crate::credits::Credits::load(dir)?,
         };
         if state.policy.versions.is_empty() {
             if state.policy.draft.is_empty() {
@@ -314,6 +317,11 @@ impl State {
 
     pub fn public_key(&self) -> String {
         self.key.public().to_string()
+    }
+
+    /// Where the state is kept.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     // ---- policy (AD-2, AD-3) --------------------------------------------
@@ -987,6 +995,7 @@ impl State {
             catalog,
             directory,
             chat,
+            credits: self.credits.for_device(request.credits),
         }
     }
 

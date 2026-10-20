@@ -243,6 +243,20 @@ export interface MailSettings {
   outgoing?: MailServer;
 }
 
+/** The Model credits page (ADR 0039): never the key. */
+export interface CreditsPage {
+  /** This console sells credits. */
+  offered: boolean;
+  /** The policy draft has credits on for agents. */
+  on: boolean;
+  granted_usd: number;
+  spent_usd: number | null;
+  remaining_usd: number | null;
+  grants: { at: string; usd: number; note: string }[];
+  /** Why usage couldn't be read, if it couldn't. */
+  problem: string | null;
+}
+
 export interface MailPage {
   draft: MailSettings | null;
   draft_version: number;

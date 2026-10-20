@@ -91,6 +91,9 @@ pub enum EventKind {
     ChatRefused,
     /// IT's Chat release (the compliance key) was applied (ADR 0030).
     ChatLoaded,
+    /// The org's model credits key arrived from its console, changed or was
+    /// taken away (ADR 0039). Never the key itself.
+    CreditsKeyApplied,
     /// glassd applied a setting IT set for the whole computer, such as its
     /// time zone or USB drives, or failed to (ADR 0031).
     DeviceSettingApplied,

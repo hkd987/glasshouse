@@ -128,6 +128,14 @@ impl Secrets {
         self.providers.get(provider)?.get(name)
     }
 
+    /// Adds `other`'s providers that these don't name: the org's model
+    /// credits key beside IT's own file, which wins any clash (ADR 0039).
+    pub fn merge(&mut self, other: Secrets) {
+        for (provider, values) in other.providers {
+            self.providers.entry(provider).or_insert(values);
+        }
+    }
+
     /// Provider ids that have credentials.
     pub fn providers(&self) -> impl Iterator<Item = &str> {
         self.providers.keys().map(String::as_str)

@@ -15,6 +15,7 @@ glass-app-studio.workspace = true
 glass-first-party.workspace = true
 glass-http.workspace = true
 glass-crypto.workspace = true
+glass-gateway-providers.workspace = true
 glass-managed.workspace = true
 glass-platform.workspace = true
 glass-policy.workspace = true
@@ -30,7 +31,6 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 glass-actions.workspace = true
 glass-app-chat.workspace = true
-glass-gateway-providers.workspace = true
 tempfile.workspace = true
 
 [lints]

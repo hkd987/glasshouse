@@ -91,6 +91,38 @@ test("ad4 every page is interactive in under 1 s with 500 devices and 50 items",
   }
 });
 
+test("adr0039 credits Glasshouse adds reach the org's computers, and its admins see what is left", async ({ browser }) => {
+  // Glasshouse adds $100 to the org, as our operators do: not an admin.
+  const grant = await fetch(new URL("/ops/credits", CONSOLE_URL), {
+    method: "POST",
+    headers: { authorization: "Bearer dev-operator-token-not-a-secret", "content-type": "application/json" },
+    body: JSON.stringify({ usd: 100, note: "e2e order" }),
+  });
+  expect(grant.status).toBe(200);
+  expect(await grant.text()).not.toContain("sk-or");
+
+  // The enrolled computer gets the org's key over its signed sync, at once,
+  // and the record says so without it.
+  await expect
+    .poll(() => audit().filter((r) => r.event.kind === "credits_key_applied").length, { timeout: 30_000 })
+    .toBeGreaterThan(0);
+  expect(JSON.stringify(audit())).not.toContain("sk-or-v1-memory");
+
+  const { page, close } = await session(browser);
+  await open(page, "#/credits", "credits");
+  const credits = page.locator("[data-test=credits]");
+  await expect(credits).toContainText("$100.00");
+  await expect(page.locator("[data-test=grant]")).toContainText("e2e order");
+  await page.locator("[data-test=use-credits]").click();
+  await expect(credits).toContainText("Saved to the draft");
+  await expect(credits).toContainText("On in the draft");
+  await shot(page, "credits");
+  // Back off, so the draft is as other tests left it.
+  await page.locator("[data-test=use-credits]").click();
+  await expect(credits).toContainText("Off");
+  await close();
+});
+
 test("ad3 dv1 a change previewed and published to the pilot ring reaches the device", async ({ browser }) => {
   const { page, close } = await session(browser);
   const before = version(status().policy);

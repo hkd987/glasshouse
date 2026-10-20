@@ -2,8 +2,8 @@
 // own servers, where IT signs in and sets agent policy, approves catalog
 // items and sees the fleet. It reads everything from the console's API,
 // never from the device it's opened on. Pages: #/policy/<group>,
-// #/catalog, #/catalog/<item>, #/settings/<group>, #/mail, #/remote-help,
-// #/devices for IT's
+// #/catalog, #/catalog/<item>, #/settings/<group>, #/mail, #/credits,
+// #/remote-help, #/devices for IT's
 // admins; #/support for support staff (ADR 0028). The pages someone sees
 // follow from their session; the console refuses the rest anyway.
 
@@ -12,6 +12,7 @@ import { h, ready, show } from "@glasshouse/sdk";
 import { Refused, type Session, SignedOut, api } from "./api.ts";
 import { catalogPage, itemPage } from "./catalog.ts";
 import { devicesPage } from "./devices.ts";
+import { creditsPage } from "./credits.ts";
 import { mailPage } from "./mail.ts";
 import { policyPage } from "./policy.ts";
 import { rolesPage } from "./roles.ts";
@@ -27,6 +28,7 @@ const ADMIN_NAV: [string, string][] = [
   ["catalog", "Catalog"],
   ["settings", "Settings"],
   ["mail", "Mail"],
+  ["credits", "Model credits"],
   ["remote-help", "Remote help"],
   ["devices", "Devices"],
 ];
@@ -121,6 +123,7 @@ async function route(): Promise<void> {
     else if (section === "catalog") await catalogPage(content);
     else if (section === "devices") await devicesPage(content);
     else if (section === "mail") await mailPage(content);
+    else if (section === "credits") await creditsPage(content);
     else await policyPage(content, arg ? decodeURIComponent(arg) : "ap-ops");
     document.documentElement.dataset.page = section;
     performance.mark(`console:${section}`);

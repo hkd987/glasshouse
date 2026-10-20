@@ -277,6 +277,11 @@ impl Runtime {
         *self.gateway.write().unwrap_or_else(PoisonError::into_inner) = gateway;
     }
 
+    /// The policy in force now, for what glassd builds from it.
+    pub fn current_policy(&self) -> Arc<Policy> {
+        self.policy()
+    }
+
     /// The policy in force for tasks starting now.
     pub(crate) fn policy(&self) -> Arc<Policy> {
         Arc::clone(&self.settings().policy)

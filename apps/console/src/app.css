@@ -835,3 +835,16 @@ details.file[open] summary {
   border-color: var(--danger);
   color: #fff;
 }
+
+/* Model credits (ADR 0039): one line per purchase. */
+.grant {
+  display: grid;
+  grid-template-columns: 7em 6em 1fr;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.grant:last-child {
+  border-bottom: none;
+}

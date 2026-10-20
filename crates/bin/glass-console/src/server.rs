@@ -91,6 +91,38 @@ pub struct Console {
     web: PathBuf,
     /// The console's address, as devices reach it.
     pub url: String,
+    /// Model credits (ADR 0039): what makes the org's key, and the token
+    /// our operators add credits with. Without it, credits aren't offered.
+    credits: std::sync::OnceLock<CreditsService>,
+    /// One grant at a time: each reads and raises the key's limit.
+    granting: tokio::sync::Mutex<()>,
+}
+
+/// What model credits need on our side (ADR 0039).
+#[derive(Debug)]
+struct CreditsService {
+    keys: Arc<dyn crate::credits::KeyService>,
+    /// Ours, not an org admin's: it adds credits.
+    operator: String,
+}
+
+/// `POST /ops/credits`: what an operator adds.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantCredits {
+    usd: f64,
+    #[serde(default)]
+    note: String,
+}
+
+/// Whether `given` is `expected`, looking at every byte whatever differs.
+fn same_secret(given: &str, expected: &str) -> bool {
+    given.len() == expected.len()
+        && given
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
 }
 
 /// Test support: `body` to `path`, signed by the computer it names (ADR
@@ -261,7 +293,109 @@ impl Console {
             builder: std::sync::OnceLock::new(),
             web,
             url,
+            credits: std::sync::OnceLock::new(),
+            granting: tokio::sync::Mutex::new(()),
         })
+    }
+
+    /// Offers model credits (ADR 0039): `keys` makes and manages the
+    /// org's key, and `operator` is the token our staff add credits with.
+    pub fn set_credits(&self, keys: Arc<dyn crate::credits::KeyService>, operator: String) {
+        let _ = self.credits.set(CreditsService { keys, operator });
+    }
+
+    /// `GET /api/credits`, for the org's admins: what it bought and spent,
+    /// never the key. OpenRouter's numbers are fetched off the request's
+    /// thread.
+    async fn credits_page(&self, request: &Request) -> Response {
+        if let Err(response) = check_origin(request) {
+            return response;
+        }
+        let Some(user) = self.signed_in(request) else {
+            return error(401, "sign in");
+        };
+        if !self.access(&user).allows(Need::Admin) {
+            return error(403, "Only the org's IT admins can do that.");
+        }
+        if request.method != "GET" {
+            return error(405, "method not allowed");
+        }
+        let (hash, on) = {
+            let state = self.state();
+            let on = state.draft().is_ok_and(|d| crate::edits::credits_on(&d));
+            (state.credits.hash.clone(), on)
+        };
+        let usage = match (hash, self.credits.get()) {
+            (Some(hash), Some(service)) => {
+                let keys = Arc::clone(&service.keys);
+                Some(
+                    tokio::task::spawn_blocking(move || keys.usage(&hash))
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string())),
+                )
+            }
+            _ => None,
+        };
+        let mut view = self.state().credits.view(usage, on);
+        view["offered"] = json!(self.credits.get().is_some());
+        ok(view)
+    }
+
+    /// `POST /ops/credits`, for our operators with their token, never an
+    /// org admin's session (ADR 0039): adds credits to the org, making its
+    /// key the first time. Computers waiting on a sync hear of a new key
+    /// at once.
+    async fn grant_credits(&self, request: &Request) -> Response {
+        let Some(service) = self.credits.get() else {
+            return error(404, "Model credits aren't offered by this console.");
+        };
+        if request.method != "POST" {
+            return error(405, "method not allowed");
+        }
+        let token = request
+            .header("authorization")
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .unwrap_or_default();
+        if !same_secret(token, &service.operator) {
+            return error(401, "Only Glasshouse adds credits.");
+        }
+        let grant: GrantCredits = match body(request) {
+            Ok(b) => b,
+            Err(r) => return r,
+        };
+        let _one = self.granting.lock().await;
+        let (mut credits, dir, org) = {
+            let state = self.state();
+            (
+                state.credits.clone(),
+                state.dir().to_owned(),
+                state.org.id.clone(),
+            )
+        };
+        let keys = Arc::clone(&service.keys);
+        let done = tokio::task::spawn_blocking(move || {
+            let result = credits.grant(&dir, &*keys, &org, grant.usd, &grant.note);
+            (credits, result)
+        })
+        .await;
+        match done {
+            Ok((credits, Ok(usage))) => {
+                tracing::info!(
+                    granted = credits.granted(),
+                    version = credits.version,
+                    "credits: added"
+                );
+                let mut state = self.state();
+                state.credits = credits;
+                let on = state.draft().is_ok_and(|d| crate::edits::credits_on(&d));
+                let view = state.credits.view(Some(Ok(usage)), on);
+                drop(state);
+                self.released();
+                ok(view)
+            }
+            Ok((_, Err(e))) => error(400, &e),
+            Err(e) => error(500, &e.to_string()),
+        }
     }
 
     /// The relay meetings' media goes through (`--relay`).
@@ -331,6 +465,14 @@ impl Console {
         let path = request.path.as_str();
         if let Some(rest) = path.strip_prefix("/device/v1/") {
             return self.device(rest, request).await;
+        }
+        // Model credits (ADR 0039): their calls to OpenRouter don't hold
+        // up the request thread.
+        if path == "/api/credits" {
+            return self.credits_page(request).await;
+        }
+        if path == "/ops/credits" {
+            return self.grant_credits(request).await;
         }
         if let Some(rest) = path.strip_prefix("/api/") {
             if let Err(response) = check_origin(request) {
@@ -762,6 +904,7 @@ impl Console {
                 if first.policy.is_some()
                     || first.catalog.is_some()
                     || first.directory.is_some()
+                    || first.credits.is_some()
                     || wait.is_zero()
                 {
                     return ok(serde_json::to_value(first).unwrap_or_default());
@@ -1349,6 +1492,7 @@ mod tests {
                 catalog: None,
                 directory: have,
                 chat: None,
+                credits: None,
                 wait_secs: 0,
             })
         };
@@ -1393,6 +1537,102 @@ mod tests {
             key,
             devices: Mutex::new(HashMap::new()),
         }
+    }
+
+    #[tokio::test]
+    async fn adr0039_credits_are_added_by_us_shown_to_admins_and_reach_computers_once() {
+        const OPERATOR: &str = "operator-token-for-tests-only-0123456789";
+        let t = console().await;
+        let (status, page) = t.call("GET", "/api/credits", Value::Null).await;
+        assert_eq!((status, &page["offered"]), (200, &json!(false)));
+        let keys = Arc::new(crate::credits::MemoryKeys::default());
+        t.console.set_credits(keys.clone(), OPERATOR.into());
+        let grant = |token: &str, usd: f64| {
+            let auth = format!("Bearer {token}");
+            request(
+                "POST",
+                "/ops/credits",
+                &json!({ "usd": usd, "note": "PO-7" }),
+                &[("authorization", auth.as_str())],
+            )
+        };
+
+        // Only Glasshouse adds credits: not an admin's session, not a guess.
+        let cookie = format!("{COOKIE}={}", t.cookie);
+        let r = t
+            .console
+            .handle(&request(
+                "POST",
+                "/ops/credits",
+                &json!({ "usd": 100 }),
+                &[("cookie", &cookie)],
+            ))
+            .await;
+        assert_eq!(r.status, 401);
+        assert_eq!(t.console.handle(&grant("wrong", 100.0)).await.status, 401);
+        assert!(t.sync("lab-1", None, 0).await.credits.is_none());
+
+        let r = t.console.handle(&grant(OPERATOR, 100.0)).await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        assert_eq!(json_of(&r)["granted_usd"], 100.0);
+        assert!(!String::from_utf8_lossy(&r.body).contains("sk-or"));
+
+        // A computer gets the key once, and nothing when it has it.
+        let credits = t.sync("lab-1", None, 0).await.credits.unwrap();
+        assert_eq!(credits.version, 1);
+        assert!(credits.api_key.as_deref().unwrap().starts_with("sk-or-v1-"));
+        let r = t
+            .device(
+                "/device/v1/sync",
+                json!({ "device": "lab-1", "credits": 1, "wait_secs": 0 }),
+            )
+            .await;
+        let again: SyncResponse = serde_json::from_slice(&r.body).unwrap();
+        assert!(again.credits.is_none());
+
+        // Admins see what was bought and spent, never the key.
+        let hash = t.console.state().credits.hash.clone().unwrap();
+        keys.spend(&hash, 25.0);
+        let (status, page) = t.call("GET", "/api/credits", Value::Null).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            (
+                &page["granted_usd"],
+                &page["spent_usd"],
+                &page["remaining_usd"]
+            ),
+            (&json!(100.0), &json!(25.0), &json!(75.0))
+        );
+        assert!(!page.to_string().contains("sk-or"), "{page}");
+        let r = t.console.handle(&grant(OPERATOR, 50.0)).await;
+        assert_eq!(json_of(&r)["remaining_usd"], 125.0);
+        assert_eq!(t.console.state().credits.version, 1, "the same key");
+
+        // Turning them on for agents is a policy edit, published like any;
+        // off takes the provider and its model out.
+        assert_eq!(page["on"], false);
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/policy/edit",
+                json!({ "edit": "credits", "on": true }),
+            )
+            .await;
+        assert_eq!(status, 200);
+        let draft = t.console.state().draft().unwrap();
+        assert_eq!(draft.models.default.as_deref(), Some("auto"));
+        assert_eq!(draft.models.models[0].model, "openrouter/auto");
+        assert!(crate::edits::credits_on(&draft));
+        let (_, page) = t.call("GET", "/api/credits", Value::Null).await;
+        assert_eq!(page["on"], true);
+        t.call(
+            "POST",
+            "/api/policy/edit",
+            json!({ "edit": "credits", "on": false }),
+        )
+        .await;
+        let draft = t.console.state().draft().unwrap();
+        assert!(!crate::edits::credits_on(&draft) && draft.models.default.is_none());
     }
 
     #[tokio::test]

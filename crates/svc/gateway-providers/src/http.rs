@@ -101,6 +101,21 @@ impl Http {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> Result<Reply, ProviderError> {
+        self.send("POST", url, headers, body)
+    }
+
+    /// Sends `method` (GET, POST, PATCH) with `headers` and `body`, as
+    /// [`Http::post`] does.
+    pub fn send(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<Reply, ProviderError> {
+        if !matches!(method, "GET" | "POST" | "PATCH" | "DELETE") {
+            return Err(ProviderError::Rejected(format!("no method {method:?}")));
+        }
         let target = Target::parse(url).ok_or_else(|| {
             ProviderError::NotConfigured(format!("{url:?} is not an http(s) URL"))
         })?;
@@ -111,7 +126,7 @@ impl Http {
         }
         let deadline = Instant::now() + CALL_TIMEOUT;
         let mut head = format!(
-            "POST {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Glasshouse model gateway\r\nContent-Length: {}\r\nConnection: close\r\n",
+            "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Glasshouse model gateway\r\nContent-Length: {}\r\nConnection: close\r\n",
             target.path,
             target.authority(),
             body.len()

@@ -31,7 +31,9 @@ pub use anthropic::AnthropicProvider;
 pub use bedrock::{AwsCredentials, BedrockProvider};
 pub use console::ConsoleClient;
 pub use mail::ImapLink;
-pub use openrouter::{AUTO as OPENROUTER_AUTO, OpenRouterProvider};
+pub use openrouter::{
+    AUTO as OPENROUTER_AUTO, KeyUsage, MadeKey, OpenRouterKeys, OpenRouterProvider,
+};
 
 /// A gateway with a provider for each policy entry this machine can use,
 /// and a note for each it can't. Notes never contain a credential.
