@@ -18,13 +18,13 @@ const OVERSAMPLE: f32 = 2.0;
 
 /// A vector icon: shapes in a view box, painted in one color unless a shape
 /// names its own.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Icon {
     pub view_box: (f32, f32),
     pub shapes: &'static [Shape],
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Shape {
     /// SVG path data.
     Path(&'static str, Ink),
@@ -44,7 +44,7 @@ pub enum Shape {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ink {
     Fill,
     Stroke(f32),
@@ -487,6 +487,44 @@ pub const MAIL: Icon = Icon {
             ink: Line(1.6),
         },
         Shape::Path("M2.5 5l6.5 5 6.5-5", Line(1.6)),
+    ],
+};
+
+/// Chat: a speech bubble with two lines of a message.
+pub const CHAT: Icon = Icon {
+    view_box: (18.0, 18.0),
+    shapes: &[
+        Shape::Path(
+            "M4 3.2h10a1.8 1.8 0 011.8 1.8v6.2a1.8 1.8 0 01-1.8 1.8H8.6L5.2 15.6V13H4a1.8 1.8 0 01-1.8-1.8V5A1.8 1.8 0 014 3.2z",
+            Line(1.6),
+        ),
+        Shape::Path("M5.8 6.6h6.4M5.8 9.4h3.8", StrokeRound(1.5)),
+    ],
+};
+
+/// Meet: a video camera.
+pub const MEET: Icon = Icon {
+    view_box: (18.0, 18.0),
+    shapes: &[
+        Shape::Rect {
+            x: 1.8,
+            y: 4.6,
+            w: 10.0,
+            h: 8.8,
+            r: 2.0,
+            ink: Line(1.6),
+        },
+        Shape::Path("M11.8 8.2l4.4-2.5v6.6l-4.4-2.5z", Line(1.6)),
+    ],
+};
+
+/// The badge on one of the person's own versions of an app (TL-5): a
+/// pencil, as in "edited, and yours".
+pub const REMIX: Icon = Icon {
+    view_box: (16.0, 16.0),
+    shapes: &[
+        Shape::Path("M3 13l.7-3.1 6.8-6.8 2.4 2.4-6.8 6.8z", StrokeRound(1.8)),
+        Shape::Path("M8.9 4.7l2.4 2.4", StrokeRound(1.8)),
     ],
 };
 

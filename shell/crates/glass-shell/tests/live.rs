@@ -701,6 +701,7 @@ fn ad7_the_dock_offers_only_the_apps_in_the_profile() {
         id: id.into(),
         name: name.into(),
         start: Start::Web,
+        based_on: None,
     };
     let launched = |live: &Live| {
         let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);
@@ -1152,6 +1153,7 @@ fn ui5_the_docks_mail_opens_mail_and_once_open_brings_it_forward() {
         id: "mail".into(),
         name: "Mail".into(),
         start: Start::Web,
+        based_on: None,
     };
     let mut live = Live::new(fixtures::tasks()).with_apps(vec![mail.clone()]);
     let mut screen = Screen::new(Size::new(SIZE.0, SIZE.1), 1.0);

@@ -13,7 +13,7 @@ inside the compositor (below).
 ## Run it
 
 ```sh
-make shell-preview                 # build/shell-preview/{boot,login,desktop,command-bar,expanded*}.png
+make shell-preview                 # build/shell-preview/{boot,login,desktop,launcher,switcher,command-bar,expanded*}.png
 make shell-preview SOCKET=/var/run/glasshouse/control.sock   # live tiles from glassd (task.list)
 make shell-test                    # unit tests, landmarks, snapshot digests
 make shell-lint                    # fmt check and clippy -D warnings
@@ -57,8 +57,13 @@ installs debug builds instead: the sign-in screen on the
 first virtual terminal, PAM checks the password (`demo` on development
 VMs), and the desktop starts as that person through `su -l`. Shift Super Q
 signs out back to the sign-in screen. Super tapped on its own, or the
-dock's launcher icon, opens the launcher (`apps::FIRST_PARTY`, the apps
-installed on the machine); a click starts the app in a window. The greeter stays on across reboots
+dock's launcher icon, opens the launcher (`apps::offered`, the apps in
+the person's profile that are on the machine); a click starts the app in
+a window. Our apps have drawn icons; an app with none of its own gets its
+initial on a tile tinted from its id; a person's own version of an app
+(`based_on`, ADR 0032, TL-5) shows that app's icon with a pencil badge in
+the corner, under its own name (`screens::launcher::look`). Alt Tab's
+switcher shows the same icons. The greeter stays on across reboots
 until `os/freebsd/scripts/shell-vm.sh greeter-off`; `make shell-vm` stops
 it while the desktop runs directly. Its log, the desktop's included, is
 `/var/log/glass-greeter.log`.
@@ -95,7 +100,7 @@ under `shell/target/tmp/` so you can compare it.
 | `crates/glass-shell/src/render.rs` | Rendering: a view to an RGBA frame or PNG, once, or frame after frame redrawing only what changed (`Screen`) |
 | `vendor/` | Crates built from a patched copy (`vendor/README.md`) |
 | `crates/glass-shell/src/live.rs` | The live desktop's state and what clicks and keys ask of glassd |
-| `crates/glass-shell/src/icons.rs`, `wallpaper.rs` | Icons from the mockups' SVG paths and the blurred wallpaper, rasterized with tiny-skia |
+| `crates/glass-shell/src/icons.rs`, `wallpaper.rs` | Icons from the mockups' SVG paths (and ours drawn the same way, such as Chat's, Meet's and the remix badge) and the blurred wallpaper, rasterized with tiny-skia |
 | `crates/glass-shell/src/fixtures.rs` | The mockups' content, for previews and tests |
 | `crates/glass-shell-preview` | The PNG renderer binary |
 | `crates/glass-shell-fb` | The desktop on the console framebuffer, with live tiles, keyboard and pointer (M2 step 1) |

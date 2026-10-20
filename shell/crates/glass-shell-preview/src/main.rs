@@ -7,8 +7,8 @@
 //!
 //! Writes `boot.png`, `login.png`, `lock.png`, `desktop.png`, `desktop-banner.png`,
 //! `agents-menu.png`, `system-menu.png`, `about.png`, `force-quit.png`,
-//! `restart.png`,
-//! `command-bar.png` and the
+//! `restart.png`, `launcher.png` and `switcher.png` (with a remix of Mail,
+//! TL-5), `command-bar.png` and the
 //! expanded view: `expanded.png` (the Expanded artboard), with its Changes
 //! tab, a roll back about to happen, a needs-you task's review and a
 //! finished task's receipt. The desktop shows the Desktop artboard's
@@ -21,8 +21,9 @@ use std::time::Instant;
 
 use anyhow::{Context, bail};
 use glass_api::{Receipt, TaskDetail, TaskRef, TaskView, TileState, UndoReport, methods};
+use glass_shell::apps::AppWindow;
 use glass_shell::screens::expanded::{self, Expanded, Rollback, Tab};
-use glass_shell::screens::{boot, command_bar, desktop, login, system};
+use glass_shell::screens::{boot, command_bar, desktop, launcher, login, switcher, system};
 use glass_shell::{Element, Message, Size, Theme, fixtures, render};
 use glass_types::Timestamp;
 use time::OffsetDateTime;
@@ -242,6 +243,47 @@ fn main() -> anyhow::Result<()> {
             vec![window()],
             thumbnail,
             Some(system::force_quit_overlay(&theme, &quit)),
+            (w, h),
+        ),
+    )?;
+
+    // The launcher: our apps, a catalog app with no icon of its own, and
+    // Dana's own version of Mail, badged (TL-5).
+    let apps = fixtures::apps();
+    write(
+        "launcher.png",
+        desktop::view(
+            &theme,
+            &bare,
+            Vec::new(),
+            thumbnail,
+            Some(launcher::overlay(&theme, &apps, None)),
+            (w, h),
+        ),
+    )?;
+    // Alt Tab over My Mail's window, Mail's and Terminal's (DK-2).
+    let open = [
+        ("chrome-my-mail.localhost__-Apps", "My Mail — Inbox"),
+        ("chrome-mail.localhost__-Apps", "Mail — Inbox"),
+        ("glass.terminal", "dana@dana-laptop: ~"),
+    ]
+    .into_iter()
+    .zip(1..)
+    .map(|((app_id, title), id)| AppWindow {
+        id,
+        app_id: app_id.into(),
+        title: title.into(),
+        minimized: false,
+    })
+    .collect::<Vec<_>>();
+    write(
+        "switcher.png",
+        desktop::view(
+            &theme,
+            &bare,
+            vec![window()],
+            thumbnail,
+            Some(switcher::overlay(&theme, &open, 1, &apps)),
             (w, h),
         ),
     )?;

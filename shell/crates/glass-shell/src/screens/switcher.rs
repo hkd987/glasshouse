@@ -15,14 +15,22 @@ use crate::{Element, Message, Theme, fonts, style};
 const TITLE: usize = 22;
 
 pub fn overlay<'a>(
-    _theme: &Theme,
+    theme: &Theme,
     windows: &[AppWindow],
     chosen: u64,
     apps: &[AppEntry],
 ) -> Element<'a, Message> {
     let cards = windows.iter().fold(Row::new().spacing(12), |row, w| {
-        let app = apps.iter().find(|a| a.owns_window(&w.app_id));
-        row.push(card(w, app, w.id == chosen))
+        // The app's icon, as the launcher shows it; a window of no app
+        // offered gets its title's initial.
+        let look = match apps.iter().find(|a| a.owns_window(&w.app_id)) {
+            Some(app) => launcher::look(app, apps),
+            None => launcher::Look {
+                glyph: launcher::initial(&w.app_id, &w.title),
+                remix: false,
+            },
+        };
+        row.push(card(theme, w, look, w.id == chosen))
     });
     let panel = container(cards)
         .padding(18)
@@ -30,26 +38,13 @@ pub fn overlay<'a>(
     container(panel).center(Length::Fill).into()
 }
 
-fn card<'a>(window: &AppWindow, app: Option<&AppEntry>, chosen: bool) -> Element<'a, Message> {
-    let icon: Element<'a, Message> = match app {
-        Some(app) => launcher::icon(&app.id),
-        None => text(
-            window
-                .title
-                .chars()
-                .next()
-                .unwrap_or('•')
-                .to_uppercase()
-                .to_string(),
-        )
-        .size(26)
-        .font(fonts::MEDIUM)
-        .color(hex(0xE6E8EB))
-        .into(),
-    };
-    let icon = container(icon)
-        .center(Length::Fixed(72.0))
-        .style(|_| style::panel(hex(0x0B0D10), 16.0));
+fn card<'a>(
+    theme: &Theme,
+    window: &AppWindow,
+    look: launcher::Look,
+    chosen: bool,
+) -> Element<'a, Message> {
+    let icon = launcher::icon_tile(theme, look, hex(0x0B0D10), 16.0);
     let title = if window.title.chars().count() > TITLE {
         let short: String = window.title.chars().take(TITLE - 1).collect();
         format!("{}…", short.trim_end())

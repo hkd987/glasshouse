@@ -2,8 +2,10 @@
 //! gives from policy by role (`apps.list`, AD-7), that can start here.
 //! First-party native apps (ADR 0025); the Browser and web apps, in the
 //! browser engine (UI-5, CF-15, ADR 0027); and on a managed device the admin
-//! console, which opens in the Browser (ADR 0023). Catalog apps join once
-//! the catalog installs on the device (DV-10, DV-11).
+//! console, which opens in the Browser (ADR 0023); after the org's, the
+//! person's own web apps, a remix saying which app it's based on (ADR 0032,
+//! TL-5). Catalog apps join once the catalog installs on the device (DV-10,
+//! DV-11).
 
 use glass_api::{ProfileApp, ProfileAppKind};
 
@@ -16,6 +18,9 @@ pub struct AppEntry {
     pub id: String,
     pub name: String,
     pub start: Start,
+    /// One of the person's own apps (ADR 0032, TL-5): the installed app it
+    /// remixes, whose icon the launcher shows it with, badged as theirs.
+    pub based_on: Option<String>,
 }
 
 /// How an app starts, and so which windows are its.
@@ -71,6 +76,7 @@ impl AppEntry {
                 id: id.to_owned(),
                 name: name.to_owned(),
                 start: Start::Program { command, app_id },
+                based_on: None,
             })
     }
 
@@ -107,6 +113,7 @@ pub fn offered(profile: &[ProfileApp], installed: impl Fn(&str) -> bool) -> Vec<
                     id: id.to_owned(),
                     name: app.name.clone(),
                     start: Start::Web,
+                    based_on: app.based_on.as_ref().map(|b| b.as_str().to_owned()),
                 },
                 ProfileAppKind::Console => AppEntry {
                     id: id.to_owned(),
@@ -114,11 +121,13 @@ pub fn offered(profile: &[ProfileApp], installed: impl Fn(&str) -> bool) -> Vec<
                     start: Start::Browser {
                         url: Some(app.url.clone()?),
                     },
+                    based_on: None,
                 },
                 ProfileAppKind::Native if id == BROWSER => AppEntry {
                     id: id.to_owned(),
                     name: app.name.clone(),
                     start: Start::Browser { url: None },
+                    based_on: None,
                 },
                 ProfileAppKind::Native => AppEntry::native(id)?,
             };
@@ -186,11 +195,38 @@ mod tests {
     }
 
     #[test]
+    fn tl5_a_remix_carries_the_app_it_is_based_on() {
+        use ProfileAppKind::*;
+        let mut apps = profile(&[("mail", Web), ("my-mail", Web), ("terminal", Native)]);
+        apps[1].name = "My Mail".into();
+        apps[1].based_on = Some("mail".parse().unwrap());
+        let offered = offered(&apps, |_| true);
+        let based_on: Vec<(&str, Option<&str>)> = offered
+            .iter()
+            .map(|a| (a.id.as_str(), a.based_on.as_deref()))
+            .collect();
+        assert_eq!(
+            based_on,
+            [
+                ("mail", None),
+                ("my-mail", Some("mail")),
+                ("terminal", None)
+            ]
+        );
+        // Its own name, and its own web app on its own origin.
+        assert_eq!(offered[1].name, "My Mail");
+        assert_eq!(offered[1].start, Start::Web);
+        assert!(offered[1].owns_window("chrome-my-mail.localhost__-Apps"));
+        assert!(!offered[1].owns_window("chrome-mail.localhost__-Apps"));
+    }
+
+    #[test]
     fn dk2_each_window_belongs_to_its_app() {
         let mail = AppEntry {
             id: "mail".into(),
             name: "Mail".into(),
             start: Start::Web,
+            based_on: None,
         };
         assert!(mail.owns_window("chrome-mail.localhost__-Apps"));
         assert!(!mail.owns_window("chrome-calendar.localhost__-Apps"));
@@ -200,6 +236,7 @@ mod tests {
             id: BROWSER.into(),
             name: "Browser".into(),
             start: Start::Browser { url: None },
+            based_on: None,
         };
         assert!(browser.owns_window("chromium-browser"));
         assert!(!browser.owns_window("chrome-mail.localhost__-Apps"));

@@ -8,9 +8,10 @@
 use std::path::{Path, PathBuf};
 
 use glass_api::TaskDetail;
+use glass_shell::apps::AppEntry;
 use glass_shell::render::{Frame, frame};
 use glass_shell::screens::expanded::{self, Expanded, Tab};
-use glass_shell::screens::{boot, command_bar, desktop, login};
+use glass_shell::screens::{boot, command_bar, desktop, launcher, login};
 use glass_shell::{Message, Size, Theme, fixtures};
 use glass_types::Timestamp;
 use time::OffsetDateTime;
@@ -183,6 +184,22 @@ fn render_desktop() -> Frame {
     };
     frame(
         desktop::view(&theme, &state, windows, thumbnail, None, SCREEN),
+        size(),
+        1.0,
+    )
+}
+
+/// The launcher over the desktop with `apps`.
+fn render_launcher(apps: &[AppEntry]) -> Frame {
+    let theme = Theme::glass();
+    let tasks = fixtures::tasks();
+    let state = desktop::Desktop {
+        tiles: desktop::Tiles::Hidden,
+        ..fixtures::desktop(&tasks)
+    };
+    let overlay = launcher::overlay(&theme, apps, None);
+    frame(
+        desktop::view(&theme, &state, Vec::new(), |_| None, Some(overlay), SCREEN),
         size(),
         1.0,
     )
@@ -374,6 +391,40 @@ fn aw10_expanded_view_has_header_panes_and_timeline_in_place() {
 }
 
 #[test]
+fn tl5_the_launcher_badges_a_remix_and_tints_a_tile_for_an_app_without_an_icon() {
+    // Dana's apps: My Mail, based on Mail, last, in the second row's fifth
+    // column; Dispute Tracker, with no icon, before it.
+    let apps = fixtures::apps();
+    let f = render_launcher(&apps);
+    // The badge's accent in a 24-pixel square at a tile's bottom right.
+    let badge = |f: &Frame, (x0, y0): (u32, u32)| {
+        (x0..x0 + 24)
+            .flat_map(|x| (y0..y0 + 24).map(move |y| (x, y)))
+            .filter(|&(x, y)| close(f.pixel(x, y), [61, 107, 255], 12))
+            .count()
+    };
+    let my_mail = (908, 515);
+    let mail = (428, 378);
+    assert!(
+        badge(&f, my_mail) > 150,
+        "{} badge pixels",
+        badge(&f, my_mail)
+    );
+    assert_eq!(badge(&f, mail), 0, "Mail itself wears no badge");
+    // Mail's glyph in both.
+    assert!(close(f.pixel(900, 497), [58, 168, 245], 8));
+    assert!(close(f.pixel(420, 360), [58, 168, 245], 8));
+    // The same app not based on another is just an app: no badge.
+    let mut plain = apps.clone();
+    plain.last_mut().unwrap().based_on = None;
+    assert_eq!(badge(&render_launcher(&plain), my_mail), 0);
+    // Dispute Tracker's initial sits on a tinted tile, not on the dark of
+    // every tile.
+    let tinted = f.pixel(770, 495);
+    assert!(!close(tinted, [21, 24, 29], 6), "{tinted:?}");
+}
+
+#[test]
 fn rendering_is_deterministic() {
     assert_eq!(render_desktop().rgba, render_desktop().rgba);
 }
@@ -424,6 +475,7 @@ fn screens_match_their_snapshots() {
     snapshot("about", &render_about());
     snapshot("force-quit", &render_force_quit());
     snapshot("restart", &render_restart());
+    snapshot("launcher", &render_launcher(&fixtures::apps()));
     snapshot("command-bar", &render_command_bar());
     snapshot("expanded", &render_expanded());
     snapshot("expanded-review", &render_expanded_review());

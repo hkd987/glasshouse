@@ -4,13 +4,15 @@
 
 use glass_api::{
     ActivityEntry, ActivityKind, AgentMode, ApprovalState, ApprovalView, AskLabels, ChangeEntry,
-    ChangeKind, FeedLine, Progress, SnapshotMarker, TaskDetail, TaskView, TileState,
+    ChangeKind, FeedLine, ProfileApp, ProfileAppKind, Progress, SnapshotMarker, TaskDetail,
+    TaskView, TileState,
 };
 use glass_types::{ApprovalId, SnapshotId, TaskId, Timestamp};
 use iced_core::alignment::{Horizontal, Vertical};
 use iced_core::{Color, Length, Padding};
 use iced_widget::{Column, column, container, row, stack, text};
 
+use crate::apps::AppEntry;
 use crate::screens::command_bar::{Answer, CommandBar};
 use crate::screens::desktop::{Desktop, Tiles};
 use crate::screens::expanded;
@@ -362,6 +364,36 @@ pub fn desktop(tasks: &[TaskView]) -> Desktop<'_> {
             .to_vec(),
         dock: true,
     }
+}
+
+/// Dana's launcher, from the profile glassd would give (`apps.list`): our
+/// web apps, the Browser and the native apps, a catalog app with no icon
+/// of its own, and after them her own version of Mail (ADR 0032, TL-5).
+pub fn apps() -> Vec<AppEntry> {
+    use ProfileAppKind::{Native, Web};
+    let profile: Vec<ProfileApp> = [
+        ("mail", "Mail", Web, None),
+        ("calendar", "Calendar", Web, None),
+        ("chat", "Chat", Web, None),
+        ("meet", "Meet", Web, None),
+        ("store", "Store", Web, None),
+        ("settings", "Settings", Web, None),
+        ("browser", "Browser", Native, None),
+        ("terminal", "Terminal", Native, None),
+        ("activity-monitor", "Activity Monitor", Native, None),
+        ("dispute-tracker", "Dispute Tracker", Web, None),
+        ("my-mail", "My Mail", Web, Some("mail")),
+    ]
+    .into_iter()
+    .map(|(id, name, kind, based_on)| ProfileApp {
+        id: id.parse().expect("valid id"),
+        name: name.into(),
+        kind,
+        url: None,
+        based_on: based_on.map(|b| b.parse().expect("valid id")),
+    })
+    .collect();
+    crate::apps::offered(&profile, |_| true)
 }
 
 /// The Command bar artboard's recent tasks.
