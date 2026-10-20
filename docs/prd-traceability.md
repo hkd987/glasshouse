@@ -335,7 +335,7 @@ artifacts* = `crates/svc/runtime/tests/artifacts.rs`.
 | SC-1 … SC-5 Scheduling | Not started | — | — |
 | IN-1 … IN-4 Microsoft 365 as provider | Not started | Plan: a Graph adapter in `glass-gateway-providers`, a provider setting per service | — |
 | IN-5 No approval from Microsoft; each person's own sign-in; user consent where the tenant allows it | Not started | Proposed 2026-10-20. Microsoft's managed default consent policy now requires an admin's approval for third-party apps that read mail, calendars or Teams content, so IN-3's one-time grant stays the usual path |
-| EM-1 … EM-4 Glasshouse Mail | Not started | Moved to P0 by the owner 2026-10-20, for teams starting with no email. Needs an ADR: what runs the mail servers, delivery and reputation, and where mail is kept |
+| EM-1 … EM-4 Glasshouse Mail | Not started | Moved to P0 by the owner 2026-10-20, for teams starting with no email. ADR 0037 (Proposed): mox per org on AWS, SES out, IMAP and SMTP to the computer behind the same mail actions; waits on the owner's decisions, GT-3 first |
 
 ## Pilot readiness
 
