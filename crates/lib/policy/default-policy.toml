@@ -69,6 +69,19 @@ approval_timeout_secs = 900
 "chat.read" = "auto"
 "chat.post" = "ask"
 "chat.create" = "ask"
+# Chat's everyday features (CF-92, ADR 0030 C4a): searching reads, on this
+# computer; reactions, edits, deletes, pins and topics reach everyone in the
+# conversation, so an agent asks. Drafts and what the person wants to hear
+# of change only the person's own settings on this computer; no agent's
+# allowed actions name them.
+"chat.search" = "auto"
+"chat.react" = "ask"
+"chat.edit" = "ask"
+"chat.delete" = "ask"
+"chat.pin" = "ask"
+"chat.topic" = "ask"
+"chat.draft" = "auto"
+"chat.notify" = "auto"
 # Artifacts (AR-1, ADR 0033): pages shared in the org's sealed shared space.
 # Reading what was shared with the person is quiet; sharing, a new version,
 # a comment or a resolve reach other people and can't be taken back, so
@@ -178,7 +191,7 @@ apps = ["console"]
 # 0030 slice C2); until that lands, nothing reaches a pilot org.
 [[app]]
 id = "chat"
-tiers = { "chat.post" = "auto", "chat.create" = "auto" }
+tiers = { "chat.post" = "auto", "chat.create" = "auto", "chat.react" = "auto", "chat.edit" = "auto", "chat.delete" = "auto", "chat.pin" = "auto", "chat.topic" = "auto", "chat.draft" = "auto", "chat.notify" = "auto" }
 
 # What the person does in Artifacts is theirs, as in Chat (ADR 0033), and
 # waits on the same presence check before a pilot org.
@@ -229,7 +242,7 @@ allowed_actions = ["files.*", "mail.*"]
 # stays out of harnesses that send model traffic to their own provider (HX-7).
 [[agent]]
 id = "claude-code"
-allowed_actions = ["files.*", "mail.*", "calendar.*", "catalog.search", "people.search", "settings.list", "chat.list", "chat.read", "chat.post", "artifact.*", "doc.list", "doc.read", "doc.create", "doc.write", "doc.comment", "skill.list", "skill.read", "skill.draft", "skill.share", "skill.propose", "skill.merge", "apps.*"]
+allowed_actions = ["files.*", "mail.*", "calendar.*", "catalog.search", "people.search", "settings.list", "chat.list", "chat.read", "chat.post", "chat.search", "chat.react", "artifact.*", "doc.list", "doc.read", "doc.create", "doc.write", "doc.comment", "skill.list", "skill.read", "skill.draft", "skill.share", "skill.propose", "skill.merge", "apps.*"]
 max_label = "internal"
 
 # Runs a skill's evals (SK-5, ADR 0034): reads the skill, asks the model

@@ -605,6 +605,75 @@ Every test name carries its PRD id. Nothing reaches a pilot org before slices C2
   - `cf65_the_export_bundle_holds_no_plaintext`
 - Cross-language: `rust_seals_open_in_typescript_and_back`.
 
+**C4a. Like Slack, inside the seal** (2026-10-20; PRD CF-92, CF-93). The
+owner asked for all of chat's everyday features, working. Everything here
+is a message part the console relays without reading, so it needs no
+console change and comes before C2. Browse and join, presence, huddles,
+unread across computers and desktop notifications need C2 or the desktop
+and come after.
+- New parts (`glass_managed::shared::Part`), each a message of its own
+  whose text is empty:
+  - `Edit { message, text }` and `Delete { message }`;
+  - `Reaction { to, emoji, off }`, `off` taking a reaction back;
+  - `Pin { message, pinned }`;
+  - `Topic { text }`, in channels only.
+- `Body` gains `mentions`: the logins of members named `@login` in the
+  text, worked out by the sender's computer.
+- Folding rules. Every computer applies them the same way, in sequence
+  order, using the verified `Header.sender` and never anything in a body:
+  - An edit or a delete counts only from the target's own sender. The
+    latest edit wins. A deleted message keeps its place, shows no text and
+    no reactions, and its replies stay. Its ciphertext stays on the
+    console for retention and holds (C3).
+  - A reaction is on or off per sender and emoji; the latest counts.
+  - A pin, unpin or topic change counts from any member; the latest wins.
+  - Parts that point at a message this computer doesn't have are kept and
+    apply when it arrives.
+- Threads. A reply's thread is its `reply_to` chain followed to a message
+  with no `reply_to`. The timeline shows thread roots, each with its reply
+  count, last reply time and up to three repliers; `chat.read` with
+  `thread` gives the root and its replies.
+- Unread and mentions are per computer until C2. Control parts (edits,
+  deletes, reactions, pins, topics) are never unread.
+- Old readers can't open messages with the new parts or fields, because
+  `Body` and `Part` refuse unknown fields. Nothing has shipped, so that is
+  accepted now. Before pilots, readers must skip a part they don't know
+  (C2).
+- Actions. Agents may react, edit, delete, pin and set topics only with a
+  yes, and may edit or delete only messages whose by-line names them. In
+  the Chat app they are Auto. Each reaches everyone in the conversation, so
+  each is irreversible even though another call can take it back. Drafts
+  and notification levels are the person's own settings: Auto, and no
+  agent's allowed actions name them, so a remix of Chat can keep them:
+
+  | Action | Input | Side effect | Agents | Chat app |
+  |---|---|---|---|---|
+  | `chat.react` | `conversation`, `message`, `emoji`, `on` | irreversible | ask | auto |
+  | `chat.edit` | `conversation`, `message`, `text` | irreversible | ask | auto |
+  | `chat.delete` | `conversation`, `message` | irreversible | ask | auto |
+  | `chat.pin` | `conversation`, `message`, `pinned` | irreversible | ask | auto |
+  | `chat.topic` | `conversation`, `topic` (channels, up to 250 characters) | irreversible | ask | auto |
+  | `chat.search` | `query`, `conversation`?, `limit`? (up to 50) | none | auto | auto |
+  | `chat.draft` | `conversation`, `thread`?, `text` (empty clears) | none | not allowed | auto |
+  | `chat.notify` | `conversation`, `level`: `all`, `mentions` or `none` | none | not allowed | auto |
+
+- `chat.search` opens messages as it goes, on the computer, and caps its
+  work. There is no plaintext index on disk. Neither the query nor any
+  text goes in the audit record.
+- Drafts live in glassd's memory, never on disk, so nothing unsealed is
+  written. They survive closing Chat but not a restart. Notification
+  levels are kept in the person's store and are honored once desktop
+  notifications exist.
+- Tests: `cf92_an_edit_or_delete_counts_only_from_the_sender`,
+  `cf92_reactions_toggle_per_person_and_emoji`,
+  `cf92_a_thread_folds_on_its_root`,
+  `cf92_parts_before_their_message_apply_when_it_arrives`,
+  `cf92_an_agent_edits_only_what_it_posted`,
+  `cf92_mentions_and_unread_count_only_messages`,
+  `cf93_search_finds_edited_text_and_never_deleted_text`, and in
+  `chat.e2e.ts` two people seeing each other's threads, reactions, edits,
+  deletes, pins and topic live.
+
 **C4. Like Slack.**
 - **Public channels and #general.**
   - There is an org conversation that everyone is in. Its key is sealed to every member key.

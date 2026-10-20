@@ -13,6 +13,8 @@
 //! them through [`glass_managed::meet::Meetings`], which the provider
 //! implements.
 
+mod everyday;
+mod fold;
 mod store;
 
 use std::collections::BTreeMap;
@@ -80,6 +82,9 @@ struct ReadInput {
     after: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// A thread's root: the root and its replies (CF-92).
+    #[serde(default)]
+    thread: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -444,6 +449,7 @@ impl ChatProvider {
             reply_to: post.reply_to.clone(),
             sent_at: Timestamp::now().to_string(),
             part: None,
+            mentions: fold::mentions(&post.text, &conversation.members, me),
         };
         let mut message = Message::seal(&header, &body, &key, &member.secret)?;
         let seq = connection
@@ -463,6 +469,69 @@ impl ChatProvider {
         }
         self.handle.changed(me, conversation.kind);
         Ok((conversation, title, header.id, seq))
+    }
+
+    /// Seals and posts a message in conversation or item `to`, which
+    /// `login` is in. Its id.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn post_sealed(
+        &self,
+        login: &str,
+        to: &str,
+        text: &str,
+        part: Option<glass_managed::shared::Part>,
+        attribution: Option<String>,
+        reply_to: Option<String>,
+        mentions: Vec<String>,
+    ) -> Result<String, ChatFailure> {
+        let connection = self.handle.connection()?;
+        let member = self.handle.existing(login).ok_or_else(|| {
+            ChatFailure::NotSetUp(format!("{login} has no chat keys on this computer yet"))
+        })?;
+        let store = self.handle.load(login);
+        let conversation = store
+            .conversations
+            .get(to)
+            .filter(|c| c.members.iter().any(|m| m == login))
+            .cloned()
+            .ok_or_else(|| ChatFailure::Local(format!("{login} isn't in {to}")))?;
+        let key = store
+            .epoch_key(&member, &conversation.id, conversation.epoch)
+            .ok_or_else(|| ChatFailure::Local("this computer can't open its key".into()))?;
+        let header = Header {
+            v: 1,
+            org: connection.org.clone(),
+            conversation: conversation.id.clone(),
+            epoch: conversation.epoch,
+            id: new_message_id(now_ms())?,
+            sender: login.to_owned(),
+            key: member.key.id.clone(),
+        };
+        let body = Body {
+            text: text.to_owned(),
+            attribution,
+            reply_to,
+            sent_at: Timestamp::now().to_string(),
+            part,
+            mentions,
+        };
+        let mut message = Message::seal(&header, &body, &key, &member.secret)?;
+        message.seq = connection
+            .link
+            .post(&PostMessage {
+                device: connection.device.clone(),
+                message: message.clone(),
+            })
+            .map_err(ChatFailure::Link)?;
+        message.at = Some(Timestamp::now().to_string());
+        {
+            let _write = self.handle.lock();
+            let mut store = self.handle.load(login);
+            store.keep(&conversation.id, message);
+            self.handle.save(login, &store)?;
+        }
+        self.handle.changed(login, conversation.kind);
+        Ok(header.id)
     }
 
     /// The person's keys. Chat makes and registers them the first time
@@ -498,19 +567,29 @@ impl ChatProvider {
             .values()
             .filter(|c| in_chat(c) && c.members.iter().any(|m| m == me))
             .map(|c| {
-                let messages = store.messages.get(&c.id).map_or(&[][..], Vec::as_slice);
+                let folded = self.folded(&store, &member, me, c);
                 let seen = store.seen.get(&c.id).copied().unwrap_or(0);
-                let unread = messages
+                // Only messages people wrote are unread: never an edit, a
+                // reaction, a pin or a topic (ADR 0030 C4a).
+                let fresh: Vec<&fold::Shown> = folded
+                    .messages
                     .iter()
-                    .filter(|m| m.seq > seen && m.header().is_ok_and(|h| h.sender != *me))
-                    .count();
-                let last = messages.last();
+                    .filter(|m| m.seq > seen && m.sender != *me && !m.deleted)
+                    .collect();
+                let unread = fresh.len();
+                let mentions = fresh.iter().filter(|m| m.mentions.iter().any(|l| l == me)).count();
+                let last = folded.messages.last();
                 let title = self.title(&store, Some(&member), me, c);
                 let line = format!(
-                    "- {title} [{}]{}",
+                    "- {title} [{}]{}{}",
                     c.id,
                     if unread > 0 {
                         format!(", {unread} unread")
+                    } else {
+                        String::new()
+                    },
+                    if mentions > 0 {
+                        format!(", {mentions} mentioning {me}")
                     } else {
                         String::new()
                     }
@@ -521,8 +600,12 @@ impl ChatProvider {
                     "title": title,
                     "people": c.members.iter().map(|m| json!({ "login": m, "name": self.name(m) })).collect::<Vec<_>>(),
                     "unread": unread,
-                    "last_at": last.and_then(|m| m.at.clone()),
-                    "last_from": last.and_then(|m| m.header().ok()).map(|h| self.name(&h.sender)),
+                    "mentions": mentions,
+                    "topic": folded.topic,
+                    "notify": everyday::level_for(&store, c),
+                    "draft": self.handle.draft(me, &c.id, None),
+                    "last_at": last.map(|m| m.at.clone()),
+                    "last_from": last.map(|m| self.name(&m.sender)),
                 });
                 (last.map_or(0, |m| m.seq), view, line)
             })
@@ -567,117 +650,98 @@ impl ChatProvider {
                 ))
             })?;
         let title = self.title(&store, Some(&member), me, conversation);
-        let all = store
-            .messages
-            .get(&conversation.id)
-            .map_or(&[][..], Vec::as_slice);
-        let index = |id: &str| {
-            all.iter()
-                .position(|m| m.header().is_ok_and(|h| h.id == id))
-        };
-        let window: &[Message] = match (&input.before, &input.after) {
-            (Some(id), None) => {
-                let end =
-                    index(id).ok_or_else(|| ActionError::NotFound(format!("no message {id}")))?;
-                &all[end.saturating_sub(limit)..end]
+        let folded = self.folded(&store, &member, me, conversation);
+        let (shown, more_before): (Vec<&fold::Shown>, bool) = match &input.thread {
+            Some(root) => {
+                let r = folded
+                    .get(root)
+                    .filter(|m| m.is_root())
+                    .ok_or_else(|| ActionError::NotFound(format!("no thread {root} in {title}")))?;
+                let replies: Vec<&fold::Shown> =
+                    r.replies.iter().map(|&i| &folded.messages[i]).collect();
+                let skip = replies.len().saturating_sub(limit);
+                let mut shown = vec![r];
+                shown.extend(&replies[skip..]);
+                (shown, skip > 0)
             }
-            (None, Some(id)) => {
-                let start =
-                    index(id).ok_or_else(|| ActionError::NotFound(format!("no message {id}")))? + 1;
-                &all[start..(start + limit).min(all.len())]
+            None => {
+                let roots: Vec<&fold::Shown> = folded.roots().collect();
+                let index = |id: &str| roots.iter().position(|m| m.id == id);
+                let window: &[&fold::Shown] = match (&input.before, &input.after) {
+                    (Some(id), None) => {
+                        let end = index(id)
+                            .ok_or_else(|| ActionError::NotFound(format!("no message {id}")))?;
+                        &roots[end.saturating_sub(limit)..end]
+                    }
+                    (None, Some(id)) => {
+                        let start = index(id)
+                            .ok_or_else(|| ActionError::NotFound(format!("no message {id}")))?
+                            + 1;
+                        &roots[start..(start + limit).min(roots.len())]
+                    }
+                    (None, None) => &roots[roots.len().saturating_sub(limit)..],
+                    (Some(_), Some(_)) => return Err(invalid("give before or after, not both")),
+                };
+                let more = window
+                    .first()
+                    .is_some_and(|m| roots.first().is_some_and(|f| f.id != m.id));
+                (window.to_vec(), more)
             }
-            (None, None) => &all[all.len().saturating_sub(limit)..],
-            (Some(_), Some(_)) => return Err(invalid("give before or after, not both")),
         };
-        let mut keys: BTreeMap<u32, Option<EpochKey>> = BTreeMap::new();
-        let mut views = Vec::with_capacity(window.len());
-        let mut lines = Vec::with_capacity(window.len());
-        let mut sealed = 0;
-        for message in window {
-            let Ok(header) = message.header() else {
-                sealed += 1;
-                continue;
-            };
-            let key = keys
-                .entry(header.epoch)
-                .or_insert_with(|| store.epoch_key(&member, &conversation.id, header.epoch));
-            let Some(body) = key.as_ref().and_then(|k| message.open(k).ok()) else {
-                sealed += 1;
-                continue;
-            };
-            let at = message.at.clone().unwrap_or_else(|| body.sent_at.clone());
-            let name = self.name(&header.sender);
-            // An item shared here shows as a card (ADR 0033); no other part
-            // belongs in a chat conversation.
-            let shared = match &body.part {
-                Some(glass_managed::shared::Part::Shared { item, kind, title }) => {
-                    Some(json!({ "item": item, "kind": kind, "title": title }))
-                }
-                _ => None,
-            };
-            lines.push(format!(
-                "[{}] {name}{}: {}{}",
-                clock(&at),
-                body.attribution
-                    .as_deref()
-                    .map(|a| format!(" ({a})"))
-                    .unwrap_or_default(),
-                body.text,
-                shared
-                    .as_ref()
-                    .map(|s| format!(
-                        " [{} {}]",
-                        s["kind"].as_str().unwrap_or_default(),
-                        s["item"].as_str().unwrap_or_default()
-                    ))
-                    .unwrap_or_default()
-            ));
-            views.push(json!({
-                "id": header.id,
-                "seq": message.seq,
-                "sender": header.sender,
-                "sender_name": name,
-                "mine": header.sender == *me,
-                "at": at,
-                "text": body.text,
-                "attribution": body.attribution,
-                "reply_to": body.reply_to,
-                "shared": shared,
-            }));
-        }
+        let views: Vec<Value> = shown.iter().map(|m| self.view(&folded, m, me)).collect();
+        let lines: Vec<String> = shown.iter().map(|m| self.line(m)).collect();
         // What the person reads in Chat is read; an agent reading for
-        // them leaves it unread.
-        if ctx.principal.agent.as_str() == APP
-            && let Some(newest) = window.last()
-        {
+        // them leaves it unread. The newest view marks everything read,
+        // edits and reactions included.
+        if ctx.principal.agent.as_str() == APP && input.before.is_none() && input.thread.is_none() {
             let _write = self.handle.lock();
             let mut store = self.handle.load(me);
             let seen = store.seen.entry(conversation.id.clone()).or_insert(0);
-            if newest.seq > *seen {
-                *seen = newest.seq;
+            if folded.newest > *seen {
+                *seen = folded.newest;
                 self.handle.save(me, &store).map_err(failed)?;
             }
         }
         let mut text = format!(
-            "{title}: {}{}.",
+            "{title}{}: {}{}.",
+            if input.thread.is_some() {
+                ", a thread"
+            } else {
+                ""
+            },
             plural(views.len(), "message", "messages"),
-            if sealed > 0 {
-                format!(" ({sealed} this computer can't open)")
+            if folded.sealed > 0 {
+                format!(" ({} this computer can't open)", folded.sealed)
             } else {
                 String::new()
             }
         );
+        if let Some(topic) = &folded.topic {
+            text.push_str(&format!(" Topic: {}.", display_line(topic)));
+        }
         for line in lines {
             text.push('\n');
             text.push_str(&line);
         }
+        let mut data = json!({
+            "conversation": {
+                "id": conversation.id,
+                "kind": conversation.kind,
+                "title": title,
+                "topic": folded.topic,
+                "pinned": folded.pinned,
+                "notify": everyday::level_for(&store, conversation),
+                "draft": self.handle.draft(me, &conversation.id, None),
+            },
+            "messages": views,
+            "more_before": more_before,
+        });
+        if let Some(root) = &input.thread {
+            data["thread"] = json!({ "root": root, "draft": self.handle.draft(me, &conversation.id, Some(root)) });
+        }
         Ok(ActionOutput {
             text,
-            data: json!({
-                "conversation": { "id": conversation.id, "kind": conversation.kind, "title": title },
-                "messages": views,
-                "more_before": window.first().is_some_and(|m| !std::ptr::eq(m, &all[0])),
-            }),
+            data,
             changes: Vec::new(),
         })
     }
@@ -963,53 +1027,7 @@ impl glass_managed::shared::Shared for ChatProvider {
         attribution: Option<String>,
         reply_to: Option<String>,
     ) -> Result<String, ChatFailure> {
-        let connection = self.handle.connection()?;
-        let member = self.handle.existing(login).ok_or_else(|| {
-            ChatFailure::NotSetUp(format!("{login} has no chat keys on this computer yet"))
-        })?;
-        let store = self.handle.load(login);
-        let conversation = store
-            .conversations
-            .get(to)
-            .filter(|c| c.members.iter().any(|m| m == login))
-            .cloned()
-            .ok_or_else(|| ChatFailure::Local(format!("{login} isn't in {to}")))?;
-        let key = store
-            .epoch_key(&member, &conversation.id, conversation.epoch)
-            .ok_or_else(|| ChatFailure::Local("this computer can't open its key".into()))?;
-        let header = Header {
-            v: 1,
-            org: connection.org.clone(),
-            conversation: conversation.id.clone(),
-            epoch: conversation.epoch,
-            id: new_message_id(now_ms())?,
-            sender: login.to_owned(),
-            key: member.key.id.clone(),
-        };
-        let body = Body {
-            text: text.to_owned(),
-            attribution,
-            reply_to,
-            sent_at: Timestamp::now().to_string(),
-            part,
-        };
-        let mut message = Message::seal(&header, &body, &key, &member.secret)?;
-        message.seq = connection
-            .link
-            .post(&PostMessage {
-                device: connection.device.clone(),
-                message: message.clone(),
-            })
-            .map_err(ChatFailure::Link)?;
-        message.at = Some(Timestamp::now().to_string());
-        {
-            let _write = self.handle.lock();
-            let mut store = self.handle.load(login);
-            store.keep(&conversation.id, message);
-            self.handle.save(login, &store)?;
-        }
-        self.handle.changed(login, conversation.kind);
-        Ok(header.id)
+        self.post_sealed(login, to, text, part, attribution, reply_to, Vec::new())
     }
 
     fn put_blob(
@@ -1168,8 +1186,9 @@ impl ActionProvider for ChatProvider {
                 title: "Read a chat conversation".into(),
                 description: "Messages in one of the person's conversations, oldest first: the \
                               newest 50 by default (up to 200), or those before or after a \
-                              message. Each has its sender, time, text and, for an agent's, \
-                              who posted it for whom."
+                              message. Each has its sender, time, text, reactions, replies and, \
+                              for an agent's, who posted it for whom. Replies are in threads: \
+                              give thread (a message id) to read one."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -1177,7 +1196,8 @@ impl ActionProvider for ChatProvider {
                         "conversation": conversation,
                         "before": { "type": "string", "description": "A message id: messages before it" },
                         "after": { "type": "string", "description": "A message id: messages after it" },
-                        "limit": { "type": "integer", "minimum": 1, "maximum": READ_MAX }
+                        "limit": { "type": "integer", "minimum": 1, "maximum": READ_MAX },
+                        "thread": { "type": "string", "description": "A message id: that thread's messages" }
                     },
                     "required": ["conversation"],
                     "additionalProperties": false
@@ -1191,8 +1211,9 @@ impl ActionProvider for ChatProvider {
                 title: "Post in chat".into(),
                 description: "Post 1 to 20 messages, each in a conversation the person is in or \
                               to people by login (their direct message or group, made if new). \
-                              Messages are sealed end to end and say they came from you for \
-                              the person. They can't be taken back."
+                              @login in the text mentions a member. reply_to answers in a \
+                              thread. Messages are sealed end to end and say they came from \
+                              you for the person. They can't be taken back."
                     .into(),
                 input_schema: json!({
                     "type": "object",
@@ -1241,6 +1262,9 @@ impl ActionProvider for ChatProvider {
                 ask: AskLabels::new("Review channel", "Approve and create"),
             },
         ]
+        .into_iter()
+        .chain(everyday::defs())
+        .collect()
     }
 
     fn preview(
@@ -1331,6 +1355,7 @@ impl ActionProvider for ChatProvider {
                     ..Preview::default()
                 })
             }
+            other if everyday::ACTIONS.contains(&other) => self.preview_everyday(ctx, other, input),
             other => Err(invalid(format!("chat has no action {other}"))),
         }
     }
@@ -1363,6 +1388,7 @@ impl ActionProvider for ChatProvider {
                 self.check_create(me, &input)?;
                 self.create(ctx, input)
             }
+            other if everyday::ACTIONS.contains(&other) => self.invoke_everyday(ctx, other, input),
             other => Err(invalid(format!("chat has no action {other}"))),
         }
     }
@@ -1754,5 +1780,450 @@ mod tests {
             json!({ "posts": [{ "conversation": id, "text": "On it" }] }),
         );
         assert_eq!(preview.summary, "Post in #northwind-deal");
+    }
+    /// Two people in a channel: Dana on computer a, Priya on b, both with
+    /// Chat open, and the channel's id.
+    fn launch_channel(org: &Org) -> (Computer, Computer, String) {
+        let (a, b) = (org.computer("dev-a"), org.computer("dev-b"));
+        b.call("priya", LIST, json!({})).unwrap();
+        a.call("dana", LIST, json!({})).unwrap();
+        let made = a
+            .call(
+                "dana",
+                CREATE,
+                json!({ "name": "launch", "people": ["priya"] }),
+            )
+            .unwrap();
+        let id = made.data["conversation"]["id"].as_str().unwrap().to_owned();
+        b.handle.sync_once(0).unwrap();
+        (a, b, id)
+    }
+
+    fn say(c: &Computer, login: &str, id: &str, text: &str, reply_to: Option<&str>) -> String {
+        let out = c
+            .call(
+                login,
+                POST,
+                json!({ "posts": [{ "conversation": id, "text": text, "reply_to": reply_to }] }),
+            )
+            .unwrap();
+        out.data["posted"][0]["id"].as_str().unwrap().to_owned()
+    }
+
+    fn sync(cs: &[&Computer]) {
+        for c in cs {
+            c.handle.sync_once(0).unwrap();
+        }
+    }
+
+    #[test]
+    fn cf92_two_computers_see_threads_reactions_edits_deletes_pins_and_topics() {
+        let org = org();
+        let (a, b, id) = launch_channel(&org);
+        let root = say(&a, "dana", &id, "Ship Friday", None);
+        sync(&[&b]);
+        let reply = say(&b, "priya", &id, "Can we do Monday?", Some(&root));
+        let oops = say(&b, "priya", &id, "oops, wrong channel", None);
+        sync(&[&a]);
+        let call = |c: &Computer, login: &str, action: &str, input: Value| {
+            c.call(login, action, input).unwrap()
+        };
+        call(
+            &a,
+            "dana",
+            everyday::REACT,
+            json!({ "conversation": id, "message": reply, "emoji": "👍" }),
+        );
+        call(
+            &b,
+            "priya",
+            everyday::REACT,
+            json!({ "conversation": id, "message": root, "emoji": "👍" }),
+        );
+        call(
+            &a,
+            "dana",
+            everyday::EDIT,
+            json!({ "conversation": id, "message": root, "text": "Ship Monday" }),
+        );
+        call(
+            &a,
+            "dana",
+            everyday::PIN,
+            json!({ "conversation": id, "message": root }),
+        );
+        call(
+            &b,
+            "priya",
+            everyday::TOPIC,
+            json!({ "conversation": id, "topic": "Q4 launch" }),
+        );
+        call(
+            &b,
+            "priya",
+            everyday::DELETE,
+            json!({ "conversation": id, "message": oops }),
+        );
+        sync(&[&a, &b]);
+
+        for (c, login) in [(&a, "dana"), (&b, "priya")] {
+            let read = c.call(login, READ, json!({ "conversation": id })).unwrap();
+            let conversation = &read.data["conversation"];
+            assert_eq!(conversation["topic"], "Q4 launch", "{login}");
+            assert_eq!(conversation["pinned"], json!([root]), "{login}");
+            let messages = read.data["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 2, "{login}: the reply is in its thread");
+            let r = &messages[0];
+            assert_eq!(
+                (
+                    r["text"].as_str(),
+                    r["edited"].as_bool(),
+                    r["pinned"].as_bool(),
+                    r["replies"].as_u64()
+                ),
+                (Some("Ship Monday"), Some(true), Some(true), Some(1)),
+                "{login}"
+            );
+            assert_eq!(r["reactions"][0]["emoji"], "👍");
+            assert_eq!(r["reactions"][0]["names"], json!(["Priya Shah"]));
+            assert_eq!(r["reactions"][0]["mine"], login == "priya");
+            assert_eq!(r["repliers"], json!(["Priya Shah"]));
+            assert_eq!(
+                (
+                    messages[1]["deleted"].as_bool(),
+                    messages[1]["text"].as_str()
+                ),
+                (Some(true), Some(""))
+            );
+            let thread = c
+                .call(login, READ, json!({ "conversation": id, "thread": root }))
+                .unwrap();
+            let t = thread.data["messages"].as_array().unwrap();
+            assert_eq!(t.len(), 2);
+            assert_eq!(
+                (t[1]["text"].as_str(), t[1]["thread"].as_str()),
+                (Some("Can we do Monday?"), Some(root.as_str()))
+            );
+            assert_eq!(t[1]["reactions"][0]["names"], json!(["Dana Ruiz"]));
+        }
+        // An agent reading sees the same, in its lines.
+        let read = a.call("dana", READ, json!({ "conversation": id })).unwrap();
+        assert!(read.text.contains("Topic: Q4 launch."), "{}", read.text);
+        assert!(
+            read.text
+                .contains("Ship Monday (edited) [1 reply] [👍 1] [pinned]"),
+            "{}",
+            read.text
+        );
+        assert!(read.text.contains("(deleted)"), "{}", read.text);
+        // The console holds the edit and the delete as ciphertext like any
+        // message: none of the new text is readable there.
+        assert!(
+            org.link
+                .messages()
+                .iter()
+                .all(|m| !m.ct.contains(&hex::encode("Ship Monday")))
+        );
+    }
+
+    #[test]
+    fn cf92_an_edit_or_delete_counts_only_from_its_sender() {
+        let org = org();
+        let (a, b, id) = launch_channel(&org);
+        let root = say(&a, "dana", &id, "Budget is 40k", None);
+        sync(&[&b]);
+        let refused = b
+            .call(
+                "priya",
+                everyday::EDIT,
+                json!({ "conversation": id, "message": root, "text": "Budget is 90k" }),
+            )
+            .unwrap_err();
+        assert!(refused.to_string().contains("only your own"), "{refused}");
+        assert!(
+            b.call(
+                "priya",
+                everyday::DELETE,
+                json!({ "conversation": id, "message": root })
+            )
+            .is_err()
+        );
+        // A changed client that posts the parts anyway changes nothing on
+        // any computer: the fold judges by the verified sender.
+        use glass_managed::shared::{Part, Shared};
+        Shared::post(
+            &b.provider,
+            "priya",
+            &id,
+            "",
+            Some(Part::Edit {
+                message: root.clone(),
+                text: "Budget is 90k".into(),
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        Shared::post(
+            &b.provider,
+            "priya",
+            &id,
+            "",
+            Some(Part::Delete {
+                message: root.clone(),
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        sync(&[&a, &b]);
+        for (c, login) in [(&a, "dana"), (&b, "priya")] {
+            let read = c.call(login, READ, json!({ "conversation": id })).unwrap();
+            let m = &read.data["messages"][0];
+            assert_eq!(
+                (
+                    m["text"].as_str(),
+                    m["edited"].as_bool(),
+                    m["deleted"].as_bool()
+                ),
+                (Some("Budget is 40k"), Some(false), Some(false)),
+                "{login}"
+            );
+        }
+    }
+
+    #[test]
+    fn cf92_an_agent_edits_only_what_it_posted() {
+        let org = org();
+        let (a, _b, id) = launch_channel(&org);
+        let agent = ctx("dana", "claude-code");
+        let posted = a
+            .provider
+            .invoke(
+                &agent,
+                &POST.parse().unwrap(),
+                &json!({ "posts": [{ "conversation": id, "text": "Draft agenda: 1. Budget" }] }),
+            )
+            .unwrap();
+        let by_agent = posted.data["posted"][0]["id"].as_str().unwrap().to_owned();
+        let typed = say(&a, "dana", &id, "I'll run the meeting", None);
+        let edit = |message: &str| {
+            a.provider.invoke(
+                &agent,
+                &everyday::EDIT.parse().unwrap(),
+                &json!({ "conversation": id, "message": message, "text": "changed" }),
+            )
+        };
+        assert!(edit(&by_agent).is_ok());
+        let refused = edit(&typed).unwrap_err().to_string();
+        assert!(refused.contains("only messages it posted"), "{refused}");
+        let refused = a
+            .provider
+            .invoke(
+                &agent,
+                &everyday::DELETE.parse().unwrap(),
+                &json!({ "conversation": id, "message": typed }),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("only messages it posted"), "{refused}");
+        // The person edits either in Chat.
+        a.call("dana", everyday::EDIT, json!({ "conversation": id, "message": by_agent, "text": "Agenda: 1. Budget 2. Hiring" })).unwrap();
+    }
+
+    #[test]
+    fn cf92_mentions_and_unread_count_only_messages() {
+        let org = org();
+        let (a, b, id) = launch_channel(&org);
+        let m = say(
+            &a,
+            "dana",
+            &id,
+            "@priya can you review? cc @sam (not here)",
+            None,
+        );
+        sync(&[&b]);
+        let row = |c: &Computer, login: &str| {
+            let list = c.call(login, LIST, json!({})).unwrap();
+            list.data["conversations"][0].clone()
+        };
+        let r = row(&b, "priya");
+        assert_eq!(
+            (r["unread"].as_u64(), r["mentions"].as_u64()),
+            (Some(1), Some(1))
+        );
+        assert_eq!(r["notify"], "mentions", "channels default to mentions");
+        let read = b
+            .call("priya", READ, json!({ "conversation": id }))
+            .unwrap();
+        assert_eq!(
+            read.data["messages"][0]["mentions"],
+            json!([{ "login": "priya", "name": "Priya Shah" }])
+        );
+        assert_eq!(row(&b, "priya")["unread"], 0);
+        // Edits, reactions and pins aren't new messages.
+        a.call(
+            "dana",
+            everyday::EDIT,
+            json!({ "conversation": id, "message": m, "text": "@priya can you review today?" }),
+        )
+        .unwrap();
+        a.call(
+            "dana",
+            everyday::REACT,
+            json!({ "conversation": id, "message": m, "emoji": "🙏" }),
+        )
+        .unwrap();
+        a.call(
+            "dana",
+            everyday::PIN,
+            json!({ "conversation": id, "message": m }),
+        )
+        .unwrap();
+        sync(&[&b]);
+        let r = row(&b, "priya");
+        assert_eq!(
+            (r["unread"].as_u64(), r["mentions"].as_u64()),
+            (Some(0), Some(0))
+        );
+        // A reaction taken back, and one that's already in place, change
+        // nothing more.
+        let again = a
+            .call(
+                "dana",
+                everyday::REACT,
+                json!({ "conversation": id, "message": m, "emoji": "🙏" }),
+            )
+            .unwrap();
+        assert_eq!(again.text, "Nothing to change.");
+        let before = org.link.messages().len();
+        a.call(
+            "dana",
+            everyday::REACT,
+            json!({ "conversation": id, "message": m, "emoji": "🙏", "on": false }),
+        )
+        .unwrap();
+        assert_eq!(org.link.messages().len(), before + 1);
+        sync(&[&b]);
+        let read = b
+            .call("priya", READ, json!({ "conversation": id }))
+            .unwrap();
+        assert_eq!(read.data["messages"][0]["reactions"], json!([]));
+    }
+
+    #[test]
+    fn cf93_search_finds_edited_text_and_never_deleted_text() {
+        let org = org();
+        let (a, b, id) = launch_channel(&org);
+        let m = say(&a, "dana", &id, "budget alpha for Q3", None);
+        let gone = say(&a, "dana", &id, "secret gamma plan", None);
+        a.call(
+            "dana",
+            everyday::EDIT,
+            json!({ "conversation": id, "message": m, "text": "budget Beta for Q3" }),
+        )
+        .unwrap();
+        a.call(
+            "dana",
+            everyday::DELETE,
+            json!({ "conversation": id, "message": gone }),
+        )
+        .unwrap();
+        sync(&[&b]);
+        let hits = |q: &str| {
+            b.call("priya", everyday::SEARCH, json!({ "query": q }))
+                .unwrap()
+                .data["hits"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+        assert_eq!(hits("beta"), 1, "case doesn't matter");
+        assert_eq!(hits("alpha"), 0, "an edit replaces the old text");
+        assert_eq!(hits("gamma"), 0, "deleted text is never found");
+        let found = b
+            .call(
+                "priya",
+                everyday::SEARCH,
+                json!({ "query": "budget", "conversation": id }),
+            )
+            .unwrap();
+        assert_eq!(found.data["hits"][0]["title"], "#launch");
+        assert_eq!(found.data["hits"][0]["message"], m);
+        // The review list and audit name where, never what was looked for.
+        let preview = b.preview("priya", everyday::SEARCH, json!({ "query": "budget" }));
+        assert_eq!(preview.summary, "Search Chat");
+        assert!(!format!("{preview:?}").contains("budget"));
+        assert!(
+            b.call("priya", everyday::SEARCH, json!({ "query": "a" }))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cf92_drafts_and_levels_stay_on_this_computer() {
+        let org = org();
+        let (a, _b, id) = launch_channel(&org);
+        let words = "half-written thought about pricing";
+        a.call(
+            "dana",
+            everyday::DRAFT,
+            json!({ "conversation": id, "text": words }),
+        )
+        .unwrap();
+        a.call(
+            "dana",
+            everyday::NOTIFY,
+            json!({ "conversation": id, "level": "none" }),
+        )
+        .unwrap();
+        let list = a.call("dana", LIST, json!({})).unwrap();
+        assert_eq!(list.data["conversations"][0]["draft"], words);
+        assert_eq!(list.data["conversations"][0]["notify"], "none");
+        // The draft is in memory, never on disk, and never at the console.
+        for entry in walk(org.dir.path()) {
+            let bytes = std::fs::read(&entry).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("pricing"),
+                "{}",
+                entry.display()
+            );
+        }
+        assert!(
+            org.link
+                .messages()
+                .iter()
+                .all(|m| !m.ct.contains(&hex::encode("pricing")))
+        );
+        a.call(
+            "dana",
+            everyday::DRAFT,
+            json!({ "conversation": id, "text": "" }),
+        )
+        .unwrap();
+        assert!(
+            a.call("dana", LIST, json!({})).unwrap().data["conversations"][0]["draft"].is_null()
+        );
+        assert!(
+            a.call(
+                "dana",
+                everyday::NOTIFY,
+                json!({ "conversation": id, "level": "loud" })
+            )
+            .is_err()
+        );
+    }
+
+    fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.extend(walk(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out
     }
 }

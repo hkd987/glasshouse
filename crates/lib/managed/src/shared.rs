@@ -112,8 +112,14 @@ pub enum Part {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         anchor: Option<Anchor>,
     },
-    /// A reaction to message `to`.
-    Reaction { to: String, emoji: String },
+    /// A reaction to message `to`, or (`off`) one taken back. The latest
+    /// per sender and emoji counts (ADR 0030 C4a).
+    Reaction {
+        to: String,
+        emoji: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        off: bool,
+    },
     /// Comment `comment` resolved, or reopened.
     Resolve { comment: String, resolved: bool },
     /// In a chat conversation: an item shared there, shown as a card.
@@ -148,6 +154,15 @@ pub enum Part {
         editors: Vec<String>,
         commenters: Vec<String>,
     },
+    /// In chat (ADR 0030 C4a): message `message`'s new text. Counts only
+    /// from that message's own sender.
+    Edit { message: String, text: String },
+    /// In chat: message `message` deleted, by its own sender.
+    Delete { message: String },
+    /// In chat: message `message` pinned, or unpinned, by a member.
+    Pin { message: String, pinned: bool },
+    /// In a chat channel: its topic, set by a member.
+    Topic { text: String },
 }
 
 /// A blob's key: a fresh random key per blob, never reused.

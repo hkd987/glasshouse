@@ -438,9 +438,14 @@ pub struct Body {
     pub reply_to: Option<String>,
     pub sent_at: String,
     /// What a message in a shared item carries (ADR 0033): a version, a
-    /// comment, a reaction or a resolve; in chat, an item shared there.
+    /// comment, a reaction or a resolve; in chat, an item shared there, or
+    /// an edit, delete, reaction, pin or topic (ADR 0030 C4a).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part: Option<crate::shared::Part>,
+    /// Members named `@login` in the text, worked out by the sender's
+    /// computer (CF-92).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<String>,
 }
 
 /// A sealed message as it travels and as the console keeps it.
@@ -1050,6 +1055,7 @@ mod tests {
             reply_to: None,
             sent_at: "2026-10-19T14:02:11Z".into(),
             part: None,
+            mentions: Vec::new(),
         };
         let message = Message::seal(&header, &body, &key, &priya_s).unwrap();
         message.verify(&priya).unwrap();

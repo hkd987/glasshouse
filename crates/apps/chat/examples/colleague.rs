@@ -10,6 +10,9 @@
 //!   say <login> <text>   message <login>
 //!   read <login>         the direct messages with <login>, as JSON
 //!   read #<channel>      a channel's messages, as JSON
+//!   conversation <login|#channel>
+//!                        that conversation's id
+//!   call <action> <json> any chat action as them, its data as JSON
 //! ```
 
 // A command-line tool: its answer is what it prints.
@@ -37,6 +40,29 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The id of the direct messages with `with`, or of channel `#name`.
+fn conversation(
+    call: &dyn Fn(&str, Value) -> Result<glass_actions::ActionOutput, String>,
+    with: &str,
+) -> Result<String, String> {
+    let list = call("chat.list", json!({}))?;
+    list.data["conversations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|c| match with.strip_prefix('#') {
+            Some(_) => c["kind"] == "channel" && c["title"] == *with,
+            None => {
+                c["kind"] == "direct"
+                    && c["people"]
+                        .as_array()
+                        .is_some_and(|p| p.iter().any(|x| x["login"] == *with))
+            }
+        })
+        .and_then(|c| c["id"].as_str().map(str::to_owned))
+        .ok_or_else(|| format!("no conversation with {with}"))
 }
 
 fn run(args: Vec<String>) -> Result<String, String> {
@@ -102,25 +128,19 @@ fn run(args: Vec<String>) -> Result<String, String> {
         )?
         .text),
         ["read", with] => {
-            let list = call("chat.list", json!({}))?;
-            let id = list.data["conversations"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|c| match with.strip_prefix('#') {
-                    Some(_) => c["kind"] == "channel" && c["title"] == *with,
-                    None => {
-                        c["kind"] == "direct"
-                            && c["people"]
-                                .as_array()
-                                .is_some_and(|p| p.iter().any(|x| x["login"] == *with))
-                    }
-                })
-                .map(|c| c["id"].clone())
-                .ok_or_else(|| format!("no messages with {with}"))?;
+            let id = conversation(&call, with)?;
             let read = call("chat.read", json!({ "conversation": id }))?;
             Ok(read.data["messages"].to_string())
         }
-        _ => Err("say <login> <text> | read <login> | open".into()),
+        ["conversation", with] => conversation(&call, with),
+        ["call", action, input] => {
+            let input: Value =
+                serde_json::from_str(input).map_err(|e| format!("the input: {e}"))?;
+            Ok(call(action, input)?.data.to_string())
+        }
+        _ => Err(
+            "say <login> <text> | read <login> | conversation <with> | call <action> <json> | open"
+                .into(),
+        ),
     }
 }

@@ -450,3 +450,74 @@ async fn cf91_chat_hears_of_a_new_message_without_reading_it() {
         .unwrap();
     assert!(quiet.changed.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cf92_an_agents_reaction_asks_the_chat_apps_does_not_and_drafts_are_never_an_agents() {
+    let h = harness_with("");
+    let org = org(&h);
+    org.priya("chat.list", json!({}));
+    let apps = Client::connect(h.serve_apps()).await.unwrap();
+    let session = open(&apps, "chat").await.session;
+    let sent = call(&apps, session, "chat.post", post_to_priya("See you at 3")).await;
+    let conversation = sent.data["posted"][0]["conversation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let message = sent.data["posted"][0]["id"].as_str().unwrap().to_owned();
+
+    // In Chat, the person's reaction doesn't ask.
+    let reacted = call(
+        &apps,
+        session,
+        "chat.react",
+        json!({ "conversation": conversation, "message": message, "emoji": "👍" }),
+    )
+    .await;
+    assert!(reacted.ok, "{}", reacted.text);
+    assert!(h.rt.approvals(&h.me).is_empty());
+    let record = audited(&h, "chat.react").pop().expect("audited");
+    assert_eq!(record.event.decision.as_ref().unwrap().tier, Tier::Auto);
+
+    // An agent's asks, naming whose message, and a decline is readable.
+    let (_task, agent) = claude_code(&h).await;
+    let pending = {
+        let agent = Arc::clone(&agent);
+        let input = json!({ "conversation": conversation, "message": message, "emoji": "🎉" });
+        tokio::spawn(async move { tool(&agent, "chat_react", input).await })
+    };
+    eventually(|| !h.rt.approvals(&h.me).is_empty()).await;
+    let ask = h.rt.approvals(&h.me).remove(0);
+    assert!(ask.summary.starts_with("React 🎉 on "), "{}", ask.summary);
+    assert!(ask.summary.ends_with("in Priya Shah"), "{}", ask.summary);
+    assert_eq!(ask.labels.approve, "Approve and react");
+    h.rt.answer(
+        &h.me,
+        AnswerApproval {
+            approval: ask.id,
+            answer: ApprovalAnswer::Deny,
+        },
+    )
+    .unwrap();
+    assert!(pending.await.unwrap().is_error);
+
+    // Drafts are Chat's own: an agent can't keep or read them.
+    let draft = tool(
+        &agent,
+        "chat_draft",
+        json!({ "conversation": conversation, "text": "Canary-draft" }),
+    )
+    .await;
+    assert!(draft.is_error, "{}", draft.text());
+
+    // An agent searches quietly, and the audit never holds what it
+    // searched for.
+    let found = tool(
+        &agent,
+        "chat_search",
+        json!({ "query": "Canary-q-See you" }),
+    )
+    .await;
+    assert!(!found.is_error, "{}", found.text());
+    let record = audited(&h, "chat.search").pop().expect("audited");
+    assert!(!serde_json::to_string(&record).unwrap().contains("Canary-q"));
+}

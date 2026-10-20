@@ -4,7 +4,7 @@
 //! (`<state>/chat/<login>/`), never in a home, so a person's own programs
 //! and agents reach chat only through actions.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -65,6 +65,13 @@ pub(crate) struct Compliance {
 
 type Listener = Box<dyn Fn(&Notice) + Send + Sync>;
 
+/// A draft's place: the login, the conversation and the thread, if any.
+type DraftKey = (String, String, Option<String>);
+
+/// A conversation folded: how many messages and the newest sequence
+/// number it was folded from, and the result.
+type Fold = ((usize, u64), Arc<crate::fold::Folded>);
+
 struct Inner {
     dir: PathBuf,
     connection: RwLock<Option<Connection>>,
@@ -72,6 +79,13 @@ struct Inner {
     /// Writers to the stores, key files and cursor, one at a time.
     write: Mutex<()>,
     listeners: Mutex<Vec<Listener>>,
+    /// Unsent drafts by (login, conversation, thread), in memory only, so
+    /// nothing unsealed is written (ADR 0030 C4a).
+    drafts: Mutex<HashMap<DraftKey, String>>,
+    /// Each conversation folded once per new message, by (login,
+    /// conversation): how many messages and the newest sequence number
+    /// folded, and the result.
+    folds: Mutex<HashMap<(String, String), Fold>>,
 }
 
 /// Chat on this computer, shared by glassd's sync thread and the actions.
@@ -106,6 +120,11 @@ pub(crate) struct Store {
     /// The newest message the person has seen in Chat, per conversation.
     #[serde(default)]
     pub seen: BTreeMap<String, u64>,
+    /// What the person wants to hear of, per conversation (CF-92): `all`,
+    /// `mentions` or `none`. Unset is `all` for direct messages and groups
+    /// and `mentions` for channels.
+    #[serde(default)]
+    pub notify: BTreeMap<String, String>,
     /// Records already refused, so each is audited once.
     #[serde(default)]
     pub refused: BTreeSet<String>,
@@ -142,7 +161,80 @@ impl ChatHandle {
             compliance: RwLock::new(None),
             write: Mutex::new(()),
             listeners: Mutex::new(Vec::new()),
+            drafts: Mutex::new(HashMap::new()),
+            folds: Mutex::new(HashMap::new()),
         }))
+    }
+
+    /// `login`'s draft in `conversation` (a thread's when `thread`).
+    pub(crate) fn draft(
+        &self,
+        login: &str,
+        conversation: &str,
+        thread: Option<&str>,
+    ) -> Option<String> {
+        self.0
+            .drafts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(
+                login.to_owned(),
+                conversation.to_owned(),
+                thread.map(str::to_owned),
+            ))
+            .cloned()
+    }
+
+    /// Keeps `text` as the draft, or clears it when empty.
+    pub(crate) fn set_draft(
+        &self,
+        login: &str,
+        conversation: &str,
+        thread: Option<&str>,
+        text: &str,
+    ) {
+        let key = (
+            login.to_owned(),
+            conversation.to_owned(),
+            thread.map(str::to_owned),
+        );
+        let mut drafts = self.0.drafts.lock().unwrap_or_else(PoisonError::into_inner);
+        if text.trim().is_empty() {
+            drafts.remove(&key);
+        } else {
+            drafts.insert(key, text.to_owned());
+        }
+    }
+
+    /// `login`'s fold of `conversation` if it was made from `stamp`'s
+    /// messages (their count and newest sequence number).
+    pub(crate) fn cached_fold(
+        &self,
+        login: &str,
+        conversation: &str,
+        stamp: (usize, u64),
+    ) -> Option<Arc<crate::fold::Folded>> {
+        self.0
+            .folds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(login.to_owned(), conversation.to_owned()))
+            .filter(|(at, _)| *at == stamp)
+            .map(|(_, f)| Arc::clone(f))
+    }
+
+    pub(crate) fn keep_fold(
+        &self,
+        login: &str,
+        conversation: &str,
+        stamp: (usize, u64),
+        folded: Arc<crate::fold::Folded>,
+    ) {
+        self.0
+            .folds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert((login.to_owned(), conversation.to_owned()), (stamp, folded));
     }
 
     /// This computer is `device` in `org`, and reaches its console through

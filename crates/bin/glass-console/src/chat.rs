@@ -570,6 +570,7 @@ mod tests {
                 reply_to: None,
                 sent_at: "2026-10-19T14:02:11Z".into(),
                 part: None,
+                mentions: Vec::new(),
             };
             let message = Message::seal(&header, &body, key, &from.secret).unwrap();
             self.post(
