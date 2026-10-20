@@ -335,10 +335,10 @@ artifacts* = `crates/svc/runtime/tests/artifacts.rs`.
 | SC-1 … SC-5 Scheduling | Not started | — | — |
 | IN-1 … IN-4 Microsoft 365 as provider | Not started | Plan: a Graph adapter in `glass-gateway-providers`, a provider setting per service | — |
 | IN-5 No approval from Microsoft; each person's own sign-in; user consent where the tenant allows it | Not started | Proposed 2026-10-20. Microsoft's managed default consent policy now requires an admin's approval for third-party apps that read mail, calendars or Teams content, so IN-3's one-time grant stays the usual path |
-| EM-1 … EM-4 Glasshouse Mail | Not started | Moved to P0 by the owner 2026-10-20, for teams starting with no email. ADR 0037 (Proposed): mox per org on AWS, SES out, IMAP and SMTP to the computer behind the same mail actions; waits on the owner's decisions, GT-3 first |
+| EM-1 … EM-4 Glasshouse Mail | In progress | Moved to P0 by the owner 2026-10-20, for teams starting with no email. ADR 0037 (Accepted 2026-10-20): mox per org on AWS, SES out, IMAP and SMTP to the computer behind the same mail actions. EM0 (the actions over any IMAP server) is being built; EM1 waits on ADR 0030 slice P (device keys) and cells on our AWS account; before a pilot org: the starter domain, the Spamhaus subscription, the on-call and SES production access (ADR 0037, "What no code supplies") |
 
 ## Pilot readiness
 
 | Id | Status | Notes |
 |---|---|---|
-| GT-1 … GT-4, GT-10, GT-30 | Process | GT-3 (customer data stays in their boundary) and GT-21 (control plane on AWS) are architecture constraints for the console and activation services |
+| GT-1 … GT-4, GT-10, GT-30 | Process | GT-3 (customer data stays in their boundary) and GT-21 (control plane on AWS) are architecture constraints for the console and activation services. GT-3 has its mail exception since 2026-10-20 (ADR 0037): an org on Glasshouse Mail keeps its mail in its own cell on our AWS, and GT-1's audit and penetration test cover the cells; `gt3_the_console_never_holds_mail_content` (EM1) proves the console holds none |

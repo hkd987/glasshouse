@@ -1,6 +1,7 @@
 # 0037. Glasshouse Mail: a mox server per org on AWS, sending through SES, reached through the same mail actions
 
-Status: **Proposed** (2026-10-20). PRD EM-1 to EM-4 (moved into the pilot
+Status: **Accepted** (2026-10-20; the owner handed the choices over: "do
+what we need to do"). PRD EM-1 to EM-4 (moved into the pilot
 release by the owner on 2026-10-20), IN-1, IN-2, NV-3, AU-10, CF-61 to
 CF-65, DP-4, DP-30, GT-1, GT-3, GT-21. It answers the PRD's open question
 "Hosted mail (EM): run our own mail servers on AWS, or a mail partner
@@ -12,8 +13,11 @@ behind our console?". Builds on:
   `[[app]]` tiers with presence.
 - ADR 0033: what the console may hold, said plainly.
 
-Nothing here is built. The owner decides the items at the end before
-slice EM1 starts.
+EM0 (the mail actions over IMAP) is being built. EM1 needs ADR 0030's
+slice P (device keys) and cells on our AWS account; EM2 is the pilot gate.
+The choices taken are at the end, with the four things no code can supply:
+the starter domain, the Spamhaus subscription, the on-call, and SES's
+production access.
 
 ## Context
 The owner moved EM-1 to EM-4 into the pilot release "for all the people
@@ -142,7 +146,7 @@ Why not the others:
   not evaluate their provisioning APIs or data terms. A partner would put
   content with a fourth party, under the same GT-3 problem, behind an
   IN-1-style provider link. It is worth a look only if the owner won't
-  take on the operations commitment (owner decision 9).
+  take on the operations commitment (choice 9).
 - **Selling Microsoft 365 or Google Workspace** answers a different
   request. The owner asked for mail for teams that don't want either.
 
@@ -234,7 +238,7 @@ Why not the others:
   - On the org's own domain: 1,000 messages and 200 first-time
     recipients (mox's defaults).
   - On the starter domain: stricter, 200 messages and 50 first-time
-    recipients. The numbers are owner decision 5.
+    recipients. The numbers are choice 5.
   - An agent's sends count like the person's. `mail.send` is still Ask,
     50 at most per approval.
   - A send refused for a limit is a tool result the agent and the person
@@ -258,7 +262,7 @@ Why not the others:
     - An endpoint costs $50 a month.
 - **Spam starts untrained.** A new person's filter has no history. The
   pilot measures spam that reaches inboxes and "Not junk" rescues. The
-  DNSBLs we use for a commercial service are owner decision 10.
+  DNSBLs we use for a commercial service are choice 10.
 - **Malware: scanned on arrival, moved before anyone reads it.**
   - mox's incoming webhook tells `glass-mail-cell` of each delivery.
   - It fetches the message over IMAP on loopback, signed in to that
@@ -293,7 +297,7 @@ Microsoft 365, Google Workspace and IMAP. The console then:
 The starter domain shares one parent domain among new orgs. That is why
 its limits are stricter, why each org is its own tenant, and why the
 parent must never be our company's own mail domain. Its name waits on
-the product name (owner decision 4).
+the product name (choice 4).
 
 **Adding the org's domain.** IT types `acme.com`. The console shows every
 record with its state, checked live:
@@ -454,7 +458,7 @@ deleted.
 - **Sending.**
   - glassd builds the message: `From:` from the directory, a
     `Message-ID` it makes, and the `X-Glasshouse-Attribution` header
-    (AU-10, owner decision 7).
+    (AU-10, choice 7).
   - It submits it, then appends it to Sent.
   - The audit record's `detail.mail` holds the Message-ID, the recipient
     count, the size and SHA-256 of what left, and the server's reply.
@@ -518,7 +522,8 @@ deleted.
   job and removed after it.
 
 ### 9. Where mail lives (GT-3)
-This is the owner's decision. The options, from least to most work:
+Decided (choice 2): A for the pilot release, B in EM5, C in P1. The
+options, from least to most work:
 - **A. Our AWS account, our key per org.** Cells in our account, each
   volume and archive under a KMS key of the org's own.
   - We can read the mail, and must say so.
@@ -540,7 +545,7 @@ This is the owner's decision. The options, from least to most work:
     answer before mail leaves.
   - It ships the cell's software to them, so it must pass our license
     rule as shipped code: mox (MIT, with the MPL-2.0 suffix list), and
-    ClamAV (GPL-2.0) unmodified with a source offer (owner decision 8).
+    ClamAV (GPL-2.0) unmodified with a source offer (choice 8).
 
 Whichever is chosen:
 - **GT-3's wording and the trust center change.** For orgs on Glasshouse
@@ -570,8 +575,7 @@ these:
   (EPL, LGPL, GPL-2.0), with a source offer when it ships;
 - never AGPL, SSPL, or a license that forbids redistribution.
 
-`dependencies.md` gains that line when this ADR is accepted (owner
-decision 8).
+`docs/dev/dependencies.md` has that line (choice 8).
 
 ## Containment review
 - **Agents gain no reach.** They still call `mail.*` through the task
@@ -710,7 +714,7 @@ keys).
   - Postmaster and abuse addresses, an on-call rotation for delivery and
     abuse, DNSBL and feedback-loop monitoring, and answering SES Trust &
     Safety.
-  - The PRD names this commitment. It is owner decision 9.
+  - The PRD names this commitment. Choice 9 takes it on.
 - **Go joins our servers.** mox is a pinned third-party program built
   from source, outside the workspace. Upgrades go through
   `mox localserve` tests, since its admin API isn't promised stable.
@@ -798,36 +802,75 @@ keys).
     † in the table.
   - The partners AWS names for WorkMail customers.
 
-## Decisions for the owner
-1. **Server:** mox, one per org, with the upstream changes M1 to M3
-   before a pilot (recommended); or Postfix, Dovecot and rspamd. Stalwart
-   is out on license.
-2. **GT-3:** placement A for the pilot, B in EM5, C in P1, and only for
-   orgs with no mail (recommended). This changes GT-3's wording, the
-   trust center and GT-1's audit scope.
-3. **The sealed journal:** journal every message sealed to IT's
-   compliance key, as chat is (recommended), or keep the journal under
-   the org's KMS key only.
-4. **The starter domain's name.** It waits on the product name, and must
-   not be our company's own mail domain.
-5. **Sending limits:** 1,000 messages and 200 first-time recipients a day
-   per person on the org's domain; 200 and 50 on the starter domain
-   (proposed).
-6. **Phones:** on by default, one password per person until per-device
-   passwords land upstream (recommended).
-7. **The by-line header on mail that leaves the org:** keep
-   `X-Glasshouse-Attribution` on every message (recommended, AU-10), or
-   strip it for outside recipients.
-8. **The license rule for servers we run** (decision 10), and ClamAV
-   (GPL-2.0) and the MPL-2.0 suffix list shipped with a source offer in
-   placement C.
-9. **The operations commitment:** a delivery and abuse on-call for our
-   own mail service (recommended), or evaluate a mail partner instead.
-10. **Spam feeds:** which DNSBLs, and their commercial terms, before the
-    pilot.
+## Choices made (2026-10-20)
+The owner handed these over ("do what we need to do"). Each takes the
+recommendation above unless it says otherwise.
+1. **Server: mox, one per org.** The upstream changes M1 to M3 land before
+   any pilot org. Postfix, Dovecot and rspamd stay the fallback behind
+   `MailHost`.
+2. **GT-3: placement A for the pilot release, B in EM5, C in P1.** Offered
+   only to orgs with no mail of their own, never to a regulated pilot. The
+   PRD's GT-3 now says what hosted mail holds, and the trust center will
+   say the same. GT-1's SOC 2 and penetration test cover the cells,
+   `glass-mail-cell` and the console's mail routes.
+3. **The journal is sealed to IT's compliance key**, as chat is.
+4. **The starter domain is a setting of our deployment**, with no default.
+   A console without one offers only the org's own domain. It must be a
+   domain we register for this alone, never our company's mail domain, and
+   its name waits on the product name. EM1 can't make it up.
+5. **Limits as proposed**, as settings of the deployment so the pilot can
+   tune them: 1,000 messages and 200 first-time recipients a day per person
+   on the org's domain; 200 and 50 on the starter domain.
+6. **Phones on by default**, one password per person until per-device
+   passwords (M7). IT can turn phones off per group.
+7. **The by-line header stays on every message** (AU-10), outside
+   recipients included.
+8. **The license rule for servers we run** is in `docs/dev/dependencies.md`
+   (§10). In placement C, ClamAV and the suffix list ship unmodified with a
+   source offer.
+9. **We run the mail service ourselves**, with what that takes:
+   `postmaster@` and `abuse@` on the mail host domain read every day, a
+   delivery and abuse on-call, DNSBL and feedback-loop watching, and SES
+   Trust & Safety answered within its deadlines. This is a commitment of
+   people, not code: no pilot org starts until the on-call exists. No mail
+   partner.
+10. **Spam feeds: Spamhaus, on its paid service, and no other list at
+    first.**
+    - Spamhaus's free public mirrors are "provided free of charge for
+      non-commercial use by small and medium sized organisations", and
+      "ISPs and commercial spam filter services" must subscribe to its
+      Datafeed Service (its DNSBL usage terms, §1.1 and §2). A hosted mail
+      service is one of those. The free mirrors also refuse queries "from
+      large shared hosting environments", which a cloud network can count
+      as.
+    - SpamCop's list publishes no terms for commercial use. SpamCop itself
+      says the list "often errs on the side of blocking mail" and
+      encourages users "to tag and divert email, rather than block it
+      outright". mox rejects any message a listed DNSBL names, so SpamCop
+      would reject good mail. It is out.
+    - mox names both lists only as examples and sets none by default.
+    - Cells take Spamhaus's zone, with our subscription's key, through
+      mox's `DNSBLs`. Until the subscription is bought (a purchase, outside
+      this repository), cells run on mox's per-person reputation alone, and
+      the pilot measures what that lets through.
+    - `MonitorDNSBLs` stays empty, since cells send nothing themselves
+      (§2).
+
+**What no code supplies**, before the first pilot org on Glasshouse Mail:
+- the starter domain, registered (choice 4);
+- the Spamhaus subscription (choice 10);
+- the on-call, and the postmaster and abuse mailboxes staffed (choice 9);
+- SES production access for our account: up to 96 hours for AWS's first
+  answer, asked once the account and the mail host domain exist.
 
 ## Sources
 Opened for this ADR on 2026-10-20:
+- Spam feeds (choice 10):
+  - https://www.spamhaus.org/organization/dnsblusage.html (the DNSBL usage
+    terms, §1.1 and §2)
+  - https://www.spamcop.net/bl.shtml
+  - https://www.xmox.nl/config/ (`DNSBLs`, `MonitorDNSBLs`, and their
+    example lists)
 - mox:
   - https://github.com/mjl-/mox
   - https://raw.githubusercontent.com/mjl-/mox/main/README.md

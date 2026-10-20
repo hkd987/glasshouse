@@ -268,7 +268,13 @@ pipeline refuses further side effects (fail closed).
   and everything above it builds and tests on Linux.
 - **Our cloud services run on AWS (GT-21)** and hold only licensing, policy
   and telemetry metadata; customer data stays on devices and in the
-  customer's own Bedrock account (GT-3).
+  customer's own Bedrock account (GT-3). Two exceptions, each said plainly:
+  what people share (chat, artifacts, docs) reaches our servers only as
+  ciphertext they can't open (ADR 0030, 0033); and an org that chooses
+  Glasshouse Mail keeps its mail in a mail cell of its own on our AWS
+  account, which reads it to deliver, filter and serve it (ADR 0037). That
+  is offered only to orgs with no mail of their own, never to a regulated
+  pilot; the console itself still holds no mail content.
 - **What people make together is a sealed conversation (AR, DC, SH,
   ADR 0033).** Artifacts, docs and sheets are chat conversations of their
   own kinds, reached through `glass-managed::shared::Shared` (no app

@@ -8,6 +8,12 @@ licensed third-party code.
 - **Not allowed** in shipped code: GPL, LGPL, AGPL, MPL, EUPL, SSPL, or any
   license with source-disclosure or network-use terms. Ask before adding
   anything outside the allow list.
+- **Servers we run** for customers, hosted or shipped to their own AWS
+  account (ADR 0037): a third-party program beside our code, outside the
+  workspace, is permissively licensed, or copyleft without network-use
+  terms (EPL, LGPL, GPL-2.0) run unmodified as its own program with a
+  source offer when it ships. Never AGPL, SSPL, or a license that forbids
+  redistribution.
 - **FreeBSD** is BSD-licensed; we build on unmodified release images and
   contribute fixes upstream (PA-5).
 

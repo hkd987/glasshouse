@@ -498,7 +498,7 @@ Glasshouse needs a developer program and an IT-controlled catalog, not a consume
 ## Familiar desktop and app compatibility
 A Windows user should feel at home in minutes, and every app the beachhead uses must run on day one, natively, in the browser or in a managed Windows session.
 **Desktop**
-- DK-1. The desktop is Mac-like: a menu bar across the top, a dock at the bottom, window controls on the left, and agent tiles at the top right. The command bar opens over everything with Ctrl Space, like Spotlight (see the Desktop artboard).
+- DK-1. The desktop is Mac-like: a menu bar across the top, a dock at the bottom, window controls on the left, and agent tiles at the top right. The command bar opens over everything with Ctrl Space, like Spotlight: typing finds apps by name and Enter opens the top one; anything else goes to the desktop agent (see the Desktop artboard).
 - DK-2. Common Windows shortcuts work as expected (Alt Tab, Ctrl C, Win-key launcher equivalents).
 - DK-3. AI is optional. A user who never opens the command bar has a complete, normal desktop.
 - DK-4. Accessibility at WCAG 2.2 AA across the shell, with screen reader, high contrast and keyboard-only operation.
@@ -634,7 +634,7 @@ Banks and insurers won't let a startup onto employee laptops without vendor due 
 **Passing due diligence during pilots**
 - GT-1. SOC 2 Type I and a third-party penetration test are complete before the first pilot. The SOC 2 Type II observation period starts the same day, so the Type II report arrives during pilots.
 - GT-2. Ready answers for standard security questionnaires (SIG Lite and CAIQ), a public trust center, and cyber and technology errors-and-omissions insurance before the first pilot.
-- GT-3. Pilots keep customer data inside the customer's own boundary: model traffic runs through their Bedrock account and data stays on their devices. Our cloud holds only licensing, policy and telemetry metadata, which shrinks the scope of their review.
+- GT-3. Pilots keep customer data inside the customer's own boundary: model traffic runs through their Bedrock account and data stays on their devices. Our cloud holds only licensing, policy and telemetry metadata, which shrinks the scope of their review. What people share (chat, artifacts, docs) reaches it only as ciphertext it can't open. The one exception is Glasshouse Mail (EM): an org that chooses it keeps its mail in a mail server of its own on our AWS, which reads the mail to deliver, filter and serve it. It is offered only to orgs with no mail of their own, never to a regulated pilot, and the trust center says so.
 - GT-4. Compliance automation from day one, so evidence for audits is collected continuously instead of rebuilt for each customer.
 **Contracts**
 - GT-10. Customers are responsible for what their agents do. Glasshouse provides the controls (approval tiers, the Never list, undo and audit), and our terms limit our liability to those controls working as documented. Legal writes this into customer terms before the first pilot.
@@ -750,7 +750,7 @@ The biggest risks are distribution and hardware, not the agent technology. Micro
 - Fee for paid listings once DV-30 launches, and whether internal-only items ever carry a fee.
 - Support lifecycle: how many years each release is supported, and the battery-life target versus Windows.
 - Confirm the first two Pilot 1 workflows with design partners, and the accuracy bar each agent must clear.
-- Hosted mail (EM): run our own mail servers on AWS, or a mail partner behind our console? Deliverability and abuse handling are an operations commitment.
+- Hosted mail (EM): run our own mail servers on AWS, or a mail partner behind our console? Deliverability and abuse handling are an operations commitment. Decided 2026-10-20 (ADR 0037): our own, one mail server per org on our AWS, sending through Amazon SES, with our own delivery and abuse on-call.
 - Links outside the org (AR-5, SC-1 booking pages) are public pages on our servers. Which orgs may turn them on, and with what review?
 - Microsoft 365 (IN): Teams chat messages need Microsoft's approval for protected APIs. Until then, is Teams chat read-only, or opened in its web app?
 **Decisions already made**
