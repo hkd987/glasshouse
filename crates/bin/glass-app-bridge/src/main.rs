@@ -333,8 +333,19 @@ impl Bridge {
     async fn api(&self, app: &str, endpoint: &str, body: &[u8]) -> Result<Value, Relay> {
         match endpoint {
             "session" => {
+                // Tiers as they are now: IT may have changed policy since
+                // the app opened.
+                let now: AppStatus = self
+                    .relay(
+                        app,
+                        app_methods::APP_STATUS,
+                        |session| json!({ "session": session }),
+                    )
+                    .await?;
                 let open = self.session(app).await?;
-                let mut value = serde_json::to_value(&open.session).unwrap_or_default();
+                let mut session = open.session.clone();
+                session.actions = now.actions;
+                let mut value = serde_json::to_value(&session).unwrap_or_default();
                 // The session id stays in the bridge.
                 if let Some(map) = value.as_object_mut() {
                     map.remove("session");

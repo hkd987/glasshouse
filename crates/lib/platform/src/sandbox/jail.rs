@@ -403,7 +403,7 @@ fn serde_json_parse(text: &str) -> Option<SandboxSpec> {
 
 impl super::ToolRunner for JailSandbox {
     fn run_tool(&self, run: &super::ToolRun) -> Result<super::ToolOutput> {
-        super::tool::run_jailed(run)
+        super::tool::run_jailed(run, &self.config.limits)
     }
 }
 

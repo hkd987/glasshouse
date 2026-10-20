@@ -180,8 +180,11 @@ Builds on ADRs 0013, 0014, 0023, 0024 and 0026.
   - the VM scenario `studio`: a jailed bundle in 2.0 s, nothing left
     behind;
   - the probe's new check that agents can't open the store.
+- The bundler's jail gets the rctl(8) limits an agent's task gets
+  (memory, processes, CPU, disk), removed when it exits.
+- A remix undone and made again goes on where it was, with the same id and
+  the next version number.
 - Not yet:
-  - the store's memory limit for the bundler (rctl, as tasks have);
   - policy's say over who may build (GA-10; everyone may);
   - Meet can't be remixed until workers are allowed;
   - the Store's Yours shelf;

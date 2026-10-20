@@ -166,7 +166,13 @@ export class Bridge {
    * names this app. Ids only; read what changed with one call (ADR 0030).
    */
   async status(wait?: { waitSecs: number; since: number }): Promise<AppStatus> {
-    return this.#post<AppStatus>("status", wait ? { wait_secs: wait.waitSecs, since: wait.since } : {});
+    const status = await this.#post<AppStatus>("status", wait ? { wait_secs: wait.waitSecs, since: wait.since } : {});
+    // A new policy reaches open apps: `tier` and `asks` answer by it.
+    if (this.#session && status.actions) {
+      this.#session = { ...this.#session, actions: status.actions };
+      this.#cache.put("session", this.#session);
+    }
+    return status;
   }
 }
 

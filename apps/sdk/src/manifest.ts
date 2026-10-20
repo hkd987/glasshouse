@@ -67,6 +67,8 @@ export interface AppStatus {
   cursor: number;
   /** Apps whose data changed for the person since `since`. */
   changed: string[];
+  /** Each declared action's tier now: IT's new policy changes it while the app is open. */
+  actions?: AppAction[];
 }
 
 const ID = /^[a-z][a-z0-9-]{0,62}$/;

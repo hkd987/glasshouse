@@ -203,13 +203,41 @@ async fn ad3_dv3_a_policy_it_publishes_reaches_an_app_already_open() {
     // Never for this person's group. The open app's next call is refused,
     // with no reopening (ADR 0023, amended).
     let h = harness();
-    let apps = Client::connect(h.serve_apps()).await.unwrap();
+    let socket = h.serve_apps();
+    let apps = Client::connect(&socket).await.unwrap();
     let calendar = open(&apps, "calendar").await;
     let standup =
         json!({ "title": "Standup", "start": "2026-10-20T09:00", "end": "2026-10-20T09:15" });
     let before = call(&apps, calendar.session, "calendar.create", standup.clone()).await;
     assert!(before.ok, "{}", before.text);
 
+    let tier = |status: &AppStatus| {
+        status
+            .actions
+            .iter()
+            .find(|a| a.name.as_str() == "calendar.create")
+            .map(|a| a.tier)
+    };
+    let opened = status(&apps, calendar.session).await;
+    assert_eq!(tier(&opened), Some(glass_types::Tier::Notify));
+    // The app waits for news; the new policy wakes it with its tiers.
+    let waiting = {
+        let apps = Client::connect(&socket).await.unwrap();
+        let session = open(&apps, "calendar").await.session;
+        let cursor = status(&apps, session).await.cursor;
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let woke: AppStatus = apps
+                .call(
+                    app_methods::APP_STATUS,
+                    json!({ "session": session, "wait_secs": 20, "since": cursor }),
+                )
+                .await
+                .unwrap();
+            (woke, started.elapsed())
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     h.apply_policy(
         r#"
 [[group]]
@@ -220,6 +248,17 @@ agents = []
 "calendar.create" = "never"
 "#,
         "managed v2",
+    );
+    let (woke, took) = waiting.await.unwrap();
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "woke after {took:?}"
+    );
+    assert_eq!(tier(&woke), Some(glass_types::Tier::Never));
+    assert_eq!(
+        tier(&status(&apps, calendar.session).await),
+        Some(glass_types::Tier::Never),
+        "the app's labels follow the policy it runs under"
     );
     let after = call(&apps, calendar.session, "calendar.create", standup.clone()).await;
     assert!(!after.ok);

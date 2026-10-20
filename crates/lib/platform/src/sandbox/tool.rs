@@ -99,7 +99,9 @@ pub(crate) fn run_unconfined(run: &ToolRun) -> Result<ToolOutput> {
 /// at its folder: the tool's folder mounted read-only at `/.tool`, no
 /// devices, no addresses, nothing a jail may be allowed. It goes when the
 /// tool exits; `jail(8)` leaves the mount, which [`run_jailed`] removes.
-pub(crate) fn jail_args(run: &ToolRun) -> Result<Vec<String>> {
+/// `jail -c` for `run`, with `rules` (rctl(8), set before the tool
+/// starts) when resource accounting is on.
+pub(crate) fn jail_args(run: &ToolRun, rules: &[String]) -> Result<Vec<String>> {
     super::check_name(&run.name)?;
     let (Some(tool_dir), Some(file)) = (run.program.parent(), run.program.file_name()) else {
         return Err(PlatformError::Unsafe(format!(
@@ -139,8 +141,14 @@ pub(crate) fn jail_args(run: &ToolRun) -> Result<Vec<String>> {
         "allow.mount=0".to_owned(),
         "allow.sysvipc=0".to_owned(),
         format!("mount={tool_dir} {root}/.tool nullfs ro 0 0"),
-        format!("command=/.tool/{file}"),
     ];
+    if !rules.is_empty() {
+        args.push(format!(
+            "exec.prestart=/usr/bin/rctl -a {}",
+            rules.join(" ")
+        ));
+    }
+    args.push(format!("command=/.tool/{file}"));
     args.extend(run.args.iter().cloned());
     Ok(args)
 }
@@ -148,8 +156,11 @@ pub(crate) fn jail_args(run: &ToolRun) -> Result<Vec<String>> {
 /// Runs `run` in a jail of its own; stopping it removes the jail. Either
 /// way the tool's mount goes before this returns, so the folder can be
 /// removed.
-pub(crate) fn run_jailed(run: &ToolRun) -> Result<ToolOutput> {
-    let args = jail_args(run)?;
+pub(crate) fn run_jailed(run: &ToolRun, limits: &super::ResourceLimits) -> Result<ToolOutput> {
+    // What an agent's task may use, a tool may use: a runaway build can't
+    // take the person's memory or fill the process table.
+    let rules = limits.rctl_rules(&run.name);
+    let args = jail_args(run, &rules)?;
     let mount_point = run.dir.join(".tool");
     std::fs::create_dir_all(&mount_point)
         .map_err(|e| PlatformError::io("making the tool's mount point", e))?;
@@ -169,6 +180,9 @@ pub(crate) fn run_jailed(run: &ToolRun) -> Result<ToolOutput> {
     });
     // Not mounted (jail(8) failed before mounting) is fine.
     let _ = crate::cmd::run("umount", &["-f", &mount_point.to_string_lossy()]);
+    if !rules.is_empty() {
+        let _ = crate::cmd::run("rctl", &["-r", &format!("jail:{}", run.name)]);
+    }
     out
 }
 
@@ -268,7 +282,7 @@ mod tests {
 
     #[test]
     fn a_tool_runs_in_its_folder_with_no_network_as_nobody() {
-        let args = jail_args(&run()).unwrap();
+        let args = jail_args(&run(), &[]).unwrap();
         for expected in [
             "-u",
             "nobody",
@@ -288,13 +302,46 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_gets_the_limits_an_agents_task_gets() {
+        let limits = super::super::ResourceLimits {
+            memory_bytes: 1 << 30,
+            max_processes: 64,
+            ..Default::default()
+        };
+        let rules = limits.rctl_rules("glass-build-1");
+        let args = jail_args(&run(), &rules).unwrap();
+        let prestart = args
+            .iter()
+            .find(|a| a.starts_with("exec.prestart="))
+            .unwrap();
+        assert!(
+            prestart.contains("jail:glass-build-1:memoryuse:deny=1073741824"),
+            "{prestart}"
+        );
+        assert!(
+            prestart.contains("jail:glass-build-1:maxproc:deny=64"),
+            "{prestart}"
+        );
+        // Set before the tool starts.
+        let at = |p: &str| args.iter().position(|a| a.starts_with(p)).unwrap();
+        assert!(at("exec.prestart=") < at("command="));
+        // Without accounting, no rules and no rctl.
+        assert!(
+            !jail_args(&run(), &[])
+                .unwrap()
+                .iter()
+                .any(|a| a.contains("rctl"))
+        );
+    }
+
+    #[test]
     fn odd_paths_and_names_are_refused() {
         let mut spaced = run();
         spaced.dir = "/var/db/a b".into();
-        assert!(jail_args(&spaced).is_err());
+        assert!(jail_args(&spaced, &[]).is_err());
         let mut named = run();
         named.name = "glass build".into();
-        assert!(jail_args(&named).is_err());
+        assert!(jail_args(&named, &[]).is_err());
     }
 
     #[test]

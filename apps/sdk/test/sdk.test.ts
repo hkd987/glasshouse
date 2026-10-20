@@ -83,6 +83,20 @@ test("ui5 the client knows each action's tier and passes refusals on as results"
   await assert.rejects(bridge.call("mail.draft"), BridgeError);
 });
 
+test("ad3 an open app's tiers follow the policy IT publishes", async () => {
+  const stricter = session.actions.map((a) => (a.name === "mail.list" ? { ...a, tier: "never" } : a));
+  const transport = fake({
+    session: { status: 200, body: session },
+    status: { status: 200, body: { live: true, waiting: null, cursor: 3, changed: [], actions: stricter } },
+  });
+  const bridge = new Bridge({ app: "mail", transport, store: memoryStore() });
+  await bridge.open();
+  assert.equal(bridge.tier("mail.list"), "auto");
+  await bridge.status({ waitSecs: 25, since: 2 });
+  assert.equal(bridge.tier("mail.list"), "never");
+  assert.equal(bridge.asks("mail.send"), true);
+});
+
 test("ui5 reads show what was loaded when the system can't be reached", async () => {
   const inbox = { ok: true, text: "1 message in Inbox", data: { messages: [{ id: "inbox/1.eml" }] } };
   const transport = fake({

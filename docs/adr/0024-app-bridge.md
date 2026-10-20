@@ -56,7 +56,10 @@ them with Playwright on the development host.
 - **Asks show on the desktop.** An app session is a tile only while it
   needs the user: its ask is a Needs you tile, asked as the app, answered
   on the desktop like any agent's. The call waits meanwhile; `app.status`
-  tells the app what the desktop is asking, so it can say so. A decline or
+  tells the app what the desktop is asking, so it can say so. It also
+  carries each declared action's tier as it is now: a policy IT publishes
+  reaches open apps (enforced at once) and wakes their `app.status` waits,
+  so the labels they show follow it. A decline or
   a timeout is a result the app shows ("Declined on the desktop, so this
   wasn't done"); an app is never paused.
 - **Refusals are results.** `app.call` returns `{ok, text, data}`; only a

@@ -571,11 +571,19 @@ impl Managed {
 /// long polls while there is someone to sync for, backs off while the
 /// console can't be reached (ADR 0030).
 fn sync_chat(chat: &ChatHandle) {
+    // The first person to use chat here starts the long poll at once: their
+    // first conversation's answer mustn't wait out a sleep (CF-91's 1 s).
+    let (someone, first) = std::sync::mpsc::channel();
+    chat.on_notice(move |notice| {
+        if matches!(notice, ChatNotice::KeyMade { .. }) {
+            let _ = someone.send(());
+        }
+    });
     let mut retry = FIRST_RETRY;
     loop {
         if chat.logins().is_empty() {
             // Nobody here has used chat yet.
-            std::thread::sleep(FIRST_RETRY);
+            let _ = first.recv_timeout(FIRST_RETRY);
             continue;
         }
         match chat.sync_once(MAX_WAIT_SECS) {

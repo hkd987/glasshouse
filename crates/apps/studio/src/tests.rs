@@ -157,6 +157,22 @@ fn tl5_mail_remixed_is_the_persons_own_app_based_on_mail() {
 }
 
 #[test]
+fn ga3_a_remix_undone_and_made_again_goes_on_where_it_was() {
+    let f = fixture(World::default());
+    f.call(SAVE, mail_remix(&f)).unwrap();
+    // Undo puts their app list back as it was before the save.
+    store::choose(&f.ctx.home, f.ctx.owner, Default::default()).unwrap();
+    assert!(f.studio.own_apps("demo", &f.ctx.home).is_empty());
+
+    let again = f.call(SAVE, mail_remix(&f)).unwrap();
+    assert_eq!(again.data["app"], "my-mail", "not my-mail-2");
+    assert_eq!(again.data["version"], 2, "after the version undone");
+    // A second remix beside the one they use is an app of its own.
+    let beside = f.call(SAVE, mail_remix(&f)).unwrap();
+    assert_eq!(beside.data["app"], "my-mail-2");
+}
+
+#[test]
 fn ga3_every_save_is_a_version_and_going_back_is_choosing_one() {
     let f = fixture(World::default());
     f.call(SAVE, mail_remix(&f)).unwrap();

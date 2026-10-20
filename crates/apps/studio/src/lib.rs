@@ -507,7 +507,23 @@ impl StudioProvider {
                     .clone()
                     .filter(|n| n.trim() != manifest.name)
                     .unwrap_or_else(|| format!("My {}", manifest.name));
-                let app = id_for(&name, &store.apps(login))?;
+                // A remix they undid, of the same app by the same name, goes
+                // on where it was: no `my-mail-2` beside a hidden `my-mail`.
+                let chosen = store::chosen(&ctx.home);
+                let undone = store.apps(login).into_iter().find(|id| {
+                    !chosen.contains_key(id)
+                        && store
+                            .versions(login, id)
+                            .last()
+                            .and_then(|&v| store.record(login, id, v))
+                            .is_some_and(|r| {
+                                r.name == name && r.based_on.is_some_and(|b| b.id == *base)
+                            })
+                });
+                let app = match undone {
+                    Some(app) => app,
+                    None => id_for(&name, &store.apps(login))?,
+                };
                 let based_on = Base {
                     id: manifest.id.clone(),
                     name: manifest.name.clone(),

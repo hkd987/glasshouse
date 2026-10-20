@@ -22,6 +22,7 @@ use glass_api::{
 use glass_audit::{AuditEvent, EventKind, Outcome as AuditOutcome, PolicyDecision};
 use glass_platform::fs::Owner;
 use glass_platform::sandbox::SandboxSpec;
+use glass_policy::EffectivePolicy;
 use glass_types::{ActionName, AgentId, AgentPrincipal, TaskId, Tier, UserRef};
 use tokio::sync::oneshot;
 
@@ -35,6 +36,8 @@ use crate::{Caller, CatalogEntry, PersonalApp, Runtime, RuntimeError};
 pub(crate) struct AppChanges {
     seq: u64,
     last: BTreeMap<(String, String), u64>,
+    /// Bumped with each new policy: open apps' tiers may have changed.
+    rules: u64,
 }
 
 /// Apps one user may have open at once. Each open window is a session.
@@ -328,18 +331,7 @@ impl Runtime {
             uid: caller.uid,
             gid: caller.gid,
         };
-        let registry = self.registry();
-        let actions: Vec<AppAction> = manifest
-            .actions
-            .iter()
-            .filter_map(|name| registry.get(name))
-            .map(|(def, _)| AppAction {
-                name: def.name.clone(),
-                title: def.title.clone(),
-                tier: policy.tier_for(&def.name, def.default_tier).tier,
-                side_effect: def.side_effect,
-            })
-            .collect();
+        let actions = self.app_actions(&manifest, &policy);
         let (stop_tx, stop_rx) = oneshot::channel();
         let task = Arc::new(Task::new(NewTask {
             id,
@@ -389,6 +381,27 @@ impl Runtime {
             actions,
             permissions: manifest.permissions.clone(),
         })
+    }
+
+    /// What `manifest`'s app may call and how each runs under `policy`.
+    fn app_actions(&self, manifest: &AppManifest, policy: &EffectivePolicy) -> Vec<AppAction> {
+        let registry = self.registry();
+        manifest
+            .actions
+            .iter()
+            .filter_map(|name| registry.get(name))
+            .map(|(def, _)| AppAction {
+                name: def.name.clone(),
+                title: def.title.clone(),
+                tier: policy.tier_for(&def.name, def.default_tier).tier,
+                side_effect: def.side_effect,
+            })
+            .collect()
+    }
+
+    /// A new policy: open apps hear their tiers again.
+    pub(crate) fn rules_changed(&self) {
+        self.app_changes.send_modify(|c| c.rules += 1);
     }
 
     /// The caller's own live app session.
@@ -473,12 +486,15 @@ impl Runtime {
                 waiting.make_display_safe();
                 waiting
             });
+        let manifest = task.app.clone().expect("an app session has its manifest");
+        let actions = self.app_actions(&manifest, &task.policy());
         let changes = self.app_changes.borrow();
         Ok(AppStatus {
             live,
             waiting,
             cursor: changes.seq,
             changed: Vec::new(),
+            actions,
         })
     }
 
@@ -502,8 +518,10 @@ impl Runtime {
         let key = (caller.name.clone(), task.entry.id.to_string());
         let wait = std::time::Duration::from_secs(request.wait_secs.min(APP_STATUS_MAX_WAIT_SECS));
         let mut changes = self.app_changes.subscribe();
+        let rules = changes.borrow().rules;
         let changed = |c: &AppChanges| c.last.get(&key).is_some_and(|at| *at > request.since);
-        let _ = tokio::time::timeout(wait, changes.wait_for(changed)).await;
+        let _ =
+            tokio::time::timeout(wait, changes.wait_for(|c| changed(c) || c.rules != rules)).await;
         let mut status = self.app_status(caller, request.session)?;
         if changed(&self.app_changes.borrow()) {
             status.changed.push(key.1);

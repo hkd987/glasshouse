@@ -263,6 +263,10 @@ pub struct AppStatus {
     /// content: the app reads what changed with one audited call.
     #[serde(default)]
     pub changed: Vec<String>,
+    /// What the app may call and how each runs for this user now. A new
+    /// policy changes it while the app is open, and wakes a wait.
+    #[serde(default)]
+    pub actions: Vec<AppAction>,
 }
 
 /// `app.status`: the session's state, waiting up to `wait_secs` (at most

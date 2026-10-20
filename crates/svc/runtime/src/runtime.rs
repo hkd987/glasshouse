@@ -286,6 +286,10 @@ impl Runtime {
                 ));
             }
         }
+        // Every open app's status wait wakes with its tiers. Policy applies
+        // are rare (a release, a restart); per-person settings mustn't come
+        // through here, or every page would wake for nothing.
+        self.rules_changed();
     }
 
     /// What `system.status` says about where the policy came from, such as
