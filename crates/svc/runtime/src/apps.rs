@@ -65,6 +65,29 @@ impl Runtime {
             .map(|m| Arc::new(m.clone()))
     }
 
+    /// The org's editions of our apps (ADR 0032 §6): org apps the catalog
+    /// lists under one of our installed apps' ids. Each replaces ours for
+    /// the people it reaches; everyone else keeps ours.
+    pub(crate) fn editions(&self) -> std::collections::BTreeSet<AgentId> {
+        let listed = self.config.org_catalog.lists();
+        self.config
+            .org_apps
+            .apps()
+            .into_iter()
+            .map(|m| m.id)
+            .filter(|id| listed.contains(id) && self.installed_app(id).is_some())
+            .collect()
+    }
+
+    /// Whether `caller` may have app `id` at all, as far as the catalog
+    /// says: an app it gates must reach them, but an edition never takes
+    /// ours away from the people it doesn't reach.
+    pub(crate) fn app_reach<'a>(&'a self, caller: &'a Caller) -> impl Fn(&AgentId) -> bool + 'a {
+        let editions = self.editions();
+        let reaches = self.catalog_reach(caller);
+        move |id| editions.contains(id) || reaches(id)
+    }
+
     /// `caller`'s own apps they may open now (ADR 0032): a remix while the
     /// app it remixes is in their profile; an app built from the template
     /// always; none while IT has remixing off (TL-6).
@@ -75,7 +98,7 @@ impl Runtime {
             return Vec::new();
         }
         let profile = policy.apps_for(&caller.name);
-        let reaches = self.catalog_reach(caller);
+        let reaches = self.app_reach(caller);
         self.config
             .personal
             .apps(&caller.name, &caller.home)
@@ -126,15 +149,20 @@ impl Runtime {
 
     /// The org apps (ADR 0032, R2) that reach `caller`: those the catalog
     /// requires for their groups, or offers and they installed (DV-11).
-    /// One the catalog doesn't list reaches nobody.
+    /// One the catalog doesn't list reaches nobody. Editions of our apps
+    /// are among them, for the people they reach, if ours is in their
+    /// profile.
     pub(crate) fn org_apps(&self, caller: &Caller) -> Vec<AppManifest> {
         let reaches = self.catalog_reach(caller);
         let listed = self.config.org_catalog.lists();
+        let policy = self.policy();
+        let profile = policy.apps_for(&caller.name);
         self.config
             .org_apps
             .apps()
             .into_iter()
-            .filter(|m| !m.id.is_personal() && self.installed_app(&m.id).is_none())
+            .filter(|m| !m.id.is_personal())
+            .filter(|m| self.installed_app(&m.id).is_none() || profile.contains(&m.id))
             .filter(|m| listed.contains(&m.id) && reaches(&m.id))
             .collect()
     }
@@ -144,16 +172,19 @@ impl Runtime {
     /// device is managed. Policy decides the profile per group (AD-7).
     pub fn profile_apps(&self, caller: &Caller) -> Vec<ProfileApp> {
         let policy = self.policy();
-        let reaches = self.catalog_reach(caller);
+        let reaches = self.app_reach(caller);
+        let org = self.org_apps(caller);
         let mut apps: Vec<ProfileApp> = policy
             .apps_for(&caller.name)
             .into_iter()
             .filter(|id| reaches(id))
             .filter_map(|id| {
                 if let Some(manifest) = self.config.apps.iter().find(|m| &m.id == id) {
+                    // The org's edition of it, where it reaches them.
+                    let edition = org.iter().find(|m| &m.id == id);
                     return Some(ProfileApp {
                         id: id.clone(),
-                        name: manifest.name.clone(),
+                        name: edition.map_or(&manifest.name, |m| &m.name).clone(),
                         kind: ProfileAppKind::Web,
                         url: None,
                         based_on: None,
@@ -184,14 +215,19 @@ impl Runtime {
                 })
             })
             .collect();
-        // Apps people made that IT approved (R2).
-        apps.extend(self.org_apps(caller).into_iter().map(|m| ProfileApp {
-            id: m.id,
-            name: m.name,
-            kind: ProfileAppKind::Web,
-            url: None,
-            based_on: None,
-        }));
+        // Apps people made that IT approved (R2); editions are above.
+        let editions = self.editions();
+        apps.extend(
+            org.into_iter()
+                .filter(|m| !editions.contains(&m.id))
+                .map(|m| ProfileApp {
+                    id: m.id,
+                    name: m.name,
+                    kind: ProfileAppKind::Web,
+                    url: None,
+                    based_on: None,
+                }),
+        );
         // Their own apps, after the org's (ADR 0032).
         apps.extend(self.own_apps(caller).into_iter().map(|own| ProfileApp {
             id: own.manifest.id,
@@ -218,29 +254,28 @@ impl Runtime {
                 .ok_or_else(|| RuntimeError::NotFound(format!("no app {app} of yours")))?;
             let allowed = self.own_apps(caller).iter().any(|o| &o.manifest.id == app);
             (Arc::new(own.manifest), allowed)
-        } else if let Some(org) = self
-            .installed_app(app)
-            .is_none()
-            .then(|| {
-                self.config
-                    .org_apps
-                    .apps()
-                    .into_iter()
-                    .find(|m| &m.id == app)
-            })
-            .flatten()
+        } else if let Some(org) = self.org_apps(caller).into_iter().find(|m| &m.id == app) {
+            // An org app (R2), or the org's edition of one of ours: the
+            // catalog decided it reaches them.
+            (Arc::new(org), true)
+        } else if self.installed_app(app).is_none()
+            && let Some(org) = self
+                .config
+                .org_apps
+                .apps()
+                .into_iter()
+                .find(|m| &m.id == app)
         {
-            // An org app (R2): the catalog decides who it reaches.
-            let allowed = self.org_apps(caller).iter().any(|m| &m.id == app);
-            (Arc::new(org), allowed)
+            // An org app that doesn't reach them.
+            (Arc::new(org), false)
         } else {
             let manifest = self
                 .installed_app(app)
                 .ok_or_else(|| RuntimeError::NotFound(format!("no app {app} is installed")))?;
             // Role-based delivery: only apps in the caller's profile open,
             // and one the org's catalog makes available only once installed.
-            let allowed = self.policy().apps_for(&caller.name).contains(app)
-                && self.catalog_reach(caller)(app);
+            let allowed =
+                self.policy().apps_for(&caller.name).contains(app) && self.app_reach(caller)(app);
             (manifest, allowed)
         };
         if !allowed {

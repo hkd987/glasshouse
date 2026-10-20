@@ -248,3 +248,58 @@ async fn dv11_the_store_lists_installs_and_removes_through_the_pipeline() {
     assert!(removed.ok, "{}", removed.text);
     assert!(!agents(&h).contains(&"invoice-demo".to_owned()));
 }
+
+/// The org's edition of Mail (ADR 0032 §6): an org app under Mail's id.
+fn mail_edition(h: &Harness, groups: &[(&str, InstallMode)]) {
+    let manifest: glass_api::AppManifest = serde_json::from_value(json!({
+        "id": "mail", "name": "Mail (Acme)", "version": "0.1.0-acme.1",
+        "actions": ["mail.list", "mail.read"], "labels": ["internal"],
+    }))
+    .unwrap();
+    let mut edition = item("mail", ItemKind::App, groups);
+    edition.app = Some(glass_managed::studio::OrgApp {
+        manifest: manifest.clone(),
+        bundle_sha256: String::new(),
+        source_sha256: String::new(),
+        made_by: "dana".into(),
+        based_on: Some("mail@0.1.0".into()),
+    });
+    publish(h, vec![edition]);
+    h.org_apps.set(vec![(
+        manifest,
+        BTreeMap::from([(
+            "index.html".to_owned(),
+            "<title>Mail (Acme)</title>".to_owned(),
+        )]),
+    )]);
+}
+
+#[tokio::test]
+async fn ga11_an_edition_replaces_our_app_only_for_the_people_it_reaches() {
+    use InstallMode::*;
+    let h = harness();
+    let mail: glass_types::AgentId = "mail".parse().unwrap();
+    // For another group: everyone else keeps ours, and ours is never
+    // taken away by it.
+    mail_edition(&h, &[("legal-ops", Required)]);
+    assert!(apps(&h).contains(&"mail".to_owned()), "ours stays");
+    assert!(
+        h.rt.app_files(&h.me, &mail).is_err(),
+        "the bridge serves ours"
+    );
+    let theirs = h.rt.profile_apps(&h.me);
+    assert_eq!(theirs.iter().find(|a| a.id == mail).unwrap().name, "Mail");
+    assert_eq!(h.rt.open_app(&h.me, &mail).unwrap().name, "Mail");
+
+    // For everyone: theirs, under the same id.
+    mail_edition(&h, &[("everyone", Required)]);
+    let profile = h.rt.profile_apps(&h.me);
+    let entries: Vec<_> = profile.iter().filter(|a| a.id == mail).collect();
+    assert_eq!(entries.len(), 1, "one Mail in the launcher");
+    assert_eq!(entries[0].name, "Mail (Acme)");
+    let files = h.rt.app_files(&h.me, &mail).unwrap();
+    assert!(files.files["index.html"].contains("Mail (Acme)"));
+    let session = h.rt.open_app(&h.me, &mail).unwrap();
+    assert_eq!(session.name, "Mail (Acme)");
+    assert_eq!(session.actions.len(), 2, "what the edition declares");
+}

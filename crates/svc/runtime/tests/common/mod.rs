@@ -59,6 +59,8 @@ pub struct Harness {
     pub meet: MeetHandle,
     /// The apps people make (ADR 0032), bundled by a stand-in for esbuild.
     pub studio: Studio,
+    /// Org apps glassd fetched (R2); none until a test sets them.
+    pub org_apps: Arc<MemoryOrgApps>,
 }
 
 impl Harness {
@@ -309,6 +311,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         bundler: "/nonexistent".into(),
     });
     studio.set_tools(Arc::new(glass_app_studio::testing::FakeBundler::default()));
+    let org_apps = Arc::new(MemoryOrgApps::default());
     let registry = test_registry(
         dir.path(),
         &machine,
@@ -351,7 +354,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
             dev_home: Some(home.clone()),
             org_catalog: Arc::new(OrgCatalog(catalog.clone())),
             personal: Arc::new(studio.clone()),
-            org_apps: Arc::new(glass_runtime::NoOrgApps),
+            org_apps: org_apps.clone(),
         },
         policy,
         policy_source: "test".into(),
@@ -397,6 +400,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         chat,
         meet,
         studio,
+        org_apps,
     }
 }
 
@@ -655,5 +659,58 @@ impl glass_runtime::CatalogGate for OrgCatalog {
                 &glass_app_catalog::installed(home),
                 id,
             )
+    }
+
+    fn lists(&self) -> std::collections::BTreeSet<glass_types::AgentId> {
+        self.0
+            .current()
+            .map(|c| c.release.items.iter().map(|i| i.id.clone()).collect())
+            .unwrap_or_default()
+    }
+}
+
+/// The org apps glassd fetched (ADR 0032, R2), as a test sets them.
+#[derive(Debug, Default)]
+pub struct MemoryOrgApps(
+    std::sync::Mutex<
+        Vec<(
+            glass_api::AppManifest,
+            std::collections::BTreeMap<String, String>,
+        )>,
+    >,
+);
+
+impl MemoryOrgApps {
+    pub fn set(
+        &self,
+        apps: Vec<(
+            glass_api::AppManifest,
+            std::collections::BTreeMap<String, String>,
+        )>,
+    ) {
+        *self.0.lock().unwrap() = apps;
+    }
+}
+
+impl glass_runtime::OrgApps for MemoryOrgApps {
+    fn apps(&self) -> Vec<glass_api::AppManifest> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(m, _)| m.clone())
+            .collect()
+    }
+
+    fn files(
+        &self,
+        id: &glass_types::AgentId,
+    ) -> Option<(String, std::collections::BTreeMap<String, String>)> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(m, _)| &m.id == id)
+            .map(|(m, files)| (m.version.clone(), files.clone()))
     }
 }

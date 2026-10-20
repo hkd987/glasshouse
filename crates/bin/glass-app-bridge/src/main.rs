@@ -273,6 +273,14 @@ impl Bridge {
         let Some(root) = self.apps.get(app) else {
             return self.own_file(app, &rel).await;
         };
+        // The org's edition of this app, for the people it reaches (ADR
+        // 0032): glassd says, with each page; everyone else gets ours.
+        if let Some(files) = self.edition(app, &rel).await {
+            return match files.files.get(&rel) {
+                Some(text) => page(&rel, text.clone().into_bytes()),
+                None => Response::text(404, "not found"),
+            };
+        }
         let file = root.join(&rel);
         // Built files only: nothing a link inside dist/ points at elsewhere.
         let inside = match (
@@ -311,6 +319,22 @@ impl Bridge {
         match files.files.get(rel) {
             Some(text) => page(rel, text.clone().into_bytes()),
             None => Response::text(404, "not found"),
+        }
+    }
+
+    /// The org's edition of our app `app` for this person, if it reaches
+    /// them: asked again with each page, kept for the page's other files.
+    async fn edition(&self, app: &str, rel: &str) -> Option<Arc<AppFiles>> {
+        if rel != "index.html" {
+            return self.own.lock().await.get(app).cloned();
+        }
+        match self.own_files(app).await {
+            Ok(files) => Some(files),
+            Err(_) => {
+                // Ours, then; and not an edition's other files with it.
+                self.own.lock().await.remove(app);
+                None
+            }
         }
     }
 

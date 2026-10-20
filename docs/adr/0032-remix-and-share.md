@@ -257,6 +257,21 @@ Builds on ADRs 0013, 0014, 0023, 0024 and 0026.
 - **Team owners.** IT approves both team and org shares until
   directory groups have owners; GA-8's delegated approval waits on that.
 
+## Editions on computers, as built
+An org app the catalog lists under one of our apps' ids is the org's
+edition of it (decision 6). On a computer:
+- It replaces ours only for the people the catalog says it reaches
+  (required for their group, or available and installed). Everyone else
+  keeps ours: an edition never takes our app away, unlike a catalog item
+  without software, which still gates ours (DV-11).
+- The launcher shows one entry, with the edition's name. Opening it opens
+  the edition, under its manifest and our app's id, so policy's `[[app]]`
+  tiers for that id apply to it, as the review that approved it saw.
+- The bridge asks glassd for an installed app's files with each page
+  (`app.files`). glassd answers with the edition's for people it reaches,
+  and the bridge serves ours otherwise.
+- Tests: runtime `ga11_an_edition_replaces_our_app_only_for_the_people_it_reaches`.
+
 ## Slices
 - **R1, remix on the computer:**
   - the source in the image, and esbuild;
@@ -267,11 +282,13 @@ Builds on ADRs 0013, 0014, 0023, 0024 and 0026.
   - An end-to-end test: an agent remixes Mail and the remix runs. An
     over-declared manifest, an unlisted import and an `innerHTML` are
     refused.
-- **R2, share:**
+- **R2, share** (built 2026-10-20; `apps/e2e/studio.e2e.ts` runs it end
+  to end):
   - `apps.share`;
   - console submissions, with the checks run again;
   - the review page, with the diff and the privilege delta;
-  - team and catalog approval;
+  - team and catalog approval (team shares are approved by IT until
+    groups have owners);
   - signed bundles delivered and checked;
   - a colleague installs it from the Store.
 - **R3, flow back:**
