@@ -61,10 +61,16 @@ async function load(): Promise<void> {
       state.appNames = read.result.data.app_names ?? {};
     }
     else state.notice = { text: read.result.text, tone: "bad" };
-    const models = await bridge.read<Models>("settings.models", {});
-    if (models.result.ok) state.models = models.result.data;
   } catch (error) {
     state.notice = { text: error instanceof Offline ? "Settings haven't been loaded on this computer yet." : String(error), tone: "bad" };
+  }
+  // AI models (ADR 0039) on their own: a system without them still shows
+  // every setting, just not this section.
+  try {
+    const models = await bridge.read<Models>("settings.models", {});
+    state.models = models.result.ok ? models.result.data : null;
+  } catch {
+    state.models = null;
   }
   render();
   ready();
