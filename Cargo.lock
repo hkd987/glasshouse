@@ -795,6 +795,7 @@ dependencies = [
  "glass-app-studio",
  "glass-crypto",
  "glass-first-party",
+ "glass-gateway",
  "glass-gateway-providers",
  "glass-http",
  "glass-managed",
