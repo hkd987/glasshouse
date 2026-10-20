@@ -8,7 +8,11 @@ on the development host and the VM: `glass-crypto`, the console's relay,
 on computers the member keys, store, sync and the four chat actions with
 `[[app]]` tiers, `app.status` waits, and the Chat app. Slice M1 works end to end on the development host, two people from a
 Calendar invitation to seeing and hearing each other (the console's room
-routes, `--relay`, and `ConsoleClient` as `MeetLink`, 2026-10-19). Its
+routes, `--relay`, and `ConsoleClient` as `MeetLink`, 2026-10-19). Slice
+M2's relay and Meet page work on the development host (2026-10-20): 25
+seats, everyone's audio and video to everyone, screen sharing, and the page
+taking a newer media key; simulcast, the active speaker, and making the new
+key when someone leaves are not done (see M2 below). Its
 computer side: meetings as conversations
 of kind `meeting`, Calendar's meeting flag, invitations and Join,
 `glass-app-meet` (`meet.list`, `meet.join`, `meet.keys`, `meet.leave`) over
@@ -360,9 +364,10 @@ A new app crate, `glass-app-chat` (`crates/apps/chat`), is registered in `glass-
   - The connection is DTLS-SRTP from hop to hop. Inside it, every encoded frame is sealed end to end in SFrame's format (RFC 9605, AES-GCM).
   - The sealing happens in an encoded transform, in a worker in the page: `RTCRtpScriptTransform`, or the engine's older `createEncodedStreams`.
   - The codec bytes the packetizer needs stay in the clear. For VP8, that is the first 10 bytes of a key frame and the first 3 of other frames. For Opus, nothing.
-  - The relay forwards packets in str0m's RTP mode, by SSRC and simulcast layer.
-  - It reads RTP headers, RTCP, and the audio-level header extension, to know who is speaking.
+  - The relay forwards packets in str0m's RTP mode, by SSRC and simulcast layer. As built in M2 there is one layer: each sender's whole stream goes to every viewer.
+  - It reads RTP headers, RTCP, and the audio-level header extension, to know who is speaking. It also reads VP8's payload descriptor and frame tag, clear for the packetizer, so a receiving line that changes hands starts on a key frame.
   - It can't decode a frame.
+  - Each page receives on a pool of its own lines: the relay puts each other person's microphone and camera, and a shared screen, on a free line of that kind, names them in its `peers` message, and frees them when that person leaves. A page short of lines offers more over the data channel. The protocol is in `crates/svc/media-relay/src/lib.rs`.
 - **Keys.**
   - A meeting is a conversation of kind `meeting`: the organizer and the invitees, all in the directory. Its epoch keys seal its title and time, like any conversation's name.
   - Media uses a separate, random **media key** for each meeting session.
@@ -397,6 +402,8 @@ A new app crate, `glass-app-chat` (`crates/apps/chat`), is registered in `glass-
   - Who joined, when and for how long is metadata. It is on the console and in each computer's audit log (`meet.join`, `meet.leave`).
 - **Camera and microphone** follow ADR 0029's settings (`browser.camera`, `browser.microphone`). The engine asks for each app origin.
 - **Screen sharing** needs the desktop to hand its screen to the engine behind a consent prompt (UI-2). CF-20 needs the same work for Teams and Zoom. Meetings get screen sharing when that lands.
+  - The page and relay side is built (M2): the page's offer keeps a second video line for its screen, empty until shared. Share screen asks the engine (`getDisplayMedia`) and sends that track on it, sealed with SFrame like the camera, and tells the relay on the data channel. The relay gives it a line on each other page, marked as a screen, and those pages show it large with everyone beside it.
+  - What the engine's capture shows, and the desktop's consent prompt, are still the desktop's work above.
 - **Calendar.**
   - `Event` gains `#[serde(default)] meeting: Option<{id}>`.
   - `calendar.create` and `calendar.update` take `"meeting": true`.
@@ -642,6 +649,27 @@ Every test name carries its PRD id. Nothing reaches a pilot org before slices C2
   - `cf21_twenty_five_people_with_fake_media_stay_within_budget`
   - `cf21_someone_who_left_cannot_decrypt_after_the_new_key`
   - `cf20_cf21_screen_sharing_asks_on_the_desktop_first`
+- Status (2026-10-20), the relay and the Meet page on the development host:
+  - Done:
+    - 25 seats a room; the 26th is refused (409).
+    - Every participant's audio and video forwarded to every other. Receiving lines are reused when someone leaves, and a line that changes hands starts on a key frame. The relay asks a sender again every 500 ms for a key frame a line waits for, because the engine's encoder ignores requests that come within 300 ms of the last.
+    - Renegotiation over the data channel.
+    - Screen sharing on the relay and in Meet (above).
+    - The grid, with the names the console may pass the relay (`"name"` on the join; "Participant N" without).
+    - Meet's `FrameCipher` holds media keys by generation: the newest seals, and a replaced one opens frames for two seconds. The page asks `meet.keys` with backoff after someone leaves.
+    - The page no longer waits for its ICE candidates before joining: joining dropped from 1.3 s to 0.3 s page to relay.
+  - Tests:
+    - Relay: `cf21_three_people_each_get_the_other_twos_audio_and_video`, `cf21_a_shared_screen_reaches_everyone_marked_as_a_screen`, `cf21_someone_who_leaves_frees_their_lines_for_the_next`, `cf21_a_line_waiting_for_a_key_frame_asks_again`, `cf21_a_room_has_twenty_five_seats_and_the_console_frees_them`.
+    - `apps/meet/test/frames.test.ts`: "cf21 someone who left cannot decrypt after the new key", at the cipher.
+    - `apps/e2e/meet.e2e.ts`: three people each decode the other two; a shared screen decodes on the others' pages and shows large; after a leave, the other two switch keys and still decode each other.
+    - Measured: a third person sees both others in 0.4–0.66 s; a renderer in a three-person call uses 168 MB (`docs/dev/performance.md`).
+  - Not done:
+    - Simulcast and layer choice.
+    - The active speaker.
+    - Making the new media key when someone leaves (key records, the console's job lease). The page takes it when `meet.keys` has it.
+    - `cf21_twenty_five_people_with_fake_media_stay_within_budget`: 25 seats are checked at the relay's API, and live media with three engine pages and four stand-in pages.
+    - `cf20_cf21_screen_sharing_asks_on_the_desktop_first` (the desktop's prompt).
+    - A budget for glass-to-glass delay.
 
 **M3. The relay in production** (GT-21, AWS). TCP on port 443 for networks that block UDP, regions, health checks, and a read-only image.
 

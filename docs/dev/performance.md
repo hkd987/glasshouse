@@ -52,10 +52,12 @@ fails when one goes over:
 | Calendar, memory | 150 MB | UI-7 | 117 MB |
 | Chat, cold launch | 1 s | UI-7 | 127 ms (132, 127, 118) |
 | Chat, memory | 150 MB | UI-7 | 106 MB |
-| Meet, cold launch | 1 s | UI-7 | 108 ms (104, 115, 108) |
+| Meet, cold launch | 1 s | UI-7 | 108 ms (104, 115, 108); with M2's grid and screen sharing, 142 ms (135, 142, 143) page alone, its bridge played by `meet.e2e.ts` |
 | Meet, memory (before joining) | 150 MB | UI-7 | 100 MB |
-| Joining a meeting: Join to the other person on screen, through the computer, the console and the relay | 2 s | UI-7, CF-21 | 1427 ms (`meetings.e2e.ts`); 1311 ms page to relay alone (`meet.e2e.ts`) |
+| Joining a meeting: Join to the other person on screen, through the computer, the console and the relay | 2 s | UI-7, CF-21 | 1427 ms (`meetings.e2e.ts`, before the page stopped waiting up to 1 s for its ICE candidates; not measured since); page to relay alone (`meet.e2e.ts`) 1311 ms then, 258–355 ms now |
+| Joining a three-person meeting: Join to both others on screen, one of them after a renegotiation over the data channel; page to relay alone | 2 s | UI-7, CF-21 | 392–658 ms (`meet.e2e.ts`, five runs); the two already there see the newcomer at 413–711 ms |
 | A page in a two-person call | 250 MB | UI-7, CF-21 | 169 MB |
+| A page in a three-person call, decoding two videos | 250 MB | UI-7, CF-21 | 168 MB (167–169, `meet.e2e.ts`) |
 | Saving an app someone remixed: the checks, a bundle in a jail of its own, the version kept | 10 s | GA-4, ADR 0032 | 2.0 s for Mail on the VM (scenario `studio`) |
 
 *Cold launch* is a fresh browser context (no cache, no service worker, no
@@ -259,10 +261,12 @@ fails when one goes over:
 | Calendar, memory | 150 MB | UI-7 | 117 MB |
 | Chat, cold launch | 1 s | UI-7 | 127 ms (132, 127, 118) |
 | Chat, memory | 150 MB | UI-7 | 106 MB |
-| Meet, cold launch | 1 s | UI-7 | 108 ms (104, 115, 108) |
+| Meet, cold launch | 1 s | UI-7 | 108 ms (104, 115, 108); with M2's grid and screen sharing, 142 ms (135, 142, 143) page alone, its bridge played by `meet.e2e.ts` |
 | Meet, memory (before joining) | 150 MB | UI-7 | 100 MB |
-| Joining a meeting: Join to the other person on screen, through the computer, the console and the relay | 2 s | UI-7, CF-21 | 1427 ms (`meetings.e2e.ts`); 1311 ms page to relay alone (`meet.e2e.ts`) |
+| Joining a meeting: Join to the other person on screen, through the computer, the console and the relay | 2 s | UI-7, CF-21 | 1427 ms (`meetings.e2e.ts`, before the page stopped waiting up to 1 s for its ICE candidates; not measured since); page to relay alone (`meet.e2e.ts`) 1311 ms then, 258–355 ms now |
+| Joining a three-person meeting: Join to both others on screen, one of them after a renegotiation over the data channel; page to relay alone | 2 s | UI-7, CF-21 | 392–658 ms (`meet.e2e.ts`, five runs); the two already there see the newcomer at 413–711 ms |
 | A page in a two-person call | 250 MB | UI-7, CF-21 | 169 MB |
+| A page in a three-person call, decoding two videos | 250 MB | UI-7, CF-21 | 168 MB (167–169, `meet.e2e.ts`) |
 | Saving an app someone remixed: the checks, a bundle in a jail of its own, the version kept | 10 s | GA-4, ADR 0032 | 2.0 s for Mail on the VM (scenario `studio`) |
 
 *Cold launch* is a fresh browser context (no cache, no service worker, no

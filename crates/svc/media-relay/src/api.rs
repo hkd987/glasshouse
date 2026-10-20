@@ -3,10 +3,12 @@
 //! answer the console hands back.
 //!
 //! - `POST /rooms/{room}/participants` with `{"participant": <u32>,
-//!   "offer": "<sdp>"}`: 200 `{"answer": "<sdp>"}`. Creates the room on the
-//!   first join; the same index again replaces that participant's
-//!   connection; a third index is 409 (M1 has two seats). A bad offer is
-//!   400.
+//!   "offer": "<sdp>"}`, and optionally `"name": "<display name>"`: 200
+//!   `{"answer": "<sdp>"}`. Creates the room on the first join; the same
+//!   index again replaces that participant's connection; a 26th index is
+//!   409 ([`SEATS`](crate::SEATS)). A bad offer is 400. The name, if given,
+//!   is what the others' pages show with that person's video (the `peers`
+//!   line's `names`); without one they show "Participant N".
 //! - `DELETE /rooms/{room}/participants/{participant}`: 204, and everyone
 //!   left gets a `peers` message.
 //! - `DELETE /rooms/{room}`: 204, and everyone in it is disconnected.
@@ -109,10 +111,17 @@ async fn respond(request: &Request, media: &mpsc::Sender<Command>) -> Response {
 struct Join {
     participant: u32,
     offer: String,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 async fn join(room: String, body: &[u8], media: &mpsc::Sender<Command>) -> Response {
-    let Ok(Join { participant, offer }) = serde_json::from_slice::<Join>(body) else {
+    let Ok(Join {
+        participant,
+        offer,
+        name,
+    }) = serde_json::from_slice::<Join>(body)
+    else {
         return error(
             400,
             "the body is {\"participant\": <index>, \"offer\": \"<sdp>\"}",
@@ -122,6 +131,7 @@ async fn join(room: String, body: &[u8], media: &mpsc::Sender<Command>) -> Respo
     let command = Command::Join {
         room,
         participant,
+        name,
         offer,
         reply,
     };

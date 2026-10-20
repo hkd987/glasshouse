@@ -1,7 +1,7 @@
 // A meeting's frames (CF-21, ADR 0030 §6): VP8's header stays clear for
 // the packetizer, nothing is sent before there is a key, a frame no key
-// of the meeting opens is dropped, and the old key opens frames in flight
-// for two seconds after a new one.
+// of the meeting opens is dropped, a newer media key takes over sending,
+// and the old key opens frames in flight for two seconds after it.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -18,7 +18,7 @@ test("cf21 the packetizer's bytes stay clear: 10 on a VP8 key frame, 3 on others
   assert.equal(clearBytes("audio", undefined), 0);
 
   const alice = new FrameCipher();
-  alice.setKey(key(), 0);
+  alice.setKey(0, key());
   const plain = new Uint8Array(frame(200));
   const sealed = new Uint8Array((await alice.sealFrame(plain.buffer.slice(0), "video", "key")) as ArrayBuffer);
   assert.deepEqual(sealed.subarray(0, 10), plain.subarray(0, 10));
@@ -32,11 +32,11 @@ test("cf21 nothing leaves before the key, and only the meeting's key opens a fra
   const mediaKey = key();
   const alice = new FrameCipher();
   assert.equal(await alice.sealFrame(frame(50), "audio"), null, "no key yet: dropped, never sent clear");
-  alice.setKey(mediaKey, 1);
+  alice.setKey(1, mediaKey);
   const bob = new FrameCipher();
-  bob.setKey(mediaKey, 2);
+  bob.setKey(2, mediaKey);
   const outsider = new FrameCipher();
-  outsider.setKey(key(), 3);
+  outsider.setKey(3, key());
 
   const sealed = (await alice.sealFrame(frame(120), "video", "delta")) as ArrayBuffer;
   const opened = await bob.openFrame(sealed, "video", "delta");
@@ -49,11 +49,54 @@ test("cf21 nothing leaves before the key, and only the meeting's key opens a fra
 test("cf21 after a new key the old one opens frames in flight for two seconds", async () => {
   const first = key();
   const alice = new FrameCipher();
-  alice.setKey(first, 0, 0);
+  alice.setKey(0, first, 0, 0);
   const bob = new FrameCipher();
-  bob.setKey(first, 1, 0);
+  bob.setKey(1, first, 0, 0);
   const inFlight = (await alice.sealFrame(frame(40), "audio")) as ArrayBuffer;
-  bob.setKey(key(), 1, 1000);
+  bob.setKey(1, key(), 1, 1000);
   assert.ok(await bob.openFrame(inFlight, "audio", undefined, 1000 + OLD_KEY_MS - 1));
   assert.equal(await bob.openFrame(inFlight, "audio", undefined, 1000 + OLD_KEY_MS), null);
+  assert.deepEqual(bob.generations(1000 + OLD_KEY_MS), [1], "the old key is forgotten");
+});
+
+test("cf21 someone who left cannot decrypt after the new key", async () => {
+  // Three people share the first key; Carol leaves, and Alice and Bob get
+  // a second one she never has.
+  const first = key();
+  const [alice, bob, carol] = [new FrameCipher(), new FrameCipher(), new FrameCipher()];
+  alice.setKey(0, first, 0, 0);
+  bob.setKey(1, first, 0, 0);
+  carol.setKey(2, first, 0, 0);
+  const before = (await alice.sealFrame(frame(64), "video", "delta")) as ArrayBuffer;
+  assert.ok(await carol.openFrame(before, "video", "delta", 0));
+
+  const second = key();
+  alice.setKey(0, second, 1, 100);
+  bob.setKey(1, second, 1, 100);
+  const after = (await alice.sealFrame(frame(64), "video", "delta")) as ArrayBuffer;
+  assert.ok(await bob.openFrame(after, "video", "delta", 200), "Bob opens Alice's frames under the new key");
+  assert.equal(await carol.openFrame(after, "video", "delta", 200), null, "Carol, with the old key only, opens nothing");
+  // Bob's frames under the new key open for Alice; frames Bob sealed
+  // just before he switched still open for a moment.
+  const bobsLast = await (async () => {
+    const b = new FrameCipher();
+    b.setKey(1, first, 0, 0);
+    return (await b.sealFrame(frame(32), "audio")) as ArrayBuffer;
+  })();
+  assert.ok(await alice.openFrame(bobsLast, "audio", undefined, 100 + OLD_KEY_MS - 1));
+  assert.equal(await alice.openFrame(bobsLast, "audio", undefined, 100 + OLD_KEY_MS), null);
+});
+
+test("cf21 a key arriving late doesn't take over sending, and the same key again changes nothing", async () => {
+  const [older, newer] = [key(), key()];
+  const alice = new FrameCipher();
+  alice.setKey(0, newer, 5, 0);
+  alice.setKey(0, older, 4, 0);
+  alice.setKey(0, newer, 5, 10_000);
+  const bob = new FrameCipher();
+  bob.setKey(1, newer, 5, 0);
+  const sealed = (await alice.sealFrame(frame(32), "audio")) as ArrayBuffer;
+  assert.ok(await bob.openFrame(sealed, "audio", undefined, 10_000), "Alice still seals with generation 5");
+  assert.deepEqual(alice.generations(1), [5, 4]);
+  assert.deepEqual(alice.generations(OLD_KEY_MS), [5]);
 });
