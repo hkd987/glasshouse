@@ -159,8 +159,10 @@ struct Opened {
     role: Role,
     pushes: u32,
     since: Instant,
-    /// Messages this session posted, so pulls don't echo them.
-    posted: Vec<String>,
+    /// Messages this session posted and the page that pushed each, so a
+    /// pull doesn't echo a page's own edits but does bring another
+    /// window's.
+    posted: Vec<(String, String)>,
 }
 
 #[derive(Debug, Default)]
@@ -918,6 +920,12 @@ impl DocsProvider {
             .entry(ctx.principal.task)
             .or_default()
             .entry(input.doc.clone())
+            .and_modify(|o| {
+                // Opened again, as another window does or after a change of
+                // roles: the role it has now.
+                o.role = role;
+                o.title.clone_from(&title);
+            })
             .or_insert_with(|| Opened {
                 title: title.clone(),
                 role,
@@ -1323,7 +1331,13 @@ impl Live for DocsProvider {
         APP
     }
 
-    fn push(&self, ctx: &TaskContext, item: &str, update: &str) -> Result<u64, ActionError> {
+    fn push(
+        &self,
+        ctx: &TaskContext,
+        item: &str,
+        client: &str,
+        update: &str,
+    ) -> Result<u64, ActionError> {
         let me = Self::me(ctx);
         let session = ctx.principal.task;
         let role = self
@@ -1341,6 +1355,10 @@ impl Live for DocsProvider {
             return Err(invalid("that isn't a Yjs update"));
         }
         let (id, cursor) = self.with_doc(me, item, |cached| {
+            // The role now, not only as opened: a demotion holds at once.
+            if !cached.role(me).edits() {
+                return Err(invalid("you can view this doc but not edit it"));
+            }
             Self::no_write_down(ctx, cached)?;
             ydoc::apply(&cached.doc, std::slice::from_ref(&bytes)).map_err(invalid)?;
             let id = self.post_update(ctx, item, &bytes)?;
@@ -1355,12 +1373,18 @@ impl Live for DocsProvider {
             .and_then(|s| s.get_mut(item))
         {
             opened.pushes += 1;
-            opened.posted.push(id);
+            opened.posted.push((client.to_owned(), id));
         }
         Ok(cursor)
     }
 
-    fn pull(&self, ctx: &TaskContext, item: &str, since: u64) -> Result<Pulled, ActionError> {
+    fn pull(
+        &self,
+        ctx: &TaskContext,
+        item: &str,
+        client: &str,
+        since: u64,
+    ) -> Result<Pulled, ActionError> {
         let me = Self::me(ctx);
         let session = ctx.principal.task;
         let posted: Vec<String> = self
@@ -1368,12 +1392,18 @@ impl Live for DocsProvider {
             .sessions
             .get(&session)
             .and_then(|s| s.get(item))
-            .map(|o| o.posted.clone())
+            .map(|o| {
+                o.posted
+                    .iter()
+                    .filter(|(by, _)| by == client)
+                    .map(|(_, id)| id.clone())
+                    .collect()
+            })
             .ok_or_else(|| invalid("this doc isn't open in this window; open it again"))?;
         let fresh = self
             .shared
             .since(me, item, since)
-            .ok_or_else(|| ActionError::NotFound("no such doc".into()))?;
+            .ok_or_else(|| invalid("no such doc"))?;
         // Bring the cache up to date too, and judge senders by its roles.
         self.with_doc(me, item, |cached| {
             let mut updates = Vec::new();

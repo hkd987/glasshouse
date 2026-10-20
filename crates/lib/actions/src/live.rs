@@ -23,10 +23,24 @@ pub trait Live: Send + Sync + std::fmt::Debug {
     /// The app whose sessions edit live, whose wakes a pull waits for.
     fn app(&self) -> &'static str;
     /// Seals and posts `update` (base64) to `item`, which the session in
-    /// `ctx` opened and may edit. The new cursor.
-    fn push(&self, ctx: &TaskContext, item: &str, update: &str) -> Result<u64, ActionError>;
-    /// What others changed in `item` after `since`. Doesn't wait.
-    fn pull(&self, ctx: &TaskContext, item: &str, since: u64) -> Result<Pulled, ActionError>;
+    /// `ctx` opened and may edit, from the page `client` (one session
+    /// serves every window of its app). The new cursor.
+    fn push(
+        &self,
+        ctx: &TaskContext,
+        item: &str,
+        client: &str,
+        update: &str,
+    ) -> Result<u64, ActionError>;
+    /// What changed in `item` after `since`, except what page `client`
+    /// pushed itself. Doesn't wait.
+    fn pull(
+        &self,
+        ctx: &TaskContext,
+        item: &str,
+        client: &str,
+        since: u64,
+    ) -> Result<Pulled, ActionError>;
     /// Session `session` ended: one line per item it changed, such as
     /// "Q3 plan: 340 changes in 14 minutes", for its audit record.
     fn closed(&self, session: &TaskId) -> Vec<String>;

@@ -237,6 +237,9 @@ struct StatusBody {
 struct LiveBody {
     op: LiveOp,
     doc: String,
+    /// The page, made once per page load: one session serves every window.
+    #[serde(default)]
+    client: String,
     #[serde(default)]
     update: Option<String>,
     #[serde(default)]
@@ -476,6 +479,7 @@ impl Bridge {
                             "session": session,
                             "op": live.op,
                             "item": live.doc,
+                            "client": live.client,
                             "update": live.update,
                             "since": live.since,
                             "wait_secs": live.wait_secs,

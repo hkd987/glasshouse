@@ -586,17 +586,27 @@ impl Runtime {
         let AppLive {
             op,
             item,
+            client,
             update,
             since,
             wait_secs,
             ..
         } = request;
+        if client.len() > 64
+            || !client
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return Err(RuntimeError::Invalid(
+                "A page's client id is up to 64 letters, digits and dashes.".into(),
+            ));
+        }
         if op == LiveOp::Push {
             let update =
                 update.ok_or_else(|| RuntimeError::Invalid("A push needs an update.".into()))?;
             let pushed = {
                 let item = item.clone();
-                tokio::task::spawn_blocking(move || live.push(&ctx, &item, &update))
+                tokio::task::spawn_blocking(move || live.push(&ctx, &item, &client, &update))
                     .await
                     .map_err(|e| RuntimeError::Internal(e.to_string()))?
             };
@@ -624,11 +634,13 @@ impl Runtime {
         loop {
             let mut changes = self.app_changes.subscribe();
             let seen = changes.borrow().last.get(&key).copied();
-            let (live, ctx, item) = (Arc::clone(&live), ctx.clone(), item.clone());
-            let pulled = tokio::task::spawn_blocking(move || live.pull(&ctx, &item, since))
-                .await
-                .map_err(|e| RuntimeError::Internal(e.to_string()))?
-                .map_err(live_error)?;
+            let (live, ctx, item, client) =
+                (Arc::clone(&live), ctx.clone(), item.clone(), client.clone());
+            let pulled =
+                tokio::task::spawn_blocking(move || live.pull(&ctx, &item, &client, since))
+                    .await
+                    .map_err(|e| RuntimeError::Internal(e.to_string()))?
+                    .map_err(live_error)?;
             let now = tokio::time::Instant::now();
             if !pulled.updates.is_empty() || now >= deadline {
                 return Ok(AppLiveResult {

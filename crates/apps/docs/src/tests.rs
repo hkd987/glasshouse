@@ -201,9 +201,9 @@ fn dc3_two_people_edit_live_and_see_each_others_changes() {
         opened_a.data["state"].as_str().unwrap(),
         "Kickoff on Monday.",
     );
-    a.docs.push(&dana, &id, &update).unwrap();
+    a.docs.push(&dana, &id, "", &update).unwrap();
     b.sync();
-    let pulled = b.docs.pull(&priya, &id, cursor_b).unwrap();
+    let pulled = b.docs.pull(&priya, &id, "", cursor_b).unwrap();
     assert_eq!(pulled.updates.len(), 1);
     assert_eq!(pulled.updates[0]["by_name"], "Dana Ruiz");
     let page = ydoc::doc_from(&[
@@ -216,7 +216,7 @@ fn dc3_two_people_edit_live_and_see_each_others_changes() {
     // Nothing new: an empty pull, and Dana's own push isn't echoed to her.
     assert!(
         b.docs
-            .pull(&priya, &id, pulled.cursor)
+            .pull(&priya, &id, "", pulled.cursor)
             .unwrap()
             .updates
             .is_empty()
@@ -224,7 +224,7 @@ fn dc3_two_people_edit_live_and_see_each_others_changes() {
     a.sync();
     assert!(
         a.docs
-            .pull(&dana, &id, 0)
+            .pull(&dana, &id, "", 0)
             .unwrap()
             .updates
             .iter()
@@ -250,7 +250,7 @@ fn dc4_roles_hold_on_every_computer() {
     assert_eq!(opened.data["role"], "viewer");
     // A viewer's page can't push, an agent for them can't write or comment.
     let update = typed(opened.data["state"].as_str().unwrap(), "Sam was here");
-    assert!(c.docs.push(&sam, &id, &update).is_err());
+    assert!(c.docs.push(&sam, &id, "", &update).is_err());
     assert!(
         c.call("sam", AGENT, WRITE, json!({ "doc": id, "markdown": "x" }))
             .is_err()
@@ -260,7 +260,7 @@ fn dc4_roles_hold_on_every_computer() {
             .is_err()
     );
     // A push from a session that didn't open the doc is refused too.
-    assert!(b.docs.push(&b.ctx("priya", APP), &id, &update).is_err());
+    assert!(b.docs.push(&b.ctx("priya", APP), &id, "", &update).is_err());
     // Dana makes Sam a commenter: he comments; others see it.
     assert!(
         b.call("priya", APP, ROLES, json!({ "doc": id, "editors": [] }))
@@ -294,6 +294,22 @@ fn dc4_roles_hold_on_every_computer() {
         json!({ "doc": id, "editors": ["priya"], "commenters": ["root"] }),
     );
     assert!(outside.is_err());
+    // Priya opened it to edit; Dana makes her a viewer: her open page's
+    // next push is refused without her opening it again.
+    let priya = b.ctx("priya", APP);
+    let opened = b.with(&priya, OPEN, json!({ "doc": id })).unwrap();
+    assert_eq!(opened.data["role"], "editor");
+    a.call(
+        "dana",
+        APP,
+        ROLES,
+        json!({ "doc": id, "editors": [], "commenters": ["sam"] }),
+    )
+    .unwrap();
+    b.sync();
+    let update = typed(opened.data["state"].as_str().unwrap(), "Priya was here");
+    let refused = b.docs.push(&priya, &id, "", &update).unwrap_err();
+    assert!(refused.to_string().contains("not edit"), "{refused}");
 }
 
 #[test]
@@ -344,7 +360,7 @@ fn dc3_versions_and_snapshots_keep_the_doc_whole_for_a_fresh_reader() {
         .to_owned();
     for n in 0..(SNAPSHOT_EVERY + 5) {
         let update = typed(&state, &format!("Line {n}"));
-        a.docs.push(&dana, &id, &update).unwrap();
+        a.docs.push(&dana, &id, "", &update).unwrap();
         let doc = ydoc::doc_from(&[
             base64::decode(&state).unwrap(),
             base64::decode(&update).unwrap(),

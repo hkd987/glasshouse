@@ -166,7 +166,7 @@ async fn dc3_live_edits_reach_a_colleague_and_the_close_is_audited_once() {
         let pushed = live(
             &apps,
             session,
-            json!({ "op": "push", "item": id, "update": typed(state, line) }),
+            json!({ "op": "push", "item": id, "client": "page-1", "update": typed(state, line) }),
         )
         .await;
         assert!(pushed.is_ok(), "{pushed:?}");
@@ -176,6 +176,16 @@ async fn dc3_live_edits_reach_a_colleague_and_the_close_is_audited_once() {
     let text = read["markdown"].as_str().unwrap();
     assert!(text.contains("Ship Northwind by Friday."), "{text}");
     assert!(text.contains("Hire two engineers."), "{text}");
+    // Another window of Docs shares the session and hears them.
+    let other = live(
+        &apps,
+        session,
+        json!({ "op": "pull", "item": id, "client": "page-2", "since": opened.data["cursor"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(other.updates.len(), 2, "{other:?}");
+    assert!(other.updates.iter().all(|u| u["by"] == h.me.name.as_str()));
 
     // The page waits for others' edits, not hearing its own; Priya's
     // arrives and wakes it.
@@ -186,7 +196,7 @@ async fn dc3_live_edits_reach_a_colleague_and_the_close_is_audited_once() {
             live(
                 &apps,
                 session,
-                json!({ "op": "pull", "item": id, "since": since, "wait_secs": 20 }),
+                json!({ "op": "pull", "item": id, "client": "page-1", "since": since, "wait_secs": 20 }),
             )
             .await
         })
@@ -198,7 +208,7 @@ async fn dc3_live_edits_reach_a_colleague_and_the_close_is_audited_once() {
         "Priya: and a launch date.",
     );
     org.priya
-        .push(&org.ctx, made.data["id"].as_str().unwrap(), &edit)
+        .push(&org.ctx, made.data["id"].as_str().unwrap(), "", &edit)
         .unwrap();
     h.chat.sync_once(0).unwrap();
     h.rt.app_changed(&h.me.name, "docs");
@@ -270,6 +280,17 @@ async fn dc4_live_edits_hold_to_what_the_session_opened() {
     .await
     .unwrap_err();
     assert!(!refused.is_empty());
+    // A client id is an id, not a place to put text.
+    let mut odd = push.clone();
+    odd["client"] = json!("<b>page</b>");
+    assert!(live(&apps, session, odd).await.is_err());
+
+    // Priya makes them an editor: opened again, the window edits.
+    org.priya("doc.roles", json!({ "doc": id, "editors": [h.me.name] }));
+    h.chat.sync_once(0).unwrap();
+    let opened = call(&apps, session, "doc.open", json!({ "doc": id })).await;
+    assert_eq!(opened.data["role"], "editor");
+    live(&apps, session, push.clone()).await.unwrap();
 
     // A closed session edits nothing more.
     let _: Value = apps
@@ -277,19 +298,22 @@ async fn dc4_live_edits_hold_to_what_the_session_opened() {
         .await
         .unwrap();
     assert!(live(&apps, session, push).await.is_err());
-    // Each refusal is on record; no edit is.
+    // Each refusal is on record, and then the edit.
     let edited = records(&h, EventKind::Edited);
-    assert_eq!(edited.len(), 3, "{edited:?}");
+    assert_eq!(edited.len(), 4, "{edited:?}");
     assert!(
-        edited
+        edited[..3]
             .iter()
             .all(|r| r.event.outcome == Some(Outcome::Blocked) && r.event.targets == [id.clone()])
     );
+    assert_eq!(edited[3].event.summary, "Board notes: 1 change in 1 minute");
+    let text = org.priya("doc.read", json!({ "doc": id }))["markdown"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(
-        org.priya("doc.read", json!({ "doc": id }))["markdown"]
-            .as_str()
-            .unwrap()
-            .contains("Notes.")
+        text.contains("Notes.") && text.contains("Mine now."),
+        "{text}"
     );
 }
 

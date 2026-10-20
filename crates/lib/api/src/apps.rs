@@ -307,6 +307,10 @@ pub struct AppLive {
     pub op: LiveOp,
     /// The shared item, which the session opened with an action.
     pub item: String,
+    /// The page within the session (one session serves every window of
+    /// its app): a pull leaves out only that page's own pushes.
+    #[serde(default)]
+    pub client: String,
     /// A Yjs update, base64.
     #[serde(default)]
     pub update: Option<String>,
