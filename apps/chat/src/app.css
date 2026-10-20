@@ -4,8 +4,23 @@
    composer at the bottom (CF-91). */
 .app {
   display: grid;
-  grid-template-columns: 248px 1fr;
+  grid-template-columns: 248px minmax(0, 1fr);
   height: 100%;
+}
+
+.app.with-panel {
+  grid-template-columns: 248px minmax(0, 1fr) 380px;
+}
+
+.icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: none;
 }
 
 .sidebar {
@@ -146,17 +161,27 @@
 
 .pane-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
   height: 52px;
-  padding: 15px 20px 0;
+  padding: 0 12px 0 20px;
   border-bottom: 1px solid var(--divider);
+}
+
+.head-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
 }
 
 .pane-head h1 {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .pane-head .people {
@@ -170,6 +195,12 @@
   padding: 10px 20px 0;
 }
 
+.banner.done {
+  border: 1px solid #c6e5d2;
+  background: #eef8f2;
+  color: #1f6b41;
+}
+
 .pane-body {
   flex: 1;
   min-height: 0;
@@ -178,20 +209,22 @@
 }
 
 .messages {
+  position: relative;
   flex: 1;
   overflow-y: auto;
-  padding: 12px 20px;
+  padding: 16px 0 12px;
 }
 
 .message {
+  position: relative;
   display: grid;
-  grid-template-columns: 36px 1fr;
-  gap: 10px;
-  padding: 6px 0 2px;
+  grid-template-columns: 36px minmax(0, 1fr);
+  column-gap: 10px;
+  padding: 6px 20px 4px;
 }
 
 .message.joined {
-  padding-top: 0;
+  padding-top: 1px;
 }
 
 .message.pending {
@@ -482,4 +515,1051 @@
   padding: 0 14px;
   color: inherit;
   text-decoration: none;
+}
+
+/* --- Like Slack, inside the seal (CF-92, CF-93, ADR 0030 C4a) --- */
+
+/* Search, at the top of the sidebar. */
+.side-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  margin-top: -6px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  background: var(--window);
+  color: var(--faint);
+}
+
+.side-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.side-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: none;
+  font-size: 13px;
+}
+
+.side-search input:focus-visible {
+  outline: none;
+}
+
+.side-lists {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  flex: 1 0 auto;
+}
+
+.row.muted {
+  color: var(--faint);
+}
+
+.row.muted .row-mark {
+  opacity: 0.6;
+}
+
+.row-draft {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11.5px;
+  flex: none;
+}
+
+.row-draft .icon,
+.row-muted .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.row-muted {
+  display: inline-flex;
+  color: var(--faint);
+}
+
+.badge.mention {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.badge-at {
+  font-weight: 500;
+  opacity: 0.85;
+}
+
+/* The header: topic, members, pins, notifications. */
+.topic {
+  min-width: 0;
+  max-width: 100%;
+  margin-left: -6px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topic:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.topic.empty {
+  color: var(--faint);
+}
+
+.topic-edit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.topic-field {
+  flex: 1;
+  min-width: 120px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+}
+
+.topic-field:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.topic-hint {
+  color: var(--faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.head-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.head-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-small);
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.head-button:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.head-button.on {
+  background: var(--accent-soft);
+  color: #2c4fc4;
+}
+
+.head-button.icon-only {
+  justify-content: center;
+  width: 30px;
+  padding: 0;
+}
+
+.head-button:focus-visible,
+.tool:focus-visible,
+.reaction:focus-visible,
+.thread-summary:focus-visible,
+.topic:focus-visible,
+.emoji:focus-visible,
+.pin-open:focus-visible,
+.hit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.head-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--divider);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Messages: hover, focus, pins, mentions, the one pointed at. */
+.message:hover {
+  background: var(--hover);
+}
+
+.message:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.message.pinned {
+  background: #fdf9ef;
+}
+
+.message.mentioned {
+  background: #fdf6e3;
+  box-shadow: inset 3px 0 0 #e2b33c;
+}
+
+.message.highlight {
+  box-shadow: inset 3px 0 0 var(--accent);
+  animation: pointed 3.5s ease-out;
+}
+
+@keyframes pointed {
+  from {
+    background: #ffeaa3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message.highlight {
+    animation: none;
+    background: #fff3cc;
+  }
+}
+
+.pin-note {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 1px;
+  color: #9a6b12;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.pin-note .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.hover-time {
+  display: block;
+  padding-top: 2px;
+  color: var(--faint);
+  font-size: 10.5px;
+  text-align: right;
+  white-space: nowrap;
+  visibility: hidden;
+}
+
+.message:hover .hover-time,
+.message:focus-within .hover-time {
+  visibility: visible;
+}
+
+.mention {
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: #2c4fc4;
+  font-weight: 500;
+}
+
+.mention.me {
+  background: #fbe6a8;
+  color: #7a4f00;
+}
+
+.edited {
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.deleted-text {
+  color: var(--faint);
+  font-style: italic;
+}
+
+/* The toolbar a message shows on hover or focus (UX-20). */
+.toolbar {
+  position: absolute;
+  top: -14px;
+  right: 20px;
+  z-index: 2;
+  display: flex;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--window);
+  box-shadow: 0 2px 10px rgb(20 23 28 / 10%);
+  visibility: hidden;
+}
+
+.message:hover > .toolbar,
+.message:focus-within > .toolbar,
+.message.tools-open > .toolbar {
+  visibility: visible;
+}
+
+.message:first-child > .toolbar,
+.divider + .message > .toolbar {
+  top: -6px;
+}
+
+.tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+}
+
+.tool:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.tool.quick {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.tool[data-act="delete"]:hover {
+  color: var(--danger);
+}
+
+/* Reactions under a message. */
+.reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.reaction {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--divider);
+  border-radius: 12px;
+  background: var(--window);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.reaction:hover {
+  border-color: var(--border);
+}
+
+.reaction.mine {
+  border-color: #aebfff;
+  background: var(--accent-soft);
+  color: #2c4fc4;
+}
+
+.reaction-emoji {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.reaction.add {
+  gap: 0;
+  padding: 0 6px;
+  visibility: hidden;
+}
+
+.reaction.add .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.message:hover .reaction.add,
+.message:focus-within .reaction.add,
+.message.tools-open .reaction.add {
+  visibility: visible;
+}
+
+.tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 3;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: #1f242b;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.08s;
+}
+
+.reaction:hover .tip,
+.reaction:focus-visible .tip {
+  opacity: 1;
+}
+
+/* "2 replies · last reply 2m ago" under a thread's root. */
+.thread-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 0 -4px;
+  padding: 3px 10px 3px 4px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  font-size: 13px;
+}
+
+.thread-summary:hover {
+  border-color: var(--divider);
+  background: var(--window);
+}
+
+.avatar.tiny {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  font-size: 9px;
+}
+
+.thread-count {
+  color: #2c4fc4;
+  font-weight: 600;
+}
+
+.thread-last {
+  color: var(--faint);
+}
+
+.thread-open {
+  display: none;
+  color: var(--muted);
+}
+
+.thread-summary:hover .thread-last {
+  display: none;
+}
+
+.thread-summary:hover .thread-open {
+  display: inline;
+}
+
+/* Dividers: days, "New messages", a thread's replies. */
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 20px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--divider);
+}
+
+.divider.day span {
+  padding: 2px 10px;
+  border: 1px solid var(--divider);
+  border-radius: 11px;
+  background: var(--window);
+}
+
+.divider.new {
+  color: var(--accent);
+}
+
+.divider.new::before,
+.divider.new::after {
+  background: #b6c6ff;
+}
+
+.divider.new::before {
+  flex: 0 0 0;
+}
+
+.divider.new {
+  flex-direction: row-reverse;
+}
+
+.divider.replies {
+  margin: 6px 20px 8px;
+  color: var(--faint);
+  font-weight: 500;
+}
+
+.divider.replies::before {
+  display: none;
+}
+
+.earlier {
+  display: flex;
+  margin: 0 auto 10px;
+}
+
+.button.small {
+  height: 28px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.button.danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
+}
+
+.button.danger:hover {
+  background: #a83232;
+}
+
+/* Editing in place. */
+.edit {
+  margin-top: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-small);
+  background: var(--window);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.edit-text {
+  display: block;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  outline: none;
+  resize: none;
+}
+
+.edit-text:focus-visible {
+  outline: none;
+}
+
+.edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.edit-actions .muted {
+  margin-right: auto;
+  font-size: 12px;
+}
+
+/* The side panel: a thread, or what's pinned. */
+.side-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--divider);
+  background: var(--window);
+}
+
+.side-panel[hidden] {
+  display: none;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 52px;
+  padding: 0 10px 0 18px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.panel-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.panel-title h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.panel-title .muted {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.side-panel .composer-wrap {
+  padding: 0 14px 14px;
+}
+
+.side-panel .composer-wrap[hidden] {
+  display: none;
+}
+
+.side-panel .message {
+  padding-right: 16px;
+  padding-left: 16px;
+}
+
+.side-panel .toolbar {
+  right: 14px;
+}
+
+.pins {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.pin-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius);
+}
+
+.pin-open {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  text-align: left;
+}
+
+.pin-open:hover {
+  background: var(--hover);
+}
+
+.pin-head,
+.hit-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.pin-text,
+.hit-text {
+  display: -webkit-box;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+.hit-thread {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--title-bar);
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+/* Search results (CF-93), grouped by conversation. */
+.search-results {
+  flex: 1;
+  padding: 14px 20px 24px;
+  overflow-y: auto;
+}
+
+.search-results .empty h2 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  color: var(--text);
+}
+
+.hit-group {
+  margin-bottom: 18px;
+}
+
+.hit-group h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.hit-group h3 .muted {
+  font-weight: 400;
+}
+
+.hit {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius);
+  background: var(--window);
+  text-align: left;
+}
+
+.hit:hover {
+  background: var(--hover);
+}
+
+.hit-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.hit-text {
+  -webkit-line-clamp: 3;
+}
+
+mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: #fde7a0;
+  color: inherit;
+}
+
+/* Popovers, the @ list, the picker, menus and the delete dialog. */
+.layer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+}
+
+.layer > * {
+  pointer-events: auto;
+}
+
+.popover {
+  position: fixed;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--window);
+  box-shadow: 0 12px 32px rgb(20 23 28 / 16%);
+}
+
+.popover[hidden] {
+  display: none;
+}
+
+.popover-title {
+  padding: 4px 8px 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.mention-list {
+  width: 320px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.mention-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.mention-option.on,
+.mention-option:hover {
+  background: var(--accent-soft);
+}
+
+.mention-name {
+  font-weight: 500;
+}
+
+.emoji-picker {
+  width: 340px;
+}
+
+.emoji-row,
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(9, 1fr);
+  gap: 2px;
+}
+
+.emoji-grid {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--divider);
+}
+
+.emoji {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  font-size: 19px;
+  line-height: 1;
+}
+
+.emoji:hover {
+  background: var(--hover);
+}
+
+.emoji.mine {
+  background: var(--accent-soft);
+}
+
+.emoji.more {
+  color: var(--muted);
+}
+
+.emoji.more.on {
+  background: var(--hover);
+}
+
+.menu {
+  width: 290px;
+}
+
+.menu-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  text-align: left;
+}
+
+.menu-item:hover,
+.menu-item:focus-visible {
+  background: var(--hover);
+  outline: none;
+}
+
+.menu-item:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.menu-check {
+  width: 14px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.menu-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.menu-name {
+  font-weight: 500;
+}
+
+.menu-about {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 96px 16px;
+  background: rgb(20 23 28 / 28%);
+}
+
+.sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 440px;
+  max-width: 100%;
+  padding: 22px 24px 20px;
+  border-radius: 14px;
+  background: var(--window);
+  box-shadow: 0 24px 60px rgb(20 23 28 / 28%);
+}
+
+.sheet h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.sheet p {
+  margin: -6px 0 0;
+  font-size: 13.5px;
+}
+
+.quote {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 120px;
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--border);
+  border-radius: 0 8px 8px 0;
+  background: var(--title-bar);
+  overflow: hidden;
+}
+
+.quote-text {
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sheet-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Members (ADR 0030 C2): the header's avatars and count, the list, and
+   adding people with the same picker as a new channel. */
+.members-button {
+  gap: 6px;
+  padding: 0 8px 0 6px;
+}
+
+.stack {
+  display: inline-flex;
+}
+
+.stack .avatar.tiny {
+  width: 20px;
+  height: 20px;
+  margin-left: -5px;
+  border: 1.5px solid var(--window);
+  border-radius: 6px;
+  font-size: 8.5px;
+}
+
+.stack .avatar.tiny:first-child {
+  margin-left: 0;
+}
+
+.members {
+  width: 290px;
+}
+
+.member-list {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+}
+
+.member-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.add-people {
+  margin-top: 4px;
+  border-top: 1px solid var(--divider);
+  border-radius: 0 0 7px 7px;
+}
+
+.add-people .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.add-sheet .picker {
+  padding: 0;
+}
+
+.add-sheet .suggestions {
+  position: static;
+  margin-top: 4px;
+}
+
+.sheet-note {
+  margin-right: auto;
+  align-self: center;
+  font-size: 12.5px;
 }

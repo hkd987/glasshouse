@@ -2,8 +2,23 @@
   "id": "chat",
   "name": "Chat",
   "version": "0.1.0",
-  "description": "Channels and direct messages with people in your organization, sealed end to end. Agents read without asking and post only with your yes.",
-  "actions": ["chat.list", "chat.read", "chat.post", "chat.create", "people.search"],
+  "description": "Channels and direct messages with people in your organization, sealed end to end: threads, reactions, mentions, pins, topics, drafts and search. Agents read without asking and post only with your yes.",
+  "actions": [
+    "chat.list",
+    "chat.read",
+    "chat.post",
+    "chat.create",
+    "chat.members",
+    "chat.react",
+    "chat.edit",
+    "chat.delete",
+    "chat.pin",
+    "chat.topic",
+    "chat.search",
+    "chat.draft",
+    "chat.notify",
+    "people.search"
+  ],
   "permissions": [],
   "labels": ["public", "internal"]
 }

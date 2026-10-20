@@ -20,7 +20,10 @@ apps/
   settings/   the person's device settings, what IT set or locked (UX-1)
   chat/       the org's chat (CF-91, ADR 0030): glassd seals and opens it; the
               page keeps nothing (bridge.call only, no offline permission) and
-              hears of news from app.status waits, ids only
+              hears of news from app.status waits, ids only. Like Slack (CF-92,
+              CF-93, C4a): threads, reactions, edits, pins, topics, mentions,
+              members, drafts and levels kept in glassd, and search; chat.ts is
+              the logic without a DOM (mentions, the unread divider, summaries)
   artifacts/  pages people and agents share (AR-1 to AR-5, ADR 0033): the list,
               the viewer (each page framed on its own origin,
               <hex>.artifact.localhost, sandboxed, put back when it navigates
