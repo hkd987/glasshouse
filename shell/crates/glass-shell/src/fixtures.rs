@@ -266,6 +266,7 @@ pub fn invoice_detail() -> TaskDetail {
             marker(8, "Before emailing Northwind AP"),
             marker(11, "After invoice 10"),
         ],
+        answer: None,
     }
 }
 
@@ -322,6 +323,7 @@ pub fn expense_detail(task: &TaskView) -> TaskDetail {
             at: minutes_before(6),
             reason: "Before the draft report".into(),
         }],
+        answer: None,
     }
 }
 

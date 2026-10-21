@@ -200,7 +200,11 @@ mod views {
                 changes,
                 cant_touch,
                 snapshots,
+                answer,
             } = self;
+            if let Some(text) = answer {
+                *text = super::display_paragraphs(text);
+            }
             view.make_display_safe();
             prompt.make_display_safe();
             plan.make_display_safe();
@@ -294,6 +298,15 @@ mod views {
             approve.make_display_safe();
         }
     }
+}
+
+/// Text in paragraphs, such as an agent's answer (ADR 0041): it keeps its
+/// line breaks, and each line is display text like any other.
+pub(crate) fn display_paragraphs(text: &str) -> String {
+    text.lines()
+        .map(|line| display_line(line).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -458,5 +471,13 @@ mod tests {
             "{shown}"
         );
         assert_eq!(view.caption, "caption\u{FFFD}[2J\u{FFFD} ");
+    }
+
+    #[test]
+    fn ae3_an_answer_keeps_its_paragraphs_but_no_escapes() {
+        assert_eq!(
+            display_paragraphs("You have 3 files.\n\nOne is \x1b[2Jnew.\r\nDone\u{202E}"),
+            "You have 3 files.\n\nOne is \u{FFFD}[2Jnew.\nDone\u{FFFD}"
+        );
     }
 }

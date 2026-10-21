@@ -102,6 +102,8 @@ pub(crate) struct TaskState {
     /// The most sensitive label of anything the task has read (DP-11).
     /// Model calls carry it, so it decides where they may go (DP-2).
     pub data_label: Option<Label>,
+    /// What the agent told the person when done (`TaskDetail::answer`).
+    pub answer: Option<String>,
 }
 
 /// Everything fixed when a task starts.
@@ -217,6 +219,7 @@ impl Task {
                 title: new.title,
                 title_fixed: new.title_fixed,
                 data_label: None,
+                answer: None,
             }),
         }
     }
@@ -296,6 +299,7 @@ impl Task {
             changes: state.changes.clone(),
             cant_touch: self.cant_touch.clone(),
             snapshots: state.snapshots.iter().map(|s| s.marker.clone()).collect(),
+            answer: state.answer.clone(),
             view,
         };
         detail.make_display_safe();

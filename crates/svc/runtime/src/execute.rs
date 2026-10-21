@@ -677,9 +677,15 @@ impl Runtime {
             total: Option<u32>,
             #[serde(default)]
             title: Option<String>,
+            #[serde(default)]
+            answer: Option<String>,
         }
         let args: Args = serde_json::from_value(args).map_err(RpcError::invalid_params)?;
         let caption: String = args.caption.chars().take(120).collect();
+        let answer: Option<String> = args
+            .answer
+            .map(|a| a.trim().chars().take(crate::ANSWER_MAX_CHARS).collect())
+            .filter(|a: &String| !a.is_empty());
         let title = match args.title.as_deref().map(title::check).transpose() {
             Ok(title) => title,
             Err(problem) => {
@@ -714,6 +720,9 @@ impl Runtime {
                 state.note(ActivityKind::Notice, caption.clone());
             }
             state.caption = caption;
+            if answer.is_some() {
+                state.answer = answer;
+            }
             state.progress = match (args.done, args.total) {
                 (Some(done), Some(total)) if total > 0 => Some(Progress {
                     done: done.min(total),

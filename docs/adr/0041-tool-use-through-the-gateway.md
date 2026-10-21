@@ -1,9 +1,12 @@
 # 0041. Tool use through the model gateway, and a first desktop agent
 
-Status: **Proposed, being built** (2026-10-21). Built overnight on the
+Status: **Proposed, built** (2026-10-21). Built overnight on the
 owner's standing ask to get our agents hooked up and tested
 (2026-10-21), without their sign-off on two choices, named below, for
-them to confirm. PRD AE-3, MP-7, DP-1, DP-3, DP-5. Extends ADR 0018 (the
+them to confirm. Built: everything in the decision below, on every
+provider, tested with the scripted provider (unit, runtime and the VM
+suite, where the desktop agent runs in its jail); no run on a real model
+yet. PRD AE-3, MP-7, DP-1, DP-3, DP-5. Extends ADR 0018 (the
 model gateway); ADR 0010's harness bundles build on it later.
 
 ## Context
@@ -56,7 +59,9 @@ model gateway); ADR 0010's harness bundles build on it later.
    words, after at most 20 steps, or when the model can't be reached. Its
    default rules are narrow: reading files, mail, calendar and people,
    and drafting; everything else at its tier. Typing in the command bar
-   doesn't reach it yet (DA-1's shell work).
+   doesn't reach it yet (DA-1's shell work). Its answer is kept on the
+  task (`TaskDetail.answer`, at most 4,000 characters, control
+  characters stripped like any agent text) and `glassctl show` prints it.
 
 ## Consequences
 - Every agent can let a model choose actions without parsing prose, and

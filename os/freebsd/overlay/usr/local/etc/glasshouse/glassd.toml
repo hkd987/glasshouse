@@ -45,6 +45,22 @@ backend = "zfs"
 # The agent catalog (AD-5): what IT has published to this machine. What each
 # agent may do is set by policy, not here.
 
+# The general desktop agent (AE-3, ADR 0041): a model chooses its steps
+# from the tools policy gives it, and every step is a call like any other.
+[[agent]]
+id = "desktop-agent"
+name = "Desktop agent"
+version = "0.1"
+description = "Does what you ask with the tools policy gives it: reads your files, mail and calendar, drafts, and asks before anything that changes or sends."
+mode = "actions"
+program = "/usr/local/libexec/glasshouse/glass-desktop-agent"
+plan = [
+  "Work out what you asked with an AI model IT approved",
+  "Use the tools policy gives it, one step at a time",
+  "Ask you before anything that changes or sends",
+  "Tell you what it did and found",
+]
+
 [[agent]]
 id = "it-agent"
 name = "IT agent"

@@ -215,7 +215,48 @@ pub async fn models(h: &Harness) -> anyhow::Result<()> {
         !log.contains(AWS_KEY) && !log.contains("ana@example.com"),
         "neither the key nor the address is in the audit log"
     );
-    it_agent(h).await
+    it_agent(h).await?;
+    desktop_agent(h, &ws).await
+}
+
+/// AE-3, ADR 0041: the desktop agent, in its jail, offers the model its
+/// tools; the scripted model asks for files_list; the agent makes the call,
+/// policy decides it, and the model answers from what it returned.
+async fn desktop_agent(h: &Harness, ws: &crate::harness::Workspace) -> anyhow::Result<()> {
+    let task = h
+        .start(
+            "desktop-agent",
+            r#"What's in my folder? Use files_list {"path": ""}"#,
+            &[ws.invoices.as_path()],
+            &[],
+        )
+        .await?;
+    h.wait_for(task, TileState::Done, Duration::from_secs(60))
+        .await?;
+    let records = h.audit(task).await?;
+    let models: Vec<_> = records
+        .iter()
+        .filter(|r| r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete"))
+        .collect();
+    ensure!(models.len() == 2, "{} model calls", models.len());
+    let first = &models[0].event.detail["model"];
+    ensure!(
+        first["tools_called"] == json!(["files_list"]) && first["tools_offered"].as_u64() > Some(0),
+        "{first}"
+    );
+    let listed = records
+        .iter()
+        .find(|r| r.event.action.as_ref().map(|a| a.as_str()) == Some("files.list"))
+        .context("the agent made the call the model proposed")?;
+    ensure!(
+        listed.event.outcome == Some(Outcome::Completed),
+        "{:?}",
+        listed.event.outcome
+    );
+    let detail = h.detail(task).await?;
+    let answer = detail.answer.unwrap_or_default();
+    ensure!(answer.contains("The tools returned"), "{answer}");
+    Ok(())
 }
 
 /// AE-4: the IT agent, in its jail, asks the model what the request is

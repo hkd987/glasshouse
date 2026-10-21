@@ -192,7 +192,7 @@ services = ["cron", "ntpd", "openvpn", "cupsd"]
 # directory fills `it-admins` (SCIM, AD-1).
 [[group]]
 name = "everyone"
-agents = ["it-agent", "invoice-demo", "containment-probe", "claude-code", "skill-evals"]
+agents = ["desktop-agent", "it-agent", "invoice-demo", "containment-probe", "claude-code", "skill-evals"]
 apps = ["browser", "mail", "calendar", "chat", "artifacts", "docs", "meet", "store", "settings", "activity-monitor", "terminal"]
 
 [[group]]
@@ -250,6 +250,14 @@ tiers = { "settings.models_connect" = "auto", "settings.models_agents" = "auto" 
 # IT self-service (AE-4): diagnoses this computer and fixes what's on IT's
 # list. The only agent allowed the system actions, which glassd runs with its
 # own privileges; it can't name a path or a command, only pick an action.
+# The general desktop agent (AE-3, ADR 0041): a model proposes each step
+# and the agent makes it here, where every rule applies. Reads and drafts
+# only by default; IT widens it per org. It needs an approved model.
+[[agent]]
+id = "desktop-agent"
+allowed_actions = ["files.list", "files.read", "mail.list", "mail.read", "mail.draft", "calendar.list", "calendar.read", "people.search", "catalog.search", "model.complete"]
+max_label = "internal"
+
 [[agent]]
 id = "it-agent"
 allowed_actions = ["system.*", "helpdesk.ticket.create"]

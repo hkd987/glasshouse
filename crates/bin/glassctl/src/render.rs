@@ -324,6 +324,13 @@ pub fn detail(d: &TaskDetail) -> String {
     let mut out = tile(&d.view);
     let _ = writeln!(out, "\n{} {}", bold("Now:"), d.now);
     let _ = writeln!(out, "{} \"{}\"", dim("Task:"), d.prompt);
+    // What the agent told the person when it was done (ADR 0041).
+    if let Some(answer) = &d.answer {
+        let _ = writeln!(out, "\n{}", bold("Answer"));
+        for line in answer.lines() {
+            let _ = writeln!(out, "  {line}");
+        }
+    }
     let _ = writeln!(out, "\n{}", bold("Activity"));
     for entry in &d.activity {
         let mark = match entry.kind {

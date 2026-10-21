@@ -261,6 +261,10 @@ pub struct TaskDetail {
     pub cant_touch: Vec<String>,
     /// Timeline markers to roll back to (AW-15).
     pub snapshots: Vec<SnapshotMarker>,
+    /// What the agent told the person, in words, when it was done (AE-3,
+    /// ADR 0041): an answer longer than a caption, in paragraphs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

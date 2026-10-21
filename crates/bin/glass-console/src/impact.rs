@@ -626,6 +626,7 @@ mod tests {
             [
                 "claude-code",
                 "containment-probe",
+                "desktop-agent",
                 "invoice-demo",
                 "it-agent",
                 "skill-evals"

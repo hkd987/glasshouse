@@ -55,3 +55,5 @@ pub use studio::StudioSurroundings;
 /// The built-in tool every agent has for keeping its tile caption and
 /// progress current (AW-4). It has no side effects and needs no policy.
 pub const REPORT_PROGRESS_TOOL: &str = "report_progress";
+/// The longest answer an agent may leave the person (ADR 0041).
+pub const ANSWER_MAX_CHARS: usize = 4000;

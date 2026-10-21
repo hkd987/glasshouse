@@ -107,6 +107,25 @@ impl Agent {
             .await?)
     }
 
+    /// The tools this task may use, as its socket lists them: names,
+    /// descriptions and input schemas, for a model to choose from (ADR
+    /// 0041).
+    pub async fn tool_list(&self) -> Result<Vec<glass_rpc::mcp::Tool>, AgentError> {
+        let listed: ListToolsResult = self.client.call("tools/list", json!({})).await?;
+        Ok(listed.tools)
+    }
+
+    /// The last word: the tile's caption, and what the agent tells the
+    /// person in full, which they see with the task (ADR 0041).
+    pub async fn answer(&self, caption: &str, answer: &str) -> Result<(), AgentError> {
+        self.call(
+            "report_progress",
+            json!({ "caption": caption, "answer": answer }),
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Updates the tile caption and, when countable, progress (AW-4).
     pub async fn progress(
         &self,

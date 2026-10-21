@@ -17,7 +17,7 @@ use glass_types::{SideEffect, TaskId, Tier};
 use serde_json::{Value, json};
 
 use crate::task::Task;
-use crate::{REPORT_PROGRESS_TOOL, Runtime};
+use crate::{ANSWER_MAX_CHARS, REPORT_PROGRESS_TOOL, Runtime};
 
 pub(crate) struct AgentApi {
     pub rt: Arc<Runtime>,
@@ -98,6 +98,11 @@ impl AgentApi {
                         "type": "string",
                         "maxLength": TITLE_MAX_CHARS,
                         "description": "A better short name for the whole task, one line, such as \"Reconcile October invoices\". It can be set once."
+                    },
+                    "answer": {
+                        "type": "string",
+                        "maxLength": ANSWER_MAX_CHARS,
+                        "description": "When you're done: what you'd tell the person, in a few plain paragraphs. They see it with the task."
                     }
                 },
                 "required": ["caption"],
