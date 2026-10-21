@@ -79,14 +79,34 @@ struct Args {
     /// Model credits (ADR 0039): a TOML file, mode 0600, with our
     /// OpenRouter `management_key`, the `operator_token` our staff add
     /// credits with, our `markup` over OpenRouter's price (0.25 is 25 %)
-    /// and, for admins to pay by card, `stripe_secret_key` and
-    /// `stripe_webhook_secret` (`endpoint`, `stripe_endpoint` optional).
-    /// With `--dev` and no file, credits are kept in memory, cost 25 % over,
-    /// are paid by webhooks signed with `GLASS_CONSOLE_STRIPE_WEBHOOK` (or
-    /// a fixed development secret), and computers' calls are answered here,
+    /// and, for admins to pay by card, either the billing relay's
+    /// `billing_url`, `billing_token` and `billing_public_key` (ADR 0040;
+    /// one Stripe account for every org) or this console's own
+    /// `stripe_secret_key` and `stripe_webhook_secret` (`endpoint`,
+    /// `stripe_endpoint` optional). With `--dev` and no file, credits are
+    /// kept in memory, cost 25 % over, are paid by webhooks signed with
+    /// `GLASS_CONSOLE_STRIPE_WEBHOOK` (or a fixed development secret), or
+    /// through `--billing-relay`, and computers' calls are answered here,
     /// reaching no model.
     #[arg(long)]
     credits: Option<PathBuf>,
+    /// Development: take payments through this billing relay
+    /// (`glass-billing --dev`), whose public key is `--billing-key`.
+    #[arg(long, requires_all = ["dev", "billing_key"])]
+    billing_relay: Option<String>,
+    /// The development billing relay's public key, hex.
+    #[arg(long, requires = "billing_relay")]
+    billing_key: Option<String>,
+}
+
+/// The development billing relay's token for every console. Not a secret.
+const DEV_BILLING_TOKEN: &str = "dev-billing-token-not-a-secret";
+
+/// The billing relay's public key, from hex.
+fn relay_key(hex_key: &str) -> anyhow::Result<glass_crypto::PublicKey> {
+    let bytes = hex::decode(hex_key.trim()).context("the billing relay's key isn't hex")?;
+    glass_crypto::PublicKey::from_bytes(&bytes)
+        .map_err(|_| anyhow::anyhow!("the billing relay's key isn't a P-256 public key"))
 }
 
 /// What `--credits` names.
@@ -105,6 +125,14 @@ struct CreditsConfig {
     stripe_webhook_secret: Option<String>,
     #[serde(default)]
     stripe_endpoint: Option<String>,
+    /// The billing relay (ADR 0040), this console's token with it, and the
+    /// relay's public key, hex.
+    #[serde(default)]
+    billing_url: Option<String>,
+    #[serde(default)]
+    billing_token: Option<String>,
+    #[serde(default)]
+    billing_public_key: Option<String>,
 }
 
 /// The markup `--dev` sells credits at.
@@ -137,6 +165,24 @@ fn credits_config(path: &std::path::Path) -> anyhow::Result<CreditsConfig> {
     if config.stripe_secret_key.is_some() != config.stripe_webhook_secret.is_some() {
         anyhow::bail!(
             "{} needs both stripe_secret_key and stripe_webhook_secret, or neither",
+            path.display()
+        );
+    }
+    let relay = [
+        &config.billing_url,
+        &config.billing_token,
+        &config.billing_public_key,
+    ]
+    .map(Option::is_some);
+    if relay.contains(&true) && relay.contains(&false) {
+        anyhow::bail!(
+            "{} needs billing_url, billing_token and billing_public_key, or none",
+            path.display()
+        );
+    }
+    if relay[0] && config.stripe_secret_key.is_some() {
+        anyhow::bail!(
+            "{} takes payments from Stripe or from the billing relay, not both",
             path.display()
         );
     }
@@ -237,15 +283,35 @@ async fn run(args: Args) -> anyhow::Result<()> {
     match &args.credits {
         Some(path) => {
             let config = credits_config(path)?;
-            let payments = match (&config.stripe_secret_key, &config.stripe_webhook_secret) {
-                (Some(key), Some(webhook)) => Some(std::sync::Arc::new(credits::StripePayments {
-                    stripe: glass_gateway_providers::stripe::Stripe::new(
-                        config.stripe_endpoint.as_deref(),
-                        key,
-                    ),
-                    webhook_secret: webhook.clone(),
-                })
-                    as std::sync::Arc<dyn credits::Payments>),
+            let payments: Option<std::sync::Arc<dyn credits::Payments>> = match (
+                &config.stripe_secret_key,
+                &config.stripe_webhook_secret,
+                &config.billing_url,
+                &config.billing_token,
+                &config.billing_public_key,
+            ) {
+                (Some(key), Some(webhook), ..) => {
+                    Some(std::sync::Arc::new(credits::StripePayments {
+                        stripe: glass_gateway_providers::stripe::Stripe::new(
+                            config.stripe_endpoint.as_deref(),
+                            key,
+                        ),
+                        events: credits::PaymentEvents::Stripe {
+                            webhook_secret: webhook.clone(),
+                        },
+                    }))
+                }
+                (_, _, Some(url), Some(token), Some(key)) => {
+                    Some(std::sync::Arc::new(credits::RelayPayments {
+                        relay: glass_gateway_providers::billing::BillingRelay::new(
+                            url, token, false,
+                        )
+                        .map_err(anyhow::Error::msg)?,
+                        events: credits::PaymentEvents::Relay {
+                            key: relay_key(key)?,
+                        },
+                    }))
+                }
                 _ => None,
             };
             console.set_credits(
@@ -267,11 +333,26 @@ async fn run(args: Args) -> anyhow::Result<()> {
             let webhook = std::env::var("GLASS_CONSOLE_STRIPE_WEBHOOK")
                 .unwrap_or_else(|_| "whsec_dev_not_a_secret".into());
             let keys = std::sync::Arc::new(credits::MemoryKeys::default());
+            let payments: std::sync::Arc<dyn credits::Payments> =
+                match (&args.billing_relay, &args.billing_key) {
+                    (Some(url), Some(key)) => std::sync::Arc::new(credits::RelayPayments {
+                        relay: glass_gateway_providers::billing::BillingRelay::new(
+                            url,
+                            DEV_BILLING_TOKEN,
+                            true,
+                        )
+                        .map_err(anyhow::Error::msg)?,
+                        events: credits::PaymentEvents::Relay {
+                            key: relay_key(key)?,
+                        },
+                    }),
+                    _ => std::sync::Arc::new(credits::DevPayments::new(webhook)),
+                };
             console.set_credits(
                 keys.clone(),
                 token,
                 DEV_MARKUP,
-                Some(std::sync::Arc::new(credits::DevPayments::new(webhook))),
+                Some(payments),
                 std::sync::Arc::new(credits::DevModels::new(keys)),
             );
         }

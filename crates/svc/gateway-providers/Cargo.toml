@@ -11,6 +11,7 @@ publish.workspace = true
 # nothing else may depend on native-tls, and only glass-crypto, for sealing
 # (ADR 0030), on OpenSSL itself (tools/check-layers.py).
 [dependencies]
+glass-crypto.workspace = true
 glass-gateway.workspace = true
 glass-managed.workspace = true
 glass-policy.workspace = true

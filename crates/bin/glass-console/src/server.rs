@@ -611,10 +611,15 @@ impl Console {
         if request.method != "POST" {
             return error(405, "method not allowed");
         }
+        // With the billing relay, Stripe's events reach the relay, not
+        // here (ADR 0040).
+        let crate::credits::PaymentEvents::Stripe { webhook_secret } = payments.events() else {
+            return error(404, "no such page");
+        };
         let signature = request.header("stripe-signature").unwrap_or_default();
         let now = glass_types::Timestamp::now().unix_seconds();
         if let Err(e) = glass_gateway_providers::stripe::verify_webhook(
-            payments.webhook_secret(),
+            webhook_secret,
             signature,
             &request.body,
             now,
@@ -644,6 +649,58 @@ impl Console {
             }
             Err((status, e)) => {
                 tracing::warn!(session = %paid.session, "credits: a paid checkout not granted yet: {e}");
+                error(status.max(500), &e)
+            }
+        }
+    }
+
+    /// `POST /billing/v1/events`: a payment the billing relay pushes (ADR
+    /// 0040), signed with the relay's key. Granted once per checkout
+    /// session; anything but 2xx makes the relay try again later.
+    async fn billing_event(&self, request: &Request) -> Response {
+        use glass_managed::billing::{BillingEvent, EventKind, SIGNATURE_HEADER, verify};
+        let Some(payments) = self.credits.get().and_then(|c| c.payments.clone()) else {
+            return error(404, "no such page");
+        };
+        let crate::credits::PaymentEvents::Relay { key } = payments.events() else {
+            return error(404, "no such page");
+        };
+        if request.method != "POST" {
+            return error(405, "method not allowed");
+        }
+        let signature = request
+            .header(&SIGNATURE_HEADER.to_ascii_lowercase())
+            .unwrap_or_default();
+        let now = glass_types::Timestamp::now().unix_seconds();
+        if let Err(e) = verify(key, signature, &request.body, now) {
+            tracing::warn!("credits: a relayed payment refused: {e}");
+            return error(400, &e);
+        }
+        let event: BillingEvent = match serde_json::from_slice(&request.body) {
+            Ok(e) => e,
+            Err(e) => return error(400, &format!("not a billing event: {e}")),
+        };
+        let org = self.state().org.id.clone();
+        if event.org != org {
+            // The relay's routing is wrong: say so, so it shows there.
+            tracing::warn!(org = %event.org, "credits: the relay sent another org's payment");
+            return error(400, "That payment is for another org.");
+        }
+        let EventKind::CreditsPaid = event.kind;
+        if event.currency != "usd" {
+            return error(400, "Credits are paid in US dollars.");
+        }
+        let usd = event.cents as f64 / 100.0;
+        match self
+            .add_credits(usd, "Paid by card", Some(event.session.clone()))
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(session = %event.session, usd, "credits: paid by card, through the relay");
+                ok(json!({}))
+            }
+            Err((status, e)) => {
+                tracing::warn!(session = %event.session, "credits: a relayed payment not granted yet: {e}");
                 error(status.max(500), &e)
             }
         }
@@ -808,6 +865,9 @@ impl Console {
         }
         if path == "/stripe/webhook" {
             return self.stripe_webhook(request).await;
+        }
+        if path == glass_managed::billing::EVENTS_PATH {
+            return self.billing_event(request).await;
         }
         if let Some(rest) = path.strip_prefix("/api/") {
             if let Err(response) = check_origin(request) {
@@ -2093,6 +2153,81 @@ mod tests {
     /// The console sells credits with in-memory keys and models at a 25 %
     /// markup; an admin accepted the terms and published credits for
     /// agents. No credits are bought yet.
+    #[tokio::test]
+    async fn adr0040_payments_the_billing_relay_pushes_add_credits_once_and_only_when_it_signed_them()
+     {
+        use glass_managed::billing::{BillingEvent, EVENTS_PATH, EventKind, sign};
+        let t = console().await;
+        let relay = glass_crypto::SecretKey::generate().unwrap();
+        let keys = Arc::new(crate::credits::MemoryKeys::default());
+        t.console.set_credits(
+            keys.clone(),
+            CREDITS_OPERATOR.into(),
+            0.25,
+            Some(Arc::new(crate::credits::RelayPayments {
+                relay: glass_gateway_providers::billing::BillingRelay::new(
+                    "http://127.0.0.1:9",
+                    "console-token",
+                    true,
+                )
+                .unwrap(),
+                events: crate::credits::PaymentEvents::Relay {
+                    key: relay.public().unwrap(),
+                },
+            })),
+            Arc::new(crate::credits::DevModels::new(keys.clone())),
+        );
+        let now = glass_types::Timestamp::now();
+        let event = |org: &str| {
+            serde_json::to_vec(&BillingEvent {
+                kind: EventKind::CreditsPaid,
+                org: org.into(),
+                session: "cs_live_relayed".into(),
+                cents: 10_000,
+                currency: "usd".into(),
+                at: now,
+            })
+            .unwrap()
+        };
+        let push = |body: Vec<u8>, key: &glass_crypto::SecretKey| Request {
+            method: "POST".into(),
+            path: EVENTS_PATH.into(),
+            query: String::new(),
+            headers: vec![(
+                "glasshouse-billing-signature".into(),
+                sign(key, now.unix_seconds(), &body).unwrap(),
+            )],
+            body,
+        };
+
+        // Stripe's own route is closed: with the relay, payments come from it.
+        let r = t
+            .console
+            .handle(&request("POST", "/stripe/webhook", &json!({}), &[]))
+            .await;
+        assert_eq!(r.status, 404);
+        // Signed by anyone else, or for another org: refused, nothing added.
+        let stranger = glass_crypto::SecretKey::generate().unwrap();
+        let r = t.console.handle(&push(event("acme"), &stranger)).await;
+        assert_eq!(r.status, 400);
+        let r = t.console.handle(&push(event("globex"), &relay)).await;
+        assert_eq!(r.status, 400);
+        assert!(t.console.state().credits.grants.is_empty());
+
+        // The relay's: $100 paid, $80 at OpenRouter, once however often.
+        for _ in 0..2 {
+            let r = t.console.handle(&push(event("acme"), &relay)).await;
+            assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        }
+        let credits = t.console.state().credits.clone();
+        assert_eq!(credits.grants.len(), 1);
+        assert_eq!((credits.granted(), credits.limit()), (100.0, 80.0));
+        assert_eq!(
+            credits.grants[0].payment.as_deref(),
+            Some("cs_live_relayed")
+        );
+    }
+
     async fn selling(t: &Test) -> Arc<crate::credits::MemoryKeys> {
         let keys = Arc::new(crate::credits::MemoryKeys::default());
         t.console.set_credits(

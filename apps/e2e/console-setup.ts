@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, openSync, readFileSync, rmSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
-import { CONSOLE_PORT, CONSOLE_STATE, DEVICE, FIXTURE, RELAY_API, STORE_PORT } from "./console-env.ts";
+import { BILLING_PORT, BILLING_STATE, CONSOLE_PORT, CONSOLE_STATE, DEVICE, FIXTURE, RELAY_API, STORE_PORT } from "./console-env.ts";
 import { BIN, DEV, REPO, RUN, glassctlJson, sleep } from "./env.ts";
 
 const LOGS = join(DEV, "..");
@@ -52,8 +52,33 @@ export default async function consoleSetup(): Promise<() => Promise<void>> {
     // The meeting relay, which the console admits people to (ADR 0030 §6).
     started.push(start("relay", join(BIN, "glass-sfu"), ["--udp", "127.0.0.1:0", "--api", RELAY_API]));
     await until("the relay", () => readFileSync(join(LOGS, "relay.log"), "utf8").includes("glass-sfu ready"));
+    // The billing relay: Stripe's webhooks reach it, and it pushes each
+    // payment to the console, signed with its key (ADR 0040).
+    rmSync(BILLING_STATE, { recursive: true, force: true });
+    started.push(
+      start("billing", join(BIN, "glass-billing"), [
+        "--dev",
+        "--listen",
+        `127.0.0.1:${BILLING_PORT}`,
+        "--state",
+        BILLING_STATE,
+        "--console",
+        `acme=http://127.0.0.1:${CONSOLE_PORT}`,
+        "--first-retry-secs",
+        "1",
+      ]),
+    );
+    let billingKey = "";
+    await until("the billing relay", () => {
+      billingKey = /glass-billing ready http=\S+ key=([0-9a-f]+)/.exec(readFileSync(join(LOGS, "billing.log"), "utf8"))?.[1] ?? "";
+      return billingKey !== "";
+    });
     started.push(
       start("console", join(BIN, "glass-console"), [
+        "--billing-relay",
+        `http://127.0.0.1:${BILLING_PORT}`,
+        "--billing-key",
+        billingKey,
         "--relay",
         RELAY_API,
         "--dev",

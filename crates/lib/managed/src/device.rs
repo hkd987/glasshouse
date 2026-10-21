@@ -126,6 +126,16 @@ impl DeviceKey {
 /// The computer's key (ADR 0030 slice P): the one kept at `path`, or a new
 /// one written there for root alone. A key others can read isn't used.
 pub fn kept(path: &Path, device: &str) -> Result<DeviceKey, String> {
+    kept_secret(path, "the device key").map(|secret| DeviceKey {
+        device: device.to_owned(),
+        secret,
+    })
+}
+
+/// A P-256 secret key kept at `path` as hex, or a new one written there for
+/// its owner alone; `what` names it in errors. A key others can read isn't
+/// used. The billing relay keeps its key this way too (ADR 0040).
+pub fn kept_secret(path: &Path, what: &str) -> Result<SecretKey, String> {
     use std::io::Write as _;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let shown = path.display();
@@ -133,29 +143,29 @@ pub fn kept(path: &Path, device: &str) -> Result<DeviceKey, String> {
         Ok(meta) => {
             if meta.mode() & 0o077 != 0 {
                 return Err(format!(
-                    "the device key {shown} can be read by others; it can't be trusted"
+                    "{what} {shown} can be read by others; it can't be trusted"
                 ));
             }
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("the device key {shown}: {e}"))?;
-            let bytes = hex::decode(text.trim())
-                .map_err(|_| format!("the device key {shown} is damaged"))?;
-            DeviceKey::from_bytes(device, &bytes)
+            let text = std::fs::read_to_string(path).map_err(|e| format!("{what} {shown}: {e}"))?;
+            let bytes =
+                hex::decode(text.trim()).map_err(|_| format!("{what} {shown} is damaged"))?;
+            SecretKey::from_bytes(&bytes).map_err(|_| format!("{what} {shown} is damaged"))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let key = DeviceKey::generate(device)?;
+            let key = SecretKey::generate().map_err(|e| e.to_string())?;
+            let bytes = key.to_bytes().map_err(|e| e.to_string())?;
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .open(path)
-                .map_err(|e| format!("the device key {shown}: {e}"))?;
-            file.write_all(hex::encode(key.to_bytes()?).as_bytes())
+                .map_err(|e| format!("{what} {shown}: {e}"))?;
+            file.write_all(hex::encode(bytes).as_bytes())
                 .and_then(|()| file.sync_all())
-                .map_err(|e| format!("the device key {shown}: {e}"))?;
+                .map_err(|e| format!("{what} {shown}: {e}"))?;
             Ok(key)
         }
-        Err(e) => Err(format!("the device key {shown}: {e}")),
+        Err(e) => Err(format!("{what} {shown}: {e}")),
     }
 }
 

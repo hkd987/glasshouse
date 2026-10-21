@@ -11,7 +11,7 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 import { type Browser, type BrowserContext, type Page, expect, test } from "@playwright/test";
 
-import { CALENDAR_URL, CONSOLE_SHOTS, CONSOLE_URL, DEVICE, MAIL_URL, SETTINGS_URL, STORE_URL } from "./console-env.ts";
+import { BILLING_URL, CALENDAR_URL, CONSOLE_SHOTS, CONSOLE_URL, DEVICE, MAIL_URL, SETTINGS_URL, STORE_URL } from "./console-env.ts";
 import { type ApprovalView, DEV, audit, glassctl, glassctlJson, mcp, outcome } from "./env.ts";
 
 /** AD-4: a page IT opens is interactive within this. */
@@ -128,9 +128,10 @@ test("adr0039 credits Glasshouse adds reach the org's computers, and its admins 
   await page.locator("[data-test=use-credits]").click();
   await expect(credits).toContainText("Off");
 
-  // An admin buys $50 by card: Stripe's page (here the console's own
-  // development stand-in) sends them back, and Stripe's signed webhook
-  // adds the credits.
+  // An admin buys $50 by card: the console asks the billing relay for the
+  // checkout, Stripe's page (here the relay's development stand-in) sends
+  // them back, and Stripe's signed webhook, which reaches the relay, is
+  // pushed to the console and adds the credits (ADR 0040).
   await page.locator("input[name=usd]").fill("50");
   await page.locator("[data-test=buy]").click();
   await page.waitForURL(/#\/credits\/paid$/);
@@ -142,7 +143,7 @@ test("adr0039 credits Glasshouse adds reach the org's computers, and its admins 
   });
   const at = Math.floor(Date.now() / 1000);
   const signature = createHmac("sha256", "whsec_dev_not_a_secret").update(`${at}.${event}`).digest("hex");
-  const paid = await fetch(new URL("/stripe/webhook", CONSOLE_URL), {
+  const paid = await fetch(new URL("/stripe/webhook", BILLING_URL), {
     method: "POST",
     headers: { "stripe-signature": `t=${at},v1=${signature}`, "content-type": "application/json" },
     body: event,
@@ -152,13 +153,26 @@ test("adr0039 credits Glasshouse adds reach the org's computers, and its admins 
   await expect(credits).toContainText("$150.00");
   await expect(page.locator("[data-test=grant]").last()).toContainText("Paid by card");
   await shot(page, "credits-paid");
-  // A forged one is refused.
-  const forged = await fetch(new URL("/stripe/webhook", CONSOLE_URL), {
+  // The relay delivered it, on the record for our operators.
+  const deliveries = (await (
+    await fetch(new URL("/ops/deliveries", BILLING_URL), { headers: { authorization: "Bearer dev-operator-token-not-a-secret" } })
+  ).json()) as { delivered: { org: string; session: string }[]; pending: unknown[] };
+  expect(deliveries.delivered.map((d) => [d.org, d.session])).toContainEqual(["acme", "cs_dev_e2e"]);
+  expect(deliveries.pending).toHaveLength(0);
+  // A forged one is refused by the relay; the console takes Stripe's
+  // events from nobody but the relay now.
+  const forged = await fetch(new URL("/stripe/webhook", BILLING_URL), {
     method: "POST",
     headers: { "stripe-signature": `t=${at},v1=${"0".repeat(64)}`, "content-type": "application/json" },
     body: event,
   });
   expect(forged.status).toBe(400);
+  const direct = await fetch(new URL("/stripe/webhook", CONSOLE_URL), {
+    method: "POST",
+    headers: { "stripe-signature": `t=${at},v1=${signature}`, "content-type": "application/json" },
+    body: event,
+  });
+  expect(direct.status).toBe(404);
   await close();
 });
 

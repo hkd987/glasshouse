@@ -17,6 +17,7 @@
 
 mod anthropic;
 mod bedrock;
+pub mod billing;
 mod console;
 mod credits;
 mod http;

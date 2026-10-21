@@ -155,7 +155,7 @@ apps-dev: apps-build ## Serve the apps from make dev-host's glassd: http://mail.
 # The org's admin console (ADR 0023): glass-console serves the web app in
 # apps/console and the API devices sync signed policy and catalog from. It
 # runs on our web servers, never on a device. See apps/README.md.
-CONSOLE_BINS := -p glass-console -p glassd -p glassctl -p glass-app-bridge -p glass-demo-agent -p glass-probe -p glass-mcp -p glass-sfu -p glass-it-agent
+CONSOLE_BINS := -p glass-console -p glass-billing -p glassd -p glassctl -p glass-app-bridge -p glass-demo-agent -p glass-probe -p glass-mcp -p glass-sfu -p glass-it-agent
 
 console-dev: apps-build ## The admin console on http://127.0.0.1:7400 (FIXTURE=500,50 fills it); enroll make dev-host with GLASS_DEV_ENROLL=build/console/enrollment.json
 	cargo build -p glass-console

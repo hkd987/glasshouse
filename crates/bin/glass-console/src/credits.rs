@@ -297,8 +297,8 @@ impl Usage {
     }
 }
 
-/// How the org pays for credits: Stripe with our keys, or for development
-/// and tests, [`DevPayments`].
+/// How the org pays for credits: Stripe with our keys, through the billing
+/// relay (ADR 0040), or for development a stand-in where no money moves.
 pub trait Payments: Send + Sync + std::fmt::Debug {
     /// A checkout page for `cents` of credits for `org`.
     fn checkout(
@@ -308,15 +308,26 @@ pub trait Payments: Send + Sync + std::fmt::Debug {
         success_url: &str,
         cancel_url: &str,
     ) -> Result<Checkout, String>;
-    /// The secret Stripe signs this console's webhooks with.
-    fn webhook_secret(&self) -> &str;
+    /// Who tells this console a payment went through.
+    fn events(&self) -> &PaymentEvents;
+}
+
+/// Who tells a console that a checkout was paid.
+#[derive(Debug, Clone)]
+pub enum PaymentEvents {
+    /// Stripe itself, at `/stripe/webhook`, signed with this endpoint's
+    /// secret: a Stripe account with this console alone.
+    Stripe { webhook_secret: String },
+    /// The billing relay (ADR 0040), at `/billing/v1/events`, signed with
+    /// its key: one Stripe account for every org's console.
+    Relay { key: glass_crypto::PublicKey },
 }
 
 /// Stripe, with our secret key and the webhook endpoint's secret.
 #[derive(Debug)]
 pub struct StripePayments {
     pub stripe: Stripe,
-    pub webhook_secret: String,
+    pub events: PaymentEvents,
 }
 
 impl Payments for StripePayments {
@@ -335,8 +346,40 @@ impl Payments for StripePayments {
         })
     }
 
-    fn webhook_secret(&self) -> &str {
-        &self.webhook_secret
+    fn events(&self) -> &PaymentEvents {
+        &self.events
+    }
+}
+
+/// The billing relay (ADR 0040): it makes checkouts with Stripe's key, for
+/// the org this console's token is for, and pushes payments here.
+#[derive(Debug)]
+pub struct RelayPayments {
+    pub relay: glass_gateway_providers::billing::BillingRelay,
+    pub events: PaymentEvents,
+}
+
+impl Payments for RelayPayments {
+    fn checkout(
+        &self,
+        _org: &str,
+        cents: u64,
+        success_url: &str,
+        cancel_url: &str,
+    ) -> Result<Checkout, String> {
+        let made = self.relay.checkout(&glass_managed::billing::CheckoutAsk {
+            cents,
+            success_url: success_url.to_owned(),
+            cancel_url: cancel_url.to_owned(),
+        })?;
+        Ok(Checkout {
+            id: made.id,
+            url: made.url,
+        })
+    }
+
+    fn events(&self) -> &PaymentEvents {
+        &self.events
     }
 }
 
@@ -345,14 +388,16 @@ impl Payments for StripePayments {
 /// signed with this secret, as Stripe's would be.
 #[derive(Debug)]
 pub struct DevPayments {
-    pub webhook_secret: String,
+    events: PaymentEvents,
     made: Mutex<u64>,
 }
 
 impl DevPayments {
     pub fn new(webhook_secret: impl Into<String>) -> Self {
         Self {
-            webhook_secret: webhook_secret.into(),
+            events: PaymentEvents::Stripe {
+                webhook_secret: webhook_secret.into(),
+            },
             made: Mutex::new(0),
         }
     }
@@ -374,8 +419,8 @@ impl Payments for DevPayments {
         })
     }
 
-    fn webhook_secret(&self) -> &str {
-        &self.webhook_secret
+    fn events(&self) -> &PaymentEvents {
+        &self.events
     }
 }
 

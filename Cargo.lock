@@ -773,6 +773,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-billing"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "glass-crypto",
+ "glass-gateway-providers",
+ "glass-http",
+ "glass-managed",
+ "glass-types",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "glass-broker"
 version = "0.1.0"
 dependencies = [
@@ -894,6 +915,7 @@ dependencies = [
 name = "glass-gateway-providers"
 version = "0.1.0"
 dependencies = [
+ "glass-crypto",
  "glass-gateway",
  "glass-managed",
  "glass-policy",

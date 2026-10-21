@@ -1,0 +1,30 @@
+[package]
+name = "glass-billing"
+description = "The billing relay (ADR 0040): one Stripe endpoint for every org, payments pushed to each org's admin console. Runs on our servers, never on a device."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+glass-crypto.workspace = true
+glass-gateway-providers.workspace = true
+glass-http.workspace = true
+glass-managed.workspace = true
+glass-types.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

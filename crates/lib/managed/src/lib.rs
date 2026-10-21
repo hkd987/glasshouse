@@ -25,6 +25,7 @@
 //! through `glass-gateway-providers`, the one crate that leaves the machine.
 
 pub mod base64;
+pub mod billing;
 pub mod catalog;
 pub mod chat;
 pub mod device;

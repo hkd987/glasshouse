@@ -27,6 +27,10 @@ export const DOCS_URL = `http://docs.localhost:${STORE_PORT}/`;
 export const MEET_URL = `http://meet.localhost:${STORE_PORT}/`;
 /** The meeting relay's private API, beside the console (ADR 0030 §6). */
 export const RELAY_API = `127.0.0.1:${Number(process.env.GLASS_CONSOLE_E2E_RELAY_PORT ?? 7412)}`;
+/** The billing relay, which Stripe's webhooks reach and which pushes payments to the console (ADR 0040). */
+export const BILLING_PORT = Number(process.env.GLASS_CONSOLE_E2E_BILLING_PORT ?? 7413);
+export const BILLING_URL = `http://127.0.0.1:${BILLING_PORT}/`;
+export const BILLING_STATE = join(CONSOLE_STATE, "..", "billing");
 /** The fixture: devices, catalog items. */
 export const FIXTURE = [500, 50] as const;
 /** This device's id in the fleet. */

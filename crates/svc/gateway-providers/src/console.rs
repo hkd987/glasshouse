@@ -318,7 +318,7 @@ fn meet_path(request: &MeetRequest, op: &str) -> Result<String, LinkError> {
     Ok(format!("/device/v1/meet/{id}/{op}"))
 }
 
-fn is_loopback(host: &str) -> bool {
+pub(crate) fn is_loopback(host: &str) -> bool {
     host == "localhost"
         || host
             .parse::<std::net::IpAddr>()
