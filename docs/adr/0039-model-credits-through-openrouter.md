@@ -6,8 +6,8 @@ console's credits (one capped key per org, grants by our operators, the
 Model credits page, the policy edit); computers' calls through the
 console, which keeps the org's key; individuals' own keys in Settings;
 payment by card through Stripe at our markup, and the providers' terms
-accepted for each org. Next: an admin control to let agents call models;
-low-balance alerts.
+accepted for each org; IT's choice of which agents ask models, and the IT
+agent asking them (AE-4). Next: low-balance alerts.
 PRD MP-1, MP-4, MP-8, MP-10, MP-11, GT-3. The owner asked for a path for
 orgs that use neither Bedrock nor Claude Code: admins buy model usage
 from us in bulk, and we route it with OpenRouter's auto mode
@@ -88,7 +88,10 @@ only, this amends ADR 0018: their prompts cross our servers.
      (`openrouter/auto`), and makes it the default when the org has none.
    - The default covers public and internal data. Confidential data goes
      to credits only if IT adds them to its route (GT-3).
-   - Agents still need `model.complete` in their allowed actions.
+   - Agents still need `model.complete` in their allowed actions. IT
+     chooses which agents ask AI models on the policy page, for every
+     group (the same rules every model kind uses). None do until IT says
+     so, except `skill-evals`, whose whole job is asking models.
 5. **Admins pay by card through Stripe, at our markup.**
    - The console makes a Stripe Checkout Session and sends the admin to
      Stripe's page; card details never reach us. Each session names the

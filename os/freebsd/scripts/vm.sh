@@ -10,6 +10,8 @@
 #   scp-in <src...> <dest>   copy host files into the VM
 #   exec <binary> [args]     copy a host binary into the VM and run it (usable as a cargo runner)
 #   reset              stop and delete the overlay + seed (next `up` is a fresh first boot)
+#   clear-snapshots    destroy the tasks' `@glass-` snapshots test runs piled up (they slow every
+#                      snapshot, docs/dev/performance.md), with glassd stopped meanwhile
 #   console-log [-f]   print (or follow) the serial console log
 #   screendump <out.png>     save what the VM's display shows right now (boot screens, splash)
 #   point <x> <y>            move the pointer to screen pixel (x, y) (the USB tablet)
@@ -330,6 +332,21 @@ cmd_exec() {
 	vm_ssh "$(printf '%q ' "$dest" "$@")"
 }
 
+cmd_clear_snapshots() {
+	# One `zfs destroy` per 100 snapshots of a dataset (`fs@a,b,c`): one a
+	# snapshot took 5 minutes for 942.
+	vm_ssh "set -e
+service glassd stop >/dev/null 2>&1 || true
+n=\$(zfs list -H -t snapshot -o name | grep -c '@glass-' || true)
+for ds in \$(zfs list -H -t snapshot -o name | grep '@glass-' | sed 's/@.*//' | sort -u); do
+	zfs list -H -t snapshot -o name -d 1 \"\$ds\" | grep '@glass-' | sed 's/.*@//' | xargs -n 100 echo | tr ' ' ',' |
+		while read -r names; do zfs destroy \"\$ds@\$names\"; done
+done
+service glassd start </dev/null >/dev/null 2>&1
+for i in \$(jot 120); do glassctl status >/dev/null 2>&1 && break; sleep 0.5; done
+echo \"destroyed \$n snapshots\""
+}
+
 cmd_reset() {
 	cmd_down
 	rm -f "$VM_DISK" "$VM_SEED" "$VM_CONSOLE" "$VM_CONSOLE.prev"
@@ -365,6 +382,7 @@ keyup) cmd_keyupdown false "$@" ;;
 type) cmd_type "$@" ;;
 usb-stick) cmd_usb_stick "$@" ;;
 reset) cmd_reset ;;
+clear-snapshots) cmd_clear_snapshots ;;
 console-log)
 	[[ ${1:-} == -f ]] && exec tail -F "$VM_CONSOLE"
 	cat "$VM_CONSOLE"

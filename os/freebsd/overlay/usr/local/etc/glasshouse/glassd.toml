@@ -48,7 +48,7 @@ backend = "zfs"
 [[agent]]
 id = "it-agent"
 name = "IT agent"
-version = "0.1"
+version = "0.2"
 description = "Fixes this computer: network and VPN, storage and slowdowns, from IT's approved list. Opens a help desk ticket with diagnostics when it can't."
 mode = "actions"
 program = "/usr/local/libexec/glasshouse/glass-it-agent"

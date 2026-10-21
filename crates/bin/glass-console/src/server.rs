@@ -538,7 +538,18 @@ impl Console {
         };
         let mut view = {
             let state = self.state();
-            state.credits.view(usage, on, &state.usage)
+            let mut view = state.credits.view(usage, on, &state.usage);
+            // Whether computers have them yet: the pilot ring gets a
+            // published change first.
+            view["live"] = json!(
+                state
+                    .in_force(Ring::Pilot)
+                    .and_then(
+                        |v| toml::from_str::<glass_policy::document::PolicyDocument>(&v.text).ok()
+                    )
+                    .is_some_and(|d| crate::edits::credits_on(&d))
+            );
+            view
         };
         view["offered"] = json!(self.credits.get().is_some());
         view["can_buy"] = json!(self.credits.get().is_some_and(|c| c.payments.is_some()));

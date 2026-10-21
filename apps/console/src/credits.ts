@@ -133,11 +133,21 @@ export async function creditsPage(root: HTMLElement, returned?: string): Promise
                   card(
                     "For agents",
                     null,
-                    h("p", {}, page.on ? chip("On in the draft", "ok") : chip("Off", "plain")),
+                    h(
+                      "p",
+                      {},
+                      page.on && page.live
+                        ? chip("On", "ok")
+                        : page.on
+                          ? chip("On in the draft: publish it in Policies", "ok")
+                          : page.live
+                            ? chip("Off in the draft: on until it's published", "plain")
+                            : chip("Off", "plain"),
+                    ),
                     h(
                       "p",
                       { class: "card-sub" },
-                      "Public and internal data only, unless you add credits to the confidential route in Policies. Agents also need to be allowed to call models.",
+                      "Public and internal data only, unless you add credits to the confidential route in Policies. Choose the agents that ask AI models in Policies, under Data labels and models.",
                     ),
                     page.terms_accepted
                       ? null
@@ -161,7 +171,7 @@ export async function creditsPage(root: HTMLElement, returned?: string): Promise
                         "div",
                         { class: "grant", "data-test": "computer" },
                         h("span", { class: "mono" }, c.device),
-                        h("span", {}, dollars(c.spent_usd)),
+                        h("span", {}, c.calls && c.spent_usd < 0.01 ? "under $0.01" : dollars(c.spent_usd)),
                         h("span", { class: "card-sub" }, `${c.calls} ${c.calls === 1 ? "call" : "calls"}`),
                       ),
                     ),

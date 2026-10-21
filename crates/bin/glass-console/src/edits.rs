@@ -58,7 +58,13 @@ pub enum Edit {
     },
     /// Whether agents may use the org's model credits (ADR 0039).
     Credits { on: bool },
+    /// Whether an agent may ask AI models (`model.complete`, AD-2), on
+    /// whatever routes the org's models allow. For every group.
+    ModelCalls { agent: AgentId, on: bool },
 }
+
+/// The action an agent needs to ask a model (ADR 0018).
+pub const MODEL_COMPLETE: &str = "model.complete";
 
 /// The provider model credits run on, in policy (ADR 0039).
 pub const CREDITS_PROVIDER: &str = "credits";
@@ -239,6 +245,24 @@ pub fn apply(doc: &mut PolicyDocument, edit: Edit) -> Result<(), String> {
             }
         }
         Edit::MaxLabel { group: name, label } => group(doc, &name).max_label = label,
+        Edit::ModelCalls { agent, on } => {
+            let rules = doc
+                .agents
+                .iter_mut()
+                .find(|a| a.id == agent)
+                .ok_or_else(|| format!("{agent} has no agent rules in this policy"))?;
+            let action: glass_types::ActionName =
+                MODEL_COMPLETE.parse().map_err(|e| format!("{e}"))?;
+            let exact: ActionPattern = MODEL_COMPLETE.parse().map_err(|e| format!("{e}"))?;
+            rules.allowed_actions.retain(|p| p != &exact);
+            if on {
+                rules.allowed_actions.push(exact);
+            } else if let Some(wider) = rules.allowed_actions.iter().find(|p| p.matches(&action)) {
+                return Err(format!(
+                    "{agent}'s rules allow {wider}, which includes asking AI models"
+                ));
+            }
+        }
         Edit::Egress { agent, egress } => {
             for destination in &egress {
                 let valid = destination
@@ -307,6 +331,63 @@ mod tests {
                 .tiers
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn ad2_adr0039_an_agent_may_ask_models_once_it_is_turned_on() {
+        let mut d = doc();
+        let allows = |d: &PolicyDocument| {
+            d.agents
+                .iter()
+                .find(|a| a.id.as_str() == "it-agent")
+                .unwrap()
+                .allowed_actions
+                .iter()
+                .filter(|p| p.as_str() == MODEL_COMPLETE)
+                .count()
+        };
+        assert_eq!(allows(&d), 0);
+        let on: Edit =
+            serde_json::from_str(r#"{"edit":"model_calls","agent":"it-agent","on":true}"#).unwrap();
+        apply(&mut d, on.clone()).unwrap();
+        apply(&mut d, on).unwrap();
+        assert_eq!(allows(&d), 1, "once, however often it's turned on");
+        glass_policy::Policy::from_document(d.clone()).unwrap();
+        apply(
+            &mut d,
+            Edit::ModelCalls {
+                agent: "it-agent".parse().unwrap(),
+                on: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(allows(&d), 0);
+        assert!(
+            apply(
+                &mut d,
+                Edit::ModelCalls {
+                    agent: "nobody".parse().unwrap(),
+                    on: true,
+                },
+            )
+            .is_err()
+        );
+        // A wider rule can't be turned off from here: the console says so.
+        let rules = d
+            .agents
+            .iter_mut()
+            .find(|a| a.id.as_str() == "it-agent")
+            .unwrap();
+        rules.allowed_actions.push("model.*".parse().unwrap());
+        let err = apply(
+            &mut d,
+            Edit::ModelCalls {
+                agent: "it-agent".parse().unwrap(),
+                on: false,
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("model.*"), "{err}");
     }
 
     #[test]

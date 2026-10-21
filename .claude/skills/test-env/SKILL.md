@@ -50,3 +50,5 @@ make vm-status            # "running: pid …, ssh … up" or not running
 See the troubleshooting table in `docs/dev/test-environment.md`. Most common:
 no sysroot (`make freebsd-sysroot`), glassd refusing a bad config
 (`make vm-run CMD="glassd --check"`), or a deploy that hung on a daemon.
+`perf` over budget on "action with snapshot first" or "take over": the VM
+has piled up test snapshots; `os/freebsd/scripts/vm.sh clear-snapshots`.

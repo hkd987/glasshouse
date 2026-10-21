@@ -249,6 +249,8 @@ export interface CreditsPage {
   offered: boolean;
   /** The policy draft has credits on for agents. */
   on: boolean;
+  /** What the pilot ring runs has them on. */
+  live?: boolean;
   granted_usd: number;
   spent_usd: number | null;
   remaining_usd: number | null;

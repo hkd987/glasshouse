@@ -9,6 +9,8 @@ import { type Impact, type PolicyPage, type Ring, type Tier, api } from "./api.t
 import { capital, card, chip, mono, notice, plural, stat } from "./ui.ts";
 
 const TIERS: Tier[] = ["auto", "notify", "ask", "never"];
+/** The action an agent needs to ask a model (ADR 0018). */
+const MODEL_COMPLETE = "model.complete";
 /** Apps a profile may hold, as policy names them. */
 const PROFILE_APPS: [string, string][] = [
   ["browser", "Browser"],
@@ -224,6 +226,21 @@ function render(view: View, act: Act): HTMLElement {
         },
         h("option", { value: "", selected: !p.max_label }, `The org's (${p.org_max_label})`),
         ...["public", "internal", "confidential"].map((l) => h("option", { value: l, selected: p.max_label === l }, capital(l))),
+      ),
+    ),
+    // AD-2, ADR 0039: which agents may ask a model at all; the routes above
+    // say which models, for each kind of data.
+    h("div", { class: "hint" }, "Agents that ask AI models, in every group"),
+    ...p.agents.map((a) =>
+      h(
+        "label",
+        { class: "check-row", "data-test": `model-calls-${a.id}` },
+        h("span", {}, a.name),
+        h("input", {
+          type: "checkbox",
+          checked: a.actions.includes(MODEL_COMPLETE),
+          onchange: (e: Event) => act(() => edit({ edit: "model_calls", agent: a.id, on: (e.target as HTMLInputElement).checked })),
+        }),
       ),
     ),
   );

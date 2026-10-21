@@ -6,13 +6,13 @@
 // fails when a budget is exceeded. Screenshots are 1440x900.
 
 import { createHmac } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { type Browser, type BrowserContext, type Page, expect, test } from "@playwright/test";
 
 import { CALENDAR_URL, CONSOLE_SHOTS, CONSOLE_URL, DEVICE, MAIL_URL, SETTINGS_URL, STORE_URL } from "./console-env.ts";
-import { DEV, audit, glassctl, glassctlJson, mcp, outcome } from "./env.ts";
+import { type ApprovalView, DEV, audit, glassctl, glassctlJson, mcp, outcome } from "./env.ts";
 
 /** AD-4: a page IT opens is interactive within this. */
 const PAGE_BUDGET_MS = 1000;
@@ -206,6 +206,69 @@ test("ad3 dv1 a change previewed and published to the pilot ring reaches the dev
   // profile, pointing at the console's servers.
   const apps = glassctlJson<{ id: string; kind: string; url: string | null }[]>("apps");
   expect(apps.find((a) => a.id === "console")?.url).toBe(CONSOLE_URL.replace(/\/$/, ""));
+  await close();
+});
+
+test("adr0039 ae4 IT lets the IT agent ask models, and its calls go through the console on the org's credits", async ({ browser }) => {
+  const { page, close } = await session(browser);
+  const before = version(status().policy);
+
+  // Credits on (an admin accepted the terms above), and the IT agent may
+  // ask models. Nothing else changes what it may do.
+  await open(page, "#/credits", "credits");
+  const credits = page.locator("[data-test=credits]");
+  await page.locator("[data-test=use-credits]").click();
+  await expect(credits).toContainText("On in the draft");
+  await open(page, "#/policy/everyone", "policy");
+  const asks = page.locator("[data-test=model-calls-it-agent] input");
+  await expect(asks).not.toBeChecked();
+  await asks.check();
+  await expect(asks).toBeChecked();
+  await page.click("button[data-test=preview]");
+  await expect(page.locator("ul.changes")).toContainText("Agent it-agent: allowed actions adds model.complete");
+  await shot(page, "model-calls-previewed");
+  await page.click("button[data-test=publish]");
+  await expect(page.locator(".notice")).toContainText("to the pilot ring");
+  await expect.poll(() => version(status().policy), { timeout: 2 * PROPAGATION_BUDGET_MS }).toBeGreaterThan(before);
+
+  // Nothing the IT agent can fix: it asks the model what the request is,
+  // then for an assessment for IT, and asks before it opens the ticket.
+  const task = glassctlJson<{ id: string }>("run", "it-agent", "The printer won't print", "--yes");
+  let ask: ApprovalView | undefined;
+  await expect
+    .poll(() => (ask = glassctlJson<ApprovalView[]>("approvals").find((a) => a.task === task.id)), { timeout: 30_000 })
+    .toBeTruthy();
+  glassctl("approve", ask!.id);
+  glassctl("wait", task.id, "--timeout", "60");
+
+  const calls = audit().filter((r) => r.event.action === "model.complete" && r.event.agent === "it-agent");
+  expect(calls).toHaveLength(2);
+  for (const call of calls) {
+    expect(outcome(call)).toBe("completed");
+    const model = (call.event.detail as { model: Record<string, unknown> }).model;
+    // Through the console, with no key on this computer: the console's
+    // development stand-in for OpenRouter answered and said what it cost.
+    expect(model.provider).toBe("credits");
+    expect(model.served_by).toBe("development/echo");
+    expect(model.cost_usd as number).toBeGreaterThan(0);
+  }
+  expect(JSON.stringify(audit())).not.toContain("sk-or-v1-memory");
+  // The stand-in's answer isn't a sorting, so keywords picked the checks;
+  // its assessment is in the ticket IT gets.
+  const outbox = join(DEV, "state/helpdesk/outbox");
+  const ticket = readdirSync(outbox)
+    .map((f) => JSON.parse(readFileSync(join(outbox, f), "utf8")) as { summary: string; details: string })
+    .find((t) => t.summary === "The printer won't print");
+  expect(ticket?.details).toContain("The IT agent's assessment:\nAnswered on model credits:");
+
+  // The admin sees what this computer spent; never what it asked.
+  await open(page, "#/credits", "credits");
+  const computer = page.locator("[data-test=computer]", { hasText: DEVICE });
+  await expect(computer).toContainText("2 calls");
+  await expect(computer).toContainText("under $0.01");
+  await expect(credits).toContainText("On");
+  await expect(credits).not.toContainText("in the draft");
+  await shot(page, "credits-by-computer");
   await close();
 });
 

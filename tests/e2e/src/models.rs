@@ -2,10 +2,11 @@
 //! scripted provider, so nothing leaves the VM.
 //!
 //! It needs the test policy `glass-e2e models-policy` prints: the default
-//! policy plus a scripted model, which the attended `claude-code` entry may
-//! call. The suite plays that agent over its task socket, as `harness`
-//! does; agents in jails call the same tool. `run-vm.sh` installs the
-//! policy, restarts glassd, runs this scenario and puts things back.
+//! policy plus a scripted model, which the attended `claude-code` entry and
+//! the IT agent may call. The suite plays `claude-code` over its task
+//! socket, as `harness` does; the IT agent calls the same tool from its
+//! jail (AE-4). `run-vm.sh` installs the policy, restarts glassd, runs this
+//! scenario and puts things back.
 
 use std::time::Duration;
 
@@ -43,19 +44,21 @@ usd_per_mtok_out = 15.0
 "#;
 
 /// The default policy, a scripted model, and model calls for the attended
-/// `claude-code` entry.
+/// `claude-code` entry and the IT agent.
 pub fn policy() -> anyhow::Result<String> {
     let mut doc: PolicyDocument = toml::from_str(glass_policy::DEFAULT_POLICY)?;
-    let agent = doc
-        .agents
-        .iter_mut()
-        .find(|a| a.id.as_str() == "claude-code")
-        .context("the default policy has a claude-code agent")?;
-    agent.allowed_actions.push(
-        "model.complete"
-            .parse()
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-    );
+    for id in ["claude-code", "it-agent"] {
+        let agent = doc
+            .agents
+            .iter_mut()
+            .find(|a| a.id.as_str() == id)
+            .with_context(|| format!("the default policy has a {id} agent"))?;
+        agent.allowed_actions.push(
+            "model.complete"
+                .parse()
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        );
+    }
     doc.models = toml::from_str::<Models>(MODELS)?;
     let text = format!(
         "# Written by glass-e2e models-policy for the model gateway scenario.\n{}",
@@ -212,6 +215,46 @@ pub async fn models(h: &Harness) -> anyhow::Result<()> {
         !log.contains(AWS_KEY) && !log.contains("ana@example.com"),
         "neither the key nor the address is in the audit log"
     );
+    it_agent(h).await
+}
+
+/// AE-4: the IT agent, in its jail, asks the model what the request is
+/// and, with nothing it can fix, for an assessment for IT's ticket. The
+/// scripted reply isn't a sorting, so keywords pick the checks.
+async fn it_agent(h: &Harness) -> anyhow::Result<()> {
+    let task = h
+        .start("it-agent", "The printer won't print", &[], &[])
+        .await?;
+    h.wait_for(task, TileState::NeedsYou, Duration::from_secs(60))
+        .await?;
+    let ask = h.the_ask(task).await?;
+    ensure!(
+        ask.summary.starts_with("Open a help desk ticket"),
+        "{}",
+        ask.summary
+    );
+    h.approve_once(&ask).await?;
+    h.wait_for(task, TileState::Done, Duration::from_secs(30))
+        .await?;
+    let calls: Vec<_> = h
+        .audit(task)
+        .await?
+        .into_iter()
+        .filter(|r| r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete"))
+        .collect();
+    ensure!(
+        calls.len() == 2,
+        "{} IT agent model calls on the record",
+        calls.len()
+    );
+    for call in &calls {
+        let m = &call.event.detail["model"];
+        ensure!(
+            call.event.outcome == Some(Outcome::Completed) && m["provider"] == "scripted",
+            "{:?} {m}",
+            call.event.outcome
+        );
+    }
     Ok(())
 }
 
