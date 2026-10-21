@@ -46,6 +46,41 @@ usd_per_mtok_out = 15.0
 /// The default policy, a scripted model, and model calls for the attended
 /// `claude-code` entry and the IT agent.
 pub fn policy() -> anyhow::Result<String> {
+    with_models(MODELS, "the model gateway scenario")
+}
+
+/// The default policy with one real model through OpenRouter (its id
+/// there, such as `anthropic/claude-sonnet-4.5`), for
+/// `tools/dev/real-model.sh`. The key is glassd's model secrets', never
+/// the policy's.
+pub fn real_policy(model: &str) -> anyhow::Result<String> {
+    ensure!(
+        !model.is_empty() && !model.contains(['"', '\\', '\n']),
+        "{model:?} isn't a model id"
+    );
+    let models = format!(
+        r#"
+default = "real"
+
+[redact]
+pii = ["email"]
+
+[[provider]]
+id = "openrouter"
+kind = "openrouter"
+name = "OpenRouter"
+
+[[model]]
+id = "real"
+provider = "openrouter"
+model = "{model}"
+name = "{model}"
+"#
+    );
+    with_models(&models, "tools/dev/real-model.sh")
+}
+
+fn with_models(models: &str, purpose: &str) -> anyhow::Result<String> {
     let mut doc: PolicyDocument = toml::from_str(glass_policy::DEFAULT_POLICY)?;
     for id in ["claude-code", "it-agent"] {
         let agent = doc
@@ -59,9 +94,9 @@ pub fn policy() -> anyhow::Result<String> {
                 .map_err(|e| anyhow::anyhow!("{e}"))?,
         );
     }
-    doc.models = toml::from_str::<Models>(MODELS)?;
+    doc.models = toml::from_str::<Models>(models)?;
     let text = format!(
-        "# Written by glass-e2e models-policy for the model gateway scenario.\n{}",
+        "# Written by glass-e2e for {purpose}.\n{}",
         toml::to_string(&doc)?
     );
     Policy::from_toml(&text)?;

@@ -34,6 +34,12 @@ make vm-status            # "running: pid …, ssh … up" or not running
 - Logs: `/var/log/glassd.log`; per task `/var/db/glasshouse/tasks/<id>/agent.log`.
 - A managed VM (what IT sets in the console reaches it): `make console-dev &`,
   then `os/freebsd/scripts/enroll-dev.sh`; `--undo` before `make e2e-vm`.
+- Agents on a real model: `tools/dev/real-model.sh [openrouter-model]` runs
+  the IT and desktop agents in the VM's jails through OpenRouter, with the
+  key from `OPENROUTER_API_KEY` (set in the environment's settings, never in
+  chat), and puts the VM back after. It needs direct TLS to openrouter.ai:
+  behind a cloud session's re-signing proxy the calls fail with "certificate
+  verify failed", and it never changes what the VM trusts to get around that.
 
 ## Rules
 
