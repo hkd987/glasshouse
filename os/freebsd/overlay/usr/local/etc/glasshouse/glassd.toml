@@ -51,13 +51,13 @@ backend = "zfs"
 id = "desktop-agent"
 name = "Desktop agent"
 version = "0.1"
-description = "Does what you ask with the tools policy gives it: reads your files, mail and calendar, drafts, and asks before anything that changes or sends."
+description = "Does what you ask with the tools policy gives it: reads your files, mail and calendar, and drafts mail for you to send. Where the rules say to ask, it asks first."
 mode = "actions"
 program = "/usr/local/libexec/glasshouse/glass-desktop-agent"
 plan = [
   "Work out what you asked with an AI model IT approved",
   "Use the tools policy gives it, one step at a time",
-  "Ask you before anything that changes or sends",
+  "Ask you first wherever the rules say to",
   "Tell you what it did and found",
 ]
 

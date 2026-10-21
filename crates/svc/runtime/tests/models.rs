@@ -9,7 +9,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use glass_api::{LayerChange, TaskRequest};
+use glass_api::{AnswerApproval, ApprovalAnswer, LayerChange, TaskRequest};
 use glass_audit::{AuditRecord, Outcome};
 use glass_rpc::Client;
 use glass_rpc::mcp::{CallToolResult, ListToolsResult};
@@ -17,7 +17,7 @@ use glass_runtime::RuntimeError;
 use glass_types::{TaskId, Tier};
 use serde_json::{Value, json};
 
-use crate::common::{Harness, harness, harness_with, tool};
+use crate::common::{Harness, eventually, harness, harness_with, tool};
 
 /// A model-backed agent, and models for public and internal data only.
 /// Internal calls try a provider that is always rate limited first.
@@ -476,4 +476,90 @@ async fn adr0041_the_model_proposes_a_tool_call_and_the_agent_makes_it_under_pol
         "no tool result in a model call's record"
     );
     assert!(log.contains("files.list"));
+}
+
+/// ADR 0041's safety property where it matters most: a call the model
+/// proposes that policy puts at Ask waits for the person like any other,
+/// and a decline reaches the model as an error result with nothing done.
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0041_a_model_proposed_call_at_ask_waits_and_a_decline_does_nothing() {
+    let h = harness_with(MODELS);
+    let mut request = h.request(&[], &["Reports"]);
+    request.agent = "writer".parse().unwrap();
+    request.scope.restrict = vec![("files.write".into(), Tier::Ask)];
+    let task = h.rt.start(&h.me, request).unwrap().id;
+    let agent = std::sync::Arc::new(h.agent(task).await);
+    let tools: ListToolsResult = agent.call("tools/list", Value::Null).await.unwrap();
+    let write = tools
+        .tools
+        .iter()
+        .find(|t| t.name == "files_write")
+        .unwrap();
+    let offered = json!([{
+        "name": write.name,
+        "description": write.description,
+        "input_schema": write.input_schema,
+    }]);
+    let prompt = r#"Save a note. Use files_write {"path": "Reports/note.txt", "content": "hi"}"#;
+    let first = tool(
+        &agent,
+        "model_complete",
+        json!({ "messages": [{"role": "user", "content": prompt}], "max_tokens": 200, "tools": offered }),
+    )
+    .await;
+    let call = first.structured_content.clone().unwrap()["tool_calls"][0].clone();
+    assert_eq!(call["name"], "files_write");
+
+    // The agent makes the call; it waits for the person.
+    let pending = {
+        let agent = std::sync::Arc::clone(&agent);
+        let input = call["input"].clone();
+        tokio::spawn(async move { tool(&agent, "files_write", input).await })
+    };
+    eventually(|| !h.rt.approvals(&h.me).is_empty()).await;
+    let ask = h.rt.approvals(&h.me).remove(0);
+    assert_eq!(ask.task, task);
+    h.rt.answer(
+        &h.me,
+        AnswerApproval {
+            approval: ask.id,
+            answer: ApprovalAnswer::Deny,
+        },
+    )
+    .unwrap();
+    let declined = pending.await.unwrap();
+    assert!(
+        declined.is_error && declined.text().contains("declined"),
+        "{}",
+        declined.text()
+    );
+    assert!(
+        !h.home().join("Reports/note.txt").exists(),
+        "nothing written"
+    );
+
+    // The model reads the refusal as the call's result.
+    let second = tool(
+        &agent,
+        "model_complete",
+        json!({
+            "messages": [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": first.text(), "tool_calls": [call]},
+                {"role": "user", "tool_results": [{"id": call["id"], "content": declined.text(), "is_error": true}]}
+            ],
+            "max_tokens": 200,
+            "tools": offered,
+        }),
+    )
+    .await;
+    assert!(!second.is_error, "{}", second.text());
+    assert!(second.text().contains("declined"), "{}", second.text());
+    let second_data = second.structured_content.clone().unwrap();
+    assert!(
+        second_data["tool_calls"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
+        "a result is answered, not a new call: {second_data}"
+    );
 }

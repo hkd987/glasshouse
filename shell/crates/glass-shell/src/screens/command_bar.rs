@@ -353,8 +353,8 @@ fn answer<'a>(bar: &'a CommandBar<'a>) -> Element<'a, Message> {
         let mut column = column![
             section("Desktop agent"),
             text(if typed {
-                "\u{21B5} Hand this to the desktop agent. It asks before anything that \
-                 changes or sends."
+                "\u{21B5} Hand this to the desktop agent. It asks first wherever the \
+                 rules say to."
             } else {
                 "Ask anything, or describe a task to hand off."
             })
