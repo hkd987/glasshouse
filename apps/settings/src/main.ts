@@ -36,6 +36,8 @@ interface Models {
   /** The person is this computer's owner. */
   editable: boolean;
   services: { id: string; name: string }[];
+  /** The agents that may ask the owner's models, on this computer they own. */
+  agents: { id: string; name: string; on: boolean; always: boolean }[];
 }
 
 const bridge = new Bridge({ app: "settings" });
@@ -255,6 +257,21 @@ async function connect(service: string | null): Promise<void> {
   await load();
 }
 
+/** Lets an agent ask the owner's AI models, or stops it (ADR 0039). */
+async function allow(agent: string, on: boolean): Promise<void> {
+  state.busy = "models";
+  state.notice = null;
+  render();
+  try {
+    const result = await bridge.call("settings.models_agents", { agent, on });
+    state.notice = { text: result.text, tone: result.ok ? "ok" : "bad" };
+  } catch (error) {
+    state.notice = { text: error instanceof BridgeError ? error.message : String(error), tone: "bad" };
+  }
+  state.busy = null;
+  await load();
+}
+
 /** How agents reach AI models: the owner's to connect, IT's when managed. */
 function models(m: Models): HTMLElement {
   const name = (id: string | null) => m.services.find((s) => s.id === id)?.name ?? id ?? "";
@@ -316,6 +333,32 @@ function models(m: Models): HTMLElement {
         ),
         control,
       ),
+      // Which agents use them: the owner's choice, once they're connected.
+      ...(m.connected && !m.managed
+        ? m.agents.map((a) =>
+            h(
+              "div",
+              { class: "setting", "data-setting": `models-agent-${a.id}` },
+              h(
+                "div",
+                {},
+                h("div", { class: "title" }, a.name),
+                h("div", { class: "help" }, a.always ? "Asks AI models whenever it runs: it's what it does." : "May use your AI models when it works for you."),
+              ),
+              h(
+                "span",
+                { class: "control" },
+                h("input", {
+                  type: "checkbox",
+                  "aria-label": `${a.name} uses your AI models`,
+                  checked: a.on,
+                  disabled: busy || a.always || !m.editable,
+                  onchange: (e: Event) => allow(a.id, (e.target as HTMLInputElement).checked),
+                }),
+              ),
+            ),
+          )
+        : []),
     ),
   );
 }

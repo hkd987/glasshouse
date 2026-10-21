@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 
-import { DEV, SHOTS, appUrl, audit, control } from "./env.ts";
+import { DEV, SHOTS, appUrl, audit, control, glassctlJson } from "./env.ts";
 
 interface SettingsView {
   settings: { id: string; value: unknown }[];
@@ -96,7 +96,27 @@ test("adr0039 the owner connects their own AI models in Settings, and the key st
     if (existsSync(path)) expect(readFileSync(path, "utf8")).not.toContain("e2e-own-key");
   }
 
+  // The IT agent may use them until the owner says otherwise: its card
+  // names the model. Turned off, it's scripted again; the choice is on the
+  // record (ADR 0039).
+  const model = () => glassctlJson<{ model: string }>("plan", "it-agent", "My disk is full").model;
+  const it = page.locator('[data-setting="models-agent-it-agent"]');
+  await expect(it.locator("input[type=checkbox]")).toBeChecked();
+  await expect(page.locator('[data-setting="models-agent-skill-evals"] input')).toBeDisabled();
+  expect(model()).not.toBe("No model (scripted agent)");
+  await page.locator('[data-setting="models-agent-skill-evals"]').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(SHOTS, "settings-ai-models-agents.png") });
+  await it.locator("input[type=checkbox]").uncheck();
+  await expect(page.locator(".banner")).toContainText("IT agent no longer uses your AI models.");
+  await expect(it.locator("input[type=checkbox]")).not.toBeChecked();
+  expect(model()).toBe("No model (scripted agent)");
+  expect(audit().some((r) => r.event.action === "settings.models_agents")).toBe(true);
+  await it.locator("input[type=checkbox]").check();
+  await expect(page.locator(".banner")).toContainText("IT agent may use your AI models now.");
+  expect(model()).not.toBe("No model (scripted agent)");
+
   await row.locator("[data-test=disconnect]").click();
   await expect(row.locator("[data-test=connect]")).toBeVisible();
   expect(existsSync(file)).toBe(false);
+  expect(model()).toBe("No model (scripted agent)");
 });

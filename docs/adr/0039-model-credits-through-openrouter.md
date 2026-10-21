@@ -117,6 +117,13 @@ only, this amends ADR 0018: their prompts cross our servers.
      an OpenRouter or Anthropic key in Settings. glassd keeps it root
      only, and adds the provider and a default model to the computer's
      own policy.
+   - The owner chooses which agents use them, in Settings, under AI
+     models (`settings.models_agents`, the owner's alone, never an
+     agent's): each choice adds `model.complete` to that agent's rules on
+     this computer. The IT agent may until the owner says otherwise (setup
+     asked how agents reach models, and it sends only the request and the
+     findings in words); others only on the owner's word; agents whose
+     rules already ask models (`skill-evals`) show as always on.
    - Of setup's answers, only "API key" can be applied now. "Claude
      Code" and "ChatGPT" sign-ins need OAuth flows that aren't built.
 

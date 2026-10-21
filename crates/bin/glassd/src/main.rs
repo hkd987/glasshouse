@@ -261,8 +261,11 @@ fn prepare(args: &Args) -> anyhow::Result<Prepared> {
     let mut loaded = loaded;
     let base_policy = loaded.policy.clone();
     if config.managed.is_none() {
-        loaded.policy =
-            personal::with_models(loaded.policy, personal::connected(&config).as_deref());
+        loaded.policy = personal::with_models(
+            loaded.policy,
+            personal::connected(&config).as_deref(),
+            &personal::chosen(&config),
+        );
     }
     let registry = registry(&config, &loaded.policy, &org)?;
     for warning in loaded.policy.lint(&registry.lint_info()) {

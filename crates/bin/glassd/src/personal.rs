@@ -4,11 +4,15 @@
 //! beside its state, which no jail mounts, adds the service to the
 //! computer's own policy as its default model, and rebuilds the gateway
 //! with it. The key is never handed back, logged or recorded.
+//!
+//! The owner also chooses which agents may ask those models: the IT agent
+//! until they say otherwise, any other on their word. Their choice is kept
+//! beside the key and adds `model.complete` to those agents' rules.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use glass_first_party::ModelKeys;
+use glass_first_party::{ModelAgent, ModelKeys};
 use glass_policy::Policy;
 use glass_policy::document::{ModelEntry, ProviderEntry, ProviderKind};
 use glass_runtime::Runtime;
@@ -24,6 +28,39 @@ pub(crate) fn path(config: &Config) -> PathBuf {
     config.state_dir.join("models/personal.toml")
 }
 
+/// Which agents may ask the owner's models until they choose: ours that
+/// ask models for the person (AE-4).
+pub(crate) const DEFAULT_AGENTS: [&str; 1] = ["it-agent"];
+
+/// The action an agent needs to ask a model.
+const MODEL_COMPLETE: &str = "model.complete";
+
+/// Where the owner's choice of agents is kept.
+fn agents_path(config: &Config) -> PathBuf {
+    config.state_dir.join("models/agents.toml")
+}
+
+/// The agents the owner lets ask their models: their choice, or ours.
+pub(crate) fn chosen(config: &Config) -> Vec<String> {
+    std::fs::read_to_string(agents_path(config))
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+        .and_then(|t| {
+            t.get("agents")?.as_array().map(|list| {
+                list.iter()
+                    .filter_map(|a| a.as_str().map(str::to_owned))
+                    .collect()
+            })
+        })
+        .unwrap_or_else(|| DEFAULT_AGENTS.iter().map(|a| (*a).to_owned()).collect())
+}
+
+/// Whether `rules` let an agent ask models already.
+fn asks_models(rules: &glass_policy::document::AgentPolicy) -> bool {
+    let action: glass_types::ActionName = MODEL_COMPLETE.parse().expect("static name");
+    rules.allowed_actions.iter().any(|p| p.matches(&action))
+}
+
 /// The service the owner connected, from the kept file.
 pub(crate) fn connected(config: &Config) -> Option<String> {
     let table: toml::Table = toml::from_str(&std::fs::read_to_string(path(config)).ok()?).ok()?;
@@ -31,10 +68,10 @@ pub(crate) fn connected(config: &Config) -> Option<String> {
 }
 
 /// `policy` with the owner's `service` as a provider and, when policy names
-/// none, the default model for public and internal data. A policy that
-/// already names `personal`, or one the result wouldn't validate as, stays
-/// as it was.
-pub(crate) fn with_models(policy: Policy, service: Option<&str>) -> Policy {
+/// none, the default model for public and internal data, and `agents`
+/// allowed to ask it. A policy that already names `personal`, or one the
+/// result wouldn't validate as, stays as it was.
+pub(crate) fn with_models(policy: Policy, service: Option<&str>, agents: &[String]) -> Policy {
     let Some(service) = service else {
         return policy;
     };
@@ -73,6 +110,17 @@ pub(crate) fn with_models(policy: Policy, service: Option<&str>) -> Policy {
         usd_per_mtok_out: None,
     });
     doc.models.default.get_or_insert_with(|| PROVIDER.into());
+    for rules in doc
+        .agents
+        .iter_mut()
+        .filter(|a| agents.iter().any(|id| id == a.id.as_str()))
+    {
+        if !asks_models(rules) {
+            rules
+                .allowed_actions
+                .push(MODEL_COMPLETE.parse().expect("static pattern"));
+        }
+    }
     match Policy::from_document(doc) {
         Ok(with) => with,
         Err(e) => {
@@ -114,7 +162,11 @@ impl PersonalModels {
             return Err("glassd is stopping".into());
         };
         let base = self.base.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let policy = with_models(base, connected(&self.config).as_deref());
+        let policy = with_models(
+            base,
+            connected(&self.config).as_deref(),
+            &chosen(&self.config),
+        );
         let registry =
             crate::registry(&self.config, &policy, &self.org).map_err(|e| format!("{e:#}"))?;
         let models = crate::gateway(&self.config, &policy, &self.org);
@@ -155,6 +207,44 @@ impl ModelKeys for PersonalModels {
         let table: toml::Table = toml::from_str(&text).ok()?;
         Some(table.get("models")?.as_str()?.to_owned())
     }
+
+    /// The agents on this computer that run a program of their own (not a
+    /// person's harness), with policy rules.
+    fn agents(&self) -> Vec<ModelAgent> {
+        let base = self.base.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let chosen = chosen(&self.config);
+        self.config
+            .agents
+            .iter()
+            .filter(|entry| !entry.attended)
+            .filter_map(|entry| {
+                let rules = base.document().agents.iter().find(|a| a.id == entry.id)?;
+                let always = asks_models(rules);
+                Some(ModelAgent {
+                    id: entry.id.to_string(),
+                    name: entry.name.clone(),
+                    on: always || chosen.iter().any(|c| c == entry.id.as_str()),
+                    always,
+                })
+            })
+            .collect()
+    }
+
+    fn allow(&self, agent: &str, on: bool) -> Result<(), String> {
+        let mut chosen = chosen(&self.config);
+        chosen.retain(|a| a != agent);
+        if on {
+            chosen.push(agent.to_owned());
+        }
+        chosen.sort();
+        let text = format!(
+            "# The agents the computer's owner lets ask their AI models, from Settings (ADR 0039).\nagents = {}\n",
+            toml::Value::Array(chosen.into_iter().map(toml::Value::String).collect())
+        );
+        crate::write_root_only(&agents_path(&self.config), text.as_bytes())
+            .map_err(|e| format!("the choice couldn't be kept: {e}"))?;
+        self.reload()
+    }
 }
 
 #[cfg(test)]
@@ -166,21 +256,24 @@ mod tests {
         let base = Policy::from_toml(glass_policy::DEFAULT_POLICY).unwrap();
         assert!(base.document().models.default.is_none());
 
-        let with = with_models(base.clone(), Some("openrouter"));
+        let with = with_models(base.clone(), Some("openrouter"), &[]);
         let models = &with.document().models;
         assert_eq!(models.default.as_deref(), Some(PROVIDER));
         assert_eq!(models.providers[0].kind, ProviderKind::OpenRouter);
         assert_eq!(models.models[0].model, "openrouter/auto");
-        let with = with_models(base.clone(), Some("anthropic"));
+        let with = with_models(base.clone(), Some("anthropic"), &[]);
         assert_eq!(
             with.document().models.providers[0].kind,
             ProviderKind::Anthropic
         );
 
         // Nothing connected, or nothing we know: the policy as it was.
-        assert_eq!(with_models(base.clone(), None).document(), base.document());
         assert_eq!(
-            with_models(base.clone(), Some("elsewhere")).document(),
+            with_models(base.clone(), None, &[]).document(),
+            base.document()
+        );
+        assert_eq!(
+            with_models(base.clone(), Some("elsewhere"), &[]).document(),
             base.document()
         );
         // A default the policy names stays.
@@ -189,7 +282,56 @@ mod tests {
             glass_policy::DEFAULT_POLICY
         ))
         .unwrap();
-        let with = with_models(named, Some("openrouter"));
+        let with = with_models(named, Some("openrouter"), &[]);
         assert_eq!(with.document().models.default.as_deref(), Some("house"));
+    }
+
+    #[test]
+    fn adr0039_the_agents_the_owner_chooses_may_ask_their_models_and_no_others() {
+        let base = Policy::from_toml(glass_policy::DEFAULT_POLICY).unwrap();
+        let asks = |p: &Policy, id: &str| {
+            p.document()
+                .agents
+                .iter()
+                .find(|a| a.id.as_str() == id)
+                .is_some_and(asks_models)
+        };
+        assert!(!asks(&base, "it-agent") && asks(&base, "skill-evals"));
+
+        let chosen: Vec<String> = DEFAULT_AGENTS.iter().map(|a| (*a).to_owned()).collect();
+        let with = with_models(base.clone(), Some("openrouter"), &chosen);
+        assert!(asks(&with, "it-agent"));
+        assert!(!asks(&with, "invoice-demo"));
+        // Once, however often it's applied.
+        let twice = with_models(with.clone(), Some("openrouter"), &chosen);
+        let rules = twice
+            .document()
+            .agents
+            .iter()
+            .find(|a| a.id.as_str() == "it-agent")
+            .unwrap();
+        assert_eq!(
+            rules
+                .allowed_actions
+                .iter()
+                .filter(|p| p.as_str() == MODEL_COMPLETE)
+                .count(),
+            1
+        );
+        // None chosen, or no models connected: no agent gains them.
+        assert!(!asks(
+            &with_models(base.clone(), Some("openrouter"), &[]),
+            "it-agent"
+        ));
+        assert!(!asks(&with_models(base.clone(), None, &chosen), "it-agent"));
+        // An agent policy has no rules for gains nothing.
+        let stranger = with_models(base, Some("openrouter"), &["nobody".to_owned()]);
+        assert!(
+            stranger
+                .document()
+                .agents
+                .iter()
+                .all(|a| a.id.as_str() != "nobody")
+        );
     }
 }

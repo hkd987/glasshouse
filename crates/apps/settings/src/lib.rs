@@ -32,6 +32,9 @@ pub const MODELS: &str = "settings.models";
 /// The owner connects their own models service with its key (ADR 0039).
 /// The person's own, in Settings alone: never an agent's.
 pub const MODELS_CONNECT: &str = "settings.models_connect";
+/// The owner lets an agent ask their AI models, or not (ADR 0039). The
+/// person's own, in Settings alone: never an agent's.
+pub const MODELS_AGENTS: &str = "settings.models_agents";
 /// The Settings app: the one place the computer's own settings change.
 pub const APP: &str = "settings";
 
@@ -50,6 +53,26 @@ pub trait ModelKeys: Send + Sync {
     fn connect(&self, choice: Option<(&str, &str)>) -> Result<(), String>;
     /// How setup said agents should reach models, if it was asked.
     fn setup_choice(&self) -> Option<String>;
+    /// The agents that may ask the owner's models, and which do.
+    fn agents(&self) -> Vec<ModelAgent> {
+        Vec::new()
+    }
+    /// Lets `agent` ask the owner's models, or stops it.
+    fn allow(&self, agent: &str, on: bool) -> Result<(), String> {
+        let _ = (agent, on);
+        Err("This computer can't choose which agents use its AI models.".into())
+    }
+}
+
+/// An agent, as Settings lists it under AI models.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelAgent {
+    pub id: String,
+    pub name: String,
+    /// It may ask the owner's models.
+    pub on: bool,
+    /// Policy lets it ask models whatever the owner chooses here.
+    pub always: bool,
 }
 
 /// A setting as someone's computer applies it.
@@ -161,6 +184,48 @@ impl SettingsHandle {
             "managed": owner.is_none(),
             "editable": keys.is_some() && owner.as_deref() == Some(user),
             "services": MODEL_SERVICES.iter().map(|(id, name, _)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
+            "agents": keys.as_ref().filter(|_| owner.is_some()).map(|k| k.agents()).unwrap_or_default(),
+        })
+    }
+
+    /// The owner's model keys, if `user` is this computer's owner; else why
+    /// not, in words.
+    fn owners_keys(&self, user: &str) -> Result<Arc<dyn ModelKeys>, ActionError> {
+        let Some(keys) = self.model_keys() else {
+            return Err(ActionError::Failed(
+                "This computer can't keep a models key.".into(),
+            ));
+        };
+        match self.owner() {
+            None => Err(ActionError::Failed(
+                "Your organization sets how agents reach AI models.".into(),
+            )),
+            Some(owner) if owner != user => Err(ActionError::Failed(format!(
+                "Only this computer's owner, {owner}, connects AI models."
+            ))),
+            Some(_) => Ok(keys),
+        }
+    }
+
+    /// The owner lets `agent` ask their AI models, or stops it (ADR 0039).
+    pub fn allow_agent(&self, user: &str, agent: &str, on: bool) -> Result<String, ActionError> {
+        let keys = self.owners_keys(user)?;
+        let Some(listed) = keys.agents().into_iter().find(|a| a.id == agent) else {
+            return Err(ActionError::InvalidInput(format!(
+                "no agent {agent:?} on this computer"
+            )));
+        };
+        if listed.always {
+            return Err(ActionError::Failed(format!(
+                "{} always asks AI models: it's what it does.",
+                listed.name
+            )));
+        }
+        keys.allow(agent, on).map_err(ActionError::Failed)?;
+        Ok(if on {
+            format!("{} may use your AI models now.", listed.name)
+        } else {
+            format!("{} no longer uses your AI models.", listed.name)
         })
     }
 
@@ -172,24 +237,7 @@ impl SettingsHandle {
         user: &str,
         choice: Option<(&str, &str)>,
     ) -> Result<String, ActionError> {
-        let Some(keys) = self.model_keys() else {
-            return Err(ActionError::Failed(
-                "This computer can't keep a models key.".into(),
-            ));
-        };
-        match self.owner() {
-            None => {
-                return Err(ActionError::Failed(
-                    "Your organization sets how agents reach AI models.".into(),
-                ));
-            }
-            Some(owner) if owner != user => {
-                return Err(ActionError::Failed(format!(
-                    "Only this computer's owner, {owner}, connects AI models."
-                )));
-            }
-            Some(_) => {}
-        }
+        let keys = self.owners_keys(user)?;
         let Some((service, key)) = choice else {
             keys.connect(None).map_err(ActionError::Failed)?;
             return Ok("AI models are disconnected; agents can't reach any now.".into());
@@ -636,6 +684,13 @@ struct ConnectInput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AgentsInput {
+    agent: String,
+    on: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SetInput {
     id: String,
     /// The new value; leave it out to go back to IT's default.
@@ -708,6 +763,25 @@ impl ActionProvider for SettingsProvider {
                 default_tier: Tier::Never,
                 ask: AskLabels::default(),
             },
+            ActionDef {
+                name: MODELS_AGENTS.parse().expect("static name"),
+                title: "Choose which agents use your AI models".into(),
+                description: "The computer's owner lets an agent ask the AI models they \
+                              connected, or stops it, in Settings. Never an agent."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "agent": { "type": "string" },
+                        "on": { "type": "boolean" }
+                    },
+                    "required": ["agent", "on"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
         ]
     }
 
@@ -743,6 +817,18 @@ impl ActionProvider for SettingsProvider {
                 let _: NoInput = glass_actions::parse_input(input)?;
                 Ok(Preview {
                     summary: "Read how agents reach AI models".into(),
+                    targets: vec!["Settings: AI models".into()],
+                    ..Preview::default()
+                })
+            }
+            MODELS_AGENTS => {
+                let input: AgentsInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: if input.on {
+                        format!("Let {} use your AI models", input.agent)
+                    } else {
+                        format!("Stop {} using your AI models", input.agent)
+                    },
                     targets: vec!["Settings: AI models".into()],
                     ..Preview::default()
                 })
@@ -838,6 +924,23 @@ impl ActionProvider for SettingsProvider {
                         None => "No AI models are connected.".into(),
                     },
                     data: view,
+                    changes: Vec::new(),
+                })
+            }
+            MODELS_AGENTS => {
+                // As connecting: the owner's own, in Settings, never an agent.
+                if ctx.principal.agent.as_str() != APP {
+                    return Err(ActionError::Failed(
+                        "Only the computer's owner chooses which agents use its AI models, in \
+                         Settings; never an agent."
+                            .into(),
+                    ));
+                }
+                let input: AgentsInput = glass_actions::parse_input(input)?;
+                let text = self.handle.allow_agent(&who.name, &input.agent, input.on)?;
+                Ok(ActionOutput {
+                    text,
+                    data: self.handle.models_view(&who.name),
                     changes: Vec::new(),
                 })
             }
@@ -1324,5 +1427,105 @@ members = ["dana"]
             )
             .unwrap();
         assert_eq!(keys.connected(), None);
+    }
+
+    /// The owner's agent choices, as glassd keeps them.
+    struct Chooser(Mutex<Vec<ModelAgent>>);
+
+    impl ModelKeys for Chooser {
+        fn connected(&self) -> Option<String> {
+            Some("openrouter".into())
+        }
+        fn connect(&self, _: Option<(&str, &str)>) -> Result<(), String> {
+            Ok(())
+        }
+        fn setup_choice(&self) -> Option<String> {
+            None
+        }
+        fn agents(&self) -> Vec<ModelAgent> {
+            self.0.lock().unwrap().clone()
+        }
+        fn allow(&self, agent: &str, on: bool) -> Result<(), String> {
+            for a in self.0.lock().unwrap().iter_mut().filter(|a| a.id == agent) {
+                a.on = on;
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn adr0039_the_owner_chooses_which_agents_use_their_models_and_no_agent_can() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SettingsHandle::new(dir.path());
+        let agent = |id: &str, name: &str, on: bool, always: bool| ModelAgent {
+            id: id.into(),
+            name: name.into(),
+            on,
+            always,
+        };
+        let keys = Arc::new(Chooser(Mutex::new(vec![
+            agent("it-agent", "IT agent", true, false),
+            agent("skill-evals", "Skill evals", true, true),
+        ])));
+        handle.set_model_keys(keys.clone());
+        let provider = SettingsProvider::new(handle.clone());
+        let choose = MODELS_AGENTS.parse().unwrap();
+        let off = json!({ "agent": "it-agent", "on": false });
+
+        // A managed computer: IT decides, and Settings lists no agents.
+        assert!(
+            provider
+                .invoke(&ctx("dana", 1001, APP), &choose, &off)
+                .is_err()
+        );
+        assert_eq!(handle.models_view("dana")["agents"], json!([]));
+
+        handle.set_owner(Some("dana".into()));
+        assert_eq!(handle.models_view("dana")["agents"][0]["on"], true);
+        // Not Sam, not an agent, not one policy always lets ask, not one
+        // that isn't here.
+        let sam = provider
+            .invoke(&ctx("sam", 1002, APP), &choose, &off)
+            .unwrap_err()
+            .to_string();
+        assert!(sam.contains("owner, dana"), "{sam}");
+        let by_agent = provider
+            .invoke(&ctx("dana", 1001, "it-agent"), &choose, &off)
+            .unwrap_err()
+            .to_string();
+        assert!(by_agent.contains("never an agent"), "{by_agent}");
+        let always = provider
+            .invoke(
+                &ctx("dana", 1001, APP),
+                &choose,
+                &json!({ "agent": "skill-evals", "on": false }),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(always.contains("always asks"), "{always}");
+        assert!(
+            provider
+                .invoke(
+                    &ctx("dana", 1001, APP),
+                    &choose,
+                    &json!({ "agent": "nobody", "on": true })
+                )
+                .is_err()
+        );
+
+        // Dana turns the IT agent off, and on again.
+        let done = provider
+            .invoke(&ctx("dana", 1001, APP), &choose, &off)
+            .unwrap();
+        assert_eq!(done.text, "IT agent no longer uses your AI models.");
+        assert_eq!(done.data["agents"][0]["on"], false);
+        let done = provider
+            .invoke(
+                &ctx("dana", 1001, APP),
+                &choose,
+                &json!({ "agent": "it-agent", "on": true }),
+            )
+            .unwrap();
+        assert_eq!(done.text, "IT agent may use your AI models now.");
     }
 }
