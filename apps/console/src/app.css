@@ -77,6 +77,16 @@ body {
   font-size: 15px;
 }
 
+.sidebar a .badge {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--attention);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+}
+
 .sidebar a.current {
   background: #e4e7eb;
   color: var(--ink);

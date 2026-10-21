@@ -7,7 +7,7 @@ Model credits page, the policy edit); computers' calls through the
 console, which keeps the org's key; individuals' own keys in Settings;
 payment by card through Stripe at our markup, and the providers' terms
 accepted for each org; IT's choice of which agents ask models, and the IT
-agent asking them (AE-4). Next: low-balance alerts.
+agent asking them (AE-4); low-balance alerts for admins and for us.
 PRD MP-1, MP-4, MP-8, MP-10, MP-11, GT-3. The owner asked for a path for
 orgs that use neither Bedrock nor Claude Code: admins buy model usage
 from us in bulk, and we route it with OpenRouter's auto mode
@@ -151,5 +151,17 @@ only, this amends ADR 0018: their prompts cross our servers.
   against OpenRouter's 24 hours, and what we say about credits that
   expire after 365 days.
 - Our OpenRouter balance must always cover the sum of every org's limits.
-  The limits are slices of one balance. Low-balance alerts to us are part
-  of the console work.
+  The limits are slices of one balance. `GET /ops/credits` (our
+  operators' token) says whether it does, from OpenRouter's account and
+  every key's unspent limit, and logs an error when it doesn't: our
+  monitoring has to poll it and page someone, which isn't set up.
+
+## Low balance
+- An org's admins are warned below a threshold they set (a tenth of what
+  they bought, at least $5, until they do): on Model credits, and beside
+  it in the sidebar on every page. The sidebar's figure comes from the
+  console's own record of its computers' calls, so no page waits on
+  OpenRouter; Model credits shows OpenRouter's own when it answers.
+- Used up, the page says agents' calls on credits go to the next model
+  on the route, or nowhere, until they buy more. No email or other
+  notice leaves the console yet.

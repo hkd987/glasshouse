@@ -37,7 +37,8 @@ pub use console::ConsoleClient;
 pub use credits::{CreditsLink, CreditsProvider};
 pub use mail::ImapLink;
 pub use openrouter::{
-    AUTO as OPENROUTER_AUTO, KeyUsage, MadeKey, OpenRouterKeys, OpenRouterProvider,
+    AUTO as OPENROUTER_AUTO, Account as OpenRouterAccount, KeyUsage, MadeKey, OpenRouterKeys,
+    OpenRouterProvider,
 };
 
 /// A gateway with a provider for each policy entry this machine can use,

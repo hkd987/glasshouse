@@ -66,7 +66,17 @@ function layout(current: string, content: HTMLElement): HTMLElement {
     h(
       "nav",
       { class: "sidebar", "aria-label": "Sections" },
-      ...nav().map(([id, name]) => h("a", { href: `#/${id}`, class: id === current ? "current" : "" }, name)),
+      ...nav().map(([id, name]) =>
+        h(
+          "a",
+          { href: `#/${id}`, class: id === current ? "current" : "" },
+          name,
+          // Credits running low show on every page (ADR 0039).
+          id === "credits" && session?.credits
+            ? h("span", { class: "badge", "data-test": "credits-badge", title: session.credits === "used_up" ? "Used up" : "Running low" }, session.credits === "used_up" ? "Used up" : "Low")
+            : null,
+        ),
+      ),
     ),
     h("main", { class: "content" }, content),
   );
@@ -111,7 +121,9 @@ async function route(): Promise<void> {
   const content = h("div", { class: "loading" });
   let section = asked ?? "";
   try {
-    session ??= await api<Session>("GET", "/api/session");
+    // Read on every page: it carries what the sidebar marks, such as
+    // credits running low (ADR 0039).
+    session = await api<Session>("GET", "/api/session");
     // A page this session doesn't open goes to the first one it does.
     const pages = nav().map(([id]) => id);
     if (!pages.includes(section)) section = pages[0] ?? "";

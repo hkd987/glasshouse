@@ -172,6 +172,23 @@ struct KeyData {
     usage: KeyUsage,
 }
 
+/// Our OpenRouter account, in OpenRouter's dollars (ADR 0039).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Account {
+    /// What's left of the credits we bought.
+    pub balance: f64,
+    /// What every org's key may still spend: the sum of their limits'
+    /// remainders, which `balance` must cover.
+    pub outstanding: f64,
+}
+
+impl Account {
+    /// Whether every org could spend all it has left.
+    pub fn covered(&self) -> bool {
+        self.balance >= self.outstanding
+    }
+}
+
 /// A key OpenRouter made: its id, for managing it, and the key itself,
 /// which it shows only this once.
 pub struct MadeKey {
@@ -216,7 +233,9 @@ impl OpenRouterKeys {
         }
     }
 
-    fn call(&self, method: &str, path: &str, body: &serde_json::Value) -> Result<KeyReply, String> {
+    /// `method` on `path` under the API, with our management key: the
+    /// reply's body when it's 2xx.
+    fn send(&self, method: &str, path: &str, body: &serde_json::Value) -> Result<String, String> {
         let bearer = format!("Bearer {}", self.management.expose());
         let body = if method == "GET" {
             Vec::new()
@@ -227,7 +246,7 @@ impl OpenRouterKeys {
             .http
             .send(
                 method,
-                &format!("{}/v1/keys{path}", self.endpoint),
+                &format!("{}{path}", self.endpoint),
                 &[
                     ("authorization", bearer.as_str()),
                     ("content-type", "application/json"),
@@ -241,7 +260,61 @@ impl OpenRouterKeys {
                 .unwrap_or_else(|_| "no details".into());
             return Err(format!("OpenRouter said HTTP {}: {message}", reply.status));
         }
-        serde_json::from_str(&reply.body).map_err(|e| format!("OpenRouter's reply: {e}"))
+        Ok(reply.body)
+    }
+
+    fn call(&self, method: &str, path: &str, body: &serde_json::Value) -> Result<KeyReply, String> {
+        let reply = self.send(method, &format!("/v1/keys{path}"), body)?;
+        serde_json::from_str(&reply).map_err(|e| format!("OpenRouter's reply: {e}"))
+    }
+
+    /// Our account (ADR 0039): what's left of the credits we bought, and
+    /// what every org's key may still spend, which it must cover.
+    pub fn account(&self) -> Result<Account, String> {
+        #[derive(Deserialize)]
+        struct Credits {
+            data: Totals,
+        }
+        #[derive(Deserialize)]
+        struct Totals {
+            total_credits: f64,
+            total_usage: f64,
+        }
+        #[derive(Deserialize)]
+        struct Keys {
+            data: Vec<KeyUsage>,
+        }
+        let credits: Credits =
+            serde_json::from_str(&self.send("GET", "/v1/credits", &json!({}))?)
+                .map_err(|e| format!("OpenRouter's credits: {e}"))?;
+        let mut outstanding = 0.0;
+        let mut offset = 0;
+        // A page at a time, as OpenRouter lists keys; never forever.
+        for _ in 0..100 {
+            let page: Keys = serde_json::from_str(&self.send(
+                "GET",
+                &format!("/v1/keys?offset={offset}"),
+                &json!({}),
+            )?)
+            .map_err(|e| format!("OpenRouter's keys: {e}"))?;
+            if page.data.is_empty() {
+                break;
+            }
+            offset += page.data.len();
+            outstanding += page
+                .data
+                .iter()
+                .filter(|k| !k.disabled)
+                .filter_map(|k| {
+                    k.limit_remaining
+                        .or_else(|| k.limit.map(|l| (l - k.usage).max(0.0)))
+                })
+                .sum::<f64>();
+        }
+        Ok(Account {
+            balance: credits.data.total_credits - credits.data.total_usage,
+            outstanding,
+        })
     }
 
     /// Makes a key named `name` that may spend `limit` dollars.
@@ -491,6 +564,53 @@ mod tests {
         assert!(
             err.contains("401") && err.contains("No auth credentials"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn adr0039_our_balance_is_checked_against_every_orgs_unspent_limit() {
+        let (url, got) = fake::serve_each(vec![
+            (
+                200,
+                r#"{"data":{"total_credits":500.0,"total_usage":120.5}}"#,
+            ),
+            (
+                200,
+                r#"{"data":[{"hash":"a","limit":100.0,"limit_remaining":60.0,"usage":40.0},{"hash":"b","limit":300.0,"usage":10.0},{"hash":"c","limit":50.0,"limit_remaining":50.0,"usage":0.0,"disabled":true},{"hash":"d","usage":3.0}]}"#,
+            ),
+            (200, r#"{"data":[]}"#),
+        ]);
+        let keys =
+            OpenRouterKeys::with_http(Http::insecure_for_tests(), Some(&url), Secret::new("m"));
+        let account = keys.account().unwrap();
+        // 60 left on a, 290 on b; c is off and d has no limit.
+        assert_eq!(account.balance, 379.5);
+        assert_eq!(account.outstanding, 350.0);
+        assert!(account.covered());
+        assert!(
+            got.recv()
+                .unwrap()
+                .head
+                .starts_with("GET /v1/credits HTTP/1.1")
+        );
+        assert!(
+            got.recv()
+                .unwrap()
+                .head
+                .starts_with("GET /v1/keys?offset=0 HTTP/1.1")
+        );
+        assert!(
+            got.recv()
+                .unwrap()
+                .head
+                .starts_with("GET /v1/keys?offset=4 HTTP/1.1")
+        );
+        assert!(
+            !Account {
+                balance: 10.0,
+                outstanding: 10.01
+            }
+            .covered()
         );
     }
 }

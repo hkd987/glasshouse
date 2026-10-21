@@ -616,39 +616,47 @@ pub(crate) mod fake {
 
     /// Serves one request; returns the base URL and the request it got.
     pub fn serve(status: u16, reply: &'static str) -> (String, mpsc::Receiver<Request>) {
+        serve_each(vec![(status, reply)])
+    }
+
+    /// Serves one request per reply, in order; returns the base URL and
+    /// the requests it got.
+    pub fn serve_each(replies: Vec<(u16, &'static str)>) -> (String, mpsc::Receiver<Request>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut head = String::new();
-            let mut length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap();
+            for (status, reply) in replies {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    head.push_str(&line);
                 }
-                if line == "\r\n" {
-                    break;
-                }
-                head.push_str(&line);
-            }
-            let mut received = vec![0; length];
-            reader.read_exact(&mut received).unwrap();
-            let mut stream = stream;
-            write!(
+                let mut received = vec![0; length];
+                reader.read_exact(&mut received).unwrap();
+                let mut stream = stream;
+                write!(
                 stream,
                 "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
                 reply.len()
             )
             .unwrap();
-            tx.send(Request {
-                head,
-                body: String::from_utf8(received).unwrap(),
-            })
-            .unwrap();
+                tx.send(Request {
+                    head,
+                    body: String::from_utf8(received).unwrap(),
+                })
+                .unwrap();
+            }
         });
         (url, rx)
     }

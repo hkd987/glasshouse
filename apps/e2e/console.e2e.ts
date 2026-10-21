@@ -283,6 +283,20 @@ test("adr0039 ae4 IT lets the IT agent ask models, and its calls go through the 
   await expect(credits).toContainText("On");
   await expect(credits).not.toContainText("in the draft");
   await shot(page, "credits-by-computer");
+
+  // Low balance: an admin asks to be warned below more than is left, and
+  // sees it on this page and beside Model credits on every page.
+  // (The stand-in model costs under a cent, so all $150 is left.)
+  await page.locator("[data-test=alert] input[name=alert]").fill("151");
+  await page.locator("[data-test=save-alert]").click();
+  await expect(credits).toContainText("You'll be warned below $151.00 left.");
+  await expect(page.locator("[data-test=credits-standing]")).toContainText("Your credits are running low");
+  await open(page, "#/devices", "devices");
+  await expect(page.locator("[data-test=credits-badge]")).toHaveText("Low");
+  await open(page, "#/credits", "credits");
+  await shot(page, "credits-low");
+  await page.getByRole("button", { name: "Use the default" }).click();
+  await expect(page.locator("[data-test=credits-standing]")).toHaveCount(0);
   await close();
 });
 

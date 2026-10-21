@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use glass_gateway::{ModelProvider, ProviderError, ProviderReply, ProviderRequest, Secret};
 use glass_gateway_providers::stripe::{Checkout, CheckoutRequest, Stripe};
-use glass_gateway_providers::{KeyUsage, OpenRouterKeys, OpenRouterProvider};
+use glass_gateway_providers::{KeyUsage, OpenRouterAccount, OpenRouterKeys, OpenRouterProvider};
 use glass_managed::ModelCredits;
 use glass_types::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,8 @@ pub trait KeyService: Send + Sync + std::fmt::Debug {
     fn create(&self, name: &str, limit: f64) -> Result<(String, String), String>;
     fn set_limit(&self, hash: &str, limit: f64) -> Result<KeyUsage, String>;
     fn usage(&self, hash: &str) -> Result<KeyUsage, String>;
+    /// Our account: its balance, and what every org's key may still spend.
+    fn account(&self) -> Result<OpenRouterAccount, String>;
 }
 
 impl KeyService for OpenRouterKeys {
@@ -49,6 +51,10 @@ impl KeyService for OpenRouterKeys {
     fn usage(&self, hash: &str) -> Result<KeyUsage, String> {
         OpenRouterKeys::usage(self, hash)
     }
+
+    fn account(&self) -> Result<OpenRouterAccount, String> {
+        OpenRouterKeys::account(self)
+    }
 }
 
 /// Keys kept in memory, as OpenRouter would keep them: for development
@@ -57,9 +63,20 @@ impl KeyService for OpenRouterKeys {
 pub struct MemoryKeys {
     /// Hash, key and usage.
     keys: Mutex<Vec<(String, String, KeyUsage)>>,
+    /// Our account's balance, if a test sets one: $1,000 otherwise.
+    balance: Mutex<Option<f64>>,
 }
 
+/// What development's OpenRouter account holds.
+const DEV_BALANCE_USD: f64 = 1000.0;
+
 impl MemoryKeys {
+    /// Sets our account's balance, as buying OpenRouter credits would.
+    #[cfg(test)]
+    pub fn set_balance(&self, dollars: f64) {
+        *self.balance.lock().unwrap_or_else(|p| p.into_inner()) = Some(dollars);
+    }
+
     /// Records `dollars` spent on the key `hash`, as calls would.
     #[cfg(test)]
     pub fn spend(&self, hash: &str, dollars: f64) {
@@ -128,6 +145,20 @@ impl KeyService for MemoryKeys {
             .find(|(h, _, _)| h == hash)
             .map(|(_, _, u)| u.clone())
             .ok_or_else(|| "no such key".into())
+    }
+
+    fn account(&self) -> Result<OpenRouterAccount, String> {
+        let keys = self.keys.lock().unwrap_or_else(|p| p.into_inner());
+        let spent: f64 = keys.iter().map(|(_, _, u)| u.usage).sum();
+        let bought = self
+            .balance
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or(DEV_BALANCE_USD);
+        Ok(OpenRouterAccount {
+            balance: bought - spent,
+            outstanding: keys.iter().filter_map(|(_, _, u)| u.limit_remaining).sum(),
+        })
     }
 }
 
@@ -260,6 +291,11 @@ pub struct Usage {
 impl Usage {
     fn path(dir: &Path) -> PathBuf {
         dir.join("model-usage.json")
+    }
+
+    /// What every computer's calls cost, in OpenRouter's dollars.
+    pub fn provider_spent(&self) -> f64 {
+        self.devices.values().map(|d| d.provider_usd).sum()
     }
 
     pub fn load(dir: &Path) -> anyhow::Result<Self> {
@@ -481,6 +517,10 @@ pub struct Credits {
     /// were told to forget it.
     #[serde(default)]
     withdrawn: bool,
+    /// Below this many of the org's dollars left, the console warns its
+    /// admins; unset, [`Credits::alert_below`] picks one.
+    #[serde(default)]
+    pub alert_below_usd: Option<f64>,
 }
 
 impl std::fmt::Debug for Credits {
@@ -541,6 +581,56 @@ impl Credits {
     /// What the key may spend at OpenRouter, in all: its limit.
     pub fn limit(&self) -> f64 {
         self.grants.iter().map(Grant::provider).sum()
+    }
+
+    /// Below how many of the org's dollars left its admins are warned:
+    /// theirs, or a tenth of what they bought, at least $5.
+    pub fn alert_below(&self) -> f64 {
+        self.alert_below_usd
+            .unwrap_or_else(|| ((self.granted() * 0.1).max(5.0) * 100.0).round() / 100.0)
+    }
+
+    /// Sets the warning's threshold, in the org's dollars; `None` goes back
+    /// to the default.
+    pub fn set_alert(&mut self, dir: &Path, usd: Option<f64>) -> Result<(), String> {
+        if let Some(usd) = usd
+            && (!usd.is_finite() || !(0.0..=MAX_GRANT_USD).contains(&usd))
+        {
+            return Err(format!(
+                "Warn below an amount from $0 to ${MAX_GRANT_USD:.0}."
+            ));
+        }
+        self.alert_below_usd = usd.map(|u| (u * 100.0).round() / 100.0);
+        self.save(dir).map_err(|e| format!("{e:#}"))
+    }
+
+    /// The org's dollars rate: what it paid for each of OpenRouter's.
+    fn rate(&self) -> f64 {
+        if self.limit() > 0.0 {
+            self.granted() / self.limit()
+        } else {
+            1.0
+        }
+    }
+
+    /// What's left, in the org's dollars, by the console's own record of
+    /// its computers' calls: OpenRouter's own figure needs a round trip.
+    pub fn left(&self, by: &Usage) -> f64 {
+        ((self.limit() - by.provider_spent()) * self.rate()).max(0.0)
+    }
+
+    /// How the org's credits stand: `None` while it has none, `low` below
+    /// the threshold, `used_up` with under a cent left.
+    pub fn standing(&self, left: f64) -> Option<&'static str> {
+        if self.grants.is_empty() {
+            None
+        } else if left < 0.01 {
+            Some("used_up")
+        } else if left < self.alert_below() {
+            Some("low")
+        } else {
+            None
+        }
     }
 
     /// Whether the checkout `session` was already granted.
@@ -637,11 +727,7 @@ impl Credits {
     /// The Credits page: what was bought and spent, in the org's dollars
     /// (OpenRouter's at the rate it paid), never the key or our markup.
     pub fn view(&self, usage: Option<Result<KeyUsage, String>>, on: bool, by: &Usage) -> Value {
-        let rate = if self.limit() > 0.0 {
-            self.granted() / self.limit()
-        } else {
-            1.0
-        };
+        let rate = self.rate();
         let cents = |usd: f64| (usd * rate * 100.0).round() / 100.0;
         let (spent, remaining, problem) = match usage {
             Some(Ok(u)) => (Some(cents(u.usage)), u.limit_remaining.map(cents), None),
@@ -662,8 +748,13 @@ impl Credits {
             .iter()
             .map(|g| json!({ "at": g.at, "usd": g.usd, "note": g.note, "paid": g.payment.is_some() }))
             .collect();
+        // OpenRouter's figure when it answered, else the console's own.
+        let standing = self.standing(remaining.unwrap_or_else(|| self.left(by)));
         json!({
             "on": on,
+            "standing": standing,
+            "alert_below_usd": self.alert_below(),
+            "alert_set": self.alert_below_usd.is_some(),
             "has_key": self.hash.is_some(),
             "granted_usd": self.granted(),
             "spent_usd": spent,
@@ -679,6 +770,47 @@ impl Credits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adr0039_admins_are_warned_when_credits_run_low_or_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = MemoryKeys::default();
+        let mut credits = Credits::default();
+        let mut usage = Usage::default();
+        // Nothing bought: nothing to warn about.
+        assert_eq!(credits.standing(0.0), None);
+
+        // $100 paid at 25 % over: $80 at OpenRouter, $100 to the org.
+        credits
+            .grant(dir.path(), &keys, "acme", 100.0, 0.25, "PO-1", None)
+            .unwrap();
+        assert_eq!(credits.alert_below(), 10.0, "a tenth of what was bought");
+        assert_eq!(credits.left(&usage), 100.0);
+        assert_eq!(credits.standing(credits.left(&usage)), None);
+
+        // $73 at OpenRouter spent: $91.25 of the org's, $8.75 left.
+        usage.record("lab-1", 73.0);
+        assert_eq!(credits.left(&usage), 8.75);
+        assert_eq!(credits.standing(credits.left(&usage)), Some("low"));
+        // The admin's own threshold, kept.
+        credits.set_alert(dir.path(), Some(5.0)).unwrap();
+        assert_eq!(credits.standing(credits.left(&usage)), None);
+        assert_eq!(Credits::load(dir.path()).unwrap().alert_below(), 5.0);
+        assert!(credits.set_alert(dir.path(), Some(-1.0)).is_err());
+        assert!(credits.set_alert(dir.path(), Some(f64::NAN)).is_err());
+        credits.set_alert(dir.path(), None).unwrap();
+        assert_eq!(credits.alert_below(), 10.0);
+
+        usage.record("lab-2", 7.0);
+        assert_eq!(credits.left(&usage), 0.0);
+        assert_eq!(credits.standing(0.0), Some("used_up"));
+        // A small purchase still warns at $5.
+        let mut small = Credits::default();
+        small
+            .grant(dir.path(), &keys, "acme", 20.0, 0.0, "PO-2", None)
+            .unwrap();
+        assert_eq!(small.alert_below(), 5.0);
+    }
 
     #[test]
     fn adr0039_the_first_grant_makes_the_orgs_key_and_later_ones_raise_its_limit() {

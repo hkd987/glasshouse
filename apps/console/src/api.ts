@@ -52,6 +52,8 @@ export interface Session {
   admin: boolean;
   /** The support roles their groups hold: the Support page. */
   roles: { id: string; name: string; tools: SupportTool[] }[];
+  /** The org's model credits running low or used up, for an admin (ADR 0039). */
+  credits?: "low" | "used_up" | null;
 }
 
 export interface GroupRef {
@@ -251,6 +253,12 @@ export interface CreditsPage {
   on: boolean;
   /** What the pilot ring runs has them on. */
   live?: boolean;
+  /** Running low or used up, by the alert below. */
+  standing: "low" | "used_up" | null;
+  /** Admins are warned below this many dollars left. */
+  alert_below_usd: number;
+  /** An admin chose it; otherwise a tenth of what was bought, at least $5. */
+  alert_set: boolean;
   granted_usd: number;
   spent_usd: number | null;
   remaining_usd: number | null;

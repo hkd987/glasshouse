@@ -495,6 +495,26 @@ impl Console {
                 };
                 self.checkout(buy.usd).await
             }
+            ("POST", "alert") => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Alert {
+                    usd: Option<f64>,
+                }
+                let alert: Alert = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                let mut state = self.state();
+                let dir = state.dir().to_owned();
+                match state.credits.set_alert(&dir, alert.usd) {
+                    Ok(()) => {
+                        tracing::info!(%user, below = state.credits.alert_below(), "credits: alert set");
+                        ok(json!({ "alert_below_usd": state.credits.alert_below() }))
+                    }
+                    Err(e) => error(400, &e),
+                }
+            }
             ("POST", "terms") => {
                 let terms: AcceptTerms = match body(request) {
                     Ok(b) => b,
@@ -763,7 +783,7 @@ impl Console {
         let Some(service) = self.credits.get() else {
             return error(404, "Model credits aren't offered by this console.");
         };
-        if request.method != "POST" {
+        if !matches!(request.method.as_str(), "GET" | "POST") {
             return error(405, "method not allowed");
         }
         let token = request
@@ -773,6 +793,9 @@ impl Console {
         if !same_secret(token, &service.operator) {
             return error(401, "Only Glasshouse adds credits.");
         }
+        if request.method == "GET" {
+            return self.credits_health(service).await;
+        }
         let grant: GrantCredits = match body(request) {
             Ok(b) => b,
             Err(r) => return r,
@@ -781,6 +804,41 @@ impl Console {
             Ok(view) => ok(view),
             Err((status, e)) => error(status, &e),
         }
+    }
+
+    /// `GET /ops/credits`, our operators' (ADR 0039): how this org's
+    /// credits stand, and whether our OpenRouter balance covers what every
+    /// org's key may still spend. For our monitoring to alert on.
+    async fn credits_health(&self, service: &CreditsService) -> Response {
+        let keys = Arc::clone(&service.keys);
+        let account = tokio::task::spawn_blocking(move || keys.account())
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        let state = self.state();
+        let left = state.credits.left(&state.usage);
+        let account = match account {
+            Ok(a) => {
+                if !a.covered() {
+                    tracing::error!(
+                        balance = a.balance,
+                        outstanding = a.outstanding,
+                        "credits: our OpenRouter balance doesn't cover what the orgs may still spend"
+                    );
+                }
+                json!({ "balance_usd": a.balance, "outstanding_usd": a.outstanding, "covered": a.covered() })
+            }
+            Err(e) => json!({ "error": e }),
+        };
+        ok(json!({
+            "org": state.org.id,
+            "granted_usd": state.credits.granted(),
+            "limit_usd": state.credits.limit(),
+            "spent_usd": state.usage.provider_spent(),
+            "left_usd": (left * 100.0).round() / 100.0,
+            "alert_below_usd": state.credits.alert_below(),
+            "standing": state.credits.standing(left),
+            "account": account,
+        }))
     }
 
     /// The relay meetings' media goes through (`--relay`).
@@ -962,12 +1020,18 @@ impl Console {
                     .map(|r| json!({ "id": r.id, "name": r.name, "tools": r.tools }))
                     .collect();
                 let state = self.state();
+                // Credits running low, for the sidebar on every page: by
+                // the console's own record, with no call to OpenRouter.
+                let credits = (access.admin && self.credits.get().is_some())
+                    .then(|| state.credits.standing(state.credits.left(&state.usage)))
+                    .flatten();
                 ok(json!({
                     "user": user,
                     "display": self.directory.display_name(&user),
                     "org": { "id": state.org.id, "name": state.org.name },
                     "admin": access.admin,
                     "roles": roles,
+                    "credits": credits,
                 }))
             }
             "POST" => {
@@ -2226,6 +2290,54 @@ mod tests {
             credits.grants[0].payment.as_deref(),
             Some("cs_live_relayed")
         );
+    }
+
+    #[tokio::test]
+    async fn adr0039_our_operators_see_whether_our_balance_covers_the_orgs_and_admins_see_low_credits()
+     {
+        let t = console().await;
+        let keys = selling(&t).await;
+        buy(&t, 100.0).await;
+        let ops = |token: &str| {
+            let auth = format!("Bearer {token}");
+            request(
+                "GET",
+                "/ops/credits",
+                &Value::Null,
+                &[("authorization", &auth)],
+            )
+        };
+        let r = t.console.handle(&ops("guess")).await;
+        assert_eq!(r.status, 401);
+        let r = t.console.handle(&ops(CREDITS_OPERATOR)).await;
+        assert_eq!(r.status, 200);
+        let health: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(health["standing"], Value::Null);
+        assert_eq!(health["account"]["covered"], true);
+        assert_eq!(health["left_usd"], 100.0);
+
+        // Our OpenRouter balance falls below what the org may still spend.
+        keys.set_balance(50.0);
+        let r = t.console.handle(&ops(CREDITS_OPERATOR)).await;
+        let health: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(health["account"]["covered"], false, "{health}");
+
+        // The org spends down to under a tenth: its admins see it on every
+        // page, from the console's own record.
+        let (_, session) = t.call("GET", "/api/session", Value::Null).await;
+        assert_eq!(session["credits"], Value::Null);
+        t.console.state().usage.record("lab-1", 75.0);
+        let (_, session) = t.call("GET", "/api/session", Value::Null).await;
+        assert_eq!(session["credits"], "low");
+        let (status, alert) = t
+            .call("POST", "/api/credits/alert", json!({ "usd": 3 }))
+            .await;
+        assert_eq!((status, &alert["alert_below_usd"]), (200, &json!(3.0)));
+        let (_, session) = t.call("GET", "/api/session", Value::Null).await;
+        assert_eq!(session["credits"], Value::Null);
+        t.console.state().usage.record("lab-1", 5.0);
+        let (_, session) = t.call("GET", "/api/session", Value::Null).await;
+        assert_eq!(session["credits"], "used_up");
     }
 
     async fn selling(t: &Test) -> Arc<crate::credits::MemoryKeys> {

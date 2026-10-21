@@ -25,6 +25,7 @@ export async function creditsPage(root: HTMLElement, returned?: string): Promise
   let message: { text: string; tone: "ok" | "bad" } | null = returned ? (RETURNS[returned] ?? null) : null;
   let amount = 100;
   let accepting = false;
+  let alertBelow: number | null = null;
 
   /** Back from paying: looks again, in the background, until Stripe's confirmation lands. */
   async function watch(): Promise<void> {
@@ -46,6 +47,13 @@ export async function creditsPage(root: HTMLElement, returned?: string): Promise
       const r = await api<{ url: string }>("POST", "/api/credits/checkout", { usd: amount });
       window.location.assign(r.url);
       return null;
+    });
+  }
+
+  function setAlert(usd: number | null): Promise<void> {
+    return act(async () => {
+      const r = await api<{ alert_below_usd: number }>("POST", "/api/credits/alert", { usd });
+      return `You'll be warned below ${dollars(r.alert_below_usd)} left.`;
     });
   }
 
@@ -112,6 +120,15 @@ export async function creditsPage(root: HTMLElement, returned?: string): Promise
         ),
         message ? notice(message.text, message.tone) : null,
         page.problem ? notice(`Usage couldn't be read just now: ${page.problem}`, "bad") : null,
+        page.standing === "used_up"
+          ? h("div", { "data-test": "credits-standing" }, notice("Your credits are used up. Agents' calls on credits go to the next model your policy routes to, or don't go at all, until you buy more.", "bad"))
+          : page.standing === "low"
+            ? h(
+                "div",
+                { "data-test": "credits-standing" },
+                notice(`Your credits are running low: ${dollars(page.remaining_usd)} left. Agents stop using them when they run out.`, "bad"),
+              )
+            : null,
         !page.offered
           ? card("Not offered here", "This console doesn't sell model credits.")
           : h(
@@ -122,7 +139,7 @@ export async function creditsPage(root: HTMLElement, returned?: string): Promise
                 { class: "stats" },
                 card(null, null, stat("Bought", dollars(page.granted_usd))),
                 card(null, null, stat("Spent", dollars(page.spent_usd), "blue")),
-                card(null, null, stat("Left", dollars(page.remaining_usd), page.remaining_usd !== null && page.remaining_usd < page.granted_usd * 0.1 ? "orange" : null)),
+                card(null, null, stat("Left", dollars(page.remaining_usd), page.standing ? "orange" : null)),
               ),
               h(
                 "div",
@@ -162,6 +179,30 @@ export async function creditsPage(root: HTMLElement, returned?: string): Promise
                           ),
                           h("button", { class: "button", "data-test": "accept-terms", onclick: () => accept() }, "Accept"),
                         ),
+                  ),
+                  card(
+                    "Low balance",
+                    `Admins see a warning here and beside Model credits on every page below ${dollars(page.alert_below_usd)} left${page.alert_set ? "" : " (a tenth of what you bought, at least $5)"}.`,
+                    h(
+                      "div",
+                      { "data-test": "alert" },
+                      h(
+                        "label",
+                        { class: "field" },
+                        "Warn below (US dollars)",
+                        h("input", {
+                          class: "text",
+                          type: "number",
+                          name: "alert",
+                          min: "0",
+                          step: "1",
+                          value: String(page.alert_below_usd),
+                          oninput: (e: Event) => (alertBelow = Number((e.target as HTMLInputElement).value)),
+                        }),
+                      ),
+                      h("button", { class: "button", "data-test": "save-alert", onclick: () => setAlert(alertBelow ?? page.alert_below_usd) }, "Save"),
+                      page.alert_set ? h("button", { class: "button", onclick: () => setAlert(null) }, "Use the default") : null,
+                    ),
                   ),
                   card(
                     "By computer",
