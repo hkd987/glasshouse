@@ -284,6 +284,27 @@ test("adr0039 ae4 IT lets the IT agent ask models, and its calls go through the 
   await expect(credits).not.toContainText("in the draft");
   await shot(page, "credits-by-computer");
 
+  // Tool use crosses the console too (ADR 0041): the desktop agent offers
+  // the stand-in its tools, the stand-in asks for one by name, this
+  // computer makes the call under its own policy, and the answer comes
+  // back from the results.
+  const desk = glassctlJson<{ id: string }>(
+    "run",
+    "desktop-agent",
+    'What is on my calendar? calendar_list {"from": "2026-10-19", "to": "2026-10-26"}',
+    "--yes",
+  );
+  glassctl("wait", desk.id, "--timeout", "60");
+  const deskCalls = audit().filter((r) => r.event.action === "model.complete" && r.event.agent === "desktop-agent");
+  expect(deskCalls).toHaveLength(2);
+  const asked = (deskCalls[0].event.detail as { model: Record<string, unknown> }).model;
+  expect(asked.provider).toBe("credits");
+  expect(asked.tools_called).toEqual(["calendar_list"]);
+  const listed = audit().find((r) => r.event.action === "calendar.list" && r.event.agent === "desktop-agent");
+  expect(listed && outcome(listed)).toBe("completed");
+  const answered = glassctlJson<{ answer?: string }>("show", desk.id);
+  expect(answered.answer).toContain("Answered on model credits. The tools returned:");
+
   // Low balance: an admin asks to be warned below more than is left, and
   // sees it on this page and beside Model credits on every page.
   // (The stand-in model costs under a cent, so all $150 is left.)

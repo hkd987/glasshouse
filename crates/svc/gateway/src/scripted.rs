@@ -144,8 +144,9 @@ impl ModelProvider for ScriptedProvider {
 
 /// The tool a fresh request asks for in words: the first offered tool its
 /// last message names, with the JSON object after the name as its input
-/// (`{}` when there's none).
-fn scripted_call(request: &ProviderRequest<'_>) -> Option<crate::ToolCall> {
+/// (`{}` when there's none). Development stand-ins for real providers (the
+/// console's for OpenRouter) call tools the same way.
+pub fn scripted_call(request: &ProviderRequest<'_>) -> Option<crate::ToolCall> {
     let last = request.messages.last()?;
     if last.role != crate::Role::User || !last.tool_results.is_empty() {
         return None;

@@ -222,7 +222,9 @@ impl ModelForwarder for OpenRouterForwarder {
 }
 
 /// For `--dev` and tests: answers on this machine, charging the in-memory
-/// key as OpenRouter would ($3 in and $15 out per million tokens).
+/// key as OpenRouter would ($3 in and $15 out per million tokens). It
+/// calls a tool the way the scripted provider does (ADR 0041), so tool use
+/// crosses the console in the suites.
 #[derive(Debug)]
 pub struct DevModels {
     keys: Arc<MemoryKeys>,
@@ -246,12 +248,27 @@ impl ModelForwarder for DevModels {
             .map(|m| m.content.chars().count())
             .sum::<usize>()
             + request.system.map_or(0, |s| s.chars().count());
-        let last: String = request
-            .messages
-            .last()
-            .map(|m| m.content.chars().take(200).collect())
-            .unwrap_or_default();
-        let text = format!("Answered on model credits: {last}");
+        let call = glass_gateway::scripted_call(request);
+        let last = request.messages.last();
+        let text = match (&call, last) {
+            (Some(call), _) => format!("Calling {} on model credits.", call.name),
+            (None, Some(m)) if !m.tool_results.is_empty() => {
+                let results: Vec<String> = m
+                    .tool_results
+                    .iter()
+                    .map(|r| r.content.chars().take(200).collect())
+                    .collect();
+                format!(
+                    "Answered on model credits. The tools returned: {}",
+                    results.join(" | ")
+                )
+            }
+            (None, m) => format!(
+                "Answered on model credits: {}",
+                m.map(|m| m.content.chars().take(200).collect::<String>())
+                    .unwrap_or_default()
+            ),
+        };
         let input = (asked as u64).div_ceil(4).max(1);
         let output = (text.chars().count() as u64).div_ceil(4);
         let cost = ((input * 3 + output * 15) as f64 / 1_000_000.0 * 1e6).round() / 1e6;
@@ -260,10 +277,10 @@ impl ModelForwarder for DevModels {
             text,
             input_tokens: input,
             output_tokens: output,
-            stop_reason: Some("stop".into()),
+            stop_reason: Some(if call.is_some() { "tool_use" } else { "stop" }.into()),
             cost_usd: Some(cost),
             served_by: Some("development/echo".into()),
-            tool_calls: Vec::new(),
+            tool_calls: call.into_iter().collect(),
         })
     }
 }

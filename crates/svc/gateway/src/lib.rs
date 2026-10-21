@@ -38,5 +38,5 @@ pub use action::{
 pub use gateway::{Attempt, Call, CallRecord, Completion, Digest, Failure, Gateway};
 pub use provider::{ModelProvider, ProviderError, ProviderReply, ProviderRequest};
 pub use redact::{Redactor, SECRET_KINDS, Vault};
-pub use scripted::{ScriptedProvider, Seen};
+pub use scripted::{ScriptedProvider, Seen, scripted_call};
 pub use secrets::{Secret, Secrets, SecretsError};
