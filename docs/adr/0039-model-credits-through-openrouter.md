@@ -92,7 +92,8 @@ only, this amends ADR 0018: their prompts cross our servers.
      chooses which agents ask AI models on the policy page, for every
      group (the same rules every model kind uses). None do until IT says
      so, except `skill-evals`, whose whole job is asking models.
-5. **Admins pay by card through Stripe, at our markup.**
+5. **Admins pay by card through Stripe, at our markup.** (With more than
+   one org, through the billing relay: ADR 0040.)
    - The console makes a Stripe Checkout Session and sends the admin to
      Stripe's page; card details never reach us. Each session names the
      org in its metadata.

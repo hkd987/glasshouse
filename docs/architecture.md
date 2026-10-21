@@ -302,13 +302,14 @@ pipeline refuses further side effects (fail closed).
 | `glass-first-party` | svc | The apps the OS ships, as one registry |
 | `glass-broker` | svc | Decisions and the approval desk |
 | `glass-gateway` | svc | The model gateway: the `model.complete` action, redaction, routing over providers with failover, the call record, the secrets stand-in (ADR 0018) |
-| `glass-gateway-providers` | svc | Everything that leaves the machine: Anthropic Messages and Amazon Bedrock over HTTPS, and the device's client for its admin console; the only crate with an outbound HTTP and TLS stack |
+| `glass-gateway-providers` | svc | Everything that leaves the machine: Anthropic Messages, Amazon Bedrock and OpenRouter over HTTPS, the device's client for its admin console, Stripe, and the billing relay's two connections (ADR 0040); the only crate with an outbound HTTP and TLS stack |
 | `glass-tailoring` | svc | Personal layers on agents: customization points, versions, re-checks (ADR 0014) |
 | `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
 | `glassd`, `glassctl`, `glass-mcp`, `glass-app-bridge`, `glass-demo-agent`, `glass-it-agent`, `glass-skill-evals`, `glass-probe` | bin | Executables |
 | `glass-console` | bin | The org's admin console server (AD-6, ADR 0023): policy, catalog, fleet, signing. Runs on our web servers, never ships in the image |
 | `glass-media-relay` | svc | The meetings relay (CF-21, ADR 0030): rooms the console admits participants to, RTP forwarded unchanged over str0m, its private API. The only crate that may use str0m |
 | `glass-sfu` | bin | The relay's daemon: one UDP port for media, the private API on loopback. Runs on our servers, never ships in the image |
+| `glass-billing` | bin | The billing relay (ADR 0040): Stripe's one webhook endpoint for every org; queues each payment on disk and pushes it to its org's console, signed with its own key; makes checkouts for consoles. Runs on our servers, never ships in the image |
 | `glass-e2e` | tests | End-to-end scenarios |
 | `@glasshouse/sdk`, Mail, Calendar | apps/ (TypeScript) | The first-party web apps and the SDK they share: bridge client, manifests, attribution, offline reads (ADR 0024, `apps/README.md`) |
 | Admin console | apps/console (TypeScript) | The admin console's web app, served by `glass-console` (ADR 0023) |
