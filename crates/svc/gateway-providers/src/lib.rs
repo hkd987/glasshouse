@@ -25,6 +25,7 @@ pub mod mail;
 mod openrouter;
 mod sigv4;
 pub mod stripe;
+mod tools;
 
 use std::sync::Arc;
 

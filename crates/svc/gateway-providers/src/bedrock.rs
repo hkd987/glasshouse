@@ -142,17 +142,15 @@ impl BedrockProvider {
         now: OffsetDateTime,
     ) -> Result<ProviderReply, ProviderError> {
         self.credentials.check(now)?;
-        let messages: Vec<Value> = request
-            .messages
-            .iter()
-            .map(|m| json!({ "role": m.role, "content": [{ "text": m.content }] }))
-            .collect();
         let mut body = json!({
-            "messages": messages,
+            "messages": crate::tools::converse_messages(request.messages),
             "inferenceConfig": { "maxTokens": request.max_tokens },
         });
         if let Some(system) = request.system {
             body["system"] = json!([{ "text": system }]);
+        }
+        if !request.tools.is_empty() {
+            body["toolConfig"] = crate::tools::converse_tools(request.tools);
         }
         let body = body.to_string();
         let segment = uri_encode(request.model);
@@ -210,6 +208,7 @@ impl BedrockProvider {
             .join("");
         Ok(ProviderReply {
             text,
+            tool_calls: crate::tools::converse_calls(&response.output.message.content),
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
             stop_reason: response.stop_reason,
@@ -294,10 +293,7 @@ mod tests {
         );
         let provider =
             BedrockProvider::with_http(Http::insecure_for_tests(), "us-east-1", &url, temporary());
-        let messages = vec![Message {
-            role: Role::User,
-            content: "Hello".into(),
-        }];
+        let messages = vec![Message::text(Role::User, "Hello")];
         let reply = provider
             .send(
                 &ProviderRequest {
@@ -305,6 +301,7 @@ mod tests {
                     system: Some("Be brief."),
                     messages: &messages,
                     max_tokens: 64,
+                    tools: &[],
                 },
                 datetime!(2026-10-18 22:00 UTC),
             )
@@ -346,10 +343,7 @@ mod tests {
                 &url,
                 temporary(),
             );
-            let messages = vec![Message {
-                role: Role::User,
-                content: "Hello".into(),
-            }];
+            let messages = vec![Message::text(Role::User, "Hello")];
             let err = provider
                 .send(
                     &ProviderRequest {
@@ -357,6 +351,7 @@ mod tests {
                         system: None,
                         messages: &messages,
                         max_tokens: 8,
+                        tools: &[],
                     },
                     datetime!(2026-10-18 22:00 UTC),
                 )

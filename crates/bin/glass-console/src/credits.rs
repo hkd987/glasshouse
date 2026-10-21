@@ -263,6 +263,7 @@ impl ModelForwarder for DevModels {
             stop_reason: Some("stop".into()),
             cost_usd: Some(cost),
             served_by: Some("development/echo".into()),
+            tool_calls: Vec::new(),
         })
     }
 }

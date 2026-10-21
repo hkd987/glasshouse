@@ -21,14 +21,74 @@ pub enum Role {
     Assistant,
 }
 
+/// The most tools one call may offer (ADR 0041).
+pub const MAX_TOOLS: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Message {
     pub role: Role,
+    /// The words; may be empty when the message carries tool calls or
+    /// results.
+    #[serde(default)]
     pub content: String,
+    /// An assistant's: the tools the model asked for (ADR 0041).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// A user's: what the tools the model asked for returned, each by the
+    /// call's id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_results: Vec<ToolResult>,
 }
 
-/// What an agent sends: Anthropic Messages shaped, text only.
+impl Message {
+    /// A message that is only words.
+    pub fn text(role: Role, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+        }
+    }
+}
+
+/// A tool the model may ask for (ADR 0041): the agent's own, as its task
+/// socket lists it. The model only proposes; the agent makes the call,
+/// where every rule applies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tool {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// JSON Schema for its input.
+    pub input_schema: Value,
+}
+
+/// A tool the model asked for, with its input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolCall {
+    /// The provider's id for the call, which its result names.
+    pub id: String,
+    pub name: String,
+    pub input: Value,
+}
+
+/// What a tool the model asked for returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolResult {
+    /// The call it answers.
+    pub id: String,
+    pub content: String,
+    /// The call was refused or failed: the model should know.
+    #[serde(default)]
+    pub is_error: bool,
+}
+
+/// What an agent sends: Anthropic Messages shaped.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompleteInput {
@@ -40,6 +100,18 @@ pub struct CompleteInput {
     /// out, which is what most agents should do (MP-7).
     #[serde(default)]
     pub model: Option<String>,
+    /// The tools the model may ask for (ADR 0041).
+    #[serde(default)]
+    pub tools: Vec<Tool>,
+}
+
+/// Whether `name` is a tool name every provider takes.
+fn tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 impl CompleteInput {
@@ -52,9 +124,65 @@ impl CompleteInput {
                 "messages must start with a user message".into(),
             ));
         }
-        if input.messages.iter().any(|m| m.content.trim().is_empty()) {
+        if input.messages.iter().any(|m| {
+            m.content.trim().is_empty() && m.tool_calls.is_empty() && m.tool_results.is_empty()
+        }) {
             return Err(ActionError::InvalidInput(
-                "every message needs some text".into(),
+                "every message needs some text, tool calls or tool results".into(),
+            ));
+        }
+        if input.tools.len() > MAX_TOOLS {
+            return Err(ActionError::InvalidInput(format!(
+                "a call offers at most {MAX_TOOLS} tools"
+            )));
+        }
+        if let Some(bad) = input.tools.iter().find(|t| !tool_name(&t.name)) {
+            return Err(ActionError::InvalidInput(format!(
+                "{:?} isn't a tool name: letters, digits, _ and -, at most 64",
+                bad.name
+            )));
+        }
+        // Calls only from the model, results only from the agent, each
+        // result answering a call in the message before it.
+        let mut asked: Vec<&str> = Vec::new();
+        for m in &input.messages {
+            match m.role {
+                Role::User if !m.tool_calls.is_empty() => {
+                    return Err(ActionError::InvalidInput(
+                        "only the model's (assistant) messages carry tool calls".into(),
+                    ));
+                }
+                Role::Assistant if !m.tool_results.is_empty() => {
+                    return Err(ActionError::InvalidInput(
+                        "tool results go in a user message".into(),
+                    ));
+                }
+                Role::User => {
+                    if let Some(r) = m
+                        .tool_results
+                        .iter()
+                        .find(|r| !asked.contains(&r.id.as_str()))
+                    {
+                        return Err(ActionError::InvalidInput(format!(
+                            "tool result {:?} answers no call in the message before it",
+                            r.id
+                        )));
+                    }
+                    asked.clear();
+                }
+                Role::Assistant => {
+                    asked = m.tool_calls.iter().map(|c| c.id.as_str()).collect();
+                }
+            }
+        }
+        if input
+            .messages
+            .iter()
+            .flat_map(|m| &m.tool_calls)
+            .any(|c| !tool_name(&c.name))
+        {
+            return Err(ActionError::InvalidInput(
+                "a tool call names no tool".into(),
             ));
         }
         if input.max_tokens == 0 {
@@ -71,21 +199,43 @@ impl CompleteInput {
         Ok(input)
     }
 
-    /// Characters in the system prompt and messages.
+    /// Characters in the system prompt, the messages, their tool calls
+    /// and results, and the tools offered.
     pub fn chars(&self) -> usize {
+        let json = |v: &Value| v.to_string().chars().count();
         self.system.as_deref().map_or(0, |s| s.chars().count())
             + self
                 .messages
                 .iter()
-                .map(|m| m.content.chars().count())
+                .map(|m| {
+                    m.content.chars().count()
+                        + m.tool_calls
+                            .iter()
+                            .map(|c| c.name.len() + json(&c.input))
+                            .sum::<usize>()
+                        + m.tool_results
+                            .iter()
+                            .map(|r| r.content.chars().count())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+            + self
+                .tools
+                .iter()
+                .map(|t| t.name.len() + t.description.chars().count() + json(&t.input_schema))
                 .sum::<usize>()
     }
 
-    /// "2 messages, 1,204 characters".
+    /// "2 messages, 1,204 characters", and the tools offered.
     pub fn describe(&self) -> String {
         let n = self.messages.len();
+        let tools = match self.tools.len() {
+            0 => String::new(),
+            1 => ", 1 tool".into(),
+            t => format!(", {t} tools"),
+        };
         format!(
-            "{n} message{}, {} characters",
+            "{n} message{}, {} characters{tools}",
             if n == 1 { "" } else { "s" },
             thousands(self.chars())
         )
@@ -125,9 +275,40 @@ pub fn definition() -> ActionDef {
                         "type": "object",
                         "properties": {
                             "role": { "enum": ["user", "assistant"] },
-                            "content": { "type": "string" }
+                            "content": { "type": "string" },
+                            "tool_calls": {
+                                "type": "array",
+                                "description": "An assistant message's: the tool calls the model asked for, as its reply gave them.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "input": { "type": "object" } },
+                                    "required": ["id", "name", "input"],
+                                    "additionalProperties": false
+                                }
+                            },
+                            "tool_results": {
+                                "type": "array",
+                                "description": "A user message's: what each call returned, by its id. Make the calls yourself first: the model only proposes them.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": { "id": { "type": "string" }, "content": { "type": "string" }, "is_error": { "type": "boolean" } },
+                                    "required": ["id", "content"],
+                                    "additionalProperties": false
+                                }
+                            }
                         },
-                        "required": ["role", "content"],
+                        "required": ["role"],
+                        "additionalProperties": false
+                    }
+                },
+                "tools": {
+                    "type": "array",
+                    "maxItems": MAX_TOOLS,
+                    "description": "Tools the model may ask for, such as your own from tools/list. The reply's tool_calls say which; you make each call, then send the results back.",
+                    "items": {
+                        "type": "object",
+                        "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "input_schema": { "type": "object" } },
+                        "required": ["name", "input_schema"],
                         "additionalProperties": false
                     }
                 },
@@ -213,7 +394,7 @@ mod tests {
             json!({"messages": [{"role": "assistant", "content": "hi"}], "max_tokens": 10}),
             json!({"messages": [{"role": "user", "content": " "}], "max_tokens": 10}),
             json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 0}),
-            json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10, "tools": []}),
+            json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10, "stream": true}),
             json!({"messages": [{"role": "user", "content": "x".repeat(MAX_PROMPT_CHARS + 1)}], "max_tokens": 10}),
         ] {
             assert!(
@@ -223,6 +404,43 @@ mod tests {
         }
         assert_eq!(thousands(1_204), "1,204");
         assert_eq!(thousands(400_000), "400,000");
+    }
+
+    #[test]
+    fn adr0041_tool_calls_come_from_the_model_and_results_answer_them() {
+        let tool = json!({ "name": "files_list", "input_schema": { "type": "object" } });
+        let call = json!({ "id": "c1", "name": "files_list", "input": {} });
+        let ok = input(json!({
+            "messages": [
+                {"role": "user", "content": "List my files"},
+                {"role": "assistant", "content": "", "tool_calls": [call]},
+                {"role": "user", "tool_results": [{"id": "c1", "content": "a.txt"}]}
+            ],
+            "max_tokens": 100,
+            "tools": [tool]
+        }))
+        .unwrap();
+        assert!(ok.describe().ends_with(", 1 tool"), "{}", ok.describe());
+        assert!(ok.chars() > "List my files".len() + "a.txt".len());
+        for bad in [
+            // A result for a call nobody made.
+            json!({"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"},
+                {"role": "user", "tool_results": [{"id": "c9", "content": "?"}]}], "max_tokens": 10}),
+            // The agent can't write the model's calls, nor the model results.
+            json!({"messages": [{"role": "user", "content": "x", "tool_calls": [call]}], "max_tokens": 10}),
+            json!({"messages": [{"role": "user", "content": "x"},
+                {"role": "assistant", "tool_results": [{"id": "c1", "content": "?"}]}], "max_tokens": 10}),
+            // A tool name providers refuse, and too many tools.
+            json!({"messages": [{"role": "user", "content": "x"}], "max_tokens": 10,
+                "tools": [{"name": "files.list", "input_schema": {}}]}),
+            json!({"messages": [{"role": "user", "content": "x"}], "max_tokens": 10,
+                "tools": vec![tool.clone(); MAX_TOOLS + 1]}),
+        ] {
+            assert!(
+                matches!(input(bad.clone()), Err(ActionError::InvalidInput(_))),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

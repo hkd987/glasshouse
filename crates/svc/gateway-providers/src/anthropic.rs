@@ -19,19 +19,12 @@ pub struct AnthropicProvider {
 
 #[derive(Deserialize)]
 struct Response {
+    /// Text and `tool_use` blocks (ADR 0041).
     #[serde(default)]
-    content: Vec<Block>,
+    content: Vec<serde_json::Value>,
     #[serde(default)]
     stop_reason: Option<String>,
     usage: Usage,
-}
-
-#[derive(Deserialize)]
-struct Block {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    text: String,
 }
 
 #[derive(Deserialize)]
@@ -72,10 +65,13 @@ impl ModelProvider for AnthropicProvider {
         let mut body = json!({
             "model": request.model,
             "max_tokens": request.max_tokens,
-            "messages": request.messages,
+            "messages": crate::tools::anthropic_messages(request.messages),
         });
         if let Some(system) = request.system {
             body["system"] = json!(system);
+        }
+        if !request.tools.is_empty() {
+            body["tools"] = crate::tools::anthropic_tools(request.tools);
         }
         let reply = self.http.post(
             &format!("{}/v1/messages", self.endpoint),
@@ -97,12 +93,13 @@ impl ModelProvider for AnthropicProvider {
         let text = response
             .content
             .iter()
-            .filter(|b| b.kind == "text")
-            .map(|b| b.text.as_str())
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str())
             .collect::<Vec<_>>()
             .join("");
         Ok(ProviderReply {
             text,
+            tool_calls: crate::tools::anthropic_calls(&response.content),
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
             stop_reason: response.stop_reason,
@@ -127,14 +124,12 @@ mod tests {
             system: Some("Be brief."),
             messages,
             max_tokens: 64,
+            tools: &[],
         }
     }
 
     fn hello() -> Vec<Message> {
-        vec![Message {
-            role: Role::User,
-            content: "Hello [redacted:email#1]".into(),
-        }]
+        vec![Message::text(Role::User, "Hello [redacted:email#1]")]
     }
 
     #[test]

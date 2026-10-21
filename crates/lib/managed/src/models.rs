@@ -25,6 +25,10 @@ pub struct ModelCall {
     pub system: Option<String>,
     pub messages: Vec<ModelMessage>,
     pub max_tokens: u32,
+    /// Tools the model may ask for (ADR 0041), as the gateway spells them.
+    /// Left out when none, so a call without tools is what it always was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<serde_json::Value>,
 }
 
 /// The call's words never print: a log line or an error shows its shape.
@@ -34,6 +38,7 @@ impl std::fmt::Debug for ModelCall {
             .field("device", &self.device)
             .field("model", &self.model)
             .field("messages", &self.messages.len())
+            .field("tools", &self.tools.len())
             .field("max_tokens", &self.max_tokens)
             .finish_non_exhaustive()
     }
@@ -44,7 +49,13 @@ impl std::fmt::Debug for ModelCall {
 pub struct ModelMessage {
     /// `user` or `assistant`.
     pub role: String,
+    #[serde(default)]
     pub content: String,
+    /// An assistant's tool calls, and a user's tool results (ADR 0041).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_results: Vec<serde_json::Value>,
 }
 
 /// What the model answered, and what it cost the org.
@@ -62,6 +73,9 @@ pub struct ModelAnswer {
     /// The model OpenRouter's router chose.
     #[serde(default)]
     pub served_by: Option<String>,
+    /// The tools the model asked for (ADR 0041).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<serde_json::Value>,
 }
 
 impl std::fmt::Debug for ModelAnswer {

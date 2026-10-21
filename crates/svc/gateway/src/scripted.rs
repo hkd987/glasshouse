@@ -74,8 +74,27 @@ impl ModelProvider for ScriptedProvider {
             + request
                 .messages
                 .iter()
-                .map(|m| m.content.chars().count())
+                .map(|m| {
+                    m.content.chars().count()
+                        + m.tool_results
+                            .iter()
+                            .map(|r| r.content.chars().count())
+                            .sum::<usize>()
+                })
                 .sum::<usize>();
+        // Tool use, deterministically (ADR 0041): a fresh request that
+        // names a tool it was offered calls that tool, with the JSON object
+        // written after its name; once results come back it answers.
+        if let Some(call) = scripted_call(request) {
+            return Ok(ProviderReply {
+                text: format!("Calling {}.", call.name),
+                tool_calls: vec![call],
+                input_tokens: tokens(chars),
+                output_tokens: 10,
+                stop_reason: Some("tool_use".into()),
+                ..ProviderReply::default()
+            });
+        }
         let last: String = request
             .messages
             .iter()
@@ -93,6 +112,23 @@ impl ModelProvider for ScriptedProvider {
             let system: String = system.chars().take(2000).collect();
             text.push_str(&format!(" Your instructions read: {system}"));
         }
+        let results: Vec<String> = request
+            .messages
+            .last()
+            .map(|m| {
+                m.tool_results
+                    .iter()
+                    .map(|r| r.content.chars().take(500).collect())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !results.is_empty() {
+            text = format!(
+                "Scripted reply from {model} (nothing left this computer). The tools returned: {}",
+                results.join(" | "),
+                model = request.model,
+            );
+        }
         let output = tokens(text.chars().count()).min(u64::from(request.max_tokens));
         Ok(ProviderReply {
             input_tokens: tokens(chars),
@@ -101,6 +137,38 @@ impl ModelProvider for ScriptedProvider {
             cost_usd: None,
             served_by: None,
             text,
+            tool_calls: Vec::new(),
         })
     }
+}
+
+/// The tool a fresh request asks for in words: the first offered tool its
+/// last message names, with the JSON object after the name as its input
+/// (`{}` when there's none).
+fn scripted_call(request: &ProviderRequest<'_>) -> Option<crate::ToolCall> {
+    let last = request.messages.last()?;
+    if last.role != crate::Role::User || !last.tool_results.is_empty() {
+        return None;
+    }
+    let text = &last.content;
+    let (at, tool) = request
+        .tools
+        .iter()
+        .filter_map(|t| text.find(t.name.as_str()).map(|at| (at, t)))
+        .min_by_key(|(at, _)| *at)?;
+    let after = &text[at + tool.name.len()..];
+    let input = after
+        .find('{')
+        .and_then(|open| {
+            let mut stream =
+                serde_json::Deserializer::from_str(&after[open..]).into_iter::<serde_json::Value>();
+            stream.next()?.ok()
+        })
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    Some(crate::ToolCall {
+        id: format!("call_{}", request.messages.len()),
+        name: tool.name.clone(),
+        input,
+    })
 }

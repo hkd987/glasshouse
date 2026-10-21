@@ -12,7 +12,8 @@ use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    CompleteInput, Message, ModelProvider, ProviderError, ProviderRequest, Redactor, Vault,
+    CompleteInput, Message, ModelProvider, ProviderError, ProviderRequest, Redactor, ToolCall,
+    ToolResult, Vault,
 };
 
 /// The model providers this machine can reach, by the policy's provider id.
@@ -37,6 +38,9 @@ pub struct Call<'a> {
 pub struct Completion {
     /// The reply with this call's PII put back.
     pub text: String,
+    /// The tools the model asked for, their inputs with PII put back (ADR
+    /// 0041). The agent makes each call, where every rule applies.
+    pub tool_calls: Vec<ToolCall>,
     pub stop_reason: Option<String>,
     pub record: CallRecord,
 }
@@ -78,6 +82,12 @@ pub struct CallRecord {
     /// policy's prices, and absent when a price isn't set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// Tools the call offered the model (ADR 0041), if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools_offered: Option<usize>,
+    /// The tools the model asked for, by name: never their inputs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools_called: Vec<String>,
     /// Replacements by kind (DP-3).
     pub redacted: BTreeMap<String, usize>,
     /// The request as sent (after redaction).
@@ -149,6 +159,8 @@ impl Gateway {
             .system
             .as_deref()
             .map(|s| call.redactor.redact(s, &mut vault));
+        // Tool calls and results carry data too (ADR 0041): every string
+        // in them is redacted as message text is.
         let messages: Vec<Message> = call
             .input
             .messages
@@ -156,9 +168,32 @@ impl Gateway {
             .map(|m| Message {
                 role: m.role,
                 content: call.redactor.redact(&m.content, &mut vault),
+                tool_calls: m
+                    .tool_calls
+                    .iter()
+                    .map(|c| ToolCall {
+                        id: c.id.clone(),
+                        name: c.name.clone(),
+                        input: redact_json(&c.input, call.redactor, &mut vault),
+                    })
+                    .collect(),
+                tool_results: m
+                    .tool_results
+                    .iter()
+                    .map(|r| ToolResult {
+                        id: r.id.clone(),
+                        content: call.redactor.redact(&r.content, &mut vault),
+                        is_error: r.is_error,
+                    })
+                    .collect(),
             })
             .collect();
-        let sent = json!({ "system": system, "messages": messages });
+        let tools = &call.input.tools;
+        let sent = if tools.is_empty() {
+            json!({ "system": system, "messages": messages })
+        } else {
+            json!({ "system": system, "messages": messages, "tools": tools })
+        };
         let mut record = CallRecord {
             label: call.route.label,
             route: call.route.rule.clone(),
@@ -170,6 +205,8 @@ impl Gateway {
             output_tokens: None,
             served_by: None,
             cost_usd: None,
+            tools_offered: (!tools.is_empty()).then_some(tools.len()),
+            tools_called: Vec::new(),
             redacted: vault.counts().clone(),
             request: Digest::of(&sent.to_string()),
             response: None,
@@ -186,6 +223,7 @@ impl Gateway {
                     system: system.as_deref(),
                     messages: &messages,
                     max_tokens: call.input.max_tokens,
+                    tools,
                 }),
                 None => Err(ProviderError::NotConfigured(
                     "no credentials or connection for it".into(),
@@ -203,12 +241,27 @@ impl Gateway {
                         .cost_usd
                         .or_else(|| cost(step, reply.input_tokens, reply.output_tokens));
                     record.served_by.clone_from(&reply.served_by);
-                    record.response = Some(Digest::of(&reply.text));
+                    record.tools_called = reply.tool_calls.iter().map(|c| c.name.clone()).collect();
+                    let answered = if reply.tool_calls.is_empty() {
+                        reply.text.clone()
+                    } else {
+                        json!({ "text": reply.text, "tool_calls": reply.tool_calls }).to_string()
+                    };
+                    record.response = Some(Digest::of(&answered));
                     if call.log_prompts {
-                        record.reply = Some(reply.text.clone());
+                        record.reply = Some(answered);
                     }
                     return Ok(Completion {
                         text: vault.restore(&reply.text),
+                        tool_calls: reply
+                            .tool_calls
+                            .iter()
+                            .map(|c| ToolCall {
+                                id: c.id.clone(),
+                                name: c.name.clone(),
+                                input: restore_json(&c.input, &vault),
+                            })
+                            .collect(),
                         stop_reason: reply.stop_reason,
                         record,
                     });
@@ -237,6 +290,45 @@ impl Gateway {
             ),
             record,
         }))
+    }
+}
+
+/// `value` with every string in it redacted.
+fn redact_json(
+    value: &serde_json::Value,
+    redactor: &Redactor,
+    vault: &mut Vault,
+) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => Value::String(redactor.redact(s, vault)),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|v| redact_json(v, redactor, vault))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), redact_json(v, redactor, vault)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// `value` with this call's PII put back in every string.
+fn restore_json(value: &serde_json::Value, vault: &Vault) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => Value::String(vault.restore(s)),
+        Value::Array(items) => Value::Array(items.iter().map(|v| restore_json(v, vault)).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), restore_json(v, vault)))
+                .collect(),
+        ),
+        other => other.clone(),
     }
 }
 
@@ -281,13 +373,11 @@ mod tests {
 
     fn input(text: &str) -> CompleteInput {
         CompleteInput {
-            messages: vec![Message {
-                role: Role::User,
-                content: text.into(),
-            }],
+            messages: vec![Message::text(Role::User, text)],
             max_tokens: 500,
             system: Some("Be brief.".into()),
             model: None,
+            tools: Vec::new(),
         }
     }
 
@@ -311,8 +401,95 @@ mod tests {
                 stop_reason: Some("stop".into()),
                 cost_usd: Some(0.42),
                 served_by: Some("anthropic/claude-sonnet-4.5".into()),
+                tool_calls: Vec::new(),
             })
         }
+    }
+
+    fn files_tool(name: &str) -> crate::Tool {
+        crate::Tool {
+            name: name.into(),
+            description: "Files in the task's folders.".into(),
+            input_schema: json!({ "type": "object", "properties": { "path": { "type": "string" } } }),
+        }
+    }
+
+    #[test]
+    fn adr0041_tool_results_are_redacted_and_the_models_calls_get_pii_back() {
+        let scripted = Arc::new(ScriptedProvider::echo());
+        let gateway = Gateway::new().with("scripted", scripted.clone());
+        let route = route(vec![step("echo", "scripted")]);
+        let redactor = redactor();
+
+        // The model asks for files_list, its input naming a person: the
+        // placeholder it saw comes back as the address.
+        let mut asked = input(r#"Use files_list {"path": "Docs", "owner": "ana@example.com"}"#);
+        asked.tools = vec![files_tool("files_list"), files_tool("files_read")];
+        let done = gateway
+            .complete(Call {
+                input: &asked,
+                route: &route,
+                redactor: &redactor,
+                log_prompts: false,
+            })
+            .unwrap();
+        assert_eq!(done.stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(done.tool_calls.len(), 1);
+        assert_eq!(done.tool_calls[0].name, "files_list");
+        assert_eq!(done.tool_calls[0].input["owner"], "ana@example.com");
+        let sent = &scripted.seen()[0];
+        assert!(sent.messages[0].content.contains("[redacted:email#1]"));
+        assert_eq!(done.record.tools_offered, Some(2));
+        assert_eq!(done.record.tools_called, vec!["files_list".to_owned()]);
+        let record = serde_json::to_string(&done.record).unwrap();
+        assert!(
+            !record.contains("ana@example.com") && !record.contains("Docs"),
+            "{record}"
+        );
+
+        // The agent made the call and sends back what it returned: redacted
+        // on the way out like any text.
+        let mut answered = asked.clone();
+        answered.messages.push(Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: done.tool_calls.clone(),
+            tool_results: Vec::new(),
+        });
+        answered.messages.push(Message {
+            role: Role::User,
+            content: String::new(),
+            tool_calls: Vec::new(),
+            tool_results: vec![crate::ToolResult {
+                id: done.tool_calls[0].id.clone(),
+                content: "notes.txt, from bo@example.com".into(),
+                is_error: false,
+            }],
+        });
+        let done = gateway
+            .complete(Call {
+                input: &answered,
+                route: &route,
+                redactor: &redactor,
+                log_prompts: false,
+            })
+            .unwrap();
+        assert!(done.tool_calls.is_empty());
+        assert_eq!(done.stop_reason.as_deref(), Some("end_turn"));
+        let sent = &scripted.seen()[1];
+        let result = &sent.messages[2].tool_results[0].content;
+        assert!(
+            result.contains("[redacted:email#") && !result.contains("bo@example.com"),
+            "{result}"
+        );
+        assert!(
+            sent.messages[1].tool_calls[0].input["owner"]
+                .as_str()
+                .unwrap()
+                .starts_with("[redacted:email#")
+        );
+        // The reply names what the tools returned, with the address back.
+        assert!(done.text.contains("bo@example.com"), "{}", done.text);
     }
 
     #[test]

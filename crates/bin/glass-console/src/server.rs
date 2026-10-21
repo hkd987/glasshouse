@@ -395,13 +395,44 @@ impl Console {
                 "assistant" => Role::Assistant,
                 other => return error(400, &format!("no role {other:?}")),
             };
+            // Tool calls and results (ADR 0041), as the gateway spells
+            // them: anything else is refused, not guessed at.
+            let parsed = (
+                m.tool_calls
+                    .iter()
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .collect::<Result<Vec<glass_gateway::ToolCall>, _>>(),
+                m.tool_results
+                    .iter()
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .collect::<Result<Vec<glass_gateway::ToolResult>, _>>(),
+            );
+            let (Ok(tool_calls), Ok(tool_results)) = parsed else {
+                return error(400, "a tool call or result the console can't read");
+            };
             messages.push(Message {
                 role,
                 content: m.content.clone(),
+                tool_calls,
+                tool_results,
             });
         }
         if messages.is_empty() {
             return error(400, "a call needs a message");
+        }
+        let Ok(tools) = call
+            .tools
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<glass_gateway::Tool>, _>>()
+        else {
+            return error(400, "a tool the console can't read");
+        };
+        if tools.len() > glass_gateway::MAX_TOOLS {
+            return error(400, "too many tools for one call");
         }
         let Ok(_permit) = self.model_calls.try_acquire() else {
             return error(503, "Too many model calls at once; try again.");
@@ -418,6 +449,7 @@ impl Console {
                     system: system.as_deref(),
                     messages: &messages,
                     max_tokens,
+                    tools: &tools,
                 },
             )
         })
@@ -462,6 +494,7 @@ impl Console {
                 .cost_usd
                 .map(|c| (c * rate * 1_000_000.0).round() / 1_000_000.0),
             served_by: reply.served_by,
+            tool_calls: reply.tool_calls.iter().map(|c| json!(c)).collect(),
         };
         ok(serde_json::to_value(answer).unwrap_or_default())
     }
@@ -2486,15 +2519,13 @@ mod tests {
         let reply = tokio::task::spawn_blocking(move || {
             client.register_device().unwrap();
             link.connect(Arc::new(client), "lab-9");
-            let messages = [Message {
-                role: Role::User,
-                content: "Draft the agenda".into(),
-            }];
+            let messages = [Message::text(Role::User, "Draft the agenda")];
             provider.complete(&ProviderRequest {
                 model: "openrouter/auto",
                 system: None,
                 messages: &messages,
                 max_tokens: 200,
+                tools: &[],
             })
         })
         .await

@@ -38,15 +38,10 @@ struct Response {
 
 #[derive(Deserialize)]
 struct Choice {
-    message: ChoiceMessage,
+    /// Its `content` and any `tool_calls` (ADR 0041).
+    message: serde_json::Value,
     #[serde(default)]
     finish_reason: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ChoiceMessage {
-    #[serde(default)]
-    content: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -87,17 +82,15 @@ impl OpenRouterProvider {
 
 impl ModelProvider for OpenRouterProvider {
     fn complete(&self, request: &ProviderRequest<'_>) -> Result<ProviderReply, ProviderError> {
-        let mut messages = Vec::with_capacity(request.messages.len() + 1);
-        if let Some(system) = request.system {
-            messages.push(json!({ "role": "system", "content": system }));
-        }
-        messages.extend(request.messages.iter().map(|m| json!(m)));
-        let body = json!({
+        let mut body = json!({
             "model": request.model,
             "max_tokens": request.max_tokens,
-            "messages": messages,
+            "messages": crate::tools::openai_messages(request.system, request.messages),
             "provider": { "zdr": true, "data_collection": "deny" },
         });
+        if !request.tools.is_empty() {
+            body["tools"] = crate::tools::openai_tools(request.tools);
+        }
         let bearer = format!("Bearer {}", self.key.expose());
         let reply = self.http.post(
             &format!("{}/v1/chat/completions", self.endpoint),
@@ -124,10 +117,17 @@ impl ModelProvider for OpenRouterProvider {
         let response: Response = serde_json::from_str(&reply.body)
             .map_err(|e| ProviderError::Unavailable(format!("unreadable reply: {e}")))?;
         let choice = response.choices.into_iter().next();
-        let stop_reason = choice.as_ref().and_then(|c| c.finish_reason.clone());
-        let text = choice.and_then(|c| c.message.content).unwrap_or_default();
+        let stop_reason =
+            crate::tools::stop_reason(choice.as_ref().and_then(|c| c.finish_reason.clone()));
+        let (text, tool_calls) = choice.map_or_else(Default::default, |c| {
+            (
+                c.message["content"].as_str().unwrap_or_default().to_owned(),
+                crate::tools::openai_calls(&c.message),
+            )
+        });
         Ok(ProviderReply {
             text,
+            tool_calls,
             input_tokens: response.usage.prompt_tokens,
             output_tokens: response.usage.completion_tokens,
             stop_reason,
@@ -387,14 +387,12 @@ mod tests {
             system: Some("Be brief."),
             messages,
             max_tokens: 64,
+            tools: &[],
         }
     }
 
     fn hello() -> Vec<Message> {
-        vec![Message {
-            role: Role::User,
-            content: "Hello [redacted:email#1]".into(),
-        }]
+        vec![Message::text(Role::User, "Hello [redacted:email#1]")]
     }
 
     #[test]

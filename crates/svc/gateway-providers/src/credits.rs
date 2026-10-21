@@ -7,6 +7,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 
 use glass_gateway::{ModelProvider, ProviderError, ProviderReply, ProviderRequest, Role};
 use glass_managed::models::{MAX_OUTPUT_TOKENS, ModelCall, ModelMessage};
+use serde_json::json;
 
 use crate::ConsoleClient;
 
@@ -69,13 +70,25 @@ impl ModelProvider for CreditsProvider {
                     }
                     .into(),
                     content: m.content.clone(),
+                    tool_calls: m.tool_calls.iter().map(|c| json!(c)).collect(),
+                    tool_results: m.tool_results.iter().map(|r| json!(r)).collect(),
                 })
                 .collect(),
             max_tokens: request.max_tokens.min(MAX_OUTPUT_TOKENS),
+            tools: request.tools.iter().map(|t| json!(t)).collect(),
         };
         let answer = client.complete_model(&call)?;
+        // The console's reply: tool calls it can't read are an outage, not
+        // something to guess at.
+        let tool_calls = answer
+            .tool_calls
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<glass_gateway::ToolCall>, _>>()
+            .map_err(|e| ProviderError::Unavailable(format!("the console's tool calls: {e}")))?;
         Ok(ProviderReply {
             text: answer.text,
+            tool_calls,
             input_tokens: answer.input_tokens,
             output_tokens: answer.output_tokens,
             stop_reason: answer.stop_reason,
@@ -106,15 +119,16 @@ mod tests {
     }
 
     fn call(provider: &CreditsProvider) -> Result<ProviderReply, ProviderError> {
-        let messages = [Message {
-            role: Role::User,
-            content: "Summarise [redacted:email#1]'s note".into(),
-        }];
+        let messages = [Message::text(
+            Role::User,
+            "Summarise [redacted:email#1]'s note",
+        )];
         provider.complete(&ProviderRequest {
             model: "openrouter/auto",
             system: Some("Be brief."),
             messages: &messages,
             max_tokens: 1_000_000,
+            tools: &[],
         })
     }
 

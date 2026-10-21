@@ -70,7 +70,7 @@ impl Runtime {
         match gateway.complete(call) {
             Ok(done) => {
                 let r = &done.record;
-                let data = json!({
+                let mut data = json!({
                     "model": r.model,
                     "provider": r.provider,
                     "label": r.label,
@@ -79,6 +79,12 @@ impl Runtime {
                     "stop_reason": done.stop_reason,
                     "redacted": r.redacted,
                 });
+                // The tools the model asked for (ADR 0041): the agent's to
+                // make, over its socket, where every rule applies. They go
+                // to the agent, never into the audit record.
+                if !done.tool_calls.is_empty() {
+                    data["tool_calls"] = json!(done.tool_calls);
+                }
                 let answered = routed
                     .route
                     .steps

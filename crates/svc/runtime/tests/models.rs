@@ -409,3 +409,71 @@ async fn dp2_a_layer_cant_widen_the_model_allowlist_or_loosen_model_calls() {
     );
     assert!(h.model.seen().is_empty());
 }
+
+/// ADR 0041: the model proposes a tool call; the agent makes it over its
+/// socket, where policy decides it; the result goes back to the model,
+/// redacted; the record names the tools, never their inputs.
+#[tokio::test]
+async fn adr0041_the_model_proposes_a_tool_call_and_the_agent_makes_it_under_policy() {
+    let h = harness_with(MODELS);
+    let (task, agent) = start(&h, &["Invoices"]).await;
+    let tools: ListToolsResult = agent.call("tools/list", Value::Null).await.unwrap();
+    let list = tools.tools.iter().find(|t| t.name == "files_list").unwrap();
+    let offered = json!([{
+        "name": list.name,
+        "description": list.description,
+        "input_schema": list.input_schema,
+    }]);
+
+    let first = tool(
+        &agent,
+        "model_complete",
+        json!({
+            "messages": [{"role": "user", "content": "What's in my invoices? Use files_list {\"path\": \"Invoices\"}"}],
+            "max_tokens": 200,
+            "tools": offered,
+        }),
+    )
+    .await;
+    assert!(!first.is_error, "{}", first.text());
+    let data = first.structured_content.clone().unwrap();
+    assert_eq!(data["stop_reason"], "tool_use");
+    let call = &data["tool_calls"][0];
+    assert_eq!(call["name"], "files_list");
+
+    // The agent makes the call itself: an action like any other.
+    let listed = tool(&agent, "files_list", call["input"].clone()).await;
+    assert!(!listed.is_error, "{}", listed.text());
+    let second = tool(
+        &agent,
+        "model_complete",
+        json!({
+            "messages": [
+                {"role": "user", "content": "What's in my invoices? Use files_list {\"path\": \"Invoices\"}"},
+                {"role": "assistant", "content": first.text(), "tool_calls": [call]},
+                {"role": "user", "tool_results": [{"id": call["id"], "content": listed.text()}]}
+            ],
+            "max_tokens": 200,
+            "tools": offered,
+        }),
+    )
+    .await;
+    assert!(!second.is_error, "{}", second.text());
+    assert!(second.text().contains("inv-001.txt"), "{}", second.text());
+
+    // On the record: two model calls offering one tool, the first naming
+    // files_list; the list itself an action policy decided.
+    let records = model_records(&h, task);
+    assert_eq!(records.len(), 2);
+    let m = &records[0].event.detail["model"];
+    assert_eq!(m["tools_offered"], 1);
+    assert_eq!(m["tools_called"], json!(["files_list"]));
+    let log = std::fs::read_to_string(h.audit_path()).unwrap();
+    assert!(
+        !records
+            .iter()
+            .any(|r| r.event.detail.to_string().contains("inv-001")),
+        "no tool result in a model call's record"
+    );
+    assert!(log.contains("files.list"));
+}

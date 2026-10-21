@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use crate::Message;
+use crate::{Message, Tool, ToolCall};
 
 /// One request as it leaves the machine: already redacted.
 #[derive(Debug, Clone, Copy)]
@@ -13,11 +13,15 @@ pub struct ProviderRequest<'a> {
     pub system: Option<&'a str>,
     pub messages: &'a [Message],
     pub max_tokens: u32,
+    /// Tools the model may ask for (ADR 0041); empty for most calls.
+    pub tools: &'a [Tool],
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProviderReply {
     pub text: String,
+    /// The tools the model asked for, in order (ADR 0041).
+    pub tool_calls: Vec<ToolCall>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// Why the model stopped, as the provider says it ("end_turn",
