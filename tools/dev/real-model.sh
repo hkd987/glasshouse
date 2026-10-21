@@ -107,12 +107,13 @@ done
 $restart" >/dev/null || echo "real-model: couldn't put the VM back; look in $etc" >&2
 }
 
+# Set first: anything after this point leaves the VM as it found it.
+trap put_back EXIT
 "$vm" run "set -e
 for f in policy.toml model-secrets.toml; do
 	if [ -e $etc/\$f ]; then mv $etc/\$f $etc/\$f.real-model-saved; fi
 done
 $e2e real-model-policy '$model' >$etc/policy.toml"
-trap put_back EXIT
 printf '[openrouter]\napi_key = "%s"\n' "$OPENROUTER_API_KEY" |
 	"$vm" ssh "umask 077; cat >$etc/model-secrets.toml"
 "$vm" run "$restart"
