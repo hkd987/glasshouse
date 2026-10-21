@@ -297,9 +297,9 @@ test("adr0039 ae4 IT lets the IT agent ask models, and its calls go through the 
   glassctl("wait", desk.id, "--timeout", "60");
   const deskCalls = audit().filter((r) => r.event.action === "model.complete" && r.event.agent === "desktop-agent");
   expect(deskCalls).toHaveLength(2);
-  const asked = (deskCalls[0].event.detail as { model: Record<string, unknown> }).model;
-  expect(asked.provider).toBe("credits");
-  expect(asked.tools_called).toEqual(["calendar_list"]);
+  const asked = (deskCalls[0]?.event.detail as { model: Record<string, unknown> } | undefined)?.model;
+  expect(asked?.provider).toBe("credits");
+  expect(asked?.tools_called).toEqual(["calendar_list"]);
   const listed = audit().find((r) => r.event.action === "calendar.list" && r.event.agent === "desktop-agent");
   expect(listed && outcome(listed)).toBe("completed");
   const answered = glassctlJson<{ answer?: string }>("show", desk.id);
