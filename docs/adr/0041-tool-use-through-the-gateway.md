@@ -58,10 +58,12 @@ model gateway); ADR 0010's harness bundles build on it later.
    results), feeds the results back, and stops when the model answers in
    words, after at most 20 steps, or when the model can't be reached. Its
    default rules are narrow: reading files, mail, calendar and people,
-   and drafting; everything else at its tier. Typing in the command bar
-   doesn't reach it yet (DA-1's shell work). Its answer is kept on the
-  task (`TaskDetail.answer`, at most 4,000 characters, control
-  characters stripped like any agent text) and `glassctl show` prints it.
+   and drafting; everything else at its tier. Enter in the command bar
+   with no app found hands it what was typed, as a task with no folders,
+   which opens on screen. Its answer is kept on the task
+   (`TaskDetail.answer`, at most 4,000 characters, control characters
+   stripped like any agent text); `glassctl show` and the shell's task
+   view show it.
 
 ## Consequences
 - Every agent can let a model choose actions without parsing prose, and
@@ -74,5 +76,5 @@ model gateway); ADR 0010's harness bundles build on it later.
 ## Not built yet
 - Streaming, parallel tool calls run concurrently (they run in order),
   images, and a model's server-side tools.
-- The command bar's hand-off to the desktop agent, and the desktop
-  agent handing off to specialists (AE-3's second half).
+- The desktop agent handing off to specialists (AE-3's second half), its
+  answer in the command bar itself, and folders chosen from the bar.

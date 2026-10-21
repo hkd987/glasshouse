@@ -6,8 +6,8 @@
 
 use glass_api::settings::SettingsView;
 use glass_api::{
-    AnswerApproval, ApprovalAnswer, ApprovalScope, Event, TaskDetail, TaskRef, TaskView,
-    UndoReport, UndoRequest, methods,
+    AnswerApproval, ApprovalAnswer, ApprovalScope, Event, ScopeRequest, TaskDetail, TaskRef,
+    TaskRequest, TaskView, UndoReport, UndoRequest, methods,
 };
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,11 @@ pub struct Live {
     tasks: Vec<TaskView>,
     /// The command bar's text while it's open.
     command: Option<String>,
+    /// What was handed to the desktop agent, until `task.start` answers.
+    asked: Option<String>,
+    /// Why the desktop agent couldn't take it, in the command bar until
+    /// the text changes.
+    agent_note: Option<String>,
     /// Whether the view draws the wallpaper, or the screen keeps it as its
     /// backdrop.
     wallpaper: bool,
@@ -230,7 +235,14 @@ pub enum Effect {
     /// the apps hidden from search, and hand back what the computer then
     /// has to [`Live::set_settings`].
     ChooseSetting(glass_api::settings::SettingChoice),
+    /// Start a task (`task.start`): what the person typed in the command
+    /// bar, for the desktop agent (AE-3). Its `TaskView` goes to
+    /// [`Live::started`], a refusal to [`Live::start_failed`].
+    Start(TaskRequest),
 }
+
+/// The agent the command bar hands what's typed to (AE-3, ADR 0041).
+pub const DESKTOP_AGENT: &str = "desktop-agent";
 
 impl Effect {
     /// The control-API call for the effects that act on a task by
@@ -261,6 +273,8 @@ impl Live {
         let mut live = Self {
             tasks,
             command: None,
+            asked: None,
+            agent_note: None,
             wallpaper: true,
             open: None,
             banners: Vec::new(),
@@ -634,6 +648,28 @@ impl Live {
         open.detail = Some(detail);
     }
 
+    /// `task.start`'s answer for what the command bar handed off: the new
+    /// tile, opened.
+    pub fn started(&mut self, task: TaskView) -> Option<Effect> {
+        self.asked = None;
+        let id = task.id;
+        match self.tasks.iter_mut().find(|t| t.id == id) {
+            Some(tile) => *tile = task,
+            None => self.tasks.push(task),
+        }
+        self.open(id)
+    }
+
+    /// `task.start` refused what the command bar handed off (no model, or
+    /// policy): the bar comes back with the text and the reason.
+    pub fn start_failed(&mut self, reason: String) -> Option<Effect> {
+        let query = self.asked.take()?;
+        self.command = Some(query);
+        self.agent_note = Some(reason);
+        self.select_top_hit();
+        Some(Effect::Focus(command_bar::INPUT))
+    }
+
     /// `task.undo`'s answer: what a roll back would change, then what it
     /// changed. After a real one, the detail is refetched to show it.
     pub fn undo_report(&mut self, report: UndoReport) -> Option<Effect> {
@@ -973,12 +1009,34 @@ impl Live {
             Message::CommandChanged(text) => {
                 if let Some(command) = &mut self.command {
                     *command = text;
+                    self.agent_note = None;
                     self.select_top_hit();
                 }
                 None
             }
+            // The bar closes and the task opens, so the person watches it
+            // work; every step that changes or sends anything still asks.
+            Message::AskAgent => {
+                let query = self.command.as_deref()?.trim().to_owned();
+                if query.is_empty() || self.asked.is_some() {
+                    return None;
+                }
+                self.command = None;
+                self.agent_note = None;
+                if self.list_selected(List::CommandBar) {
+                    self.selected = None;
+                }
+                self.asked = Some(query.clone());
+                Some(Effect::Start(TaskRequest {
+                    agent: DESKTOP_AGENT.parse().ok()?,
+                    prompt: query,
+                    scope: ScopeRequest::default(),
+                    title: None,
+                }))
+            }
             Message::CloseCommandBar => {
                 self.command = None;
+                self.agent_note = None;
                 if self.list_selected(List::CommandBar) {
                     self.selected = None;
                 }
@@ -1210,6 +1268,16 @@ impl Live {
             {
                 Some(Message::ChooseSelected)
             }
+            // Nothing found to open: Enter asks the desktop agent (AE-3).
+            Key::Named(Named::Enter)
+                if modifiers.is_empty()
+                    && self
+                        .command
+                        .as_deref()
+                        .is_some_and(|q| !q.trim().is_empty()) =>
+            {
+                Some(Message::AskAgent)
+            }
             // The system menu, as Control F2 moves to a Mac's menu bar.
             Key::Named(Named::F2) if modifiers.control() => Some(Message::ToggleSystemMenu),
             // The agents menu, as Super N opens Windows' notifications.
@@ -1256,6 +1324,7 @@ impl Live {
                 .collect(),
             selected: self.selected_in(List::CommandBar),
             answer: None,
+            note: self.agent_note.as_deref(),
             suggestions: Vec::new(),
             recent: &self.tasks,
             model: String::new(),

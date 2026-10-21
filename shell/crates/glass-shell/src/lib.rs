@@ -114,6 +114,9 @@ pub enum Message {
     /// Open the command bar (Ctrl Space).
     OpenCommandBar,
     CommandChanged(String),
+    /// Enter in the command bar with no app found: hand what was typed to
+    /// the desktop agent (AE-3).
+    AskAgent,
     /// A "for what's on your screen" suggestion.
     RunSuggestion(String),
     /// Hide this app (by id) from the command bar's search (DK-1).

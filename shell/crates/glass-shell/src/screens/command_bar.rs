@@ -2,8 +2,9 @@
 //! everything with Ctrl Space, like Spotlight. Typing finds apps by name
 //! and Enter opens the top one; the desktop agent answers on the left
 //! (AE-3); suggestions for what's on screen and recent tasks sit on the
-//! right. Recent tasks are real `task.list` data; the answer comes from the
-//! desktop agent, which isn't built yet, so callers pass it in.
+//! right. Recent tasks are real `task.list` data. With no app found, Enter
+//! hands what was typed to the desktop agent as a task, which opens; an
+//! answer in the bar itself is the artboard's, which callers pass in.
 
 use glass_api::{TaskView, TileState, display_line};
 use iced_core::alignment::Vertical;
@@ -24,6 +25,8 @@ pub struct CommandBar<'a> {
     /// The hit Enter opens: the first, until the arrows move it.
     pub selected: Option<usize>,
     pub answer: Option<Answer>,
+    /// Why the desktop agent couldn't take what was typed.
+    pub note: Option<&'a str>,
     /// "For what's on your screen".
     pub suggestions: Vec<String>,
     pub recent: &'a [TaskView],
@@ -214,7 +217,7 @@ pub fn view<'a>(theme: &Theme, bar: &'a CommandBar<'a>) -> Element<'a, Message> 
         );
     }
     let main = container(if bar.hits.is_empty() {
-        answer(bar.answer.as_ref())
+        answer(bar)
     } else {
         hits(bar)
     })
@@ -344,16 +347,25 @@ fn hits<'a>(bar: &'a CommandBar<'a>) -> Element<'a, Message> {
     .into()
 }
 
-fn answer<'a>(answer: Option<&'a Answer>) -> Element<'a, Message> {
-    let Some(answer) = answer else {
-        return column![
+fn answer<'a>(bar: &'a CommandBar<'a>) -> Element<'a, Message> {
+    let Some(answer) = bar.answer.as_ref() else {
+        let typed = !bar.query.trim().is_empty();
+        let mut column = column![
             section("Desktop agent"),
-            text("Ask anything, or describe a task to hand off.")
-                .size(15)
-                .color(hex(0xD6DBE1)),
+            text(if typed {
+                "\u{21B5} Hand this to the desktop agent. It asks before anything that \
+                 changes or sends."
+            } else {
+                "Ask anything, or describe a task to hand off."
+            })
+            .size(15)
+            .color(hex(0xD6DBE1)),
         ]
-        .spacing(14)
-        .into();
+        .spacing(14);
+        if let Some(note) = bar.note {
+            column = column.push(text(display_line(note)).size(14).color(hex(0xF5A65B)));
+        }
+        return column.into();
     };
     let mut column = column![section("Desktop agent")].spacing(14);
     for (i, paragraph) in answer.paragraphs.iter().enumerate() {

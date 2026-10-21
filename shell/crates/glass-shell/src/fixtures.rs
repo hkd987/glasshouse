@@ -426,6 +426,7 @@ pub fn command_bar(recent: &[TaskView]) -> CommandBar<'_> {
         query: "prep me for my 2:00".into(),
         hits: Vec::new(),
         selected: None,
+        note: None,
         answer: Some(Answer {
             paragraphs: vec![
                 vec![

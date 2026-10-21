@@ -293,6 +293,20 @@ cmd_type() {
 		_) k="shift-minus" ;;
 		=) k="equal" ;;
 		+) k="shift-equal" ;;
+		\[) k="bracket_left" ;;
+		\]) k="bracket_right" ;;
+		\{) k="shift-bracket_left" ;;
+		\}) k="shift-bracket_right" ;;
+		\$) k="shift-4" ;;
+		%) k="shift-5" ;;
+		\&) k="shift-7" ;;
+		\*) k="shift-8" ;;
+		\<) k="shift-comma" ;;
+		\>) k="shift-dot" ;;
+		\|) k="shift-backslash" ;;
+		\\) k="backslash" ;;
+		\`) k="grave_accent" ;;
+		\~) k="shift-grave_accent" ;;
 		*) die "vm.sh type: can't type '$c'" ;;
 		esac
 		monitor "sendkey $k"

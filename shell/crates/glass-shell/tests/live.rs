@@ -1376,14 +1376,61 @@ fn dk1_the_command_bar_opens_the_app_typed_with_enter_as_spotlight_does() {
     for key in [Named::ArrowLeft, Named::ArrowRight, Named::Home, Named::End] {
         assert_eq!(press(&mut live, key), None, "{key:?} stays the query's");
     }
-    // What no app is called leaves Enter and the arrows to the agent.
+    // What no app is called leaves the arrows to the query, and Enter to
+    // the agent (`ae3_enter_hands_…`).
     type_query(&mut live, "prep me for my 2:00");
     let bar = live.command_bar().unwrap();
     assert!(bar.hits.is_empty() && bar.selected.is_none());
     assert_eq!(press(&mut live, Named::ArrowDown), None);
-    assert_eq!(press(&mut live, Named::Enter), None);
     assert_eq!(press(&mut live, Named::Escape), Some(None));
     assert!(live.command_bar().is_none());
+}
+
+#[test]
+fn ae3_enter_hands_what_no_app_is_called_to_the_desktop_agent() {
+    let mut live = Live::new(fixtures::tasks()).with_apps(fixtures::apps());
+    live.update(Message::OpenCommandBar);
+    // Only spaces: nothing to hand off.
+    type_query(&mut live, "   ");
+    assert_eq!(press(&mut live, Named::Enter), None);
+    type_query(&mut live, " What's in my folder? ");
+    let Some(Some(Effect::Start(request))) = press(&mut live, Named::Enter) else {
+        panic!("Enter starts a task");
+    };
+    assert_eq!(request.agent.as_str(), "desktop-agent");
+    assert_eq!(request.prompt, "What's in my folder?");
+    assert!(
+        request.scope.read.is_empty() && request.scope.write.is_empty(),
+        "no folders unless the person grants them"
+    );
+    assert!(live.command_bar().is_none(), "the bar closes");
+    // A second Enter before glassd answers starts nothing more.
+    live.update(Message::OpenCommandBar);
+    type_query(&mut live, "again");
+    assert_eq!(live.update(Message::AskAgent), None);
+    live.update(Message::CloseCommandBar);
+
+    // glassd refuses: the bar comes back with the text and the reason.
+    assert_eq!(
+        live.start_failed("No AI model is approved for this.".into()),
+        Some(Effect::Focus(glass_shell::screens::command_bar::INPUT))
+    );
+    let bar = live.command_bar().unwrap();
+    assert_eq!(bar.query, "What's in my folder?");
+    assert_eq!(bar.note, Some("No AI model is approved for this."));
+    type_query(&mut live, "What's in my folder?!");
+    assert_eq!(live.command_bar().unwrap().note, None, "typing clears it");
+
+    // Asked again and started: the new tile opens.
+    let Some(Some(Effect::Start(_))) = press(&mut live, Named::Enter) else {
+        panic!("Enter starts a task");
+    };
+    let mut view = fixtures::tasks()[0].clone();
+    view.id = glass_types::TaskId::new();
+    let id = view.id;
+    assert_eq!(live.started(view), Some(Effect::Get(id)));
+    assert_eq!(live.open_task(), Some(id));
+    assert!(live.tasks().iter().any(|t| t.id == id));
 }
 
 #[test]

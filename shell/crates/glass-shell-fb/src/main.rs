@@ -1188,6 +1188,20 @@ impl Shell {
                 }
                 Vec::new()
             }
+            Effect::Start(request) => {
+                let result: Result<TaskView, _> = client.call(methods::TASK_START, &request).await;
+                self.dirty = true;
+                match result {
+                    Ok(view) => {
+                        eprintln!("task.start {}: {}", request.agent, view.id.short());
+                        self.live.started(view).into_iter().collect()
+                    }
+                    Err(e) => {
+                        eprintln!("task.start {}: {e}", request.agent);
+                        self.live.start_failed(plain(&e)).into_iter().collect()
+                    }
+                }
+            }
             Effect::Undo(request) => {
                 let result: Result<UndoReport, _> = client.call(methods::TASK_UNDO, &request).await;
                 self.dirty = true;

@@ -686,6 +686,22 @@ fn receipt_pane<'a>(
     if let Some(failure) = &task.failure {
         pane = pane.push(text(failure.as_str()).size(15).color(t.text));
     }
+    // What the agent told the person (AE-3, ADR 0041), first: it's what
+    // they asked for.
+    if let Some(answer) = state.detail.and_then(|d| d.answer.as_deref()) {
+        pane = pane.push(
+            container(
+                Column::with_children(
+                    paragraphs(answer)
+                        .map(|p| text(p).size(15).color(t.text).line_height(1.5).into()),
+                )
+                .spacing(10),
+            )
+            .width(Length::Fill)
+            .padding(Padding::from([14.0, 16.0]))
+            .style(move |_| style::panel(t.raised, 12.0)),
+        );
+    }
     pane = pane.push(text(receipt.outcome()).size(15).color(t.caption));
     let stat = |label: &'static str, n: u32| -> Element<'a, Message> {
         container(
@@ -726,6 +742,21 @@ fn receipt_pane<'a>(
         );
     }
     quiet_scroll(t, pane.into())
+}
+
+/// An answer's paragraphs: its lines, joined where a paragraph wraps,
+/// split where a blank line is.
+fn paragraphs(answer: &str) -> impl Iterator<Item = String> + '_ {
+    answer
+        .split("\n\n")
+        .map(|p| {
+            p.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|p| !p.is_empty())
 }
 
 /// Rolling back (AW-15): what it would change, then what it changed.
@@ -883,6 +914,9 @@ fn now_bar<'a>(t: TileColors, state: &Expanded<'a>) -> Element<'a, Message> {
     .into()
 }
 
+/// The most room Can't touch takes: six lines.
+const CANT_TOUCH_HEIGHT: f32 = 110.0;
+
 /// The right column: Activity or Changes over Can't touch.
 fn side<'a>(theme: &Theme, state: &Expanded<'a>) -> Element<'a, Message> {
     let t = theme.tile;
@@ -922,10 +956,20 @@ fn side<'a>(theme: &Theme, state: &Expanded<'a>) -> Element<'a, Message> {
                         .size(14)
                         .font(fonts::MEDIUM)
                         .color(t.text),
-                    text(detail.cant_touch.join(", "))
-                        .size(13)
-                        .color(t.muted)
-                        .line_height(1.4),
+                    // An agent with narrow rules can't touch dozens of
+                    // things: they scroll, so Activity keeps its room.
+                    container(
+                        scroll(
+                            t,
+                            text(detail.cant_touch.join(", "))
+                                .size(13)
+                                .color(t.muted)
+                                .line_height(1.4)
+                                .into(),
+                        )
+                        .height(Length::Shrink),
+                    )
+                    .max_height(CANT_TOUCH_HEIGHT),
                 ]
                 .spacing(4),
             )
@@ -1439,6 +1483,16 @@ mod tests {
             Some(snapshots[2].id)
         );
         assert!(target(&[], None).is_none());
+    }
+
+    #[test]
+    fn ae3_an_answer_reads_as_paragraphs() {
+        let got: Vec<String> =
+            paragraphs("You have 3 files.\nOne is new.\n\n\nplan.txt is the newest.\n").collect();
+        assert_eq!(
+            got,
+            ["You have 3 files. One is new.", "plan.txt is the newest."]
+        );
     }
 
     #[test]
