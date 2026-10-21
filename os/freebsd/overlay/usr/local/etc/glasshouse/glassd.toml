@@ -62,6 +62,22 @@ plan = [
 ]
 
 [[agent]]
+id = "desktop-agent-plan"
+name = "Desktop agent (your plan)"
+version = "0.1"
+description = "The desktop agent, run by your own Claude Code on your Claude plan. Its only tools are this computer's, under your rules; what it reads goes from Claude Code straight to Anthropic, so it reaches internal data at most."
+mode = "actions"
+attended = true
+driver = "/usr/local/libexec/glasshouse/glass-claude-runner"
+model = "Your Claude plan, through your own Claude Code"
+plan = [
+  "Start your own Claude Code with only this computer's tools",
+  "Use the tools the rules give it, one step at a time",
+  "Ask you first wherever the rules say to",
+  "Tell you what it did and found",
+]
+
+[[agent]]
 id = "it-agent"
 name = "IT agent"
 version = "0.2"

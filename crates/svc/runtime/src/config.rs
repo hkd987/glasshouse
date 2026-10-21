@@ -37,6 +37,12 @@ pub struct CatalogEntry {
     /// (HX-1). Every call still goes through the action pipeline.
     #[serde(default)]
     pub attended: bool,
+    /// For an attended agent, the program the person's client (`glassctl
+    /// run --drive`, the command bar) runs as them to drive it, with the
+    /// task socket in `GLASS_AGENT_SOCKET` (ADR 0042). glassd never starts
+    /// it.
+    #[serde(default)]
+    pub driver: Option<PathBuf>,
     #[serde(default)]
     pub args: Vec<String>,
     /// The plan shown on the handoff card, until model-backed planning
@@ -55,6 +61,12 @@ fn default_mode() -> AgentMode {
 impl CatalogEntry {
     /// Checks what the entry declares, for config validation.
     pub fn check(&self) -> Result<(), String> {
+        if self.driver.is_some() && !self.attended {
+            return Err(format!(
+                "agent {}: a driver is for attended agents only",
+                self.id
+            ));
+        }
         glass_tailoring::check_declared(&self.customize)
     }
 
@@ -66,6 +78,7 @@ impl CatalogEntry {
             description: self.description.clone(),
             mode: self.mode,
             attended: self.attended,
+            driver: self.driver.as_ref().map(|d| d.display().to_string()),
         }
     }
 }

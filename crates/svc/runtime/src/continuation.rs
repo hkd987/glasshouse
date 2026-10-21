@@ -54,7 +54,11 @@ impl Runtime {
                 return;
             }
             state.connected = true;
-            state.caption = format!("You're driving in {}", task.entry.name);
+            state.caption = if task.entry.driver.is_some() {
+                format!("{} started", task.entry.name)
+            } else {
+                format!("You're driving in {}", task.entry.name)
+            };
             state.note(
                 ActivityKind::State,
                 format!("{} connected", task.entry.name),
@@ -69,7 +73,10 @@ impl Runtime {
         {
             let mut state = task.lock();
             state.tile = TileState::Done;
-            state.caption = "You finished in your harness".into();
+            // A driver that answered (ADR 0042) keeps its answer's caption.
+            if state.answer.is_none() {
+                state.caption = "You finished in your harness".into();
+            }
             state.progress = None;
         }
         task.gate.send_replace(Gate::Ended);

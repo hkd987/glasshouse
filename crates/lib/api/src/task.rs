@@ -28,6 +28,11 @@ pub struct AgentSummary {
     /// `glass-mcp`; glassd starts no program for it (HX-1).
     #[serde(default)]
     pub attended: bool,
+    /// For an attended agent, the program the person's own client runs, as
+    /// them, to drive it, such as `glass-claude-runner` (ADR 0042). None
+    /// when the person connects their harness by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
 }
 
 /// A task handed off in plain language (DA-1), with the scope the user set

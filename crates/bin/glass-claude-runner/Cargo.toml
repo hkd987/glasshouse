@@ -1,0 +1,17 @@
+[package]
+name = "glass-claude-runner"
+description = "Runs a task on the person's own Claude Code and Claude plan, with this computer's tools only (ADR 0042, MP-5, HX-1, HX-7)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glass-agent-sdk.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

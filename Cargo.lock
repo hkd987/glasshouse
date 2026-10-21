@@ -805,6 +805,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-claude-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glass-agent-sdk",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "glass-console"
 version = "0.1.0"
 dependencies = [

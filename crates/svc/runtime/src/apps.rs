@@ -354,6 +354,7 @@ impl Runtime {
             mode: AgentMode::Actions,
             program: Default::default(),
             attended: false,
+            driver: None,
             args: Vec::new(),
             plan: Vec::new(),
             customize: Vec::new(),

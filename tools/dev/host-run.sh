@@ -25,7 +25,8 @@ bin="${CARGO_TARGET_DIR:-$repo/target}/debug"
 
 if [ -z "${GLASS_DEV_SKIP_BUILD:-}" ]; then
 	cargo build --manifest-path "$repo/Cargo.toml" -p glassd -p glassctl -p glass-demo-agent -p glass-probe \
-		-p glass-mcp -p glass-app-bridge -p glass-skill-evals -p glass-it-agent -p glass-desktop-agent
+		-p glass-mcp -p glass-app-bridge -p glass-skill-evals -p glass-it-agent -p glass-desktop-agent \
+		-p glass-claude-runner
 fi
 
 mkdir -p "$dev/home" "$dev/state" "$run"
@@ -81,6 +82,15 @@ name = "Desktop agent"
 description = "Does what you ask with the tools policy gives it."
 program = "$bin/glass-desktop-agent"
 plan = ["Work out what you asked with an AI model IT approved", "Use the tools policy gives it", "Tell you what it did and found"]
+
+[[agent]]
+id = "desktop-agent-plan"
+name = "Desktop agent (your plan)"
+description = "The desktop agent, run by your own Claude Code on your Claude plan, with this computer's tools only."
+attended = true
+driver = "$bin/glass-claude-runner"
+model = "Your Claude plan, through your own Claude Code"
+plan = ["Start your own Claude Code with only this computer's tools", "Use the tools the rules give it", "Tell you what it did and found"]
 
 [[agent]]
 id = "it-agent"

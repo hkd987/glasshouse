@@ -49,6 +49,7 @@ const PARALLEL: &[&str] = &[
     "changes",
     "it",
     "harness",
+    "plan",
 ];
 /// Run after the parallel ones, one at a time: `invoices` sends mail,
 /// `tailor` changes the invoice agent's layer, `studio` times a bundle, and
@@ -198,6 +199,7 @@ async fn scenario(name: &str, h: &Harness) -> anyhow::Result<()> {
         "it" => scenarios::it(h).await,
         "tailor" => scenarios::tailor(h).await,
         "harness" => scenarios::harness(h).await,
+        "plan" => scenarios::plan(h).await,
         "perf" => perf::perf(h).await,
         "models" => models::models(h).await,
         "studio" => studio::studio(h).await,

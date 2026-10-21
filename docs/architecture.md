@@ -305,7 +305,7 @@ pipeline refuses further side effects (fail closed).
 | `glass-gateway-providers` | svc | Everything that leaves the machine: Anthropic Messages, Amazon Bedrock and OpenRouter over HTTPS, the device's client for its admin console, Stripe, and the billing relay's two connections (ADR 0040); the only crate with an outbound HTTP and TLS stack |
 | `glass-tailoring` | svc | Personal layers on agents: customization points, versions, re-checks (ADR 0014) |
 | `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
-| `glassd`, `glassctl`, `glass-mcp`, `glass-app-bridge`, `glass-demo-agent`, `glass-it-agent`, `glass-desktop-agent`, `glass-skill-evals`, `glass-probe` | bin | Executables |
+| `glassd`, `glassctl`, `glass-mcp`, `glass-app-bridge`, `glass-demo-agent`, `glass-it-agent`, `glass-desktop-agent`, `glass-claude-runner`, `glass-skill-evals`, `glass-probe` | bin | Executables |
 | `glass-console` | bin | The org's admin console server (AD-6, ADR 0023): policy, catalog, fleet, signing. Runs on our web servers, never ships in the image |
 | `glass-media-relay` | svc | The meetings relay (CF-21, ADR 0030): rooms the console admits participants to, RTP forwarded unchanged over str0m, its private API. The only crate that may use str0m |
 | `glass-sfu` | bin | The relay's daemon: one UDP port for media, the private API on loopback. Runs on our servers, never ships in the image |

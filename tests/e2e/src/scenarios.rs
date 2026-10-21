@@ -673,3 +673,80 @@ async fn wait_until_finished(h: &Harness, task: TaskId) -> anyhow::Result<()> {
     }
     bail!("the task never finished tearing down")
 }
+
+/// ADR 0042: the desktop agent on the person's own Claude Code. `glassctl
+/// run --drive` starts the attended task and runs its driver as the person;
+/// `glass-fake-claude` stands in for Claude Code. It reaches the folder
+/// only through the task socket, and the answer lands on the task. A Claude
+/// Code that comes up with tools of its own is stopped before its first
+/// step.
+pub async fn plan(h: &Harness) -> anyhow::Result<()> {
+    let ws = h.workspace("plan")?;
+    std::fs::write(ws.invoices.join("acme.txt"), "Acme: 1200\n")?;
+    let fake = std::env::current_exe()?
+        .parent()
+        .context("glass-e2e's folder")?
+        .join("glass-fake-claude");
+    let drive = |own_tools: Option<&str>| {
+        let mut command = std::process::Command::new("glassctl");
+        command
+            .args(["run", "desktop-agent-plan", "--drive", "-y", "--read"])
+            .arg(&ws.invoices)
+            .arg(r#"What invoices do I have? files_list {"path": "Invoices"}"#)
+            .env("GLASS_CLAUDE", &fake);
+        if let Some(tools) = own_tools {
+            command.env("FAKE_CLAUDE_OWN_TOOLS", tools);
+        }
+        command.output()
+    };
+
+    let ran = drive(None)?;
+    ensure!(
+        ran.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let mine = |state: Option<TileState>| async move {
+        let tasks: Vec<TaskView> = h.call(methods::TASK_LIST, Value::Null).await?;
+        tasks
+            .into_iter()
+            .filter(|t| t.agent.as_str() == "desktop-agent-plan")
+            .filter(|t| state.is_none_or(|s| t.state == s))
+            .max_by_key(|t| t.started_at)
+            .context("a desktop-agent-plan task")
+    };
+    let done = mine(Some(TileState::Done)).await?;
+    let detail = h.detail(done.id).await?;
+    let answer = detail.answer.unwrap_or_default();
+    ensure!(answer.contains("acme.txt"), "{answer}");
+    let records = h.audit(done.id).await?;
+    let listed = records
+        .iter()
+        .find(|r| r.event.action.as_ref().map(|a| a.as_str()) == Some("files.list"))
+        .context("the folder was listed through the task socket")?;
+    ensure!(listed.event.outcome == Some(Outcome::Completed));
+
+    let refused = drive(Some("Bash"))?;
+    ensure!(
+        !refused.status.success(),
+        "a Claude Code with Bash must be refused"
+    );
+    let stopped = mine(Some(TileState::Stopped)).await?;
+    ensure!(
+        stopped.caption.contains("tools of its own (Bash)"),
+        "{}",
+        stopped.caption
+    );
+    let records = h.audit(stopped.id).await?;
+    ensure!(
+        !records.iter().any(|r| r.event.kind == EventKind::Action),
+        "it did nothing before it was stopped"
+    );
+    for task in [done.id, stopped.id] {
+        let _: Value = h
+            .call(methods::TASK_DISMISS, glass_api::TaskRef { task })
+            .await?;
+    }
+    Ok(())
+}

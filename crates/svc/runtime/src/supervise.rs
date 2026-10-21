@@ -249,14 +249,18 @@ async fn drive_attended(
             state.tile = TileState::Working;
             state.caption = format!("Waiting for {} to connect", task.entry.name);
         }
-        state.note(
-            ActivityKind::State,
+        // A driver starts it for the person (ADR 0042); otherwise they
+        // connect their own harness.
+        let note = if task.entry.driver.is_some() {
+            format!("Waiting for {} to start", task.entry.name)
+        } else {
             format!(
                 "You're driving in {}: connect it with glass-mcp {}",
                 task.entry.name,
                 socket.display()
-            ),
-        );
+            )
+        };
+        state.note(ActivityKind::State, note);
     }
     rt.publish(task);
     let _ = stop.await;

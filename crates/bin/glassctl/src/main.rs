@@ -62,6 +62,10 @@ enum Command {
         /// Start without asking.
         #[arg(long, short)]
         yes: bool,
+        /// For an agent driven by your own harness: run its driver as you
+        /// until it's done, then hand the task back (ADR 0042).
+        #[arg(long)]
+        drive: bool,
     },
     /// Your agents' tiles.
     #[command(alias = "ps")]
@@ -394,7 +398,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let card: HandoffCard = ctl.call(methods::TASK_PLAN, args.request()?).await?;
             ctl.show(&card, render::card)
         }
-        Command::Run { task, yes } => {
+        Command::Run { task, yes, drive } => {
             let request = task.request()?;
             let card: HandoffCard = ctl.call(methods::TASK_PLAN, &request).await?;
             if !ctl.json {
@@ -405,6 +409,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             let view: TaskView = ctl.call(methods::TASK_START, &request).await?;
             let view = until_started(&ctl, view).await?;
+            if drive {
+                return drive_task(&ctl, view, &request.prompt).await;
+            }
             ctl.show(&view, |v| {
                 if v.driver_socket.is_some() {
                     format!("\n{}", render::connect(v))
@@ -561,6 +568,49 @@ async fn until_started(ctl: &Ctl, view: TaskView) -> anyhow::Result<TaskView> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Ok(view)
+}
+
+/// Runs an attended agent's driver as the person, then hands the task back
+/// with its answer, or stops it if the driver couldn't finish (ADR 0042).
+/// glassd never starts a driver: it runs here, as whoever asked.
+async fn drive_task(ctl: &Ctl, view: TaskView, prompt: &str) -> anyhow::Result<()> {
+    let Some(socket) = &view.driver_socket else {
+        bail!(
+            "{} runs on its own; --drive is for agents your harness drives",
+            view.agent_name
+        );
+    };
+    let agents: Vec<AgentSummary> = ctl.call(methods::AGENTS_LIST, Value::Null).await?;
+    let Some(driver) = agents
+        .into_iter()
+        .find(|a| a.id == view.agent)
+        .and_then(|a| a.driver)
+    else {
+        let _: TaskView = ctl
+            .call(methods::TASK_STOP, TaskRef { task: view.id })
+            .await?;
+        bail!(
+            "{} has no driver; connect your harness with `glassctl run` instead",
+            view.agent_name
+        );
+    };
+    let status = tokio::process::Command::new(&driver)
+        .env("GLASS_AGENT_SOCKET", socket)
+        .env("GLASS_TASK_ID", view.id.to_string())
+        .env("GLASS_TASK_PROMPT", prompt)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .await
+        .with_context(|| format!("running {driver}"))?;
+    let task = TaskRef { task: view.id };
+    if !status.success() {
+        let ended: TaskView = ctl.call(methods::TASK_STOP, task).await?;
+        ctl.show(&ended, render::tile)?;
+        bail!("{} didn't finish", view.agent_name);
+    }
+    let _: TaskView = ctl.call(methods::TASK_HAND_BACK, &task).await?;
+    let detail: TaskDetail = ctl.call(methods::TASK_GET, task).await?;
+    ctl.show(&detail, render::detail)
 }
 
 async fn lifecycle(ctl: &Ctl, method: &str, task: &str) -> anyhow::Result<()> {

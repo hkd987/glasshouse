@@ -47,6 +47,8 @@ bin=${GLASS_E2E_BIN:-$target/glass-e2e}
 [[ -n ${GLASS_E2E_BIN:-} ]] || cargo build --profile "$profile" --target x86_64-unknown-freebsd -p glass-e2e
 "$vm" run "mkdir -p ${e2e%/*}"
 "$vm" scp-in "$bin" "$e2e"
+# Claude Code's headless mode, for the plan scenario (ADR 0042).
+"$vm" scp-in "${bin%/*}/glass-fake-claude" "${e2e%/*}/glass-fake-claude"
 
 step "scenarios as demo"
 "$vm" run "su demo -c '$e2e all'"
