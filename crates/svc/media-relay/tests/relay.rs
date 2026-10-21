@@ -144,6 +144,10 @@ struct Page {
     connected: bool,
     channel_open: bool,
     closed: bool,
+    /// The relay hung up under a write (its DTLS session gone first): the
+    /// connection has ended, as a browser would show it, and the page
+    /// stops.
+    hung_up: bool,
     received: Vec<Received>,
     keyframe_requests: Vec<Mid>,
     messages: Vec<Value>,
@@ -230,6 +234,7 @@ impl Page {
             connected: false,
             channel_open: false,
             closed: false,
+            hung_up: false,
             received: Vec::new(),
             keyframe_requests: Vec::new(),
             messages: Vec::new(),
@@ -259,6 +264,9 @@ impl Page {
     /// lines, and sends a packet of audio and one of video (and one of its
     /// screen while sharing) every 20 ms once connected.
     fn poll(&mut self) {
+        if self.hung_up {
+            return;
+        }
         let mut buf = [0u8; 2048];
         loop {
             let (n, source) = match self.socket.recv_from(&mut buf) {
@@ -326,7 +334,18 @@ impl Page {
 
     fn drain(&mut self) {
         loop {
-            match self.rtc.poll_output().unwrap() {
+            let output = match self.rtc.poll_output() {
+                Ok(output) => output,
+                // Removed by the relay while a packet was on its way out.
+                Err(e @ str0m::RtcError::Dtls(_)) => {
+                    eprintln!("{}: the relay hung up ({e})", self.name);
+                    self.hung_up = true;
+                    self.closed = true;
+                    return;
+                }
+                Err(e) => panic!("{}: {e}", self.name),
+            };
+            match output {
                 Output::Timeout(t) => {
                     self.timeout = t;
                     return;
