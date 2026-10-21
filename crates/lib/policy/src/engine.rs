@@ -677,7 +677,10 @@ impl EffectivePolicy {
     /// Installed actions at Never are listed by `title`. Never rules that
     /// match no installed action are listed too, by their policy name, so the
     /// list shows IT's intent ("Payments") whatever apps are installed.
-    /// Limits on data, network and scope come last.
+    /// Actions an agent simply isn't given (outside its `allowed_actions`,
+    /// and under no Never rule) are one counted line: an agent with narrow
+    /// rules would otherwise list dozens, burying IT's. Limits on data,
+    /// network and scope come last.
     pub fn cant_touch(
         &self,
         known: &[(ActionName, Tier)],
@@ -689,8 +692,17 @@ impl EffectivePolicy {
                 lines.push(line);
             }
         };
+        let mut not_given = 0;
         for (name, default) in known {
-            if self.tier_for(name, *default).tier == Tier::Never {
+            let decision = self.tier_for(name, *default);
+            if decision.tier != Tier::Never {
+                continue;
+            }
+            if decision.source == RuleSource::NotAllowed
+                && !self.never_patterns().any(|p| p.matches(name))
+            {
+                not_given += 1;
+            } else {
                 push(title(name));
             }
         }
@@ -698,6 +710,11 @@ impl EffectivePolicy {
             if !known.iter().any(|(name, _)| pattern.matches(name)) {
                 push(self.display_name(pattern));
             }
+        }
+        match not_given {
+            0 => {}
+            1 => push("1 other action it isn't given".into()),
+            n => push(format!("{n} other actions it isn't given")),
         }
         push(match self.max_label {
             Label::Public => "Anything labeled internal, confidential or restricted".into(),
@@ -1180,6 +1197,35 @@ mod tests {
                 .any(|l| l.contains("confidential or restricted"))
         );
         assert!(lines.iter().any(|l| l.contains("network")));
+    }
+
+    #[test]
+    fn aw14_actions_an_agent_isnt_given_are_counted_not_listed() {
+        let known = [
+            (name("files.read"), Tier::Auto),
+            (name("calendar.list"), Tier::Auto),
+            (name("calendar.add"), Tier::Ask),
+            (name("chat.post"), Tier::Ask),
+            (name("security.settings"), Tier::Ask),
+        ];
+        // The probe may read files only; security.* is also IT's Never.
+        let probe = Policy::from_toml(POLICY)
+            .unwrap()
+            .effective("demo", &"probe".parse().unwrap())
+            .unwrap();
+        let lines = probe.cant_touch(&known, |n| format!("[{n}]"));
+        assert_eq!(lines[0], "[security.settings]", "IT's rule, by name");
+        assert!(
+            lines.contains(&"3 other actions it isn't given".to_string()),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("calendar")), "{lines:?}");
+        // An agent given everything it could touch has no such line.
+        let lines = invoice().cant_touch(&known[..1], |n| n.to_string());
+        assert!(
+            !lines.iter().any(|l| l.contains("isn't given")),
+            "{lines:?}"
+        );
     }
 
     #[test]
