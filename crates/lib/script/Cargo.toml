@@ -1,0 +1,18 @@
+[package]
+name = "glass-script"
+description = "Scripts agents run for exact work and routines: JavaScript whose only reach is the task's tools (ADR 0044)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+boa_engine.workspace = true
+glass-agent-sdk.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

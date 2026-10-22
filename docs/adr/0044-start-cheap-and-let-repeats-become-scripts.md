@@ -1,6 +1,6 @@
 # 0044. Start on the cheapest model; let repeats become scripts
 
-Status: **Proposed, first slice built** (2026-10-22). The owner asked for
+Status: **Accepted, being built** (2026-10-22). The owner asked for
 it: "pick the right model for a task to start with so we can try to get
 things done the cheapest way possible … we should have our harness write
 code so that it can then just call scripts that do the work in cases of
@@ -89,13 +89,54 @@ on ADR 0018 (the gateway), 0041 (tool use, the desktop agent) and 0043
    didn't for exact figures it then got wrong. The safety nets are
    below.
 
-**Proposed, not built (the owner's go-ahead first):**
+**Built after the owner's go-ahead** ("Yes to all the suggestions",
+2026-10-22):
 
-4. **Exact work goes to code, not to a bigger model.** A step that needs
-   exact dates, sums or counts writes a few lines of code that run on the
-   tools' data, and the model reads the result. On Haiku that is right
-   and costs a fraction of a cent, where Opus guessing well costs 46
-   times as much.
+4. **Exact work goes to code, not to a bigger model.** The desktop
+   agent offers the model `run_script` from the first step. The model
+   writes a short JavaScript script, and the agent runs it.
+   - **What a script can do.** `call(tool, input)` makes one of the
+     model's own tool calls on the task socket, under the same rules,
+     and returns `{ok, text, data}`.
+   - **Helpers** for what models get wrong by hand: `today()` (the
+     computer's date), `daysBetween`, `addDays`, `weekday`, `round`,
+     `print`.
+   - **The instructions** say to use it for exact figures.
+   - **Measured.** Haiku 5.5 got the exact-figures task right three
+     times in three, for about $0.001 each: 20,147.60. By hand it said
+     20,610.40, and Opus 5.5 by hand cost $0.046.
+6. **One runtime**: the `glass-script` library, which the desktop agent
+   runs in its own process, in its jail.
+   - **The engine is Boa**, JavaScript written in Rust, MIT or
+     Unlicense, with no default features. It adds 134 crates and about
+     30 s to a clean build, and nothing to the edit loop.
+   - **Considered:**
+     - Rhai: 16 s and 30 crates, but `smartstring` is MPL-2.0, outside
+       `deny.toml`'s list. That is the owner's legal call.
+     - Starlark: 59 s and 181 crates.
+     - QuickJS: C, against the no-C-build-scripts rule.
+     - A JSON plan format, TypeScript on the browser engine, Python or
+       shell, as before.
+   - **Its only reach is `call`, over the task socket.**
+     - Every `import` is refused: Boa's default loader would read
+       modules from the current folder, so the idle loader is set.
+     - Boa has no files, network, processes or timers, and the host
+       adds none.
+     - Loops stop at 100,000 iterations, calls at 256 deep, and tool
+       calls at 100 a script.
+     - A broken socket stops the script even inside a `catch`.
+     - Memory is the jail's limit. A script stuck inside one built-in,
+       such as a runaway regular expression, runs until the task is
+       stopped; its tile shows "Running a script" meanwhile.
+     - Whole numbers cross as integers, as tools' schemas ask.
+     - Tests prove each of these (`glass-script`). The e2e suite runs a
+       script in the agent's jail, its call decided and audited, and a
+       script that imports `/etc/passwd` fails there.
+   - **No new probe check.** The runner adds no reach to the agent's
+     process; the jail and the probe's 27 checks bound it as before.
+
+**Being built:**
+
 5. **Automations become scripts** (DA-4, NV-21).
    - **Written once.** "Do this every Monday" has the strongest model
      write a short program against the task's own tools: the action
@@ -113,23 +154,6 @@ on ADR 0018 (the gateway), 0041 (tool use, the desktop agent) and 0043
      the script's own checks reject, stops the run. The agent carries on
      from there on the cheapest model (NV-21) and can propose a fixed
      version.
-6. **One runtime for both**: `glass-script-runner`, an agent binary
-   embedding a JavaScript engine written in Rust (a candidate is
-   `boa_engine`; licences still to check).
-   - It exposes only `tools.<name>(input)`, over the task socket. There
-     are no files, network, clock or processes beyond what the tools
-     give, and it runs in the agent jail like any agent.
-   - Models write JavaScript well.
-   - Considered:
-     - a JSON plan format: safest to show, but loops and arithmetic make
-       it a language anyway;
-     - TypeScript on the OS's browser engine: heavier, for a headless
-       run;
-     - Python or shell: not in the base system (ADR 0007), and they reach
-       files.
-   - A new probe check proves the runner reaches nothing but its task
-     socket.
-
 ## Consequences
 - An org that turns `by_cost` on pays about a thirtieth for the desktop
   agent's everyday tasks. Answers that hang on exact figures need item 4
@@ -144,7 +168,7 @@ on ADR 0018 (the gateway), 0041 (tool use, the desktop agent) and 0043
   the person approves what will run, not only what ran.
 
 ## Not built yet
-- Items 4 to 6.
+- Item 5 (routines).
 - Choosing the starting model per kind of task from evals (SK-2 scores
   per model) instead of always the cheapest.
 - A catalog setting for an agent's starting model. Single-call agents

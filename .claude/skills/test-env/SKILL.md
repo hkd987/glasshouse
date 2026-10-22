@@ -52,6 +52,13 @@ make vm-status            # "running: pid …, ssh … up" or not running
   `vm.sh type "..."`, `vm.sh key ret`, `vm.sh screendump`, and click to
   approve or roll back. Its Mail is at http://mail.localhost:7300.
   `real-desktop.sh down` deletes the key file and stops it all.
+- No credits, or a failure to make happen on purpose:
+  `tools/dev/fake-model.sh [--it] [--ladder] <scenario> [request]` runs the
+  agent on the dev host against `tools/dev/fake-anthropic.py`. That is a
+  local stand-in for the Messages API that checks requests as the API does,
+  over the real provider, gateway and TLS. Scenarios include `overload2`,
+  `ratelimit2`, `refusal2`, `maxtokens`, `credit` and `billing`.
+  `build/dev-fake-model/requests.jsonl` keeps every request and reply.
 
 ## Rules
 

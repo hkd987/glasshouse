@@ -271,7 +271,8 @@ pub async fn models(h: &Harness) -> anyhow::Result<()> {
         "neither the key nor the address is in the audit log"
     );
     it_agent(h).await?;
-    desktop_agent(h, &ws).await
+    desktop_agent(h, &ws).await?;
+    desktop_agent_script(h, &ws).await
 }
 
 /// AE-3, ADR 0041: the desktop agent, in its jail, offers the model its
@@ -317,6 +318,62 @@ async fn desktop_agent(h: &Harness, ws: &crate::harness::Workspace) -> anyhow::R
         answer.contains("Its reasoning came back unchanged."),
         "{answer}"
     );
+    Ok(())
+}
+
+/// ADR 0044: in its jail, the desktop agent runs the script the model
+/// wrote. The script's call goes over the task socket like any (decided,
+/// audited), its result goes back to the model, and a script that tries to
+/// import a file gets an error instead.
+async fn desktop_agent_script(h: &Harness, ws: &crate::harness::Workspace) -> anyhow::Result<()> {
+    let task = h
+        .start(
+            "desktop-agent",
+            r#"How many? Use run_script {"source": "const r = call('files_list', {path: ''}); ({ok: r.ok, seen: r.text.length > 0})"}"#,
+            &[ws.invoices.as_path()],
+            &[],
+        )
+        .await?;
+    h.wait_for(task, TileState::Done, Duration::from_secs(60))
+        .await?;
+    let records = h.audit(task).await?;
+    let listed = records
+        .iter()
+        .find(|r| r.event.action.as_ref().map(|a| a.as_str()) == Some("files.list"))
+        .context("the script's call went over the socket and was audited")?;
+    ensure!(
+        listed.event.outcome == Some(Outcome::Completed),
+        "{:?}",
+        listed.event.outcome
+    );
+    let first = records
+        .iter()
+        .find(|r| r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete"))
+        .context("a model call")?;
+    ensure!(
+        first.event.detail["model"]["tools_called"] == json!(["run_script"]),
+        "{}",
+        first.event.detail["model"]
+    );
+    let answer = h.detail(task).await?.answer.unwrap_or_default();
+    ensure!(
+        answer.contains(r#""result":{"ok":true,"seen":true}"#),
+        "{answer}"
+    );
+
+    let task = h
+        .start(
+            "desktop-agent",
+            r#"Look. Use run_script {"source": "import('/etc/passwd')"}"#,
+            &[ws.invoices.as_path()],
+            &[],
+        )
+        .await?;
+    h.wait_for(task, TileState::Done, Duration::from_secs(60))
+        .await?;
+    let answer = h.detail(task).await?.answer.unwrap_or_default();
+    ensure!(answer.contains("The script failed"), "{answer}");
+    ensure!(!answer.contains("root:"), "{answer}");
     Ok(())
 }
 

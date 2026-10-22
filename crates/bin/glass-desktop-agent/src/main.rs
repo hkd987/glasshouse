@@ -29,6 +29,9 @@ const OWN: [&str; 2] = ["model_complete", "report_progress"];
 /// The tool the agent offers the model for handing the rest of the task to
 /// the strongest model policy approves (ADR 0044).
 const STRONGER: &str = "use_a_stronger_model";
+/// The tool for a script that makes the task's calls and works out exact
+/// figures (ADR 0044), which the agent runs: the model only writes it.
+const RUN_SCRIPT: &str = "run_script";
 
 const SYSTEM: &str = "You are the Glasshouse desktop agent, working for the person \
 on this computer. Do what they ask using the tools you're given; they're the only \
@@ -39,7 +42,9 @@ details such as email addresses reach you as placeholders like [redacted:email#1
 each stands for the real value, which this computer puts back wherever you use the \
 placeholder, in a tool call or your answer. Use it as you would the value; don't ask \
 the person for it. Secrets such as keys and passwords stay hidden and are never put \
-back. When you're done, answer the person in a few short paragraphs of plain words: \
+back. For exact figures from what the tools return (dates, sums, counts, sorting), \
+write a short script with run_script and use its result rather than working them out \
+yourself. When you're done, answer the person in a few short paragraphs of plain words: \
 what you did and what you found. The answer is shown as plain text, not Markdown: no \
 asterisks, headings or bullet marks, and a blank line between points.";
 
@@ -58,7 +63,9 @@ async fn main() -> ExitCode {
 fn offered(tools: &[glass_rpc::mcp::Tool]) -> Vec<Value> {
     tools
         .iter()
-        .filter(|t| !OWN.contains(&t.name.as_str()) && t.name != STRONGER)
+        .filter(|t| {
+            !OWN.contains(&t.name.as_str()) && ![STRONGER, RUN_SCRIPT].contains(&t.name.as_str())
+        })
         .map(|t| {
             json!({
                 "name": t.name,
@@ -200,6 +207,43 @@ fn now_line(now: time::OffsetDateTime, offset_secs: i32) -> String {
     )
 }
 
+/// The model's way to exact figures (ADR 0044): a JavaScript script the
+/// agent runs (`glass-script`), whose only reach is the task's own tools,
+/// called on its socket like the model's calls. Offered from the first
+/// step, with the rest.
+fn script_tool() -> Value {
+    json!({
+        "name": RUN_SCRIPT,
+        "description": "Run a short JavaScript script that makes this task's tool calls and \
+            works out exact results: dates, sums, counts, sorting, filtering. Use it whenever an \
+            answer needs exact figures; don't work them out yourself. call(tool, input) makes one \
+            call with your tools under the same rules, such as call(\"files_read\", {path: \
+            \"Invoices/a.txt\"}), and returns {ok, text, data}: text is what the tool said, data \
+            its structured result (a mail list's messages, a calendar's events). Helpers: today() \
+            (\"YYYY-MM-DD\" on this computer), daysBetween(a, b), addDays(date, n), weekday(date), \
+            round(x, places = 2), print(...). No imports, files, network or timers. The value of \
+            the last expression is the result, so end with an object holding what you need.",
+        "input_schema": {
+            "type": "object",
+            "properties": { "source": { "type": "string", "description": "The script" } },
+            "required": ["source"],
+            "additionalProperties": false
+        }
+    })
+}
+
+/// What a script came to, as the model reads it.
+fn script_result(run: &glass_script::Run) -> String {
+    json!({ "result": run.result, "printed": run.printed, "tool_calls": run.calls }).to_string()
+}
+
+/// Today on this computer, `YYYY-MM-DD`, for scripts.
+fn local_date(now: time::OffsetDateTime, offset_secs: i32) -> String {
+    let offset = time::UtcOffset::from_whole_seconds(offset_secs).unwrap_or(time::UtcOffset::UTC);
+    let format = time::macros::format_description!("[year]-[month]-[day]");
+    now.to_offset(offset).format(&format).unwrap_or_default()
+}
+
 /// A tile caption from the answer's first line.
 fn caption(answer: &str) -> String {
     let line = answer
@@ -222,7 +266,13 @@ async fn run() -> anyhow::Result<()> {
         bail!("this agent needs an AI model, and policy gives it none here");
     }
     let mut tools = offered(&agent.tool_list().await?);
+    // A script may make the calls the model may, and no others.
+    let scriptable: std::collections::BTreeSet<String> = tools
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_owned))
+        .collect();
     tools.push(stronger_tool());
+    tools.push(script_tool());
     let mut ladder = Ladder::default();
     let opening = format!(
         "{}\n\n{}",
@@ -285,6 +335,32 @@ async fn run() -> anyhow::Result<()> {
             let id = call["id"].clone();
             // Only what the socket offers; anything else is the model's
             // mistake, told back to it.
+            if name == RUN_SCRIPT {
+                agent.progress("Running a script", None, None).await?;
+                let source = call["input"]["source"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let today = local_date(time::OffsetDateTime::now_utc(), agent.utc_offset_secs);
+                let (content, is_error) =
+                    match glass_script::run_on(&agent, source, today, scriptable.clone()).await {
+                        Ok(run) => (script_result(&run), false),
+                        Err(glass_script::ScriptError::Script(why)) => {
+                            (format!("The script failed: {why}"), true)
+                        }
+                        Err(e @ glass_script::ScriptError::Host(_)) => bail!("{e}"),
+                    };
+                eprintln!(
+                    "{RUN_SCRIPT}: {}",
+                    if is_error {
+                        content.chars().take(300).collect::<String>()
+                    } else {
+                        "ran".to_owned()
+                    }
+                );
+                results.push(json!({ "id": id, "content": content, "is_error": is_error }));
+                continue;
+            }
             if name == STRONGER {
                 let content = if ladder.step_up() {
                     let why = call["input"]["reason"].as_str().unwrap_or_default();
@@ -448,9 +524,28 @@ mod tests {
             input_schema: json!({ "type": "object" }),
             annotations: None,
         };
-        let offered = offered(&[tool("files_list"), tool(STRONGER)]);
+        let offered = offered(&[tool("files_list"), tool(STRONGER), tool(RUN_SCRIPT)]);
         let names: Vec<&str> = offered.iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(names, ["files_list"]);
+    }
+
+    #[test]
+    fn adr0044_the_model_writes_scripts_the_agent_runs() {
+        let tool = script_tool();
+        assert_eq!(tool["name"], RUN_SCRIPT);
+        assert_eq!(tool["input_schema"]["required"], json!(["source"]));
+        let at = time::macros::datetime!(2026-10-22 23:30 UTC);
+        assert_eq!(local_date(at, 0), "2026-10-22");
+        assert_eq!(local_date(at, 2 * 3600), "2026-10-23", "local, not UTC");
+        let run = glass_script::Run {
+            result: json!({ "weighted": 20147.6 }),
+            printed: vec!["inv-1.txt 21".into()],
+            calls: 6,
+        };
+        assert_eq!(
+            script_result(&run),
+            r#"{"printed":["inv-1.txt 21"],"result":{"weighted":20147.6},"tool_calls":6}"#
+        );
     }
 
     #[test]

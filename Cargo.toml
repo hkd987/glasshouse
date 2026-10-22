@@ -29,6 +29,7 @@ glass-audit = { path = "crates/lib/audit" }
 glass-rpc = { path = "crates/lib/rpc" }
 glass-platform = { path = "crates/lib/platform" }
 glass-agent-sdk = { path = "crates/lib/agent-sdk" }
+glass-script = { path = "crates/lib/script" }
 glass-broker = { path = "crates/svc/broker" }
 glass-tailoring = { path = "crates/svc/tailoring" }
 glass-actions = { path = "crates/lib/actions" }
@@ -57,6 +58,9 @@ glass-media-relay = { path = "crates/svc/media-relay" }
 
 # Third-party crates. Licenses must pass `deny.toml` (no copyleft).
 anyhow = "1.0.104"
+# The script runner's JavaScript (ADR 0044): pure Rust, no default features
+# (no Temporal, no Intl), about 30 s on a clean build.
+boa_engine = { version = "0.22.0", default-features = false }
 cap-std = "4.0.3"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 # Org signatures on managed settings (ADR 0023): verify on devices, sign in the
