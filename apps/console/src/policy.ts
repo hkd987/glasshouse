@@ -35,6 +35,8 @@ export async function policyPage(root: HTMLElement, group: string | null): Promi
   async function act(work: () => Promise<string | null>, keepImpact = false): Promise<void> {
     if (view.busy) return;
     view.busy = true;
+    // Until this lands, a click would be dropped: say so instead of losing it.
+    for (const button of root.querySelectorAll<HTMLButtonElement>("button")) button.disabled = true;
     try {
       const text = await work();
       view.message = text ? { text, tone: "ok" } : null;
