@@ -29,6 +29,7 @@ mod error;
 mod execute;
 mod labels;
 mod model;
+mod routines;
 mod runtime;
 mod seat;
 mod studio;

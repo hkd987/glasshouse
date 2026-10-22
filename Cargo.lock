@@ -1033,6 +1033,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-app-routines"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-platform",
+ "glass-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+]
+
+[[package]]
 name = "glass-app-settings"
 version = "0.1.0"
 dependencies = [
@@ -1211,6 +1225,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "glass-api",
+ "glass-app-routines",
  "glass-audit",
  "glass-platform",
  "glass-policy",
@@ -1237,6 +1252,7 @@ dependencies = [
  "glass-app-mail",
  "glass-app-meet",
  "glass-app-people",
+ "glass-app-routines",
  "glass-app-settings",
  "glass-app-skills",
  "glass-app-studio",
@@ -1401,6 +1417,7 @@ dependencies = [
  "glass-app-mail",
  "glass-app-meet",
  "glass-app-people",
+ "glass-app-routines",
  "glass-app-settings",
  "glass-app-skills",
  "glass-app-studio",
@@ -1508,6 +1525,7 @@ dependencies = [
  "glass-actions",
  "glass-api",
  "glass-app-catalog",
+ "glass-app-routines",
  "glass-app-studio",
  "glass-app-system",
  "glass-audit",

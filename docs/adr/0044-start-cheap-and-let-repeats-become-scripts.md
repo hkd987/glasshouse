@@ -1,6 +1,6 @@
 # 0044. Start on the cheapest model; let repeats become scripts
 
-Status: **Accepted, being built** (2026-10-22). The owner asked for
+Status: **Accepted, built** (2026-10-22). The owner asked for
 it: "pick the right model for a task to start with so we can try to get
 things done the cheapest way possible … we should have our harness write
 code so that it can then just call scripts that do the work in cases of
@@ -146,25 +146,57 @@ on ADR 0018 (the gateway), 0041 (tool use, the desktop agent) and 0043
      `tools/dev/real-desktop.sh`, `real-remix.sh` and
      `fake-model.sh --ladder`.
 
-**Being built:**
+**Built after the go-ahead, continued** (2026-10-22):
 
-5. **Automations become scripts** (DA-4, NV-21).
-   - **Written once.** "Do this every Monday" has the strongest model
-     write a short program against the task's own tools: the action
-     registry's typed actions, NV-1. It has ordinary loops, conditions
-     and arithmetic, and no model inside. A step that needs judgment
-     ("is this email a complaint?") calls `model.complete` with
-     `prefer: "cheapest"`.
-   - **An item like a skill** (ADR 0034). It has an owner and versions.
-     The person sees what it calls, at which tiers, before it's saved.
-     Changes are proposals.
-   - **Run as a task, in the same jail.** Same grants, tiers, asks,
-     Never, labels, audit and undo. Its only reach is its tools on the
-     task socket, so it can do nothing an agent couldn't.
-   - **When it breaks, the agent takes over.** A failed call, or a result
-     the script's own checks reject, stops the run. The agent carries on
-     from there on the cheapest model (NV-21) and can propose a fixed
-     version.
+5. **Automations become scripts** (DA-4, NV-21), as `glass-app-routines`.
+   - **Written once.** Asked for something regularly ("every weekday at
+     9:00, tell me which invoices are unpaid"), the desktop agent writes
+     a script against the task's own tools, tries it with `run_script`,
+     and saves it with `routines.save`. The model is whichever the
+     ladder gives; Haiku wrote a good one. Its script used the listing's
+     data, counted money in integer cents and returned a line per
+     invoice. Saving it cost $0.0019.
+   - **What the person approves.** `routines.save` is Ask. Its review
+     shows the request, the schedule, what it reads and changes, the
+     tools the script calls and the script itself, every line. A new
+     version is another save the person approves.
+   - **Kept like the apps people make** (ADR 0032). Every version is a
+     file under glassd's state, root only, never changed. The person's
+     list is a file in their home, written as them, so task undo takes
+     a routine away. `routines.delete` (Notify) does too.
+   - **The same scope.** A routine keeps the grants of the task that
+     saved it, never paths from the input (DA-4).
+   - **Run as a task, in the same jail.** It runs on `glassctl routine
+     run <id>` or on its schedule. A schedule is `daily 18:30`,
+     `weekdays 09:00`, `mon,thu 08:30` or `hourly`, in the computer's
+     local time; glassd checks once a minute and starts it as its owner.
+     A minute the computer slept through doesn't run late. A run is a
+     task of the agent that saved it, under policy as it is then, with
+     `GLASS_ROUTINE` naming it. The agent reads it over its socket
+     (`routines.read`, audited) and runs the script. The live run made
+     no model call and gave the same total.
+   - **When it breaks, the agent takes over** (NV-21). A script that
+     fails, or throws on a result it rejects, hands the request to the
+     model with what went wrong, on the cheapest model when by cost.
+     The model says the routine needs fixing and may save a fixed
+     version, which the person approves.
+   - **Policy.** The default policy gives the desktop agent `routines.*`.
+     A routine can do only what that agent may, with the scope it was
+     saved with, and the person approves every save.
+   - **Containment.**
+     - A routine's id or its owner's login never becomes a path. A
+       person may edit their list by hand, but `../..` picks nothing.
+     - A kept version must name its owner, id and number, so glassd,
+       reading as root, never runs a file put there under another name.
+     - The probe's new check: an agent can't open glassd's routines
+       (`/var/db/glasshouse/routines`, made at start for it). That makes
+       28 checks.
+   - **Not built.**
+     - A script can't call a model for a judgment step: scripts get
+       the tools the model gets, and `model.complete` isn't one.
+     - The approval doesn't show each call's tier.
+     - Triggers other than time.
+     - The shell's screen for routines.
 ## Consequences
 - An org that turns `by_cost` on pays about a thirtieth for the desktop
   agent's everyday tasks. Answers that hang on exact figures need item 4
@@ -179,7 +211,8 @@ on ADR 0018 (the gateway), 0041 (tool use, the desktop agent) and 0043
   the person approves what will run, not only what ran.
 
 ## Not built yet
-- Item 5 (routines).
+- Item 5's judgment steps, tiers in its review, and triggers other
+  than time.
 - Choosing the starting model per kind of task from evals (SK-2 scores
   per model) instead of always the cheapest.
 - A catalog setting for an agent's starting model. Single-call agents

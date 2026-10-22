@@ -299,6 +299,15 @@ async fn main() -> ExitCode {
                 |()| "opened /var/db/glasshouse/apps".into(),
             ),
         ),
+        // Routines (DA-4): people's scripts and the scopes they run with.
+        attempt(
+            "files: open people's routines",
+            Want::Denied,
+            io(
+                std::fs::read_dir("/var/db/glasshouse/routines").map(drop),
+                |()| "opened /var/db/glasshouse/routines".into(),
+            ),
+        ),
         attempt(
             "files: read daemon config",
             Want::Denied,

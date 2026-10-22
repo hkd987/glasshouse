@@ -254,10 +254,13 @@ tiers = { "settings.models_connect" = "auto", "settings.models_agents" = "auto" 
 # own privileges; it can't name a path or a command, only pick an action.
 # The general desktop agent (AE-3, ADR 0041): a model proposes each step
 # and the agent makes it here, where every rule applies. Reads and drafts
-# only by default; IT widens it per org. It needs an approved model.
+# only by default; IT widens it per org. It needs an approved model. It
+# saves what the person wants done again as a routine (DA-4, ADR 0044),
+# which they approve, script and all, and which runs as this agent with
+# the scope it was saved with: nothing it couldn't do itself.
 [[agent]]
 id = "desktop-agent"
-allowed_actions = ["files.list", "files.read", "mail.list", "mail.read", "mail.draft", "calendar.list", "calendar.read", "people.search", "catalog.search", "model.complete"]
+allowed_actions = ["files.list", "files.read", "mail.list", "mail.read", "mail.draft", "calendar.list", "calendar.read", "people.search", "catalog.search", "model.complete", "routines.*"]
 max_label = "internal"
 
 # The desktop agent on the person's own Claude Code and Claude plan (ADR

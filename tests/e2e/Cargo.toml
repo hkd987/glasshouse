@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 glass-api.workspace = true
+glass-app-routines.workspace = true
 glass-audit.workspace = true
 glass-platform.workspace = true
 glass-policy.workspace = true

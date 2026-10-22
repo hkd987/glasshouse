@@ -24,6 +24,9 @@ pub mod env {
     /// The computer's offset from UTC when the task started, in seconds
     /// east: its local time, which the calendar's times are in (ADR 0031).
     pub const UTC_OFFSET: &str = "GLASS_UTC_OFFSET";
+    /// The id of the routine this task runs, empty for any other task
+    /// (DA-4): `routines.read` gives its script.
+    pub const ROUTINE: &str = "GLASS_ROUTINE";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +53,8 @@ pub struct Agent {
     /// The computer's offset from UTC, in seconds east, when the task
     /// started; 0 when glassd didn't say.
     pub utc_offset_secs: i32,
+    /// The routine this task runs, by id (DA-4).
+    pub routine: Option<String>,
 }
 
 impl Agent {
@@ -91,6 +96,7 @@ impl Agent {
                 .ok()
                 .and_then(|text| text.parse().ok())
                 .unwrap_or(0),
+            routine: var(env::ROUTINE).ok().filter(|id| !id.is_empty()),
         })
     }
 

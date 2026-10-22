@@ -294,6 +294,16 @@ fn test_registry(
         .register(Arc::new(StudioProvider::new(studio.clone())))
         .unwrap();
     registry
+        .register(Arc::new(glass_app_routines::RoutinesProvider::new(
+            routines(dir),
+        )))
+        .unwrap();
+    registry
+}
+
+/// People's routines, kept where glassd keeps them (DA-4).
+pub fn routines(dir: &Path) -> glass_app_routines::Routines {
+    glass_app_routines::Routines::new(dir.join("state/routines"))
 }
 
 /// A harness whose policy is the default plus `policy_extra`, in which
@@ -406,6 +416,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         &rt,
         |_groups, _need| Vec::new(),
     )));
+    rt.set_routines(routines(dir.path()));
     // New mail wakes Mail, as glassd wires it (ADR 0037).
     {
         let rt = Arc::downgrade(&rt);

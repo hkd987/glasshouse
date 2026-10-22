@@ -38,7 +38,7 @@ small it looks.
 ## Prove it
 
 1. `make test lint`.
-2. `make e2e-vm`: the containment probe must pass every check (27/27) and
+2. `make e2e-vm`: the containment probe must pass every check (28/28) and
    "nothing left behind" must pass.
 3. New surface → new probe check in `crates/bin/glass-probe` (it must FAIL on
    the insecure host backend and PASS in a jail).

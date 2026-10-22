@@ -56,6 +56,8 @@ pub(crate) struct Task {
     pub driver_socket: Option<PathBuf>,
     /// The ended task this one carries on from (`task.continue`).
     pub continues: Option<Continued>,
+    /// The routine it runs, if it's one (DA-4).
+    pub routine: Option<RoutineRun>,
     /// For an app session (ADR 0024): the app, as its manifest declares
     /// it. The task's principal is the app, acting for the user.
     pub app: Option<Arc<AppManifest>>,
@@ -125,11 +127,22 @@ pub(crate) struct NewTask {
     pub layer: Option<u32>,
     pub driver_socket: Option<PathBuf>,
     pub continues: Option<Continued>,
+    pub routine: Option<RoutineRun>,
     pub app: Option<Arc<AppManifest>>,
     pub title: String,
     /// The request gave the title, so the agent can't rename the task.
     pub title_fixed: bool,
     pub stop: oneshot::Sender<()>,
+}
+
+/// The routine a task runs (DA-4): the agent reads it by id and runs its
+/// script first.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RoutineRun {
+    pub id: String,
+    pub version: u32,
+    /// Started by glassd on its schedule, not by the person.
+    pub scheduled: bool,
 }
 
 /// What a continued task tells the harness about the task it carries on
@@ -198,6 +211,7 @@ impl Task {
             layer: new.layer,
             driver_socket: new.driver_socket,
             continues: new.continues,
+            routine: new.routine,
             app: new.app,
             started_at: now,
             gate: watch::Sender::new(Gate::Run),

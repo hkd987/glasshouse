@@ -32,6 +32,8 @@ const STRONGER: &str = "use_a_stronger_model";
 /// The tool for a script that makes the task's calls and works out exact
 /// figures (ADR 0044), which the agent runs: the model only writes it.
 const RUN_SCRIPT: &str = "run_script";
+/// What a routine's run reads its script with (DA-4).
+const ROUTINES_READ: &str = "routines_read";
 
 const SYSTEM: &str = "You are the Glasshouse desktop agent, working for the person \
 on this computer. Do what they ask using the tools you're given; they're the only \
@@ -45,7 +47,10 @@ the person for it. In your answer, write it where the value goes: the person rea
 the value, so don't say it was hidden or call it a placeholder. Secrets such as keys and passwords stay hidden and are never put \
 back. For exact figures from what the tools return (dates, sums, counts, sorting), \
 write a short script with run_script and use its result rather than working them out \
-yourself. When you're done, answer the person in a few short paragraphs of plain words: \
+yourself. When the person wants something done again or regularly (each morning, every \
+Monday), and routines_save is among your tools, make it a routine: write a script that \
+does it and returns the answer as a string, try it with run_script, then save it with \
+routines_save, so it runs without a model. When you're done, answer the person in a few short paragraphs of plain words: \
 what you did and what you found. The answer is shown as plain text, not Markdown: no \
 asterisks, headings or bullet marks, and a blank line between points.";
 
@@ -245,28 +250,108 @@ fn local_date(now: time::OffsetDateTime, offset_secs: i32) -> String {
     now.to_offset(offset).format(&format).unwrap_or_default()
 }
 
+/// A script's answer, a line per thing it found: each line its own
+/// paragraph, since answers are shown in paragraphs and a script's lines
+/// never wrap one.
+fn lines_kept(answer: &str) -> String {
+    if answer.contains("\n\n") {
+        return answer.to_owned();
+    }
+    answer
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// A routine's run (DA-4, NV-21): its script, with no model. The answer
+/// it gives, or why it couldn't, for the model to take over from.
+async fn run_routine(
+    agent: &Agent,
+    id: &str,
+    scriptable: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<Result<String, String>> {
+    agent.progress("Running the routine", None, None).await?;
+    let read = agent.call(ROUTINES_READ, json!({ "routine": id })).await?;
+    let script = read
+        .structured_content
+        .as_ref()
+        .and_then(|d| d["script"].as_str())
+        .map(str::to_owned);
+    let Some(script) = script.filter(|_| !read.is_error) else {
+        return Ok(Err(format!(
+            "its routine couldn't be read: {}",
+            read.text()
+        )));
+    };
+    let today = local_date(time::OffsetDateTime::now_utc(), agent.utc_offset_secs);
+    match glass_script::run_on(agent, script, today, scriptable.clone()).await {
+        Ok(run) => Ok(Ok(match run.result {
+            Value::String(answer) if !answer.trim().is_empty() => lines_kept(&answer),
+            Value::Null if !run.printed.is_empty() => lines_kept(&run.printed.join("\n")),
+            Value::Null => "The routine ran; its script gave no answer.".to_owned(),
+            other => serde_json::to_string_pretty(&other).unwrap_or_default(),
+        })),
+        Err(glass_script::ScriptError::Script(why)) => Ok(Err(format!("its script failed: {why}"))),
+        Err(e @ glass_script::ScriptError::Host(_)) => bail!("{e}"),
+    }
+}
+
 async fn run() -> anyhow::Result<()> {
     let agent = Agent::from_env()
         .await
         .context("connecting to the task socket")?;
     eprintln!("task {}: {}", agent.task_id, agent.prompt);
-    if !agent.has_tool("model_complete") {
-        bail!("this agent needs an AI model, and policy gives it none here");
-    }
     let mut tools = offered(&agent.tool_list().await?);
     // A script may make the calls the model may, and no others.
     let scriptable: std::collections::BTreeSet<String> = tools
         .iter()
         .filter_map(|t| t["name"].as_str().map(str::to_owned))
         .collect();
+    // A routine runs its script first, with no model; only if that fails
+    // does a model take over, from the request and what went wrong.
+    let mut broke = None;
+    if let Some(id) = &agent.routine {
+        match run_routine(&agent, id, &scriptable).await? {
+            Ok(answer) => {
+                agent
+                    .answer(&glass_agent_sdk::caption(&answer), &answer)
+                    .await?;
+                eprintln!("routine {id}: answered with no model");
+                return Ok(());
+            }
+            Err(why) => {
+                eprintln!(
+                    "routine {id}: {}",
+                    why.chars().take(300).collect::<String>()
+                );
+                agent
+                    .progress("The routine's script failed; working it out", None, None)
+                    .await?;
+                broke = Some(why);
+            }
+        }
+    }
+    if !agent.has_tool("model_complete") {
+        bail!("this agent needs an AI model, and policy gives it none here");
+    }
     tools.push(stronger_tool());
     tools.push(script_tool());
     let mut ladder = Ladder::default();
-    let opening = format!(
+    let mut opening = format!(
         "{}\n\n{}",
         now_line(time::OffsetDateTime::now_utc(), agent.utc_offset_secs),
         agent.prompt
     );
+    if let (Some(id), Some(why)) = (&agent.routine, &broke) {
+        opening.push_str(&format!(
+            "\n\nThis is the person's routine {id}, and {why}. Do what it's for with the \
+             tools, and say in your answer that the routine needs fixing and why. If you can \
+             see the fix, you may save it as the routine's next version (routine \"{id}\"); \
+             the person approves it."
+        ));
+    }
     let mut messages = vec![json!({ "role": "user", "content": opening })];
 
     for round in 1..=MAX_STEPS {
@@ -399,6 +484,23 @@ async fn run() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn da4_a_scripts_lines_stay_lines() {
+        assert_eq!(
+            lines_kept("Unpaid: 2\nINV-1 | 120.00\n\nignored?"),
+            "Unpaid: 2\nINV-1 | 120.00\n\nignored?",
+            "paragraphs of its own are kept"
+        );
+        assert_eq!(
+            lines_kept("Unpaid: 2\nINV-1 | 120.00  \n\nINV-3"),
+            "Unpaid: 2\nINV-1 | 120.00  \n\nINV-3"
+        );
+        assert_eq!(
+            lines_kept("Unpaid: 2\nINV-1 | 120.00\nINV-3 | 462.80\n"),
+            "Unpaid: 2\n\nINV-1 | 120.00\n\nINV-3 | 462.80"
+        );
+    }
 
     #[test]
     fn ae3_the_model_is_offered_the_sockets_tools_but_the_agents_own() {

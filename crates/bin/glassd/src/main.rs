@@ -206,6 +206,8 @@ pub(crate) struct OrgData {
     /// Apps people made that IT approved (R2): bundles fetched from the
     /// console and checked against the signed catalog.
     pub(crate) org_apps: org_apps::OrgAppStore,
+    /// People's routines (DA-4), root only in the state directory.
+    pub(crate) routines: glass_first_party::Routines,
 }
 
 impl OrgData {
@@ -234,6 +236,7 @@ impl OrgData {
                 source: config.studio.source.clone(),
                 bundler: config.studio.bundler.clone(),
             }),
+            routines: glass_first_party::Routines::new(state_dir.join("routines")),
         }
     }
 }
@@ -382,6 +385,7 @@ fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<R
         managed: config.managed.is_some(),
         studio: org.studio.clone(),
         skills: config.state_dir.join("skills"),
+        routines: org.routines.clone(),
     })?)
 }
 
@@ -408,11 +412,14 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     let mail_dir = config.state_dir.join("mail");
     // Drafts and eval results of skills, per person (ADR 0034), root only.
     let skills_dir = config.state_dir.join("skills");
+    // People's routines (DA-4), root only: the probe tries to open them.
+    let routines_dir = config.state_dir.join("routines");
     for (dir, mode) in [
         (config.state_dir.as_path(), 0o700),
         (chat_dir.as_path(), 0o700),
         (mail_dir.as_path(), 0o700),
         (skills_dir.as_path(), 0o700),
+        (routines_dir.as_path(), 0o700),
         (run_dir, 0o755),
     ] {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -545,6 +552,48 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
 
     // A new agent version re-checks every layer on it (TL-13).
     runtime.recheck_layers();
+
+    // People's routines start on their schedules (DA-4), in this computer's
+    // local time, each as the person it belongs to. A minute the computer
+    // slept through doesn't run late.
+    runtime.set_routines(org.routines.clone());
+    {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+            let mut last = None;
+            loop {
+                tick.tick().await;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs() as i64);
+                // Once a minute; offsets are whole minutes.
+                if last.replace(now.div_euclid(60)) == Some(now.div_euclid(60)) {
+                    continue;
+                }
+                let offset = glass_platform::system::utc_offset_secs().unwrap_or(0);
+                let (day, hour, minute, _) = glass_app_routines::local_minute(now, offset);
+                let runtime = Arc::clone(&runtime);
+                let started = tokio::task::spawn_blocking(move || {
+                    runtime.run_due_routines(day, hour, minute, |login| {
+                        runtime.caller(glass_platform::users::by_name(login)?.uid)
+                    })
+                })
+                .await
+                .unwrap_or_default();
+                for (routine, result) in started {
+                    match result {
+                        Ok(task) => {
+                            tracing::info!(routine, task = %task.id, "started a routine on its schedule")
+                        }
+                        Err(e) => {
+                            tracing::warn!(routine, "a routine couldn't start on its schedule: {e}")
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     // The computer sleeps when the person at the screen has left it alone
     // as long as their setting says, agents paused first (ADR 0031).

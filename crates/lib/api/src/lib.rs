@@ -38,8 +38,9 @@ pub use tailoring::{
 };
 pub use task::{
     ActivityEntry, ActivityKind, AgentMode, AgentSummary, ChangeEntry, ChangeKind, FeedLine,
-    HandoffCard, Progress, Receipt, ScopeLine, ScopeRequest, SnapshotMarker, TITLE_MAX_CHARS,
-    TaskDetail, TaskRef, TaskRequest, TaskView, TileState, UndoReport, UndoRequest,
+    HandoffCard, Progress, Receipt, RoutineRef, RoutineView, ScopeLine, ScopeRequest,
+    SnapshotMarker, TITLE_MAX_CHARS, TaskDetail, TaskRef, TaskRequest, TaskView, TileState,
+    UndoReport, UndoRequest,
 };
 pub use text::{DisplaySafe, STAND_IN, display_char, display_line, invisible};
 
@@ -94,6 +95,11 @@ pub mod methods {
     /// user's own harness through `glass-mcp <driver_socket>`, with what the
     /// first task did and why it stopped in the harness's instructions.
     pub const TASK_CONTINUE: &str = "task.continue";
+    /// `()` → `Vec<`[`crate::RoutineView`]`>`: the caller's routines (DA-4).
+    pub const ROUTINE_LIST: &str = "routine.list";
+    /// [`crate::RoutineRef`] → [`crate::TaskView`]: starts one of the
+    /// caller's routines now, as a task with the scope it was saved with.
+    pub const ROUTINE_RUN: &str = "routine.run";
     /// [`crate::TaskRef`] → [`crate::TaskView`]: the Failed tile's Retry.
     /// Starts the ended task's request again as a new task, under today's
     /// policy. What the first run saved stays (and stays undoable there).

@@ -322,6 +322,14 @@ fn agent_env(rt: &Runtime, task: &Task) -> Vec<(String, String)> {
                 .unwrap_or(0)
                 .to_string(),
         ),
+        // A routine's run (DA-4): the agent reads it and runs its script.
+        (
+            "GLASS_ROUTINE".into(),
+            task.routine
+                .as_ref()
+                .map(|r| r.id.clone())
+                .unwrap_or_default(),
+        ),
         ("GLASS_WORK".into(), inside(WORK_DIR)),
         ("HOME".into(), inside(WORK_DIR)),
         ("TMPDIR".into(), inside("/tmp")),

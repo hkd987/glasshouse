@@ -27,7 +27,7 @@ use crate::error::Result;
 
 /// How long sleep waits for actions already under way.
 const SLEEP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-use crate::task::{Continued, Gate, NewTask, TakenSnapshot, Task};
+use crate::task::{Continued, Gate, NewTask, RoutineRun, TakenSnapshot, Task};
 use crate::{Caller, CatalogEntry, RuntimeConfig, RuntimeError, supervise, title};
 
 /// Everything the runtime is built from. `glassd` assembles these from its
@@ -88,6 +88,8 @@ pub struct Runtime {
     pub(crate) seat_file: std::sync::OnceLock<PathBuf>,
     /// Who is signed in at the screen, for what follows them (ADR 0031).
     pub(crate) seat_user: tokio::sync::watch::Sender<Option<String>>,
+    /// People's routines (DA-4), set once at startup. Unset, nobody has any.
+    pub(crate) routines: std::sync::OnceLock<glass_app_routines::Routines>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -134,6 +136,8 @@ pub(crate) enum Origin {
     RetryOf(TaskId),
     /// Take over on an ended task, in the user's harness.
     Continues(Continued),
+    /// One of the person's routines, by id and version (DA-4).
+    Routine(RoutineRun),
 }
 
 impl Runtime {
@@ -167,6 +171,7 @@ impl Runtime {
             seat: Mutex::new(None),
             wakes: tokio::sync::watch::Sender::new(0),
             seat_file: std::sync::OnceLock::new(),
+            routines: std::sync::OnceLock::new(),
             seat_user: tokio::sync::watch::Sender::new(None),
         });
         // Settings that list apps by id (DK-1) show them by the names the
@@ -761,10 +766,11 @@ impl Runtime {
             .entry
             .attended
             .then(|| self.config.attended_dir.join(format!("{id}.sock")));
-        let (retry_of, continues) = match origin {
-            Origin::New => (None, None),
-            Origin::RetryOf(first) => (Some(first), None),
-            Origin::Continues(from) => (None, Some(from)),
+        let (retry_of, continues, routine) = match origin {
+            Origin::New => (None, None, None),
+            Origin::RetryOf(first) => (Some(first), None, None),
+            Origin::Continues(from) => (None, Some(from), None),
+            Origin::Routine(run) => (None, None, Some(run)),
         };
         let (stop_tx, stop_rx) = oneshot::channel();
         let task = Arc::new(Task::new(NewTask {
@@ -782,6 +788,7 @@ impl Runtime {
             layer: prepared.layer,
             driver_socket,
             continues,
+            routine,
             app: None,
             title: prepared.title.clone(),
             title_fixed: request.title.is_some(),
@@ -804,6 +811,9 @@ impl Runtime {
             "sandbox": self.sandbox.kind(),
             "retry_of": retry_of,
             "continues": task.continues.as_ref().map(|c| c.id),
+            "routine": task.routine.as_ref().map(|r| serde_json::json!({
+                "id": r.id, "version": r.version, "scheduled": r.scheduled,
+            })),
             "attended": task.entry.attended,
             "layer": task.layer,
             "settings": task.settings,
@@ -813,18 +823,26 @@ impl Runtime {
             let mut state = task.lock();
             state.note(
                 ActivityKind::State,
-                match (retry_of, &task.continues) {
-                    (Some(first), _) => {
+                match (retry_of, &task.continues, &task.routine) {
+                    (_, _, Some(run)) if run.scheduled => format!(
+                        "Started on its schedule (routine {} version {})",
+                        run.id, run.version
+                    ),
+                    (_, _, Some(run)) => format!(
+                        "Started by {} (routine {} version {})",
+                        caller.name, run.id, run.version
+                    ),
+                    (Some(first), _, None) => {
                         format!("Started by {} (retry of {})", caller.name, first.short())
                     }
-                    (None, Some(from)) => format!(
+                    (None, Some(from), None) => format!(
                         "Started by {}, continuing {} ({} {})",
                         caller.name,
                         from.id.short(),
                         from.agent,
                         from.ended
                     ),
-                    (None, None) => format!("Started by {}", caller.name),
+                    (None, None, None) => format!("Started by {}", caller.name),
                 },
             );
             if let Some(note) = layer_note {

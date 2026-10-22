@@ -58,6 +58,7 @@ Tests: *unit* = crate unit tests, *pipeline* =
 | DA-11 Approve once or for the task, never forever | **Done** | `broker/desk.rs` | unit `desk::*`, pipeline `sends_wait_for…` |
 | DA-12 Batched asks, one approval | **Done** | `mail.send` batches, `Preview::items` | pipeline, e2e `invoices` |
 | DA-13 Unanswered asks hold; timeout pauses | **Done** | `execute.rs::ask` | pipeline `approvals_time_out…` |
+| DA-4 Recurring tasks saved as named routines with the same scope, on a schedule or trigger | Partial | ADR 0044 item 5: `glass-app-routines`. `routines.save` (Ask) keeps a name, the request, a script and an optional schedule ("weekdays 09:00"), with the saving task's scope, never the input's. The approval shows the schedule, scope, the tools the script calls and the script itself. Versions are root only and never change; the person's list is a file in their home, so undo removes one. `glassctl routines`, `glassctl routine run <id>`, and glassd's minute tick start a run as its owner, a task with that scope where the desktop agent runs the script with no model. Live on Claude Haiku 5.5 (2026-10-22): "Every weekday at 9:00, tell me which of my invoices are unpaid and what they come to" made a routine for $0.0019; its run made no model call and gave the same total. Missing: triggers other than time, showing tiers in the approval, the shell's routines screen. `glass-app-routines` `da4_…`, runtime `routines::da4_…`, VM `models` (`desktop_agent_routine`) |
 
 ## Agent window
 
@@ -96,6 +97,7 @@ thumbnails are not started.
 | NV-10 Toolkit requires role + label | Not started | shell |
 | NV-11 A11y tree through the broker | Not started | |
 | NV-20 Screen agents on their own display | Not started | |
+| NV-21 Recorded flows replayed as code; the agent takes over when replay fails | Partial | For actions, not yet screens: a routine (DA-4) is code the agent wrote once, replayed with no model, and when its script fails the desktop agent does the request itself, told what broke, and may save a fixed version (ADR 0044 item 5). Recording a legacy app's flow is not built. VM `models` (`desktop_agent_routine`: a broken script, the model takes over) |
 
 ## Data protection and models
 

@@ -319,6 +319,14 @@ pub fn summary(views: &[TaskView]) -> String {
     format!("{}   {}\n", parts.join("   "), dim(&format!("→ {next}")))
 }
 
+/// The expanded view as printed: safe to print by its own rules, which
+/// keep the answer's line breaks where the general ones would flatten
+/// them into one line.
+pub fn detail_shown(mut d: TaskDetail) -> String {
+    d.make_display_safe();
+    detail(&d)
+}
+
 /// The expanded view (AW-10 to AW-16).
 pub fn detail(d: &TaskDetail) -> String {
     let mut out = tile(&d.view);
@@ -674,6 +682,30 @@ mod tests {
         );
         assert!(printed.contains("All done\\u202e"));
         assert_eq!(serde_json::from_str::<TaskView>(&printed).unwrap(), hostile);
+    }
+
+    /// An answer keeps its lines (ADR 0041): a routine's is a line per
+    /// item, and a model's has paragraphs.
+    #[test]
+    fn ae3_an_answer_prints_in_its_lines_and_still_without_escapes() {
+        let (_, view) = sample();
+        let shown = plain(&detail_shown(TaskDetail {
+            view,
+            prompt: "Which invoices are unpaid?".into(),
+            plan: Vec::new(),
+            now: "Finished.".into(),
+            activity: Vec::new(),
+            changes: Vec::new(),
+            cant_touch: Vec::new(),
+            snapshots: Vec::new(),
+            answer: Some("Unpaid invoices: 2\nINV-1 | 120.00\nINV-3 | 462.80\x1b[2J".into()),
+        }));
+        assert!(
+            shown.contains(
+                "Answer\n  Unpaid invoices: 2\n  INV-1 | 120.00\n  INV-3 | 462.80\u{FFFD}[2J\n"
+            ),
+            "{shown}"
+        );
     }
 
     /// Audit records come back as they were recorded (they are history);

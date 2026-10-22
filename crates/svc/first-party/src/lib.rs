@@ -23,6 +23,8 @@ pub use glass_app_mail::{
 pub use glass_app_meet::MeetHandle;
 use glass_app_meet::MeetProvider;
 use glass_app_people::PeopleProvider;
+pub use glass_app_routines::Routines;
+use glass_app_routines::RoutinesProvider;
 use glass_app_settings::SettingsProvider;
 pub use glass_app_settings::{ModelAgent, ModelKeys, SettingsHandle};
 use glass_app_skills::SkillsProvider;
@@ -70,6 +72,8 @@ pub struct Setup {
     pub studio: Studio,
     /// Each person's skill drafts and eval results (ADR 0034), root's.
     pub skills: PathBuf,
+    /// Each person's routines (DA-4), root's: the runtime runs them.
+    pub routines: Routines,
 }
 
 impl Setup {
@@ -89,6 +93,7 @@ impl Setup {
             managed: false,
             studio: Studio::offline(),
             skills: PathBuf::from("/nonexistent"),
+            routines: Routines::offline(),
         }
     }
 }
@@ -143,6 +148,7 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
     )))?;
     registry.register(Arc::new(chat))?;
     registry.register(Arc::new(StudioProvider::new(setup.studio)))?;
+    registry.register(Arc::new(RoutinesProvider::new(setup.routines)))?;
     registry.register(Arc::new(ModelAction))?;
     Ok(registry)
 }

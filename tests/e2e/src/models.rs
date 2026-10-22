@@ -314,7 +314,8 @@ pub async fn models(h: &Harness) -> anyhow::Result<()> {
     );
     it_agent(h).await?;
     desktop_agent(h, &ws).await?;
-    desktop_agent_script(h, &ws).await
+    desktop_agent_script(h, &ws).await?;
+    desktop_agent_routine(h, &ws).await
 }
 
 /// AE-3, ADR 0041: the desktop agent, in its jail, offers the model its
@@ -416,6 +417,147 @@ async fn desktop_agent_script(h: &Harness, ws: &crate::harness::Workspace) -> an
     let answer = h.detail(task).await?.answer.unwrap_or_default();
     ensure!(answer.contains("The script failed"), "{answer}");
     ensure!(!answer.contains("root:"), "{answer}");
+    Ok(())
+}
+
+/// A routine in the jail (DA-4, NV-21, ADR 0044): the desktop agent saves
+/// one, the person approves it, and its run does the job with the script
+/// alone, no model; a routine whose script breaks has the model take over.
+async fn desktop_agent_routine(h: &Harness, ws: &crate::harness::Workspace) -> anyhow::Result<()> {
+    let save = |name: &str, script: &str| {
+        format!(
+            r#"Save it. Use routines_save {}"#,
+            json!({
+                "name": name,
+                "request": "Say whether my invoices folder lists.",
+                "script": script,
+                "note": "First version",
+            })
+        )
+    };
+    let mut ids = Vec::new();
+    for (name, script) in [
+        (
+            "Listing check",
+            "const r = call('files_list', {path: ''}); return 'Listed: ' + (r.ok ? 'yes' : 'no');",
+        ),
+        (
+            "Broken check",
+            "call('files_list', {path: ''}); throw new Error('the folder moved');",
+        ),
+    ] {
+        let task = h
+            .start(
+                "desktop-agent",
+                &save(name, script),
+                &[ws.invoices.as_path()],
+                &[],
+            )
+            .await?;
+        h.wait_for(task, TileState::NeedsYou, Duration::from_secs(60))
+            .await?;
+        let ask = h.the_ask(task).await?;
+        ensure!(
+            ask.summary == format!("Save the routine {name}"),
+            "{}",
+            ask.summary
+        );
+        ensure!(
+            ask.items
+                .iter()
+                .any(|i| i == "Calls: files_list, each at its tier, as desktop-agent would"),
+            "{:?}",
+            ask.items
+        );
+        h.approve_once(&ask).await?;
+        h.wait_for(task, TileState::Done, Duration::from_secs(60))
+            .await?;
+        let saved = h.audit(task).await?.into_iter().find(|r| {
+            r.event.action.as_ref().map(|a| a.as_str()) == Some("routines.save")
+                && r.event.outcome == Some(Outcome::Completed)
+        });
+        ensure!(saved.is_some(), "{name} saved");
+        // This run's: the one with this workspace's scope.
+        let listed: Vec<glass_api::RoutineView> =
+            h.call(methods::ROUTINE_LIST, Value::Null).await?;
+        let mine = listed
+            .iter()
+            .find(|r| r.name == name && r.read == [ws.invoices.clone()])
+            .with_context(|| format!("{name} with this task's scope in {listed:?}"))?;
+        ids.push(mine.routine.clone());
+    }
+
+    // Its run: the script, over the task's socket, and no model.
+    let run: TaskView = h
+        .call(
+            methods::ROUTINE_RUN,
+            glass_api::RoutineRef {
+                routine: ids[0].clone(),
+            },
+        )
+        .await?;
+    h.wait_for(run.id, TileState::Done, Duration::from_secs(60))
+        .await?;
+    let answer = h.detail(run.id).await?.answer.unwrap_or_default();
+    ensure!(answer == "Listed: yes", "{answer}");
+    let records = h.audit(run.id).await?;
+    let actions: Vec<&str> = records
+        .iter()
+        .filter(|r| r.event.outcome == Some(Outcome::Completed))
+        .filter_map(|r| r.event.action.as_ref().map(|a| a.as_str()))
+        .collect();
+    ensure!(
+        actions.contains(&"routines.read") && actions.contains(&"files.list"),
+        "{actions:?}"
+    );
+    ensure!(
+        !actions.contains(&"model.complete"),
+        "no model: {actions:?}"
+    );
+
+    // A broken script: the model takes over from the request.
+    let run: TaskView = h
+        .call(
+            methods::ROUTINE_RUN,
+            glass_api::RoutineRef {
+                routine: ids[1].clone(),
+            },
+        )
+        .await?;
+    h.wait_for(run.id, TileState::Done, Duration::from_secs(60))
+        .await?;
+    let detail = h.detail(run.id).await?;
+    ensure!(
+        detail
+            .activity
+            .iter()
+            .any(|a| a.text.contains("The routine's script failed")),
+        "{:?}",
+        detail.activity
+    );
+    let called = h
+        .audit(run.id)
+        .await?
+        .iter()
+        .any(|r| r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete"));
+    ensure!(called, "the model took over");
+
+    // The person takes them off their list, as they may by hand.
+    let file =
+        std::path::PathBuf::from(std::env::var("HOME")?).join(glass_app_routines::store::MINE);
+    let mut kept: Value = serde_json::from_slice(&std::fs::read(&file)?)?;
+    let kept_ids = kept["routines"]
+        .as_object_mut()
+        .context("the routines file")?;
+    for id in &ids {
+        kept_ids.remove(id);
+    }
+    std::fs::write(&file, serde_json::to_vec(&kept)?)?;
+    let listed: Vec<glass_api::RoutineView> = h.call(methods::ROUTINE_LIST, Value::Null).await?;
+    ensure!(
+        !listed.iter().any(|r| ids.contains(&r.routine)),
+        "{listed:?}"
+    );
     Ok(())
 }
 

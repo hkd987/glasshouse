@@ -22,6 +22,7 @@ glass-app-people.workspace = true
 glass-app-settings.workspace = true
 glass-app-skills.workspace = true
 glass-app-studio.workspace = true
+glass-app-routines.workspace = true
 glass-app-system.workspace = true
 glass-managed.workspace = true
 glass-policy.workspace = true

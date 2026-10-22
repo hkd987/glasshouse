@@ -106,6 +106,30 @@ pub struct TaskRef {
     pub task: TaskId,
 }
 
+/// One of the caller's routines (DA-4): a task saved with its scope and a
+/// script, which runs when they start it or on its schedule.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutineView {
+    pub routine: String,
+    pub name: String,
+    pub version: u32,
+    /// When it runs by itself, in words ("every weekday at 09:00"), or
+    /// "when started".
+    pub runs: String,
+    /// What it does: the request each run starts with.
+    pub request: String,
+    pub agent: AgentId,
+    /// The tools its script calls.
+    pub calls: Vec<String>,
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutineRef {
+    pub routine: String,
+}
+
 /// A tile's state (PRD "Tile states"). "Collapsed" is how the shell shows
 /// tiles, not a task state, so it is not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

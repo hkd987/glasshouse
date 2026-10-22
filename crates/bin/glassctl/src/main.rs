@@ -17,9 +17,9 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use glass_api::{
     AgentSummary, AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalView, AuditVerifyResult,
-    DisplaySafe, Event, HandoffCard, PowerResult, ProfileApp, ProfileAppKind, ScopeRequest,
-    SystemStatus, TaskDetail, TaskRef, TaskRequest, TaskView, TileState, UndoReport, UndoRequest,
-    methods,
+    DisplaySafe, Event, HandoffCard, PowerResult, ProfileApp, ProfileAppKind, RoutineRef,
+    RoutineView, ScopeRequest, SystemStatus, TaskDetail, TaskRef, TaskRequest, TaskView, TileState,
+    UndoReport, UndoRequest, methods,
 };
 use glass_audit::AuditRecord;
 use glass_rpc::Client;
@@ -151,12 +151,24 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         timeout: u64,
     },
+    /// Your routines: tasks you saved to run again, by themselves or when
+    /// you start them (DA-4).
+    Routines,
+    /// Start one of your routines now.
+    #[command(subcommand)]
+    Routine(RoutineCommand),
     /// Policy tools (offline).
     #[command(subcommand)]
     Policy(PolicyCommand),
     /// Machine power events (root; run by the rc.d suspend/resume hooks).
     #[command(subcommand)]
     System(SystemCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum RoutineCommand {
+    /// Start a routine now, by its id from `glassctl routines`.
+    Run { routine: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -434,7 +446,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Show { task } => {
             let detail: TaskDetail = ctl.task_call(methods::TASK_GET, &task).await?;
-            ctl.show(&detail, render::detail)
+            if ctl.json {
+                return ctl.show(&detail, render::detail);
+            }
+            print!("{}", render::detail_shown(detail));
+            Ok(())
         }
         Command::Watch => watch(&ctl).await,
         Command::Approvals => {
@@ -472,6 +488,45 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::HandBack { task } => lifecycle(&ctl, methods::TASK_HAND_BACK, &task).await,
         Command::Stop { task } => lifecycle(&ctl, methods::TASK_STOP, &task).await,
         Command::Dismiss { task } => ctl.task_call(methods::TASK_DISMISS, &task).await,
+        Command::Routines => {
+            let routines: Vec<RoutineView> = ctl.call(methods::ROUTINE_LIST, Value::Null).await?;
+            ctl.show(&routines, |list| {
+                if list.is_empty() {
+                    return "No routines yet. Ask the desktop agent to do something every \
+                            morning, or again later, and it offers to save one.\n"
+                        .to_owned();
+                }
+                list.iter()
+                    .map(|r| {
+                        format!(
+                            "{}  {} (version {})\n  Runs {}. {}\n  Calls: {}\n",
+                            style::bold(&r.routine),
+                            r.name,
+                            r.version,
+                            r.runs,
+                            style::dim(&r.request),
+                            if r.calls.is_empty() {
+                                "nothing".to_owned()
+                            } else {
+                                r.calls.join(", ")
+                            }
+                        )
+                    })
+                    .collect()
+            })
+        }
+        Command::Routine(RoutineCommand::Run { routine }) => {
+            let view: TaskView = ctl
+                .call(methods::ROUTINE_RUN, RoutineRef { routine })
+                .await?;
+            ctl.show(&view, |v| {
+                format!(
+                    "Started the routine {} ({}). Watch it with `glassctl watch`.\n",
+                    v.title,
+                    v.id.short()
+                )
+            })
+        }
         Command::Retry { task } => {
             let view: TaskView = ctl.task_call(methods::TASK_RETRY, &task).await?;
             ctl.show(&view, |v| {
