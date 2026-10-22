@@ -44,6 +44,14 @@ make vm-status            # "running: pid …, ssh … up" or not running
   openrouter.ai fails (the session proxy re-signs HTTPS and the VM doesn't
   trust it; never change that): use `--host`, which runs them on the dev
   host (nothing contained) where this machine's trust applies.
+- The agents on a real model on the VM's own desktop (screenshots of an
+  agent using the OS): `tools/dev/real-desktop.sh up [model]` (default
+  `claude-haiku-5-5`, about a tenth of a cent a task) runs a dev-host glassd
+  on Anthropic with a seeded workday (Inbox, this week's calendar, notes,
+  invoices) and puts the VM's desktop on it; then `vm.sh key ctrl-spc`,
+  `vm.sh type "..."`, `vm.sh key ret`, `vm.sh screendump`, and click to
+  approve or roll back. Its Mail is at http://mail.localhost:7300.
+  `real-desktop.sh down` deletes the key file and stops it all.
 
 ## Rules
 

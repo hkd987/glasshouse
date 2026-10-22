@@ -37,7 +37,8 @@ each stands for the real value, which this computer puts back wherever you use t
 placeholder, in a tool call or your answer. Use it as you would the value; don't ask \
 the person for it. Secrets such as keys and passwords stay hidden and are never put \
 back. When you're done, answer the person in a few short paragraphs of plain words: \
-what you did and what you found.";
+what you did and what you found. The answer is shown as plain text, not Markdown: no \
+asterisks, headings or bullet marks, and a blank line between points.";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
