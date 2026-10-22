@@ -138,20 +138,6 @@ fn using(tool: &str) -> Option<String> {
     (name != "report_progress").then(|| format!("Using {}", name.replace('_', " ")))
 }
 
-/// A tile caption from the answer's first line.
-fn caption(answer: &str) -> String {
-    let line = answer
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("Done")
-        .trim();
-    let mut caption: String = line.chars().take(100).collect();
-    if line.chars().count() > 100 {
-        caption.push('…');
-    }
-    caption
-}
-
 /// Claude Code's arguments: headless, its own tools off, ours only.
 fn claude_args(config: &Path) -> Vec<String> {
     let mut args: Vec<String> = [
@@ -228,7 +214,9 @@ async fn run() -> anyhow::Result<()> {
     let outcome = drive(&agent, &claude, &config, &work).await;
     let _ = std::fs::remove_dir_all(&work);
     match outcome {
-        Ok(answer) => Ok(agent.answer(&caption(&answer), &answer).await?),
+        Ok(answer) => Ok(agent
+            .answer(&glass_agent_sdk::caption(&answer), &answer)
+            .await?),
         Err(e) => {
             // The tile says why; whoever started it stops the task.
             let _ = agent
@@ -400,6 +388,5 @@ mod tests {
             Some("Using files list")
         );
         assert_eq!(using("mcp__glasshouse__report_progress"), None);
-        assert_eq!(caption("\nTwo files.\nMore"), "Two files.");
     }
 }

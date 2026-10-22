@@ -104,6 +104,7 @@ pub(crate) fn with_models(policy: Policy, service: Option<&str>, agents: &[Strin
         name: name.into(),
         region: None,
         endpoint: None,
+        check_history: false,
     });
     doc.models.models.push(ModelEntry {
         id: PROVIDER.into(),
@@ -114,6 +115,43 @@ pub(crate) fn with_models(policy: Policy, service: Option<&str>, agents: &[Strin
         usd_per_mtok_out: prices[1],
         usd_per_mtok_cache_read: prices[2],
     });
+    // On Anthropic, the cheaper models beside it, cheapest first for an
+    // agent that asks (ADR 0044): the desktop agent starts on Haiku and
+    // steps up a model at a time. Agents that don't choose get Opus. Only
+    // where policy set no models of its own.
+    let ours = doc.models.default.is_none() && doc.models.routes.is_empty();
+    if kind == ProviderKind::Anthropic && ours {
+        let mut route = vec![PROVIDER.to_owned()];
+        for (id, model, name, prices) in [
+            (
+                "personal-sonnet",
+                "claude-sonnet-5-5",
+                "Claude Sonnet",
+                [2.0, 10.0, 0.2],
+            ),
+            (
+                "personal-haiku",
+                "claude-haiku-5-5",
+                "Claude Haiku",
+                [0.1, 0.5, 0.01],
+            ),
+        ] {
+            doc.models.models.push(ModelEntry {
+                id: id.into(),
+                provider: PROVIDER.into(),
+                model: model.into(),
+                name: name.into(),
+                usd_per_mtok_in: Some(prices[0]),
+                usd_per_mtok_out: Some(prices[1]),
+                usd_per_mtok_cache_read: Some(prices[2]),
+            });
+            route.push(id.into());
+        }
+        for label in [glass_types::Label::Public, glass_types::Label::Internal] {
+            doc.models.routes.insert(label, route.clone());
+        }
+        doc.models.by_cost = true;
+    }
     doc.models.default.get_or_insert_with(|| PROVIDER.into());
     for rules in doc
         .agents
@@ -271,6 +309,28 @@ mod tests {
             with.document().models.providers[0].kind,
             ProviderKind::Anthropic
         );
+        // ADR 0044: Haiku and Sonnet beside Opus, chosen by cost; agents
+        // that don't choose still get Opus.
+        let models = &with.document().models;
+        assert!(models.by_cost);
+        assert_eq!(models.default.as_deref(), Some(PROVIDER));
+        let route = models.routes.get(&glass_types::Label::Internal).unwrap();
+        assert_eq!(route, &["personal", "personal-sonnet", "personal-haiku"]);
+        let effective = with
+            .effective("demo", &"desktop-agent".parse().unwrap())
+            .expect("everyone may run the desktop agent");
+        let rules = effective.models();
+        let cheapest = rules
+            .route_for(
+                glass_types::Label::Internal,
+                None,
+                Some(glass_policy::Prefer::Cheapest),
+                None,
+            )
+            .unwrap();
+        assert_eq!(cheapest.steps[0].provider_model, "claude-haiku-5-5");
+        let plain = rules.route(glass_types::Label::Internal, None).unwrap();
+        assert_eq!(plain.steps[0].provider_model, "claude-opus-5-5");
 
         // Nothing connected, or nothing we know: the policy as it was.
         assert_eq!(

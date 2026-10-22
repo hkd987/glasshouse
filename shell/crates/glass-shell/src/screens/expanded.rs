@@ -691,10 +691,27 @@ fn receipt_pane<'a>(
     if let Some(answer) = state.detail.and_then(|d| d.answer.as_deref()) {
         pane = pane.push(
             container(
-                Column::with_children(
-                    paragraphs(answer)
-                        .map(|p| text(p).size(15).color(t.text).line_height(1.5).into()),
-                )
+                Column::with_children(blocks(answer).into_iter().map(|block| {
+                    match block {
+                        Block::Heading(h) => {
+                            text(h).size(16).font(fonts::MEDIUM).color(t.text).into()
+                        }
+                        Block::Paragraph(p) => {
+                            text(p).size(15).color(t.text).line_height(1.5).into()
+                        }
+                        Block::Item { mark, text: item } => row![
+                            text(mark)
+                                .size(15)
+                                .color(t.caption)
+                                .width(Length::Fixed(22.0)),
+                            text(item).size(15).color(t.text).line_height(1.5),
+                        ]
+                        .into(),
+                        Block::Code(line) => {
+                            text(line).size(13).font(fonts::MONO).color(t.text).into()
+                        }
+                    }
+                }))
                 .spacing(10),
             )
             .width(Length::Fill)
@@ -744,19 +761,115 @@ fn receipt_pane<'a>(
     quiet_scroll(t, pane.into())
 }
 
-/// An answer's paragraphs: its lines, joined where a paragraph wraps,
-/// split where a blank line is.
-fn paragraphs(answer: &str) -> impl Iterator<Item = String> + '_ {
-    answer
-        .split("\n\n")
-        .map(|p| {
-            p.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .filter(|p| !p.is_empty())
+/// A piece of an answer as it's shown. Agents are asked for plain text,
+/// but models write Markdown anyway, and Claude Code's answers are
+/// Markdown: its headings, lists and code show as such, never as `#`, `-`
+/// and backticks.
+#[derive(Debug, PartialEq)]
+enum Block {
+    Heading(String),
+    /// Lines joined where a paragraph wraps.
+    Paragraph(String),
+    /// A list item and its mark: "•", or its number ("2.").
+    Item {
+        mark: String,
+        text: String,
+    },
+    /// A line of a code block, as written.
+    Code(String),
+}
+
+fn blocks(answer: &str) -> Vec<Block> {
+    let mut blocks = Vec::new();
+    let mut paragraph: Vec<&str> = Vec::new();
+    let mut code = false;
+    let flush = |paragraph: &mut Vec<&str>, blocks: &mut Vec<Block>| {
+        if !paragraph.is_empty() {
+            blocks.push(Block::Paragraph(inline(&paragraph.join(" "))));
+            paragraph.clear();
+        }
+    };
+    for line in answer.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            flush(&mut paragraph, &mut blocks);
+            code = !code;
+            continue;
+        }
+        if code {
+            blocks.push(Block::Code(line.trim_end().to_owned()));
+            continue;
+        }
+        let heading = trimmed
+            .trim_start_matches('#')
+            .strip_prefix(' ')
+            .filter(|_| {
+                trimmed.starts_with('#')
+                    && trimmed.len() - trimmed.trim_start_matches('#').len() <= 6
+            });
+        let number = trimmed.split_once(['.', ')']).filter(|(n, rest)| {
+            !n.is_empty()
+                && n.len() <= 3
+                && n.bytes().all(|b| b.is_ascii_digit())
+                && rest.starts_with(' ')
+        });
+        if trimmed.is_empty() || trimmed.chars().all(|c| c == '-' || c == '*') && trimmed.len() >= 3
+        {
+            flush(&mut paragraph, &mut blocks);
+        } else if let Some(heading) = heading {
+            flush(&mut paragraph, &mut blocks);
+            blocks.push(Block::Heading(inline(heading.trim())));
+        } else if let Some(item) = ["- ", "* ", "+ ", "• "]
+            .iter()
+            .find_map(|m| trimmed.strip_prefix(m))
+        {
+            flush(&mut paragraph, &mut blocks);
+            blocks.push(Block::Item {
+                mark: "•".into(),
+                text: inline(item.trim()),
+            });
+        } else if let Some((n, rest)) = number {
+            flush(&mut paragraph, &mut blocks);
+            blocks.push(Block::Item {
+                mark: format!("{n}."),
+                text: inline(rest.trim()),
+            });
+        } else if let (Some(Block::Item { text, .. }), true, true) = (
+            blocks.last_mut(),
+            paragraph.is_empty(),
+            line.starts_with([' ', '\t']),
+        ) {
+            // An item's text wrapped onto an indented line.
+            text.push(' ');
+            text.push_str(&inline(trimmed));
+        } else {
+            paragraph.push(trimmed);
+        }
+    }
+    flush(&mut paragraph, &mut blocks);
+    blocks
+}
+
+/// Markdown's inline marks taken off: bold, code, and a link as its text
+/// and address.
+fn inline(text: &str) -> String {
+    let mut out = text.replace("**", "").replace("__", "").replace('`', "");
+    while let Some(open) = out.find('[') {
+        let Some(close) = out[open..].find("](").map(|i| open + i) else {
+            break;
+        };
+        let Some(end) = out[close..].find(')').map(|i| close + i) else {
+            break;
+        };
+        let (label, url) = (&out[open + 1..close], &out[close + 2..end]);
+        let shown = if label == url {
+            label.to_owned()
+        } else {
+            format!("{label} ({url})")
+        };
+        out.replace_range(open..=end, &shown);
+    }
+    out
 }
 
 /// Rolling back (AW-15): what it would change, then what it changed.
@@ -1487,11 +1600,46 @@ mod tests {
 
     #[test]
     fn ae3_an_answer_reads_as_paragraphs() {
-        let got: Vec<String> =
-            paragraphs("You have 3 files.\nOne is new.\n\n\nplan.txt is the newest.\n").collect();
         assert_eq!(
-            got,
-            ["You have 3 files. One is new.", "plan.txt is the newest."]
+            blocks("You have 3 files.\nOne is new.\n\n\nplan.txt is the newest.\n"),
+            [
+                Block::Paragraph("You have 3 files. One is new.".into()),
+                Block::Paragraph("plan.txt is the newest.".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn ae3_markdown_in_an_answer_shows_as_what_it_means() {
+        let answer = "## What I found\n\
+            Two files in **LaunchNotes**:\n\
+            - `plan.txt`: ship by\n  November 14.\n\
+            * todo.txt: call Ana.\n\n\
+            ---\n\
+            1. Draft the mail\n\
+            2) Book the room, see [the wiki](https://wiki.example/room)\n\
+            ```\nlet x = 1;\n  x + 1\n```\n\
+            Total: 3 * 4 = 12. #3 is next.";
+        let item = |mark: &str, text: &str| Block::Item {
+            mark: mark.into(),
+            text: text.into(),
+        };
+        assert_eq!(
+            blocks(answer),
+            [
+                Block::Heading("What I found".into()),
+                Block::Paragraph("Two files in LaunchNotes:".into()),
+                item("•", "plan.txt: ship by November 14."),
+                item("•", "todo.txt: call Ana."),
+                item("1.", "Draft the mail"),
+                item(
+                    "2.",
+                    "Book the room, see the wiki (https://wiki.example/room)"
+                ),
+                Block::Code("let x = 1;".into()),
+                Block::Code("  x + 1".into()),
+                Block::Paragraph("Total: 3 * 4 = 12. #3 is next.".into()),
+            ]
         );
     }
 

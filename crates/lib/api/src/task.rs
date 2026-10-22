@@ -223,6 +223,10 @@ pub struct Receipt {
     /// Changes that left the machine, such as sent mail. Can't be undone.
     #[serde(default)]
     pub left_machine: u32,
+    /// The providers its model calls went to ("Anthropic"): what it sent
+    /// them left the machine too, though nothing there changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
     /// Things the user should look at, such as irreversible actions taken.
     pub flagged: Vec<String>,
 }
@@ -231,10 +235,20 @@ impl Receipt {
     /// One plain sentence on what's safe and what isn't, for a tile that
     /// stopped early: "Nothing left the machine. 26 changes can be undone."
     pub fn outcome(&self) -> String {
-        let left = match self.left_machine {
-            0 => "Nothing left the machine.".to_owned(),
-            1 => "1 change left the machine and can't be undone.".to_owned(),
-            n => format!("{n} changes left the machine and can't be undone."),
+        let models = match self.models.as_slice() {
+            [] => String::new(),
+            [one] => format!("its model calls to {one}"),
+            [rest @ .., last] => format!("its model calls to {} and {last}", rest.join(", ")),
+        };
+        let left = match (self.left_machine, models.is_empty()) {
+            (0, true) => "Nothing left the machine.".to_owned(),
+            (0, false) => format!("Nothing left the machine but {models}."),
+            (1, _) => "1 change left the machine and can't be undone.".to_owned(),
+            (n, _) => format!("{n} changes left the machine and can't be undone."),
+        };
+        let left = match (self.left_machine, models.is_empty()) {
+            (1.., false) => format!("{left} So did {models}."),
+            _ => left,
         };
         let undoable = match self.undoable {
             0 if self.changes == 0 => "Nothing was changed.".to_owned(),
@@ -369,6 +383,7 @@ mod tests {
             changes,
             undoable,
             left_machine,
+            models: Vec::new(),
             flagged: Vec::new(),
         };
         assert_eq!(
@@ -386,6 +401,20 @@ mod tests {
         assert_eq!(
             receipt(2, 0, 2).outcome(),
             "2 changes left the machine and can't be undone."
+        );
+        // What a task sent its models left the machine too.
+        let sent = |left_machine, models: &[&str]| Receipt {
+            models: models.iter().map(|m| (*m).to_owned()).collect(),
+            ..receipt(left_machine, 0, left_machine)
+        };
+        assert_eq!(
+            sent(0, &["Anthropic"]).outcome(),
+            "Nothing left the machine but its model calls to Anthropic. Nothing was changed."
+        );
+        assert_eq!(
+            sent(1, &["Amazon Bedrock", "Anthropic"]).outcome(),
+            "1 change left the machine and can't be undone. So did its model calls to \
+             Amazon Bedrock and Anthropic."
         );
     }
 }

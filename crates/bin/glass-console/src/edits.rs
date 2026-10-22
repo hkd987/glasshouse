@@ -94,6 +94,7 @@ fn credits(doc: &mut PolicyDocument, on: bool) {
                 name: "Glasshouse model credits".into(),
                 region: None,
                 endpoint: None,
+                check_history: false,
             });
         }
         if !models.models.iter().any(|m| m.id == CREDITS_MODEL) {

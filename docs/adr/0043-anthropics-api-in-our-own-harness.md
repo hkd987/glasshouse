@@ -142,6 +142,15 @@ gateway) and ADR 0041 (tool use, the desktop agent).
   taken as missing, and it wouldn't draft the mail until told that
   using the placeholder puts the value back.
 
+- The history check is policy's `check_history` on an Anthropic
+  provider (2026-10-22). With it, every call sends the beta header and
+  `thinking.block_binding.prefix_mismatch_behavior: "error"`.
+  `glass-e2e real-model-policy` sets it, so every real-key script and
+  `tools/dev/fake-model.sh` run with it. On a real key the desktop agent
+  ran opted in: 3 calls, thinking sent back each step, none dropped.
+  Production policies leave it off: accounts made from 2026-08-31 have
+  it anyway, and an older account's agent loses only reasoning.
+
 ## Not built yet
 - Anthropic's server-side fallback on refusals, and fallback credit.
 - `thinking.display: "updates"` (beta) for captions between tool calls.

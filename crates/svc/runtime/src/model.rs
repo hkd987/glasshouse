@@ -7,6 +7,7 @@ use std::path::Path;
 
 use glass_actions::{ActionError, ActionOutput, Grant};
 use glass_gateway::{Call, CallRecord, CompleteInput, Redactor};
+use glass_policy::document::ProviderKind;
 use glass_policy::{EffectivePolicy, ModelRefusal, Route, RouteStep};
 use glass_types::{Label, Tier};
 use serde_json::{Value, json};
@@ -27,6 +28,10 @@ pub(crate) struct Sent {
     /// The summary and target naming the model that answered, which after a
     /// failover isn't the first on the route.
     pub answered: Option<(String, Vec<String>)>,
+    /// The providers off this computer the call's data went to, as people
+    /// know them ("Anthropic"): the one that answered and any tried before
+    /// it, if this computer could reach them.
+    pub went_to: Vec<String>,
 }
 
 impl Runtime {
@@ -72,6 +77,25 @@ impl Runtime {
             redactor: &redactor,
             log_prompts: rules.log_prompts(),
         };
+        // Every provider the call was sent to: those tried first, then the
+        // one that answered. One this computer has no connection for was
+        // never sent anything; a scripted one is on this computer.
+        let went_to = |record: &CallRecord| -> Vec<String> {
+            let connected: Vec<&str> = gateway.providers().collect();
+            let mut names: Vec<String> = Vec::new();
+            let tried = record.failed_over.iter().map(|a| a.provider.as_str());
+            for provider in tried.chain(record.provider.as_deref()) {
+                let step = routed.route.steps.iter().find(|s| s.provider == provider);
+                if let Some(step) = step
+                    && step.kind != ProviderKind::Scripted
+                    && connected.contains(&provider)
+                    && !names.contains(&step.provider_name)
+                {
+                    names.push(step.provider_name.clone());
+                }
+            }
+            names
+        };
         match gateway.complete(call) {
             Ok(done) => {
                 let r = &done.record;
@@ -108,6 +132,7 @@ impl Runtime {
                     .find(|s| Some(&s.model) == r.model.as_ref())
                     .map(|step| summary_for(step, &routed.input));
                 Sent {
+                    went_to: went_to(&done.record),
                     result: Ok(ActionOutput {
                         text: done.text,
                         data,
@@ -118,6 +143,7 @@ impl Runtime {
                 }
             }
             Err(failure) => Sent {
+                went_to: went_to(&failure.record),
                 result: Err(ActionError::Failed(failure.message)),
                 record: failure.record,
                 answered: None,

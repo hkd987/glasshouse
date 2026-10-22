@@ -267,9 +267,9 @@ impl Runtime {
             (state.snapshots.len(), state.snapshot_roots())
         };
         let (result, seen, sent) = if let Some(call) = routed {
-            let (rt, task) = (Arc::clone(self), Arc::clone(task));
+            let (rt, sending) = (Arc::clone(self), Arc::clone(task));
             let sent = tokio::task::spawn_blocking(move || {
-                Runtime::send_model(&rt.gateway(), &task.policy(), &call)
+                Runtime::send_model(&rt.gateway(), &sending.policy(), &call)
             })
             .await;
             match sent {
@@ -277,6 +277,13 @@ impl Runtime {
                     if let Some((summary, targets)) = sent.answered {
                         (preview.summary, preview.targets) = (summary, targets);
                     }
+                    let mut state = task.lock();
+                    for name in sent.went_to {
+                        if !state.models_sent_to.contains(&name) {
+                            state.models_sent_to.push(name);
+                        }
+                    }
+                    drop(state);
                     (sent.result, Seen::default(), Some(sent.record))
                 }
                 Err(e) => (

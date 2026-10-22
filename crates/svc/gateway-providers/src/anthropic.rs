@@ -11,6 +11,8 @@ use crate::http::{Http, Reply, classify};
 /// The public endpoint, unless policy names another.
 pub const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
+/// The beta that lets a call ask for the thinking-history check (ADR 0043).
+const HISTORY_CHECK_BETA: &str = "thinking-binding-controls-2026-08-01";
 /// How long to wait before each retry of a rate-limited, overloaded or
 /// failed call, unless the reply says how long: a few seconds usually
 /// clears them, where failing over or ending the task would not need to.
@@ -27,6 +29,9 @@ pub struct AnthropicProvider {
     /// field Anthropic's own API takes; endpoints policy names instead may
     /// not.
     auto_cache: bool,
+    /// Ask the API to refuse thinking sent back after a different
+    /// conversation (policy's `check_history`).
+    check_history: bool,
     /// The waits before each retry ([`WAITS`]; shorter in tests).
     waits: Vec<Duration>,
 }
@@ -89,19 +94,29 @@ impl AnthropicProvider {
             auto_cache: endpoint == DEFAULT_ENDPOINT,
             endpoint,
             key,
+            check_history: false,
             waits: WAITS.to_vec(),
         }
+    }
+
+    /// Every call asks for the thinking-history check (ADR 0043).
+    pub fn checking_history(mut self, on: bool) -> Self {
+        self.check_history = on;
+        self
     }
 
     /// Posts `body`, retrying what Anthropic asks callers to retry: rate
     /// limits (429), overload (529) and server errors, as its own SDKs do.
     fn post(&self, body: &[u8]) -> Result<Reply, ProviderError> {
         let url = format!("{}/v1/messages", self.endpoint);
-        let headers = [
+        let mut headers = vec![
             ("x-api-key", self.key.expose()),
             ("anthropic-version", API_VERSION),
             ("content-type", "application/json"),
         ];
+        if self.check_history {
+            headers.push(("anthropic-beta", HISTORY_CHECK_BETA));
+        }
         let mut tries = 0;
         loop {
             let reply = self.http.post(&url, &headers, body)?;
@@ -142,6 +157,14 @@ impl ModelProvider for AnthropicProvider {
         }
         if !request.tools.is_empty() {
             body["tools"] = crate::tools::anthropic_tools(request.tools);
+        }
+        // Adaptive is how these models think anyway; the binding is what's
+        // asked for.
+        if self.check_history {
+            body["thinking"] = json!({
+                "type": "adaptive",
+                "block_binding": { "prefix_mismatch_behavior": "error" },
+            });
         }
         let reply = self.post(body.to_string().as_bytes())?;
         if reply.status != 200 {
@@ -277,6 +300,37 @@ mod tests {
             json!({ "type": "ephemeral" })
         );
         assert!(AnthropicProvider::new(None, Secret::new("k")).auto_cache);
+    }
+
+    #[test]
+    fn adr0043_checks_on_a_real_model_ask_for_the_thinking_history_check() {
+        const OK: &str = r#"{"content":[{"type":"text","text":"Hi"}],"stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":3}}"#;
+        let (url, got) = fake::serve_each(vec![(200, OK), (200, OK)]);
+        let messages = hello();
+        for on in [true, false] {
+            AnthropicProvider::with_http(Http::insecure_for_tests(), Some(&url), Secret::new("k"))
+                .checking_history(on)
+                .complete(&request(&messages))
+                .unwrap();
+            let sent = got.recv().unwrap();
+            let body: serde_json::Value = serde_json::from_str(&sent.body).unwrap();
+            let beta = sent
+                .head
+                .to_ascii_lowercase()
+                .contains("anthropic-beta: thinking-binding-controls-2026-08-01\r\n");
+            let binding = &body["thinking"]["block_binding"]["prefix_mismatch_behavior"];
+            match on {
+                true => {
+                    assert!(beta, "{}", sent.head);
+                    assert_eq!(body["thinking"]["type"], "adaptive");
+                    assert_eq!(binding, "error");
+                }
+                false => {
+                    assert!(!beta && !sent.head.contains("anthropic-beta"));
+                    assert!(body.get("thinking").is_none(), "{body}");
+                }
+            }
+        }
     }
 
     #[test]

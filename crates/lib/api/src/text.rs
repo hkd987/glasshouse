@@ -183,8 +183,10 @@ mod views {
                 changes: _,
                 undoable: _,
                 left_machine: _,
+                models,
                 flagged,
             } = self;
+            models.make_display_safe();
             flagged.make_display_safe();
         }
     }
@@ -455,6 +457,7 @@ mod tests {
                 labels: crate::AskLabels::new(&hostile("review"), &hostile("approve")),
             }),
             receipt: Some(crate::Receipt {
+                models: vec![hostile("provider")],
                 flagged: vec![hostile("flag")],
                 ..Default::default()
             }),

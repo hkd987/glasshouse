@@ -110,6 +110,14 @@ def check(body, headers):
     if thinking.get("type") in ("disabled", "enabled"):
         raise Bad(400, "invalid_request_error",
                   f'"thinking.type.{thinking["type"]}" is not supported for this model.')
+    # The history check is asked for under its beta; this stand-in always
+    # holds blocks to their conversation, as "error" does.
+    if "block_binding" in thinking:
+        betas = [b.strip() for b in headers.get("anthropic-beta", "").split(",")]
+        if "thinking-binding-controls-2026-08-01" not in betas:
+            raise Bad(400, "invalid_request_error", "thinking.block_binding: Extra inputs are not permitted")
+        if thinking["block_binding"].get("prefix_mismatch_behavior") not in ("error", "drop_block"):
+            raise Bad(400, "invalid_request_error", "thinking.block_binding.prefix_mismatch_behavior: invalid value")
     if (body.get("tool_choice") or {}).get("type") in ("any", "tool"):
         raise Bad(400, "invalid_request_error", 'tool_choice: type "tool" and "any" are not supported for this model.')
     breakpoints = 1 if "cache_control" in body else 0

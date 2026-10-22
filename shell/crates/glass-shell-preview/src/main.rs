@@ -378,6 +378,7 @@ fn main() -> anyhow::Result<()> {
         changes: 41,
         undoable: 40,
         left_machine: 1,
+        models: vec!["Amazon Bedrock".into()],
         flagged: vec![
             "INV-0407: total is $212.40 over PO 7752".into(),
             "INV-0433: no purchase order found".into(),

@@ -63,10 +63,14 @@ async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let printed = match args.first().map(String::as_str) {
         Some("models-policy") => Some(models::policy()),
-        Some("real-model-policy") => Some(match (args.get(1), args.get(2)) {
-            (Some(provider), Some(model)) => models::real_policy(provider, model),
+        Some("real-model-policy") => Some(match (args.get(1), args.get(2), args.get(3)) {
+            (Some(provider), Some(model), ladder @ (None | Some(_)))
+                if ladder.is_none_or(|l| l == "--ladder") =>
+            {
+                models::real_policy(provider, model, ladder.is_some())
+            }
             _ => Err(anyhow::anyhow!(
-                "usage: glass-e2e real-model-policy <openrouter|anthropic> <model>"
+                "usage: glass-e2e real-model-policy <openrouter|anthropic> <model> [--ladder]"
             )),
         }),
         _ => None,

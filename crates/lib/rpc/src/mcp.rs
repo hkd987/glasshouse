@@ -123,10 +123,19 @@ pub struct CallToolResult {
 }
 
 impl CallToolResult {
-    /// A successful result with a text summary and structured data.
+    /// A successful result with a text summary and structured data. The
+    /// data goes in the content too, as JSON text after the summary: the
+    /// MCP spec asks it of a tool with structured results, and a client
+    /// that reads only the content, as Claude Code does, sees it there.
     pub fn ok(text: impl Into<String>, structured: Value) -> Self {
+        let mut content = vec![Content::Text { text: text.into() }];
+        if !structured.is_null() {
+            content.push(Content::Text {
+                text: structured.to_string(),
+            });
+        }
         Self {
-            content: vec![Content::Text { text: text.into() }],
+            content,
             structured_content: (!structured.is_null()).then_some(structured),
             is_error: false,
         }
@@ -142,15 +151,25 @@ impl CallToolResult {
         }
     }
 
-    /// The concatenated text content.
+    /// The concatenated text content, without the structured content's
+    /// JSON copy: what a person or a caption reads.
     pub fn text(&self) -> String {
         self.content
             .iter()
             .map(|c| match c {
                 Content::Text { text } => text.as_str(),
             })
+            .filter(|text| !self.is_data_copy(text))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Whether `text` is the structured content as JSON ([`Self::ok`]).
+    fn is_data_copy(&self, text: &str) -> bool {
+        self.structured_content.as_ref().is_some_and(|data| {
+            text.starts_with(['{', '['])
+                && serde_json::from_str::<Value>(text).is_ok_and(|v| v == *data)
+        })
     }
 }
 
@@ -166,8 +185,27 @@ mod tests {
         let v = serde_json::to_value(&result).unwrap();
         assert_eq!(
             v,
-            json!({"content":[{"type":"text","text":"done"}],"structuredContent":{"n":1},"isError":false})
+            json!({"content":[{"type":"text","text":"done"},{"type":"text","text":"{\"n\":1}"}],"structuredContent":{"n":1},"isError":false})
         );
+    }
+
+    #[test]
+    fn structured_content_is_in_the_content_too_and_text_is_the_summary() {
+        // Clients that read only the content, as Claude Code does, get the
+        // data; our agents' text() is still the summary.
+        let data = json!({ "files": { "src/main.ts": "h(\"New message\")" }, "n": 1.5 });
+        let result = CallToolResult::ok("Mail: 5 files", data.clone());
+        let Content::Text { text } = &result.content[1];
+        assert_eq!(serde_json::from_str::<Value>(text).unwrap(), data);
+        assert_eq!(result.text(), "Mail: 5 files");
+        // As it arrives over the wire.
+        let back: CallToolResult =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        assert_eq!(back.text(), "Mail: 5 files");
+        // No data, one block; a summary that is itself JSON stays.
+        assert_eq!(CallToolResult::ok("done", Value::Null).content.len(), 1);
+        let json_summary = CallToolResult::ok("[1]", json!({ "n": 1 }));
+        assert_eq!(json_summary.text(), "[1]");
     }
 
     #[test]

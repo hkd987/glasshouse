@@ -84,7 +84,7 @@ thumbnails are not started.
 | AW-20 Take over pauses at a safe point within 1 s | Partial | actions agents pause at the next action boundary, ~0.2 s in the VM (e2e `perf`); display/input hand-off needs screen agents |
 | AW-21 Hand back says what changed | **Done** | pipeline + e2e `takeover` |
 | AW-22 Take over always available, even during an ask | **Done** | e2e `takeover` |
-| Tile states: Failed with Retry, take over, undo all | **Done** (data + CLI) | `receipt.outcome()` on Failed and Stopped tiles; `task.retry`. Take over on an ended actions agent continues in the user's harness (`task.continue`, ADR 0015). Pipeline `an_ended_task_says_what_is_safe…`, `continuation::…`; e2e `changes`, `harness` |
+| Tile states: Failed with Retry, take over, undo all | **Done** (data + CLI) | `receipt.outcome()` on Failed and Stopped tiles. It names the providers the task's model calls went to ("Nothing left the machine but its model calls to Anthropic"), since what it sent them left too (runtime `dp2_the_receipt_says_where_model_calls_took_the_tasks_data`); `task.retry`. Take over on an ended actions agent continues in the user's harness (`task.continue`, ADR 0015). Pipeline `an_ended_task_says_what_is_safe…`, `continuation::…`; e2e `changes`, `harness` |
 
 ## Navigation
 

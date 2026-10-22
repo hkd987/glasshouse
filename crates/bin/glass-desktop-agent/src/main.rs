@@ -41,7 +41,8 @@ it; work around it or say what you couldn't do. Keep to what was asked. Personal
 details such as email addresses reach you as placeholders like [redacted:email#1]: \
 each stands for the real value, which this computer puts back wherever you use the \
 placeholder, in a tool call or your answer. Use it as you would the value; don't ask \
-the person for it. Secrets such as keys and passwords stay hidden and are never put \
+the person for it. In your answer, write it where the value goes: the person reads \
+the value, so don't say it was hidden or call it a placeholder. Secrets such as keys and passwords stay hidden and are never put \
 back. For exact figures from what the tools return (dates, sums, counts, sorting), \
 write a short script with run_script and use its result rather than working them out \
 yourself. When you're done, answer the person in a few short paragraphs of plain words: \
@@ -244,19 +245,6 @@ fn local_date(now: time::OffsetDateTime, offset_secs: i32) -> String {
     now.to_offset(offset).format(&format).unwrap_or_default()
 }
 
-/// A tile caption from the answer's first line.
-fn caption(answer: &str) -> String {
-    let line = answer
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("Done");
-    let mut caption: String = line.trim().chars().take(100).collect();
-    if line.trim().chars().count() > 100 {
-        caption.push('…');
-    }
-    caption
-}
-
 async fn run() -> anyhow::Result<()> {
     let agent = Agent::from_env()
         .await
@@ -304,7 +292,9 @@ async fn run() -> anyhow::Result<()> {
         let calls = match step(&reply) {
             Step::Calls(calls) => calls,
             Step::Answer(answer) => {
-                agent.answer(&caption(&answer), &answer).await?;
+                agent
+                    .answer(&glass_agent_sdk::caption(&answer), &answer)
+                    .await?;
                 eprintln!("answered after {round} round(s)");
                 return Ok(());
             }
@@ -546,15 +536,5 @@ mod tests {
             script_result(&run),
             r#"{"printed":["inv-1.txt 21"],"result":{"weighted":20147.6},"tool_calls":6}"#
         );
-    }
-
-    #[test]
-    fn ae3_the_caption_is_the_answers_first_line_short() {
-        assert_eq!(
-            caption("\n\nYou have 3 invoices.\nMore detail"),
-            "You have 3 invoices."
-        );
-        assert_eq!(caption(&"x".repeat(150)).chars().count(), 101);
-        assert_eq!(caption(""), "Done");
     }
 }

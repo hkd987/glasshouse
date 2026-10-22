@@ -59,10 +59,10 @@ pub fn connect(
             ProviderKind::Anthropic => match secrets.get(&entry.id, "api_key") {
                 Some(key) => gateway.add(
                     &entry.id,
-                    Arc::new(AnthropicProvider::new(
-                        entry.endpoint.as_deref(),
-                        key.clone(),
-                    )),
+                    Arc::new(
+                        AnthropicProvider::new(entry.endpoint.as_deref(), key.clone())
+                            .checking_history(entry.check_history),
+                    ),
                 ),
                 None => notes.push(format!(
                     "model provider {}: no api_key in the secrets file, so calls skip it",

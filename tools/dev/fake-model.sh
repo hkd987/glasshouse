@@ -58,30 +58,8 @@ python3 -I "$repo/tools/dev/fake-anthropic.py" --port "$port" --cert "$dev/cert.
 fake=$!
 
 policy=$dev/fake-policy.toml
-"$bin/glass-e2e" real-model-policy anthropic claude-haiku-5-5 |
+"$bin/glass-e2e" real-model-policy anthropic claude-haiku-5-5 ${ladder:+--ladder} |
 	sed "s|^kind = \"anthropic\"|kind = \"anthropic\"\nendpoint = \"https://127.0.0.1:$port\"|" >"$policy"
-if [[ -n $ladder ]]; then
-	sed -i -e 's/^by_cost = false$/by_cost = true/' \
-		-e 's|^\[models.routes\]$|[models.routes]\ninternal = ["real", "sonnet", "opus"]|' "$policy"
-	cat >>"$policy" <<'EOF'
-
-[[models.model]]
-id = "sonnet"
-provider = "anthropic"
-model = "claude-sonnet-5-5"
-name = "claude-sonnet-5-5"
-usd_per_mtok_in = 2.0
-usd_per_mtok_out = 10.0
-
-[[models.model]]
-id = "opus"
-provider = "anthropic"
-model = "claude-opus-5-5"
-name = "claude-opus-5-5"
-usd_per_mtok_in = 4.0
-usd_per_mtok_out = 20.0
-EOF
-fi
 # glassd refuses a secrets file anyone else can read.
 (umask 077 && printf '[anthropic]\napi_key = "sk-ant-api03-not-a-real-key"\n' >"$dev/model-secrets.toml")
 

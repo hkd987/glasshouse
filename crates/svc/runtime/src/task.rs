@@ -104,6 +104,8 @@ pub(crate) struct TaskState {
     pub data_label: Option<Label>,
     /// What the agent told the person when done (`TaskDetail::answer`).
     pub answer: Option<String>,
+    /// Where its model calls took what it sent them (`Receipt::models`).
+    pub models_sent_to: Vec<String>,
 }
 
 /// Everything fixed when a task starts.
@@ -220,6 +222,7 @@ impl Task {
                 title_fixed: new.title_fixed,
                 data_label: None,
                 answer: None,
+                models_sent_to: Vec::new(),
             }),
         }
     }
@@ -355,6 +358,7 @@ impl TaskState {
             changes: self.changes.len() as u32,
             undoable: count(|c| c.reversible && !c.undone) as u32,
             left_machine: count(|c| !c.reversible) as u32,
+            models: self.models_sent_to.clone(),
             flagged: self
                 .changes
                 .iter()

@@ -298,6 +298,13 @@ pub struct ProviderEntry {
     /// endpoint (MP-2). HTTPS only.
     #[serde(default)]
     pub endpoint: Option<String>,
+    /// Anthropic only: every call asks the API to refuse thinking sent back
+    /// after a conversation other than the one it was written for (ADR
+    /// 0043), as accounts made from 2026-08-31 do anyway. An agent that
+    /// edits its history then fails loudly instead of quietly losing its
+    /// reasoning. Checks on a real model turn it on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub check_history: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

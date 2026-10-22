@@ -6,7 +6,7 @@
 #
 # Hacking on our apps and sharing them back to the org's store, on a real Anthropic model (TL-5,
 # GA-8, ADR 0032). `up` starts the admin console (http://127.0.0.1:7410) with a policy that routes
-# to Claude Haiku 5.5, steps up to Sonnet 5.5 by cost, and lets the desktop agent remix and share
+# to Claude Haiku 5.5, steps up to Sonnet and Opus by cost, and lets the desktop agent remix and share
 # apps (apps.*, as IT would widen it, ADR 0041). It also starts a glassd on this machine enrolled
 # with it (tools/dev/host-run.sh, NOTHING CONTAINED), with a seeded workday, and the computer's
 # app bridge for the Store (http://store.localhost:7411).
@@ -53,22 +53,9 @@ up() {
 	[[ -f apps/console/dist/app.js ]] || make -s apps-build
 
 	local policy=$dev/policy.toml
-	glass-e2e real-model-policy anthropic claude-haiku-5-5 >"$policy"
-	sed -i -e 's/^by_cost = false$/by_cost = true/' \
-		-e 's|^\[models.routes\]$|[models.routes]\npublic = ["real", "sonnet"]\ninternal = ["real", "sonnet"]|' \
-		-e '/^id = "desktop-agent"$/{n;s/"model.complete"\]$/"model.complete", "apps.*"]/}' "$policy"
+	glass-e2e real-model-policy anthropic claude-haiku-5-5 --ladder >"$policy"
+	sed -i -e '/^id = "desktop-agent"$/{n;s/"model.complete"\]$/"model.complete", "apps.*"]/}' "$policy"
 	grep -q '"model.complete", "apps.\*"\]' "$policy" || die "the desktop agent's actions moved; apps.* didn't go in"
-	cat >>"$policy" <<'EOF'
-
-[[models.model]]
-id = "sonnet"
-provider = "anthropic"
-model = "claude-sonnet-5-5"
-name = "claude-sonnet-5-5"
-usd_per_mtok_in = 2.0
-usd_per_mtok_out = 10.0
-usd_per_mtok_cache_read = 0.2
-EOF
 	# The console releases its draft as the org's first policy.
 	python3 -I -c 'import json, sys; json.dump({"draft": open(sys.argv[1]).read(), "versions": [], "rings": {}}, open(sys.argv[2], "w"))' \
 		"$policy" "$dev/console/policy.json"

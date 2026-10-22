@@ -251,6 +251,48 @@ async fn mp8_an_outage_fails_over_to_the_next_model_and_is_logged() {
 }
 
 #[tokio::test]
+async fn dp2_the_receipt_says_where_model_calls_took_the_tasks_data() {
+    // The harness's providers as outside ones: the call tries Backup, then
+    // Anthropic answers. Both were sent what the task read.
+    let outside = MODELS
+        .replace(
+            "id = \"scripted\"\nkind = \"scripted\"\nname = \"Scripted\"",
+            "id = \"scripted\"\nkind = \"anthropic\"\nname = \"Anthropic\"",
+        )
+        .replace(
+            "id = \"down\"\nkind = \"scripted\"\nname = \"Backup\"",
+            "id = \"down\"\nkind = \"openrouter\"\nname = \"OpenRouter\"",
+        );
+    assert_ne!(outside, MODELS);
+    for (policy, models, outcome) in [
+        (
+            outside.as_str(),
+            vec!["OpenRouter", "Anthropic"],
+            "Nothing left the machine but its model calls to OpenRouter and Anthropic. \
+             Nothing was changed.",
+        ),
+        // Scripted replies are made on this computer.
+        (
+            MODELS,
+            vec![],
+            "Nothing left the machine. Nothing was changed.",
+        ),
+    ] {
+        let h = harness_with(policy);
+        let (task, agent) = start(&h, &["Invoices"]).await;
+        for _ in 0..2 {
+            let reply = tool(&agent, "model_complete", ask("hello")).await;
+            assert!(!reply.is_error, "{}", reply.text());
+        }
+        h.rt.stop(&h.me, task).unwrap();
+        eventually(|| h.rt.get(&h.me, task).unwrap().view.receipt.is_some()).await;
+        let receipt = h.rt.get(&h.me, task).unwrap().view.receipt.unwrap();
+        assert_eq!(receipt.models, models);
+        assert_eq!(receipt.outcome(), outcome);
+    }
+}
+
+#[tokio::test]
 async fn mp8_an_agent_asks_for_the_cheapest_or_the_strongest_approved_model() {
     let h = harness_with(&by_cost());
     let (task, agent) = start(&h, &["Invoices"]).await;

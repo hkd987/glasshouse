@@ -76,9 +76,23 @@ model gateway); ADR 0010's harness bundles build on it later.
   (2026-10-22): `mail.list` says "7 messages in Inbox" and puts the
   messages in its data, so a model given only the words, as it was until
   then, could see no sender, subject or event on a real model. glassd's
-  task socket keeps the two apart (the words are what tiles show);
-  whether Claude Code, on the same socket, shows its model the data is
-  undocumented.
+  task socket keeps the two apart (the words are what tiles show).
+  Since 2026-10-22 a result also carries its data in the content, as
+  JSON text after the words, as the MCP spec asks of a tool with
+  structured results. A client that reads only the content, as Claude
+  Code on the same socket does, sees the data. Our agents' `text()`
+  leaves that copy out.
+- An answer is plain text by the instructions, but models write
+  Markdown anyway, and Claude Code's answers are Markdown. Since
+  2026-10-22:
+  - the desktop's expanded view shows headings, lists and code blocks as
+    such;
+  - the tile's caption, made by the agent SDK's `caption`, has no
+    Markdown marks.
+- A placeholder put back in an answer reads as the value only if the
+  model wrote it as one. On a real model (2026-10-22), Haiku wrote "the
+  email address shown as [redacted:email#1]", which came out as "shown as
+  ana@…". The instructions now say the person reads the value.
 - The desktop agent's first message says when it is on the computer
   (`GLASS_UTC_OFFSET`, which glassd gives every agent): a model has no
   date of its own, and calendar times are local. It goes in the message,

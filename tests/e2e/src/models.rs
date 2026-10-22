@@ -53,35 +53,77 @@ pub fn policy() -> anyhow::Result<String> {
 /// there, such as `anthropic/claude-sonnet-4.5`), for
 /// `tools/dev/real-model.sh`. The key is glassd's model secrets', never
 /// the policy's.
-pub fn real_policy(provider: &str, model: &str) -> anyhow::Result<String> {
+/// Anthropic's current models, cheapest first, with their list prices.
+const LADDER: [(&str, &str); 3] = [
+    // Prompts up to 100K tokens; the cheapest check of the harness.
+    (
+        "claude-haiku-5-5",
+        "usd_per_mtok_in = 0.1\nusd_per_mtok_out = 0.5\nusd_per_mtok_cache_read = 0.01\n",
+    ),
+    (
+        "claude-sonnet-5-5",
+        "usd_per_mtok_in = 2.0\nusd_per_mtok_out = 10.0\nusd_per_mtok_cache_read = 0.2\n",
+    ),
+    (
+        "claude-opus-5-5",
+        "usd_per_mtok_in = 4.0\nusd_per_mtok_out = 20.0\nusd_per_mtok_cache_read = 0.2\n",
+    ),
+];
+
+/// A policy for the agents on a real model. With `ladder`, on Anthropic,
+/// the other current models too, chosen by cost (ADR 0044): an agent that
+/// asks starts on the cheapest and steps up a model at a time.
+pub fn real_policy(provider: &str, model: &str, ladder: bool) -> anyhow::Result<String> {
     ensure!(
         !model.is_empty() && !model.contains(['"', '\\', '\n']),
         "{model:?} isn't a model id"
     );
-    let name = match provider {
-        "openrouter" => "OpenRouter",
-        "anthropic" => "Anthropic",
+    // On Anthropic, every call asks for the thinking-history check, so a
+    // harness that edits its history fails here even on an account older
+    // than the check's default (ADR 0043).
+    let (name, check) = match provider {
+        "openrouter" => ("OpenRouter", ""),
+        "anthropic" => ("Anthropic", "check_history = true\n"),
         _ => anyhow::bail!("{provider:?} isn't openrouter or anthropic"),
     };
+    ensure!(
+        !ladder || provider == "anthropic",
+        "the ladder is Anthropic's models"
+    );
     // OpenRouter says what each call cost; for Anthropic's current models
     // the record prices them from their list prices (ADR 0043).
-    let prices = match model {
-        "claude-opus-5-5" => {
-            "usd_per_mtok_in = 4.0\nusd_per_mtok_out = 20.0\nusd_per_mtok_cache_read = 0.2\n"
-        }
-        "claude-sonnet-5-5" => {
-            "usd_per_mtok_in = 2.0\nusd_per_mtok_out = 10.0\nusd_per_mtok_cache_read = 0.2\n"
-        }
-        // Prompts up to 100K tokens; the cheapest check of the harness.
-        "claude-haiku-5-5" => {
-            "usd_per_mtok_in = 0.1\nusd_per_mtok_out = 0.5\nusd_per_mtok_cache_read = 0.01\n"
-        }
-        _ => "",
+    let prices = LADDER
+        .iter()
+        .find(|(id, _)| *id == model)
+        .map_or("", |(_, prices)| *prices);
+    let others: Vec<(&str, &str)> = match ladder {
+        true => LADDER.into_iter().filter(|(id, _)| *id != model).collect(),
+        false => Vec::new(),
+    };
+    let mut route = vec!["\"real\"".to_owned()];
+    let mut more = String::new();
+    for (id, prices) in &others {
+        // "claude-sonnet-5-5" is "sonnet" here.
+        let short = id.split('-').nth(1).unwrap_or(id);
+        route.push(format!("\"{short}\""));
+        more.push_str(&format!(
+            "\n[[model]]\nid = \"{short}\"\nprovider = \"{provider}\"\nmodel = \"{id}\"\nname = \"{id}\"\n{prices}"
+        ));
+    }
+    let (by_cost, routes) = match ladder {
+        true => (
+            "by_cost = true\n",
+            format!(
+                "\n[routes]\npublic = [{0}]\ninternal = [{0}]\n",
+                route.join(", ")
+            ),
+        ),
+        false => ("", String::new()),
     };
     let models = format!(
         r#"
 default = "real"
-
+{by_cost}
 [redact]
 pii = ["email"]
 
@@ -89,13 +131,13 @@ pii = ["email"]
 id = "{provider}"
 kind = "{provider}"
 name = "{name}"
-
+{check}
 [[model]]
 id = "real"
 provider = "{provider}"
 model = "{model}"
 name = "{model}"
-{prices}"#
+{prices}{more}{routes}"#
     );
     with_models(&models, "tools/dev/real-model.sh")
 }

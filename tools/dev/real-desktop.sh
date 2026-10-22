@@ -54,7 +54,8 @@ up() {
 	cargo build -q -p glassd -p glassctl -p glass-desktop-agent -p glass-it-agent -p glass-e2e -p glass-app-bridge
 	cargo build -q --manifest-path "$repo/shell/Cargo.toml" --target x86_64-unknown-freebsd -p glass-shell-fb
 	mkdir -p "$dev" "$run"
-	"$bin/glass-e2e" real-model-policy anthropic "$model" >"$dev/real-policy.toml"
+	# The other current models beside it, cheapest first (ADR 0044).
+	"$bin/glass-e2e" real-model-policy anthropic "$model" --ladder >"$dev/real-policy.toml"
 	(umask 077 && printf '[anthropic]\napi_key = "%s"\n' "$GLASS_ANTHROPIC_API_KEY" >"$dev/model-secrets.toml")
 	GLASS_DEV_SKIP_BUILD=1 GLASS_DEV_DIR=$dev GLASS_DEV_RUN=$run GLASS_DEV_POLICY=$dev/real-policy.toml \
 		GLASS_DEV_MODEL_SECRETS=$dev/model-secrets.toml nohup "$repo/tools/dev/host-run.sh" >"$dev/glassd.log" 2>&1 &

@@ -137,6 +137,14 @@ on ADR 0018 (the gateway), 0041 (tool use, the desktop agent) and 0043
        script that imports `/etc/passwd` fails there.
    - **No new probe check.** The runner adds no reach to the agent's
      process; the jail and the probe's 27 checks bound it as before.
+7. **Cost ordering where we set the models** (2026-10-22):
+   - An owner who connects their own Anthropic account (ADR 0039) gets
+     Haiku and Sonnet beside Opus, with `by_cost` on, unless policy set
+     models of its own. The desktop agent starts on Haiku. Agents that
+     don't choose still get Opus.
+   - `glass-e2e real-model-policy … --ladder` writes the same ladder for
+     `tools/dev/real-desktop.sh`, `real-remix.sh` and
+     `fake-model.sh --ladder`.
 
 **Being built:**
 

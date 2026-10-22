@@ -125,8 +125,9 @@ impl Agent {
         Ok(listed.tools)
     }
 
-    /// The last word: the tile's caption, and what the agent tells the
-    /// person in full, which they see with the task (ADR 0041).
+    /// The last word: the tile's caption ([`caption`] makes one from the
+    /// answer), and what the agent tells the person in full, which they see
+    /// with the task (ADR 0041).
     pub async fn answer(&self, caption: &str, answer: &str) -> Result<(), AgentError> {
         self.call(
             "report_progress",
@@ -149,5 +150,56 @@ impl Agent {
             args["total"] = json!(total);
         }
         self.call("report_progress", args).await.map(|_| ())
+    }
+}
+
+/// A tile caption from an answer: its first line, 100 characters at most,
+/// without the Markdown marks models put on it (`## `, `- `, `**`,
+/// backticks), which a caption would show as they are.
+pub fn caption(answer: &str) -> String {
+    let line = answer
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.chars().all(|c| c == '-' || c == '*' || c == '#'))
+        .unwrap_or("Done");
+    // A heading's marks, never a "#3" that starts a sentence.
+    let line = line
+        .trim_start_matches('#')
+        .strip_prefix(' ')
+        .filter(|_| line.starts_with('#'))
+        .unwrap_or(line);
+    let line = ["- ", "* ", "+ "]
+        .iter()
+        .find_map(|m| line.strip_prefix(m))
+        .unwrap_or(line);
+    let line = line.replace("**", "").replace("__", "").replace('`', "");
+    let line = line.trim();
+    let mut caption: String = line.chars().take(100).collect();
+    if line.chars().count() > 100 {
+        caption.push('…');
+    }
+    caption
+}
+
+#[cfg(test)]
+mod caption_tests {
+    use super::caption;
+
+    #[test]
+    fn ae3_the_caption_is_the_answers_first_line_short_and_plain() {
+        assert_eq!(
+            caption("\n\nYou have 3 invoices.\nMore detail"),
+            "You have 3 invoices."
+        );
+        assert_eq!(caption(&"x".repeat(150)).chars().count(), 101);
+        assert_eq!(caption(""), "Done");
+        // Markdown's marks, which a caption would show as they are.
+        assert_eq!(
+            caption("**Checklist of LaunchNotes and Invoices**\n\n1. plan.txt"),
+            "Checklist of LaunchNotes and Invoices"
+        );
+        assert_eq!(caption("---\n## What I found\n"), "What I found");
+        assert_eq!(caption("- `plan.txt` is new"), "plan.txt is new");
+        assert_eq!(caption("#3 of 5 is overdue"), "#3 of 5 is overdue");
     }
 }
