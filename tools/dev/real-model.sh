@@ -9,7 +9,8 @@
 # into a model-secrets file only its owner can read (over ssh's stdin, for the VM) and is never
 # printed. Writes a policy naming the model (glass-e2e real-model-policy), runs one task per agent
 # (the IT agent's help desk ticket is approved), prints what each did and said and the record of
-# each model call, then puts everything back.
+# each model call (tokens, prompt cache, cost, whether its thinking went back), then puts
+# everything back.
 #
 # By default it runs in the dev VM's jails and restores the VM's policy and model secrets after.
 # It never changes what the VM trusts: where outbound HTTPS is re-signed by a proxy the VM doesn't
@@ -65,6 +66,8 @@ desk=$(glassctl run desktop-agent --read "$DIR" -y \
 glassctl wait "$desk" --timeout 180 >/dev/null || true
 glassctl show "$desk" | sed -n "/^Answer/,/^Activity/p"
 glassctl audit "$desk" | grep -E "Ask |files\.|Finished|Failed" || true
+echo "-- each model call: tokens, prompt cache, cost, replayed thinking (ADR 0043)"
+glassctl --json audit "$desk" | grep -E "\"(provider_model|input_tokens|output_tokens|cache_write_tokens|cache_read_tokens|cost_usd|replays_dropped)\"" || true
 
 echo "== IT agent"
 it=$(glassctl run it-agent -y "My computer has been slow all morning" | short)
@@ -78,7 +81,9 @@ while [ $i -lt 360 ]; do
 	i=$((i + 1))
 done
 glassctl show "$it" | head -3
-glassctl audit "$it" | grep -E "Ask |system\.|helpdesk|Finished|Failed" || true'
+glassctl audit "$it" | grep -E "Ask |system\.|helpdesk|Finished|Failed" || true
+echo "-- each model call"
+glassctl --json audit "$it" | grep -E "\"(provider_model|input_tokens|output_tokens|cache_write_tokens|cache_read_tokens|cost_usd)\"" || true'
 
 if [[ -n $host ]]; then
 	dev=$repo/build/dev-real-model
