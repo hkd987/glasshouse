@@ -315,6 +315,13 @@ fn agent_env(rt: &Runtime, task: &Task) -> Vec<(String, String)> {
             "GLASS_AGENT_SETTINGS".into(),
             serde_json::to_string(&task.settings).unwrap_or_else(|_| "{}".into()),
         ),
+        // Its local time: the calendar's times are the computer's (ADR 0031).
+        (
+            "GLASS_UTC_OFFSET".into(),
+            glass_platform::system::utc_offset_secs()
+                .unwrap_or(0)
+                .to_string(),
+        ),
         ("GLASS_WORK".into(), inside(WORK_DIR)),
         ("HOME".into(), inside(WORK_DIR)),
         ("TMPDIR".into(), inside("/tmp")),

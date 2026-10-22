@@ -21,6 +21,9 @@ pub mod env {
     pub const WORK: &str = "GLASS_WORK";
     /// JSON object: the agent's customization points, with the user's layer.
     pub const SETTINGS: &str = "GLASS_AGENT_SETTINGS";
+    /// The computer's offset from UTC when the task started, in seconds
+    /// east: its local time, which the calendar's times are in (ADR 0031).
+    pub const UTC_OFFSET: &str = "GLASS_UTC_OFFSET";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +47,9 @@ pub struct Agent {
     /// The settings the catalog entry declares, with the user's layer
     /// applied (TL-2). Read them with [`Agent::setting`].
     pub settings: serde_json::Map<String, Value>,
+    /// The computer's offset from UTC, in seconds east, when the task
+    /// started; 0 when glassd didn't say.
+    pub utc_offset_secs: i32,
 }
 
 impl Agent {
@@ -81,6 +87,10 @@ impl Agent {
                 .ok()
                 .and_then(|text| serde_json::from_str(&text).ok())
                 .unwrap_or_default(),
+            utc_offset_secs: var(env::UTC_OFFSET)
+                .ok()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(0),
         })
     }
 

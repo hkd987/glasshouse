@@ -65,9 +65,15 @@ fn offered(tools: &[glass_rpc::mcp::Tool]) -> Vec<Value> {
         .collect()
 }
 
-/// What a tool returned, as the model reads it: its words, cut short.
+/// What a tool returned, as the model reads it: its words and its data,
+/// cut short. The words are often only a summary ("7 messages in Inbox"),
+/// and the data is the messages, events or people themselves (AE-3).
 fn result_text(result: &CallToolResult) -> String {
-    let text = result.text();
+    let mut text = result.text();
+    if let Some(data) = &result.structured_content {
+        text.push_str("\n\n");
+        text.push_str(&data.to_string());
+    }
     if text.chars().count() <= MAX_RESULT_CHARS {
         return text;
     }
@@ -108,6 +114,25 @@ fn step(reply: &CallToolResult) -> Step {
     })
 }
 
+/// When it is on this computer, for the start of the conversation: a
+/// model knows no date of its own, and the calendar's times are local
+/// (ADR 0031). It goes in the first message, not the instructions, so the
+/// instructions and tools stay the same from task to task and the prompt
+/// cache keeps them (ADR 0043).
+fn now_line(now: time::OffsetDateTime, offset_secs: i32) -> String {
+    let offset = time::UtcOffset::from_whole_seconds(offset_secs).unwrap_or(time::UtcOffset::UTC);
+    let local = now.to_offset(offset);
+    let format = time::macros::format_description!(
+        "[weekday], [day padding:none] [month repr:long] [year], [hour]:[minute]"
+    );
+    let zone = time::macros::format_description!("[offset_hour sign:mandatory]:[offset_minute]");
+    format!(
+        "It is {} on this computer (UTC{}).",
+        local.format(&format).unwrap_or_default(),
+        local.format(&zone).unwrap_or_default()
+    )
+}
+
 /// A tile caption from the answer's first line.
 fn caption(answer: &str) -> String {
     let line = answer
@@ -130,7 +155,12 @@ async fn run() -> anyhow::Result<()> {
         bail!("this agent needs an AI model, and policy gives it none here");
     }
     let tools = offered(&agent.tool_list().await?);
-    let mut messages = vec![json!({ "role": "user", "content": agent.prompt })];
+    let opening = format!(
+        "{}\n\n{}",
+        now_line(time::OffsetDateTime::now_utc(), agent.utc_offset_secs),
+        agent.prompt
+    );
+    let mut messages = vec![json!({ "role": "user", "content": opening })];
 
     for round in 1..=MAX_STEPS {
         agent.progress("Thinking", None, None).await?;
@@ -255,6 +285,36 @@ mod tests {
             step(&reply("end_turn", json!(null), " ")),
             Step::Answer("Done.".into())
         );
+    }
+
+    #[test]
+    fn ae3_the_conversation_opens_with_the_computers_local_time() {
+        let at = time::macros::datetime!(2026-10-22 12:24 UTC);
+        assert_eq!(
+            now_line(at, 7200),
+            "It is Thursday, 22 October 2026, 14:24 on this computer (UTC+02:00)."
+        );
+        assert_eq!(
+            now_line(at, -5 * 3600),
+            "It is Thursday, 22 October 2026, 07:24 on this computer (UTC-05:00)."
+        );
+        assert!(now_line(at, i32::MAX).ends_with("12:24 on this computer (UTC+00:00)."));
+    }
+
+    #[test]
+    fn ae3_the_model_reads_a_tools_data_not_only_its_summary() {
+        let listed = CallToolResult::ok(
+            "2 messages in Inbox",
+            json!({ "messages": [{ "from": "Priya Shah", "subject": "Can we move our 1:1?" }] }),
+        );
+        let text = result_text(&listed);
+        assert!(text.starts_with("2 messages in Inbox\n\n{"), "{text}");
+        assert!(text.contains("Can we move our 1:1?"), "{text}");
+        // A file's text is its content, with no data to add.
+        let read = CallToolResult::ok("Q4 plan: ship by November 14.", Value::Null);
+        assert_eq!(result_text(&read), "Q4 plan: ship by November 14.");
+        let long = CallToolResult::ok("x".repeat(MAX_RESULT_CHARS + 10), Value::Null);
+        assert!(result_text(&long).ends_with("\n[cut short]"));
     }
 
     #[test]

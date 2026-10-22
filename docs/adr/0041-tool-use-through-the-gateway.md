@@ -72,6 +72,18 @@ model gateway); ADR 0010's harness bundles build on it later.
   labels allow: an agent that reads a confidential file and asks a model
   sends it only where confidential data may go.
 - Tool definitions add tokens to every call that offers them.
+- The desktop agent sends the model a tool's data as well as its words
+  (2026-10-22): `mail.list` says "7 messages in Inbox" and puts the
+  messages in its data, so a model given only the words, as it was until
+  then, could see no sender, subject or event on a real model. glassd's
+  task socket keeps the two apart (the words are what tiles show);
+  whether Claude Code, on the same socket, shows its model the data is
+  undocumented.
+- The desktop agent's first message says when it is on the computer
+  (`GLASS_UTC_OFFSET`, which glassd gives every agent): a model has no
+  date of its own, and calendar times are local. It goes in the message,
+  not the instructions, which stay the same so the prompt cache keeps
+  them (ADR 0043).
 
 ## Not built yet
 - Streaming, parallel tool calls run concurrently (they run in order),
