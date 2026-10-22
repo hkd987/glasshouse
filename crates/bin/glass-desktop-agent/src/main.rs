@@ -70,15 +70,17 @@ fn offered(tools: &[glass_rpc::mcp::Tool]) -> Vec<Value> {
 }
 
 /// The model's way up (ADR 0044): every task starts on the cheapest model
-/// policy approves for its data, and moves to the strongest when the model
-/// asks. Offered from the first step, so the tools never change mid-task.
+/// policy approves for its data and moves up a step each time the model
+/// asks ([`Ladder`]). Offered from the first step, so the tools never
+/// change mid-task.
 fn stronger_tool() -> Value {
     json!({
         "name": STRONGER,
-        "description": "Hand the rest of this task to a stronger, costlier model. Call it first \
-            when the task needs careful judgment, exact figures from many numbers, or writing \
-            that must be just right; or when a step went wrong in a way you can't put right. \
-            Not for lookups, lists or drafts you can do well yourself. Say why in one line.",
+        "description": "Hand the rest of this task to the next stronger, costlier model; call it \
+            again to go up another step. Call it first when the task needs careful judgment, exact \
+            figures from many numbers, or writing that must be just right; or when a step went \
+            wrong in a way you can't put right. Not for lookups, lists or drafts you can do well \
+            yourself. Say why in one line.",
         "input_schema": {
             "type": "object",
             "properties": { "reason": { "type": "string", "description": "Why, in one line" } },
@@ -86,6 +88,48 @@ fn stronger_tool() -> Value {
             "additionalProperties": false
         }
     })
+}
+
+/// Which model a task's steps go to (ADR 0044): the cheapest policy
+/// approves for its data, then one step up at a time, to the cheapest
+/// dearer than the model that last answered, when the model asks or a
+/// step runs out of room. Policy decides which models these are.
+#[derive(Debug, Default)]
+struct Ladder {
+    /// The model to go above, once the task has stepped up.
+    above: Option<String>,
+    /// The policy id of the model that answered the last step.
+    answered: Option<String>,
+    /// Whether policy approves a dearer model than that one here.
+    stronger: bool,
+}
+
+impl Ladder {
+    /// `model_complete`'s routing arguments for the next step.
+    fn args(&self) -> Value {
+        match &self.above {
+            Some(above) => json!({ "prefer": "cheapest", "above": above }),
+            None => json!({ "prefer": "cheapest" }),
+        }
+    }
+
+    /// The reply's `model` and `stronger` (whether there's a step up).
+    fn answered_by(&mut self, reply: &Value) {
+        self.answered = reply["model"].as_str().map(str::to_owned);
+        self.stronger = reply["stronger"].as_bool().unwrap_or(false);
+    }
+
+    /// One step up from the model that last answered. False at the top,
+    /// or when policy doesn't let agents choose by cost.
+    fn step_up(&mut self) -> bool {
+        match &self.answered {
+            Some(model) if self.stronger && self.above.as_ref() != Some(model) => {
+                self.above = Some(model.clone());
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 /// What a tool returned, as the model reads it: its words and its data,
@@ -179,9 +223,7 @@ async fn run() -> anyhow::Result<()> {
     }
     let mut tools = offered(&agent.tool_list().await?);
     tools.push(stronger_tool());
-    // Cheapest first; the strongest once the model asks or a step runs
-    // out of room. Policy decides which models these may be (ADR 0044).
-    let mut prefer = "cheapest";
+    let mut ladder = Ladder::default();
     let opening = format!(
         "{}\n\n{}",
         now_line(time::OffsetDateTime::now_utc(), agent.utc_offset_secs),
@@ -191,22 +233,23 @@ async fn run() -> anyhow::Result<()> {
 
     for round in 1..=MAX_STEPS {
         agent.progress("Thinking", None, None).await?;
-        let reply = agent
-            .call(
-                "model_complete",
-                json!({
-                    "system": SYSTEM,
-                    "messages": messages,
-                    "max_tokens": MAX_TOKENS,
-                    "tools": tools,
-                    "prefer": prefer,
-                }),
-            )
-            .await?;
+        let mut args = json!({
+            "system": SYSTEM,
+            "messages": messages,
+            "max_tokens": MAX_TOKENS,
+            "tools": tools,
+        });
+        if let (Some(args), Value::Object(routing)) = (args.as_object_mut(), ladder.args()) {
+            args.extend(routing);
+        }
+        let reply = agent.call("model_complete", args).await?;
         if reply.is_error {
             // No model, or none for this data: there's nothing to do
             // without one.
             bail!("no AI model could help: {}", reply.text());
+        }
+        if let Some(data) = &reply.structured_content {
+            ladder.answered_by(data);
         }
         let calls = match step(&reply) {
             Step::Calls(calls) => calls,
@@ -215,10 +258,9 @@ async fn run() -> anyhow::Result<()> {
                 eprintln!("answered after {round} round(s)");
                 return Ok(());
             }
-            // Once, on the strongest model: the step is asked again as it
-            // was, since nothing of the cut-off reply was kept.
-            Step::CutOff if prefer == "cheapest" => {
-                prefer = "strongest";
+            // A step up, and the step asked again as it was, since
+            // nothing of the cut-off reply was kept.
+            Step::CutOff if ladder.step_up() => {
                 agent
                     .progress("Handing this to a stronger model", None, None)
                     .await?;
@@ -244,8 +286,7 @@ async fn run() -> anyhow::Result<()> {
             // Only what the socket offers; anything else is the model's
             // mistake, told back to it.
             if name == STRONGER {
-                let content = if prefer == "cheapest" {
-                    prefer = "strongest";
+                let content = if ladder.step_up() {
                     let why = call["input"]["reason"].as_str().unwrap_or_default();
                     eprintln!("{STRONGER}: {why}");
                     agent
@@ -367,6 +408,30 @@ mod tests {
         assert_eq!(result_text(&read), "Q4 plan: ship by November 14.");
         let long = CallToolResult::ok("x".repeat(MAX_RESULT_CHARS + 10), Value::Null);
         assert!(result_text(&long).ends_with("\n[cut short]"));
+    }
+
+    #[test]
+    fn adr0044_the_task_climbs_one_step_at_a_time_and_stops_at_the_top() {
+        let mut ladder = Ladder::default();
+        assert_eq!(ladder.args(), json!({ "prefer": "cheapest" }));
+        assert!(!ladder.step_up(), "no step answered yet");
+        ladder.answered_by(&json!({ "model": "haiku", "stronger": true }));
+        assert!(ladder.step_up());
+        assert_eq!(
+            ladder.args(),
+            json!({ "prefer": "cheapest", "above": "haiku" })
+        );
+        ladder.answered_by(&json!({ "model": "sonnet", "stronger": true }));
+        assert!(ladder.step_up());
+        assert_eq!(ladder.args()["above"], "sonnet");
+        // Opus is the top: no step up, and no call wasted finding out.
+        ladder.answered_by(&json!({ "model": "opus", "stronger": false }));
+        assert!(!ladder.step_up());
+        assert_eq!(ladder.args()["above"], "sonnet");
+        // Where policy doesn't let agents choose by cost, nothing moves.
+        let mut fixed = Ladder::default();
+        fixed.answered_by(&json!({ "model": "sonnet", "stronger": false }));
+        assert!(!fixed.step_up());
     }
 
     #[test]

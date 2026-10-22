@@ -520,6 +520,7 @@ mod tests {
             system: Some("Be brief.".into()),
             model: None,
             prefer: None,
+            above: None,
             tools: Vec::new(),
         }
     }

@@ -62,17 +62,32 @@ on ADR 0018 (the gateway), 0041 (tool use, the desktop agent) and 0043
      listed a model only as an outage fallback.
    - Policy still decides which models a call's data may go to. This
      only orders them.
-2. **The desktop agent starts every task on the cheapest model.** It
-   moves the rest of the task to the strongest model when:
-   - the model calls `use_a_stronger_model` (offered from the first
-     step, so the tools never change mid-task and the replayed thinking
-     and the cache hold, ADR 0043; on Anthropic's API, Opus 5.5 reads
-     Haiku 5.5's thinking); or
-   - a step is cut off at `max_tokens`. That step is asked again once,
-     on the strongest model.
-3. **Self-escalation is a convenience, not the safety net.** Haiku never
-   called `use_a_stronger_model` in our runs, not even for exact figures
-   it then got wrong. The safety nets are below.
+2. **The desktop agent starts every task on the cheapest model and
+   climbs one step at a time.** Haiku hands over to Sonnet before Opus
+   (the owner: "we don't have to jump from Haiku to Opus").
+   - **One step up.** `model.complete` takes `above: <model>` with
+     `prefer: "cheapest"`. The route then puts the cheapest model priced
+     above that one first, then that one, then the cheaper ones. So a
+     step up never goes down, and at the top the top stays first.
+   - **The agent knows the top.** Each reply says whether a dearer
+     approved model could take the next step (`stronger`), so the agent
+     stops climbing there without spending a call to find out.
+   - **When it climbs.** The rest of the task moves up a step when:
+     - the model calls `use_a_stronger_model`, once per step up. It is
+       offered from the first step, so the tools never change mid-task
+       and the replayed thinking and the cache hold (ADR 0043). On
+       Anthropic's API, Sonnet 5.5 and Opus 5.5 read Haiku 5.5's
+       thinking.
+     - a step is cut off at `max_tokens`. That step is asked again on
+       the next model up.
+   - **Seen working.** Live, asked to hand an exact-figures task up,
+     Haiku did, and Sonnet answered it right: $0.020, where Opus alone
+     was $0.046. Against a stand-in that cut off every first step, the
+     agent climbed Haiku, Sonnet, Opus and stopped with the reason.
+3. **Self-escalation is a convenience, not the safety net.** Haiku
+   called `use_a_stronger_model` only when the request told it to. It
+   didn't for exact figures it then got wrong. The safety nets are
+   below.
 
 **Proposed, not built (the owner's go-ahead first):**
 
@@ -122,8 +137,8 @@ on ADR 0018 (the gateway), 0041 (tool use, the desktop agent) and 0043
   `by_cost` off, or approve only a stronger model for that data.
 - IT keeps the say: which models a label's data may go to, and whether
   agents may choose among them by cost.
-- Moving a task to a stronger model restarts the prompt cache once,
-  since caches are per model.
+- Each step up restarts the prompt cache once, since caches are per
+  model.
 - Scripts make a routine's code steps free and the same every time.
   Each new routine then has a reviewed artifact, which is the point:
   the person approves what will run, not only what ran.

@@ -64,31 +64,53 @@ pub enum Prefer {
     Strongest,
 }
 
+/// A model's place in price order: output, then input, per million
+/// tokens. `None` when policy prices it no way to compare.
+fn price(out: Option<f64>, inp: Option<f64>) -> Option<(f64, f64)> {
+    out.map(|out| (out, inp.unwrap_or(0.0)))
+}
+
+fn cheaper(a: (f64, f64), b: (f64, f64)) -> std::cmp::Ordering {
+    a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+}
+
 impl Route {
-    /// The same models, cheapest or dearest first by policy's prices
-    /// (output, then input), the unpriced after the priced in the order
-    /// policy gave them. The rest still take over on an outage.
-    fn ordered(mut self, prefer: Prefer) -> Self {
-        let price = |s: &RouteStep| {
-            s.usd_per_mtok_out
-                .map(|out| (out, s.usd_per_mtok_in.unwrap_or(0.0)))
+    /// The same models in price order (ADR 0044), the unpriced after the
+    /// priced in the order policy gave them. With `above` (the price of a
+    /// model that answered before), the cheapest dearer than it come
+    /// first, then those at its price, then the cheaper ones, nearest
+    /// first: one step up, never down while a step up is there. The rest
+    /// still take over on an outage.
+    fn ordered(mut self, prefer: Prefer, above: Option<(&str, (f64, f64))>) -> Self {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        let at = above.map(|(_, p)| p);
+        // (group, price): groups sort first, then the price within one.
+        let rank = |s: &RouteStep| match (price(s.usd_per_mtok_out, s.usd_per_mtok_in), at) {
+            (None, _) => (3, None),
+            (Some(p), Some(a)) if prefer == Prefer::Cheapest => match cheaper(p, a) {
+                Greater => (0, Some(p)),
+                Equal => (1, None),
+                Less => (2, Some(p)),
+            },
+            (Some(p), _) => (0, Some(p)),
         };
-        self.steps.sort_by(|a, b| match (price(a), price(b)) {
-            (Some(a), Some(b)) => {
-                let cheaper = a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1));
-                match prefer {
-                    Prefer::Cheapest => cheaper,
-                    Prefer::Strongest => cheaper.reverse(),
+        self.steps.sort_by(|x, y| {
+            let ((gx, px), (gy, py)) = (rank(x), rank(y));
+            gx.cmp(&gy).then_with(|| match (px, py) {
+                (Some(a), Some(b)) if gx == 2 || prefer == Prefer::Strongest => {
+                    cheaper(a, b).reverse()
                 }
+                (Some(a), Some(b)) => cheaper(a, b),
+                _ => Equal,
+            })
+        });
+        match (prefer, above) {
+            (Prefer::Cheapest, Some((id, _))) => {
+                self.rule.push_str(&format!(", cheapest above {id} first"))
             }
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        });
-        self.rule.push_str(match prefer {
-            Prefer::Cheapest => ", cheapest first",
-            Prefer::Strongest => ", strongest first",
-        });
+            (Prefer::Cheapest, None) => self.rule.push_str(", cheapest first"),
+            (Prefer::Strongest, _) => self.rule.push_str(", strongest first"),
+        }
         self
     }
 }
@@ -203,17 +225,53 @@ impl ModelRules {
 
     /// [`ModelRules::route`], ordered as the agent prefers when policy lets
     /// agents choose by cost and the call names no model (ADR 0044).
+    /// `above` is a model that answered before, for a step up from it.
     pub fn route_for(
         &self,
         label: Label,
         requested: Option<&str>,
         prefer: Option<Prefer>,
+        above: Option<&str>,
     ) -> Result<Route, ModelRefusal> {
         let route = self.route(label, requested)?;
-        Ok(match prefer {
-            Some(prefer) if requested.is_none() && self.doc.by_cost => route.ordered(prefer),
-            _ => route,
-        })
+        let Some(prefer) = prefer.filter(|_| requested.is_none() && self.doc.by_cost) else {
+            return Ok(route);
+        };
+        let above =
+            match above {
+                Some(id) => {
+                    let model = self.doc.models.iter().find(|m| m.id == id).ok_or_else(|| {
+                        ModelRefusal {
+                            reason: format!("{id} isn't a model policy lists"),
+                            rule: route.rule.clone(),
+                        }
+                    })?;
+                    price(model.usd_per_mtok_out, model.usd_per_mtok_in).map(|p| (id, p))
+                }
+                None => None,
+            };
+        Ok(route.ordered(prefer, above))
+    }
+
+    /// Whether a call routed on `route` that `answered` could step up: an
+    /// agent may choose by cost here, and a model on the route is priced
+    /// above it (ADR 0044).
+    pub fn can_step_up(&self, route: &Route, answered: &str) -> bool {
+        let priced = |s: &RouteStep| price(s.usd_per_mtok_out, s.usd_per_mtok_in);
+        let Some(at) = route
+            .steps
+            .iter()
+            .find(|s| s.model == answered)
+            .and_then(priced)
+        else {
+            return false;
+        };
+        self.doc.by_cost
+            && route
+                .steps
+                .iter()
+                .filter_map(priced)
+                .any(|p| cheaper(p, at) == std::cmp::Ordering::Greater)
     }
 
     fn step(&self, id: &str) -> Option<RouteStep> {
@@ -486,7 +544,7 @@ mod tests {
         let by_cost = rules(&priced);
         // Bedrock east at $15 out, west at $0.50, the API unpriced.
         let cheap = by_cost
-            .route_for(Label::Internal, None, Some(Prefer::Cheapest))
+            .route_for(Label::Internal, None, Some(Prefer::Cheapest), None)
             .unwrap();
         assert_eq!(
             order(&cheap),
@@ -494,7 +552,7 @@ mod tests {
         );
         assert_eq!(cheap.rule, "model route for internal data, cheapest first");
         let strong = by_cost
-            .route_for(Label::Internal, None, Some(Prefer::Strongest))
+            .route_for(Label::Internal, None, Some(Prefer::Strongest), None)
             .unwrap();
         assert_eq!(
             order(&strong),
@@ -503,12 +561,17 @@ mod tests {
         );
         // Only the models the data may go to: confidential is Bedrock east.
         let confidential = by_cost
-            .route_for(Label::Confidential, None, Some(Prefer::Cheapest))
+            .route_for(Label::Confidential, None, Some(Prefer::Cheapest), None)
             .unwrap();
         assert_eq!(order(&confidential), ["claude-bedrock"]);
         // A model the agent names comes first, as it always did.
         let named = by_cost
-            .route_for(Label::Internal, Some("claude-api"), Some(Prefer::Cheapest))
+            .route_for(
+                Label::Internal,
+                Some("claude-api"),
+                Some(Prefer::Cheapest),
+                None,
+            )
             .unwrap();
         assert_eq!(order(&named)[0], "claude-api");
         // Without by_cost the route's order stands.
@@ -516,11 +579,97 @@ mod tests {
         assert_eq!(
             order(
                 &fixed
-                    .route_for(Label::Internal, None, Some(Prefer::Cheapest))
+                    .route_for(Label::Internal, None, Some(Prefer::Cheapest), None)
                     .unwrap()
             ),
             ["claude-bedrock", "claude-bedrock-west", "claude-api"]
         );
+    }
+
+    #[test]
+    fn mp8_a_step_up_goes_one_rung_never_down() {
+        // Listed out of price order on purpose: the prices decide.
+        let rules = Policy::from_toml(
+            r#"
+            version = 1
+            [[group]]
+            name = "everyone"
+            agents = ["writer"]
+            [[agent]]
+            id = "writer"
+            allowed_actions = ["model.complete"]
+            [models]
+            by_cost = true
+            [models.routes]
+            internal = ["opus", "sonnet", "haiku"]
+            [[models.provider]]
+            id = "anthropic"
+            kind = "anthropic"
+            name = "Anthropic"
+            [[models.model]]
+            id = "opus"
+            provider = "anthropic"
+            model = "claude-opus-5-5"
+            name = "Claude Opus"
+            usd_per_mtok_in = 4.0
+            usd_per_mtok_out = 20.0
+            [[models.model]]
+            id = "sonnet"
+            provider = "anthropic"
+            model = "claude-sonnet-5-5"
+            name = "Claude Sonnet"
+            usd_per_mtok_in = 2.0
+            usd_per_mtok_out = 10.0
+            [[models.model]]
+            id = "haiku"
+            provider = "anthropic"
+            model = "claude-haiku-5-5"
+            name = "Claude Haiku"
+            usd_per_mtok_in = 0.1
+            usd_per_mtok_out = 0.5
+            "#,
+        )
+        .unwrap()
+        .effective("dana", &"writer".parse().unwrap())
+        .unwrap()
+        .models()
+        .clone();
+        let up = |above: Option<&str>| {
+            rules
+                .route_for(Label::Internal, None, Some(Prefer::Cheapest), above)
+                .unwrap()
+        };
+        assert_eq!(order(&up(None)), ["haiku", "sonnet", "opus"]);
+        let from_haiku = up(Some("haiku"));
+        assert_eq!(order(&from_haiku), ["sonnet", "opus", "haiku"]);
+        assert_eq!(
+            from_haiku.rule,
+            "model route for internal data, cheapest above haiku first"
+        );
+        assert_eq!(order(&up(Some("sonnet"))), ["opus", "sonnet", "haiku"]);
+        assert_eq!(
+            order(&up(Some("opus"))),
+            ["opus", "sonnet", "haiku"],
+            "at the top it stays there"
+        );
+        // The agent hears whether there's a step up from what answered.
+        let route = up(None);
+        assert!(rules.can_step_up(&route, "haiku"));
+        assert!(rules.can_step_up(&route, "sonnet"));
+        assert!(!rules.can_step_up(&route, "opus"), "the top");
+        let strongest = rules
+            .route_for(
+                Label::Internal,
+                None,
+                Some(Prefer::Strongest),
+                Some("haiku"),
+            )
+            .unwrap();
+        assert_eq!(order(&strongest), ["opus", "sonnet", "haiku"]);
+        let unknown = rules
+            .route_for(Label::Internal, None, Some(Prefer::Cheapest), Some("gpt"))
+            .unwrap_err();
+        assert!(unknown.reason.contains("isn't a model policy lists"));
     }
 
     #[test]

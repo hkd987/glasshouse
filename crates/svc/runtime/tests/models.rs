@@ -254,18 +254,27 @@ async fn mp8_an_outage_fails_over_to_the_next_model_and_is_logged() {
 async fn mp8_an_agent_asks_for_the_cheapest_or_the_strongest_approved_model() {
     let h = harness_with(&by_cost());
     let (task, agent) = start(&h, &["Invoices"]).await;
-    for (prefer, answered) in [
-        (Some("cheapest"), "cheap"),
-        (Some("strongest"), "echo"),
-        (None, "echo"),
+    for (prefer, above, answered) in [
+        (Some("cheapest"), None, "cheap"),
+        (Some("strongest"), None, "echo"),
+        (None, None, "echo"),
+        // A step up from the cheap model, and none above the top.
+        (Some("cheapest"), Some("cheap"), "echo"),
+        (Some("cheapest"), Some("echo"), "echo"),
     ] {
         let mut args = ask("hello");
         if let Some(prefer) = prefer {
             args["prefer"] = json!(prefer);
         }
+        if let Some(above) = above {
+            args["above"] = json!(above);
+        }
         let reply = tool(&agent, "model_complete", args).await;
         assert!(!reply.is_error, "{}", reply.text());
-        assert_eq!(reply.structured_content.unwrap()["model"], answered);
+        let data = reply.structured_content.unwrap();
+        assert_eq!(data["model"], answered);
+        // A step up is there from the cheap model, not from the top.
+        assert_eq!(data["stronger"], answered == "cheap");
     }
     let records = model_records(&h, task);
     let routes: Vec<&str> = records
@@ -278,6 +287,8 @@ async fn mp8_an_agent_asks_for_the_cheapest_or_the_strongest_approved_model() {
             "model route for internal data, cheapest first",
             "model route for internal data, strongest first",
             "model route for internal data",
+            "model route for internal data, cheapest above cheap first",
+            "model route for internal data, cheapest above echo first",
         ]
     );
 

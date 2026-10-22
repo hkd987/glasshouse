@@ -48,7 +48,12 @@ impl Runtime {
             });
         }
         let label = call_label(task);
-        let route = rules.route_for(label, input.model.as_deref(), input.prefer)?;
+        let route = rules.route_for(
+            label,
+            input.model.as_deref(),
+            input.prefer,
+            input.above.as_deref(),
+        )?;
         Ok(Routed { input, route })
     }
 
@@ -78,6 +83,12 @@ impl Runtime {
                     "output_tokens": r.output_tokens,
                     "stop_reason": done.stop_reason,
                     "redacted": r.redacted,
+                    // Whether a dearer approved model could take the next
+                    // step (`above`, ADR 0044).
+                    "stronger": r
+                        .model
+                        .as_deref()
+                        .is_some_and(|m| rules.can_step_up(&routed.route, m)),
                 });
                 // The tools the model asked for (ADR 0041): the agent's to
                 // make, over its socket, where every rule applies. They go

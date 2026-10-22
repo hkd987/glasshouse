@@ -127,6 +127,10 @@ pub struct CompleteInput {
     /// it names none and policy lets agents choose by cost (ADR 0044).
     #[serde(default)]
     pub prefer: Option<glass_policy::Prefer>,
+    /// With `prefer: "cheapest"`, a model that answered before: the
+    /// cheapest dearer than it goes first, a step up (ADR 0044).
+    #[serde(default)]
+    pub above: Option<String>,
     /// The tools the model may ask for (ADR 0041).
     #[serde(default)]
     pub tools: Vec<Tool>,
@@ -395,7 +399,8 @@ pub fn definition() -> ActionDef {
                 "max_tokens": { "type": "integer", "minimum": 1, "description": "The most the model may write." },
                 "system": { "type": "string", "description": "Instructions for the model." },
                 "model": { "type": "string", "description": "An approved model id; usually left out." },
-                "prefer": { "type": "string", "enum": ["cheapest", "strongest"], "description": "With no model: the cheapest approved model for a step that needs little, or the strongest for one that needs more, where IT lets agents choose by cost." }
+                "prefer": { "type": "string", "enum": ["cheapest", "strongest"], "description": "With no model: the cheapest approved model for a step that needs little, or the strongest for one that needs more, where IT lets agents choose by cost." },
+                "above": { "type": "string", "description": "With prefer cheapest: the model of an earlier reply, to move up one step, to the cheapest model dearer than it." }
             },
             "required": ["messages", "max_tokens"],
             "additionalProperties": false
@@ -492,6 +497,14 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(cheap.prefer, Some(glass_policy::Prefer::Cheapest));
+        let up = input(json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+            "prefer": "cheapest",
+            "above": "haiku"
+        }))
+        .unwrap();
+        assert_eq!(up.above.as_deref(), Some("haiku"));
         assert_eq!(thousands(1_204), "1,204");
         assert_eq!(thousands(400_000), "400,000");
     }
