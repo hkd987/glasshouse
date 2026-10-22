@@ -78,6 +78,21 @@ fn labeled() -> String {
         + "\n[[label]]\npath = \"{home}/Reports\"\nlabel = \"internal\"\n"
 }
 
+/// [`MODELS`] with a cheaper model on the internal route, where agents may
+/// choose by cost (ADR 0044).
+fn by_cost() -> String {
+    MODELS
+        .replace(
+            "internal = [\"flaky\", \"echo\"]",
+            "internal = [\"echo\", \"cheap\"]",
+        )
+        .replace(
+            "max_output_tokens = 1000",
+            "max_output_tokens = 1000\nby_cost = true",
+        )
+        + "\n[[models.model]]\nid = \"cheap\"\nprovider = \"scripted\"\nmodel = \"cheap-1\"\nname = \"Cheap\"\nusd_per_mtok_in = 0.1\nusd_per_mtok_out = 0.5\n"
+}
+
 // AWS's documentation example key, not a real one.
 const AWS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
 
@@ -233,6 +248,46 @@ async fn mp8_an_outage_fails_over_to_the_next_model_and_is_logged() {
             .contains("rate limited")
     );
     assert_eq!(records[0].event.detail["model"]["model"], "echo");
+}
+
+#[tokio::test]
+async fn mp8_an_agent_asks_for_the_cheapest_or_the_strongest_approved_model() {
+    let h = harness_with(&by_cost());
+    let (task, agent) = start(&h, &["Invoices"]).await;
+    for (prefer, answered) in [
+        (Some("cheapest"), "cheap"),
+        (Some("strongest"), "echo"),
+        (None, "echo"),
+    ] {
+        let mut args = ask("hello");
+        if let Some(prefer) = prefer {
+            args["prefer"] = json!(prefer);
+        }
+        let reply = tool(&agent, "model_complete", args).await;
+        assert!(!reply.is_error, "{}", reply.text());
+        assert_eq!(reply.structured_content.unwrap()["model"], answered);
+    }
+    let records = model_records(&h, task);
+    let routes: Vec<&str> = records
+        .iter()
+        .map(|r| r.event.detail["model"]["route"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        routes,
+        [
+            "model route for internal data, cheapest first",
+            "model route for internal data, strongest first",
+            "model route for internal data",
+        ]
+    );
+
+    // Where policy doesn't let agents choose, the route's order stands.
+    let h = harness_with(&by_cost().replace("by_cost = true", ""));
+    let (_, agent) = start(&h, &["Invoices"]).await;
+    let mut args = ask("hello");
+    args["prefer"] = json!("cheapest");
+    let reply = tool(&agent, "model_complete", args).await;
+    assert_eq!(reply.structured_content.unwrap()["model"], "echo");
 }
 
 #[tokio::test]

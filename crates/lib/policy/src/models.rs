@@ -52,6 +52,47 @@ pub struct RouteStep {
     pub usd_per_mtok_cache_read: Option<f64>,
 }
 
+/// What an agent asks of a call's model when it names none (MP-8, ADR
+/// 0044): the cheapest approved one, for a step that needs little, or the
+/// strongest, for one that needs more. Policy still decides which models
+/// the data may go to; this only orders them, and only where policy says
+/// agents may (`[models] by_cost`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Prefer {
+    Cheapest,
+    Strongest,
+}
+
+impl Route {
+    /// The same models, cheapest or dearest first by policy's prices
+    /// (output, then input), the unpriced after the priced in the order
+    /// policy gave them. The rest still take over on an outage.
+    fn ordered(mut self, prefer: Prefer) -> Self {
+        let price = |s: &RouteStep| {
+            s.usd_per_mtok_out
+                .map(|out| (out, s.usd_per_mtok_in.unwrap_or(0.0)))
+        };
+        self.steps.sort_by(|a, b| match (price(a), price(b)) {
+            (Some(a), Some(b)) => {
+                let cheaper = a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1));
+                match prefer {
+                    Prefer::Cheapest => cheaper,
+                    Prefer::Strongest => cheaper.reverse(),
+                }
+            }
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        self.rule.push_str(match prefer {
+            Prefer::Cheapest => ", cheapest first",
+            Prefer::Strongest => ", strongest first",
+        });
+        self
+    }
+}
+
 /// Why a call can't go anywhere. The reason is shown to the agent and the
 /// user; the rule goes in the audit record.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -158,6 +199,21 @@ impl ModelRules {
         }
         let steps = usable.into_iter().filter_map(|id| self.step(id)).collect();
         Ok(Route { label, steps, rule })
+    }
+
+    /// [`ModelRules::route`], ordered as the agent prefers when policy lets
+    /// agents choose by cost and the call names no model (ADR 0044).
+    pub fn route_for(
+        &self,
+        label: Label,
+        requested: Option<&str>,
+        prefer: Option<Prefer>,
+    ) -> Result<Route, ModelRefusal> {
+        let route = self.route(label, requested)?;
+        Ok(match prefer {
+            Some(prefer) if requested.is_none() && self.doc.by_cost => route.ordered(prefer),
+            _ => route,
+        })
     }
 
     fn step(&self, id: &str) -> Option<RouteStep> {
@@ -409,6 +465,62 @@ mod tests {
         assert_eq!(order(&confidential), ["claude-bedrock"], "Bedrock only");
         let restricted = rules.route(Label::Restricted, None).unwrap_err();
         assert!(restricted.reason.contains("never goes to a model"));
+    }
+
+    #[test]
+    fn mp8_agents_may_ask_for_the_cheapest_or_strongest_where_policy_says() {
+        let priced = POLICY
+            .replace(
+                "name = \"Claude Sonnet\"\n\n        [[models.model]]\n        id = \"claude-api\"",
+                "name = \"Claude Sonnet\"\n        usd_per_mtok_in = 0.1\n        usd_per_mtok_out = 0.5\n\n        [[models.model]]\n        id = \"claude-api\"",
+            )
+            .replace("[models]\n", "[models]\n        by_cost = true\n");
+        let rules = |text: &str| {
+            Policy::from_toml(text)
+                .unwrap()
+                .effective("dana", &"writer".parse().unwrap())
+                .unwrap()
+                .models()
+                .clone()
+        };
+        let by_cost = rules(&priced);
+        // Bedrock east at $15 out, west at $0.50, the API unpriced.
+        let cheap = by_cost
+            .route_for(Label::Internal, None, Some(Prefer::Cheapest))
+            .unwrap();
+        assert_eq!(
+            order(&cheap),
+            ["claude-bedrock-west", "claude-bedrock", "claude-api"]
+        );
+        assert_eq!(cheap.rule, "model route for internal data, cheapest first");
+        let strong = by_cost
+            .route_for(Label::Internal, None, Some(Prefer::Strongest))
+            .unwrap();
+        assert_eq!(
+            order(&strong),
+            ["claude-bedrock", "claude-bedrock-west", "claude-api"],
+            "the unpriced stay last"
+        );
+        // Only the models the data may go to: confidential is Bedrock east.
+        let confidential = by_cost
+            .route_for(Label::Confidential, None, Some(Prefer::Cheapest))
+            .unwrap();
+        assert_eq!(order(&confidential), ["claude-bedrock"]);
+        // A model the agent names comes first, as it always did.
+        let named = by_cost
+            .route_for(Label::Internal, Some("claude-api"), Some(Prefer::Cheapest))
+            .unwrap();
+        assert_eq!(order(&named)[0], "claude-api");
+        // Without by_cost the route's order stands.
+        let fixed = rules(&priced.replace("by_cost = true", ""));
+        assert_eq!(
+            order(
+                &fixed
+                    .route_for(Label::Internal, None, Some(Prefer::Cheapest))
+                    .unwrap()
+            ),
+            ["claude-bedrock", "claude-bedrock-west", "claude-api"]
+        );
     }
 
     #[test]

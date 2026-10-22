@@ -24,7 +24,7 @@ pub use engine::{
     EVERYONE, EffectivePolicy, LoosenRefused, PEOPLE_ONLY, PERSONS_OWN, Policy, PolicyError,
     RuleSource, TierDecision, people_only, persons_own,
 };
-pub use models::{ModelRefusal, ModelRules, Route, RouteStep};
+pub use models::{ModelRefusal, ModelRules, Prefer, Route, RouteStep};
 pub use pattern::{ActionPattern, InvalidPattern, Specificity};
 
 /// The policy a new org ships with. Also what `glassd` enforces when no

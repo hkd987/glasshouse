@@ -519,6 +519,7 @@ mod tests {
             max_tokens: 500,
             system: Some("Be brief.".into()),
             model: None,
+            prefer: None,
             tools: Vec::new(),
         }
     }

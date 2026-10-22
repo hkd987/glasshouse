@@ -48,7 +48,7 @@ impl Runtime {
             });
         }
         let label = call_label(task);
-        let route = rules.route(label, input.model.as_deref())?;
+        let route = rules.route_for(label, input.model.as_deref(), input.prefer)?;
         Ok(Routed { input, route })
     }
 

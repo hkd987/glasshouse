@@ -123,6 +123,10 @@ pub struct CompleteInput {
     /// out, which is what most agents should do (MP-7).
     #[serde(default)]
     pub model: Option<String>,
+    /// The cheapest or strongest model policy approves for the call, when
+    /// it names none and policy lets agents choose by cost (ADR 0044).
+    #[serde(default)]
+    pub prefer: Option<glass_policy::Prefer>,
     /// The tools the model may ask for (ADR 0041).
     #[serde(default)]
     pub tools: Vec<Tool>,
@@ -390,7 +394,8 @@ pub fn definition() -> ActionDef {
                 },
                 "max_tokens": { "type": "integer", "minimum": 1, "description": "The most the model may write." },
                 "system": { "type": "string", "description": "Instructions for the model." },
-                "model": { "type": "string", "description": "An approved model id; usually left out." }
+                "model": { "type": "string", "description": "An approved model id; usually left out." },
+                "prefer": { "type": "string", "enum": ["cheapest", "strongest"], "description": "With no model: the cheapest approved model for a step that needs little, or the strongest for one that needs more, where IT lets agents choose by cost." }
             },
             "required": ["messages", "max_tokens"],
             "additionalProperties": false
@@ -471,6 +476,7 @@ mod tests {
             json!({"messages": [{"role": "user", "content": " "}], "max_tokens": 10}),
             json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 0}),
             json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10, "stream": true}),
+            json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 10, "prefer": "fastest"}),
             json!({"messages": [{"role": "user", "content": "x".repeat(MAX_PROMPT_CHARS + 1)}], "max_tokens": 10}),
         ] {
             assert!(
@@ -478,6 +484,14 @@ mod tests {
                 "{bad}"
             );
         }
+        // ADR 0044: the agent's preference, which routing applies.
+        let cheap = input(json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 10,
+            "prefer": "cheapest"
+        }))
+        .unwrap();
+        assert_eq!(cheap.prefer, Some(glass_policy::Prefer::Cheapest));
         assert_eq!(thousands(1_204), "1,204");
         assert_eq!(thousands(400_000), "400,000");
     }

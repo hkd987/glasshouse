@@ -241,6 +241,11 @@ pub struct Models {
     /// Restricted data never goes to a model.
     #[serde(default)]
     pub routes: BTreeMap<Label, Vec<String>>,
+    /// Agents may ask for the cheapest or the strongest of the models a
+    /// call's data may go to (MP-8, ADR 0044): the same models, ordered by
+    /// their prices. Off by default, when the route's order always stands.
+    #[serde(default)]
+    pub by_cost: bool,
     #[serde(default, rename = "provider")]
     pub providers: Vec<ProviderEntry>,
     /// The allowlist: every model an agent may be routed to.
@@ -260,6 +265,7 @@ impl Default for Models {
             max_output_tokens: default_max_output_tokens(),
             log_prompts: false,
             routes: BTreeMap::new(),
+            by_cost: false,
             providers: Vec::new(),
             models: Vec::new(),
             redact: Redaction::default(),

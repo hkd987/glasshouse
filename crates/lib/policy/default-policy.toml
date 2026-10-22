@@ -162,6 +162,8 @@ services = ["cron", "ntpd", "openvpn", "cupsd"]
 #
 # [models]
 # default = "claude-bedrock"         # for public and internal data
+# by_cost = true                     # agents may ask for the cheapest or strongest approved
+#                                    # model for a call (ADR 0044); off, the route's order stands
 # [models.routes]                    # in order; the rest take over on an outage
 # confidential = ["claude-bedrock"]  # confidential data goes only where a route says
 # [models.redact]                    # secrets are always redacted; this adds PII

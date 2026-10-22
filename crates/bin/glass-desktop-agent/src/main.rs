@@ -26,6 +26,9 @@ const MAX_TOKENS: u32 = 16_000;
 const MAX_RESULT_CHARS: usize = 20_000;
 /// Its own tools, which the model never calls: the agent does.
 const OWN: [&str; 2] = ["model_complete", "report_progress"];
+/// The tool the agent offers the model for handing the rest of the task to
+/// the strongest model policy approves (ADR 0044).
+const STRONGER: &str = "use_a_stronger_model";
 
 const SYSTEM: &str = "You are the Glasshouse desktop agent, working for the person \
 on this computer. Do what they ask using the tools you're given; they're the only \
@@ -55,7 +58,7 @@ async fn main() -> ExitCode {
 fn offered(tools: &[glass_rpc::mcp::Tool]) -> Vec<Value> {
     tools
         .iter()
-        .filter(|t| !OWN.contains(&t.name.as_str()))
+        .filter(|t| !OWN.contains(&t.name.as_str()) && t.name != STRONGER)
         .map(|t| {
             json!({
                 "name": t.name,
@@ -64,6 +67,25 @@ fn offered(tools: &[glass_rpc::mcp::Tool]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+/// The model's way up (ADR 0044): every task starts on the cheapest model
+/// policy approves for its data, and moves to the strongest when the model
+/// asks. Offered from the first step, so the tools never change mid-task.
+fn stronger_tool() -> Value {
+    json!({
+        "name": STRONGER,
+        "description": "Hand the rest of this task to a stronger, costlier model. Call it first \
+            when the task needs careful judgment, exact figures from many numbers, or writing \
+            that must be just right; or when a step went wrong in a way you can't put right. \
+            Not for lookups, lists or drafts you can do well yourself. Say why in one line.",
+        "input_schema": {
+            "type": "object",
+            "properties": { "reason": { "type": "string", "description": "Why, in one line" } },
+            "required": ["reason"],
+            "additionalProperties": false
+        }
+    })
 }
 
 /// What a tool returned, as the model reads it: its words and its data,
@@ -155,7 +177,11 @@ async fn run() -> anyhow::Result<()> {
     if !agent.has_tool("model_complete") {
         bail!("this agent needs an AI model, and policy gives it none here");
     }
-    let tools = offered(&agent.tool_list().await?);
+    let mut tools = offered(&agent.tool_list().await?);
+    tools.push(stronger_tool());
+    // Cheapest first; the strongest once the model asks or a step runs
+    // out of room. Policy decides which models these may be (ADR 0044).
+    let mut prefer = "cheapest";
     let opening = format!(
         "{}\n\n{}",
         now_line(time::OffsetDateTime::now_utc(), agent.utc_offset_secs),
@@ -173,6 +199,7 @@ async fn run() -> anyhow::Result<()> {
                     "messages": messages,
                     "max_tokens": MAX_TOKENS,
                     "tools": tools,
+                    "prefer": prefer,
                 }),
             )
             .await?;
@@ -187,6 +214,15 @@ async fn run() -> anyhow::Result<()> {
                 agent.answer(&caption(&answer), &answer).await?;
                 eprintln!("answered after {round} round(s)");
                 return Ok(());
+            }
+            // Once, on the strongest model: the step is asked again as it
+            // was, since nothing of the cut-off reply was kept.
+            Step::CutOff if prefer == "cheapest" => {
+                prefer = "strongest";
+                agent
+                    .progress("Handing this to a stronger model", None, None)
+                    .await?;
+                continue;
             }
             Step::CutOff => bail!(
                 "the AI model ran out of room before it finished a step \
@@ -207,6 +243,21 @@ async fn run() -> anyhow::Result<()> {
             let id = call["id"].clone();
             // Only what the socket offers; anything else is the model's
             // mistake, told back to it.
+            if name == STRONGER {
+                let content = if prefer == "cheapest" {
+                    prefer = "strongest";
+                    let why = call["input"]["reason"].as_str().unwrap_or_default();
+                    eprintln!("{STRONGER}: {why}");
+                    agent
+                        .progress("Handing this to a stronger model", None, None)
+                        .await?;
+                    "From the next step a stronger model carries on with this task."
+                } else {
+                    "This is already the strongest model this task may use; carry on."
+                };
+                results.push(json!({ "id": id, "content": content, "is_error": false }));
+                continue;
+            }
             if OWN.contains(&name) || !agent.has_tool(name) {
                 results.push(json!({
                     "id": id,
@@ -316,6 +367,25 @@ mod tests {
         assert_eq!(result_text(&read), "Q4 plan: ship by November 14.");
         let long = CallToolResult::ok("x".repeat(MAX_RESULT_CHARS + 10), Value::Null);
         assert!(result_text(&long).ends_with("\n[cut short]"));
+    }
+
+    #[test]
+    fn adr0044_the_model_is_offered_a_way_up_that_never_clashes() {
+        let tool = stronger_tool();
+        assert_eq!(tool["name"], STRONGER);
+        assert_eq!(tool["input_schema"]["required"], json!(["reason"]));
+        // The name is the agent's: a socket tool by it is never offered,
+        // so the model's list never holds two (the API refuses that).
+        let tool = |name: &str| glass_rpc::mcp::Tool {
+            name: name.into(),
+            title: None,
+            description: "A tool".into(),
+            input_schema: json!({ "type": "object" }),
+            annotations: None,
+        };
+        let offered = offered(&[tool("files_list"), tool(STRONGER)]);
+        let names: Vec<&str> = offered.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert_eq!(names, ["files_list"]);
     }
 
     #[test]
