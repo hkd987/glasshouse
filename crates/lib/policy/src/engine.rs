@@ -379,11 +379,17 @@ pub const PEOPLE_ONLY: &[&str] = &["meet"];
 const PEOPLE_ONLY_WHY: &str = "meetings are for people, never agents (ADR 0030); \
      the Meet and Calendar apps' own [[app]] tiers say what the person does there";
 
+/// What agents may still take in a people-only app: reading a transcribed
+/// meeting's transcript, never joining it (ADR 0045). Policy rules name it
+/// like any action.
+pub const AGENTS_TOO: &[&str] = &["meet.transcript"];
+
 fn in_people_only_app(name: &str) -> bool {
-    PEOPLE_ONLY.iter().any(|app| {
-        name.strip_prefix(app)
-            .is_some_and(|rest| rest.starts_with('.'))
-    })
+    !AGENTS_TOO.contains(&name)
+        && PEOPLE_ONLY.iter().any(|app| {
+            name.strip_prefix(app)
+                .is_some_and(|rest| rest.starts_with('.'))
+        })
 }
 
 /// Whether `action` is one only people take ([`PEOPLE_ONLY`]).
@@ -1074,6 +1080,44 @@ mod tests {
             claude.tier_for(&name("meet.list"), Tier::Auto).tier,
             Tier::Never
         );
+    }
+
+    #[test]
+    fn adr0045_agents_read_a_transcript_but_never_join_or_add_to_one() {
+        let policy = Policy::from_toml(crate::DEFAULT_POLICY).unwrap();
+        let desktop = policy
+            .effective("dana", &"desktop-agent".parse().unwrap())
+            .unwrap();
+        assert_eq!(
+            desktop.tier_for(&name("meet.transcript"), Tier::Auto).tier,
+            Tier::Auto
+        );
+        assert_eq!(
+            desktop.tier_for(&name("mail.send"), Tier::Ask).tier,
+            Tier::Ask,
+            "sending what it was asked to always asks"
+        );
+        for action in ["meet.transcribe", "meet.join", "meet.keys"] {
+            assert_eq!(
+                desktop.tier_for(&name(action), Tier::Auto).source,
+                RuleSource::PeopleOnly,
+                "{action}"
+            );
+        }
+        // Meet adds the person's own words; an agent's "*" doesn't.
+        let declared = [name("meet.transcribe")];
+        let meet = policy.for_app("dana", &"meet".parse().unwrap(), &declared, Label::Internal);
+        assert_eq!(
+            meet.tier_for(&name("meet.transcribe"), Tier::Ask).tier,
+            Tier::Auto
+        );
+        // A rule may name the transcript, as any action: IT can keep a
+        // group's agents out of it.
+        with_default(
+            "[[group]]\nname = \"legal\"\nmembers = [\"dana\"]\nagents = [\"desktop-agent\"]\n\
+             [group.tiers]\n\"meet.transcript\" = \"never\"\n",
+        )
+        .unwrap();
     }
 
     #[test]

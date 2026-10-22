@@ -135,6 +135,9 @@ approval_timeout_secs = 900
 # them doesn't validate. The person joins in Meet and sees their meetings in
 # Calendar, by those apps' own [[app]] tiers below.
 "meet.*" = "never"
+# Where IT turned transcripts on, agents read a meeting's transcript; they
+# still never join one (ADR 0045).
+"meet.transcript" = "auto"
 "security.*" = "never"
 "vendors.bank_details.*" = "never"
 "data.export_bulk" = "never"
@@ -233,11 +236,12 @@ id = "skills"
 tiers = { "skill.share" = "auto", "skill.propose" = "auto", "skill.merge" = "auto" }
 
 # The person joins a meeting in Meet, which fetches its media keys and
-# leaves (CF-21); Calendar lists the meetings they're in, with Join. The
-# org's "meet.*" = "never" holds for every other app.
+# leaves (CF-21), and adds what they say to a transcribed meeting's
+# transcript (ADR 0045); Calendar lists the meetings they're in, with Join.
+# The org's "meet.*" = "never" holds for every other app.
 [[app]]
 id = "meet"
-tiers = { "meet.list" = "auto", "meet.join" = "auto", "meet.keys" = "auto", "meet.leave" = "auto" }
+tiers = { "meet.list" = "auto", "meet.join" = "auto", "meet.keys" = "auto", "meet.leave" = "auto", "meet.transcribe" = "auto" }
 
 [[app]]
 id = "calendar"
@@ -253,14 +257,15 @@ tiers = { "settings.models_connect" = "auto", "settings.models_agents" = "auto" 
 # list. The only agent allowed the system actions, which glassd runs with its
 # own privileges; it can't name a path or a command, only pick an action.
 # The general desktop agent (AE-3, ADR 0041): a model proposes each step
-# and the agent makes it here, where every rule applies. Reads and drafts
-# only by default; IT widens it per org. It needs an approved model. It
-# saves what the person wants done again as a routine (DA-4, ADR 0044),
-# which they approve, script and all, and which runs as this agent with
-# the scope it was saved with: nothing it couldn't do itself.
+# and the agent makes it here, where every rule applies. It reads, drafts,
+# and sends mail when the person approves each send (Ask), as asked in a
+# meeting (ADR 0045); IT widens or narrows it per org. It needs an approved
+# model. It saves what the person wants done again as a routine (DA-4,
+# ADR 0044), which they approve, script and all, and which runs as this
+# agent with the scope it was saved with: nothing it couldn't do itself.
 [[agent]]
 id = "desktop-agent"
-allowed_actions = ["files.list", "files.read", "mail.list", "mail.read", "mail.draft", "calendar.list", "calendar.read", "people.search", "catalog.search", "model.complete", "routines.*"]
+allowed_actions = ["files.list", "files.read", "mail.list", "mail.read", "mail.draft", "mail.send", "calendar.list", "calendar.read", "people.search", "catalog.search", "meet.transcript", "model.complete", "routines.*"]
 max_label = "internal"
 
 # The desktop agent on the person's own Claude Code and Claude plan (ADR

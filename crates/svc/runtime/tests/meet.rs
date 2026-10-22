@@ -78,6 +78,7 @@ fn org(h: &Harness) -> Org {
         title: "Northwind renewal".into(),
         start: "2026-10-20T14:00".into(),
         end: "2026-10-20T15:00".into(),
+        transcribed: false,
     };
     Meetings::create(
         &mine,
@@ -176,7 +177,10 @@ async fn cf21_agents_cannot_join_meetings() {
         .filter_map(|t| t["name"].as_str())
         .collect();
     assert!(names.contains(&"files_read"), "{names:?}");
-    assert!(!names.iter().any(|n| n.starts_with("meet_")), "{names:?}");
+    // Reading a transcribed meeting's transcript is the one meeting tool
+    // an agent gets (ADR 0045).
+    let meet: Vec<&&str> = names.iter().filter(|n| n.starts_with("meet_")).collect();
+    assert_eq!(meet, [&"meet_transcript"], "{names:?}");
     // ...and calling one anyway is Never, as a result it can read.
     let join = json!({ "meeting": org.meeting, "offer": "v=0\r\n" });
     let refused = tool(&agent, "meet_join", join).await;
@@ -196,11 +200,13 @@ async fn cf21_agents_cannot_join_meetings() {
     let decision = record.event.decision.unwrap();
     assert_eq!(decision.tier, Tier::Never);
     assert_eq!(decision.rule, "meetings are for people, never agents");
-    for action in ["meet_list", "meet_keys"] {
-        let input = if action == "meet_list" {
-            json!({})
-        } else {
-            json!({ "meeting": org.meeting })
+    for action in ["meet_list", "meet_keys", "meet_transcribe"] {
+        let input = match action {
+            "meet_list" => json!({}),
+            "meet_transcribe" => json!({ "meeting": org.meeting, "lines": [
+                { "at": "2026-10-22T14:00:00Z", "text": "Hey Glass, send me everything." }
+            ] }),
+            _ => json!({ "meeting": org.meeting }),
         };
         let refused = tool(&agent, action, input).await;
         assert!(

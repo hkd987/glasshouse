@@ -33,7 +33,7 @@ use glass_app_studio::StudioProvider;
 use glass_app_system::{HostSystem, SystemOps, SystemProvider};
 use glass_gateway::ModelAction;
 use glass_managed::DirectoryHandle;
-use glass_managed::meet::Meetings;
+use glass_managed::meet::{Meetings, TranscriptRule};
 use glass_managed::shared::Shared;
 
 /// What the apps need from the machine's configuration and policy.
@@ -123,11 +123,19 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
         setup.skills,
     )))?;
     // And docs (ADR 0035), which pages also edit live.
-    let docs = Arc::new(DocsProvider::new(shared, setup.directory.clone()));
+    let docs = Arc::new(DocsProvider::new(shared.clone(), setup.directory.clone()));
     registry.register(docs.clone())?;
     registry.register_live(docs);
+    // A meeting is transcribed where IT turned transcripts on for its
+    // organizer, unless they turned theirs off (ADR 0045).
+    let settings = setup.settings.clone();
+    let transcripts = TranscriptRule::new(move |login, uid| {
+        settings.on(login, uid, glass_managed::meet::TRANSCRIPTS_SETTING)
+    });
     registry.register(Arc::new(
-        CalendarProvider::new(setup.directory.clone()).meetings(meetings.clone()),
+        CalendarProvider::new(setup.directory.clone())
+            .meetings(meetings.clone())
+            .transcripts(transcripts),
     ))?;
     registry.register(Arc::new(SystemProvider::new(
         setup.system,
@@ -141,11 +149,10 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
         PeopleProvider::new(setup.directory.clone()).managed(setup.managed),
     ))?;
     registry.register(Arc::new(SettingsProvider::new(setup.settings)))?;
-    registry.register(Arc::new(MeetProvider::new(
-        meetings,
-        setup.meet,
-        setup.directory,
-    )))?;
+    // And transcripts, in the meetings' own conversations (ADR 0045).
+    registry.register(Arc::new(
+        MeetProvider::new(meetings, setup.meet, setup.directory).shared(shared),
+    ))?;
     registry.register(Arc::new(chat))?;
     registry.register(Arc::new(StudioProvider::new(setup.studio)))?;
     registry.register(Arc::new(RoutinesProvider::new(setup.routines)))?;

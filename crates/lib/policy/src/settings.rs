@@ -229,12 +229,32 @@ pub fn table() -> &'static [SettingDef] {
                 Scope::Seat,
                 true,
             ),
+            // Calendar seals it into each meeting the person organizes, and
+            // every computer in a transcribed meeting adds what its own
+            // person says (ADR 0045). Only IT turns it on.
+            toggle(
+                "meetings.transcripts",
+                "Meetings",
+                "Meeting transcripts",
+                "Meetings people organize are transcribed: everyone is told as they join, each computer turns only its own person's words into text, and IT can read the transcript as it does chat. Agents act on what the person asks them in a meeting. Audio and video are never recorded. People may turn it off for meetings they organize, never on.",
+                Scope::Person,
+                false,
+            ),
         ]
     })
 }
 
 pub fn def(id: &str) -> Option<&'static SettingDef> {
     table().iter().find(|d| d.id == id)
+}
+
+/// Settings only IT turns on: a person may turn one off for themselves
+/// where IT turned it on, but never on where IT didn't (ADR 0045).
+pub const NARROW_ONLY: &[&str] = &["meetings.transcripts"];
+
+/// Whether a person may only turn `id` off ([`NARROW_ONLY`]).
+pub fn narrow_only(id: &str) -> bool {
+    NARROW_ONLY.contains(&id)
 }
 
 /// Where a person's setting came from.

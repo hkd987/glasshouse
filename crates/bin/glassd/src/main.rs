@@ -13,6 +13,7 @@ mod browser;
 mod config;
 mod device;
 mod managed;
+mod meetings;
 mod org_apps;
 mod personal;
 
@@ -638,6 +639,10 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             }
         });
     }
+
+    // "Hey Glass" in a transcribed meeting starts the person's desktop
+    // agent on what they asked (ADR 0045).
+    org.meet.agents(Arc::new(meetings::Asks::new(&runtime)));
 
     // Chat's keys and the records it kept out go in the audit log (AU-1);
     // news wakes the app that shows it: Chat, Calendar or Artifacts (ADR

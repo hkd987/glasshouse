@@ -30,7 +30,7 @@ use std::sync::Arc;
 use glass_api::{AskLabels, ChangeKind};
 use glass_managed::DirectoryHandle;
 use glass_managed::chat::{is_conversation_id, new_conversation_id};
-use glass_managed::meet::{MAX_INVITEES, MAX_PEOPLE, MeetingDetails, Meetings};
+use glass_managed::meet::{MAX_INVITEES, MAX_PEOPLE, MeetingDetails, Meetings, TranscriptRule};
 use glass_platform::fs::ConfinedDir;
 use glass_types::{ActionName, SideEffect, Tier, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,8 @@ pub struct CalendarProvider {
     /// The person's meetings in chat's store on this computer (CF-21);
     /// none where meetings aren't wired in.
     meetings: Option<Arc<dyn Meetings>>,
+    /// Whether the meetings a person organizes are transcribed (ADR 0045).
+    transcripts: TranscriptRule,
 }
 
 impl CalendarProvider {
@@ -76,12 +78,20 @@ impl CalendarProvider {
         Self {
             directory,
             meetings: None,
+            transcripts: TranscriptRule::default(),
         }
     }
 
     /// Events can be Glasshouse meetings, kept in `meetings` (CF-21).
     pub fn meetings(mut self, meetings: Arc<dyn Meetings>) -> Self {
         self.meetings = Some(meetings);
+        self
+    }
+
+    /// Meetings are transcribed where `rule` says, for their organizer
+    /// (ADR 0045).
+    pub fn transcripts(mut self, rule: TranscriptRule) -> Self {
+        self.transcripts = rule;
         self
     }
 }
@@ -1020,10 +1030,15 @@ impl ActionProvider for CalendarProvider {
                 if let Some((meetings, meeting, logins, true)) =
                     self.meeting_invitees(ctx, &event, &to)?
                 {
+                    // Transcribed or not is the organizer's, as IT set it
+                    // when the meeting is made, sealed in with its title
+                    // so every computer in it reads the same (ADR 0045).
+                    let who = &ctx.principal.on_behalf_of;
                     let details = MeetingDetails {
                         title: event.title.clone(),
                         start: event.start.clone(),
                         end: event.end.clone(),
+                        transcribed: self.transcripts.transcribed(&who.name, who.uid),
                     };
                     meetings
                         .create(

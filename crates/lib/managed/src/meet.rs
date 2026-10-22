@@ -17,8 +17,14 @@
 //! key ([`MeetRequest`]). Calendar and Meet reach the person's keys and
 //! meeting conversations through [`Meetings`], which chat's store on the
 //! computer implements, so neither app depends on Chat (ADR 0013).
+//!
+//! Where IT turns transcripts on (ADR 0045), a meeting says so in its
+//! sealed details, each computer adds what its own person says to the
+//! meeting's conversation, and the person's own "Hey Glass, …" starts
+//! their agent ([`addressed`], [`AskAgent`]).
 
 use std::fmt;
+use std::sync::Arc;
 
 use glass_crypto::{Sealed, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -61,7 +67,7 @@ pub fn is_media_key_id(id: &str) -> bool {
 }
 
 /// What a meeting is, sealed under its first epoch key as its name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeetingDetails {
     pub title: String,
@@ -69,6 +75,105 @@ pub struct MeetingDetails {
     /// them: `2026-10-20T14:30`.
     pub start: String,
     pub end: String,
+    /// Transcribed (ADR 0045): IT turned transcripts on for the organizer
+    /// when it was made. Left out when not, so a meeting without one reads
+    /// on a computer that predates them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transcribed: bool,
+}
+
+/// The setting IT turns transcripts on with, per group, for the meetings
+/// its people organize (ADR 0045).
+pub const TRANSCRIPTS_SETTING: &str = "meetings.transcripts";
+
+/// The most lines one call adds to a transcript, the longest line, and
+/// the most characters in one call, so its sealed message stays under
+/// chat's limit.
+pub const MAX_TRANSCRIPT_LINES: usize = 50;
+pub const MAX_LINE_CHARS: usize = 1_000;
+pub const MAX_TRANSCRIBE_CHARS: usize = 10_000;
+
+/// What wakes the person's agent in a transcribed meeting, word by word.
+pub const WAKE_WORDS: &[&[&str]] = &[
+    &["hey", "glass"],
+    &["hey", "glasshouse"],
+    &["ok", "glass"],
+    &["okay", "glass"],
+];
+
+/// The request in `line` when it speaks to the person's agent: the words
+/// after "Hey Glass", as said. None when it doesn't, or nothing follows.
+/// Punctuation and case don't matter, since speech-to-text puts them in
+/// as it hears fit ("Hey, glass, send…").
+pub fn addressed(line: &str) -> Option<String> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let plain: Vec<String> = words
+        .iter()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect()
+        })
+        .collect();
+    for start in 0..plain.len() {
+        for wake in WAKE_WORDS {
+            let end = start + wake.len();
+            if end <= plain.len() && wake.iter().zip(&plain[start..end]).all(|(a, b)| a == b) {
+                let rest = words[end..].join(" ");
+                let rest = rest
+                    .trim_start_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+                    .trim();
+                return (!rest.is_empty()).then(|| rest.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Whether the meetings a person organizes are transcribed (ADR 0045):
+/// IT's value for their groups, which they may turn off for their own
+/// meetings but never on. Off until glassd says how to tell.
+#[derive(Clone, Default)]
+pub struct TranscriptRule(Option<Arc<RuleFn>>);
+
+/// Whether `login` (`uid`) has transcripts on.
+type RuleFn = dyn Fn(&str, u32) -> bool + Send + Sync;
+
+impl TranscriptRule {
+    pub fn new(rule: impl Fn(&str, u32) -> bool + Send + Sync + 'static) -> Self {
+        Self(Some(Arc::new(rule)))
+    }
+
+    /// For `login` (`uid`), organizing a meeting now.
+    pub fn transcribed(&self, login: &str, uid: u32) -> bool {
+        self.0.as_ref().is_some_and(|rule| rule(login, uid))
+    }
+}
+
+impl fmt::Debug for TranscriptRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "TranscriptRule(set)"
+        } else {
+            "TranscriptRule(off)"
+        })
+    }
+}
+
+/// Starts the person's agent on what they asked in a transcribed meeting
+/// (ADR 0045). glassd implements it with its runtime. The request is the
+/// person's own words, from their own computer's microphone; what others
+/// said stays in the transcript, for the agent to read.
+pub trait AskAgent: Send + Sync + fmt::Debug {
+    fn ask(
+        &self,
+        login: &str,
+        uid: u32,
+        meeting: &str,
+        title: &str,
+        request: &str,
+    ) -> std::result::Result<(), String>;
 }
 
 impl MeetingDetails {
@@ -663,6 +768,7 @@ mod tests {
             title: "Northwind renewal".into(),
             start: "2026-10-20T14:00".into(),
             end: "2026-10-20T15:00".into(),
+            transcribed: false,
         };
         let sealed = details.seal(&key, &meeting).unwrap();
         assert!(!sealed.contains(&hex::encode("Northwind")));
@@ -696,5 +802,52 @@ mod tests {
         let key = MediaKey::from_bytes(&[0xff; 32]).unwrap();
         assert_eq!(key.to_base64().len(), 44);
         assert!(key.to_base64().starts_with("////"));
+    }
+
+    #[test]
+    fn adr0045_hey_glass_and_what_follows_as_said() {
+        for (said, request) in [
+            (
+                "Hey Glass, send the Q3 report to Susan.",
+                Some("send the Q3 report to Susan."),
+            ),
+            (
+                "Hey, glass, send a cute free report to Susan.",
+                Some("send a cute free report to Susan."),
+            ),
+            (
+                "OK so, hey Glasshouse: what did Ana say?",
+                Some("what did Ana say?"),
+            ),
+            ("okay GLASS book the room", Some("book the room")),
+            ("Hey Glass.", None),
+            ("Let's move the launch to Thursday.", None),
+            ("Hey Sam, glass is fragile", None),
+        ] {
+            assert_eq!(addressed(said).as_deref(), request, "{said}");
+        }
+    }
+
+    #[test]
+    fn adr0045_an_untranscribed_meeting_reads_as_before() {
+        let plain = MeetingDetails {
+            title: "Launch".into(),
+            start: "2026-10-22T14:00".into(),
+            end: "2026-10-22T14:30".into(),
+            transcribed: false,
+        };
+        assert_eq!(
+            plain.to_name(),
+            r#"{"title":"Launch","start":"2026-10-22T14:00","end":"2026-10-22T14:30"}"#
+        );
+        let on = MeetingDetails {
+            transcribed: true,
+            ..plain
+        };
+        assert!(on.to_name().ends_with(r#""transcribed":true}"#));
+        let back: MeetingDetails = serde_json::from_str(&on.to_name()).unwrap();
+        assert!(back.transcribed);
+        assert!(!TranscriptRule::default().transcribed("dana", 1001));
+        assert!(TranscriptRule::new(|login, _| login == "dana").transcribed("dana", 1001));
     }
 }

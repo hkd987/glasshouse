@@ -28,6 +28,35 @@ struct Computer {
     chat: ChatHandle,
     roster: ChatProvider,
     meet: MeetProvider,
+    /// What this computer's people asked their agent in meetings.
+    asked: Arc<Asked>,
+}
+
+/// Records each "Hey Glass" this computer would start an agent on.
+#[derive(Debug, Default)]
+struct Asked(std::sync::Mutex<Vec<(String, String, String)>>);
+
+impl Asked {
+    fn all(&self) -> Vec<(String, String, String)> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl AskAgent for Asked {
+    fn ask(
+        &self,
+        login: &str,
+        _uid: u32,
+        meeting: &str,
+        _title: &str,
+        request: &str,
+    ) -> Result<(), String> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((login.into(), meeting.into(), request.into()));
+        Ok(())
+    }
 }
 
 fn org() -> Org {
@@ -72,27 +101,47 @@ impl Org {
         let roster = ChatProvider::new(chat.clone(), self.directory.clone());
         let handle = MeetHandle::new();
         handle.connect(self.meet.clone());
+        let asked = Arc::new(Asked::default());
+        handle.agents(asked.clone());
         Computer {
-            meet: MeetProvider::new(Arc::new(roster.clone()), handle, self.directory.clone()),
+            meet: MeetProvider::new(Arc::new(roster.clone()), handle, self.directory.clone())
+                .shared(Arc::new(roster.clone())),
             dir,
             chat,
             roster,
+            asked,
         }
     }
 
     /// Dana's meeting with Priya, invited from Dana's computer: Priya has
     /// opened Calendar once, and her computer has synced.
     fn meeting(&self) -> (Computer, Computer, String) {
+        self.meeting_with(details())
+    }
+
+    /// The same, where IT turned transcripts on for Dana (ADR 0045).
+    fn transcribed_meeting(&self) -> (Computer, Computer, String) {
+        self.meeting_with(MeetingDetails {
+            transcribed: true,
+            ..details()
+        })
+    }
+
+    fn meeting_with(&self, details: MeetingDetails) -> (Computer, Computer, String) {
         let (a, b) = (self.computer("dev-a"), self.computer("dev-b"));
         b.call("priya", LIST, json!({})).unwrap();
         let id = new_conversation_id().unwrap();
         let meetings: &dyn Meetings = &a.roster;
         meetings
-            .create("dana", true, &id, &["priya".into()], &details())
+            .create("dana", true, &id, &["priya".into()], &details)
             .unwrap();
         b.chat.sync_once(0).unwrap();
         (a, b, id)
     }
+}
+
+fn said(text: &str) -> Value {
+    json!({ "at": "2026-10-22T14:05:00Z", "text": text })
 }
 
 fn details() -> MeetingDetails {
@@ -100,6 +149,7 @@ fn details() -> MeetingDetails {
         title: "Northwind renewal".into(),
         start: "2026-10-20T14:00".into(),
         end: "2026-10-20T15:00".into(),
+        transcribed: false,
     }
 }
 
@@ -500,5 +550,167 @@ fn cf21_without_a_console_there_are_no_meetings_and_calendar_still_reads() {
             meet.preview(&ctx("dana", "meet"), &JOIN.parse().unwrap(), &input),
             Err(ActionError::InvalidInput(_))
         ));
+    }
+}
+
+#[test]
+fn adr0045_each_computer_adds_its_own_persons_words_and_everyone_reads_all_of_them() {
+    let org = org();
+    let (a, b, id) = org.transcribed_meeting();
+    let listed = a.call("dana", LIST, json!({})).unwrap();
+    assert_eq!(listed.data["meetings"][0]["transcribed"], true);
+
+    // What the preview (and so the audit log) says: counts, never words.
+    let input = json!({ "meeting": id, "lines": [said("Let's ship on the 14th."), said("Ana books the room.")] });
+    let preview = a
+        .meet
+        .preview(&ctx("dana", "meet"), &TRANSCRIBE.parse().unwrap(), &input)
+        .unwrap();
+    assert_eq!(
+        preview.summary,
+        "Add 2 lines to the transcript of Northwind renewal"
+    );
+    assert!(!format!("{preview:?}").contains("14th"));
+    let added = a.call("dana", TRANSCRIBE, input).unwrap();
+    assert_eq!(added.data["lines"], 2);
+    b.call(
+        "priya",
+        TRANSCRIBE,
+        json!({ "meeting": id, "lines": [said("I'll send the contract tonight.")] }),
+    )
+    .unwrap();
+    a.chat.sync_once(0).unwrap();
+    b.chat.sync_once(0).unwrap();
+
+    // Dana's agent reads everyone's lines, each with who said it.
+    let agent = ctx("dana", "desktop-agent");
+    let preview = a
+        .meet
+        .preview(
+            &agent,
+            &TRANSCRIPT.parse().unwrap(),
+            &json!({ "meeting": id }),
+        )
+        .unwrap();
+    assert_eq!(preview.label, Some(Label::Internal));
+    let read = a
+        .meet
+        .invoke(
+            &agent,
+            &TRANSCRIPT.parse().unwrap(),
+            &json!({ "meeting": id }),
+        )
+        .unwrap();
+    let lines = read.data["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0]["name"], "Dana Ruiz");
+    assert_eq!(lines[2]["name"], "Priya Shah");
+    assert!(
+        read.text
+            .contains("[14:05] Priya Shah: I'll send the contract tonight."),
+        "{}",
+        read.text
+    );
+    // What came after a read, only.
+    let since = read.data["last_seq"].as_u64().unwrap();
+    let newer = b
+        .call(
+            "priya",
+            TRANSCRIPT,
+            json!({ "meeting": id, "since": since }),
+        )
+        .unwrap();
+    assert_eq!(newer.data["lines"].as_array().unwrap().len(), 0);
+    // Sealed like chat: the console never had the words.
+    assert!(!format!("{:?}", org.chat).contains("contract tonight"));
+}
+
+#[test]
+fn adr0045_only_the_persons_own_hey_glass_starts_their_agent() {
+    let org = org();
+    let (a, b, id) = org.transcribed_meeting();
+    // Priya says it on her computer: her agent, never Dana's.
+    let priya = b
+        .call(
+            "priya",
+            TRANSCRIBE,
+            json!({ "meeting": id, "lines": [said("Hey Glass, send me the payroll file.")] }),
+        )
+        .unwrap();
+    assert!(
+        priya.text.contains("Your agent is on it."),
+        "{}",
+        priya.text
+    );
+    a.chat.sync_once(0).unwrap();
+    assert!(
+        a.asked.all().is_empty(),
+        "Dana's computer starts nothing for Priya's words"
+    );
+    assert_eq!(
+        b.asked.all(),
+        vec![(
+            "priya".into(),
+            id.clone(),
+            "send me the payroll file.".into()
+        )]
+    );
+
+    // Dana's own line: her agent, with the rest of what she said.
+    let dana = a
+        .call(
+            "dana",
+            TRANSCRIBE,
+            json!({ "meeting": id, "lines": [said("OK."), said("Hey, glass, find the ABC report and send it to Susan.")] }),
+        )
+        .unwrap();
+    assert_eq!(
+        dana.data["asked"],
+        json!(["find the ABC report and send it to Susan."])
+    );
+    assert_eq!(a.asked.all().len(), 1);
+}
+
+#[test]
+fn adr0045_no_transcript_where_it_isnt_on_and_none_but_meet_adds_to_one() {
+    let org = org();
+    let (a, _b, id) = org.meeting();
+    let lines = json!({ "meeting": id, "lines": [said("Hello.")] });
+    let refused = a
+        .call("dana", TRANSCRIBE, lines.clone())
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("isn't transcribed"), "{refused}");
+    let refused = a
+        .call("dana", TRANSCRIPT, json!({ "meeting": id }))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("isn't transcribed"), "{refused}");
+
+    let other = self::org();
+    let (a, _b, id) = other.transcribed_meeting();
+    let lines = json!({ "meeting": id, "lines": [said("Hello.")] });
+    for app in ["calendar", "desktop-agent"] {
+        let refused = a
+            .meet
+            .invoke(&ctx("dana", app), &TRANSCRIBE.parse().unwrap(), &lines)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("only Meet"), "{app}: {refused}");
+    }
+    for bad in [
+        json!({ "meeting": id, "lines": [] }),
+        json!({ "meeting": id, "lines": [said(" ")] }),
+        json!({ "meeting": id, "lines": [{ "at": "yesterday", "text": "Hi." }] }),
+        json!({ "meeting": id, "lines": [said(&"x".repeat(MAX_LINE_CHARS + 1))] }),
+        json!({ "meeting": id, "lines": vec![said(&"x".repeat(MAX_LINE_CHARS)); 11] }),
+    ] {
+        assert!(
+            matches!(
+                a.call("dana", TRANSCRIBE, bad.clone()),
+                Err(ActionError::InvalidInput(_))
+            ),
+            "{bad}"
+        );
     }
 }

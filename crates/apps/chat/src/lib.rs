@@ -1692,6 +1692,7 @@ mod tests {
             title: "Northwind renewal".into(),
             start: "2026-10-20T14:00".into(),
             end: "2026-10-20T15:00".into(),
+            transcribed: false,
         };
         // An agent's call never makes the organizer's keys.
         let meetings: &dyn Meetings = &a.provider;

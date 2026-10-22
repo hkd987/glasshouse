@@ -163,6 +163,19 @@ pub enum Part {
     Pin { message: String, pinned: bool },
     /// In a chat channel: its topic, set by a member.
     Topic { text: String },
+    /// In a transcribed meeting (ADR 0045): lines its sender's computer
+    /// heard from its own microphone, in order. The message's text is
+    /// empty; the sender is the speaker.
+    Transcript { lines: Vec<TranscriptLine> },
+}
+
+/// One line of a meeting's transcript (ADR 0045).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptLine {
+    /// When it was said, by the speaker's computer's clock (RFC 3339).
+    pub at: String,
+    pub text: String,
 }
 
 /// A blob's key: a fresh random key per blob, never reused.

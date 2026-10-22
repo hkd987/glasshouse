@@ -444,6 +444,26 @@ impl SettingsHandle {
                 let it = policy
                     .as_ref()
                     .and_then(|p| p.settings_for(user).into_iter().find(|r| r.id == def.id));
+                // Only IT turns one of these on (ADR 0045): where it
+                // didn't, it's off and the person can't change that.
+                if settings::narrow_only(def.id)
+                    && it.as_ref().map_or(&def.default, |r| &r.value) != &SettingValue::Bool(true)
+                {
+                    return Effective {
+                        def,
+                        value: SettingValue::Bool(false),
+                        locked: false,
+                        from: if it
+                            .as_ref()
+                            .is_some_and(|r| r.source != settings::Source::Default)
+                        {
+                            SettingFrom::It
+                        } else {
+                            SettingFrom::Default
+                        },
+                        editable: false,
+                    };
+                }
                 match it {
                     Some(r) if r.locked => Effective {
                         def,
@@ -487,6 +507,13 @@ impl SettingsHandle {
                 }
             })
             .collect()
+    }
+
+    /// Whether `user`'s toggle `id` is on, as [`Self::person`] resolves it.
+    pub fn on(&self, user: &str, uid: u32, id: &str) -> bool {
+        self.person(user, uid)
+            .into_iter()
+            .any(|e| e.def.id == id && e.value == SettingValue::Bool(true))
     }
 
     /// The computer's own settings, such as the browser's, as policy sets
@@ -544,6 +571,12 @@ impl SettingsHandle {
                 "IT locked {} at {}; only IT can change it.",
                 def.title,
                 settings::describe(def, &current.value)
+            )));
+        }
+        if !current.editable && settings::narrow_only(id) {
+            return Err(ActionError::Failed(format!(
+                "{} are off where IT hasn't turned them on; only IT turns them on.",
+                def.title
             )));
         }
         if let Some(v) = &value {
@@ -1000,6 +1033,44 @@ members = ["dana"]
 "lock.after_minutes" = { value = 5, locked = true }
 "clock.hour24" = { value = true }
 "#;
+
+    #[test]
+    fn adr0045_only_it_turns_meeting_transcripts_on_and_people_may_turn_theirs_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SettingsHandle::new(dir.path());
+        const ID: &str = "meetings.transcripts";
+        // Nobody set it: off, and the person can't turn it on.
+        handle.set_policy(&policy(""));
+        assert!(!handle.on("dana", 1001, ID));
+        let refused = handle
+            .choose("dana", 1001, ID, Some(SettingValue::Bool(true)))
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("only IT turns them on"), "{refused}");
+        assert!(!handle.on("dana", 1001, ID));
+
+        // IT turns it on for Dana's group, unlocked: she may turn hers off,
+        // and on again; Sam's group didn't, so his stays off.
+        handle.set_policy(&policy(
+            "[[group]]\nname = \"sales\"\nmembers = [\"dana\"]\n\
+             [group.settings]\n\"meetings.transcripts\" = { value = true }\n",
+        ));
+        assert!(handle.on("dana", 1001, ID));
+        assert!(!handle.on("sam", 1002, ID));
+        handle
+            .choose("dana", 1001, ID, Some(SettingValue::Bool(false)))
+            .unwrap();
+        assert!(!handle.on("dana", 1001, ID));
+        handle
+            .choose("dana", 1001, ID, Some(SettingValue::Bool(true)))
+            .unwrap();
+        assert!(handle.on("dana", 1001, ID));
+        assert!(
+            handle
+                .choose("sam", 1002, ID, Some(SettingValue::Bool(true)))
+                .is_err()
+        );
+    }
 
     #[test]
     fn ux1_locked_settings_win_then_the_persons_choice_then_its_default() {

@@ -34,6 +34,25 @@
   margin-left: auto;
 }
 
+/* Transcribed (ADR 0045): said before joining, and shown for the call. */
+.badge {
+  color: #ffb4a8;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.lobby .transcribed {
+  max-width: 460px;
+  margin: 0;
+  padding: 12px 16px;
+  border: 1px solid #5c3d38;
+  border-radius: 10px;
+  background: #2a1f1d;
+  color: #f2d6d1;
+  line-height: 1.45;
+  text-align: center;
+}
+
 .lobby {
   display: flex;
   flex: 1;

@@ -12,6 +12,9 @@
 //!   join <meeting>     join with the WebRTC offer on stdin: the answer,
 //!                      the media key and their seat, as JSON
 //!   leave <meeting>    leave it
+//!   say <meeting> <text>
+//!                      add a line they said to a transcribed meeting's
+//!                      transcript, as their own computer heard it (ADR 0045)
 //! ```
 
 // A command-line tool: its answer is what it prints.
@@ -98,7 +101,7 @@ fn run(args: Vec<String>) -> Result<String, String> {
     let meetings = Arc::new(ChatProvider::new(chat, DirectoryHandle::new()));
     let link = MeetHandle::new();
     link.connect(Arc::new(console()?));
-    let meet = MeetProvider::new(meetings, link, DirectoryHandle::new());
+    let meet = MeetProvider::new(meetings.clone(), link, DirectoryHandle::new()).shared(meetings);
     let call = |action: &str, input: Value| {
         let mut ctx = glass_actions::testing::context(Path::new("/nonexistent"));
         ctx.principal.on_behalf_of.name = login.clone();
@@ -122,6 +125,18 @@ fn run(args: Vec<String>) -> Result<String, String> {
             Ok(joined.data.to_string())
         }
         ["leave", meeting] => Ok(call("meet.leave", json!({ "meeting": meeting }))?.text),
-        _ => Err("list | join <meeting> (offer on stdin) | leave <meeting>".into()),
+        ["say", meeting, text] => {
+            let at = glass_types::Timestamp::now().to_string();
+            let line = json!({ "at": at, "text": text });
+            Ok(call(
+                "meet.transcribe",
+                json!({ "meeting": meeting, "lines": [line] }),
+            )?
+            .text)
+        }
+        _ => Err(
+            "list | join <meeting> (offer on stdin) | leave <meeting> | say <meeting> <text>"
+                .into(),
+        ),
     }
 }

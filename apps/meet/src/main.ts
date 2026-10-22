@@ -23,6 +23,8 @@ interface Joined {
   media_key_id?: string;
   /** This computer's index in the meeting: its SFrame KID. */
   participant: number;
+  /** IT turned transcripts on for its organizer (ADR 0045). */
+  transcribed?: boolean;
 }
 
 /** `meet.keys`: the session's media keys, current first. */
@@ -58,6 +60,8 @@ const state = {
   phase: "lobby" as "lobby" | "joining" | "in" | "left" | "failed",
   error: "",
   notice: "",
+  /** The meeting is transcribed: its people are told before they join (ADR 0045). */
+  transcribed: false,
   mic: true,
   camera: true,
   sharing: false,
@@ -268,6 +272,7 @@ async function join(): Promise<void> {
   // The key goes to the worker before any frame can: until then the
   // worker drops what it is given, so nothing leaves unsealed.
   state.me = joined.participant;
+  state.transcribed = joined.transcribed === true;
   keyIds.set(joined.media_key_id ?? "joined", 0);
   giveKey(joined.media_key, 0);
   await connection.setRemoteDescription({ type: "answer", sdp: joined.answer });
@@ -406,7 +411,11 @@ function draw(): void {
     "header",
     { class: "head" },
     h("h1", {}, "Meeting"),
-    h("span", { class: "sealed", title: "Each frame is sealed on this computer; the relay can't open it, and nothing is recorded." }, "🔒 Sealed end to end"),
+    h("span", { class: "sealed", title: "Each frame is sealed on this computer; the relay can't open it, and audio and video are never recorded." }, "🔒 Sealed end to end"),
+    // For as long as the call lasts (ADR 0045).
+    state.transcribed && state.phase === "in"
+      ? h("span", { class: "badge", "data-test": "transcribing", title: "What people say goes into the meeting's transcript." }, "● Transcribed")
+      : null,
     state.phase === "in" ? h("span", { class: "count", "data-test": "count" }, others.length + 1 === 1 ? "Just you" : `${others.length + 1} people`) : null,
   );
   if (state.phase === "lobby" || state.phase === "joining") {
@@ -417,6 +426,14 @@ function draw(): void {
         "main",
         { class: "lobby" },
         h("p", {}, "Your camera and microphone turn on when you join."),
+        // Before joining, which is the consent (ADR 0045).
+        state.transcribed
+          ? h(
+              "p",
+              { class: "transcribed", "data-test": "transcribed" },
+              "This meeting is transcribed. What you say goes into its transcript, which the people in it and IT can read. Say \u201cHey Glass\u201d and your agent acts on the rest. Audio and video are never recorded.",
+            )
+          : null,
         h("button", { class: "primary", "data-test": "join", disabled: state.phase === "joining", onclick: () => void join() }, state.phase === "joining" ? "Joining…" : "Join"),
       ),
     );
@@ -481,5 +498,19 @@ function draw(): void {
   );
 }
 
+/** Whether this meeting is transcribed, so the lobby can say so before Join. */
+async function lookUp(): Promise<void> {
+  try {
+    const result = await bridge.call<{ meetings: { id: string; transcribed?: boolean }[] }>("meet.list", {});
+    state.transcribed = result.ok && (result.data?.meetings ?? []).some((m) => m.id === meeting && m.transcribed === true);
+  } catch {
+    state.transcribed = false;
+  }
+  draw();
+}
+
 draw();
-void bridge.open().finally(ready);
+void bridge
+  .open()
+  .then(lookUp)
+  .finally(ready);

@@ -423,11 +423,13 @@ As built (slice P, 2026-10-20; `glass_managed::device`):
   - ADR 0024's no-network rule rests on the page's CSP, and CSP doesn't govern WebRTC. So `media` is checked in the manifest, and our engine build (CF-15) must allow WebRTC only to origins that declare it.
   - Until our build exists, that is a gap for every app, Meet or not.
 - **Agents can't join.** Policy validation refuses any agent rule that names `meet.*`, in glassd and in the console. So an agent's call is Never, and comes back as a readable refusal.
+  - Changed by ADR 0045 (2026-10-22): agents may read a transcribed meeting's transcript (`meet.transcript`), the one meeting action they may take; they still never join one or add to its transcript.
 - **ICE.**
   - The relay is ICE-lite on public addresses, with one UDP port for everyone.
   - Computers connect out to it, so there's no TURN in V1.
   - str0m also does ICE over TCP. A passive TCP candidate on port 443 is the fallback for networks that block UDP (slice M3).
 - **Never recorded.**
+  - Changed by ADR 0045 (2026-10-22): where IT turns transcripts on, what each person says is transcribed on their own computer into the meeting's sealed conversation, which IT's compliance key opens. Audio and video are still never recorded.
   - The relay has no code that writes media. It runs from a read-only image with no data volume.
   - Media keys are never sealed to anything that outlives the session.
   - Who joined, when and for how long is metadata. It is on the console and in each computer's audit log (`meet.join`, `meet.leave`).
