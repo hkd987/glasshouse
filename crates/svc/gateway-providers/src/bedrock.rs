@@ -215,6 +215,7 @@ impl BedrockProvider {
             cost_usd: None,
             served_by: None,
             blocks: Vec::new(),
+            ..ProviderReply::default()
         })
     }
 }

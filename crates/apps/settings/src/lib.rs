@@ -255,6 +255,15 @@ impl SettingsHandle {
                 "That isn't an {name} key: they start with {prefix}."
             )));
         }
+        // A Claude sign-in token, not an API key: never ours to keep (ADR
+        // 0042, ADR 0043).
+        if key.starts_with("sk-ant-oat") {
+            return Err(ActionError::InvalidInput(
+                "That's a Claude sign-in token, not an API key. Create an API key in your \
+                 Anthropic account and use that."
+                    .into(),
+            ));
+        }
         keys.connect(Some((service, key)))
             .map_err(ActionError::Failed)?;
         Ok(format!(
@@ -1385,6 +1394,16 @@ members = ["dana"]
             .unwrap_err()
             .to_string();
         assert!(wrong.contains("start with sk-ant-"), "{wrong}");
+        // ADR 0043: a Claude sign-in token is refused, and not kept.
+        let token = provider
+            .invoke(
+                &ctx("dana", 1001, APP),
+                &connect,
+                &json!({ "service": "anthropic", "key": "sk-ant-oat01-not-real" }),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(token.contains("sign-in token, not an API key"), "{token}");
         assert_eq!(keys.connected(), None);
 
         // Dana connects hers: kept, and never said back.

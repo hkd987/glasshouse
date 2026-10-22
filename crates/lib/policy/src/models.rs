@@ -49,6 +49,7 @@ pub struct RouteStep {
     pub endpoint: Option<String>,
     pub usd_per_mtok_in: Option<f64>,
     pub usd_per_mtok_out: Option<f64>,
+    pub usd_per_mtok_cache_read: Option<f64>,
 }
 
 /// Why a call can't go anywhere. The reason is shown to the agent and the
@@ -173,6 +174,7 @@ impl ModelRules {
             endpoint: provider.endpoint.clone(),
             usd_per_mtok_in: model.usd_per_mtok_in,
             usd_per_mtok_out: model.usd_per_mtok_out,
+            usd_per_mtok_cache_read: model.usd_per_mtok_cache_read,
         })
     }
 }
@@ -239,7 +241,11 @@ pub(crate) fn validate(doc: &crate::document::PolicyDocument, errors: &mut Vec<S
                 m.id, m.provider
             ));
         }
-        let prices = [m.usd_per_mtok_in, m.usd_per_mtok_out];
+        let prices = [
+            m.usd_per_mtok_in,
+            m.usd_per_mtok_out,
+            m.usd_per_mtok_cache_read,
+        ];
         if prices.iter().flatten().any(|p| !p.is_finite() || *p < 0.0) {
             errors.push(format!("models.model {:?}: prices can't be negative", m.id));
         }

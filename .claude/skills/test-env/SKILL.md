@@ -37,7 +37,10 @@ make vm-status            # "running: pid …, ssh … up" or not running
 - Agents on a real model: `tools/dev/real-model.sh [openrouter-model]` runs
   the IT and desktop agents in the VM's jails through OpenRouter, with the
   key from `OPENROUTER_API_KEY` (set in the environment's settings, never in
-  chat), and puts the VM back after. In a cloud session the VM's TLS to
+  chat), and puts the VM back after. `--provider anthropic [model]` uses
+  Anthropic directly (default `claude-opus-5-5`) with the key from
+  `GLASS_ANTHROPIC_API_KEY`; never `ANTHROPIC_API_KEY`, which a Claude Code
+  session in the same environment would take as its own. In a cloud session the VM's TLS to
   openrouter.ai fails (the session proxy re-signs HTTPS and the VM doesn't
   trust it; never change that): use `--host`, which runs them on the dev
   host (nothing contained) where this machine's trust applies.

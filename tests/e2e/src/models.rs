@@ -53,11 +53,27 @@ pub fn policy() -> anyhow::Result<String> {
 /// there, such as `anthropic/claude-sonnet-4.5`), for
 /// `tools/dev/real-model.sh`. The key is glassd's model secrets', never
 /// the policy's.
-pub fn real_policy(model: &str) -> anyhow::Result<String> {
+pub fn real_policy(provider: &str, model: &str) -> anyhow::Result<String> {
     ensure!(
         !model.is_empty() && !model.contains(['"', '\\', '\n']),
         "{model:?} isn't a model id"
     );
+    let name = match provider {
+        "openrouter" => "OpenRouter",
+        "anthropic" => "Anthropic",
+        _ => anyhow::bail!("{provider:?} isn't openrouter or anthropic"),
+    };
+    // OpenRouter says what each call cost; for Anthropic's current models
+    // the record prices them from their list prices (ADR 0043).
+    let prices = match model {
+        "claude-opus-5-5" => {
+            "usd_per_mtok_in = 4.0\nusd_per_mtok_out = 20.0\nusd_per_mtok_cache_read = 0.2\n"
+        }
+        "claude-sonnet-5-5" => {
+            "usd_per_mtok_in = 2.0\nusd_per_mtok_out = 10.0\nusd_per_mtok_cache_read = 0.2\n"
+        }
+        _ => "",
+    };
     let models = format!(
         r#"
 default = "real"
@@ -66,16 +82,16 @@ default = "real"
 pii = ["email"]
 
 [[provider]]
-id = "openrouter"
-kind = "openrouter"
-name = "OpenRouter"
+id = "{provider}"
+kind = "{provider}"
+name = "{name}"
 
 [[model]]
 id = "real"
-provider = "openrouter"
+provider = "{provider}"
 model = "{model}"
 name = "{model}"
-"#
+{prices}"#
     );
     with_models(&models, "tools/dev/real-model.sh")
 }

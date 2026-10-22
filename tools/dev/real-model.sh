@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Usage: tools/dev/real-model.sh [--host] [openrouter-model]   (default anthropic/claude-sonnet-4.5)
+# Usage: tools/dev/real-model.sh [--host] [--provider openrouter|anthropic] [model]
 #
-# The IT agent and the desktop agent on a real model through OpenRouter, with the key in
-# OPENROUTER_API_KEY. Set that in this environment's settings, never in chat or the repo: it goes
+# The IT agent and the desktop agent on a real model:
+#   openrouter (the default): model anthropic/claude-sonnet-4.5 unless named, key in OPENROUTER_API_KEY
+#   anthropic (ADR 0043): model claude-opus-5-5 unless named, key in GLASS_ANTHROPIC_API_KEY (not
+#     ANTHROPIC_API_KEY, which a Claude Code session in the same environment would use itself)
+# Set the key in this environment's settings, never in chat or the repo: it goes
 # into a model-secrets file only its owner can read (over ssh's stdin, for the VM) and is never
 # printed. Writes a policy naming the model (glass-e2e real-model-policy), runs one task per agent
 # (the IT agent's help desk ticket is approved), prints what each did and said and the record of
@@ -17,19 +20,36 @@ set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 host=
-if [[ ${1:-} == --host ]]; then
-	host=1
-	shift
-fi
-model=${1:-anthropic/claude-sonnet-4.5}
-
+provider=openrouter
 die() {
 	echo "real-model: $*" >&2
 	exit 1
 }
-[[ -n ${OPENROUTER_API_KEY:-} ]] ||
-	die "OPENROUTER_API_KEY isn't set: add it in this environment's settings"
-[[ $model =~ ^[A-Za-z0-9._:/-]+$ ]] || die "'$model' isn't an OpenRouter model id"
+while [[ ${1:-} == --* ]]; do
+	case $1 in
+	--host) host=1 ;;
+	--provider)
+		provider=${2:-}
+		shift
+		;;
+	*) die "unknown option $1" ;;
+	esac
+	shift
+done
+case $provider in
+openrouter)
+	model=${1:-anthropic/claude-sonnet-4.5}
+	keyvar=OPENROUTER_API_KEY
+	;;
+anthropic)
+	model=${1:-claude-opus-5-5}
+	keyvar=GLASS_ANTHROPIC_API_KEY
+	;;
+*) die "--provider is openrouter or anthropic" ;;
+esac
+key=${!keyvar:-}
+[[ -n $key ]] || die "$keyvar isn't set: add it in this environment's settings"
+[[ $model =~ ^[A-Za-z0-9._:/-]+$ ]] || die "'$model' isn't a model id"
 
 # One task per agent, as whoever runs it; DIR is a folder the desktop agent may read.
 # shellcheck disable=SC2016
@@ -66,8 +86,8 @@ if [[ -n $host ]]; then
 	bin=${CARGO_TARGET_DIR:-$repo/target}/debug
 	mkdir -p "$dev"
 	cargo build -q -p glass-e2e
-	"$bin/glass-e2e" real-model-policy "$model" >"$dev/real-policy.toml"
-	(umask 077 && printf '[openrouter]\napi_key = "%s"\n' "$OPENROUTER_API_KEY" >"$dev/model-secrets.toml")
+	"$bin/glass-e2e" real-model-policy "$provider" "$model" >"$dev/real-policy.toml"
+	(umask 077 && printf '[%s]\napi_key = "%s"\n' "$provider" "$key" >"$dev/model-secrets.toml")
 	GLASS_DEV_DIR=$dev GLASS_DEV_RUN=$run GLASS_DEV_POLICY=$dev/real-policy.toml \
 		GLASS_DEV_MODEL_SECRETS=$dev/model-secrets.toml "$repo/tools/dev/host-run.sh" >"$dev/glassd.log" 2>&1 &
 	glassd=$!
@@ -113,8 +133,8 @@ trap put_back EXIT
 for f in policy.toml model-secrets.toml; do
 	if [ -e $etc/\$f ]; then mv $etc/\$f $etc/\$f.real-model-saved; fi
 done
-$e2e real-model-policy '$model' >$etc/policy.toml"
-printf '[openrouter]\napi_key = "%s"\n' "$OPENROUTER_API_KEY" |
+$e2e real-model-policy '$provider' '$model' >$etc/policy.toml"
+printf '[%s]\napi_key = "%s"\n' "$provider" "$key" |
 	"$vm" ssh "umask 077; cat >$etc/model-secrets.toml"
 "$vm" run "$restart"
 

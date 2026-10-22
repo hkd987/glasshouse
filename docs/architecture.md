@@ -154,9 +154,18 @@ agent ── model_complete ──► pipeline: tier → route by label → ask?
   Converse with SigV4 and temporary credentials only (MP-1, MP-2), in
   `glass-gateway-providers`, the one crate with HTTP and TLS (native-tls on
   the base system's OpenSSL).
+- **Replays** (ADR 0043): a provider that needs its reply back verbatim
+  (Anthropic's thinking blocks) gets it through the agent, sealed by the
+  gateway with a per-process key. Only replays it sealed go, only to the
+  provider that wrote them, never redacted again; one that changed means
+  none of the call's go. Redaction numbers placeholders by first
+  appearance, so a conversation's prefix redacts the same on every call,
+  which the provider's binding and prompt cache need.
 - **The record** is the action's audit entry with `detail.model`: model,
-  provider, tokens, cost, label, redactions, and the sizes and SHA-256 of
-  what crossed, but no prompt text unless policy sets `log_prompts` (DP-5).
+  provider, tokens (cache writes and reads among them), cost, label,
+  redactions, and the sizes and SHA-256 of what crossed, but no prompt text
+  unless policy sets `log_prompts` (DP-5). A refusal (`stop_reason:
+  "refusal"`) ends the call with all of that on the record.
 - **Credentials** come from a root-only file, `model-secrets.toml`, the
   stand-in for the secrets broker (MP-4), refused unless it is private to
   glassd's user and outside everything mounted into a jail.

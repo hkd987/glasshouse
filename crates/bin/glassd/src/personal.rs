@@ -75,18 +75,22 @@ pub(crate) fn with_models(policy: Policy, service: Option<&str>, agents: &[Strin
     let Some(service) = service else {
         return policy;
     };
-    let (kind, name, model, model_name) = match service {
+    // OpenRouter says what each call cost; Anthropic's prices are its
+    // list prices for the model (ADR 0043).
+    let (kind, name, model, model_name, prices) = match service {
         "openrouter" => (
             ProviderKind::OpenRouter,
             "Your OpenRouter account",
             glass_gateway_providers::OPENROUTER_AUTO,
             "The best model for each request",
+            [None; 3],
         ),
         "anthropic" => (
             ProviderKind::Anthropic,
             "Your Anthropic account",
-            "claude-sonnet-5-5",
-            "Claude Sonnet",
+            "claude-opus-5-5",
+            "Claude Opus",
+            [Some(4.0), Some(20.0), Some(0.2)],
         ),
         _ => return policy,
     };
@@ -106,8 +110,9 @@ pub(crate) fn with_models(policy: Policy, service: Option<&str>, agents: &[Strin
         provider: PROVIDER.into(),
         model: model.into(),
         name: model_name.into(),
-        usd_per_mtok_in: None,
-        usd_per_mtok_out: None,
+        usd_per_mtok_in: prices[0],
+        usd_per_mtok_out: prices[1],
+        usd_per_mtok_cache_read: prices[2],
     });
     doc.models.default.get_or_insert_with(|| PROVIDER.into());
     for rules in doc

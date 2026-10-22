@@ -1,6 +1,9 @@
 # 0042. The desktop agent on the person's own Claude Code and Claude plan
 
-Status: **Proposed, first slice built** (2026-10-21). The owner asked for
+Status: **On hold** (2026-10-22): the owner chose Anthropic's API in our
+own harness (ADR 0043) while this waits on Anthropic's confirmation and a
+FreeBSD build of Claude Code. The first slice stays built for development
+hosts. **Proposed, first slice built** (2026-10-21). The owner asked for
 it: "the ability to work with the user's Claude Code harness so we can use
 that subscription if they have one." PRD MP-5, HX-1, HX-2, HX-3, HX-7,
 AE-3. Builds on ADR 0015 (attended harnesses) and ADR 0041 (the desktop

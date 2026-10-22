@@ -10,7 +10,7 @@
 //! glass-e2e release <id>        stop it
 //! glass-e2e sleeping|awake <id> its state after a system suspend / resume
 //! glass-e2e models-policy       print the policy the `models` scenario needs
-//! glass-e2e real-model-policy <openrouter-model>
+//! glass-e2e real-model-policy <openrouter|anthropic> <model>
 //!                               the default policy with that model (tools/dev/real-model.sh)
 //! glass-e2e models              the model gateway (run-vm.sh installs that policy first)
 //! ```
@@ -63,10 +63,10 @@ async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let printed = match args.first().map(String::as_str) {
         Some("models-policy") => Some(models::policy()),
-        Some("real-model-policy") => Some(match args.get(1) {
-            Some(model) => models::real_policy(model),
-            None => Err(anyhow::anyhow!(
-                "usage: glass-e2e real-model-policy <openrouter-model>"
+        Some("real-model-policy") => Some(match (args.get(1), args.get(2)) {
+            (Some(provider), Some(model)) => models::real_policy(provider, model),
+            _ => Err(anyhow::anyhow!(
+                "usage: glass-e2e real-model-policy <openrouter|anthropic> <model>"
             )),
         }),
         _ => None,

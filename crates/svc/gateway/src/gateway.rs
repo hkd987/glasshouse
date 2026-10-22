@@ -130,6 +130,12 @@ pub struct CallRecord {
     pub input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    /// Of the input, tokens written to and read from the provider's prompt
+    /// cache (ADR 0043).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
     /// The model a router chose to answer, such as OpenRouter's auto
     /// router (ADR 0039).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -281,6 +287,8 @@ impl Gateway {
             region: None,
             input_tokens: None,
             output_tokens: None,
+            cache_write_tokens: None,
+            cache_read_tokens: None,
             served_by: None,
             cost_usd: None,
             tools_offered: (!tools.is_empty()).then_some(tools.len()),
@@ -336,10 +344,30 @@ impl Gateway {
                     record.region.clone_from(&step.region);
                     record.input_tokens = Some(reply.input_tokens);
                     record.output_tokens = Some(reply.output_tokens);
-                    record.cost_usd = reply
-                        .cost_usd
-                        .or_else(|| cost(step, reply.input_tokens, reply.output_tokens));
+                    record.cache_write_tokens =
+                        (reply.cache_write_tokens > 0).then_some(reply.cache_write_tokens);
+                    record.cache_read_tokens =
+                        (reply.cache_read_tokens > 0).then_some(reply.cache_read_tokens);
+                    record.cost_usd = reply.cost_usd.or_else(|| cost(step, &reply));
                     record.served_by.clone_from(&reply.served_by);
+                    // Declined: billed like any call, so on the record, but
+                    // nothing to hand the agent. Another model on the route
+                    // is for outages, not for this (ADR 0043).
+                    if reply.stop_reason.as_deref() == Some("refusal") {
+                        let why = reply
+                            .declined
+                            .as_deref()
+                            .map(|c| format!(" ({c})"))
+                            .unwrap_or_default();
+                        record.response = Some(Digest::of(""));
+                        return Err(Box::new(Failure {
+                            message: format!(
+                                "{} via {} declined the request{why}",
+                                step.name, step.provider_name
+                            ),
+                            record,
+                        }));
+                    }
                     record.tools_called = reply.tool_calls.iter().map(|c| c.name.clone()).collect();
                     let answered = if reply.tool_calls.is_empty() {
                         reply.text.clone()
@@ -436,10 +464,19 @@ fn restore_json(value: &serde_json::Value, vault: &Vault) -> serde_json::Value {
     }
 }
 
-/// Dollars for a call, when policy prices both directions.
-fn cost(step: &RouteStep, input: u64, output: u64) -> Option<f64> {
+/// Dollars for a call, when policy prices both directions. Input the
+/// provider's cache wrote costs 1.25 times the input price; input it read,
+/// the model's cache price, else a tenth of the input price (ADR 0043).
+fn cost(step: &RouteStep, reply: &crate::ProviderReply) -> Option<f64> {
     let (inp, out) = (step.usd_per_mtok_in?, step.usd_per_mtok_out?);
-    let dollars = (input as f64 * inp + output as f64 * out) / 1_000_000.0;
+    let read = step.usd_per_mtok_cache_read.unwrap_or(inp / 10.0);
+    let (written, cached) = (reply.cache_write_tokens, reply.cache_read_tokens);
+    let fresh = reply.input_tokens.saturating_sub(written + cached);
+    let dollars = (fresh as f64 * inp
+        + written as f64 * inp * 1.25
+        + cached as f64 * read
+        + reply.output_tokens as f64 * out)
+        / 1_000_000.0;
     // Micro-dollars are plenty; keeps records short.
     Some((dollars * 1_000_000.0).round() / 1_000_000.0)
 }
@@ -464,6 +501,7 @@ mod tests {
             endpoint: None,
             usd_per_mtok_in: Some(3.0),
             usd_per_mtok_out: Some(15.0),
+            usd_per_mtok_cache_read: None,
         }
     }
 
@@ -507,6 +545,7 @@ mod tests {
                 served_by: Some("anthropic/claude-sonnet-4.5".into()),
                 tool_calls: Vec::new(),
                 blocks: Vec::new(),
+                ..ProviderReply::default()
             })
         }
     }
@@ -916,11 +955,76 @@ mod tests {
         assert_eq!(record["failed_over"].as_array().unwrap().len(), 2);
     }
 
+    fn used(input: u64, output: u64) -> ProviderReply {
+        ProviderReply {
+            input_tokens: input,
+            output_tokens: output,
+            ..ProviderReply::default()
+        }
+    }
+
     #[test]
     fn cost_needs_both_prices() {
         let mut s = step("m", "p");
-        assert_eq!(cost(&s, 1_000_000, 100_000), Some(4.5));
+        assert_eq!(cost(&s, &used(1_000_000, 100_000)), Some(4.5));
         s.usd_per_mtok_out = None;
-        assert_eq!(cost(&s, 10, 10), None);
+        assert_eq!(cost(&s, &used(10, 10)), None);
+    }
+
+    #[test]
+    fn adr0043_cache_writes_cost_more_and_reads_much_less() {
+        // A million in, at $3: 200k fresh, 300k written, 500k read.
+        let mut s = step("m", "p");
+        let reply = ProviderReply {
+            cache_write_tokens: 300_000,
+            cache_read_tokens: 500_000,
+            ..used(1_000_000, 0)
+        };
+        // 0.6 + 1.125 + 0.15 (a tenth of the input price)
+        assert_eq!(cost(&s, &reply), Some(1.875));
+        s.usd_per_mtok_cache_read = Some(0.2);
+        // 0.6 + 1.125 + 0.1
+        assert_eq!(cost(&s, &reply), Some(1.825));
+    }
+
+    /// Declines everything, as Anthropic's classifiers can: HTTP 200, the
+    /// call billed.
+    #[derive(Debug)]
+    struct Declines;
+
+    impl ModelProvider for Declines {
+        fn complete(&self, _: &ProviderRequest<'_>) -> Result<ProviderReply, ProviderError> {
+            Ok(ProviderReply {
+                stop_reason: Some("refusal".into()),
+                declined: Some("cyber".into()),
+                ..used(1_000, 0)
+            })
+        }
+    }
+
+    #[test]
+    fn adr0043_a_refusal_ends_the_call_on_the_record() {
+        let spare = Arc::new(ScriptedProvider::echo());
+        let gateway = Gateway::new()
+            .with("declines", Arc::new(Declines))
+            .with("spare", spare.clone());
+        let route = route(vec![step("first", "declines"), step("second", "spare")]);
+        let failure = gateway
+            .complete(Call {
+                input: &input("hello"),
+                route: &route,
+                redactor: &redactor(),
+                log_prompts: false,
+            })
+            .unwrap_err();
+        assert_eq!(
+            failure.message,
+            "Claude Sonnet via DECLINES declined the request (cyber)"
+        );
+        assert!(spare.seen().is_empty(), "no failover on a refusal");
+        let r = &failure.record;
+        assert_eq!(r.model.as_deref(), Some("first"));
+        assert_eq!(r.input_tokens, Some(1_000));
+        assert_eq!(r.cost_usd, Some(0.003));
     }
 }

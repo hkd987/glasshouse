@@ -19,10 +19,13 @@ use glass_gateway::ProviderError;
 /// The most of a reply we read. Model replies are text; this is generous.
 const MAX_REPLY: usize = 8 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Long replies take a while; a stuck call fails over eventually.
-const CALL_TIMEOUT: Duration = Duration::from_secs(300);
-/// The longest a connection may sit silent.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Long replies take a while; a stuck call fails over eventually. Ten
+/// minutes is the most a model API answers in without streaming, and a
+/// reply that thinks first can take most of it (ADR 0043).
+const CALL_TIMEOUT: Duration = Duration::from_secs(600);
+/// The longest a connection may sit silent. Without streaming, a reply
+/// says nothing until it's whole.
+const IDLE_TIMEOUT: Duration = CALL_TIMEOUT;
 /// How much longer a hop in front of a provider waits than the provider's
 /// own call (ADR 0039: a computer's call through its console), so the far
 /// end gives up first and the near end hears why.

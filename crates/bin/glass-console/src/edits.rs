@@ -104,6 +104,7 @@ fn credits(doc: &mut PolicyDocument, on: bool) {
                 name: "The best model for each request".into(),
                 usd_per_mtok_in: None,
                 usd_per_mtok_out: None,
+                usd_per_mtok_cache_read: None,
             });
         }
         models.default.get_or_insert_with(|| CREDITS_MODEL.into());

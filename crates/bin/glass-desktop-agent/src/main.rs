@@ -19,8 +19,9 @@ use serde_json::{Value, json};
 
 /// Rounds of model and tools before the agent stops with what it has.
 const MAX_STEPS: usize = 20;
-/// The most a model may write in one round.
-const MAX_TOKENS: u32 = 2048;
+/// The most a model may write in one round, its thinking included (ADR
+/// 0043).
+const MAX_TOKENS: u32 = 16_000;
 /// The most of one tool's result sent back to the model.
 const MAX_RESULT_CHARS: usize = 20_000;
 /// Its own tools, which the model never calls: the agent does.

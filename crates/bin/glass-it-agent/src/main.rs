@@ -31,14 +31,16 @@ storage (disk space, caches) and performance (slowness, freezing, fans), and is 
 empty when nothing fits. Its field restart is a service the person asked by name \
 to restart, or null. Its field no_fix is true for hardware and anything else none \
 of the checks covers, such as printers, monitors, keyboards and cameras.";
-const TRIAGE_TOKENS: u32 = 200;
+/// Room to think first: current models count their thinking here (ADR
+/// 0043). The answer itself is short.
+const TRIAGE_TOKENS: u32 = 2_000;
 
 /// How the model writes up a ticket for IT.
 const ASSESS: &str = "You are a computer's IT agent, writing in a help desk \
 ticket for IT staff. From what the person reported and what the checks found, \
 say in under 120 words what is most likely wrong and what IT should try next. \
 Plain words, no greeting, no sign-off.";
-const ASSESS_TOKENS: u32 = 400;
+const ASSESS_TOKENS: u32 = 4_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Area {

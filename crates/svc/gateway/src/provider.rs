@@ -22,11 +22,20 @@ pub struct ProviderReply {
     pub text: String,
     /// The tools the model asked for, in order (ADR 0041).
     pub tool_calls: Vec<ToolCall>,
+    /// Every input token, those the provider's prompt cache wrote and read
+    /// included.
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Input tokens written to the provider's prompt cache, and read from
+    /// it (ADR 0043): part of `input_tokens`, priced differently.
+    pub cache_write_tokens: u64,
+    pub cache_read_tokens: u64,
     /// Why the model stopped, as the provider says it ("end_turn",
-    /// "max_tokens").
+    /// "max_tokens"). "refusal" when it declined (ADR 0043).
     pub stop_reason: Option<String>,
+    /// Why it declined, when the provider says (Anthropic's
+    /// `stop_details.category`: "cyber", "bio", …).
+    pub declined: Option<String>,
     /// What the provider charged for the call, in dollars, when it says
     /// (OpenRouter does); otherwise the gateway estimates from policy.
     pub cost_usd: Option<f64>,

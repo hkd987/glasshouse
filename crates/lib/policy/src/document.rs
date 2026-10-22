@@ -271,8 +271,9 @@ fn default_unlabeled() -> Label {
     Label::Internal
 }
 
+/// Room for current models' thinking, which counts as output (ADR 0043).
 fn default_max_output_tokens() -> u32 {
-    4096
+    16_000
 }
 
 /// A model service glassd may call (MP-1 … MP-4). Its credentials live in
@@ -331,6 +332,10 @@ pub struct ModelEntry {
     pub usd_per_mtok_in: Option<f64>,
     #[serde(default)]
     pub usd_per_mtok_out: Option<f64>,
+    /// Price per million input tokens read from the provider's prompt
+    /// cache (ADR 0043); a tenth of the input price when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usd_per_mtok_cache_read: Option<f64>,
 }
 
 /// PII redaction on top of the built-in secret detectors (DP-3).

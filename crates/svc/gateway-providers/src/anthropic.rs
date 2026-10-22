@@ -15,6 +15,10 @@ pub struct AnthropicProvider {
     http: Http,
     endpoint: String,
     key: Secret,
+    /// Automatic prompt caching for the conversation's tail, a top-level
+    /// field Anthropic's own API takes; endpoints policy names instead may
+    /// not.
+    auto_cache: bool,
 }
 
 #[derive(Deserialize)]
@@ -24,13 +28,28 @@ struct Response {
     content: Vec<serde_json::Value>,
     #[serde(default)]
     stop_reason: Option<String>,
+    /// On a refusal, its category when Anthropic says (ADR 0043).
+    #[serde(default)]
+    stop_details: Option<StopDetails>,
     usage: Usage,
 }
 
 #[derive(Deserialize)]
+struct StopDetails {
+    #[serde(default)]
+    category: Option<String>,
+}
+
+/// Anthropic counts cached input apart: `input_tokens` is only what came
+/// after the last cache breakpoint.
+#[derive(Deserialize)]
 struct Usage {
     input_tokens: u64,
     output_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -49,12 +68,14 @@ impl AnthropicProvider {
     }
 
     fn with_http(http: Http, endpoint: Option<&str>, key: Secret) -> Self {
+        let endpoint = endpoint
+            .unwrap_or(DEFAULT_ENDPOINT)
+            .trim_end_matches('/')
+            .to_owned();
         Self {
             http,
-            endpoint: endpoint
-                .unwrap_or(DEFAULT_ENDPOINT)
-                .trim_end_matches('/')
-                .to_owned(),
+            auto_cache: endpoint == DEFAULT_ENDPOINT,
+            endpoint,
             key,
         }
     }
@@ -67,8 +88,14 @@ impl ModelProvider for AnthropicProvider {
             "max_tokens": request.max_tokens,
             "messages": crate::tools::anthropic_messages(request.messages),
         });
+        // The prompt cache (ADR 0043): a breakpoint at the end of the
+        // instructions, which the tools come before, so every step of a
+        // tool loop reads them; and the tail, which grows by a turn a step.
         if let Some(system) = request.system {
-            body["system"] = json!(system);
+            body["system"] = json!([{ "type": "text", "text": system, "cache_control": { "type": "ephemeral" } }]);
+        }
+        if self.auto_cache {
+            body["cache_control"] = json!({ "type": "ephemeral" });
         }
         if !request.tools.is_empty() {
             body["tools"] = crate::tools::anthropic_tools(request.tools);
@@ -97,12 +124,19 @@ impl ModelProvider for AnthropicProvider {
             .filter_map(|b| b["text"].as_str())
             .collect::<Vec<_>>()
             .join("");
+        let usage = &response.usage;
         Ok(ProviderReply {
             text,
             tool_calls: crate::tools::anthropic_calls(&response.content),
-            input_tokens: response.usage.input_tokens,
-            output_tokens: response.usage.output_tokens,
+            input_tokens: usage.input_tokens
+                + usage.cache_creation_input_tokens
+                + usage.cache_read_input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_write_tokens: usage.cache_creation_input_tokens,
+            cache_read_tokens: usage.cache_read_input_tokens,
+            // "refusal": the gateway ends the call (ADR 0043).
             stop_reason: response.stop_reason,
+            declined: response.stop_details.and_then(|d| d.category),
             cost_usd: None,
             served_by: None,
             // All of it goes back on the next call, thinking included.
@@ -166,10 +200,51 @@ mod tests {
             json!({
                 "model": "claude-test",
                 "max_tokens": 64,
-                "system": "Be brief.",
+                "system": [{"type": "text", "text": "Be brief.", "cache_control": {"type": "ephemeral"}}],
                 "messages": [{"role": "user", "content": "Hello [redacted:email#1]"}]
             })
         );
+    }
+
+    #[test]
+    fn adr0043_the_cache_is_marked_and_what_it_saved_is_counted() {
+        let (url, got) = fake::serve(
+            200,
+            r#"{"content":[{"type":"text","text":"Hi"}],"stop_reason":"end_turn","usage":{"input_tokens":50,"output_tokens":3,"cache_creation_input_tokens":200,"cache_read_input_tokens":1800}}"#,
+        );
+        let mut provider =
+            AnthropicProvider::with_http(Http::insecure_for_tests(), Some(&url), Secret::new("k"));
+        assert!(!provider.auto_cache, "only Anthropic's own endpoint");
+        provider.auto_cache = true;
+        let messages = hello();
+        let reply = provider.complete(&request(&messages)).unwrap();
+        assert_eq!(reply.input_tokens, 2_050);
+        assert_eq!(
+            (reply.cache_write_tokens, reply.cache_read_tokens),
+            (200, 1_800)
+        );
+        let body: serde_json::Value = serde_json::from_str(&got.recv().unwrap().body).unwrap();
+        assert_eq!(body["cache_control"], json!({ "type": "ephemeral" }));
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
+        assert!(AnthropicProvider::new(None, Secret::new("k")).auto_cache);
+    }
+
+    #[test]
+    fn adr0043_a_refusal_says_why() {
+        let (url, _got) = fake::serve(
+            200,
+            r#"{"content":[],"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber"},"usage":{"input_tokens":40,"output_tokens":0}}"#,
+        );
+        let provider =
+            AnthropicProvider::with_http(Http::insecure_for_tests(), Some(&url), Secret::new("k"));
+        let messages = hello();
+        let reply = provider.complete(&request(&messages)).unwrap();
+        assert_eq!(reply.stop_reason.as_deref(), Some("refusal"));
+        assert_eq!(reply.declined.as_deref(), Some("cyber"));
+        assert_eq!(reply.text, "");
     }
 
     #[test]

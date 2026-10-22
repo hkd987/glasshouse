@@ -282,6 +282,7 @@ impl ModelForwarder for DevModels {
             served_by: Some("development/echo".into()),
             tool_calls: call.into_iter().collect(),
             blocks: Vec::new(),
+            ..ProviderReply::default()
         })
     }
 }

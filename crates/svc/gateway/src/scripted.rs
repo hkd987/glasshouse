@@ -201,6 +201,7 @@ impl ModelProvider for ScriptedProvider {
             blocks: blocks(request, &text, &[]),
             text,
             tool_calls: Vec::new(),
+            ..ProviderReply::default()
         })
     }
 }
