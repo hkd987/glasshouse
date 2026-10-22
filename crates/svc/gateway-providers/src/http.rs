@@ -52,6 +52,9 @@ struct Proxy {
 pub(crate) struct Reply {
     pub status: u16,
     pub body: String,
+    /// How long the server asked us to wait before trying again
+    /// (`retry-after`, in seconds), when it said.
+    pub retry_after: Option<Duration>,
 }
 
 /// Where a request goes.
@@ -269,19 +272,28 @@ enum Framing {
     Close,
 }
 
+/// A reply's head, once it's all there.
+struct Head {
+    status: u16,
+    /// Where the body starts.
+    at: usize,
+    framing: Framing,
+    retry_after: Option<Duration>,
+}
+
 fn read_reply(stream: &mut dyn Stream, deadline: Instant) -> Result<Reply, ProviderError> {
     let mut buf: Vec<u8> = Vec::with_capacity(16 * 1024);
     let mut chunk = [0u8; 16 * 1024];
-    let mut parsed: Option<(u16, usize, Framing)> = None;
+    let mut parsed: Option<Head> = None;
     let mut closed = false;
     loop {
         if parsed.is_none() {
             parsed = head(&buf)?;
         }
-        if let Some((status, at, framing)) = &parsed {
-            let body = &buf[*at..];
-            let done = match framing {
-                Framing::Length(n) if body.len() >= *n => Some(body[..*n].to_vec()),
+        if let Some(head) = &parsed {
+            let body = &buf[head.at..];
+            let done = match head.framing {
+                Framing::Length(n) if body.len() >= n => Some(body[..n].to_vec()),
                 Framing::Chunked => dechunk(body)?,
                 Framing::Close if closed => Some(body.to_vec()),
                 _ => None,
@@ -290,8 +302,9 @@ fn read_reply(stream: &mut dyn Stream, deadline: Instant) -> Result<Reply, Provi
                 let body = String::from_utf8(body)
                     .map_err(|_| ProviderError::Unavailable("the reply isn't UTF-8".into()))?;
                 return Ok(Reply {
-                    status: *status,
+                    status: head.status,
                     body,
+                    retry_after: head.retry_after,
                 });
             }
         }
@@ -313,15 +326,20 @@ fn read_reply(stream: &mut dyn Stream, deadline: Instant) -> Result<Reply, Provi
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
             // A server that closes without TLS close_notify ends the body
             // of a reply framed by the connection.
-            Err(_) if matches!(parsed, Some((_, _, Framing::Close))) => closed = true,
+            Err(_)
+                if parsed
+                    .as_ref()
+                    .is_some_and(|h| matches!(h.framing, Framing::Close)) =>
+            {
+                closed = true;
+            }
             Err(e) => return Err(outage("reading the reply", &e)),
         }
     }
 }
 
-/// The status, where the body starts and how it's framed, once the head is
-/// all there.
-fn head(buf: &[u8]) -> Result<Option<(u16, usize, Framing)>, ProviderError> {
+/// The reply's head, once it's all there.
+fn head(buf: &[u8]) -> Result<Option<Head>, ProviderError> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut response = httparse::Response::new(&mut headers);
     let at = match response.parse(buf) {
@@ -354,7 +372,16 @@ fn head(buf: &[u8]) -> Result<Option<(u16, usize, Framing)>, ProviderError> {
     } else {
         Framing::Close
     };
-    Ok(Some((status, at, framing)))
+    // Seconds only: the HTTP-date form is for humans' clocks.
+    let retry_after = value("retry-after")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs);
+    Ok(Some(Head {
+        status,
+        at,
+        framing,
+        retry_after,
+    }))
 }
 
 /// The body of a chunked reply, once its last chunk has arrived.
@@ -592,6 +619,20 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_says_when_to_try_again() {
+        let (url, _got) = fake::serve_headed(vec![
+            (429, "Retry-After: 7\r\n", "{}"),
+            (429, "retry-after: Wed, 21 Oct 2026 07:28:00 GMT\r\n", "{}"),
+            (200, "", "{}"),
+        ]);
+        let http = Http::insecure_for_tests();
+        let asked = |http: &Http| http.post(&url, &[], b"{}").unwrap().retry_after;
+        assert_eq!(asked(&http), Some(Duration::from_secs(7)));
+        assert_eq!(asked(&http), None, "seconds only");
+        assert_eq!(asked(&http), None);
+    }
+
+    #[test]
     fn statuses_say_whether_to_fail_over() {
         assert!(classify(429, String::new()).fails_over());
         assert!(classify(503, String::new()).fails_over());
@@ -625,11 +666,18 @@ pub(crate) mod fake {
     /// Serves one request per reply, in order; returns the base URL and
     /// the requests it got.
     pub fn serve_each(replies: Vec<(u16, &'static str)>) -> (String, mpsc::Receiver<Request>) {
+        serve_headed(replies.into_iter().map(|(s, r)| (s, "", r)).collect())
+    }
+
+    /// As [`serve_each`], each reply with more header lines (`name: value\r\n`).
+    pub fn serve_headed(
+        replies: Vec<(u16, &'static str, &'static str)>,
+    ) -> (String, mpsc::Receiver<Request>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            for (status, reply) in replies {
+            for (status, headers, reply) in replies {
                 let (stream, _) = listener.accept().unwrap();
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut head = String::new();
@@ -650,7 +698,7 @@ pub(crate) mod fake {
                 let mut stream = stream;
                 write!(
                 stream,
-                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{reply}",
                 reply.len()
             )
             .unwrap();

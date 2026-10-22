@@ -72,6 +72,38 @@ fn result_text(result: &CallToolResult) -> String {
     cut
 }
 
+/// What a model's reply asks of the agent.
+#[derive(Debug, PartialEq)]
+enum Step {
+    /// Make these calls and send back what they return.
+    Calls(Vec<Value>),
+    /// Done: this is the answer.
+    Answer(String),
+    /// Cut off at `max_tokens`: thinking can take all of a step's room,
+    /// and a call it was writing may be cut short, so it is neither an
+    /// answer nor calls to make (ADR 0043).
+    CutOff,
+}
+
+fn step(reply: &CallToolResult) -> Step {
+    let data = reply.structured_content.as_ref();
+    if data.is_some_and(|d| d["stop_reason"] == "max_tokens") {
+        return Step::CutOff;
+    }
+    let calls = data
+        .and_then(|d| d["tool_calls"].as_array().cloned())
+        .unwrap_or_default();
+    if !calls.is_empty() {
+        return Step::Calls(calls);
+    }
+    let text = reply.text();
+    Step::Answer(if text.trim().is_empty() {
+        "Done.".to_owned()
+    } else {
+        text
+    })
+}
+
 /// A tile caption from the answer's first line.
 fn caption(answer: &str) -> String {
     let line = answer
@@ -96,7 +128,7 @@ async fn run() -> anyhow::Result<()> {
     let tools = offered(&agent.tool_list().await?);
     let mut messages = vec![json!({ "role": "user", "content": agent.prompt })];
 
-    for step in 1..=MAX_STEPS {
+    for round in 1..=MAX_STEPS {
         agent.progress("Thinking", None, None).await?;
         let reply = agent
             .call(
@@ -114,22 +146,20 @@ async fn run() -> anyhow::Result<()> {
             // without one.
             bail!("no AI model could help: {}", reply.text());
         }
-        let text = reply.text();
+        let calls = match step(&reply) {
+            Step::Calls(calls) => calls,
+            Step::Answer(answer) => {
+                agent.answer(&caption(&answer), &answer).await?;
+                eprintln!("answered after {round} round(s)");
+                return Ok(());
+            }
+            Step::CutOff => bail!(
+                "the AI model ran out of room before it finished a step \
+                 ({MAX_TOKENS} tokens a step, its thinking included)"
+            ),
+        };
         let data = reply.structured_content.as_ref();
-        let calls: Vec<Value> = data
-            .and_then(|d| d["tool_calls"].as_array().cloned())
-            .unwrap_or_default();
-        if calls.is_empty() {
-            let answer = if text.trim().is_empty() {
-                "Done.".to_owned()
-            } else {
-                text
-            };
-            agent.answer(&caption(&answer), &answer).await?;
-            eprintln!("answered after {step} round(s)");
-            return Ok(());
-        }
-        let mut said = json!({ "role": "assistant", "content": text, "tool_calls": calls });
+        let mut said = json!({ "role": "assistant", "content": reply.text(), "tool_calls": calls });
         // The model's reasoning, sent back as it came so the next step
         // carries it on (ADR 0043).
         if let Some(replay) = data.map(|d| &d["replay"]).filter(|r| r.is_object()) {
@@ -195,6 +225,32 @@ mod tests {
         let names: Vec<&str> = offered.iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(names, ["files_list", "mail_draft"]);
         assert_eq!(offered[0]["input_schema"]["type"], "object");
+    }
+
+    #[test]
+    fn adr0043_a_reply_cut_off_at_max_tokens_is_no_answer_and_no_calls() {
+        let reply = |stop: &str, calls: Value, text: &str| {
+            CallToolResult::ok(text, json!({ "stop_reason": stop, "tool_calls": calls }))
+        };
+        let call = json!([{ "id": "toolu_1", "name": "files_list", "input": { "path": "Do" } }]);
+        assert_eq!(step(&reply("max_tokens", json!(null), "")), Step::CutOff);
+        assert_eq!(step(&reply("max_tokens", call.clone(), "")), Step::CutOff);
+        assert_eq!(
+            step(&reply("max_tokens", json!(null), "You have three fi")),
+            Step::CutOff
+        );
+        assert_eq!(
+            step(&reply("tool_use", call.clone(), "")),
+            Step::Calls(call.as_array().cloned().unwrap_or_default())
+        );
+        assert_eq!(
+            step(&reply("end_turn", json!(null), "Three files.")),
+            Step::Answer("Three files.".into())
+        );
+        assert_eq!(
+            step(&reply("end_turn", json!(null), " ")),
+            Step::Answer("Done.".into())
+        );
     }
 
     #[test]

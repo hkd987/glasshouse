@@ -72,6 +72,10 @@ pub fn real_policy(provider: &str, model: &str) -> anyhow::Result<String> {
         "claude-sonnet-5-5" => {
             "usd_per_mtok_in = 2.0\nusd_per_mtok_out = 10.0\nusd_per_mtok_cache_read = 0.2\n"
         }
+        // Prompts up to 100K tokens; the cheapest check of the harness.
+        "claude-haiku-5-5" => {
+            "usd_per_mtok_in = 0.1\nusd_per_mtok_out = 0.5\nusd_per_mtok_cache_read = 0.01\n"
+        }
         _ => "",
     };
     let models = format!(

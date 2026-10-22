@@ -83,7 +83,11 @@ gateway) and ADR 0041 (tool use, the desktop agent).
    16,000. The desktop agent asks for 16,000 a step, the IT agent 2,000
    to sort a request and 4,000 for a ticket's assessment. Providers wait
    up to 10 minutes for a reply, the non-streaming ceiling, since a
-   reply that thinks first says nothing until it's whole.
+   reply that thinks first says nothing until it's whole. A reply cut
+   off at `max_tokens` is neither an answer nor calls to make (its
+   thinking may have taken the room, and a call may be cut short): the
+   desktop agent stops and says so, and the IT agent goes on without
+   it, where both used to take it as done.
 6. **Keys and the owner's default.** The Settings app takes Anthropic API
    keys only: a Claude sign-in token (`sk-ant-oat…`) is refused and never
    kept (ADR 0042: we never take Claude.ai credentials). A computer's
@@ -95,6 +99,13 @@ gateway) and ADR 0041 (tool use, the desktop agent).
    Claude Code session in the same environment would take as its own),
    with `--host` where the VM can't reach out. With a fake key it reached
    `api.anthropic.com` and got its 401 (2026-10-22).
+8. **Retries and used-up credit** (2026-10-22). The provider retries a 408,
+   429, 529 or other 5xx twice, after 1 and 4 seconds or the reply's
+   `retry-after` up to a minute, as Anthropic's SDKs do, before the
+   route fails over: one overloaded reply used to end the task. An
+   account out of credit (a 400 "Your credit balance is too low", or a
+   402) fails over like OpenRouter's used-up credits, where it used to
+   end the call as "refused".
 
 ## Consequences
 - Tool loops on Anthropic keep their reasoning and their cache, at no
@@ -106,7 +117,16 @@ gateway) and ADR 0041 (tool use, the desktop agent).
   tests and the VM suite prove the round trip through the desktop agent.
 - An org whose policy sets `max_output_tokens` below 16,000 refuses the
   desktop agent's calls; the refusal says the limit.
-- Not yet run on a real key: no key is in this environment.
+- Not yet run on a real key. The key now in this environment reached
+  `api.anthropic.com` with `--host` and was refused for want of credit
+  (2026-10-22), so the agents were run against a local stand-in for the
+  Messages API that checks requests as the API documents: each replayed
+  thinking block bound to the system prompt, tools and messages before
+  it, tool results answering the calls before them, strict fields. Five
+  desktop agent steps with an email address in a file kept every block
+  valid, sent no address, and drafted the mail to it after the ask;
+  overload, rate limits, a refusal, `max_tokens` and used-up credit
+  each ended as decided above.
 
 ## Not built yet
 - Anthropic's server-side fallback on refusals, and fallback credit.

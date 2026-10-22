@@ -177,7 +177,19 @@ async fn ask(
         *models = false;
         return Ok(None);
     }
-    Ok(Some(reply.text()))
+    Ok(answer(&reply))
+}
+
+/// A model's reply as an answer, if it is one: not cut off at
+/// `max_tokens`, where thinking may have taken all the room (ADR 0043),
+/// and not empty.
+fn answer(reply: &CallToolResult) -> Option<String> {
+    let cut = reply
+        .structured_content
+        .as_ref()
+        .is_some_and(|d| d["stop_reason"] == "max_tokens");
+    let text = reply.text();
+    (!cut && !text.trim().is_empty()).then_some(text)
 }
 
 /// Things this agent has no fix for yet: straight to a ticket.
@@ -428,6 +440,19 @@ fn report(result: &CallToolResult, step: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adr0043_a_reply_cut_off_or_empty_is_no_answer() {
+        let reply =
+            |stop: &str, text: &str| CallToolResult::ok(text, json!({ "stop_reason": stop }));
+        assert_eq!(
+            answer(&reply("end_turn", "Likely a runaway process.")).as_deref(),
+            Some("Likely a runaway process.")
+        );
+        assert_eq!(answer(&reply("max_tokens", "Likely a run")), None);
+        assert_eq!(answer(&reply("max_tokens", "")), None);
+        assert_eq!(answer(&reply("end_turn", "  \n")), None);
+    }
 
     #[test]
     fn requests_pick_the_checks_that_fit() {

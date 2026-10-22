@@ -1,14 +1,22 @@
 //! The Anthropic Messages API with an org or team key (MP-4).
 
+use std::time::Duration;
+
 use glass_gateway::{ModelProvider, ProviderError, ProviderReply, ProviderRequest, Secret};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::http::{Http, classify};
+use crate::http::{Http, Reply, classify};
 
 /// The public endpoint, unless policy names another.
 pub const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
+/// How long to wait before each retry of a rate-limited, overloaded or
+/// failed call, unless the reply says how long: a few seconds usually
+/// clears them, where failing over or ending the task would not need to.
+const WAITS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
+/// The longest `retry-after` honored; past it, the usual wait.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub struct AnthropicProvider {
@@ -19,6 +27,8 @@ pub struct AnthropicProvider {
     /// field Anthropic's own API takes; endpoints policy names instead may
     /// not.
     auto_cache: bool,
+    /// The waits before each retry ([`WAITS`]; shorter in tests).
+    waits: Vec<Duration>,
 }
 
 #[derive(Deserialize)]
@@ -59,6 +69,8 @@ struct ErrorBody {
 
 #[derive(Deserialize)]
 struct ErrorDetail {
+    #[serde(default, rename = "type")]
+    kind: String,
     message: String,
 }
 
@@ -77,8 +89,39 @@ impl AnthropicProvider {
             auto_cache: endpoint == DEFAULT_ENDPOINT,
             endpoint,
             key,
+            waits: WAITS.to_vec(),
         }
     }
+
+    /// Posts `body`, retrying what Anthropic asks callers to retry: rate
+    /// limits (429), overload (529) and server errors, as its own SDKs do.
+    fn post(&self, body: &[u8]) -> Result<Reply, ProviderError> {
+        let url = format!("{}/v1/messages", self.endpoint);
+        let headers = [
+            ("x-api-key", self.key.expose()),
+            ("anthropic-version", API_VERSION),
+            ("content-type", "application/json"),
+        ];
+        let mut tries = 0;
+        loop {
+            let reply = self.http.post(&url, &headers, body)?;
+            let retried = matches!(reply.status, 408 | 429 | 500..=599);
+            let Some(wait) = self.waits.get(tries).filter(|_| retried) else {
+                return Ok(reply);
+            };
+            std::thread::sleep(wait_for(&reply, *wait));
+            tries += 1;
+        }
+    }
+}
+
+/// The wait before retrying `reply`: what the server asked for, within
+/// reason, else `usual`.
+fn wait_for(reply: &Reply, usual: Duration) -> Duration {
+    reply
+        .retry_after
+        .filter(|asked| *asked <= MAX_RETRY_AFTER)
+        .unwrap_or(usual)
 }
 
 impl ModelProvider for AnthropicProvider {
@@ -100,19 +143,23 @@ impl ModelProvider for AnthropicProvider {
         if !request.tools.is_empty() {
             body["tools"] = crate::tools::anthropic_tools(request.tools);
         }
-        let reply = self.http.post(
-            &format!("{}/v1/messages", self.endpoint),
-            &[
-                ("x-api-key", self.key.expose()),
-                ("anthropic-version", API_VERSION),
-                ("content-type", "application/json"),
-            ],
-            body.to_string().as_bytes(),
-        )?;
+        let reply = self.post(body.to_string().as_bytes())?;
         if reply.status != 200 {
-            let message = serde_json::from_str::<ErrorBody>(&reply.body)
-                .map(|e| e.error.message)
-                .unwrap_or_else(|_| "no details".into());
+            let (kind, message) = serde_json::from_str::<ErrorBody>(&reply.body)
+                .map(|e| (e.error.kind, e.error.message))
+                .unwrap_or_else(|_| (String::new(), "no details".into()));
+            // The account's credit is used up, which Anthropic says with a
+            // 402 or, today, a 400: another model on the route may still
+            // answer, so it fails over, as OpenRouter's 402 does.
+            if reply.status == 402
+                || kind == "billing_error"
+                || message.starts_with("Your credit balance is too low")
+            {
+                return Err(ProviderError::Unavailable(format!(
+                    "HTTP {}: the credits for this key are used up ({message})",
+                    reply.status
+                )));
+            }
             return Err(classify(reply.status, message));
         }
         let response: Response = serde_json::from_str(&reply.body)
@@ -323,13 +370,111 @@ mod tests {
                 status,
                 r#"{"type":"error","error":{"type":"x","message":"slow down"}}"#,
             );
-            let provider = AnthropicProvider::with_http(
+            let mut provider = AnthropicProvider::with_http(
                 Http::insecure_for_tests(),
                 Some(&url),
                 Secret::new("k"),
             );
+            provider.waits = Vec::new();
             let messages = hello();
             assert_eq!(provider.complete(&request(&messages)), Err(expected));
+        }
+    }
+
+    const OVERLOADED: &str =
+        r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+    const OK: &str = r#"{"content":[{"type":"text","text":"Hi"}],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":1}}"#;
+
+    fn retrying(url: &str) -> AnthropicProvider {
+        let mut provider =
+            AnthropicProvider::with_http(Http::insecure_for_tests(), Some(url), Secret::new("k"));
+        provider.waits = vec![Duration::ZERO; 2];
+        provider
+    }
+
+    #[test]
+    fn overload_and_rate_limits_are_retried_before_the_route_fails_over() {
+        let (url, got) = fake::serve_headed(vec![
+            (529, "", OVERLOADED),
+            (
+                429,
+                "retry-after: 0\r\n",
+                r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
+            ),
+            (200, "", OK),
+        ]);
+        let messages = hello();
+        let reply = retrying(&url).complete(&request(&messages)).unwrap();
+        assert_eq!(reply.text, "Hi");
+        assert_eq!(got.iter().take(3).count(), 3, "two retries, then the reply");
+
+        // Still overloaded after the retries: an outage the route fails
+        // over from.
+        let (url, got) = fake::serve_each(vec![(529, OVERLOADED); 3]);
+        let err = retrying(&url).complete(&request(&messages)).unwrap_err();
+        assert_eq!(
+            err,
+            ProviderError::Unavailable("HTTP 529: Overloaded".into())
+        );
+        assert!(err.fails_over());
+        assert_eq!(got.iter().take(3).count(), 3);
+
+        // What isn't worth retrying isn't.
+        let (url, got) = fake::serve(
+            400,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#,
+        );
+        assert_eq!(
+            retrying(&url).complete(&request(&messages)),
+            Err(ProviderError::Rejected("HTTP 400: bad".into()))
+        );
+        assert_eq!(got.iter().count(), 1);
+    }
+
+    #[test]
+    fn a_retry_waits_as_long_as_the_server_asks_within_reason() {
+        let reply = |retry_after| Reply {
+            status: 429,
+            body: String::new(),
+            retry_after,
+        };
+        let usual = Duration::from_secs(1);
+        assert_eq!(
+            wait_for(&reply(Some(Duration::from_secs(20))), usual),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            wait_for(&reply(Some(Duration::from_secs(600))), usual),
+            usual
+        );
+        assert_eq!(wait_for(&reply(None), usual), usual);
+        assert_eq!(WAITS.len(), 2, "as Anthropic's SDKs: two retries");
+    }
+
+    #[test]
+    fn used_up_credit_fails_over_and_says_so() {
+        // What the API sent a key with no credit left (2026-10-22), and
+        // its documented billing error.
+        for (status, body) in [
+            (
+                400,
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}"#,
+            ),
+            (
+                402,
+                r#"{"type":"error","error":{"type":"billing_error","message":"There is a problem with your organization's billing."}}"#,
+            ),
+        ] {
+            let (url, _got) = fake::serve(status, body);
+            let messages = hello();
+            let err = retrying(&url).complete(&request(&messages)).unwrap_err();
+            assert!(err.fails_over(), "{err}");
+            assert!(
+                err.to_string().contains(&format!(
+                    "HTTP {status}: the credits for this key are used up"
+                )),
+                "{err}"
+            );
         }
     }
 
