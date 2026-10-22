@@ -117,16 +117,30 @@ gateway) and ADR 0041 (tool use, the desktop agent).
   tests and the VM suite prove the round trip through the desktop agent.
 - An org whose policy sets `max_output_tokens` below 16,000 refuses the
   desktop agent's calls; the refusal says the limit.
-- Not yet run on a real key. The key now in this environment reached
-  `api.anthropic.com` with `--host` and was refused for want of credit
-  (2026-10-22), so the agents were run against a local stand-in for the
-  Messages API that checks requests as the API documents: each replayed
-  thinking block bound to the system prompt, tools and messages before
-  it, tool results answering the calls before them, strict fields. Five
-  desktop agent steps with an email address in a file kept every block
-  valid, sent no address, and drafted the mail to it after the ask;
-  overload, rate limits, a refusal, `max_tokens` and used-up credit
-  each ended as decided above.
+- Run on a real key (2026-10-22, `--host`), each request opted into
+  the history check (`thinking-binding-controls-2026-08-01`,
+  `prefix_mismatch_behavior: "error"`), which the key's account, older
+  than 2026-08-31, isn't by default, so a harness that edited its
+  history would pass there unnoticed: every step of the desktop agent
+  on Claude Haiku 5.5 sent its thinking back and was accepted with no
+  block dropped (Claude Opus 5.5 didn't think on this task, at its
+  default effort or `high`, so none of its blocks has gone back yet);
+  after the first call nearly all input was read from the
+  cache (about 2,100 tokens of instructions and tools, shared across
+  tasks); the recorded cost matched the API's usage. Opus 5.5 at its
+  default effort read two files and drafted a mail in 4 calls for
+  $0.026; Haiku 5.5 did it for $0.001. An edited history, opted in, is
+  the documented 400; a trailing space is not an edit.
+- Before the key's account had credit, the agents ran against a local
+  stand-in for the Messages API that checks requests as the API
+  documents (blocks bound to what came before them, tool results
+  answering the calls before them, strict fields): overload, rate
+  limits, a refusal, `max_tokens` and used-up credit each ended as
+  decided above.
+- The desktop agent's instructions say what a placeholder is: on a real
+  model (Haiku 5.5), an address seen only as `[redacted:email#1]` was
+  taken as missing, and it wouldn't draft the mail until told that
+  using the placeholder puts the value back.
 
 ## Not built yet
 - Anthropic's server-side fallback on refusals, and fallback credit.
