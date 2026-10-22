@@ -114,9 +114,8 @@ async fn run() -> anyhow::Result<()> {
             bail!("no AI model could help: {}", reply.text());
         }
         let text = reply.text();
-        let calls: Vec<Value> = reply
-            .structured_content
-            .as_ref()
+        let data = reply.structured_content.as_ref();
+        let calls: Vec<Value> = data
             .and_then(|d| d["tool_calls"].as_array().cloned())
             .unwrap_or_default();
         if calls.is_empty() {
@@ -129,7 +128,13 @@ async fn run() -> anyhow::Result<()> {
             eprintln!("answered after {step} round(s)");
             return Ok(());
         }
-        messages.push(json!({ "role": "assistant", "content": text, "tool_calls": calls }));
+        let mut said = json!({ "role": "assistant", "content": text, "tool_calls": calls });
+        // The model's reasoning, sent back as it came so the next step
+        // carries it on (ADR 0043).
+        if let Some(replay) = data.map(|d| &d["replay"]).filter(|r| r.is_object()) {
+            said["replay"] = replay.clone();
+        }
+        messages.push(said);
         let mut results = Vec::with_capacity(calls.len());
         for call in &calls {
             let name = call["name"].as_str().unwrap_or_default();

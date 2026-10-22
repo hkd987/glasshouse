@@ -137,6 +137,7 @@ impl ModelProvider for OpenRouterProvider {
                 .cost
                 .map(|c| (c * 1_000_000.0).round() / 1_000_000.0),
             served_by: response.model,
+            blocks: Vec::new(),
         })
     }
 }

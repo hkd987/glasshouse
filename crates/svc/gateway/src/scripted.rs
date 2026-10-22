@@ -3,6 +3,9 @@
 
 use std::sync::Mutex;
 
+use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
+
 use crate::{Message, ModelProvider, ProviderError, ProviderReply, ProviderRequest};
 
 /// What a scripted provider was sent, for tests to inspect.
@@ -56,6 +59,59 @@ fn tokens(chars: usize) -> u64 {
     chars.div_ceil(4) as u64
 }
 
+/// What its thinking block is "signed" with, as Anthropic binds one (ADR
+/// 0043): everything the model was sent before writing it.
+fn signature(request: &ProviderRequest<'_>, before: &[Message]) -> String {
+    let prefix = json!({ "system": request.system, "tools": request.tools, "messages": before });
+    format!(
+        "scripted:{}",
+        hex::encode(Sha256::digest(prefix.to_string().as_bytes()))
+    )
+}
+
+/// The reply's blocks, Anthropic shaped: an empty thinking block bound to
+/// the request, then the text and the tool calls.
+fn blocks(request: &ProviderRequest<'_>, text: &str, calls: &[crate::ToolCall]) -> Vec<Value> {
+    let mut blocks = vec![json!({
+        "type": "thinking",
+        "thinking": "",
+        "signature": signature(request, request.messages),
+    })];
+    if !text.is_empty() {
+        blocks.push(json!({ "type": "text", "text": text }));
+    }
+    blocks.extend(
+        calls
+            .iter()
+            .map(|c| json!({ "type": "tool_use", "id": c.id, "name": c.name, "input": c.input })),
+    );
+    blocks
+}
+
+/// Checks each replayed thinking block against what came before it, as
+/// Anthropic does: a changed conversation is refused. Says whether the last
+/// assistant message's came back.
+fn replayed(request: &ProviderRequest<'_>) -> Result<bool, ProviderError> {
+    let mut last = false;
+    for (i, m) in request.messages.iter().enumerate() {
+        if m.role != crate::Role::Assistant {
+            continue;
+        }
+        last = false;
+        let Some(replay) = &m.replay else { continue };
+        for block in replay.blocks.iter().filter(|b| b["type"] == "thinking") {
+            if block["signature"].as_str() != Some(&signature(request, &request.messages[..i])) {
+                return Err(ProviderError::Rejected(format!(
+                    "messages.{i}: Invalid `signature` in `thinking` block. The block is bound \
+                     to a different conversation."
+                )));
+            }
+            last = true;
+        }
+    }
+    Ok(last)
+}
+
 impl ModelProvider for ScriptedProvider {
     fn complete(&self, request: &ProviderRequest<'_>) -> Result<ProviderReply, ProviderError> {
         self.seen
@@ -70,6 +126,7 @@ impl ModelProvider for ScriptedProvider {
         if let Some(error) = &self.fails {
             return Err(error.clone());
         }
+        let reasoned = replayed(request)?;
         let chars: usize = request.system.map_or(0, |s| s.chars().count())
             + request
                 .messages
@@ -86,8 +143,10 @@ impl ModelProvider for ScriptedProvider {
         // names a tool it was offered calls that tool, with the JSON object
         // written after its name; once results come back it answers.
         if let Some(call) = scripted_call(request) {
+            let text = format!("Calling {}.", call.name);
             return Ok(ProviderReply {
-                text: format!("Calling {}.", call.name),
+                blocks: blocks(request, &text, std::slice::from_ref(&call)),
+                text,
                 tool_calls: vec![call],
                 input_tokens: tokens(chars),
                 output_tokens: 10,
@@ -128,6 +187,9 @@ impl ModelProvider for ScriptedProvider {
                 results.join(" | "),
                 model = request.model,
             );
+            if reasoned {
+                text.push_str(" Its reasoning came back unchanged.");
+            }
         }
         let output = tokens(text.chars().count()).min(u64::from(request.max_tokens));
         Ok(ProviderReply {
@@ -136,6 +198,7 @@ impl ModelProvider for ScriptedProvider {
             stop_reason: Some("end_turn".into()),
             cost_usd: None,
             served_by: None,
+            blocks: blocks(request, &text, &[]),
             text,
             tool_calls: Vec::new(),
         })

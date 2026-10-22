@@ -85,6 +85,11 @@ impl Runtime {
                 if !done.tool_calls.is_empty() {
                     data["tool_calls"] = json!(done.tool_calls);
                 }
+                // The reply as the provider wrote it, sealed, for the agent
+                // to send back (ADR 0043); not kept in the record either.
+                if let Some(replay) = &done.replay {
+                    data["replay"] = json!(replay);
+                }
                 let answered = routed
                     .route
                     .steps

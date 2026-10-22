@@ -921,6 +921,7 @@ version = "0.1.0"
 dependencies = [
  "glass-actions",
  "glass-api",
+ "glass-crypto",
  "glass-policy",
  "glass-types",
  "hex",

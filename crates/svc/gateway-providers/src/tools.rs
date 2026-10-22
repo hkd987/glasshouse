@@ -30,6 +30,12 @@ pub(crate) fn anthropic_messages(messages: &[Message]) -> Value {
         messages
             .iter()
             .map(|m| {
+                // The model's own blocks, thinking included, as it wrote
+                // them (ADR 0043): the gateway only passes on replays it
+                // sealed for this provider.
+                if let Some(replay) = &m.replay {
+                    return json!({ "role": role(m.role), "content": replay.blocks });
+                }
                 if m.tool_calls.is_empty() && m.tool_results.is_empty() {
                     return json!({ "role": role(m.role), "content": m.content });
                 }
@@ -230,6 +236,7 @@ mod tests {
                     input: json!({ "path": "Docs" }),
                 }],
                 tool_results: Vec::new(),
+                replay: None,
             },
             Message {
                 role: Role::User,
@@ -240,6 +247,7 @@ mod tests {
                     content: "a.txt".into(),
                     is_error: false,
                 }],
+                replay: None,
             },
         ]
     }

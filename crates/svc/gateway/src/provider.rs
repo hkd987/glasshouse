@@ -33,6 +33,11 @@ pub struct ProviderReply {
     /// The model that answered, when the provider chose it (OpenRouter's
     /// auto router picks one per call).
     pub served_by: Option<String>,
+    /// The reply as the provider wrote it, when the next call must send it
+    /// back unchanged: Anthropic's content blocks, thinking included (ADR
+    /// 0043). Empty for providers that rebuild replies from text and tool
+    /// calls.
+    pub blocks: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

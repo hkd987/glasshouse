@@ -214,6 +214,7 @@ impl BedrockProvider {
             stop_reason: response.stop_reason,
             cost_usd: None,
             served_by: None,
+            blocks: Vec::new(),
         })
     }
 }

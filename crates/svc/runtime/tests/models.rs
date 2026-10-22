@@ -450,7 +450,7 @@ async fn adr0041_the_model_proposes_a_tool_call_and_the_agent_makes_it_under_pol
         json!({
             "messages": [
                 {"role": "user", "content": "What's in my invoices? Use files_list {\"path\": \"Invoices\"}"},
-                {"role": "assistant", "content": first.text(), "tool_calls": [call]},
+                {"role": "assistant", "content": first.text(), "tool_calls": [call], "replay": data["replay"]},
                 {"role": "user", "tool_results": [{"id": call["id"], "content": listed.text()}]}
             ],
             "max_tokens": 200,
@@ -460,6 +460,13 @@ async fn adr0041_the_model_proposes_a_tool_call_and_the_agent_makes_it_under_pol
     .await;
     assert!(!second.is_error, "{}", second.text());
     assert!(second.text().contains("inv-001.txt"), "{}", second.text());
+    // ADR 0043: the reply's blocks went back as the model wrote them, and
+    // nothing before them had changed, redaction included.
+    assert!(
+        second.text().contains("Its reasoning came back unchanged."),
+        "{}",
+        second.text()
+    );
 
     // On the record: two model calls offering one tool, the first naming
     // files_list; the list itself an action policy decided.
@@ -476,6 +483,7 @@ async fn adr0041_the_model_proposes_a_tool_call_and_the_agent_makes_it_under_pol
         "no tool result in a model call's record"
     );
     assert!(log.contains("files.list"));
+    assert!(!log.contains("\"signature\""), "no replay in the record");
 }
 
 /// ADR 0041's safety property where it matters most: a call the model

@@ -281,6 +281,7 @@ impl ModelForwarder for DevModels {
             cost_usd: Some(cost),
             served_by: Some("development/echo".into()),
             tool_calls: call.into_iter().collect(),
+            blocks: Vec::new(),
         })
     }
 }

@@ -291,6 +291,12 @@ async fn desktop_agent(h: &Harness, ws: &crate::harness::Workspace) -> anyhow::R
     let detail = h.detail(task).await?;
     let answer = detail.answer.unwrap_or_default();
     ensure!(answer.contains("The tools returned"), "{answer}");
+    // ADR 0043: its reasoning went back to the model as written, with
+    // nothing before it changed.
+    ensure!(
+        answer.contains("Its reasoning came back unchanged."),
+        "{answer}"
+    );
     Ok(())
 }
 

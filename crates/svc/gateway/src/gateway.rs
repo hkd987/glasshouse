@@ -12,14 +12,67 @@ use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    CompleteInput, Message, ModelProvider, ProviderError, ProviderRequest, Redactor, ToolCall,
-    ToolResult, Vault,
+    CompleteInput, Message, ModelProvider, ProviderError, ProviderRequest, Redactor, Replay,
+    ToolCall, ToolResult, Vault,
 };
 
 /// The model providers this machine can reach, by the policy's provider id.
 #[derive(Debug, Default, Clone)]
 pub struct Gateway {
     providers: BTreeMap<String, Arc<dyn ModelProvider>>,
+    seal: SealKey,
+}
+
+/// The key the gateway seals replays with (ADR 0043): random, and this
+/// process's only. After a restart, replays sealed before it aren't sent.
+#[derive(Clone)]
+struct SealKey(Arc<[u8; 32]>);
+
+impl Default for SealKey {
+    fn default() -> Self {
+        Self(Arc::new(
+            glass_crypto::random().expect("the system's random numbers"),
+        ))
+    }
+}
+
+impl std::fmt::Debug for SealKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SealKey(..)")
+    }
+}
+
+impl SealKey {
+    /// The MAC over a provider id and its blocks, hex. The blocks' JSON is
+    /// canonical because serde_json's maps are sorted: nothing in the
+    /// workspace turns on its `preserve_order`.
+    fn mac(&self, provider: &str, blocks: &[serde_json::Value]) -> Option<String> {
+        let blocks = serde_json::to_string(blocks).ok()?;
+        glass_crypto::hmac(
+            &self.0[..],
+            &[
+                b"glasshouse replay v1\0",
+                provider.as_bytes(),
+                b"\0",
+                blocks.as_bytes(),
+            ],
+        )
+        .ok()
+        .map(hex::encode)
+    }
+
+    fn seal(&self, provider: &str, blocks: Vec<serde_json::Value>) -> Option<Replay> {
+        Some(Replay {
+            provider: provider.to_owned(),
+            seal: self.mac(provider, &blocks)?,
+            blocks,
+        })
+    }
+
+    fn opens(&self, replay: &Replay) -> bool {
+        self.mac(&replay.provider, &replay.blocks)
+            .is_some_and(|mac| glass_crypto::same(mac.as_bytes(), replay.seal.as_bytes()))
+    }
 }
 
 /// One call, after policy has routed it.
@@ -42,6 +95,9 @@ pub struct Completion {
     /// 0041). The agent makes each call, where every rule applies.
     pub tool_calls: Vec<ToolCall>,
     pub stop_reason: Option<String>,
+    /// The reply as the provider wrote it, sealed, for the agent to send
+    /// back on this assistant message (ADR 0043). Placeholders stay in.
+    pub replay: Option<Replay>,
     pub record: CallRecord,
 }
 
@@ -90,6 +146,10 @@ pub struct CallRecord {
     pub tools_called: Vec<String>,
     /// Replacements by kind (DP-3).
     pub redacted: BTreeMap<String, usize>,
+    /// Replays the agent sent that this gateway didn't seal, or that were
+    /// changed: none of the call's replays went (ADR 0043).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub replays_dropped: bool,
     /// The request as sent (after redaction).
     pub request: Digest,
     /// The reply as received (before PII came back).
@@ -153,6 +213,16 @@ impl Gateway {
     /// Sends `call` along its route. Blocks until a model answers or every
     /// model on the route has failed.
     pub fn complete(&self, call: Call<'_>) -> Result<Completion, Box<Failure>> {
+        // Replays go as the provider wrote them, so only sealed ones go,
+        // and then all of them: dropping one would change what the later
+        // ones were written after, and the provider refuses those (ADR
+        // 0043).
+        let replays_dropped = call
+            .input
+            .messages
+            .iter()
+            .filter_map(|m| m.replay.as_ref())
+            .any(|r| !self.seal.opens(r));
         let mut vault = Vault::default();
         let system = call
             .input
@@ -186,6 +256,14 @@ impl Gateway {
                         is_error: r.is_error,
                     })
                     .collect(),
+                // The provider's own words from this conversation, which
+                // left redacted: sent back as they came, never redacted
+                // again, which would change them.
+                replay: if replays_dropped {
+                    None
+                } else {
+                    m.replay.clone()
+                },
             })
             .collect();
         let tools = &call.input.tools;
@@ -208,6 +286,7 @@ impl Gateway {
             tools_offered: (!tools.is_empty()).then_some(tools.len()),
             tools_called: Vec::new(),
             redacted: vault.counts().clone(),
+            replays_dropped,
             request: Digest::of(&sent.to_string()),
             response: None,
             failed_over: Vec::new(),
@@ -217,11 +296,31 @@ impl Gateway {
 
         let mut problems = Vec::new();
         for step in &call.route.steps {
+            // A replay goes back only to the provider that wrote it; others
+            // get the text and tool calls.
+            let elsewhere = messages.iter().any(|m| {
+                m.replay
+                    .as_ref()
+                    .is_some_and(|r| r.provider != step.provider)
+            });
+            let theirs: Vec<Message>;
+            let messages = if elsewhere {
+                theirs = messages
+                    .iter()
+                    .map(|m| Message {
+                        replay: m.replay.clone().filter(|r| r.provider == step.provider),
+                        ..m.clone()
+                    })
+                    .collect();
+                &theirs
+            } else {
+                &messages
+            };
             let result = match self.providers.get(&step.provider) {
                 Some(provider) => provider.complete(&ProviderRequest {
                     model: &step.provider_model,
                     system: system.as_deref(),
-                    messages: &messages,
+                    messages,
                     max_tokens: call.input.max_tokens,
                     tools,
                 }),
@@ -263,6 +362,11 @@ impl Gateway {
                             })
                             .collect(),
                         stop_reason: reply.stop_reason,
+                        replay: if reply.blocks.is_empty() {
+                            None
+                        } else {
+                            self.seal.seal(&step.provider, reply.blocks)
+                        },
                         record,
                     });
                 }
@@ -402,6 +506,7 @@ mod tests {
                 cost_usd: Some(0.42),
                 served_by: Some("anthropic/claude-sonnet-4.5".into()),
                 tool_calls: Vec::new(),
+                blocks: Vec::new(),
             })
         }
     }
@@ -455,6 +560,7 @@ mod tests {
             content: String::new(),
             tool_calls: done.tool_calls.clone(),
             tool_results: Vec::new(),
+            replay: None,
         });
         answered.messages.push(Message {
             role: Role::User,
@@ -465,6 +571,7 @@ mod tests {
                 content: "notes.txt, from bo@example.com".into(),
                 is_error: false,
             }],
+            replay: None,
         });
         let done = gateway
             .complete(Call {
@@ -490,6 +597,165 @@ mod tests {
         );
         // The reply names what the tools returned, with the address back.
         assert!(done.text.contains("bo@example.com"), "{}", done.text);
+    }
+
+    /// One tool round: `first` with the model's call answered, the reply's
+    /// replay (changed by `edit`) on the assistant message.
+    fn answered(
+        first: &CompleteInput,
+        done: &Completion,
+        edit: impl FnOnce(&mut Replay),
+    ) -> CompleteInput {
+        let mut replay = done.replay.clone().expect("a replay");
+        edit(&mut replay);
+        let mut next = first.clone();
+        next.messages.push(Message {
+            role: Role::Assistant,
+            content: done.text.clone(),
+            tool_calls: done.tool_calls.clone(),
+            tool_results: Vec::new(),
+            replay: Some(replay),
+        });
+        next.messages.push(Message {
+            role: Role::User,
+            content: String::new(),
+            tool_calls: Vec::new(),
+            tool_results: vec![crate::ToolResult {
+                id: done.tool_calls[0].id.clone(),
+                content: "notes.txt, from bo@example.com".into(),
+                is_error: false,
+            }],
+            replay: None,
+        });
+        next
+    }
+
+    fn asks_for_files() -> CompleteInput {
+        // Addresses in the instructions and the request: the placeholders
+        // must come out the same on every call for the replay to hold.
+        let mut first =
+            input(r#"Ask zoe@example.com, then use files_list {"owner": "ana@example.com"}"#);
+        first.system = Some("Be brief. Copy ana@example.com.".into());
+        first.tools = vec![files_tool("files_list")];
+        first
+    }
+
+    #[test]
+    fn adr0043_the_providers_blocks_go_back_unchanged_and_the_conversation_holds() {
+        let scripted = Arc::new(ScriptedProvider::echo());
+        let gateway = Gateway::new().with("scripted", scripted.clone());
+        let route = route(vec![step("echo", "scripted")]);
+        let redactor = redactor();
+        let send = |input: &CompleteInput| {
+            gateway.complete(Call {
+                input,
+                route: &route,
+                redactor: &redactor,
+                log_prompts: false,
+            })
+        };
+
+        let first = asks_for_files();
+        let done = send(&first).unwrap();
+        let replay = done.replay.clone().unwrap();
+        assert_eq!(replay.provider, "scripted");
+        assert_eq!(replay.blocks[0]["type"], "thinking");
+        // The blocks stay as the provider wrote them: placeholders in.
+        let blocks = serde_json::to_string(&replay.blocks).unwrap();
+        assert!(!blocks.contains("ana@example.com"), "{blocks}");
+        assert_eq!(done.tool_calls[0].input["owner"], "ana@example.com");
+
+        // Sent back: the provider gets them byte for byte, and its check
+        // that nothing before them changed passes, redaction included.
+        let done = send(&answered(&first, &done, |_| {})).unwrap();
+        assert!(!done.record.replays_dropped);
+        let sent = &scripted.seen()[1];
+        assert_eq!(sent.messages[1].replay.as_ref(), Some(&replay));
+        assert!(
+            done.text.ends_with("Its reasoning came back unchanged."),
+            "{}",
+            done.text
+        );
+        assert!(done.replay.is_some());
+    }
+
+    #[test]
+    fn adr0043_a_changed_replay_never_leaves() {
+        let scripted = Arc::new(ScriptedProvider::echo());
+        let gateway = Gateway::new().with("scripted", scripted.clone());
+        let route = route(vec![step("echo", "scripted")]);
+        let redactor = redactor();
+        let send = |input: &CompleteInput| {
+            gateway
+                .complete(Call {
+                    input,
+                    route: &route,
+                    redactor: &redactor,
+                    log_prompts: false,
+                })
+                .unwrap()
+        };
+        let first = asks_for_files();
+        let done = send(&first);
+
+        // A secret written into a block, a seal from another run, and a
+        // block moved to another provider: none of them is sent, and the
+        // record says so.
+        let edits: [fn(&mut Replay); 3] = [
+            |r| r.blocks[0]["signature"] = json!("AKIAIOSFODNN7EXAMPLE"),
+            |r| r.seal = "0".repeat(64),
+            |r| r.provider = "other".into(),
+        ];
+        for edit in edits {
+            let changed = send(&answered(&first, &done, edit));
+            assert!(changed.record.replays_dropped);
+            let sent = scripted.seen().pop().unwrap();
+            assert!(sent.messages.iter().all(|m| m.replay.is_none()));
+            assert!(!changed.text.contains("came back"), "{}", changed.text);
+        }
+
+        // Another gateway, as after a restart, has another key.
+        let other = Gateway::new().with("scripted", scripted.clone());
+        let after = other
+            .complete(Call {
+                input: &answered(&first, &done, |_| {}),
+                route: &route,
+                redactor: &redactor,
+                log_prompts: false,
+            })
+            .unwrap();
+        assert!(after.record.replays_dropped);
+    }
+
+    #[test]
+    fn adr0043_a_replay_goes_back_only_to_the_provider_that_wrote_it() {
+        let wrote = Arc::new(ScriptedProvider::echo());
+        let spare = Arc::new(ScriptedProvider::echo());
+        let gateway = Gateway::new()
+            .with("wrote", wrote.clone())
+            .with("spare", spare.clone());
+        let redactor = redactor();
+        let first = asks_for_files();
+        let done = gateway
+            .complete(Call {
+                input: &first,
+                route: &route(vec![step("echo", "wrote")]),
+                redactor: &redactor,
+                log_prompts: false,
+            })
+            .unwrap();
+        let done = gateway
+            .complete(Call {
+                input: &answered(&first, &done, |_| {}),
+                route: &route(vec![step("echo", "spare")]),
+                redactor: &redactor,
+                log_prompts: false,
+            })
+            .unwrap();
+        assert!(!done.record.replays_dropped);
+        let sent = &spare.seen()[0];
+        assert!(sent.messages[1].replay.is_none());
+        assert_eq!(sent.messages[1].tool_calls.len(), 1);
     }
 
     #[test]

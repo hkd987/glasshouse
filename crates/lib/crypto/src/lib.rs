@@ -71,6 +71,12 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     openssl::sha::sha256(data)
 }
 
+/// Whether `a` and `b` are equal, in time that doesn't depend on where they
+/// differ: for comparing MACs.
+pub fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && openssl::memcmp::eq(a, b)
+}
+
 /// A P-256 private key. Never printed.
 pub struct SecretKey {
     key: EcKey<Private>,
@@ -209,7 +215,9 @@ impl PublicKey {
 
 // ---- HKDF-SHA256 (RFC 5869), on OpenSSL's HMAC --------------------------
 
-fn hmac(key: &[u8], parts: &[&[u8]]) -> Result<[u8; 32]> {
+/// HMAC-SHA256 of `parts`, one after another. The model gateway seals the
+/// blocks it hands agents with it (ADR 0043).
+pub fn hmac(key: &[u8], parts: &[&[u8]]) -> Result<[u8; 32]> {
     // An empty key is a block of zeros to HMAC; OpenSSL wants it spelled.
     let zeros = [0u8; 32];
     let key = PKey::hmac(if key.is_empty() { &zeros } else { key })?;

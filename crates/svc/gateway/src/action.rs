@@ -24,6 +24,9 @@ pub enum Role {
 /// The most tools one call may offer (ADR 0041).
 pub const MAX_TOOLS: usize = 64;
 
+/// The most blocks one message's replay may carry (ADR 0043).
+pub const MAX_REPLAY_BLOCKS: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Message {
@@ -39,6 +42,10 @@ pub struct Message {
     /// call's id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_results: Vec<ToolResult>,
+    /// An assistant's: the reply's `replay`, passed back unchanged (ADR
+    /// 0043).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<Replay>,
 }
 
 impl Message {
@@ -49,8 +56,24 @@ impl Message {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_results: Vec::new(),
+            replay: None,
         }
     }
+}
+
+/// A reply as its provider wrote it, for the next call to send back
+/// unchanged (ADR 0043): Anthropic's content blocks, thinking included,
+/// which the model needs to carry its reasoning across tool calls. The
+/// gateway seals what it hands out and sends back only what it sealed, to
+/// the provider that wrote it; a replay that was changed is never sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Replay {
+    /// The policy's provider id it came from.
+    pub provider: String,
+    pub blocks: Vec<Value>,
+    /// The gateway's MAC over the two, hex.
+    pub seal: String,
 }
 
 /// A tool the model may ask for (ADR 0041): the agent's own, as its task
@@ -125,7 +148,10 @@ impl CompleteInput {
             ));
         }
         if input.messages.iter().any(|m| {
-            m.content.trim().is_empty() && m.tool_calls.is_empty() && m.tool_results.is_empty()
+            m.content.trim().is_empty()
+                && m.tool_calls.is_empty()
+                && m.tool_results.is_empty()
+                && m.replay.as_ref().is_none_or(|r| r.blocks.is_empty())
         }) {
             return Err(ActionError::InvalidInput(
                 "every message needs some text, tool calls or tool results".into(),
@@ -157,6 +183,11 @@ impl CompleteInput {
                         "tool results go in a user message".into(),
                     ));
                 }
+                Role::User if m.replay.is_some() => {
+                    return Err(ActionError::InvalidInput(
+                        "a replay goes back on the model's (assistant) message it came with".into(),
+                    ));
+                }
                 Role::User => {
                     if let Some(r) = m
                         .tool_results
@@ -172,6 +203,9 @@ impl CompleteInput {
                 }
                 Role::Assistant => {
                     asked = m.tool_calls.iter().map(|c| c.id.as_str()).collect();
+                    if let Some(replay) = &m.replay {
+                        check_replay(replay, &asked)?;
+                    }
                 }
             }
         }
@@ -199,8 +233,8 @@ impl CompleteInput {
         Ok(input)
     }
 
-    /// Characters in the system prompt, the messages, their tool calls
-    /// and results, and the tools offered.
+    /// Characters in the system prompt, the messages, their tool calls,
+    /// results and replays, and the tools offered.
     pub fn chars(&self) -> usize {
         let json = |v: &Value| v.to_string().chars().count();
         self.system.as_deref().map_or(0, |s| s.chars().count())
@@ -217,6 +251,9 @@ impl CompleteInput {
                             .iter()
                             .map(|r| r.content.chars().count())
                             .sum::<usize>()
+                        + m.replay
+                            .as_ref()
+                            .map_or(0, |r| r.blocks.iter().map(json).sum::<usize>())
                 })
                 .sum::<usize>()
             + self
@@ -242,6 +279,33 @@ impl CompleteInput {
     }
 }
 
+/// A replay's shape: objects with a type, and the same tool calls as the
+/// message it's on, so the results that follow answer what the provider
+/// is sent. Its seal is the gateway's to check.
+fn check_replay(replay: &Replay, calls: &[&str]) -> Result<(), ActionError> {
+    let bad = |why: &str| Err(ActionError::InvalidInput(format!("a replay {why}")));
+    if replay.blocks.len() > MAX_REPLAY_BLOCKS {
+        return bad(&format!("carries at most {MAX_REPLAY_BLOCKS} blocks"));
+    }
+    if replay.blocks.iter().any(|b| !b["type"].is_string()) {
+        return bad("is blocks, each an object with a type");
+    }
+    let used: Vec<&str> = replay
+        .blocks
+        .iter()
+        .filter(|b| b["type"] == "tool_use")
+        .filter_map(|b| b["id"].as_str())
+        .collect();
+    let mut a = used.clone();
+    let mut b = calls.to_vec();
+    a.sort_unstable();
+    b.sort_unstable();
+    if a != b {
+        return bad("must carry the same tool calls as its message: pass both back unchanged");
+    }
+    Ok(())
+}
+
 fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
@@ -262,7 +326,8 @@ pub fn definition() -> ActionDef {
         description: "Get a reply from an AI model. The OS chooses a model IT approved for the \
                       data you have read, replaces secrets and personal details with placeholders \
                       before anything leaves this computer, and logs the call. Leave model out \
-                      unless you were told to use a particular one."
+                      unless you were told to use a particular one. When a reply has a replay, \
+                      send it back unchanged on that assistant message."
             .into(),
         input_schema: json!({
             "type": "object",
@@ -295,6 +360,17 @@ pub fn definition() -> ActionDef {
                                     "required": ["id", "content"],
                                     "additionalProperties": false
                                 }
+                            },
+                            "replay": {
+                                "type": "object",
+                                "description": "An assistant message's: the reply's replay, exactly as it came. It carries the model's reasoning to the next step; a changed one isn't sent.",
+                                "properties": {
+                                    "provider": { "type": "string" },
+                                    "blocks": { "type": "array", "maxItems": MAX_REPLAY_BLOCKS, "items": { "type": "object" } },
+                                    "seal": { "type": "string" }
+                                },
+                                "required": ["provider", "blocks", "seal"],
+                                "additionalProperties": false
                             }
                         },
                         "required": ["role"],
@@ -435,6 +511,50 @@ mod tests {
                 "tools": [{"name": "files.list", "input_schema": {}}]}),
             json!({"messages": [{"role": "user", "content": "x"}], "max_tokens": 10,
                 "tools": vec![tool.clone(); MAX_TOOLS + 1]}),
+        ] {
+            assert!(
+                matches!(input(bad.clone()), Err(ActionError::InvalidInput(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn adr0043_a_replay_rides_on_its_assistant_message_with_the_same_calls() {
+        let call = json!({ "id": "c1", "name": "files_list", "input": {} });
+        let replay =
+            |blocks: Value| json!({ "provider": "anthropic", "blocks": blocks, "seal": "00" });
+        let thinking = json!({ "type": "thinking", "thinking": "", "signature": "sig" });
+        let used = json!({ "type": "tool_use", "id": "c1", "name": "files_list", "input": {} });
+        let ok = input(json!({
+            "messages": [
+                {"role": "user", "content": "List my files"},
+                {"role": "assistant", "tool_calls": [call], "replay": replay(json!([thinking, used]))},
+                {"role": "user", "tool_results": [{"id": "c1", "content": "a.txt"}]},
+                // Only thinking: no words, no calls, still a message.
+                {"role": "assistant", "replay": replay(json!([thinking]))},
+                {"role": "user", "content": "Thanks"}
+            ],
+            "max_tokens": 100
+        }))
+        .unwrap();
+        assert!(ok.chars() > "List my files".len() + "a.txt".len() + "sig".len());
+        for bad in [
+            // On a user message.
+            json!({"messages": [{"role": "user", "content": "x", "replay": replay(json!([thinking]))}],
+                "max_tokens": 10}),
+            // Blocks calling what the message doesn't, or the reverse.
+            json!({"messages": [{"role": "user", "content": "x"},
+                {"role": "assistant", "content": "y", "replay": replay(json!([used]))}], "max_tokens": 10}),
+            json!({"messages": [{"role": "user", "content": "x"},
+                {"role": "assistant", "tool_calls": [call], "replay": replay(json!([thinking]))}],
+                "max_tokens": 10}),
+            // Not blocks, and too many.
+            json!({"messages": [{"role": "user", "content": "x"},
+                {"role": "assistant", "content": "y", "replay": replay(json!(["thinking"]))}], "max_tokens": 10}),
+            json!({"messages": [{"role": "user", "content": "x"},
+                {"role": "assistant", "content": "y", "replay": replay(json!(vec![thinking.clone(); MAX_REPLAY_BLOCKS + 1]))}],
+                "max_tokens": 10}),
         ] {
             assert!(
                 matches!(input(bad.clone()), Err(ActionError::InvalidInput(_))),

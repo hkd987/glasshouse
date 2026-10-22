@@ -19,7 +19,7 @@ pub struct AnthropicProvider {
 
 #[derive(Deserialize)]
 struct Response {
-    /// Text and `tool_use` blocks (ADR 0041).
+    /// Thinking, text and `tool_use` blocks (ADR 0041, ADR 0043).
     #[serde(default)]
     content: Vec<serde_json::Value>,
     #[serde(default)]
@@ -105,6 +105,8 @@ impl ModelProvider for AnthropicProvider {
             stop_reason: response.stop_reason,
             cost_usd: None,
             served_by: None,
+            // All of it goes back on the next call, thinking included.
+            blocks: response.content,
         })
     }
 }
@@ -168,6 +170,60 @@ mod tests {
                 "messages": [{"role": "user", "content": "Hello [redacted:email#1]"}]
             })
         );
+    }
+
+    #[test]
+    fn adr0043_thinking_comes_back_whole_and_goes_back_as_written() {
+        let thinking =
+            json!({ "type": "thinking", "thinking": "", "signature": "EqQBCkgIARABGAIi" });
+        let used = json!({ "type": "tool_use", "id": "toolu_1", "name": "files_list", "input": { "path": "Docs" } });
+        let (url, got) = fake::serve(
+            200,
+            r#"{"content":[{"type":"thinking","thinking":"","signature":"EqQBCkgIARABGAIi"},{"type":"tool_use","id":"toolu_1","name":"files_list","input":{"path":"Docs"}}],"stop_reason":"tool_use","usage":{"input_tokens":20,"output_tokens":9}}"#,
+        );
+        let provider =
+            AnthropicProvider::with_http(Http::insecure_for_tests(), Some(&url), Secret::new("k"));
+        let messages = hello();
+        let reply = provider.complete(&request(&messages)).unwrap();
+        assert_eq!(reply.blocks, vec![thinking.clone(), used.clone()]);
+        assert_eq!(reply.tool_calls[0].id, "toolu_1");
+        drop(got);
+
+        // The next call: the assistant turn is those blocks, unchanged;
+        // the result answers the call they make.
+        let (url, got) = fake::serve(
+            200,
+            r#"{"content":[{"type":"text","text":"One file."}],"stop_reason":"end_turn","usage":{"input_tokens":30,"output_tokens":3}}"#,
+        );
+        let provider =
+            AnthropicProvider::with_http(Http::insecure_for_tests(), Some(&url), Secret::new("k"));
+        let mut turn = hello();
+        turn.push(Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: reply.tool_calls.clone(),
+            tool_results: Vec::new(),
+            replay: Some(glass_gateway::Replay {
+                provider: "anthropic".into(),
+                blocks: reply.blocks.clone(),
+                seal: "checked by the gateway".into(),
+            }),
+        });
+        turn.push(Message {
+            role: Role::User,
+            content: String::new(),
+            tool_calls: Vec::new(),
+            tool_results: vec![glass_gateway::ToolResult {
+                id: "toolu_1".into(),
+                content: "a.txt".into(),
+                is_error: false,
+            }],
+            replay: None,
+        });
+        provider.complete(&request(&turn)).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&got.recv().unwrap().body).unwrap();
+        assert_eq!(body["messages"][1]["content"], json!([thinking, used]));
+        assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "toolu_1");
     }
 
     #[test]

@@ -32,8 +32,8 @@ mod scripted;
 mod secrets;
 
 pub use action::{
-    CompleteInput, MAX_PROMPT_CHARS, MAX_TOOLS, MODEL_COMPLETE, Message, ModelAction, Role, Tool,
-    ToolCall, ToolResult, definition,
+    CompleteInput, MAX_PROMPT_CHARS, MAX_REPLAY_BLOCKS, MAX_TOOLS, MODEL_COMPLETE, Message,
+    ModelAction, Replay, Role, Tool, ToolCall, ToolResult, definition,
 };
 pub use gateway::{Attempt, Call, CallRecord, Completion, Digest, Failure, Gateway};
 pub use provider::{ModelProvider, ProviderError, ProviderReply, ProviderRequest};

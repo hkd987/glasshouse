@@ -94,6 +94,7 @@ impl ModelProvider for CreditsProvider {
             stop_reason: answer.stop_reason,
             cost_usd: answer.cost_usd,
             served_by: answer.served_by,
+            blocks: Vec::new(),
         })
     }
 }

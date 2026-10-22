@@ -417,6 +417,7 @@ impl Console {
                 content: m.content.clone(),
                 tool_calls,
                 tool_results,
+                replay: None,
             });
         }
         if messages.is_empty() {
