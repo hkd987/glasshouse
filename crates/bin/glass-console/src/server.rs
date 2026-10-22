@@ -3520,6 +3520,30 @@ mod tests {
         );
         assert_eq!(bundle("1").await.status, 200);
         assert_eq!(bundle("2").await.status, 404);
+        // A new version the person didn't name keeps its name in the store,
+        // whatever the computer calls it; one they named takes that name.
+        let mut unnamed = next.clone();
+        unnamed.version = 4;
+        unnamed.named = false;
+        unnamed.name = "My Mail".into();
+        unnamed.manifest.name = "My Mail".into();
+        assert_eq!(submit(&unnamed).await.status, 200);
+        let (_, item) = t
+            .call("GET", "/api/catalog/mail-with-write", Value::Null)
+            .await;
+        assert_eq!(
+            (item["version"].as_str(), item["name"].as_str()),
+            (Some("3"), Some("Mail, with Write"))
+        );
+        let mut renamed = unnamed.clone();
+        renamed.version = 5;
+        renamed.named = true;
+        renamed.name = "Mail, quieter".into();
+        assert_eq!(submit(&renamed).await.status, 200);
+        let (_, item) = t
+            .call("GET", "/api/catalog/mail-with-write", Value::Null)
+            .await;
+        assert_eq!(item["name"], "Mail, quieter");
 
         // Someone else's app named like another one is refused.
         let mut copy = submission.clone();

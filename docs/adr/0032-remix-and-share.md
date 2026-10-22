@@ -183,7 +183,19 @@ Builds on ADRs 0013, 0014, 0023, 0024 and 0026.
 - The bundler's jail gets the rctl(8) limits an agent's task gets
   (memory, processes, CPU, disk), removed when it exits.
 - A remix undone and made again goes on where it was, with the same id and
-  the next version number.
+  the next version number. A second remix beside one they use gets the
+  next free name, "My Mail 2", as it gets the next free id (2026-10-22: a
+  live run left two "My Mail"s in the launcher).
+- An agent that can't take a whole app at once (2026-10-22). The
+  desktop agent cuts each result at 20,000 characters, and Mail's
+  source is about 38,000.
+  - `apps.source` lists the files with their lengths, and with `path`
+    returns one file's text exactly.
+  - `apps.save` takes `edits` (`path`, `old` found exactly once, `new`)
+    instead of `files`, made to the source it starts from, and the
+    manifest it starts from unless one is sent.
+  - An edit that doesn't fit says which and why, and nothing is saved.
+    The edited source goes through the same checks as any save.
 - Not yet:
   - policy's say over who may build (GA-10; everyone may);
   - Meet can't be remixed until workers are allowed;
@@ -245,6 +257,11 @@ Builds on ADRs 0013, 0014, 0023, 0024 and 0026.
   - The same person sharing the same app again makes the next version
     of the same item. It waits for review while computers keep the
     approved version.
+  - A new version keeps the name it has in the store unless the share
+    names one (2026-10-22). The submission says whether the person
+    named it (`named`). In a live run, the desktop agent re-shared a
+    version 2 under a name it made up, and "Mail, with Write" was
+    renamed for everyone.
   - Its maker must be in the directory; a team share must go to a group
     they are in.
 - **What the console keeps.** Beside the catalog, per version: the

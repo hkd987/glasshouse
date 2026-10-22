@@ -234,4 +234,18 @@ fn adr0044_scripts_as_models_write_them() {
     // A `return` that isn't the problem keeps the first error.
     let err = ran("return 1 2").unwrap_err();
     assert!(err.to_string().contains("return"), "{err}");
+    // Calls awaited as if they were fetches, as Haiku wrote one live.
+    let run = ran(r#"
+        const listed = await call("files_list", { path: "Invoices" });
+        const names = listed.text.split("\n");
+        return { count: names.length, first: (await call("files_read", { path: "Invoices/" + names[0] })).ok };
+    "#)
+    .unwrap();
+    assert_eq!(run.result, json!({ "count": 3, "first": true }));
+    // Thrown inside, it's the script's error, at the script's own line.
+    let err = ran("await call('files_list', {});\nthrow new Error('no invoices')")
+        .unwrap_err()
+        .to_string();
+    assert!(err.starts_with("Error: no invoices"), "{err}");
+    assert!(err.contains(":2:7"), "line 2, as the script has it: {err}");
 }

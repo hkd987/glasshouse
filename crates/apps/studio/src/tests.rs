@@ -167,9 +167,13 @@ fn ga3_a_remix_undone_and_made_again_goes_on_where_it_was() {
     let again = f.call(SAVE, mail_remix(&f)).unwrap();
     assert_eq!(again.data["app"], "my-mail", "not my-mail-2");
     assert_eq!(again.data["version"], 2, "after the version undone");
-    // A second remix beside the one they use is an app of its own.
+    // A second remix beside the one they use is an app of its own, with a
+    // name of its own in the launcher.
     let beside = f.call(SAVE, mail_remix(&f)).unwrap();
-    assert_eq!(beside.data["app"], "my-mail-2");
+    assert_eq!(
+        (&beside.data["app"], &beside.data["name"]),
+        (&json!("my-mail-2"), &json!("My Mail 2"))
+    );
 }
 
 #[test]
@@ -211,6 +215,114 @@ fn ga3_every_save_is_a_version_and_going_back_is_choosing_one() {
         f.call(REVERT, json!({ "app": "my-mail", "version": 7 }))
             .is_err()
     );
+}
+
+/// Mail's compose button, as its source has it.
+const COMPOSE: &str = "\"data-test\": \"compose\" },\n      \"New message\"";
+
+#[test]
+fn tl5_an_agent_reads_one_file_and_saves_an_edit_to_it() {
+    // An agent whose results are cut at a length reads Mail a file at a
+    // time and changes one string, without sending the app back whole.
+    let f = fixture(World::default());
+    let listed = f.call(SOURCE, json!({ "app": "mail" })).unwrap();
+    assert!(
+        listed.text.contains("src/main.ts (") && listed.text.contains(" lines)"),
+        "{}",
+        listed.text
+    );
+    let main = std::fs::read_to_string(apps().join("mail/src/main.ts")).unwrap();
+    let read = f
+        .call(SOURCE, json!({ "app": "mail", "path": "src/main.ts" }))
+        .unwrap();
+    assert_eq!(read.text, main, "the file, exactly");
+    assert_eq!(read.data["path"], "src/main.ts");
+
+    let edit = |old: &str, new: &str| {
+        json!({
+            "base": "mail",
+            "edits": [{ "path": "src/main.ts", "old": old, "new": new }],
+            "note": "Write, not New message",
+        })
+    };
+    let saved = f
+        .call(
+            SAVE,
+            edit(COMPOSE, &COMPOSE.replace("New message", "Write")),
+        )
+        .unwrap();
+    assert_eq!(saved.data["app"], "my-mail", "{}", saved.text);
+    let app: AgentId = "my-mail".parse().unwrap();
+    let store = f.studio.store();
+    let source = store.source("demo", &app, 1).unwrap();
+    assert!(source["src/main.ts"].contains(&COMPOSE.replace("New message", "Write")));
+    assert_eq!(
+        source.len(),
+        listed.data["files"].as_object().unwrap().len()
+    );
+    // What it declares is Mail's, as nothing said otherwise.
+    let declares = &listed.data["manifest"];
+    let manifest = store.manifest("demo", &app, 1).unwrap();
+    assert_eq!(json!(manifest.actions), declares["actions"]);
+    assert_eq!(manifest.name, "My Mail");
+
+    // The next version starts from the last: a second edit, a new file.
+    let next = f
+        .call(
+            SAVE,
+            json!({
+                "app": "my-mail",
+                "edits": [
+                    { "path": "src/main.ts", "old": "\"Write\"", "new": "\"Write one\"" },
+                    { "path": "src/extra.css", "new": ".x { color: red; }" },
+                ],
+                "note": "Write one",
+            }),
+        )
+        .unwrap();
+    assert_eq!(next.data["version"], 2);
+    let source = store.source("demo", &app, 2).unwrap();
+    assert!(source["src/main.ts"].contains("\"Write one\""));
+    assert_eq!(source["src/extra.css"], ".x { color: red; }");
+}
+
+#[test]
+fn tl5_an_edit_that_doesnt_fit_says_why_and_saves_nothing() {
+    let f = fixture(World::default());
+    let save = |edits: Value| {
+        f.call(SAVE, json!({ "base": "mail", "edits": edits, "note": "x" }))
+            .unwrap_err()
+            .to_string()
+    };
+    let err = save(json!([{ "path": "src/main.ts", "old": "Not in Mail at all", "new": "" }]));
+    assert!(err.contains("old isn't in the file"), "{err}");
+    let err = save(json!([{ "path": "src/main.ts", "old": "const", "new": "let" }]));
+    assert!(err.contains("times; include more"), "{err}");
+    let err = save(json!([{ "path": "src/nope.ts", "old": "x", "new": "y" }]));
+    assert!(
+        err.contains("edit 1 (src/nope.ts): there's no such file"),
+        "{err}"
+    );
+    let err = save(json!([{ "path": "src/main.ts", "new": "y" }]));
+    assert!(err.contains("the file is there"), "{err}");
+    // A second edit failing keeps the first from saving too.
+    let err = save(json!([
+        { "path": "src/main.ts", "old": COMPOSE, "new": "Write" },
+        { "path": "src/main.ts", "old": "Not there", "new": "" },
+    ]));
+    assert!(err.contains("edit 2 (src/main.ts): old isn't"), "{err}");
+    // An edit's new file is checked like any other.
+    let err = save(json!([{ "path": "notes.txt", "new": "hi" }]));
+    assert!(
+        err.contains("notes.txt: an app's source lives under src/"),
+        "{err}"
+    );
+    assert!(f.studio.own_apps("demo", &f.ctx.home).is_empty());
+    let err = f
+        .call(SOURCE, json!({ "app": "mail", "path": "src/nope.ts" }))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("has no src/nope.ts; it has"), "{err}");
 }
 
 #[test]
@@ -474,6 +586,15 @@ fn ga8_ga13_a_person_shares_their_app_through_the_store_only() {
     assert_eq!((got.maker.as_str(), got.device.as_str()), ("demo", "dev-1"));
     assert_eq!(got.based_on.unwrap().id.as_str(), "mail");
     assert!(got.files["src/main.ts"].contains("Unread count in the title"));
+    // Not named: a new version would keep its name in the store.
+    assert_eq!((got.name.as_str(), got.named), ("My Mail", false));
+    f.call(
+        SHARE,
+        json!({ "app": "my-mail", "to": "org", "name": "Mail, with Write", "note": "x" }),
+    )
+    .unwrap();
+    let got = console.got.lock().unwrap()[1].clone();
+    assert_eq!((got.name.as_str(), got.named), ("Mail, with Write", true));
 
     // A team is one of the person's own groups.
     let err = f

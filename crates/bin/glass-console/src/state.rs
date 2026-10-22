@@ -688,11 +688,16 @@ impl State {
                 submission.maker
             )));
         }
-        let name = submission.name.trim();
         if submission.note.trim().is_empty() {
             return Err(invalid("say what it's for".into()));
         }
         let before = self.shared_as(&submission.maker, &submission.app);
+        // A new version keeps its name in the store unless the person
+        // named it: an agent's guess never renames it for everyone.
+        let name = match before {
+            Some(item) if !submission.named => item.item.name.trim(),
+            _ => submission.name.trim(),
+        };
         let ours = builder.our_apps();
         // A name colleagues could take for another app's is refused.
         let same = |other: &str| other.trim().eq_ignore_ascii_case(name);

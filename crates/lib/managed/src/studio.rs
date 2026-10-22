@@ -38,6 +38,10 @@ pub struct Submission {
     /// The maker's own id for it (`my-…`).
     pub app: AgentId,
     pub name: String,
+    /// Whether the person chose `name`: a new version of an app already in
+    /// the store keeps the name it has there unless they did.
+    #[serde(default)]
+    pub named: bool,
     pub version: u32,
     /// The login of whoever made it, on the computer that sends it.
     pub maker: String,
@@ -156,6 +160,7 @@ mod tests {
         let submission = Submission {
             app: "my-mail".parse().unwrap(),
             name: "Mail, with Write".into(),
+            named: true,
             version: 2,
             maker: "dana".into(),
             device: "dev-1".into(),

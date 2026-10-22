@@ -52,6 +52,18 @@ make vm-status            # "running: pid …, ssh … up" or not running
   `vm.sh type "..."`, `vm.sh key ret`, `vm.sh screendump`, and click to
   approve or roll back. Its Mail is at http://mail.localhost:7300.
   `real-desktop.sh down` deletes the key file and stops it all.
+- Hacking on our apps and sharing them back to the org's store, on a real
+  model (TL-5, GA-8): `tools/dev/real-remix.sh up` starts the admin console
+  (http://127.0.0.1:7410) and an enrolled dev-host glassd on Claude Haiku
+  5.5, which steps up to Sonnet. Its desktop agent may use `apps.*`. It
+  also starts the Store (http://store.localhost:7411). Then:
+  - `real-remix.sh run "Make my own version of Mail where …, and share it
+    with everyone"` approves what the agent asks and prints each model
+    call's cost;
+  - `real-remix.sh review <catalog-id>` is IT's side in a browser: review,
+    approve, the Store installs it, it opens, with screenshots;
+  - `real-remix.sh down` stops it and deletes the key file.
+  It uses the console suite's ports, so stop it before `make console-test`.
 - No credits, or a failure to make happen on purpose:
   `tools/dev/fake-model.sh [--it] [--ladder] <scenario> [request]` runs the
   agent on the dev host against `tools/dev/fake-anthropic.py`. That is a

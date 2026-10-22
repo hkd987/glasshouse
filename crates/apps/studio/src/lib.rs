@@ -333,6 +333,10 @@ struct SourceInput {
     version: Option<u32>,
     #[serde(default)]
     template: bool,
+    /// One file, as text: an agent that can't take a whole app at once
+    /// reads it a file at a time.
+    #[serde(default)]
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -344,9 +348,28 @@ struct SaveInput {
     /// An installed app: the save is a new app remixing it.
     #[serde(default)]
     base: Option<AgentId>,
-    manifest: Declares,
-    files: BTreeMap<String, String>,
+    /// What it declares; what it starts from declares by default.
+    #[serde(default)]
+    manifest: Option<Declares>,
+    /// The whole source, or
+    #[serde(default)]
+    files: Option<BTreeMap<String, String>>,
+    /// changes to what it starts from: an agent changes a line without
+    /// sending the rest of the app again.
+    #[serde(default)]
+    edits: Vec<Edit>,
     note: String,
+}
+
+/// One change to a file: `old`, found exactly once, becomes `new`. An
+/// empty `old` on a path that isn't there makes the file.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Edit {
+    path: String,
+    #[serde(default)]
+    old: String,
+    new: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -462,7 +485,11 @@ impl StudioProvider {
     fn plan_save(&self, ctx: &TaskContext, input: SaveInput) -> Result<Plan, ActionError> {
         let login = ctx.principal.on_behalf_of.name.as_str();
         let store = self.studio.store();
-        let (app, version, base, base_actions, default_name) = match (&input.app, &input.base) {
+        // What the save starts from: its manifest and source, read only
+        // when the input leaves either out.
+        let partial = input.manifest.is_none() || input.files.is_none();
+        let (app, version, base, base_actions, default_name, from) = match (&input.app, &input.base)
+        {
             (Some(app), None) => {
                 let versions = store.versions(login, app);
                 let Some(&latest) = versions.last() else {
@@ -479,17 +506,29 @@ impl StudioProvider {
                     .and_then(|b| self.studio.installed(&b.id))
                     .map(|(m, _)| m.actions)
                     .unwrap_or_default();
+                let from = match partial {
+                    true => Some((
+                        store
+                            .manifest(login, app, latest)
+                            .ok_or_else(|| invalid(format!("{app}'s manifest can't be read")))?,
+                        store
+                            .source(login, app, latest)
+                            .map_err(|e| ActionError::io("its source", e))?,
+                    )),
+                    false => None,
+                };
                 (
                     app.clone(),
                     latest + 1,
                     record.based_on,
                     base_actions,
                     record.name,
+                    from,
                 )
             }
             (None, Some(base)) => {
                 let surroundings = self.studio.surroundings()?;
-                let Some((manifest, _)) = self.studio.installed(base) else {
+                let Some((manifest, files)) = self.studio.installed(base) else {
                     return Err(invalid(format!(
                         "{base} isn't an app installed here with its source; apps.bases lists what you can remix"
                     )));
@@ -503,8 +542,8 @@ impl StudioProvider {
                 // Never the base's own name: both are in the launcher.
                 let name = input
                     .manifest
-                    .name
-                    .clone()
+                    .as_ref()
+                    .and_then(|m| m.name.clone())
                     .filter(|n| n.trim() != manifest.name)
                     .unwrap_or_else(|| format!("My {}", manifest.name));
                 // A remix they undid, of the same app by the same name, goes
@@ -520,6 +559,29 @@ impl StudioProvider {
                                 r.name == name && r.based_on.is_some_and(|b| b.id == *base)
                             })
                 });
+                // Beside another app of theirs by that name, the next free
+                // "My Mail 2": two "My Mail"s in the launcher can't be told
+                // apart.
+                let name = match &undone {
+                    Some(_) => name,
+                    None => {
+                        let names: Vec<String> = store
+                            .apps(login)
+                            .iter()
+                            .filter_map(|id| {
+                                let latest = *store.versions(login, id).last()?;
+                                Some(store.record(login, id, latest)?.name)
+                            })
+                            .collect();
+                        (1..)
+                            .map(|n| match n {
+                                1 => name.clone(),
+                                n => format!("{name} {n}"),
+                            })
+                            .find(|candidate| !names.contains(candidate))
+                            .unwrap_or(name)
+                    }
+                };
                 let app = match undone {
                     Some(app) => app,
                     None => id_for(&name, &store.apps(login))?,
@@ -529,7 +591,9 @@ impl StudioProvider {
                     name: manifest.name.clone(),
                     version: manifest.version.clone(),
                 };
-                (app, 1, Some(based_on), manifest.actions, name)
+                let base_actions = manifest.actions.clone();
+                let from = partial.then_some((manifest, files));
+                (app, 1, Some(based_on), base_actions, name, from)
             }
             _ => {
                 return Err(invalid(
@@ -538,11 +602,27 @@ impl StudioProvider {
             }
         };
         let name = match &input.app {
-            Some(_) => input.manifest.name.clone().unwrap_or(default_name),
+            Some(_) => input
+                .manifest
+                .as_ref()
+                .and_then(|m| m.name.clone())
+                .unwrap_or(default_name),
             None => default_name,
         };
+        let (declares, files) = match (input.manifest, input.files, from) {
+            (Some(declares), Some(files), _) => (declares, files),
+            (declares, files, Some((from_manifest, from_files))) => (
+                declares.unwrap_or_else(|| Declares::of(&from_manifest)),
+                files.unwrap_or(from_files),
+            ),
+            (_, _, None) => unreachable!("read when the input leaves something out"),
+        };
+        let files = match (input.edits.is_empty(), files) {
+            (true, files) => files,
+            (false, files) => edited(files, &input.edits)?,
+        };
         Ok(Plan {
-            manifest: manifest(&app, &name, version, input.manifest),
+            manifest: manifest(&app, &name, version, declares),
             app,
             name,
             version,
@@ -550,7 +630,7 @@ impl StudioProvider {
             base_actions,
             need: None,
             declined: Vec::new(),
-            files: input.files,
+            files,
             note: input.note,
         })
     }
@@ -735,6 +815,59 @@ fn refused(found: &Findings) -> ActionError {
     ))
 }
 
+impl Declares {
+    /// What `manifest` declares, its name left to the save.
+    fn of(manifest: &AppManifest) -> Self {
+        Self {
+            name: None,
+            description: Some(manifest.description.clone()),
+            actions: manifest.actions.clone(),
+            permissions: manifest.permissions.clone(),
+            labels: manifest.labels.clone(),
+        }
+    }
+}
+
+/// `files` with `edits` made, in order; an edit that doesn't fit exactly
+/// says why, so the agent reads the file again rather than guessing.
+fn edited(
+    mut files: BTreeMap<String, String>,
+    edits: &[Edit],
+) -> Result<BTreeMap<String, String>, ActionError> {
+    for (n, edit) in edits.iter().enumerate() {
+        let which = format!("edit {} ({})", n + 1, edit.path);
+        match files.get_mut(&edit.path) {
+            None if edit.old.is_empty() => {
+                files.insert(edit.path.clone(), edit.new.clone());
+            }
+            None => {
+                return Err(invalid(format!(
+                    "{which}: there's no such file; an empty old makes a new one"
+                )));
+            }
+            Some(_) if edit.old.is_empty() => {
+                return Err(invalid(format!(
+                    "{which}: the file is there; old is the text to replace"
+                )));
+            }
+            Some(text) => match text.matches(edit.old.as_str()).count() {
+                1 => *text = text.replacen(edit.old.as_str(), &edit.new, 1),
+                0 => {
+                    return Err(invalid(format!(
+                        "{which}: old isn't in the file; read it again with apps.source and its path"
+                    )));
+                }
+                times => {
+                    return Err(invalid(format!(
+                        "{which}: old is in the file {times} times; include more of the text around it"
+                    )));
+                }
+            },
+        }
+    }
+    Ok(files)
+}
+
 fn manifest(app: &AgentId, name: &str, version: u32, declares: Declares) -> AppManifest {
     AppManifest {
         id: app.clone(),
@@ -851,11 +984,14 @@ impl StudioProvider {
             let files = store
                 .source(login, &app, version)
                 .map_err(|e| ActionError::io("its source", e))?;
+            let label = format!("{} version {version}", manifest.name);
+            if let Some(path) = &input.path {
+                return one_file(&app, &label, &files, path);
+            }
             return Ok(ActionOutput {
                 text: format!(
-                    "{} version {version}: {} files. Save a new version with apps.save {{\"app\": \"{app}\"}}.",
-                    manifest.name,
-                    files.len()
+                    "{label}: {}. Save a new version with apps.save {{\"app\": \"{app}\"}}.",
+                    listing(&files)
                 ),
                 data: json!({
                     "app": app, "name": manifest.name, "version": version, "yours": true,
@@ -870,12 +1006,14 @@ impl StudioProvider {
             .installed(&app)
             .filter(|_| surroundings.profile(login).contains(&app))
             .ok_or_else(|| invalid(format!("{app} isn't an app of yours with its source here")))?;
+        let label = format!("{} {}", manifest.name, manifest.version);
+        if let Some(path) = &input.path {
+            return one_file(&app, &label, &files, path);
+        }
         Ok(ActionOutput {
             text: format!(
-                "{} {}: {} files. Change them and save your version with apps.save {{\"base\": \"{app}\"}}.",
-                manifest.name,
-                manifest.version,
-                files.len()
+                "{label}: {}. Change them and save your version with apps.save {{\"base\": \"{app}\"}}.",
+                listing(&files)
             ),
             data: json!({
                 "app": app, "name": manifest.name, "version": manifest.version, "yours": false,
@@ -1013,6 +1151,7 @@ impl StudioProvider {
         Ok(Submission {
             app: input.app.clone(),
             name: manifest.name.clone(),
+            named: input.name.is_some(),
             version,
             maker: login.to_owned(),
             device: device.clone(),
@@ -1052,6 +1191,36 @@ fn audience(share: &ShareTo) -> String {
         ShareTo::Team { group } => format!("the {group} team"),
         ShareTo::Org => "everyone in your organization".into(),
     }
+}
+
+/// An app's files by path and length, for an agent choosing what to read.
+fn listing(files: &BTreeMap<String, String>) -> String {
+    let each: Vec<String> = files
+        .iter()
+        .map(|(path, text)| format!("{path} ({} lines)", text.lines().count()))
+        .collect();
+    format!("{} files: {}", files.len(), each.join(", "))
+}
+
+/// One of an app's files: the result's text is the file, exactly, for an
+/// agent to copy an edit's `old` from.
+fn one_file(
+    app: &AgentId,
+    label: &str,
+    files: &BTreeMap<String, String>,
+    path: &str,
+) -> Result<ActionOutput, ActionError> {
+    let Some(text) = files.get(path) else {
+        return Err(invalid(format!(
+            "{label} has no {path}; it has {}",
+            files.keys().cloned().collect::<Vec<_>>().join(", ")
+        )));
+    };
+    Ok(ActionOutput {
+        text: text.clone(),
+        data: json!({ "app": app, "of": label, "path": path, "lines": text.lines().count() }),
+        changes: Vec::new(),
+    })
 }
 
 fn declares_json(manifest: &AppManifest) -> Value {
@@ -1112,7 +1281,8 @@ impl ActionProvider for StudioProvider {
                 "An app's source",
                 "An app's TypeScript and CSS source and what its manifest declares, to change \
                  and save as the person's own version; or, with template, the starting point \
-                 for a new app.",
+                 for a new app. Its text lists the files; with path, the result is that one \
+                 file's text, exactly, to make edits from.",
                 SideEffect::None,
                 Tier::Auto,
                 json!({
@@ -1120,7 +1290,8 @@ impl ActionProvider for StudioProvider {
                     "properties": {
                         "app": app,
                         "version": { "type": "integer", "minimum": 1 },
-                        "template": { "type": "boolean" }
+                        "template": { "type": "boolean" },
+                        "path": { "type": "string", "description": "One file, such as src/main.ts." }
                     },
                     "additionalProperties": false
                 }),
@@ -1129,8 +1300,10 @@ impl ActionProvider for StudioProvider {
                 SAVE,
                 "Save an app of your own",
                 "Saves a remix of an installed app (base) or a new version of an app the person \
-                 made (app). glassd checks the source and what it declares, bundles it and keeps \
-                 every version; the person can go back to any. Refusals say what to fix.",
+                 made (app), from the whole source (files) or from edits to what it starts \
+                 from; manifest is what that declares unless sent. glassd checks the source and \
+                 what it declares, bundles it and keeps every version; the person can go back \
+                 to any. Refusals say what to fix.",
                 SideEffect::LocalReversible,
                 Tier::Notify,
                 json!({
@@ -1140,9 +1313,23 @@ impl ActionProvider for StudioProvider {
                         "base": app,
                         "manifest": manifest_schema(),
                         "files": files_schema(),
+                        "edits": {
+                            "type": "array",
+                            "description": "Changes to the source it starts from, in order, instead of files.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": { "type": "string", "description": "Such as src/main.ts." },
+                                    "old": { "type": "string", "description": "Text in the file, exactly as apps.source gave it, found once. Empty makes a new file." },
+                                    "new": { "type": "string", "description": "What it becomes." }
+                                },
+                                "required": ["path", "new"],
+                                "additionalProperties": false
+                            }
+                        },
                         "note": { "type": "string", "description": "What changed, in a sentence." }
                     },
-                    "required": ["manifest", "files", "note"],
+                    "required": ["note"],
                     "additionalProperties": false
                 }),
             ),
@@ -1182,7 +1369,7 @@ impl ActionProvider for StudioProvider {
                         "app": app,
                         "to": { "enum": ["team", "org"] },
                         "team": { "type": "string", "description": "One of the person's groups, for to: team." },
-                        "name": { "type": "string", "description": "What colleagues see it as in the Store, for what it does (\"Mail, with Write\"); its own name by default." },
+                        "name": { "type": "string", "description": "What colleagues see it as in the Store, for what it does (\"Mail, with Write\"); its own name by default. Leave it out for a new version of an app already in the Store: it keeps the name it has there." },
                         "note": { "type": "string", "description": "What it's for, in a sentence." }
                     },
                     "required": ["app", "to", "note"],

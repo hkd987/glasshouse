@@ -199,10 +199,15 @@ fn evaluate(source: &str, today: &str) -> Result<Value, ScriptError> {
         .eval(Source::from_bytes(&prelude))
         .map_err(|e| ScriptError::Host(e.to_string()))?;
     // A script may end with its result or `return` it, as a function body
-    // would: models write both.
+    // would, and may `await` calls as if they were fetches: models write
+    // all three. An async function's body takes both.
     let value = match context.eval(Source::from_bytes(source)) {
-        Err(e) if e.to_string().contains("unexpected token 'return'") => {
-            let body = format!("(function () {{\n{source}\n}})()");
+        Err(e)
+            if e.to_string().starts_with("SyntaxError")
+                && (source.contains("return") || source.contains("await")) =>
+        {
+            // On the script's first line, so errors say its own lines.
+            let body = format!("(async function () {{ {source}\n}})()");
             context
                 .eval(Source::from_bytes(&body))
                 .map_err(|_| thrown(e))?

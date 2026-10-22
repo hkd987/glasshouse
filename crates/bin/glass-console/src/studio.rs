@@ -292,6 +292,7 @@ pub(crate) mod tests {
         let submission = Submission {
             app: "my-mail".parse().unwrap(),
             name: manifest.name.clone(),
+            named: true,
             version: 2,
             maker: "dana".into(),
             device: "dev-1".into(),

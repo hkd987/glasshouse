@@ -129,6 +129,9 @@ on ADR 0018 (the gateway), 0041 (tool use, the desktop agent) and 0043
        such as a runaway regular expression, runs until the task is
        stopped; its tile shows "Running a script" meanwhile.
      - Whole numbers cross as integers, as tools' schemas ask.
+     - A script may `return` its result or `await` its calls, as models
+       write them: either runs as an async function's body. Haiku's
+       first script in a live remix awaited a call and failed to parse.
      - Tests prove each of these (`glass-script`). The e2e suite runs a
        script in the agent's jail, its call decided and audited, and a
        script that imports `/etc/passwd` fails there.
