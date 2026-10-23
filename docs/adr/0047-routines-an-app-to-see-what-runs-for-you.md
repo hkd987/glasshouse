@@ -42,6 +42,14 @@ for users to see their routines maybe a routines app on our os". PRD DA-4
    - `routines.repeats`, `routines.keep`, `routines.dismiss`: the
      repeats; keeping one, with the code this computer wrote; and no
      longer offering one until it's done the same way twice again.
+   - `routines.use` (Notify): makes another of a routine's saved versions
+     the one that runs, such as the one before a change that didn't work
+     out. Each was approved when it was saved, so it's a choice among
+     them, in the person's routines file, undoable, as pausing is. Its
+     notice says what changes: when it runs, and whether its code does.
+   - `routines.read` lists a routine's versions (newest first, what each
+     was, when it runs, which one is in use) and, with `version`, reads
+     one of them, its code included.
    - The provider reaches the runtime through `glass_app_routines::Host`,
      which glassd sets.
 3. **Starting and keeping are the person's own.** `routines.run`,
@@ -87,9 +95,33 @@ for users to see their routines maybe a routines app on our os". PRD DA-4
   - Typing a time a key at a time lost the field to a redraw. The picker
     now keeps what's typed, and the apps test types it that way.
 
+6. **Routines hears of changes; it never asks again on a timer.** glassd
+   wakes the person's Routines windows (`app.status`, ADR 0030's waits)
+   when a routine's run starts or ends, wherever it was started (its
+   schedule, `glassctl`, the agent), when a request is done the same way
+   twice, and when any `routines.*` call changes a routine. `routines.list`
+   and `routines.read` say which routine is running now, and its run.
+7. **Versions, and going back.** Opened, a routine lists its versions;
+   each one not in use shows its changes against the one in use (when it
+   runs, then its code, line by line, added and removed lines marked) and
+   "Go back to this version".
+
+## Consequences, added (2026-10-23)
+- A scheduled run shows as running, then how it went, in an open
+  Routines, as it happens. The page's 2 s polling while a run it started
+  was going is gone.
+- A change the person regrets is one click back, without their agent or
+  an approval: the version they go back to was approved when saved.
+- Tests: `glass-app-routines`
+  `adr0047_a_routine_goes_back_to_an_earlier_version_and_any_version_reads`,
+  `adr0047_routines_windows_hear_of_every_change_and_see_what_runs`;
+  runtime `flows::adr0047_the_person_keeps_runs_pauses_and_reschedules_…`
+  (the window wakes at a run's start and end, and after going back);
+  `routines.spec.ts` (a run started with `glassctl` shows in the open
+  page; version 1 against version 2, then back to it); the line diff in
+  `routines.test.ts`.
+
 ## Not built yet
 - Editing a routine's code in the app. A new version still comes from the
   agent, with an approval.
-- Hearing of a run's end without asking: the page asks again every 2 s
-  while a run it started is going, and when it comes back to the front.
-- A routine's versions side by side.
+- Removing a version for good: versions are kept, never changed.

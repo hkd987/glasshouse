@@ -32,15 +32,30 @@ export interface Routine {
   paused: boolean;
   next_run_at: string | null;
   last_run: Run | null;
+  /** Its run going now, wherever it was started. */
+  running: string | null;
   note: string;
   saved_at: string;
 }
 
-/** routines.read: the same, with its code and the runs kept. */
+/** One saved version of a routine, as routines.read lists them. */
+export interface Version {
+  version: number;
+  note: string;
+  saved_at: string;
+  /** When it runs, in a sentence. */
+  runs: string;
+  /** The one that runs. */
+  in_use: boolean;
+}
+
+/** routines.read: the same, with its code, the runs kept and its versions, newest first. */
 export interface RoutineDetail extends Routine {
   script: string;
   runs_kept: Run[];
-  versions: number;
+  /** This is the version that runs. */
+  in_use: boolean;
+  versions: Version[];
 }
 
 /** A request done the same way more than once (ADR 0046). */
@@ -209,4 +224,49 @@ export function folder(path: string, user: string): string {
 /** A tool as the code calls it, in words: "mail_move" → "mail move". */
 export function tool(name: string): string {
   return name.replaceAll("_", " ");
+}
+
+/** A line of one version's code against another's. */
+export interface DiffLine {
+  kind: "same" | "added" | "removed";
+  text: string;
+}
+
+/**
+ * `to`'s lines against `from`'s: those both have, in order, and those
+ * only one has, the fewest of them (a longest common subsequence). Code
+ * over 2,000 lines comes back whole, as removed then added.
+ */
+export function diffLines(from: string, to: string): DiffLine[] {
+  const a = from.replace(/\n+$/, "").split("\n");
+  const b = to.replace(/\n+$/, "").split("\n");
+  if (a.length > 2000 || b.length > 2000) {
+    return [...a.map((text) => ({ kind: "removed" as const, text })), ...b.map((text) => ({ kind: "added" as const, text }))];
+  }
+  // longest[i][j]: the longest run of lines a[i..] and b[j..] have in common.
+  const longest = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1));
+  for (let i = a.length - 1; i >= 0; i -= 1) {
+    for (let j = b.length - 1; j >= 0; j -= 1) {
+      longest[i]![j] = a[i] === b[j] ? longest[i + 1]![j + 1]! + 1 : Math.max(longest[i + 1]![j]!, longest[i]![j + 1]!);
+    }
+  }
+  const out: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      out.push({ kind: "same", text: a[i]! });
+      i += 1;
+      j += 1;
+    } else if (longest[i + 1]![j]! >= longest[i]![j + 1]!) {
+      out.push({ kind: "removed", text: a[i]! });
+      i += 1;
+    } else {
+      out.push({ kind: "added", text: b[j]! });
+      j += 1;
+    }
+  }
+  for (; i < a.length; i += 1) out.push({ kind: "removed", text: a[i]! });
+  for (; j < b.length; j += 1) out.push({ kind: "added", text: b[j]! });
+  return out;
 }

@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { type Routine, type Run, choiceOf, choiceProblem, folder, nameFor, outcome, past, scheduleOf, upcoming, whenLine } from "../src/routines.ts";
+import { type Routine, type Run, choiceOf, choiceProblem, diffLines, folder, nameFor, outcome, past, scheduleOf, upcoming, whenLine } from "../src/routines.ts";
 
 test("adr0047 schedules read into the picker and back into the words routines take", () => {
   for (const words of ["daily 09:00", "weekdays 09:00", "weekends 10:00", "fri 17:00", "hourly"]) {
@@ -46,6 +46,7 @@ const routine = (extra: Partial<Routine> = {}): Routine => ({
   paused: false,
   next_run_at: new Date(2026, 9, 23, 17, 0).toISOString(),
   last_run: null,
+  running: null,
   note: "",
   saved_at: new Date(2026, 9, 16, 17, 0).toISOString(),
   ...extra,
@@ -82,4 +83,19 @@ test("adr0047 a repeat's name starts from its words, and folders from home", () 
   assert.equal(folder("/home/demo/Mail", "demo"), "~/Mail");
   assert.equal(folder("/usr/home/demo", "demo"), "~");
   assert.equal(folder("/srv/shared", "demo"), "/srv/shared");
+});
+
+test("adr0047 a version's code reads against the one in use, line by line", () => {
+  const before = 'const names = call("mail_list", {});\nlet moved = 0;\nreturn "Moved " + moved;\n';
+  const after = 'const names = call("mail_list", { folder: "Inbox" });\nlet moved = 0;\nmoved += 1;\nreturn "Moved " + moved;';
+  assert.deepEqual(diffLines(before, after), [
+    { kind: "removed", text: 'const names = call("mail_list", {});' },
+    { kind: "added", text: 'const names = call("mail_list", { folder: "Inbox" });' },
+    { kind: "same", text: "let moved = 0;" },
+    { kind: "added", text: "moved += 1;" },
+    { kind: "same", text: 'return "Moved " + moved;' },
+  ]);
+  assert.ok(diffLines(after, after).every((l) => l.kind === "same"));
+  const long = "x\n".repeat(2001);
+  assert.equal(diffLines(long, "y").filter((l) => l.kind === "removed").length, 2001);
 });

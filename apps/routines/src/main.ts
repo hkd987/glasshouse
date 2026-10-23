@@ -3,9 +3,11 @@
 // next, how it last ran, what it can reach, the code itself and its runs;
 // run it now, pause it, change when it runs, remove it. Above them, what
 // the person did the same way more than once, which this computer can
-// keep as a routine from the code it wrote (ADR 0046). Every change goes
-// through the bridge and the audit log like any action; the page keeps
-// nothing.
+// keep as a routine from the code it wrote (ADR 0046). A routine's
+// versions, each against the one in use, and going back to one. Every
+// change goes through the bridge and the audit log like any action; the
+// page keeps nothing. glassd wakes it when a run starts or ends, or a
+// routine changes anywhere (`app.status`).
 
 import { Bridge, BridgeError, Offline, h, ready, show } from "@glasshouse/sdk";
 
@@ -16,8 +18,10 @@ import {
   type Routine,
   type RoutineDetail,
   type Run,
+  type Version,
   choiceOf,
   choiceProblem,
+  diffLines,
   folder,
   nameFor,
   outcome,
@@ -47,8 +51,11 @@ const state = {
   keeping: null as { task: string; name: string; choice: Choice } | null,
   /** Asking before a routine is removed. */
   removing: null as string | null,
-  /** Runs started here, until they're on record. */
-  running: new Map<string, string>(),
+  /** A version shown against the one in use, once read. */
+  comparing: null as { routine: string; version: number; detail: RoutineDetail | null } | null,
+  /** Where the page's wait for changes picks up (`app.status`). */
+  cursor: 0,
+  listening: false,
 };
 
 function message(error: unknown): string {
@@ -71,11 +78,14 @@ async function load(): Promise<void> {
       const read = await bridge.call<RoutineDetail>("routines.read", { routine: state.open });
       state.detail = read.ok ? read.data : null;
       if (!read.ok) state.open = null;
+      const comparing = state.comparing;
+      if (comparing && (comparing.routine !== state.open || !state.detail?.versions.some((v) => v.version === comparing.version && !v.in_use))) {
+        state.comparing = null;
+      }
     }
-    // A run started here is done once it's on record.
-    for (const [routine, task] of state.running) {
-      const r = state.routines.find((x) => x.routine === routine);
-      if (!r || r.last_run?.task === task) state.running.delete(routine);
+    if (!state.listening) {
+      state.listening = true;
+      void listen();
     }
   } catch (error) {
     state.notice = { text: error instanceof Offline ? "Routines can't be loaded right now." : message(error), tone: "bad" };
@@ -108,30 +118,53 @@ function refuse(text: string): void {
 }
 
 function runNow(r: Routine): Promise<void> {
-  return act(`run:${r.routine}`, "routines.run", { routine: r.routine }, (data) => {
-    const task = (data as { task?: string } | null)?.task;
-    if (task) {
-      state.running.set(r.routine, task);
-      watch();
-    }
-  });
+  return act(`run:${r.routine}`, "routines.run", { routine: r.routine });
 }
 
-let watching = 0;
-/** Loads again every two seconds while a run started here is going, for three minutes at most. */
-function watch(): void {
-  if (watching) return;
-  const until = Date.now() + 180_000;
-  watching = window.setInterval(() => {
-    if (!state.running.size || Date.now() > until) {
-      window.clearInterval(watching);
-      watching = 0;
-      state.running.clear();
-      render();
-      return;
+/**
+ * Waits on glassd for the person's routines to change (25 s at a time):
+ * a run starting or ending, wherever it was started, or a routine saved,
+ * paused or removed by their agent or another window. Then loads again.
+ */
+async function listen(): Promise<void> {
+  try {
+    state.cursor = (await bridge.status()).cursor;
+  } catch {
+    // Offline: the first wait below tries again.
+  }
+  for (;;) {
+    try {
+      const status = await bridge.status({ waitSecs: 25, since: state.cursor });
+      state.cursor = status.cursor;
+      // A change of the page's own reloads when it's done.
+      if (status.changed.includes("routines") && state.busy === null) await load();
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
     }
-    void load();
-  }, 2000);
+  }
+}
+
+/** Shows version `version` of the open routine against the one in use, or stops. */
+async function compare(d: RoutineDetail, version: number): Promise<void> {
+  if (state.comparing?.version === version) {
+    state.comparing = null;
+    return render();
+  }
+  state.comparing = { routine: d.routine, version, detail: null };
+  render();
+  try {
+    const read = await bridge.call<RoutineDetail>("routines.read", { routine: d.routine, version });
+    if (state.comparing?.version !== version) return;
+    if (read.ok) state.comparing.detail = read.data;
+    else {
+      state.comparing = null;
+      state.notice = { text: read.text, tone: "bad" };
+    }
+  } catch (error) {
+    state.comparing = null;
+    state.notice = { text: message(error), tone: "bad" };
+  }
+  render();
 }
 
 function navigate(): void {
@@ -140,6 +173,7 @@ function navigate(): void {
   state.detail = null;
   state.picking = null;
   state.removing = null;
+  state.comparing = null;
   state.notice = null;
   void load();
 }
@@ -152,7 +186,7 @@ function button(label: string, attrs: Record<string, unknown>, primary = false):
 
 function lastRun(r: Routine): HTMLElement {
   const now = new Date();
-  if (state.running.has(r.routine)) {
+  if (r.running) {
     return h("div", { class: "last running", "data-test": "running" }, h("span", { class: "dot running" }), "Running now");
   }
   const run = r.last_run;
@@ -296,7 +330,7 @@ function routineCard(r: Routine): HTMLElement {
             onclick: () => act(`pause:${r.routine}`, "routines.pause", { routine: r.routine, paused: !r.paused }),
           })
         : null,
-      button("Run now", { "data-test": "run", disabled: busy || state.running.has(r.routine), onclick: () => runNow(r) }, true),
+      button("Run now", { "data-test": "run", disabled: busy || r.running !== null, onclick: () => runNow(r) }, true),
     ),
   );
 }
@@ -343,6 +377,64 @@ function runRow(run: Run): HTMLElement {
     h("td", {}, run.scheduled ? "On its schedule" : "You started it"),
     h("td", {}, h("span", { class: `dot ${how.tone}` }), how.text),
     h("td", { class: "said" }, run.said || (run.changes ? `${run.changes} changes` : "")),
+  );
+}
+
+/** One saved version: what it was, and, if it isn't the one in use, its changes and going back to it. */
+function versionRow(d: RoutineDetail, v: Version): HTMLElement {
+  const busy = state.busy !== null;
+  const open = state.comparing?.routine === d.routine && state.comparing.version === v.version;
+  return h(
+    "li",
+    { class: v.in_use ? "version in-use" : "version", "data-version": String(v.version) },
+    h(
+      "div",
+      { class: "head" },
+      h("strong", {}, `Version ${v.version}`),
+      v.in_use ? h("span", { class: "chip in-use" }, "In use") : null,
+      h("span", { class: "muted" }, `${past(v.saved_at, new Date())} · runs ${v.runs}`),
+    ),
+    h("div", { class: "note" }, v.note),
+    v.in_use
+      ? null
+      : h(
+          "div",
+          { class: "buttons" },
+          button(open ? "Hide changes" : "Show changes", { "data-test": "compare", disabled: busy, onclick: () => compare(d, v.version) }),
+          button(v.version < d.version ? "Go back to this version" : "Use this version", {
+            "data-test": "use-version",
+            disabled: busy,
+            onclick: () => act(`use:${d.routine}`, "routines.use", { routine: d.routine, version: v.version }, () => (state.comparing = null)),
+          }),
+        ),
+    open ? comparison(d) : null,
+  );
+}
+
+/** The version being compared against the one in use: when it runs, and its code, line by line. */
+function comparison(d: RoutineDetail): HTMLElement {
+  const other = state.comparing?.detail;
+  if (!other) return h("div", { class: "muted" }, "Loading…");
+  const lines = diffLines(d.script, other.script);
+  const changed = lines.some((l) => l.kind !== "same");
+  const mark = { same: " ", added: "+", removed: "\u2212" } as const;
+  return h(
+    "div",
+    { class: "comparison", "data-test": "comparison" },
+    h(
+      "p",
+      { class: "hint" },
+      `Against version ${d.version}, in use: `,
+      other.runs === d.runs ? `the same schedule (runs ${d.runs})` : `runs ${other.runs}, not ${d.runs}`,
+      changed ? "; its code differs where marked." : "; the same code.",
+    ),
+    changed
+      ? h(
+          "pre",
+          { class: "code diff" },
+          ...lines.map((l) => h("span", { class: `line ${l.kind}` }, h("span", { class: "n" }, mark[l.kind]), h("span", { class: "text" }, l.text), "\n")),
+        )
+      : null,
   );
 }
 
@@ -431,6 +523,15 @@ function detail(d: RoutineDetail): HTMLElement[] {
         : h("p", { class: "muted" }, "It hasn't run yet."),
       d.next_run_at && !d.paused ? h("p", { class: "hint" }, `Next: ${upcoming(d.next_run_at, now)}.`) : null,
     ),
+    h(
+      "section",
+      { class: "group", "data-test": "versions" },
+      h("h2", {}, "Versions"),
+      d.versions.length > 1
+        ? h("p", { class: "hint" }, "Each was approved when it was saved. Going back to one is undoable from the desktop.")
+        : h("p", { class: "hint" }, "This is its first version. Changing when it runs, or your agent changing it, saves the next."),
+      h("ol", { class: "versions" }, ...d.versions.map((v) => versionRow(d, v))),
+    ),
     h("section", { class: "group" }, remove),
   ];
 }
@@ -445,7 +546,7 @@ function render(): void {
         h("a", { class: "back", href: "#", "aria-label": "All routines" }, "‹ Routines"),
         h("h1", {}, d.name),
         h("span", { class: "spacer" }),
-        button("Run now", { "data-test": "run", disabled: state.busy !== null || state.running.has(d.routine), onclick: () => runNow(d) }, true),
+        button("Run now", { "data-test": "run", disabled: state.busy !== null || d.running !== null, onclick: () => runNow(d) }, true),
       )
     : h("header", { class: "titlebar" }, h("h1", {}, "Routines"), h("span", { class: "spacer" }), h("span", { class: "muted" }, "What runs for you, with no model"));
   show(

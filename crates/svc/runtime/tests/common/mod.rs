@@ -751,7 +751,7 @@ pub fn settings_app() -> AppManifest {
 pub fn routines_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "routines", "name": "Routines", "version": "0.1.0",
-        "actions": ["routines.list", "routines.read", "routines.run", "routines.pause", "routines.schedule", "routines.delete", "routines.repeats", "routines.keep", "routines.dismiss"],
+        "actions": ["routines.list", "routines.read", "routines.run", "routines.pause", "routines.schedule", "routines.delete", "routines.use", "routines.repeats", "routines.keep", "routines.dismiss"],
         "permissions": [], "labels": ["public", "internal"]
     }))
     .unwrap()

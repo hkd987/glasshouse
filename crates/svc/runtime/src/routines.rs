@@ -3,10 +3,11 @@
 //! with the scope it was saved with. Each run is a task like any other:
 //! policy, tiers, asks, audit and undo as they are when it runs.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
 
 use glass_api::{RoutineView, ScopeRequest, TaskRequest, TaskView, TileState};
-use glass_app_routines::{Host, Outcome, Repeat, Routine, Routines, Run, Weekday, store};
+use glass_app_routines::{APP, Host, Outcome, Repeat, Routine, Routines, Run, Weekday, store};
 use glass_types::{TaskId, Timestamp};
 
 use crate::runtime::Origin;
@@ -62,6 +63,8 @@ impl Runtime {
         if let Err(e) = routines.record_run(&task.user.name, &run.id, record) {
             tracing::warn!(task = %task.id, routine = %run.id, "keeping the routine's run: {e}");
         }
+        // Routines' windows show how it went without asking (ADR 0047).
+        self.app_changed(&task.user.name, APP);
     }
 
     fn current_routines(&self, caller: &Caller) -> Vec<Routine> {
@@ -111,7 +114,23 @@ impl Runtime {
             version: routine.version,
             scheduled,
         };
-        self.start_task(caller, request, Origin::Routine(run))
+        let started = self.start_task(caller, request, Origin::Routine(run))?;
+        // Routines' windows show it running.
+        self.app_changed(&caller.name, APP);
+        Ok(started)
+    }
+
+    /// `login`'s routines running now: each one's run, by routine id.
+    fn routines_running(&self, login: &str) -> BTreeMap<String, TaskId> {
+        let tasks: Vec<Arc<Task>> = self.tasks().values().cloned().collect();
+        tasks
+            .into_iter()
+            .filter(|t| t.user.name == login)
+            .filter_map(|t| {
+                let run = t.routine.as_ref()?;
+                t.lock().tile.is_live().then(|| (run.id.clone(), t.id))
+            })
+            .collect()
     }
 
     /// Starts every routine due in the minute that begins at `hour:minute`
@@ -193,6 +212,18 @@ impl Host for RoutinesHost {
         runtime
             .dismiss_repeat(login, task)
             .map_err(|e| e.to_string())
+    }
+
+    fn running(&self, login: &str, uid: u32) -> BTreeMap<String, TaskId> {
+        self.person(login, uid)
+            .map(|(runtime, _)| runtime.routines_running(login))
+            .unwrap_or_default()
+    }
+
+    fn changed(&self, login: &str) {
+        if let Some(runtime) = self.runtime.upgrade() {
+            runtime.app_changed(login, APP);
+        }
     }
 }
 

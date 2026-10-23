@@ -163,6 +163,8 @@ impl Runtime {
             tracing::warn!(task = %task.id, "keeping what the task did as code: {e}");
         }
         if let Some(earlier) = earlier {
+            // Routines' windows offer it without asking (ADR 0047).
+            self.app_changed(login, glass_app_routines::APP);
             task.lock().note(
                 glass_api::ActivityKind::Notice,
                 format!(

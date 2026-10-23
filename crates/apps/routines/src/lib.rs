@@ -16,6 +16,8 @@
 //! - `routines.pause` (Notify), `routines.schedule` (Ask): pauses a
 //!   routine's schedule or resumes it; changes when it runs, as its next
 //!   version (ADR 0047).
+//! - `routines.use` (Notify): goes back, or on, to another of a routine's
+//!   saved versions; undo puts the one before back.
 //! - `routines.run`, `routines.repeats`, `routines.keep`,
 //!   `routines.dismiss`: the person's own, in the Routines app, never an
 //!   agent's (ADR 0047): starting one now, and the requests they did the
@@ -55,6 +57,9 @@ pub const RUN: &str = "routines.run";
 pub const REPEATS: &str = "routines.repeats";
 pub const KEEP: &str = "routines.keep";
 pub const DISMISS: &str = "routines.dismiss";
+pub const USE: &str = "routines.use";
+/// The Routines app, whose windows hear when routines change (ADR 0047).
+pub const APP: &str = "routines";
 
 /// The longest script kept: a routine is a short program.
 pub const MAX_SCRIPT_BYTES: usize = 32 * 1024;
@@ -63,6 +68,8 @@ const MAX_REQUEST_CHARS: usize = 2_000;
 const MAX_NOTE_CHARS: usize = 300;
 /// The script lines an approval shows before saying how many more.
 const SHOWN_LINES: usize = 40;
+/// The versions `routines.read` lists, newest first.
+const MAX_VERSIONS_LISTED: usize = 50;
 
 fn invalid(why: impl Into<String>) -> ActionError {
     ActionError::InvalidInput(why.into())
@@ -236,6 +243,22 @@ struct TaskInput {
     task: glass_types::TaskId,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadInput {
+    routine: String,
+    /// One of its saved versions; the one in use without it.
+    #[serde(default)]
+    version: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UseInput {
+    routine: String,
+    version: u32,
+}
+
 /// The actions over [`Routines`].
 #[derive(Debug, Clone)]
 pub struct RoutinesProvider {
@@ -289,6 +312,7 @@ impl RoutinesProvider {
             .routines
             .keep(routine, &ctx.home, ctx.owner)
             .map_err(|e| ActionError::io("the routine", e))?;
+        self.changed(ctx);
         let when = match &saved.schedule {
             Some(schedule) => format!("It runs {}", schedule.describe()),
             None => "It runs when you start it".to_owned(),
@@ -402,8 +426,15 @@ impl RoutinesProvider {
 
     /// A routine as the Routines app lists it: with whether its schedule is
     /// paused, when it next runs and how it last ran.
-    fn listed(&self, routine: &Routine, paused: bool, now: Now) -> Value {
+    fn listed(
+        &self,
+        routine: &Routine,
+        paused: bool,
+        now: Now,
+        running: Option<glass_types::TaskId>,
+    ) -> Value {
         let mut data = summary_json(routine);
+        data["running"] = json!(running);
         let runs = self.routines.runs(&routine.owner, &routine.id);
         data["paused"] = json!(paused);
         data["next_run_at"] = json!(if paused {
@@ -415,6 +446,60 @@ impl RoutinesProvider {
         data["note"] = json!(routine.note);
         data["saved_at"] = json!(routine.saved_at);
         data
+    }
+
+    /// The version of `found` a `routines.use` makes the one in use: saved,
+    /// and not the one in use already.
+    fn used(&self, found: &Routine, version: u32) -> Result<Routine, ActionError> {
+        if version == found.version {
+            return Err(invalid(format!(
+                "{} is version {version} already",
+                found.name
+            )));
+        }
+        self.version_of(found, version)
+    }
+
+    /// Wakes the person's Routines windows: what they show changed.
+    fn changed(&self, ctx: &TaskContext) {
+        if let Some(host) = self.routines.host() {
+            host.changed(&ctx.principal.on_behalf_of.name);
+        }
+    }
+
+    /// The saved version `version` of `found`, one of the person's routines.
+    fn version_of(&self, found: &Routine, version: u32) -> Result<Routine, ActionError> {
+        self.routines
+            .record(&found.owner, &found.id, version)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "{} has no version {version}; routines.read lists its versions",
+                    found.name
+                ))
+            })
+    }
+
+    /// Each saved version of `current`'s routine, newest first: what it
+    /// was, when, and whether it's the one in use.
+    fn versions_json(&self, current: &Routine) -> Value {
+        let mut versions: Vec<Value> = self
+            .routines
+            .versions(&current.owner, &current.id)
+            .into_iter()
+            .rev()
+            .filter_map(|v| self.routines.record(&current.owner, &current.id, v))
+            .map(|r| {
+                json!({
+                    "version": r.version,
+                    "note": r.note,
+                    "saved_at": r.saved_at,
+                    "runs": runs_text(r.schedule),
+                    "in_use": r.version == current.version,
+                })
+            })
+            .collect();
+        versions.truncate(MAX_VERSIONS_LISTED);
+        Value::Array(versions)
     }
 
     fn mine(&self, ctx: &TaskContext, id: &str) -> Result<Routine, ActionError> {
@@ -623,12 +708,16 @@ impl ActionProvider for RoutinesProvider {
             def(
                 READ,
                 "A routine",
-                "One routine, with its script.",
+                "One routine, with its script and its saved versions; with version, that \
+                 version of it.",
                 SideEffect::None,
                 Tier::Auto,
                 json!({
                     "type": "object",
-                    "properties": { "routine": routine },
+                    "properties": {
+                        "routine": routine,
+                        "version": { "type": "integer", "minimum": 1, "description": "One of its saved versions, to read that one; the one in use without it." }
+                    },
                     "required": ["routine"],
                     "additionalProperties": false
                 }),
@@ -710,6 +799,24 @@ impl ActionProvider for RoutinesProvider {
                 }),
             )
             .asking("Review the change", "Change it"),
+            def(
+                USE,
+                "Use another version of a routine",
+                "Makes one of a routine's saved versions the one that runs, such as the one \
+                 before a change that didn't work out. Each was approved when it was saved. \
+                 Undo puts the one before back.",
+                SideEffect::LocalReversible,
+                Tier::Notify,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "routine": routine,
+                        "version": { "type": "integer", "minimum": 1, "description": "One of its saved versions, as routines.read lists them." }
+                    },
+                    "required": ["routine", "version"],
+                    "additionalProperties": false
+                }),
+            ),
             // The person's own, in Routines (ADR 0047): policy makes them
             // Never for every agent.
             def(
@@ -799,10 +906,17 @@ impl ActionProvider for RoutinesProvider {
                 })
             }
             READ => {
-                let Named { routine } = parse_input(input)?;
+                let ReadInput { routine, version } = parse_input(input)?;
                 let found = self.mine(ctx, &routine)?;
+                let summary = match version {
+                    Some(v) => {
+                        self.version_of(&found, v)?;
+                        format!("Read version {v} of the routine {}", found.name)
+                    }
+                    None => format!("Read the routine {}", found.name),
+                };
                 Ok(Preview {
-                    summary: format!("Read the routine {}", found.name),
+                    summary,
                     targets: vec![found.name],
                     ..Preview::default()
                 })
@@ -856,6 +970,35 @@ impl ActionProvider for RoutinesProvider {
                             runs_text(next.schedule)
                         ),
                     ],
+                ))
+            }
+            USE => {
+                let UseInput { routine, version } = parse_input(input)?;
+                let found = self.mine(ctx, &routine)?;
+                let target = self.used(&found, version)?;
+                let verb = if version < found.version {
+                    "Go back to"
+                } else {
+                    "Use"
+                };
+                let mut items = vec![
+                    format!("Version {}: {}", target.version, target.note),
+                    format!("Instead of version {}: {}", found.version, found.note),
+                ];
+                if target.schedule != found.schedule {
+                    items.push(format!(
+                        "Runs {} again, not {}",
+                        runs_text(target.schedule),
+                        runs_text(found.schedule)
+                    ));
+                }
+                if target.script != found.script {
+                    items.push("Its code is that version's".into());
+                }
+                Ok(choice_preview(
+                    ctx,
+                    format!("{verb} version {version} of the routine {}", found.name),
+                    items,
                 ))
             }
             RUN => {
@@ -924,26 +1067,45 @@ impl ActionProvider for RoutinesProvider {
                         .join("\n"),
                 };
                 let now = Now::here();
+                let running = self
+                    .routines
+                    .host()
+                    .map(|host| host.running(login, ctx.owner.uid))
+                    .unwrap_or_default();
                 Ok(ActionOutput {
                     text,
                     data: json!({ "routines": mine
                         .iter()
-                        .map(|r| self.listed(r, paused.contains(&r.id), now))
+                        .map(|r| self.listed(r, paused.contains(&r.id), now, running.get(&r.id).copied()))
                         .collect::<Vec<_>>() }),
                     changes: Vec::new(),
                 })
             }
             READ => {
-                let Named { routine } = parse_input(input)?;
-                let found = self.mine(ctx, &routine)?;
+                let ReadInput { routine, version } = parse_input(input)?;
+                let current = self.mine(ctx, &routine)?;
+                let found = match version {
+                    Some(v) => self.version_of(&current, v)?,
+                    None => current.clone(),
+                };
                 let paused = store::paused(&ctx.home).contains(&found.id);
-                let mut data = self.listed(&found, paused, Now::here());
+                let running = self
+                    .routines
+                    .host()
+                    .and_then(|host| host.running(login, ctx.owner.uid).remove(&found.id));
+                let mut data = self.listed(&found, paused, Now::here(), running);
                 data["script"] = json!(found.script);
                 data["runs_kept"] = json!(self.routines.runs(login, &found.id));
-                data["versions"] = json!(self.routines.versions(login, &found.id).len());
+                data["in_use"] = json!(found.version == current.version);
+                data["versions"] = self.versions_json(&current);
+                let in_use = if found.version == current.version {
+                    String::new()
+                } else {
+                    format!(", not the one in use (version {})", current.version)
+                };
                 Ok(ActionOutput {
                     text: format!(
-                        "{} (version {}) runs {}: {}",
+                        "{} (version {}{in_use}) runs {}: {}",
                         found.name,
                         found.version,
                         found
@@ -959,6 +1121,33 @@ impl ActionProvider for RoutinesProvider {
                 let routine = self.plan(ctx, parse_input(input)?)?;
                 self.save(ctx, routine)
             }
+            USE => {
+                let UseInput { routine, version } = parse_input(input)?;
+                let found = self.mine(ctx, &routine)?;
+                let target = self.used(&found, version)?;
+                let mut chosen: BTreeMap<String, u32> = store::chosen(&ctx.home);
+                chosen.insert(target.id.clone(), target.version);
+                store::choose(&ctx.home, ctx.owner, chosen)
+                    .map_err(|e| ActionError::io("your routines", e))?;
+                self.changed(ctx);
+                Ok(ActionOutput {
+                    text: format!(
+                        "{} is version {} again: {}. It runs {}. Undo puts version {} back.",
+                        target.name,
+                        target.version,
+                        target.note,
+                        runs_text(target.schedule),
+                        found.version
+                    ),
+                    data: summary_json(&target),
+                    changes: vec![Change {
+                        kind: ChangeKind::Modified,
+                        target: format!("Routine: {} version {}", target.name, target.version),
+                        reversible: true,
+                        paths: vec![ctx.home.join(store::MINE)],
+                    }],
+                })
+            }
             DELETE => {
                 let Named { routine } = parse_input(input)?;
                 let found = self.mine(ctx, &routine)?;
@@ -966,6 +1155,7 @@ impl ActionProvider for RoutinesProvider {
                 chosen.remove(&found.id);
                 store::choose(&ctx.home, ctx.owner, chosen)
                     .map_err(|e| ActionError::io("your routines", e))?;
+                self.changed(ctx);
                 Ok(ActionOutput {
                     text: format!(
                         "Removed the routine {}; it won't run again. Undo puts it back.",
@@ -985,6 +1175,7 @@ impl ActionProvider for RoutinesProvider {
                 let found = self.mine(ctx, &routine)?;
                 store::pause(&ctx.home, ctx.owner, &found.id, paused)
                     .map_err(|e| ActionError::io("your routines", e))?;
+                self.changed(ctx);
                 let text = if paused {
                     format!(
                         "Paused {}: it runs only when you start it, until you resume it.",
@@ -1061,6 +1252,7 @@ impl ActionProvider for RoutinesProvider {
                 self.host()?
                     .dismiss(login, ctx.owner.uid, task)
                     .map_err(ActionError::Failed)?;
+                self.changed(ctx);
                 Ok(ActionOutput {
                     text: "It won't be offered again unless it's done the same way twice more."
                         .into(),

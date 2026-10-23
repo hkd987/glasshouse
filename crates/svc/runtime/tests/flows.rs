@@ -314,6 +314,34 @@ impl RoutinesApp {
         assert!(result.ok, "{action}: {}", result.text);
         result.data
     }
+
+    /// `app.status`: with `since`, waiting up to 10 s for the person's routines to change.
+    async fn status(&self, since: Option<u64>) -> glass_api::AppStatus {
+        let wait = since.map_or(
+            json!({}),
+            |since| json!({ "wait_secs": 10, "since": since }),
+        );
+        let mut request = json!({ "session": self.session.session });
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(wait.as_object().unwrap().clone());
+        self.client
+            .call(app_methods::APP_STATUS, request)
+            .await
+            .unwrap()
+    }
+
+    /// Waits for the next change to the person's routines after `since`; its cursor.
+    async fn changed(&self, since: u64) -> u64 {
+        let status = self.status(Some(since)).await;
+        assert_eq!(
+            status.changed,
+            ["routines"],
+            "woken by a change to routines"
+        );
+        status.cursor
+    }
 }
 
 #[tokio::test]
@@ -357,12 +385,18 @@ async fn adr0047_the_person_keeps_runs_pauses_and_reschedules_what_they_did_twic
     assert!(listed["next_run_at"].is_string(), "{listed}");
 
     // Run now: a task of its own, and how it went is kept beside it.
+    // Routines' window hears it start and end, without asking again.
+    let cursor = app.status(None).await.cursor;
     let started = app
         .ok("routines.run", json!({ "routine": "invoice-count" }))
         .await;
     let run: TaskId = serde_json::from_value(started["task"].clone()).unwrap();
+    let cursor = app.changed(cursor).await;
+    let listed = app.ok("routines.list", json!({})).await["routines"][0].clone();
+    assert_eq!(listed["running"], json!(run), "running now");
     let _agent = play(&h, run).await;
     done(&h, run).await;
+    app.changed(cursor).await;
     eventually(|| {
         h.rt.get(&h.me, run).is_ok()
             && common::routines(h.dir.path())
@@ -425,6 +459,26 @@ async fn adr0047_the_person_keeps_runs_pauses_and_reschedules_what_they_did_twic
         kept.record(&h.me.name, "invoice-count", 2).unwrap().script,
         kept.record(&h.me.name, "invoice-count", 1).unwrap().script
     );
+
+    // Back to the first version: on Fridays again, the person's own choice.
+    let cursor = app.status(None).await.cursor;
+    let used = app
+        .ok(
+            "routines.use",
+            json!({ "routine": "invoice-count", "version": 1 }),
+        )
+        .await;
+    assert_eq!(
+        (&used["version"], &used["runs"]),
+        (&json!(1), &json!("every Friday at 17:00"))
+    );
+    assert!(h.rt.approvals(&h.me).is_empty(), "no ask in Routines");
+    app.changed(cursor).await;
+    let read = app
+        .ok("routines.read", json!({ "routine": "invoice-count" }))
+        .await;
+    assert_eq!(read["version"], 1);
+    assert_eq!(read["versions"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]

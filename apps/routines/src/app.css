@@ -328,3 +328,62 @@ table.runs td:nth-child(3) {
   max-width: 440px;
   margin: 0 auto;
 }
+
+/* A routine's versions (ADR 0047), newest first, each against the one in use. */
+.versions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.version {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 6px;
+}
+
+.version.in-use {
+  border-color: var(--accent);
+}
+
+.version .head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.version .note {
+  font-size: 13px;
+}
+
+.chip.in-use {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.comparison {
+  display: grid;
+  gap: 6px;
+}
+
+.code.diff .line.added {
+  background: rgba(46, 160, 67, 0.22);
+}
+
+.code.diff .line.removed {
+  background: rgba(248, 81, 73, 0.2);
+}
+
+.code.diff .line.added .n {
+  color: #7ee08f;
+}
+
+.code.diff .line.removed .n {
+  color: #ff9b94;
+}

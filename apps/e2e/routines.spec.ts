@@ -1,8 +1,9 @@
 // Routines (DA-4, NV-21, ADR 0047): the desktop agent, on the scripted
 // model, drafts the same email twice; Routines offers to keep it with the
 // code this computer wrote; kept, it runs with no model, changes when it
-// runs, pauses, and goes. Every step is the person's own, by Routines for
-// them, on the record.
+// runs, goes back to its first version, pauses, and goes. A run started
+// anywhere shows without asking (glassd wakes the page). Every step is
+// the person's own, by Routines for them, on the record.
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -66,11 +67,31 @@ test("adr0047 a request done twice the same way is kept, run with no model, resc
   await expect(page.locator("[data-test=when]")).toContainText("Runs every weekday at 09:00");
   await expect(page.locator("[data-test=notice]")).toContainText("version 2");
 
+  // Started from somewhere else, it shows here as it runs and as it ends, without asking.
+  const runs = page.locator("[data-test=runs] tr");
+  glassctl("routine", "run", "weekly-numbers-draft");
+  await expect(runs).toHaveCount(2, { timeout: 60_000 });
+
+  // Its versions: the first against the one in use, then back to it.
+  const versions = page.locator("[data-test=versions] li");
+  await expect(versions).toHaveCount(2);
+  await expect(versions.nth(0)).toContainText("Version 2");
+  await expect(versions.nth(0)).toContainText("In use");
+  const first = page.locator('[data-version="1"]');
+  await first.locator("[data-test=compare]").click();
+  await expect(first.locator("[data-test=comparison]")).toContainText("runs every Friday at 17:00, not every weekday at 09:00; the same code.");
+  await page.screenshot({ path: join(SHOTS, "routines-versions.png"), fullPage: true });
+  await first.locator("[data-test=use-version]").click();
+  await expect(page.locator("[data-test=notice]")).toContainText("version 1 again");
+  await expect(page.locator("[data-test=when]")).toContainText("Runs every Friday at 17:00");
+  await expect(page.locator('[data-version="1"]')).toContainText("In use");
+  expect(glassctlJson<unknown[]>("approvals")).toEqual([]);
+
   // Paused, then resumed.
   await page.click("[data-test=pause]");
   await expect(page.locator("[data-test=when]")).toContainText("Paused");
   await page.click("[data-test=pause]");
-  await expect(page.locator("[data-test=when]")).toContainText("Runs every weekday at 09:00 · next");
+  await expect(page.locator("[data-test=when]")).toContainText("Runs every Friday at 17:00 · next");
 
   // Removed, after asking.
   await page.click("[data-test=remove]");
@@ -79,7 +100,7 @@ test("adr0047 a request done twice the same way is kept, run with no model, resc
 
   // On the record, by Routines for the person.
   const byRoutines = audit().filter((r) => r.event.agent === "routines" && r.event.outcome?.status === "completed");
-  for (const action of ["routines.keep", "routines.run", "routines.schedule", "routines.pause", "routines.delete"]) {
+  for (const action of ["routines.keep", "routines.run", "routines.schedule", "routines.use", "routines.pause", "routines.delete"]) {
     expect(byRoutines.some((r) => r.event.action === action), action).toBe(true);
   }
 });

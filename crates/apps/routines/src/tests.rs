@@ -251,3 +251,168 @@ fn da4_an_id_is_never_a_path_whatever_the_choices_file_says() {
     assert_eq!((kept.owner.as_str(), kept.version), ("demo", 1));
     assert!(store::valid_id("overdue-invoices-2") && !store::valid_id("Overdue"));
 }
+
+#[test]
+fn adr0047_a_routine_goes_back_to_an_earlier_version_and_any_version_reads() {
+    let f = fixture();
+    f.call(SAVE, overdue()).unwrap();
+    f.call(
+        SCHEDULE,
+        json!({ "routine": "overdue-invoices", "schedule": "fri 17:00" }),
+    )
+    .unwrap();
+
+    // Its versions, newest first, and which one runs.
+    let read = f
+        .call(READ, json!({ "routine": "overdue-invoices" }))
+        .unwrap();
+    let versions = read.data["versions"].as_array().unwrap();
+    assert_eq!(
+        versions
+            .iter()
+            .map(|v| (
+                v["version"].as_u64().unwrap(),
+                v["in_use"].as_bool().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [(2, true), (1, false)]
+    );
+    assert_eq!(versions[1]["note"], "First version");
+    assert_eq!(versions[1]["runs"], "every weekday at 09:00");
+    assert_eq!(read.data["in_use"], true);
+    // An earlier one reads with its own code and schedule.
+    let first = f
+        .call(READ, json!({ "routine": "overdue-invoices", "version": 1 }))
+        .unwrap();
+    assert_eq!(
+        (
+            &first.data["version"],
+            &first.data["in_use"],
+            &first.data["runs"]
+        ),
+        (&json!(1), &json!(false), &json!("every weekday at 09:00"))
+    );
+    assert_eq!(first.data["script"], OVERDUE);
+    assert!(
+        first.text.contains("not the one in use (version 2)"),
+        "{}",
+        first.text
+    );
+
+    // Back to version 1: the person's choice, undoable, what it changes said first.
+    let input = json!({ "routine": "overdue-invoices", "version": 1 });
+    let preview = f.preview(USE, &input).unwrap();
+    assert_eq!(
+        preview.summary,
+        "Go back to version 1 of the routine Overdue invoices"
+    );
+    assert!(
+        preview
+            .items
+            .contains(&"Runs every weekday at 09:00 again, not every Friday at 17:00".to_owned()),
+        "{:?}",
+        preview.items
+    );
+    assert_eq!(preview.writes, [f.ctx.home.join(store::MINE)]);
+    let used = f.call(USE, input.clone()).unwrap();
+    assert!(used.changes[0].reversible);
+    assert_eq!(f.routines.current("demo", &f.ctx.home)[0].version, 1);
+    assert!(
+        used.text.contains("Undo puts version 2 back"),
+        "{}",
+        used.text
+    );
+    // Both versions stay; the next save is version 3.
+    assert_eq!(f.routines.versions("demo", "overdue-invoices"), [1, 2]);
+
+    // Not one that's in use, nor one never saved.
+    let err = f.call(USE, input).unwrap_err().to_string();
+    assert!(err.contains("is version 1 already"), "{err}");
+    let err = f
+        .call(USE, json!({ "routine": "overdue-invoices", "version": 7 }))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("has no version 7"), "{err}");
+    let err = f
+        .call(READ, json!({ "routine": "overdue-invoices", "version": 7 }))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("has no version 7"), "{err}");
+}
+
+/// The runtime as Routines' tests see it: what's running, and who heard of changes.
+#[derive(Debug, Default)]
+struct Watched {
+    running: std::sync::Mutex<BTreeMap<String, glass_types::TaskId>>,
+    woken: std::sync::Mutex<Vec<String>>,
+}
+
+impl Host for Watched {
+    fn run(&self, _: &str, _: u32, _: &str) -> Result<glass_types::TaskId, String> {
+        Err("not here".into())
+    }
+    fn repeats(&self, _: &str, _: u32) -> Vec<Repeat> {
+        Vec::new()
+    }
+    fn dismiss(&self, _: &str, _: u32, _: glass_types::TaskId) -> Result<(), String> {
+        Ok(())
+    }
+    fn running(&self, _: &str, _: u32) -> BTreeMap<String, glass_types::TaskId> {
+        self.running.lock().unwrap().clone()
+    }
+    fn changed(&self, login: &str) {
+        self.woken.lock().unwrap().push(login.to_owned());
+    }
+}
+
+#[test]
+fn adr0047_routines_windows_hear_of_every_change_and_see_what_runs() {
+    let f = fixture();
+    let host = std::sync::Arc::new(Watched::default());
+    f.routines.set_host(host.clone());
+    let woken = || std::mem::take(&mut *host.woken.lock().unwrap());
+
+    f.call(SAVE, overdue()).unwrap();
+    assert_eq!(woken(), ["demo"], "saved");
+    let routine = json!({ "routine": "overdue-invoices" });
+    f.call(
+        PAUSE,
+        json!({ "routine": "overdue-invoices", "paused": true }),
+    )
+    .unwrap();
+    assert_eq!(woken(), ["demo"], "paused");
+    f.call(
+        SCHEDULE,
+        json!({ "routine": "overdue-invoices", "schedule": null }),
+    )
+    .unwrap();
+    assert_eq!(woken(), ["demo"], "rescheduled");
+    f.call(USE, json!({ "routine": "overdue-invoices", "version": 1 }))
+        .unwrap();
+    assert_eq!(woken(), ["demo"], "an earlier version");
+    // Reading changes nothing, and wakes no one.
+    f.call(LIST, json!({})).unwrap();
+    f.call(READ, routine.clone()).unwrap();
+    assert!(woken().is_empty());
+
+    // A run going now shows, wherever it was started.
+    let run = glass_types::TaskId::new();
+    host.running
+        .lock()
+        .unwrap()
+        .insert("overdue-invoices".into(), run);
+    let listed = f.call(LIST, json!({})).unwrap();
+    assert_eq!(listed.data["routines"][0]["running"], json!(run));
+    assert_eq!(
+        f.call(READ, routine.clone()).unwrap().data["running"],
+        json!(run)
+    );
+    host.running.lock().unwrap().clear();
+    assert_eq!(
+        f.call(LIST, json!({})).unwrap().data["routines"][0]["running"],
+        Value::Null
+    );
+
+    f.call(DELETE, routine).unwrap();
+    assert_eq!(woken(), ["demo"], "removed");
+}

@@ -3,6 +3,7 @@
 //! once, as the code this computer wrote from them (ADR 0046). glassd
 //! implements it with its runtime; without it, those actions refuse.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -21,6 +22,13 @@ pub trait Host: Send + Sync + fmt::Debug {
     /// Stops offering the request the repeat `task` did, until it's done
     /// the same way twice again.
     fn dismiss(&self, login: &str, uid: u32, task: TaskId) -> Result<(), String>;
+
+    /// `login`'s routines running now: each one's run, by routine id.
+    fn running(&self, login: &str, uid: u32) -> BTreeMap<String, TaskId>;
+
+    /// Something Routines shows changed for `login`: wakes its open
+    /// windows (`app.status`).
+    fn changed(&self, login: &str);
 }
 
 /// A request done the same way more than once: what keeping it as a
