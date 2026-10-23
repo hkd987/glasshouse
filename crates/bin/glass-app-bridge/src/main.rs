@@ -28,7 +28,7 @@
 //! app's session and sandboxed by their CSP: no network, no storage, no
 //! bridge, framed only by the Artifacts app.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -37,7 +37,8 @@ use std::sync::Arc;
 use anyhow::{Context, bail};
 use clap::Parser;
 use glass_api::{
-    AppCallResult, AppFiles, AppLiveResult, AppManifest, AppSession, AppStatus, LiveOp, app_methods,
+    AppCallResult, AppFiles, AppLiveResult, AppManifest, AppPermission, AppSession, AppStatus,
+    LiveOp, app_methods,
 };
 use glass_rpc::{Client, ClientError, codes};
 use serde::Deserialize;
@@ -125,7 +126,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     if !listen.ip().is_loopback() {
         bail!("the bridge serves loopback only; {listen} isn't");
     }
-    let apps = installed(&args.apps)?;
+    let (apps, speech) = installed(&args.apps)?;
     if apps.is_empty() {
         bail!("no apps in {}", args.apps.display());
     }
@@ -145,6 +146,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         socket: args.socket,
         port,
         apps,
+        speech,
         sessions: Mutex::new(BTreeMap::new()),
         own: Mutex::new(BTreeMap::new()),
     });
@@ -190,9 +192,11 @@ async fn owned_by(stream: &TcpStream, peer: SocketAddr, uid: u32) -> bool {
     }
 }
 
-/// The installed apps, by id: where each one's built files are.
-fn installed(dir: &Path) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+/// The installed apps, by id: where each one's built files are; and those
+/// that turn the person's speech into text (ADR 0045 T2).
+fn installed(dir: &Path) -> anyhow::Result<(BTreeMap<String, PathBuf>, BTreeSet<String>)> {
     let mut apps = BTreeMap::new();
+    let mut speech = BTreeSet::new();
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let path = entry?.path();
         let Ok(text) = std::fs::read_to_string(path.join("manifest.json")) else {
@@ -202,18 +206,24 @@ fn installed(dir: &Path) -> anyhow::Result<BTreeMap<String, PathBuf>> {
         // to know the app is there.
         match serde_json::from_str::<AppManifest>(&text) {
             Ok(manifest) => {
+                if manifest.check().is_ok() && manifest.may(AppPermission::Speech) {
+                    speech.insert(manifest.id.to_string());
+                }
                 apps.insert(manifest.id.to_string(), path.join("dist"));
             }
             Err(e) => tracing::warn!("{}: {e}", path.display()),
         }
     }
-    Ok(apps)
+    Ok((apps, speech))
 }
 
 struct Bridge {
     socket: PathBuf,
     port: u16,
     apps: BTreeMap<String, PathBuf>,
+    /// Installed apps whose worker may run WebAssembly, for speech (ADR
+    /// 0045 T2): their own files, never an edition's or a person's.
+    speech: BTreeSet<String>,
     /// One session per app, opened on first use.
     sessions: Mutex<BTreeMap<String, Arc<Open>>>,
     /// The person's own apps' and org apps' files (ADR 0032), from glassd:
@@ -323,7 +333,7 @@ impl Bridge {
         // 0032): glassd says, with each page; everyone else gets ours.
         if let Some(files) = self.edition(app, &rel).await {
             return match files.files.get(&rel) {
-                Some(text) => page(app, self.port, &rel, text.clone().into_bytes()),
+                Some(text) => page(app, self.port, &rel, text.clone().into_bytes(), false),
                 None => Response::text(404, "not found"),
             };
         }
@@ -343,7 +353,7 @@ impl Bridge {
         let Some(body) = body else {
             return Response::text(404, "not found (build the apps with make apps-build)");
         };
-        page(app, self.port, &rel, body)
+        page(app, self.port, &rel, body, self.speech.contains(app))
     }
 
     /// An artifact's page (ADR 0033): the version the path names, as
@@ -437,7 +447,7 @@ impl Bridge {
             },
         };
         match files.files.get(rel) {
-            Some(text) => page(app, self.port, rel, text.clone().into_bytes()),
+            Some(text) => page(app, self.port, rel, text.clone().into_bytes(), false),
             None => Response::text(404, "not found"),
         }
     }
@@ -585,26 +595,40 @@ impl Bridge {
 
 /// A file as the bridge serves it: pages with the CSP that keeps them to
 /// their own files and bridge.
-fn page(app: &str, port: u16, rel: &str, body: Vec<u8>) -> Response {
+fn page(app: &str, port: u16, rel: &str, body: Vec<u8>, wasm: bool) -> Response {
     let mut response =
         Response::new(200, content_type(rel), body).with("Cache-Control", "no-cache");
     if rel.ends_with(".html") {
         response = response
-            .with("Content-Security-Policy", app_csp(app, port))
+            .with("Content-Security-Policy", app_csp(app, port, wasm))
             .with("Cross-Origin-Opener-Policy", "same-origin");
+    } else if rel.ends_with(".js") || rel.ends_with(".mjs") {
+        // A worker's policy is its own script's: without one, a worker
+        // could reach anywhere. A page's scripts ignore it.
+        response = response.with("Content-Security-Policy", app_csp(app, port, wasm));
     }
     response
 }
 
 /// An app's CSP: [`CSP`], and for Artifacts, frames of artifacts' pages;
-/// for Mail, frames of messages' HTML.
-fn app_csp(app: &str, port: u16) -> String {
-    if app == ARTIFACTS {
-        format!("{CSP}; frame-src http://*.artifact.localhost:{port}")
-    } else if app == MAIL {
-        format!("{CSP}; frame-src http://{MAIL_VIEW}.localhost:{port}")
+/// for Mail, frames of messages' HTML; with `wasm`, WebAssembly, for the
+/// speech an app turns into text on the computer (ADR 0045 T2).
+fn app_csp(app: &str, port: u16, wasm: bool) -> String {
+    let csp = if wasm {
+        CSP.replacen(
+            "script-src 'self'",
+            "script-src 'self' 'wasm-unsafe-eval'",
+            1,
+        )
     } else {
         CSP.to_owned()
+    };
+    if app == ARTIFACTS {
+        format!("{csp}; frame-src http://*.artifact.localhost:{port}")
+    } else if app == MAIL {
+        format!("{csp}; frame-src http://{MAIL_VIEW}.localhost:{port}")
+    } else {
+        csp
     }
 }
 
@@ -779,13 +803,15 @@ fn static_path(path: &str) -> Option<String> {
 fn content_type(rel: &str) -> &'static str {
     match rel.rsplit('.').next().unwrap_or_default() {
         "html" => "text/html; charset=utf-8",
-        "js" => "text/javascript; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "json" | "map" => "application/json",
         "webmanifest" => "application/manifest+json",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "woff2" => "font/woff2",
+        // The speech model's runtime (ADR 0045 T2); compiled as it streams.
+        "wasm" => "application/wasm",
         _ => "application/octet-stream",
     }
 }
@@ -925,8 +951,10 @@ mod tests {
             assert!(csp.contains(part), "{part}: {csp}");
         }
         assert!(!csp.contains("allow-"), "no allowances: {csp}");
-        assert!(app_csp("mail", 7300).ends_with("frame-src http://view.mail.localhost:7300"));
-        assert!(!app_csp("calendar", 7300).contains("frame-src"));
+        assert!(
+            app_csp("mail", 7300, false).ends_with("frame-src http://view.mail.localhost:7300")
+        );
+        assert!(!app_csp("calendar", 7300, false).contains("frame-src"));
         let page = mail_page("<p>Hi</p>", 7300);
         assert!(
             page.headers
@@ -976,6 +1004,35 @@ mod tests {
     }
 
     #[test]
+    fn adr0045_workers_keep_to_their_app_and_only_speech_runs_webassembly() {
+        let csp = |response: &Response| {
+            response
+                .headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case("content-security-policy"))
+                .map(|(_, v)| v.clone())
+        };
+        // A worker's script carries the app's policy, as its page does.
+        let worker = page("meet", 7300, "speech.js", b"0".to_vec(), true);
+        let policy = csp(&worker).unwrap();
+        assert!(policy.contains("connect-src 'self'"), "{policy}");
+        assert!(
+            policy.contains("script-src 'self' 'wasm-unsafe-eval';"),
+            "{policy}"
+        );
+        // Without speech, no WebAssembly; other files carry none.
+        assert!(!app_csp("chat", 7300, false).contains("wasm"));
+        assert!(
+            csp(&page("chat", 7300, "app.js", b"0".to_vec(), false))
+                .is_some_and(|p| !p.contains("wasm"))
+        );
+        assert_eq!(
+            csp(&page("meet", 7300, "speech/x.onnx", b"0".to_vec(), true)),
+            None
+        );
+    }
+
+    #[test]
     fn ar1_an_artifact_runs_sandboxed_with_no_network() {
         let response = artifact_page("<h1>Q3</h1>", 7300);
         let header = |name: &str| {
@@ -1008,10 +1065,13 @@ mod tests {
         assert!(body.trim_end().ends_with("</script>"));
         assert!(body.contains("glass: TAG"));
         // Only the Artifacts app frames them.
-        assert!(app_csp("artifacts", 7300).ends_with("frame-src http://*.artifact.localhost:7300"));
-        assert_eq!(app_csp("calendar", 7300), CSP);
+        assert!(
+            app_csp("artifacts", 7300, false)
+                .ends_with("frame-src http://*.artifact.localhost:7300")
+        );
+        assert_eq!(app_csp("calendar", 7300, false), CSP);
         // Mail frames messages' HTML (ADR 0037), never an artifact.
-        assert!(!app_csp("mail", 7300).contains("artifact"));
+        assert!(!app_csp("mail", 7300, false).contains("artifact"));
         assert!(CSP.contains("frame-ancestors 'none'"));
     }
 

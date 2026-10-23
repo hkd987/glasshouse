@@ -8,6 +8,8 @@ declare const self: ServiceWorkerGlobalScope;
 
 const CACHE = "glass-app-files-v1";
 const FILES = ["./", "./index.html", "./app.js", "./app.css"];
+/** Larger files aren't kept: a speech model (ADR 0045 T2) is read from this computer's disk anyway. */
+const MAX_KEPT_BYTES = 4 * 1024 * 1024;
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -34,7 +36,7 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        if (response.ok) {
+        if (response.ok && Number(response.headers.get("content-length") ?? 0) <= MAX_KEPT_BYTES) {
           const copy = response.clone();
           void caches.open(CACHE).then((cache) => cache.put(event.request, copy));
         }

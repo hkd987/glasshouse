@@ -2,8 +2,21 @@
   "id": "meet",
   "name": "Meet",
   "version": "0.1.0",
-  "description": "Video meetings with people in your organization, sealed end to end: the relay forwards what it can't open, and audio and video are never recorded. Where IT turns transcripts on, what each person says is transcribed on their own computer.",
-  "actions": ["meet.list", "meet.join", "meet.keys", "meet.leave", "meet.transcribe", "meet.transcript"],
-  "permissions": ["media"],
-  "labels": ["public", "internal"]
+  "description": "Video meetings with people in your organization, sealed end to end: the relay forwards what it can't open, and audio and video are never recorded. Where IT turns transcripts on, what each person says is turned into text on their own computer.",
+  "actions": [
+    "meet.list",
+    "meet.join",
+    "meet.keys",
+    "meet.leave",
+    "meet.transcribe",
+    "meet.transcript"
+  ],
+  "permissions": [
+    "media",
+    "speech"
+  ],
+  "labels": [
+    "public",
+    "internal"
+  ]
 }

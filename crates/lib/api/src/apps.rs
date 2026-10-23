@@ -120,6 +120,11 @@ pub enum AppPermission {
     /// so Chat never does. Until our engine build (CF-15) enforces it per
     /// origin, it is checked here and in `apps-lint`.
     Media,
+    /// The person's own speech turned into text on this computer, for a
+    /// transcribed meeting (ADR 0045 T2): its worker may run WebAssembly
+    /// (`'wasm-unsafe-eval'`). For an app that adds to transcripts only:
+    /// it must declare `meet.transcribe`.
+    Speech,
 }
 
 impl AppManifest {
@@ -169,6 +174,15 @@ impl AppManifest {
         {
             return Err(format!(
                 "{}: media is for meetings: only an app that declares meet.join may have it",
+                self.id
+            ));
+        }
+        if self.may(AppPermission::Speech)
+            && !self.actions.iter().any(|a| a.as_str() == "meet.transcribe")
+        {
+            return Err(format!(
+                "{}: speech is for transcribed meetings: only an app that declares \
+                 meet.transcribe may have it",
                 self.id
             ));
         }
@@ -377,6 +391,19 @@ mod tests {
                 .contains("only an app that declares meet.join")
         );
         m.actions.push("meet.join".parse().unwrap());
+        assert!(m.check().is_ok());
+    }
+
+    #[test]
+    fn adr0045_only_an_app_that_adds_to_transcripts_hears_speech() {
+        let mut m = manifest();
+        m.permissions.push(AppPermission::Speech);
+        assert!(
+            m.check()
+                .unwrap_err()
+                .contains("only an app that declares meet.transcribe")
+        );
+        m.actions.push("meet.transcribe".parse().unwrap());
         assert!(m.check().is_ok());
     }
 

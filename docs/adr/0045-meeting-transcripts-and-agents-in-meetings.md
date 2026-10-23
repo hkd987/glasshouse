@@ -1,6 +1,6 @@
 # 0045. Meeting transcripts IT turns on, and agents that act on what you say in a meeting
 
-Status: **Accepted, slice T1 built** (2026-10-22). The owner asked for
+Status: **Accepted, slices T1 and T2 built** (T1 2026-10-22, T2 2026-10-23). The owner asked for
 agents that "join meetings and listen in by reading the transcript, then
 take action on my behalf during the meeting, like 'hey x, grab abc report
 and send it to Susan'", and decided: "enterprise admin should be able to
@@ -126,13 +126,58 @@ desktop agent).
   Priya's computer adds her lines, her "Hey Glass" starts nothing here,
   mine starts my desktop agent, which reads the transcript and answers
   with what Priya said).
-- **T2**: Moonshine in the Meet page: a fetch script with a pinned
-  revision and SHA-256 for the model, ONNX Runtime Web's single-threaded
-  build, `'wasm-unsafe-eval'` in the page's policy for Meet only (gated on
-  a manifest permission), batching lines every 10 to 15 s and at once on
-  "Hey Glass", tested on recorded speech
-  (`--use-file-for-fake-audio-capture`). Live captions of others' lines
-  need the meeting's changes to wake Meet, not only Calendar.
+- **T2, built** (2026-10-23): what the person says becomes text in their
+  Meet page, from their own microphone only.
+  - **The model.** Moonshine tiny (English, MIT), quantized: its encoder
+    and the decoder that keeps its cache (8 and 20 MB).
+    `tools/fetch-speech-model.sh` fetches it and the licenses at pinned
+    revisions, each file's SHA-256 checked; `make apps-build` ships it in
+    Meet (`speech/`, its tokens alone), with ONNX Runtime Web's
+    single-threaded WebAssembly (MIT, `ort/`). The notices reproduce both
+    licenses and the runtime's third-party notices. Offline, Meet is
+    built without it and doesn't transcribe.
+  - **In the page.** Joined to a transcribed meeting, Meet hands a copy of
+    its microphone track to a worker (`speech.ts`): the audio becomes
+    16 kHz, is cut where the person pauses (loudness over the room's
+    noise; 15 s at most a piece), and each piece's words become a line.
+    The worker keeps no audio once it's text. Muted, nothing is heard;
+    what was said before muting still goes.
+  - **To the transcript.** Lines go to `meet.transcribe` together every
+    12 s, and at once when one asks the agent ("Hey Glass, …", read as
+    glassd reads it). "Hey Glass" said alone waits 6 s for the request
+    after it and goes with it as one line. Leaving sends what's left
+    first. Lines glassd can't take yet wait, the newest 200 kept; a
+    refusal (IT turned transcripts off) stops hearing.
+  - **The person sees it.** "You: …" shows the line just heard from them,
+    and "Your agent is on it: …" what their agent took on; the badge says
+    "not you while muted".
+  - **WebAssembly for Meet alone.** A new manifest permission, `speech`,
+    only for an app that declares `meet.transcribe`
+    (`glass_api::AppManifest::check`, the SDK's `manifestProblems`). The
+    bridge allows `'wasm-unsafe-eval'` on that app's own files only, never
+    an edition's or a person's app. It now also sends the app's policy on
+    its scripts: a worker's policy is its script's own, so before this an
+    app's worker (Meet's frame transform) could reach anywhere.
+  - Tests: `adr0045 t2 …` in `meet/test/transcribe.test.ts` (resampling,
+    pauses, noise, tokens, lines, "Hey Glass", batching, and the shipped
+    model on recorded speech: `meet/test/fixtures/README.md`);
+    `e2e/speech.spec.ts` (the worker under the real bridge's policy;
+    other apps can't compile WebAssembly); `e2e/meet.e2e.ts` (the
+    engine's fake microphone plays the recording in a call: both
+    sentences reach the transcript, the request at once and shown,
+    nothing after muting, the last lines before leaving); bridge
+    `adr0045_workers_keep_to_their_app_and_only_speech_runs_webassembly`;
+    `glass-api`
+    `adr0045_only_an_app_that_adds_to_transcripts_hears_speech`.
+  - Measured on the development host: 0.8–1.0 s for a 2–4 s line, the
+    model loaded in 1.5–1.7 s while joining; a page in a transcribed call
+    360–435 MB (budget 500 MB; 250 MB for a call that isn't). Recorded
+    speech came back as said, "Hey glass, find the Abc report and send it
+    to Susan."
+  - Not built: captions of others' lines (they need the meeting's
+    changes to wake Meet, not only Calendar); releasing the model while
+    the person is silent for long; a wake-word model (a misheard "Hey
+    Glass" asks nothing); languages other than English.
 - **Built for the owner's example** (ADR 0048): Mail attachments, and
   folders for tasks the person starts by voice or from the command bar.
   Live, "Hey Glass, grab the ABC report and send it to Dana" sent the PDF.

@@ -7,8 +7,10 @@ export type Label = "public" | "internal" | "confidential" | "restricted";
 /**
  * Powers beyond actions. `offline`: keep what was loaded and show it (UI-5).
  * `media`: camera, microphone and WebRTC, for meetings only (CF-21).
+ * `speech`: the person's own speech as text on the computer, for a
+ * transcribed meeting (ADR 0045): its worker may run WebAssembly.
  */
-export type AppPermission = "offline" | "media";
+export type AppPermission = "offline" | "media" | "speech";
 
 /** An app's manifest: the OS enforces it, so the app can never exceed it (DV-3). */
 export interface AppManifest {
@@ -74,7 +76,7 @@ export interface AppStatus {
 const ID = /^[a-z][a-z0-9-]{0,62}$/;
 const ACTION = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
 const LABELS: readonly string[] = ["public", "internal", "confidential", "restricted"];
-const PERMISSIONS: readonly string[] = ["offline", "media"];
+const PERMISSIONS: readonly string[] = ["offline", "media", "speech"];
 const FIELDS: readonly string[] = [
   "id",
   "name",
@@ -145,6 +147,9 @@ export function manifestProblems(value: unknown): string[] {
   const declared = Array.isArray(m.actions) ? m.actions.map(String) : [];
   if (permissions.includes("media") && !declared.includes("meet.join")) {
     problems.push("media is for meetings: only an app that declares meet.join may have it");
+  }
+  if (permissions.includes("speech") && !declared.includes("meet.transcribe")) {
+    problems.push("speech is for transcribed meetings: only an app that declares meet.transcribe may have it");
   }
   return problems;
 }

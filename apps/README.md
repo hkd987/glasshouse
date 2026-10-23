@@ -72,7 +72,7 @@ rules. So keep our apps' source readable: it is what customers start from,
 and `glass-app-studio`'s `tl5_first_party_apps_pass_their_own_checks`
 fails when one stops passing the checks a remix of it gets (no `innerHTML`,
 `fetch`, storage of its own, workers or action names it doesn't declare;
-Meet's worker is the known exception).
+Meet's workers are the known exception).
 
 ## Running them
 
@@ -105,7 +105,7 @@ own processes. `make freebsd vm-deploy` puts all of it in the dev VM.
 
 | Command | What it does |
 |---|---|
-| `make apps-build` | esbuild, minified, one script and one stylesheet per app |
+| `make apps-build` | esbuild, minified, one script and one stylesheet per app; Meet's speech model and runtime (ADR 0045 T2), fetched once by `tools/fetch-speech-model.sh` at pinned revisions, each file's SHA-256 checked (offline, Meet is built without them and doesn't transcribe) |
 | `make apps-test` | types; unit tests (`node --test`, `*/test/*.test.ts`); Playwright in headless Chromium against dev-host glassd, with the launch and memory budgets (UI-7) |
 | `make apps-lint` | types, every manifest as glassd will check it, and every npm package's license (`tools/legal/npm_licenses.py apps`) |
 

@@ -154,4 +154,7 @@ test("cf21 only a meeting app has the camera and microphone; Chat never does", (
   assert.match(manifestProblems({ ...chat, permissions: ["media"] }).join("; "), /only an app that declares meet\.join/);
   const meet = { id: "meet", name: "Meet", version: "0.1.0", actions: ["meet.list", "meet.join"], permissions: ["media"], labels: ["internal"] };
   assert.deepEqual(manifestProblems(meet), []);
+  // ADR 0045 T2: speech, only for an app that adds to transcripts.
+  assert.match(manifestProblems({ ...meet, permissions: ["media", "speech"] }).join("; "), /only an app that declares meet\.transcribe/);
+  assert.deepEqual(manifestProblems({ ...meet, actions: [...meet.actions, "meet.transcribe"], permissions: ["media", "speech"] }), []);
 });

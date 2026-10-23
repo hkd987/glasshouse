@@ -135,7 +135,8 @@ apps/node_modules: apps/package.json apps/package-lock.json
 	cd apps && npm ci --no-audit --no-fund
 	@touch apps/node_modules
 
-apps-build: apps/node_modules ## Build the web apps into apps/<app>/dist (esbuild)
+apps-build: apps/node_modules ## Build the web apps into apps/<app>/dist (esbuild), Meet with its speech model (ADR 0045 T2)
+	@tools/fetch-speech-model.sh || echo "apps-build: no speech model (offline?): Meet is built without it and won't transcribe"
 	cd apps && node build.mjs
 
 apps-test: apps-build ## Apps: type check, unit tests, Playwright e2e (cold launch and memory budgets) on dev-host glassd

@@ -5,7 +5,10 @@
 // reaches the others and is shown large; after someone leaves, the others
 // switch to the new media key and still see each other; joining takes
 // under two seconds and the page stays within its memory (UI-7); the page
-// keeps no key anywhere.
+// keeps no key anywhere. In a transcribed meeting (ADR 0045 T2), what the
+// engine's microphone plays (a recording) becomes lines of the transcript,
+// on the page, and "Hey Glass" asks the person's agent at once; muted
+// isn't transcribed.
 //
 // The test plays glassd and the console: it answers the page's bridge
 // calls (`meet.join`, `meet.keys`, `meet.leave`) and hands each offer to
@@ -14,12 +17,14 @@
 // connection is found through an init script, never through the app.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { type Browser, type BrowserContext, expect, type Page, test } from "@playwright/test";
+import { type Browser, type BrowserContext, chromium, expect, type Page, test } from "@playwright/test";
+
+import { type Line, wake } from "../meet/src/transcribe.ts";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const TARGET = process.env.CARGO_TARGET_DIR ?? join(REPO, "target");
@@ -35,7 +40,15 @@ const MEMORY_BUDGET_MB = 150;
 /** How long a replaced media key still opens frames (frames.ts). */
 const OLD_KEY_MS = 2000;
 const SHOTS = join(REPO, "apps/e2e/results/meet-shots");
-const TYPES: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
+/** UI-7: a page in a transcribed call, its speech model loaded (ADR 0045 T2). */
+const TRANSCRIBED_MEMORY_BUDGET_MB = 500;
+const TYPES: Record<string, string> = {
+  ".html": "text/html",
+  ".js": "text/javascript",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".wasm": "application/wasm",
+};
 
 let relay: ChildProcess;
 let api = "";
@@ -80,6 +93,8 @@ interface Seat {
   mediaKey: Uint8Array;
   /** The display name the console passes the relay, if any. */
   name?: string;
+  /** A transcribed meeting (ADR 0045): what the page adds to its transcript, and every call it makes, in order. */
+  transcript?: { added: Line[][]; calls: string[] };
 }
 
 /** One person's Meet page, with the test standing in for glassd. */
@@ -114,7 +129,18 @@ async function person(browser: Browser, seat: Seat): Promise<Page> {
       });
     }
     if (url.pathname === "/_bridge/call") {
-      const { action, input } = route.request().postDataJSON() as { action: string; input: { offer?: string } };
+      const { action, input } = route.request().postDataJSON() as { action: string; input: { offer?: string; lines?: Line[] } };
+      seat.transcript?.calls.push(action);
+      if (action === "meet.list" && seat.transcript) {
+        return route.fulfill({ json: { ok: true, text: "1 meeting", data: { meetings: [{ id: seat.room, transcribed: true }] } } });
+      }
+      if (action === "meet.transcribe" && seat.transcript) {
+        const lines = input.lines ?? [];
+        seat.transcript.added.push(lines);
+        // As glassd answers: the requests to the person's agent among them.
+        const asked = lines.map((l) => wake(l.text)).filter((r): r is string => !!r);
+        return route.fulfill({ json: { ok: true, text: `Added ${lines.length} lines`, data: { lines: lines.length, asked } } });
+      }
       if (action === "meet.join") {
         const response = await fetch(`${api}/rooms/${seat.room}/participants`, {
           method: "POST",
@@ -127,7 +153,13 @@ async function person(browser: Browser, seat: Seat): Promise<Page> {
           json: {
             ok: true,
             text: "Joined",
-            data: { answer: body.answer, media_key: base64(seat.mediaKey), media_key_id: keyId(seat.mediaKey), participant: seat.participant },
+            data: {
+              answer: body.answer,
+              media_key: base64(seat.mediaKey),
+              media_key_id: keyId(seat.mediaKey),
+              participant: seat.participant,
+              ...(seat.transcript ? { transcribed: true } : {}),
+            },
           },
         });
       }
@@ -382,6 +414,56 @@ test("cf21 after someone leaves the others switch to the new media key and still
   await ana.waitForTimeout(1500);
   const after = await Promise.all([ana, bo].map(received));
   for (const i of [0, 1]) expect(after[i]!.framesDecoded - before[i]!.framesDecoded).toBeGreaterThan(15);
+});
+
+test("adr0045 t2 what I say is transcribed on this computer, Hey Glass asks my agent at once, and muted isn't transcribed", async () => {
+  test.skip(!existsSync(join(DIST, "speech/encoder.onnx")), "no speech model in Meet (tools/fetch-speech-model.sh, then make apps-build)");
+  // The engine's microphone plays the recording, over and over: "I'll send
+  // the deck after this call." then "Hey Glass, find the ABC report and
+  // send it to Susan." (meet/test/fixtures/README.md).
+  const browser = await chromium.launch({
+    ...test.info().project.use.launchOptions,
+    args: [
+      ...(test.info().project.use.launchOptions?.args ?? []),
+      `--use-file-for-fake-audio-capture=${join(REPO, "apps/meet/test/fixtures/hey-glass.wav")}`,
+    ],
+  });
+  try {
+    const transcript = { added: [] as Line[][], calls: [] as string[] };
+    const page = await person(browser, { room: "launch-review", participant: 0, mediaKey: key(), transcript });
+    await expect(page.locator("[data-test=transcribed]")).toContainText("This meeting is transcribed");
+    await page.click("[data-test=join]");
+    await expect(page.locator("[data-test=transcribing]")).toHaveAttribute("data-hearing", "on", { timeout: 20_000 });
+
+    // Both sentences become lines; the request goes the moment it's heard.
+    const said = () => transcript.added.flat().map((l) => l.text);
+    await expect.poll(() => said().some((t) => /^hey,? glass,? find the ABC report and send it to Susan\.?$/i.test(t)), { timeout: 30_000 }).toBe(true);
+    await expect.poll(() => said().some((t) => /send the deck after this call/i.test(t)), { timeout: 20_000 }).toBe(true);
+    const asking = transcript.added.find((call) => call.some((l) => wake(l.text)));
+    expect(wake(asking!.at(-1)!.text), "a request is the last line of its call: it went at once").toMatch(/find the ABC report/i);
+    await expect(page.locator("[data-test=asked]")).toContainText(/Your agent is on it: find the ABC report and send it to Susan/i);
+    await expect(page.locator("[data-test=heard]")).toContainText("You:");
+    await page.screenshot({ path: join(SHOTS, "transcribed-call.png") });
+    const memoryMb = await largestRenderer(browser);
+    console.log(`meet: transcribed call, renderer ${memoryMb.toFixed(0)} MB; ${said().length} lines so far`);
+    expect(memoryMb, "a transcribed call's memory (UI-7)").toBeLessThan(TRANSCRIBED_MEMORY_BUDGET_MB);
+
+    // Muted, nothing more is transcribed: what was said before goes when leaving, nothing after.
+    await page.click("[data-test=mic]");
+    const muted = Date.now();
+    await expect(page.locator("[data-test=transcribing]")).toContainText("not you while muted");
+    await page.waitForTimeout(9_000);
+    await page.click("[data-test=leave]");
+    await expect(page.locator("[data-test=message]")).toContainText("You left");
+    await expect.poll(() => transcript.calls.includes("meet.leave"), { timeout: 10_000 }).toBe(true);
+    const lines = transcript.added.flat();
+    const after = lines.filter((l) => Date.parse(l.at) > muted);
+    expect(after, "nothing heard after muting").toEqual([]);
+    expect(transcript.calls.lastIndexOf("meet.transcribe"), "the last lines go before leaving").toBeLessThan(transcript.calls.indexOf("meet.leave"));
+    for (const line of lines) expect(line.text.length).toBeGreaterThan(0);
+  } finally {
+    await browser.close();
+  }
 });
 
 test("ui7 meet launches cold in under a second and stays under 150 MB before joining", async ({ browser }) => {

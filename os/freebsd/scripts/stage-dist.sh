@@ -111,6 +111,10 @@ for name in "${shipped[@]}"; do notice_args+=(--package "$name"); done
 for name in "${shell_shipped[@]}"; do notice_args+=(--shell-package "$name"); done
 if ((${#shell_shipped[@]})); then notice_args+=(--assets "$REPO_ROOT/shell/assets/fonts"); fi
 notice_args+=(--assets "$esbuild_license")
+# Meet's speech model and the runtime it runs in (ADR 0045 T2), when it was built with them.
+for speech in "$REPO_ROOT/apps/meet/dist/speech" "$REPO_ROOT/apps/meet/dist/ort"; do
+	if [[ -d $speech ]]; then notice_args+=(--assets "$speech"); fi
+done
 # An image built from base packages (STAGE_FOR=pkgbase, make image-pkgbase) offers the source
 # packages of the catalog it's built from, not the release's src.txz (BR-3).
 if [[ ${STAGE_FOR:-} == pkgbase ]]; then

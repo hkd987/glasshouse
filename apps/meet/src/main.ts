@@ -11,8 +11,14 @@
 // carries whose microphone, camera or screen; when it lists someone
 // without a line, the page offers more over the same channel (the
 // protocol is in crates/svc/media-relay/src/lib.rs).
+//
+// In a transcribed meeting (ADR 0045), what this computer's person says is
+// turned into text here, by the speech worker (speech.ts), from their own
+// microphone only, and added to the transcript with `meet.transcribe`.
 
 import { Bridge, BridgeError, h, Offline, ready, show } from "@glasshouse/sdk";
+
+import { Batcher, type FromSpeech, type Line, type ToSpeech } from "./transcribe.ts";
 
 interface Joined {
   /** The relay's SDP answer. */
@@ -71,6 +77,12 @@ const state = {
   sharers: [] as number[],
   names: {} as Record<string, string>,
   tracks: [] as Track[],
+  /** Transcribing this person (ADR 0045 T2): getting ready, on, or it can't here. */
+  hearing: "off" as "off" | "loading" | "on" | "failed",
+  /** The last line heard from them, shown for a while: what went into the transcript. */
+  heard: "",
+  /** The last request their agent took from what they said. */
+  asked: "",
 };
 let pc: RTCPeerConnection | null = null;
 let channel: RTCDataChannel | null = null;
@@ -87,6 +99,22 @@ let inbox: Promise<void> = Promise.resolve();
 const keyIds = new Map<string, number>();
 /** The current wait for a new media key; a newer one replaces it. */
 let rekeying = 0;
+
+/** The engine's raw audio frames from a track (Chromium's). */
+type TrackProcessor = new (init: { track: MediaStreamTrack }) => { readable: ReadableStream<AudioData> };
+
+/**
+ * Transcribing: the speech worker, the copy of the microphone it hears,
+ * the lines waiting to go, and when the worker has made text of all it
+ * heard.
+ */
+let speech: Worker | null = null;
+let heard: MediaStreamTrack | null = null;
+const batch = new Batcher();
+let sending: Promise<void> = Promise.resolve();
+let ticking = 0;
+let clearHeard = 0;
+let heardAll: () => void = () => undefined;
 
 const scriptTransform = "RTCRtpScriptTransform" in globalThis;
 const transformed = new WeakSet<RTCRtpSender | RTCRtpReceiver>();
@@ -277,12 +305,107 @@ async function join(): Promise<void> {
   giveKey(joined.media_key, 0);
   await connection.setRemoteDescription({ type: "answer", sdp: joined.answer });
   state.phase = "in";
+  if (state.transcribed && audio) hear(audio);
   draw();
+}
+
+/**
+ * Starts transcribing what this computer's person says (ADR 0045 T2): a
+ * copy of their microphone goes to the speech worker, never anyone
+ * else's audio. Its lines go to the transcript every twelve seconds, and
+ * at once when they speak to their agent.
+ */
+function hear(microphone: MediaStreamTrack): void {
+  const Processor = (globalThis as unknown as { MediaStreamTrackProcessor?: TrackProcessor }).MediaStreamTrackProcessor;
+  if (!Processor) {
+    state.hearing = "failed";
+    return;
+  }
+  heard = microphone.clone();
+  heard.enabled = state.mic;
+  const { readable } = new Processor({ track: heard });
+  speech = new Worker("./speech.js", { type: "module" });
+  speech.onmessage = ({ data }: MessageEvent<FromSpeech>) => {
+    if (data.type === "ready") {
+      state.hearing = "on";
+    } else if (data.type === "line") {
+      showHeard(data.line.text);
+      if (batch.add(data.line, Date.now())) void send();
+    } else if (data.type === "done") {
+      heardAll();
+      return;
+    } else if (data.type === "failed") {
+      state.hearing = "failed";
+    }
+    draw();
+  };
+  const start: ToSpeech = { type: "start", audio: readable };
+  speech.postMessage(start, [readable as unknown as Transferable]);
+  if (!state.mic) speech.postMessage({ type: "muted", on: true } satisfies ToSpeech);
+  state.hearing = "loading";
+  ticking = window.setInterval(() => {
+    if (batch.due(Date.now())) void send();
+  }, 1000);
+}
+
+/** Shows the person the line just heard from them, for eight seconds. */
+function showHeard(text: string): void {
+  state.heard = text;
+  window.clearTimeout(clearHeard);
+  clearHeard = window.setTimeout(() => {
+    state.heard = "";
+    draw();
+  }, 8000);
+}
+
+/** Adds the waiting lines to the transcript, one call at a time; lines glassd couldn't take wait for the next. */
+function send(lines?: Line[]): Promise<void> {
+  sending = sending.then(async () => {
+    const taking = lines ?? batch.take();
+    if (taking.length === 0) return;
+    try {
+      const result = await bridge.call<{ asked?: string[] }>("meet.transcribe", { meeting, lines: taking });
+      if (!result.ok) {
+        // Refused: IT turned transcripts off, or this meeting isn't one.
+        state.notice = result.text;
+        state.hearing = "failed";
+        void stopHearing(false);
+      } else {
+        const asked = result.data?.asked ?? [];
+        if (asked.length > 0) state.asked = asked[asked.length - 1]!;
+      }
+    } catch {
+      batch.putBack(taking, Date.now());
+    }
+    draw();
+  });
+  return sending;
+}
+
+/**
+ * Stops hearing: the worker turns what it already heard into text (five
+ * seconds at most), and, with `rest`, those lines go too.
+ */
+async function stopHearing(rest = true): Promise<void> {
+  const worker = speech;
+  if (!worker) return;
+  speech = null;
+  window.clearInterval(ticking);
+  const done = new Promise<void>((resolve) => {
+    heardAll = resolve;
+    window.setTimeout(resolve, 5000);
+  });
+  heard?.stop();
+  heard = null;
+  await done;
+  worker.terminate();
+  for (let lines = batch.drain(); lines.length > 0; lines = batch.drain()) if (rest) await send(lines);
 }
 
 function fail(message: string): void {
   state.phase = "failed";
   state.error = message;
+  void stopHearing();
   stop();
   draw();
 }
@@ -301,9 +424,11 @@ function stop(): void {
 }
 
 async function leave(): Promise<void> {
+  const finishing = stopHearing();
   stop();
   state.phase = "left";
   draw();
+  await finishing;
   try {
     await bridge.call("meet.leave", { meeting });
   } catch {
@@ -314,6 +439,11 @@ async function leave(): Promise<void> {
 function toggle(kind: Kind): void {
   const on = kind === "audio" ? (state.mic = !state.mic) : (state.camera = !state.camera);
   for (const track of kind === "audio" ? (media?.getAudioTracks() ?? []) : (media?.getVideoTracks() ?? [])) track.enabled = on;
+  if (kind === "audio" && heard) {
+    // Muted isn't transcribed.
+    heard.enabled = on;
+    speech?.postMessage({ type: "muted", on: !on } satisfies ToSpeech);
+  }
   draw();
 }
 
@@ -414,7 +544,11 @@ function draw(): void {
     h("span", { class: "sealed", title: "Each frame is sealed on this computer; the relay can't open it, and audio and video are never recorded." }, "🔒 Sealed end to end"),
     // For as long as the call lasts (ADR 0045).
     state.transcribed && state.phase === "in"
-      ? h("span", { class: "badge", "data-test": "transcribing", title: "What people say goes into the meeting's transcript." }, "● Transcribed")
+      ? h(
+          "span",
+          { class: "badge", "data-test": "transcribing", "data-hearing": state.hearing, title: hearingTitle() },
+          state.hearing === "on" && !state.mic ? "● Transcribed · not you while muted" : "● Transcribed",
+        )
       : null,
     state.phase === "in" ? h("span", { class: "count", "data-test": "count" }, others.length + 1 === 1 ? "Just you" : `${others.length + 1} people`) : null,
   );
@@ -483,6 +617,14 @@ function draw(): void {
     head,
     stage,
     state.notice ? h("p", { class: "notice", "data-test": "notice" }, state.notice) : null,
+    state.heard || state.asked
+      ? h(
+          "div",
+          { class: "captions" },
+          state.heard ? h("p", { class: "heard", "data-test": "heard" }, h("strong", {}, "You: "), state.heard) : null,
+          state.asked ? h("p", { class: "asked", "data-test": "asked" }, `Your agent is on it: ${state.asked}`) : null,
+        )
+      : null,
     h(
       "footer",
       { class: "controls" },
@@ -496,6 +638,13 @@ function draw(): void {
       h("button", { class: "danger", "data-test": "leave", onclick: () => void leave() }, "Leave"),
     ),
   );
+}
+
+/** What the transcript badge says about this person's words. */
+function hearingTitle(): string {
+  if (state.hearing === "failed") return "What people say goes into the meeting's transcript. What you say can't be transcribed on this computer right now.";
+  if (state.hearing === "loading") return "What people say goes into the meeting's transcript. Getting ready to transcribe what you say, on this computer.";
+  return "What people say goes into the meeting's transcript. What you say is turned into text on this computer; audio never leaves it.";
 }
 
 /** Whether this meeting is transcribed, so the lobby can say so before Join. */

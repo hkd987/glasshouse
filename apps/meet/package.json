@@ -5,5 +5,8 @@
   "description": "Meet: Glasshouse video meetings, sealed end to end with SFrame (CF-21, ADR 0030).",
   "license": "UNLICENSED",
   "type": "module",
-  "dependencies": { "@glasshouse/sdk": "0.1.0" }
+  "dependencies": {
+    "@glasshouse/sdk": "0.1.0",
+    "onnxruntime-web": "1.30.0"
+  }
 }
