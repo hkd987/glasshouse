@@ -103,6 +103,36 @@ fn em0_imap_link_lists_syncs_fetches_and_moves_on_a_real_server() {
 }
 
 #[test]
+fn em3_read_state_is_the_servers_seen_flag_both_ways() {
+    let Some(mox) = Mox::start() else { return };
+    let link = mox.link();
+    let me = mox.account("dana");
+    let first = mox.deliver(&message("first"));
+    let second = mox.deliver(&message("second"));
+    // Syncing reads without marking anything read (BODY.PEEK).
+    let synced = link.sync(&me, "Inbox", None, &[], LIMITS).unwrap();
+    assert_eq!(synced.unseen, [first, second]);
+
+    link.mark(&me, "Inbox", &[first], true).unwrap();
+    let again = link
+        .sync(&me, "Inbox", Some(&synced.state), &[first, second], LIMITS)
+        .unwrap();
+    assert!(again.new.is_empty(), "nothing new arrived");
+    assert_eq!(
+        again.unseen,
+        [second],
+        "a mark shows though nothing arrived"
+    );
+
+    link.mark(&me, "Inbox", &[first, second], false).unwrap();
+    link.mark(&me, "Inbox", &[second], true).unwrap();
+    let last = link
+        .sync(&me, "Inbox", Some(&again.state), &[first, second], LIMITS)
+        .unwrap();
+    assert_eq!(last.unseen, [first]);
+}
+
+#[test]
 fn em0_imap_link_submits_and_files_in_sent() {
     let Some(mox) = Mox::start() else { return };
     let link = mox.link();

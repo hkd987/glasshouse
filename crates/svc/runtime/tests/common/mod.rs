@@ -712,7 +712,7 @@ impl SystemOps for FakeMachine {
 pub fn mail_app() -> AppManifest {
     serde_json::from_value(json!({
         "id": "mail", "name": "Mail", "version": "0.1.0",
-        "actions": ["mail.account", "mail.list", "mail.read", "mail.draft", "mail.send", "mail.move", "mail.connect", "people.search"],
+        "actions": ["mail.account", "mail.list", "mail.read", "mail.draft", "mail.send", "mail.move", "mail.mark", "mail.connect", "people.search"],
         "permissions": ["offline"], "labels": ["public", "internal"]
     }))
     .unwrap()

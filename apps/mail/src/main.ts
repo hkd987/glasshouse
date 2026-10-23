@@ -8,7 +8,9 @@
 // files mail in Archive, Junk or Trash (mail.move). A message's HTML is
 // shown in a frame on its own origin with no scripts and no network, so no
 // remote image tells the sender it was read; everything else is text. New
-// mail arrives through app.status waits, ids only.
+// mail arrives through app.status waits, ids only. Opening a message marks
+// it read, here and on the server (mail.mark, ADR 0050); an agent reading
+// it never does.
 
 import {
   type AppStatus,
@@ -42,6 +44,7 @@ import {
   parseRecipients,
   problems,
   replyTo,
+  tracksReading,
   viewUrl,
   wasSent,
 } from "./mail.ts";
@@ -79,6 +82,8 @@ const bridge = new Bridge({ app: "mail" });
 const state = {
   folder: "inbox" as Folder,
   lists: { inbox: [], drafts: [], sent: [], archive: [], junk: [], trash: [] } as Record<Folder, Summary[]>,
+  /** How many in each folder the person hasn't opened, listed or not. */
+  unread: {} as Partial<Record<Folder, number>>,
   selected: null as string | null,
   message: null as Message | null,
   compose: null as Compose | null,
@@ -108,8 +113,11 @@ let nextKey = 1;
 const root = document.getElementById("app") as HTMLElement;
 
 async function loadFolder(folder: Folder): Promise<void> {
-  const read = await bridge.read<{ messages: Summary[] }>("mail.list", { folder, limit: 100 });
-  if (read.result.ok) state.lists[folder] = read.result.data.messages;
+  const read = await bridge.read<{ messages: Summary[]; unread?: number }>("mail.list", { folder, limit: 100 });
+  if (read.result.ok) {
+    state.lists[folder] = read.result.data.messages;
+    state.unread[folder] = read.result.data.unread ?? 0;
+  }
   noteOffline(read.offline, read.loadedAt);
 }
 
@@ -128,6 +136,8 @@ async function open(id: string): Promise<void> {
     noteOffline(read.offline, read.loadedAt);
     state.message = read.result.ok ? read.result.data.message : null;
     if (!read.result.ok) state.notice = read.result.text;
+    // The person opened it: read now (an agent's mail.read never marks).
+    if (state.message?.unread && !read.offline) void mark(state.message, true);
   } catch (error) {
     state.message = null;
     state.notice = error instanceof Offline ? "This message wasn't loaded before going offline." : String(error);
@@ -142,6 +152,31 @@ async function refresh(): Promise<void> {
     await Promise.all([...folders].map((f) => loadFolder(f)));
   } catch (error) {
     state.notice = error instanceof Offline ? "Mail hasn't been loaded on this device yet." : String(error);
+  }
+  render();
+}
+
+/** Marks a message read or unread (mail.mark); undo on the desktop marks it back. */
+async function mark(message: Summary, read: boolean): Promise<void> {
+  try {
+    const result = await bridge.call("mail.mark", { ids: [message.id], read });
+    if (!result.ok) {
+      state.notice = result.text;
+      return render();
+    }
+    for (const m of [...state.lists[message.folder], state.message]) {
+      if (m?.id === message.id && m.unread === read) {
+        m.unread = !read;
+        if (m !== state.message) state.unread[message.folder] = Math.max(0, (state.unread[message.folder] ?? 0) + (read ? -1 : 1));
+      }
+    }
+    if (!read) {
+      // Back to the list, so it stays unread until it's opened again.
+      state.selected = null;
+      state.message = null;
+    }
+  } catch (error) {
+    state.notice = error instanceof Offline ? "Marking needs the system; it isn't answering." : String(error);
   }
   render();
 }
@@ -331,7 +366,8 @@ function titlebar(): HTMLElement {
 }
 
 function sidebar(): HTMLElement {
-  const unread = (folder: Folder) => state.lists[folder].length;
+  // Unread mail where folders keep read state; how many drafts wait.
+  const count = (folder: Folder) => (folder === "drafts" ? state.lists.drafts.length : tracksReading(folder) ? (state.unread[folder] ?? 0) : 0);
   const waiting = state.outbox.filter((p) => p.state === "waiting" || p.state === "sending");
   const done = state.outbox.filter((p) => p.state !== "waiting" && p.state !== "sending").slice(-3);
   return h(
@@ -356,7 +392,7 @@ function sidebar(): HTMLElement {
           "data-folder": f.id,
         },
         h("span", {}, f.title),
-        h("span", { class: "count" }, unread(f.id) || ""),
+        h("span", { class: "count" }, count(f.id) || ""),
       ),
     ),
     state.account
@@ -441,7 +477,7 @@ function list(): HTMLElement {
       return h(
         "button",
         {
-          class: `row${state.selected === m.id ? " selected" : ""}`,
+          class: `row${state.selected === m.id ? " selected" : ""}${m.unread ? " unread" : ""}`,
           onclick: () => void open(m.id),
           "data-id": m.id,
         },
@@ -627,6 +663,9 @@ function reading(message: Message): HTMLElement {
           m.label,
         ),
       ),
+      tracksReading(message.folder)
+        ? h("button", { class: "button", disabled: state.offline, onclick: () => void mark(message, false), "data-test": "mark-unread" }, "Mark unread")
+        : null,
       isDraft
         ? h(
             "button",

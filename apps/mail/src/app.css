@@ -133,6 +133,26 @@
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+/* Not opened yet (ADR 0050): a dot in the margin and the subject in bold. */
+.row.unread {
+  position: relative;
+}
+
+.row.unread::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 19px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.row.unread .row-subject {
+  font-weight: 600;
+}
+
 .row-top {
   display: flex;
   justify-content: space-between;

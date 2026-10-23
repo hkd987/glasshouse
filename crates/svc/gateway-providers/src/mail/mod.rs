@@ -139,6 +139,19 @@ impl MailLink for ImapLink {
         })
     }
 
+    fn mark(
+        &self,
+        account: &Account,
+        folder: &str,
+        uids: &[u32],
+        seen: bool,
+    ) -> Result<(), LinkError> {
+        self.session(account, |s| {
+            s.open_folder(folder, true, None)?;
+            s.store_seen(uids, seen)
+        })
+    }
+
     fn wait(&self, account: &Account, folder: &str, timeout: Duration) -> Result<bool, LinkError> {
         self.session(account, |s| {
             s.open_folder(folder, false, None)?;
@@ -182,6 +195,8 @@ fn sync(
         reset,
         ..FolderSync::default()
     };
+    // Read state changes without UIDNEXT or EXISTS moving: always asked.
+    result.unseen = s.unseen()?;
     // UIDNEXT and EXISTS both unmoved: nothing arrived (UIDNEXT would
     // grow) and so nothing went (EXISTS would shrink).
     if let Some(st) = since

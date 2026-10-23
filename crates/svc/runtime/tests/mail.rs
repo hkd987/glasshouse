@@ -252,6 +252,10 @@ async fn the_usual_calls(h: &Harness) -> Vec<(String, Value)> {
         tool(&agent, "mail_list", json!({ "folder": "sent" })).await,
     );
     ok(
+        "mark",
+        tool(&agent, "mail_mark", json!({ "ids": [id], "read": true })).await,
+    );
+    ok(
         "move",
         tool(&agent, "mail_move", json!({ "ids": [id], "to": "archive" })).await,
     );
@@ -284,9 +288,11 @@ async fn in2_mail_actions_return_the_same_shapes_on_the_local_store_and_on_imap(
     for ((name, a), (_, b)) in on_local.iter().zip(&on_imap) {
         assert_eq!(differ(name, a, b), None, "{a}\n{b}");
     }
-    // And it really went to the server.
-    assert_eq!(on_imap[6].1["moved"], 1);
+    // And it really went to the server, marked read before it was filed.
+    let moved = on_imap.iter().find(|(name, _)| name == "move").unwrap();
+    assert_eq!(moved.1["moved"], 1);
     assert_eq!(mox.uids("Archive").len(), 1);
+    assert!(mox.unseen("Archive").is_empty());
     assert!(mox.uids("Inbox").is_empty());
     assert_eq!(mox.uids("Sent").len(), 1);
 }
@@ -604,6 +610,69 @@ async fn nv3_new_mail_wakes_the_mail_app_without_a_read() {
     assert_eq!(inbox.data["messages"][0]["subject"], "Ping");
 }
 
+/// The messages kept in `~/Mail/<folder>`, not its read markers (ADR 0050).
+fn messages(h: &Harness, folder: &str) -> Vec<String> {
+    std::fs::read_dir(h.home().join("Mail").join(folder))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn em3_an_agents_mark_tells_the_person_and_undo_marks_it_back_on_the_server() {
+    let Some(mox) = Mox::start() else { return };
+    let uid = mox.deliver(&inbox_message("Renewal"));
+    let (h, apps) = on_mox(&mox, "").await;
+    let (task, agent) = claude_code(&h).await;
+    let inbox = tool(&agent, "mail_list", json!({ "folder": "inbox" })).await;
+    let listed = inbox.structured_content.unwrap();
+    assert_eq!(listed["unread"], 1);
+    let id = listed["messages"][0]["id"].clone();
+    // An agent reading mail leaves it new to the person, there too.
+    let read = tool(&agent, "mail_read", json!({ "id": id })).await;
+    assert_eq!(read.structured_content.unwrap()["message"]["unread"], true);
+    assert_eq!(mox.unseen("Inbox"), [uid]);
+
+    let marked = tool(&agent, "mail_mark", json!({ "ids": [id], "read": true })).await;
+    assert!(!marked.is_error, "{}", marked.text());
+    assert!(h.rt.approvals(&h.me).is_empty(), "Notify: no ask");
+    assert!(mox.unseen("Inbox").is_empty(), "read on the server");
+    let record = audited(&h, "mail.mark").pop().expect("audited");
+    assert_eq!(record.event.outcome, Some(Outcome::Completed));
+    assert!(record.event.snapshot.is_some(), "a snapshot first");
+
+    let report =
+        h.rt.undo(
+            &h.me,
+            glass_api::UndoRequest {
+                task,
+                to: None,
+                changes: Vec::new(),
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(report.not_undone.is_empty(), "{report:?}");
+    assert_eq!(mox.unseen("Inbox"), [uid], "unread again on the server");
+
+    // In Mail, opening it marks it read without a word (its [[app]] tier).
+    let session = open(&apps, "mail").await.session;
+    let opened = call(
+        &apps,
+        session,
+        "mail.mark",
+        json!({ "ids": [id], "read": true }),
+    )
+    .await;
+    assert!(opened.ok, "{}", opened.text);
+    assert!(mox.unseen("Inbox").is_empty());
+    let list = call(&apps, session, "mail.list", json!({ "folder": "inbox" })).await;
+    assert_eq!(list.data["unread"], 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn em0_an_agents_move_runs_at_notify_and_undo_moves_it_back_on_the_server() {
     let Some(mox) = Mox::start() else { return };
@@ -637,22 +706,13 @@ async fn em0_an_agents_move_runs_at_notify_and_undo_moves_it_back_on_the_server(
     assert!(mox.uids("Junk").is_empty(), "moved back on the server");
     let back = mox.uids("Inbox");
     assert_eq!(back.len(), 1);
-    let names: Vec<String> = std::fs::read_dir(h.home().join("Mail/Inbox"))
-        .unwrap()
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
+    let names = messages(&h, "Inbox");
     assert_eq!(names.len(), 1, "{names:?}");
     assert!(
         names[0].ends_with(&format!("-{:010}.eml", back[0])),
         "{names:?}"
     );
-    assert_eq!(
-        std::fs::read_dir(h.home().join("Mail/Junk"))
-            .unwrap()
-            .count(),
-        0
-    );
+    assert_eq!(messages(&h, "Junk").len(), 0);
     let changes = h.rt.get(&h.me, task).unwrap().changes;
     assert!(
         changes.iter().all(|c| c.undone || !c.reversible),

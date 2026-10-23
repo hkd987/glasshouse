@@ -173,6 +173,35 @@ test("em0 mail is archived and rescued from junk, each a move the app makes", as
   expect(moved.map(outcome)).toEqual(["completed", "completed", "completed"]);
 });
 
+test("em3 opening a message marks it read, and Mark unread brings it back", async ({ page }) => {
+  // ADR 0050: what the person hasn't opened is new; Mail marks it as they open it.
+  await openMail(page);
+  const row = page.locator(".row", { hasText: "Q4 forecast review" });
+  const count = page.locator("[data-folder=inbox] .count");
+  await expect(row).toHaveClass(/unread/);
+  const before = Number(await count.textContent());
+  expect(before).toBeGreaterThan(0);
+  const marks = () => audit().filter((r) => r.event.action === "mail.mark" && r.event.agent === "mail");
+  const marked = marks().length;
+
+  await row.click();
+  await expect(page.locator("[data-test=mark-unread]")).toBeVisible();
+  await expect(row).not.toHaveClass(/unread/);
+  await expect(count).toHaveText(before > 1 ? String(before - 1) : "");
+  // It stays read when Mail loads the inbox again.
+  await page.reload();
+  await expect(page.locator("html[data-ready=true]")).toHaveCount(1);
+  await expect(page.locator(".row", { hasText: "Q4 forecast review" })).not.toHaveClass(/unread/);
+
+  await page.locator(".row", { hasText: "Q4 forecast review" }).click();
+  await page.click("[data-test=mark-unread]");
+  await expect(page.locator(".row", { hasText: "Q4 forecast review" })).toHaveClass(/unread/);
+  await expect(count).toHaveText(String(before));
+  // The person's own marks, in Mail: run without asking, audited.
+  await expect.poll(() => marks().length).toBe(marked + 2);
+  expect(marks().slice(marked).map(outcome)).toEqual(["completed", "completed"]);
+});
+
 test("nv3 an html message runs no script and loads no remote image", async ({ page }) => {
   // A server that notes whatever reaches it: a remote image, stylesheet,
   // background, script, redirect, form or link would (ADR 0037).

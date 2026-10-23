@@ -9,7 +9,7 @@
 //! it, and its watcher thread keeps the Inbox fresh (IMAP IDLE) and wakes
 //! the Mail app when mail arrives.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -78,6 +78,10 @@ struct FolderEntry {
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     state: Option<FolderState>,
+    /// Marks made on this computer that the server hasn't heard yet, by
+    /// UID under `state`'s UIDVALIDITY: whether each is read (ADR 0050).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    marks: BTreeMap<u32, bool>,
 }
 
 /// A person's home, as the actions last saw it, for the watcher.
@@ -101,6 +105,8 @@ pub(crate) enum SyncError {
 pub(crate) struct Synced {
     pub new: usize,
     pub gone: usize,
+    /// Messages read or unread now that weren't before.
+    pub marked: usize,
 }
 
 struct Inner {
@@ -126,7 +132,7 @@ impl std::fmt::Debug for MailHandle {
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -305,7 +311,8 @@ impl MailHandle {
         );
     }
 
-    fn person_lock(&self, login: &str) -> Arc<Mutex<()>> {
+    /// One person's mail, changed by one sync or mark at a time.
+    pub(crate) fn person_lock(&self, login: &str) -> Arc<Mutex<()>> {
         lock(&self.0.syncing)
             .entry(login.to_owned())
             .or_default()
@@ -335,6 +342,7 @@ impl MailHandle {
                     state.folders.entry(r).or_insert(FolderEntry {
                         name: folder.name,
                         state: None,
+                        marks: BTreeMap::new(),
                     });
                 }
             }
@@ -424,22 +432,125 @@ impl MailHandle {
                 .map_err(local)?;
             report.gone += 1;
         }
+        // Read state (ADR 0050): marks made here while the server was out
+        // of reach go to it first; then the server's says the rest.
         let mut state = self.load_state(login);
+        let mut marks = match state.folders.get(&role) {
+            Some(entry) if !synced.reset => entry.marks.clone(),
+            _ => BTreeMap::new(),
+        };
+        let mut unseen: BTreeSet<u32> = synced.unseen.iter().copied().collect();
+        for seen in [true, false] {
+            let uids: Vec<u32> = marks
+                .iter()
+                .filter(|(_, read)| **read == seen)
+                .map(|(uid, _)| *uid)
+                .collect();
+            if uids.is_empty() {
+                continue;
+            }
+            match remote.link.mark(&account, &name, &uids, seen) {
+                Ok(()) => {
+                    for uid in &uids {
+                        marks.remove(uid);
+                        if seen {
+                            unseen.remove(uid);
+                        } else {
+                            unseen.insert(*uid);
+                        }
+                    }
+                }
+                Err(e) if e.is_offline() => {}
+                // Gone, or refused: the server's state stands.
+                Err(_) => {
+                    for uid in &uids {
+                        marks.remove(uid);
+                    }
+                }
+            }
+        }
+        // One listing of the markers, and a write only where one differs.
+        let was_read = cache.read_names(role).map_err(local)?;
+        for kept in cache.names(role).map_err(local)? {
+            let Some((v, uid)) = cache::parse_synced(&kept) else {
+                continue;
+            };
+            if v != validity {
+                continue;
+            }
+            let read = marks.get(&uid).copied().unwrap_or(!unseen.contains(&uid));
+            if read != was_read.contains(&kept)
+                && cache.set_read(role, &kept, read).map_err(local)?
+            {
+                report.marked += 1;
+            }
+        }
         state.folders.insert(
             role,
             FolderEntry {
                 name,
                 state: Some(synced.state),
+                marks,
             },
         );
         self.save_state(login, &state)?;
         lock(&self.0.fresh).insert((login.to_owned(), role), Instant::now());
-        if report.new + report.gone > 0 {
+        if report.new + report.gone + report.marked > 0 {
             self.notify(&Notice::Changed {
                 login: login.to_owned(),
             });
         }
         Ok(report)
+    }
+
+    /// Tells the server that synced messages `uids` (named under
+    /// `validity`) in `role` are read or unread now. The caller holds
+    /// [`Self::person_lock`], so a sync can't undo the mark halfway. Out of
+    /// reach or not connected, the marks wait for the next sync (ADR 0050).
+    /// Whether the server has them now.
+    pub(crate) fn tell_server(
+        &self,
+        login: &str,
+        role: Role,
+        validity: u32,
+        uids: &[u32],
+        seen: bool,
+    ) -> Result<bool, SyncError> {
+        if uids.is_empty() {
+            return Ok(true);
+        }
+        if let Some((remote, account)) = self.account(login) {
+            let told = self
+                .folder(login, &remote, &account, role)
+                .and_then(|(name, folder)| match folder {
+                    Some(f) if f.uid_validity != validity => Err(SyncError::Local(format!(
+                        "{} changed on the server since it was listed; list it again",
+                        cache::dir(role)
+                    ))),
+                    _ => remote
+                        .link
+                        .mark(&account, &name, uids, seen)
+                        .map_err(SyncError::Link),
+                });
+            match told {
+                Ok(()) => return Ok(true),
+                Err(SyncError::Link(e)) if e.is_offline() => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let mut state = self.load_state(login);
+        let Some(entry) = state.folders.get_mut(&role) else {
+            // Never synced: no message of the server's is here to mark.
+            return Ok(false);
+        };
+        if entry.state.is_some_and(|f| f.uid_validity != validity) {
+            return Ok(false);
+        }
+        for uid in uids {
+            entry.marks.insert(*uid, seen);
+        }
+        self.save_state(login, &state)?;
+        Ok(false)
     }
 
     /// The people whose mail glassd watches: signed in, with a home seen.

@@ -387,10 +387,12 @@ fn em0_after_signing_in_again_mail_that_went_meanwhile_leaves_the_cache() {
     let goes = s.link.deliver("INBOX", &arriving("Goes"));
     s.connect(&ctx);
     let inbox = || {
+        // Messages, not the read markers' folder (ADR 0050).
         let mut names: Vec<String> = fs::read_dir(home.path().join("Mail/Inbox"))
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.'))
             .collect();
         names.sort();
         names
@@ -518,6 +520,213 @@ fn em0_mail_moves_on_the_server_and_undo_moves_it_back() {
         .join("Mail/Inbox")
         .join(cache::synced_name(1000, back[0].0));
     assert!(named.exists(), "the restored file names its new UID");
+}
+
+fn unread(s: &MailProvider, ctx: &TaskContext, folder: &str) -> (Value, Vec<bool>) {
+    let list = s
+        .invoke(ctx, &action("mail.list"), &json!({ "folder": folder }))
+        .unwrap();
+    let each = list.data["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["unread"].as_bool().unwrap())
+        .collect();
+    (list.data["unread"].clone(), each)
+}
+
+#[test]
+fn em3_read_state_is_the_servers_and_marks_made_here_go_back_to_it() {
+    let (home, ctx) = setup();
+    let s = service();
+    let first = s.link.deliver("INBOX", &arriving("Renewal"));
+    let second = s.link.deliver("INBOX", &arriving("Lunch"));
+    s.connect(&ctx);
+    // Read on the person's phone; this computer's next sync hears.
+    s.link.mark(&account(&s), "INBOX", &[first], true).unwrap();
+    s.mail
+        .sync("demo", home.path(), ctx.owner, Role::Inbox)
+        .unwrap();
+    assert_eq!(
+        unread(&s.provider, &ctx, "inbox"),
+        (json!(1), vec![true, false])
+    );
+    let lunch = format!("inbox/{}", cache::synced_name(1000, second));
+
+    // An agent reading it leaves it new to the person.
+    let read = s
+        .provider
+        .invoke(&ctx, &action("mail.read"), &json!({ "id": lunch }))
+        .unwrap();
+    assert_eq!(read.data["message"]["unread"], true);
+    assert!(!s.link.seen("INBOX").contains(&second));
+
+    // Marked read: here and on the server, as a change undo can take back.
+    let input = json!({ "ids": [lunch], "read": true });
+    let preview = s
+        .provider
+        .preview(&ctx, &action("mail.mark"), &input)
+        .unwrap();
+    assert_eq!(preview.summary, "Mark an email read: Lunch");
+    assert_eq!(
+        preview.snapshot_roots,
+        [home.path().join("Mail/Inbox/.read")]
+    );
+    let out = s
+        .provider
+        .invoke(&ctx, &action("mail.mark"), &input)
+        .unwrap();
+    assert_eq!(out.text, "Marked 1 email read");
+    assert_eq!(out.data, json!({ "marked": 1, "read": true }));
+    assert!(s.link.seen("INBOX").contains(&second));
+    assert_eq!(unread(&s.provider, &ctx, "inbox").0, json!(0));
+    let change = &out.changes[0];
+    assert!(change.reversible);
+    assert_eq!(change.target, "Inbox: Lunch → read");
+    assert!(change.paths[0].exists());
+
+    // Undo: the snapshot takes the marker away, then the server hears.
+    fs::remove_file(&change.paths[0]).unwrap();
+    s.provider
+        .revert(&ctx, &action("mail.mark"), &change.paths)
+        .unwrap();
+    assert!(!s.link.seen("INBOX").contains(&second));
+
+    // Marked elsewhere: the next sync brings it here.
+    s.link.mark(&account(&s), "INBOX", &[second], true).unwrap();
+    s.link.mark(&account(&s), "INBOX", &[first], false).unwrap();
+    let synced = s
+        .mail
+        .sync("demo", home.path(), ctx.owner, Role::Inbox)
+        .unwrap();
+    assert_eq!(synced.marked, 2);
+    assert_eq!(
+        unread(&s.provider, &ctx, "inbox"),
+        (json!(1), vec![false, true])
+    );
+
+    // Offline, a mark is made here and waits for the server.
+    s.link.offline(true);
+    let out = s
+        .provider
+        .invoke(
+            &ctx,
+            &action("mail.mark"),
+            &json!({ "ids": [lunch], "read": false }),
+        )
+        .unwrap();
+    assert_eq!(
+        out.text,
+        "Marked 1 email unread (the mail server hears when you're back online)"
+    );
+    assert!(s.link.seen("INBOX").contains(&second));
+    s.link.offline(false);
+    s.mail
+        .sync("demo", home.path(), ctx.owner, Role::Inbox)
+        .unwrap();
+    assert!(!s.link.seen("INBOX").contains(&second), "told once back");
+    assert_eq!(unread(&s.provider, &ctx, "inbox").0, json!(2));
+
+    // Filed, a message stays as read as it was.
+    let renewal = format!("inbox/{}", cache::synced_name(1000, first));
+    s.provider
+        .invoke(
+            &ctx,
+            &action("mail.mark"),
+            &json!({ "ids": [renewal], "read": true }),
+        )
+        .unwrap();
+    s.provider
+        .invoke(
+            &ctx,
+            &action("mail.move"),
+            &json!({ "ids": [renewal], "to": "archive" }),
+        )
+        .unwrap();
+    assert_eq!(s.link.seen("Archive").len(), 1);
+    assert_eq!(
+        unread(&s.provider, &ctx, "archive"),
+        (json!(0), vec![false])
+    );
+    assert_eq!(unread(&s.provider, &ctx, "inbox").0, json!(1));
+}
+
+fn account(s: &Service) -> glass_managed::mail::Account {
+    s.mail.account("demo").unwrap().1
+}
+
+#[test]
+fn em3_without_a_service_read_state_is_kept_here_and_drafts_are_always_read() {
+    let (home, ctx) = setup();
+    fs::write(
+        home.path().join("Mail/Inbox/1792400000-0-hello.eml"),
+        "From: a@b.example\nSubject: Hello\nDate: 2026-10-19T08:00:00Z\n\nHi\n",
+    )
+    .unwrap();
+    let p = MailProvider::default();
+    assert_eq!(unread(&p, &ctx, "inbox"), (json!(1), vec![true]));
+    let id = "inbox/1792400000-0-hello.eml";
+    let out = p
+        .invoke(
+            &ctx,
+            &action("mail.mark"),
+            &json!({ "ids": [id], "read": true }),
+        )
+        .unwrap();
+    assert!(
+        home.path()
+            .join("Mail/Inbox/.read/1792400000-0-hello.eml")
+            .exists()
+    );
+    assert_eq!(unread(&p, &ctx, "inbox"), (json!(0), vec![false]));
+    // Nothing on a server to tell: undo's files are all there is.
+    assert!(
+        p.revert(&ctx, &action("mail.mark"), &out.changes[0].paths)
+            .is_ok()
+    );
+    let again = p
+        .invoke(
+            &ctx,
+            &action("mail.mark"),
+            &json!({ "ids": [id, id], "read": true }),
+        )
+        .unwrap();
+    assert_eq!(again.text, "Already read");
+    assert!(again.changes.is_empty());
+
+    p.invoke(
+        &ctx,
+        &action("mail.draft"),
+        &json!({ "to": ["a@b.example"], "subject": "Re: Hello", "body": "Hi" }),
+    )
+    .unwrap();
+    assert_eq!(unread(&p, &ctx, "drafts"), (json!(0), vec![false]));
+    let draft = p
+        .invoke(&ctx, &action("mail.list"), &json!({ "folder": "drafts" }))
+        .unwrap()
+        .data["messages"][0]["id"]
+        .clone();
+    for bad in [
+        json!({ "ids": [draft], "read": false }),
+        json!({ "ids": [], "read": true }),
+        json!({ "ids": ["inbox/../x.eml"], "read": true }),
+    ] {
+        assert!(
+            matches!(
+                p.preview(&ctx, &action("mail.mark"), &bad),
+                Err(ActionError::InvalidInput(_))
+            ),
+            "{bad}"
+        );
+    }
+    assert!(matches!(
+        p.preview(
+            &ctx,
+            &action("mail.mark"),
+            &json!({ "ids": ["inbox/1792400000-9-gone.eml"], "read": true })
+        ),
+        Err(ActionError::NotFound(_))
+    ));
 }
 
 #[test]
@@ -759,6 +968,10 @@ fn ga1_what_each_action_returns_is_what_it_declares() {
     run(
         "mail.send",
         json!({ "messages": [{ "to": ["dana@northwind.example"], "subject": "Terms", "body": "Agreed." }] }),
+    );
+    run(
+        "mail.mark",
+        json!({ "ids": [inbox["messages"][0]["id"]], "read": true }),
     );
     run(
         "mail.move",

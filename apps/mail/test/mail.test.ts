@@ -16,6 +16,7 @@ import {
   parseRecipients,
   problems,
   replyTo,
+  tracksReading,
   viewUrl,
   wasSent,
 } from "../src/mail.ts";
@@ -55,6 +56,7 @@ const dana: Message = {
   date: "2026-10-19T08:12:00Z",
   snippet: "Hi, can we talk terms?",
   attribution: null,
+  unread: true,
   body: "Hi,\n\nCan we talk terms?\n",
 };
 
@@ -67,7 +69,15 @@ const draft: Summary = {
   date: "2026-10-19T08:20:00Z",
   snippet: "Tuesday works.",
   attribution: { text: "by claude-code for demo", by: "claude-code", for: "demo" },
+  unread: false,
 };
+
+test("adr0050 drafts and sent mail keep no read state; the rest do", () => {
+  assert.deepEqual(
+    (["inbox", "drafts", "sent", "archive", "junk", "trash"] as const).filter(tracksReading),
+    ["inbox", "archive", "junk", "trash"],
+  );
+});
 
 test("names and addresses", () => {
   assert.equal(displayName(dana.from), "Dana Ruiz");

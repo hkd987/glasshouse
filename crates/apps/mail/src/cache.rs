@@ -7,10 +7,16 @@
 //! store's (drafts, and everything when no service is connected): a sync
 //! never touches them.
 //!
+//! What the person has read is an empty file per message in the folder's
+//! `.read` (ADR 0050): a mark's change names those files, so undo puts them
+//! back as it does any file, and a move or a sync carries them along.
+//! Drafts and sent mail are always read.
+//!
 //! Every write goes through `ConfinedDir` at the person's home and is
 //! handed to them, so a link they put in `~/Mail` can't send root's writes
 //! elsewhere (PA-3).
 
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +24,8 @@ use glass_managed::mail::Role;
 use glass_platform::fs::{ConfinedDir, Owner};
 
 pub(crate) const MAIL_DIR: &str = "Mail";
+/// A folder's read markers, by message file name (ADR 0050).
+pub(crate) const READ_DIR: &str = ".read";
 /// What a listing reads of each message: its header and the start of its
 /// body.
 const SUMMARY_BYTES: u64 = 64 * 1024;
@@ -55,6 +63,17 @@ pub(crate) fn role_of_key(key_: &str) -> Option<Role> {
 /// `Mail/<Folder>`, relative to the home.
 pub(crate) fn rel_dir(role: Role) -> PathBuf {
     Path::new(MAIL_DIR).join(dir(role))
+}
+
+/// `Mail/<Folder>/.read`, relative to the home.
+pub(crate) fn rel_read_dir(role: Role) -> PathBuf {
+    rel_dir(role).join(READ_DIR)
+}
+
+/// Whether a folder keeps read state: drafts and sent mail are the
+/// person's own, always read.
+pub(crate) fn tracks_reading(role: Role) -> bool {
+    !matches!(role, Role::Drafts | Role::Sent)
 }
 
 /// The file a synced message is kept in.
@@ -97,15 +116,66 @@ impl Cache {
         })
     }
 
-    /// Makes the mail folders the person doesn't have yet, theirs.
+    /// Makes the mail folders the person doesn't have yet, theirs, with
+    /// their read markers' folders.
     pub(crate) fn prepare(&self) -> std::io::Result<()> {
         for role in Role::ALL {
             let rel = rel_dir(role);
             if !self.home.exists(&rel) {
                 self.home.create_dir_all_as(&rel, self.owner)?;
             }
+            let read = rel_read_dir(role);
+            if tracks_reading(role) && !self.home.exists(&read) {
+                self.home.create_dir_all_as(&read, self.owner)?;
+            }
         }
         Ok(())
+    }
+
+    /// The messages in a folder the person has read, by file name; every
+    /// one kept, where the folder keeps no read state.
+    pub(crate) fn read_names(&self, role: Role) -> std::io::Result<BTreeSet<String>> {
+        if !tracks_reading(role) {
+            return Ok(self.names(role)?.into_iter().collect());
+        }
+        match self.home.list(&rel_read_dir(role)) {
+            Ok(entries) => Ok(entries
+                .into_iter()
+                .filter(|e| !e.is_dir && plain_name(&e.name))
+                .map(|e| e.name)
+                .collect()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeSet::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether the person has read a message.
+    pub(crate) fn is_read(&self, role: Role, name: &str) -> bool {
+        !tracks_reading(role) || self.home.exists(&rel_read_dir(role).join(name))
+    }
+
+    /// Marks a message read or unread; whether that changed anything.
+    pub(crate) fn set_read(&self, role: Role, name: &str, read: bool) -> std::io::Result<bool> {
+        if !tracks_reading(role) || self.is_read(role, name) == read {
+            return Ok(false);
+        }
+        let marker = rel_read_dir(role).join(name);
+        if read {
+            if !self.home.exists(&rel_read_dir(role)) {
+                self.home
+                    .create_dir_all_as(&rel_read_dir(role), self.owner)?;
+            }
+            match self.home.write_new(&marker, b"", Some(self.owner)) {
+                Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+                _ => {}
+            }
+        } else {
+            match self.home.remove_file(&marker) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+        Ok(true)
     }
 
     /// The message files in a folder, by name.
@@ -176,16 +246,23 @@ impl Cache {
         ))
     }
 
+    /// Removes a message, and whether it was read with it.
     pub(crate) fn remove(&self, role: Role, name: &str) -> std::io::Result<()> {
         match self.home.remove_file(&rel_dir(role).join(name)) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            other => other,
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
         }
+        self.set_read(role, name, false).map(drop)
     }
 
+    /// Moves a message, and whether it was read with it: a move keeps it
+    /// read or not, on the server too (IMAP MOVE keeps its flags).
     pub(crate) fn rename(&self, from: (Role, &str), to: (Role, &str)) -> std::io::Result<()> {
+        let read = self.is_read(from.0, from.1);
         self.home
-            .rename(&rel_dir(from.0).join(from.1), &rel_dir(to.0).join(to.1))
+            .rename(&rel_dir(from.0).join(from.1), &rel_dir(to.0).join(to.1))?;
+        self.set_read(from.0, from.1, false)?;
+        self.set_read(to.0, to.1, read).map(drop)
     }
 
     /// A whole message, up to the cap.

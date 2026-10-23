@@ -390,6 +390,21 @@ impl Session {
             Some(from) => format!("UID {from}:*"),
             None => "ALL".into(),
         };
+        let mut uids = self.search_for(&criteria)?;
+        // `n:*` always includes the newest message, even below `n`.
+        if let Some(from) = from {
+            uids.retain(|u| *u >= from);
+        }
+        Ok(uids)
+    }
+
+    /// UIDs in the open folder the server has as unread: usually far fewer
+    /// than those read (ADR 0050).
+    pub(crate) fn unseen(&mut self) -> Result<Vec<u32>, LinkError> {
+        self.search_for("UNSEEN")
+    }
+
+    fn search_for(&mut self, criteria: &str) -> Result<Vec<u32>, LinkError> {
         let mut uids = Vec::new();
         let done = self.command(&format!("UID SEARCH {criteria}"), |u| {
             if u.values.first().is_some_and(|v| v.is("SEARCH")) {
@@ -400,13 +415,30 @@ impl Session {
         if !done.ok {
             return Err(refused(&self.conn.host, "searching", &done));
         }
-        // `n:*` always includes the newest message, even below `n`.
-        if let Some(from) = from {
-            uids.retain(|u| *u >= from);
-        }
         uids.sort_unstable();
         uids.dedup();
         Ok(uids)
+    }
+
+    /// Marks `uids` in the folder open to change (SELECT) read or unread.
+    pub(crate) fn store_seen(&mut self, uids: &[u32], seen: bool) -> Result<(), LinkError> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let sign = if seen { '+' } else { '-' };
+        let done = self.command(
+            &format!("UID STORE {} {sign}FLAGS.SILENT (\\Seen)", set_of(uids)),
+            |_| Ok(()),
+        )?;
+        if !done.ok {
+            let doing = if seen {
+                "marking read"
+            } else {
+                "marking unread"
+            };
+            return Err(refused(&self.conn.host, doing, &done));
+        }
+        Ok(())
     }
 
     /// `items` for each of `uids`: each FETCH response's pairs, by UID.

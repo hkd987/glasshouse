@@ -156,12 +156,17 @@ impl Mox {
         }
     }
 
-    /// Files a message in its Inbox, as if it had arrived; its UID.
+    /// Files a message in its Inbox, as if it had arrived: unread (filing
+    /// marks it read, as for Sent). Its UID.
     pub fn deliver(&self, message: &[u8]) -> u32 {
-        self.link()
-            .append(&self.account("test"), "Inbox", message)
+        let (link, account) = (self.link(), self.account("test"));
+        let uid = link
+            .append(&account, "Inbox", message)
             .expect("mox takes the message")
-            .expect("mox gives its UID")
+            .expect("mox gives its UID");
+        link.mark(&account, "Inbox", &[uid], false)
+            .expect("mox marks it unread");
+        uid
     }
 
     /// The UIDs in one of its folders, now.
@@ -180,6 +185,23 @@ impl Mox {
             )
             .expect("mox answers");
         sync.new.iter().map(|m| m.uid).collect()
+    }
+
+    /// The UIDs in one of its folders it has as unread, now (ADR 0050).
+    pub fn unseen(&self, folder: &str) -> Vec<u32> {
+        self.link()
+            .sync(
+                &self.account("test"),
+                folder,
+                None,
+                &[],
+                SyncLimits {
+                    newest: 0,
+                    max_bytes: 0,
+                },
+            )
+            .expect("mox answers")
+            .unseen
     }
 
     /// Gives its account another password (`mox setaccountpassword`).

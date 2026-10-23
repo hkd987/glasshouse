@@ -73,6 +73,13 @@ export interface Summary {
   snippet: string;
   /** Who wrote it, when an agent or app did (AU-10). */
   attribution: Attribution | null;
+  /** Not opened by the person yet (ADR 0050); drafts and sent mail never are. */
+  unread: boolean;
+}
+
+/** Whether a folder keeps read state: drafts and sent mail are the person's own. */
+export function tracksReading(folder: Folder): boolean {
+  return folder !== "drafts" && folder !== "sent";
 }
 
 /** A file a message carries, by name: Mail never has its contents. */

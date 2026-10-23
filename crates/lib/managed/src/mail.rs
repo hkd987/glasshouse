@@ -164,6 +164,9 @@ pub struct FolderSync {
     pub new: Vec<RemoteMessage>,
     /// UIDs the computer had that the server no longer does.
     pub vanished: Vec<u32>,
+    /// Every UID in the folder the server has as unread (no `\Seen`),
+    /// ascending: read state changed anywhere shows here (ADR 0050).
+    pub unseen: Vec<u32>,
 }
 
 /// What a sync asks of a folder.
@@ -242,6 +245,8 @@ pub trait MailLink: Send + Sync + fmt::Debug {
     /// Moves a message to another folder. Its UID there, when the server
     /// says (UIDPLUS).
     fn move_to(&self, account: &Account, from: &str, uid: u32, to: &str) -> Result<Option<u32>>;
+    /// Marks messages in `folder` read (`\Seen`) or unread (ADR 0050).
+    fn mark(&self, account: &Account, folder: &str, uids: &[u32], seen: bool) -> Result<()>;
     /// Waits up to `timeout` for `folder` to change (IMAP IDLE); whether it
     /// did. A link that can't wait returns `Ok(false)` at once.
     fn wait(&self, _account: &Account, _folder: &str, _timeout: Duration) -> Result<bool> {
@@ -263,6 +268,8 @@ pub mod testing {
         uid_validity: u32,
         uid_next: u32,
         messages: BTreeMap<u32, Vec<u8>>,
+        /// The UIDs marked `\Seen`.
+        seen: std::collections::BTreeSet<u32>,
     }
 
     #[derive(Debug)]
@@ -290,7 +297,7 @@ pub mod testing {
                     let folder = Folder {
                         uid_validity: 1000 + i as u32,
                         uid_next: 1,
-                        messages: BTreeMap::new(),
+                        ..Folder::default()
                     };
                     ((*name).to_owned(), folder)
                 })
@@ -329,6 +336,17 @@ pub mod testing {
                 .unwrap_or_else(|e| e.into_inner())
                 .submitted
                 .clone()
+        }
+
+        /// The UIDs in `folder` marked read.
+        pub fn seen(&self, folder: &str) -> Vec<u32> {
+            self.kept
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .folders
+                .get(folder)
+                .map(|f| f.seen.iter().copied().collect())
+                .unwrap_or_default()
         }
 
         /// The messages in `folder`, by UID.
@@ -433,11 +451,18 @@ pub mod testing {
                     .filter(|u| !f.messages.contains_key(u))
                     .collect()
             };
+            let unseen = f
+                .messages
+                .keys()
+                .copied()
+                .filter(|u| !f.seen.contains(u))
+                .collect();
             Ok(FolderSync {
                 state,
                 reset,
                 new,
                 vanished,
+                unseen,
             })
         }
 
@@ -469,6 +494,7 @@ pub mod testing {
             let uid = f.uid_next;
             f.uid_next += 1;
             f.messages.insert(uid, message.to_vec());
+            f.seen.insert(uid);
             Ok(Some(uid))
         }
 
@@ -483,19 +509,37 @@ pub mod testing {
             if !kept.folders.contains_key(to) {
                 return Err(missing(to));
             }
-            let message = kept
-                .folders
-                .get_mut(from)
-                .ok_or_else(|| missing(from))?
+            let source = kept.folders.get_mut(from).ok_or_else(|| missing(from))?;
+            let message = source
                 .messages
                 .remove(&uid)
                 .ok_or_else(|| LinkError::Refused(format!("{from} has no message {uid}")))?;
+            let seen = source.seen.remove(&uid);
             let f = kept.folders.get_mut(to).ok_or_else(|| missing(to))?;
             f.uid_next = f.uid_next.max(1);
             let new = f.uid_next;
             f.uid_next += 1;
             f.messages.insert(new, message);
+            if seen {
+                f.seen.insert(new);
+            }
             Ok(Some(new))
+        }
+
+        fn mark(&self, account: &Account, folder: &str, uids: &[u32], seen: bool) -> Result<()> {
+            let mut kept = self.reach(account)?;
+            let f = kept
+                .folders
+                .get_mut(folder)
+                .ok_or_else(|| missing(folder))?;
+            for uid in uids.iter().filter(|u| f.messages.contains_key(u)) {
+                if seen {
+                    f.seen.insert(*uid);
+                } else {
+                    f.seen.remove(uid);
+                }
+            }
+            Ok(())
         }
     }
 

@@ -277,6 +277,13 @@ struct MoveInput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct MarkInput {
+    ids: Vec<String>,
+    read: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConnectInput {
     password: String,
     #[serde(default)]
@@ -360,6 +367,8 @@ struct Summary {
     snippet: String,
     /// Who wrote it, when an agent or app did (AU-10).
     attribution: Option<Attribution>,
+    /// Not opened by the person yet (ADR 0050).
+    unread: bool,
 }
 
 /// A mailbox, as results name it ([`Folder`]).
@@ -389,9 +398,10 @@ fn summary_shape(read: bool) -> Value {
                 "required": ["text", "by", "for"],
                 "additionalProperties": false,
                 "description": "who wrote it, when an agent or app did"
-            }
+            },
+            "unread": { "type": "boolean", "description": "the person hasn't opened it yet; drafts and sent mail are always read" }
         },
-        "required": ["id", "folder", "from", "to", "subject", "date", "snippet", "attribution"],
+        "required": ["id", "folder", "from", "to", "subject", "date", "snippet", "attribution", "unread"],
         "additionalProperties": false
     });
     if read {
@@ -697,7 +707,7 @@ impl MailProvider {
         }
     }
 
-    fn summary(folder: Folder, name: &str, parsed: &message::Parsed) -> Summary {
+    fn summary(folder: Folder, name: &str, parsed: &message::Parsed, unread: bool) -> Summary {
         Summary {
             id: format!("{}/{name}", folder.key()),
             folder,
@@ -707,6 +717,7 @@ impl MailProvider {
             date: parsed.date.clone(),
             snippet: parsed.snippet.clone(),
             attribution: parsed.attribution.clone(),
+            unread,
         }
     }
 
@@ -741,6 +752,10 @@ impl MailProvider {
         let names = cache
             .names(folder.role())
             .map_err(|e| ActionError::io("mail store", e))?;
+        let read = cache
+            .read_names(folder.role())
+            .map_err(|e| ActionError::io("mail store", e))?;
+        let unread = names.iter().filter(|n| !read.contains(*n)).count();
         // Stored names start with when they were saved or their UID, so
         // the last names are the newest; the Date header orders them.
         let mut messages: Vec<(i64, Summary)> = names
@@ -750,7 +765,8 @@ impl MailProvider {
             .filter_map(|name| {
                 let raw = cache.read_start(folder.role(), name).ok()?;
                 let parsed = message::parse(&raw);
-                Some((parsed.when, Self::summary(folder, name, &parsed)))
+                let summary = Self::summary(folder, name, &parsed, !read.contains(name));
+                Some((parsed.when, summary))
             })
             .collect();
         messages.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.id.cmp(&a.1.id)));
@@ -758,12 +774,15 @@ impl MailProvider {
         let messages: Vec<Summary> = messages.into_iter().map(|(_, s)| s).collect();
         let n = messages.len();
         let mut text = format!("{} in {}", plural(n, "message"), folder.dir());
+        if unread > 0 {
+            text.push_str(&format!(", {unread} unread"));
+        }
         if let Some(note) = note {
             text.push_str(&format!(" ({note})"));
         }
         Ok(ActionOutput {
             text,
-            data: json!({ "folder": folder, "messages": messages }),
+            data: json!({ "folder": folder, "messages": messages, "unread": unread }),
             changes: Vec::new(),
         })
     }
@@ -782,7 +801,7 @@ impl MailProvider {
                 _ => ActionError::io(format!("message {id}"), e),
             })?;
         let parsed = message::parse(&raw);
-        let summary = Self::summary(folder, name, &parsed);
+        let summary = Self::summary(folder, name, &parsed, !cache.is_read(folder.role(), name));
         let mut data = json!({ "message": summary });
         data["message"]["body"] = Value::String(parsed.body.clone());
         // Only the Mail app is handed HTML, which it frames with no scripts
@@ -1198,6 +1217,29 @@ impl ActionProvider for MailProvider {
                 ask: AskLabels::new("Review", "Approve and move"),
             },
             ActionDef {
+                name: "mail.mark".parse().expect("static name"),
+                title: "Mark emails read or unread".into(),
+                description: format!(
+                    "Mark messages, by the ids mail.list gave them, read or unread (up to \
+                     {MAX_BATCH}), on this computer and on the mail server. Reading a message \
+                     never marks it: what's new to the person stays new until they open it or \
+                     this says otherwise. Drafts and sent mail are always read. Undo marks them \
+                     back."
+                ),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "ids": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": MAX_BATCH },
+                        "read": { "type": "boolean" }
+                    },
+                    "required": ["ids", "read"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Notify,
+                ask: AskLabels::new("Review", "Approve and mark"),
+            },
+            ActionDef {
                 name: "mail.connect".parse().expect("static name"),
                 title: "Connect mail".into(),
                 description: "The person connects their mail on this computer with their mail \
@@ -1378,6 +1420,58 @@ impl ActionProvider for MailProvider {
                     label: None,
                 })
             }
+            "mail.mark" => {
+                let MarkInput { ids, read } = parse_input(input)?;
+                let marks = self.marks(ctx, &ids)?;
+                let cache = Self::cache(ctx)?;
+                let subjects: Vec<String> = marks
+                    .iter()
+                    .map(|(folder, name)| {
+                        cache
+                            .read_start(folder.role(), name)
+                            .map(|raw| message::parse(&raw))
+                            .map(|p| {
+                                format!(
+                                    "{}: from {}: {}",
+                                    folder.dir(),
+                                    p.from,
+                                    if p.subject.is_empty() {
+                                        "(no subject)"
+                                    } else {
+                                        &p.subject
+                                    }
+                                )
+                            })
+                            .unwrap_or_else(|_| format!("{}: {name}", folder.dir()))
+                    })
+                    .collect();
+                let mut dirs: Vec<PathBuf> = marks
+                    .iter()
+                    .map(|(f, _)| mail.join(f.dir()).join(cache::READ_DIR))
+                    .collect();
+                dirs.sort();
+                dirs.dedup();
+                let word = marks::state_word(read);
+                Ok(Preview {
+                    summary: match subjects.as_slice() {
+                        [one] => format!(
+                            "Mark an email {word}: {}",
+                            one.splitn(3, ": ").nth(2).unwrap_or_default()
+                        ),
+                        _ => format!("Mark {} emails {word}", marks.len()),
+                    },
+                    targets: ids.clone(),
+                    items: subjects,
+                    texts: Vec::new(),
+                    reads: marks
+                        .iter()
+                        .map(|(f, n)| mail.join(f.dir()).join(n))
+                        .collect(),
+                    writes: dirs.clone(),
+                    snapshot_roots: dirs,
+                    label: None,
+                })
+            }
             "mail.connect" => {
                 let input: ConnectInput = parse_input(input)?;
                 if input.password.is_empty() || input.password.len() > MAX_SECRET {
@@ -1443,6 +1537,10 @@ impl ActionProvider for MailProvider {
                 let MoveInput { ids, to } = parse_input(input)?;
                 self.move_messages(ctx, &ids, to)
             }
+            "mail.mark" => {
+                let MarkInput { ids, read } = parse_input(input)?;
+                self.mark_messages(ctx, &ids, read)
+            }
             "mail.connect" => {
                 let input: ConnectInput = parse_input(input)?;
                 self.connect(ctx, &input)
@@ -1459,9 +1557,10 @@ impl ActionProvider for MailProvider {
                 "type": "object",
                 "properties": {
                     "folder": folder_shape(),
-                    "messages": { "type": "array", "items": summary_shape(false), "description": "newest first" }
+                    "messages": { "type": "array", "items": summary_shape(false), "description": "newest first" },
+                    "unread": { "type": "integer", "description": "how many in the whole folder the person hasn't opened, listed or not" }
                 },
-                "required": ["folder", "messages"],
+                "required": ["folder", "messages", "unread"],
                 "additionalProperties": false
             }),
             "mail.read" => json!({
@@ -1483,6 +1582,15 @@ impl ActionProvider for MailProvider {
                 "type": "object",
                 "properties": { "sent": { "type": "integer", "description": "how many messages went" } },
                 "required": ["sent"],
+                "additionalProperties": false
+            }),
+            "mail.mark" => json!({
+                "type": "object",
+                "properties": {
+                    "marked": { "type": "integer", "description": "how many changed; those already so don't count" },
+                    "read": { "type": "boolean", "description": "what they are now" }
+                },
+                "required": ["marked", "read"],
                 "additionalProperties": false
             }),
             "mail.move" => json!({
@@ -1522,13 +1630,15 @@ impl ActionProvider for MailProvider {
         action: &ActionName,
         paths: &[PathBuf],
     ) -> Result<(), ActionError> {
-        if action.as_str() != "mail.move" {
-            return Ok(());
+        match action.as_str() {
+            "mail.move" => self.move_back(ctx, paths),
+            "mail.mark" => self.mark_back(ctx, paths),
+            _ => Ok(()),
         }
-        self.move_back(ctx, paths)
     }
 }
 
+mod marks;
 mod moves;
 
 #[cfg(test)]

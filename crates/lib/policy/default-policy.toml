@@ -31,6 +31,9 @@ approval_timeout_secs = 900
 # Filing mail in Inbox, Archive, Junk or Trash runs and stays undoable: undo
 # moves it back on the mail server too (ADR 0037).
 "mail.move" = "notify"
+# Marking mail read or unread changes what the person sees as new: an agent
+# doing it tells them, and undo marks it back on the server too (ADR 0050).
+"mail.mark" = "notify"
 # Connecting mail takes the person's mail password: theirs to type, in Mail
 # (its [[app]] below), never an agent's whatever its rules say (ADR 0037).
 "mail.connect" = "never"
@@ -219,12 +222,12 @@ tiers = { "chat.post" = "auto", "chat.create" = "auto", "chat.react" = "auto", "
 id = "artifacts"
 tiers = { "artifact.share" = "auto", "artifact.update" = "auto", "artifact.comment" = "auto", "artifact.resolve" = "auto" }
 
-# In Mail the person connects their mail with their password, and files
-# the mail they're reading (ADR 0037). Sending still asks: presence comes
-# with ADR 0030 slice C2.
+# In Mail the person connects their mail with their password, files the
+# mail they're reading (ADR 0037) and marks it read by opening it (ADR
+# 0050). Sending still asks: presence comes with ADR 0030 slice C2.
 [[app]]
 id = "mail"
-tiers = { "mail.connect" = "auto", "mail.move" = "auto" }
+tiers = { "mail.connect" = "auto", "mail.move" = "auto", "mail.mark" = "auto" }
 
 # And in Docs, with the same presence check to come.
 [[app]]
