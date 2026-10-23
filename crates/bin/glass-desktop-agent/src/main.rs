@@ -47,7 +47,9 @@ the person for it. In your answer, write it where the value goes: the person rea
 the value, so don't say it was hidden or call it a placeholder. Secrets such as keys and passwords stay hidden and are never put \
 back. For exact figures from what the tools return (dates, sums, counts, sorting), \
 write a short script with run_script and use its result rather than working them out \
-yourself. When the person wants something done again or regularly (each morning, every \
+yourself. Files the person mentions are in your folders: files_list with an empty path \
+lists them, and a file goes with an email when you name its path in attachments. When \
+the person wants something done again or regularly (each morning, every \
 Monday), and routines_save is among your tools, make it a routine, so it runs without a \
 model. For actions (moving, drafting, filing), do it once with the tools, then save it \
 with routines_save and from_this_task: true; this computer writes the code from what you \

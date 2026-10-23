@@ -552,7 +552,8 @@ impl Runtime {
 
     /// The handoff card for a request, with no side effects (DA-2).
     pub fn plan(&self, caller: &Caller, request: &TaskRequest) -> Result<HandoffCard> {
-        Ok(self.prepare(caller, request)?.card)
+        let request = self.with_agent_folders(caller, request.clone());
+        Ok(self.prepare(caller, &request)?.card)
     }
 
     fn prepare(&self, caller: &Caller, request: &TaskRequest) -> Result<Prepared> {
@@ -712,6 +713,11 @@ impl Runtime {
         request: TaskRequest,
         origin: Origin,
     ) -> Result<TaskView> {
+        // A routine runs with the scope it was saved with, nothing more.
+        let request = match origin {
+            Origin::Routine(_) => request,
+            _ => self.with_agent_folders(caller, request),
+        };
         let prepared = self.prepare(caller, &request)?;
         let live = self
             .tasks()
@@ -1282,6 +1288,41 @@ pub(crate) fn blocking<R>(work: impl FnOnce() -> R) -> R {
 
 /// Validates and names the folders a task may touch. Users may grant only
 /// folders inside their home; root may grant any.
+impl Runtime {
+    /// A request to the desktop agent that names no folders (the command
+    /// bar's, "Hey Glass"): it reads the folders the person chose for it
+    /// (`agents.folders`, ADR 0048), those that are folders in their home.
+    /// Writing still needs a folder named in the request.
+    pub(crate) fn with_agent_folders(
+        &self,
+        caller: &Caller,
+        mut request: TaskRequest,
+    ) -> TaskRequest {
+        let named = !request.scope.read.is_empty() || !request.scope.write.is_empty();
+        if named || request.agent.as_str() != glass_api::DESKTOP_AGENT {
+            return request;
+        }
+        request.scope.read = self
+            .device_settings
+            .list(
+                &caller.name,
+                caller.uid,
+                glass_policy::settings::AGENT_FOLDERS,
+            )
+            .into_iter()
+            .map(|folder| caller.home.join(folder))
+            .filter(|path| {
+                let one = ScopeRequest {
+                    read: vec![path.clone()],
+                    ..ScopeRequest::default()
+                };
+                resolve_scope(caller, &one).is_ok()
+            })
+            .collect();
+        request
+    }
+}
+
 fn resolve_scope(caller: &Caller, scope: &ScopeRequest) -> Result<Vec<Grant>> {
     let mut grants: Vec<Grant> = Vec::new();
     let requested = scope

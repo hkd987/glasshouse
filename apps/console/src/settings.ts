@@ -113,13 +113,19 @@ export async function settingsPage(root: HTMLElement, group: string): Promise<vo
         return h("input", { class: "text", name: row.id, value: String(f.value), placeholder: "https://intranet.example", disabled, oninput: (e: Event) => set((e.target as HTMLInputElement).value.trim()) });
       case "sites":
       case "apps":
+      case "folders":
         return h(
           "textarea",
           {
             class: "text",
             name: row.id,
             rows: 3,
-            placeholder: row.kind.type === "apps" ? "One per line, by id: my-mail, notes" : "One per line: games.example, *.social.example",
+            placeholder:
+              row.kind.type === "apps"
+                ? "One per line, by id: my-mail, notes"
+                : row.kind.type === "folders"
+                  ? "One per line, in the person's home: Documents, Projects/Northwind"
+                  : "One per line: games.example, *.social.example",
             disabled,
             oninput: (e: Event) =>
               set(

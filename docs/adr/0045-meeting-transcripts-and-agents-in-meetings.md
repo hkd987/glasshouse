@@ -133,10 +133,9 @@ desktop agent).
   "Hey Glass", tested on recorded speech
   (`--use-file-for-fake-audio-capture`). Live captions of others' lines
   need the meeting's changes to wake Meet, not only Calendar.
-- **Next, needed for the owner's example**: Mail attachments ("send it to
-  Susan" with the report attached; Mail has none today), and folders for
-  tasks the person starts by voice or from the command bar (today they
-  get none, so "grab the ABC report" can't read files).
+- **Built for the owner's example** (ADR 0048): Mail attachments, and
+  folders for tasks the person starts by voice or from the command bar.
+  Live, "Hey Glass, grab the ABC report and send it to Dana" sent the PDF.
 - **Later**: starting and stopping a transcript during a meeting; the wake
   phrase IT names; Teams, Zoom and Meet in the browser (CF-20), which our
   pages don't hear.

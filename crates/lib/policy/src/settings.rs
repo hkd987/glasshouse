@@ -15,6 +15,12 @@ use serde::Serialize;
 use crate::EVERYONE;
 use crate::document::{Managed, PolicyDocument, SettingValue};
 
+/// The folders the desktop agent reads when asked without naming any
+/// (ADR 0048).
+pub const AGENT_FOLDERS: &str = "agents.folders";
+/// What it reads on a computer where nobody chose: the person's Documents.
+pub const AGENT_FOLDERS_DEFAULT: &str = "Documents";
+
 /// Whom a setting is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +53,9 @@ pub enum Kind {
     TimeZone,
     /// Apps, by id, such as `my-mail`.
     Apps,
+    /// Folders in the person's home, such as `Documents` or
+    /// `Projects/Northwind`.
+    Folders,
 }
 
 /// One setting a computer has.
@@ -221,6 +230,19 @@ pub fn table() -> &'static [SettingDef] {
                 scope: Scope::Person,
                 default: SettingValue::List(Vec::new()),
             },
+            // What the desktop agent reads when the person asks it from the
+            // command bar or in a meeting without naming folders (ADR
+            // 0048): "grab the ABC report" has somewhere to look. IT may
+            // set or lock it, as any of the person's.
+            SettingDef {
+                id: AGENT_FOLDERS,
+                section: "Agents",
+                title: "Folders your agent reads",
+                help: "When you ask the desktop agent something from Ctrl Space or in a meeting, it may read these folders in your home. It can't change anything in them, and it still asks before it sends anything.",
+                kind: Kind::Folders,
+                scope: Scope::Person,
+                default: SettingValue::List(vec![AGENT_FOLDERS_DEFAULT.to_owned()]),
+            },
             toggle(
                 "browser.microphone",
                 "Privacy",
@@ -344,6 +366,7 @@ pub fn describe(def: &SettingDef, value: &SettingValue) -> String {
         (_, SettingValue::Text(t)) if t.is_empty() => "none".into(),
         (_, SettingValue::Text(t)) => t.clone(),
         (Kind::Apps, SettingValue::List(l)) if l.len() > 3 => format!("{} apps", l.len()),
+        (Kind::Folders, SettingValue::List(l)) if l.len() > 3 => format!("{} folders", l.len()),
         (_, SettingValue::List(l)) if l.is_empty() => "none".into(),
         (_, SettingValue::List(l)) if l.len() <= 3 => l.join(", "),
         (_, SettingValue::List(l)) => format!("{} sites", l.len()),
@@ -404,6 +427,17 @@ pub fn check(def: &SettingDef, value: &SettingValue) -> Result<(), String> {
                 None => Ok(()),
             }
         }
+        (Kind::Folders, SettingValue::List(folders)) => {
+            if folders.len() > 20 {
+                return Err("at most 20 folders".into());
+            }
+            match folders.iter().find(|f| !folder_ok(f)) {
+                Some(bad) => Err(format!(
+                    "{bad:?} isn't a folder in the home, such as Documents"
+                )),
+                None => Ok(()),
+            }
+        }
         (Kind::Apps, SettingValue::List(apps)) => {
             if apps.len() > 200 {
                 return Err("at most 200 apps".into());
@@ -428,7 +462,20 @@ pub fn check(def: &SettingDef, value: &SettingValue) -> Result<(), String> {
         (Kind::Sites, _) => Err("a list of sites".into()),
         (Kind::TimeZone, _) => Err("a time zone's name".into()),
         (Kind::Apps, _) => Err("a list of apps".into()),
+        (Kind::Folders, _) => Err("a list of folders".into()),
     }
+}
+
+/// A folder in a home, by its path there: plain names only, never `..`,
+/// a root or a control character.
+fn folder_ok(folder: &str) -> bool {
+    !folder.is_empty()
+        && folder.len() <= 200
+        && !folder.starts_with('/')
+        && !folder.chars().any(char::is_control)
+        && folder
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 /// An app's id: lowercase letters, digits and `-`, as agent and app ids

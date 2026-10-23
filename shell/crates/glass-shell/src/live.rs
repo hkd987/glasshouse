@@ -242,7 +242,7 @@ pub enum Effect {
 }
 
 /// The agent the command bar hands what's typed to (AE-3, ADR 0041).
-pub const DESKTOP_AGENT: &str = "desktop-agent";
+pub use glass_api::DESKTOP_AGENT;
 
 impl Effect {
     /// The control-API call for the effects that act on a task by

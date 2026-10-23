@@ -330,7 +330,7 @@ export interface SettingRow {
   section: string;
   title: string;
   help: string;
-  kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" } | { type: "time_zone" } | { type: "apps" };
+  kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" } | { type: "time_zone" } | { type: "apps" } | { type: "folders" };
   /** A person's own, or the whole computer's (set for everyone only). */
   scope: "person" | "device" | "seat";
   default: SettingValue;

@@ -16,7 +16,7 @@ interface Setting {
   section: string;
   title: string;
   help: string;
-  kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" } | { type: "time_zone" } | { type: "apps" };
+  kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" } | { type: "time_zone" } | { type: "apps" } | { type: "folders" };
   scope: "person" | "device" | "seat";
   default: Value;
   value: Value;
@@ -187,8 +187,9 @@ function control(setting: Setting): HTMLElement {
       }),
     );
   }
-  if (setting.kind.type === "sites") {
+  if (setting.kind.type === "sites" || setting.kind.type === "folders") {
     const list = Array.isArray(setting.value) ? setting.value : [];
+    const folders = setting.kind.type === "folders";
     return h(
       "span",
       { class: "control" },
@@ -200,7 +201,7 @@ function control(setting: Setting): HTMLElement {
           name: setting.id,
           "aria-label": setting.title,
           rows: 2,
-          placeholder: "One per line: games.example",
+          placeholder: folders ? "One per line, in your home: Documents" : "One per line: games.example",
           disabled: busy,
           onchange: (e: Event) =>
             change(

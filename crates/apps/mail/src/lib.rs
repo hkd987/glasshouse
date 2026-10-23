@@ -54,6 +54,9 @@ use crate::message::Draft;
 const APP: &str = "mail";
 /// Most messages one `mail.send` or `mail.move` may carry.
 const MAX_BATCH: usize = 50;
+/// The most files a message carries, and their size together.
+const MAX_ATTACHMENTS: usize = 10;
+const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 /// Most messages one listing reads and returns; it returns
 /// [`DEFAULT_LIMIT`] unless asked for more.
 const MAX_LISTED: usize = 500;
@@ -237,6 +240,12 @@ struct Message {
     to: Vec<String>,
     subject: String,
     body: String,
+    /// Files sent with it, by their paths in the task's folders (ADR 0048).
+    #[serde(default)]
+    attachments: Vec<String>,
+    /// The draft it is, `drafts/<file>`, whose files go with it.
+    #[serde(default)]
+    draft: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -353,13 +362,42 @@ struct Summary {
     attribution: Option<Attribution>,
 }
 
+/// A file's type from its name, for the message that carries it.
+fn content_type(name: &str) -> &'static str {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "txt" | "md" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "html" | "htm" => "text/html",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
+
 fn message_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
             "to": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
             "subject": { "type": "string" },
-            "body": { "type": "string" }
+            "body": { "type": "string" },
+            "attachments": {
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": MAX_ATTACHMENTS,
+                "description": "Files to send with it, by their paths in this task's folders, as files.list gives them: \"Documents/ABC report.pdf\"."
+            }
         },
         "required": ["to", "subject", "body"],
         "additionalProperties": false
@@ -435,13 +473,107 @@ impl MailProvider {
         if message.subject.contains(['\r', '\n']) {
             return Err(ActionError::InvalidInput("subject must be one line".into()));
         }
+        if message.attachments.len() > MAX_ATTACHMENTS {
+            return Err(ActionError::InvalidInput(format!(
+                "a message carries at most {MAX_ATTACHMENTS} files"
+            )));
+        }
         Ok(())
     }
 
-    /// `message` as glassd builds it, from the person and the agent.
-    fn build(&self, ctx: &TaskContext, message: &Message, message_id: &str) -> Vec<u8> {
+    /// Where `message`'s files are: each in a folder this task may read,
+    /// so policy and labels judge them as any read (ADR 0048).
+    fn attached<'c>(
+        ctx: &'c TaskContext,
+        message: &Message,
+    ) -> Result<Vec<glass_actions::Resolved<'c>>, ActionError> {
+        message.attachments.iter().map(|p| ctx.resolve(p)).collect()
+    }
+
+    /// The files the draft `message` comes from carries; none without one.
+    fn draft_files(
+        ctx: &TaskContext,
+        message: &Message,
+    ) -> Result<Vec<message::Attachment>, ActionError> {
+        let Some(id) = &message.draft else {
+            return Ok(Vec::new());
+        };
+        let (folder, name) = Self::message_ref(id)?;
+        if folder.role() != Role::Drafts {
+            return Err(ActionError::InvalidInput(format!(
+                "{id} isn't a draft: only a draft's files go with it"
+            )));
+        }
+        let raw = Self::cache(ctx)?
+            .read(folder.role(), name)
+            .map_err(|e| ActionError::io(format!("draft {id}"), e))?;
+        Ok(message::attachments_of(&raw))
+    }
+
+    /// The names of the files `message` carries: its draft's, then those
+    /// from the task's folders.
+    fn file_names(ctx: &TaskContext, message: &Message) -> Result<Vec<String>, ActionError> {
+        let mut names: Vec<String> = Self::draft_files(ctx, message)?
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        names.extend(
+            message
+                .attachments
+                .iter()
+                .map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()),
+        );
+        Ok(names)
+    }
+
+    /// `message`'s files: its draft's, and those read from the task's
+    /// folders.
+    fn attachments(
+        ctx: &TaskContext,
+        message: &Message,
+    ) -> Result<Vec<message::Attachment>, ActionError> {
+        let carried = Self::draft_files(ctx, message)?;
+        let mut left = MAX_ATTACHMENT_BYTES
+            .saturating_sub(carried.iter().map(|f| f.bytes.len() as u64).sum::<u64>());
+        let read = Self::attached(ctx, message)?
+            .into_iter()
+            .map(|r| {
+                let bytes = glass_platform::fs::ConfinedDir::open(&r.grant.root)
+                    .and_then(|dir| dir.read(&r.rel, left))
+                    .map_err(|e| match e.kind() {
+                        std::io::ErrorKind::FileTooLarge => ActionError::InvalidInput(format!(
+                            "the files come to more than {} MB together",
+                            MAX_ATTACHMENT_BYTES / (1024 * 1024)
+                        )),
+                        _ => ActionError::io(&r.display, e),
+                    })?;
+                left = left.saturating_sub(bytes.len() as u64);
+                let name = r.rel.file_name().map_or_else(
+                    || "attachment".to_owned(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                Ok(message::Attachment {
+                    content_type: content_type(&name).to_owned(),
+                    name,
+                    bytes,
+                })
+            })
+            .collect::<Result<Vec<_>, ActionError>>()?;
+        Ok(carried.into_iter().chain(read).collect())
+    }
+
+    /// `message` as glassd builds it, from the person and the agent, with
+    /// its files.
+    fn build(
+        &self,
+        ctx: &TaskContext,
+        message: &Message,
+        message_id: &str,
+        attachments: &[message::Attachment],
+    ) -> Vec<u8> {
         let (from, _) = self.sender(&ctx.principal.on_behalf_of.name);
         message::build(&Draft {
+            attachments,
             from: &from,
             to: &message.to,
             subject: &message.subject,
@@ -485,6 +617,15 @@ impl MailProvider {
 
     fn describe(message: &Message) -> String {
         format!("To {}: {}", message.to.join(", "), message.subject)
+    }
+
+    /// The review's line for `message`: whom, what, and the files with it.
+    fn reviewed(ctx: &TaskContext, message: &Message) -> Result<String, ActionError> {
+        let line = Self::describe(message);
+        Ok(match Self::file_names(ctx, message)?.as_slice() {
+            [] => line,
+            names => format!("{line} · attached: {}", names.join(", ")),
+        })
     }
 
     /// Checks a message id, `<folder>/<file>.eml`, and splits it. Plain
@@ -594,8 +735,21 @@ impl MailProvider {
             (Some(html), true) => Value::String(html.clone()),
             _ => Value::Null,
         };
+        // The files it carries, by name: never their contents (ADR 0048).
+        data["message"]["attachments"] = json!(parsed.attachments);
+        let carries = match parsed.attachments.as_slice() {
+            [] => String::new(),
+            files => format!(
+                " (attached: {})",
+                files
+                    .iter()
+                    .map(|f| f.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
         Ok(ActionOutput {
-            text: format!("From {}: {}", summary.from, summary.subject),
+            text: format!("From {}: {}{carries}", summary.from, summary.subject),
             data,
             changes: Vec::new(),
         })
@@ -604,7 +758,8 @@ impl MailProvider {
     fn draft(&self, ctx: &TaskContext, message: &Message) -> Result<ActionOutput, ActionError> {
         let cache = Self::cache(ctx)?;
         let (from, _) = self.sender(&ctx.principal.on_behalf_of.name);
-        let raw = self.build(ctx, message, &message::new_message_id(&from));
+        let files = Self::attachments(ctx, message)?;
+        let raw = self.build(ctx, message, &message::new_message_id(&from), &files);
         let rel = cache
             .save_new(Role::Drafts, &Self::stem(message, 0), &raw)
             .map_err(|e| ActionError::io("saving draft", e))?;
@@ -633,7 +788,8 @@ impl MailProvider {
             .iter()
             .enumerate()
             .filter_map(|(i, m)| {
-                let raw = self.build(ctx, m, &message::new_message_id(&from));
+                let files = Self::attachments(ctx, m).unwrap_or_default();
+                let raw = self.build(ctx, m, &message::new_message_id(&from), &files);
                 let rel = cache.save_new(Role::Drafts, &Self::stem(m, i), &raw).ok()?;
                 attribute(ctx, &cache.host_path(&rel));
                 let name = rel.file_name()?.to_string_lossy().into_owned();
@@ -671,11 +827,17 @@ impl MailProvider {
                     .into(),
             ));
         }
+        // Every file read before anything leaves: one that can't be stops
+        // the batch while nothing has been sent.
+        let files: Vec<Vec<message::Attachment>> = messages
+            .iter()
+            .map(|m| Self::attachments(ctx, m))
+            .collect::<Result<_, _>>()?;
         let mut changes = Vec::new();
         let mut audit = Vec::new();
         for (index, message) in messages.iter().enumerate() {
             let message_id = message::new_message_id(&from);
-            let raw = self.build(ctx, message, &message_id);
+            let raw = self.build(ctx, message, &message_id, &files[index]);
             let (reply, path, filed) = match &remote {
                 // No service: it stays in Sent here, as before EM0.
                 None => {
@@ -740,6 +902,16 @@ impl MailProvider {
             audit.push(json!({
                 "message_id": format!("<{message_id}>"),
                 "recipients": message.to.len(),
+                // Which files left, by name, size and hash: never what's in
+                // them (ADR 0048).
+                "attachments": files[index]
+                    .iter()
+                    .map(|f| json!({
+                        "name": f.name,
+                        "size": f.bytes.len(),
+                        "sha256": glass_managed::sha256_hex(&f.bytes),
+                    }))
+                    .collect::<Vec<_>>(),
                 "size": raw.len(),
                 "sha256": glass_managed::sha256_hex(&raw),
                 "reply": reply,
@@ -1043,11 +1215,15 @@ impl ActionProvider for MailProvider {
             "mail.draft" => {
                 let message: Message = parse_input(input)?;
                 Self::validate(&message)?;
-                let line = Self::describe(&message);
+                let line = Self::reviewed(ctx, &message)?;
                 Ok(Preview {
                     summary: format!("Draft email {}", line.replacen("To ", "to ", 1)),
                     targets: message.to.clone(),
                     items: vec![line],
+                    reads: Self::attached(ctx, &message)?
+                        .into_iter()
+                        .map(|r| r.host)
+                        .collect(),
                     writes: vec![mail.join(cache::dir(Role::Drafts))],
                     snapshot_roots: vec![mail.join(cache::dir(Role::Drafts))],
                     ..Preview::default()
@@ -1069,9 +1245,21 @@ impl ActionProvider for MailProvider {
                         format!("Send {n} emails")
                     },
                     targets: messages.iter().flat_map(|m| m.to.clone()).collect(),
-                    items: messages.iter().map(Self::describe).collect(),
+                    items: messages
+                        .iter()
+                        .map(|m| Self::reviewed(ctx, m))
+                        .collect::<Result<_, _>>()?,
                     // What each says: the person reads what they send.
                     texts: messages.iter().map(|m| m.body.clone()).collect(),
+                    // What each carries is read, and judged, as any read.
+                    reads: messages
+                        .iter()
+                        .map(|m| Self::attached(ctx, m))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_iter()
+                        .flatten()
+                        .map(|r| r.host)
+                        .collect(),
                     // Sent here; or Drafts, when it can't leave.
                     writes: vec![
                         mail.join(cache::dir(Role::Sent)),

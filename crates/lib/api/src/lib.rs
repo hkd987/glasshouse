@@ -46,6 +46,10 @@ pub use text::{DisplaySafe, STAND_IN, display_char, display_line, invisible};
 
 /// Where `glassd` listens unless configured otherwise.
 pub const DEFAULT_CONTROL_SOCKET: &str = "/var/run/glasshouse/control.sock";
+
+/// The general desktop agent (AE-3): what the command bar and "Hey Glass"
+/// start.
+pub const DESKTOP_AGENT: &str = "desktop-agent";
 /// Environment variable clients read to find the control socket.
 pub const CONTROL_SOCKET_ENV: &str = "GLASS_CONTROL_SOCKET";
 

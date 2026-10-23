@@ -8,7 +8,7 @@ use glass_managed::Sender;
 use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address;
 use mail_builder::headers::text::Text;
-use mail_parser::MessageParser;
+use mail_parser::{MessageParser, MimeHeaders};
 use serde::Serialize;
 
 /// The header that carries "by [agent] for [user]" (AU-10).
@@ -57,6 +57,43 @@ pub(crate) struct Parsed {
     /// Its HTML part, if it has one.
     pub html: Option<String>,
     pub message_id: Option<String>,
+    /// The files it carries, by name: never their contents.
+    pub attachments: Vec<AttachmentInfo>,
+}
+
+/// A file a message carries, as listings and reads describe it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct AttachmentInfo {
+    pub name: String,
+    pub size: usize,
+    #[serde(rename = "type")]
+    pub content_type: String,
+}
+
+/// A file sent with a message (ADR 0048): from a folder the task may read.
+#[derive(Debug, Clone)]
+pub(crate) struct Attachment {
+    pub name: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// The files a stored message carries, with their contents: what sending
+/// a draft sends with it (ADR 0048).
+pub(crate) fn attachments_of(raw: &[u8]) -> Vec<Attachment> {
+    let Some(message) = MessageParser::default().parse(raw) else {
+        return Vec::new();
+    };
+    let infos = parse(raw).attachments;
+    message
+        .attachments()
+        .zip(infos)
+        .map(|(part, info)| Attachment {
+            name: info.name,
+            content_type: info.content_type,
+            bytes: part.contents().to_vec(),
+        })
+        .collect()
 }
 
 fn mailbox(name: Option<&str>, address: Option<&str>) -> String {
@@ -123,6 +160,7 @@ pub(crate) fn parse(raw: &[u8]) -> Parsed {
             body: String::from_utf8_lossy(raw).into_owned(),
             html: None,
             message_id: None,
+            attachments: Vec::new(),
         };
     };
     let (date, when) = date_of(&message);
@@ -158,6 +196,20 @@ pub(crate) fn parse(raw: &[u8]) -> Parsed {
         body,
         html,
         message_id: message.message_id().map(str::to_owned),
+        attachments: message
+            .attachments()
+            .map(|part| AttachmentInfo {
+                name: one_line(part.attachment_name().unwrap_or("attachment")),
+                size: part.len(),
+                content_type: part.content_type().map_or_else(
+                    || "application/octet-stream".to_owned(),
+                    |t| match t.subtype() {
+                        Some(sub) => format!("{}/{sub}", t.ctype()),
+                        None => t.ctype().to_owned(),
+                    },
+                ),
+            })
+            .collect(),
     }
 }
 
@@ -175,6 +227,7 @@ pub(crate) struct Draft<'a> {
     pub message_id: &'a str,
     /// Seconds since 1970.
     pub date: i64,
+    pub attachments: &'a [Attachment],
 }
 
 /// A new Message-ID on the sender's domain: time-ordered and random
@@ -205,7 +258,7 @@ pub(crate) fn build(draft: &Draft<'_>) -> Vec<u8> {
     if !body.ends_with('\n') {
         body.push('\n');
     }
-    MessageBuilder::new()
+    let mut builder = MessageBuilder::new()
         .from(from)
         .to(to)
         .subject(draft.subject)
@@ -213,9 +266,15 @@ pub(crate) fn build(draft: &Draft<'_>) -> Vec<u8> {
         .message_id(draft.message_id)
         .header(ATTRIBUTION_HEADER, Text::new(draft.attribution))
         .header(TASK_HEADER, Text::new(draft.task))
-        .text_body(body)
-        .write_to_vec()
-        .unwrap_or_default()
+        .text_body(body);
+    for file in draft.attachments {
+        builder = builder.attachment(
+            file.content_type.as_str(),
+            file.name.as_str(),
+            file.bytes.as_slice(),
+        );
+    }
+    builder.write_to_vec().unwrap_or_default()
 }
 
 /// What a message larger than the sync's cap keeps on this computer: its
@@ -284,6 +343,7 @@ mod tests {
         };
         let to = ["dana@northwind.example".to_owned()];
         let raw = build(&Draft {
+            attachments: &[],
             from: &from,
             to: &to,
             subject: "Re: Renewal — terms",

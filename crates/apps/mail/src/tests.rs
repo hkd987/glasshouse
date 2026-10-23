@@ -570,3 +570,159 @@ fn a_message_too_large_to_keep_keeps_its_header_and_says_so() {
     assert!(parsed.body.contains("too large"), "{}", parsed.body);
     let _ = Path::new("");
 }
+
+#[test]
+fn adr0048_a_file_from_the_tasks_folders_goes_with_the_email_and_reads_back_by_name() {
+    let (dir, ctx) = setup();
+    fs::create_dir_all(dir.path().join("Invoices")).unwrap();
+    let pdf = b"%PDF-1.4\n% ABC report\n1 0 obj <<>> endobj\ntrailer <<>>\n%%EOF\n".to_vec();
+    fs::write(dir.path().join("Invoices/ABC report.pdf"), &pdf).unwrap();
+    let input = json!({ "messages": [{
+        "to": ["susan@example.com"], "subject": "The ABC report", "body": "Here it is.",
+        "attachments": ["Invoices/ABC report.pdf"]
+    }] });
+    let provider = MailProvider::default();
+
+    // The review says what goes with it; the file is read, and judged, as
+    // any read.
+    let preview = provider
+        .preview(&ctx, &action("mail.send"), &input)
+        .unwrap();
+    assert_eq!(
+        preview.items,
+        ["To susan@example.com: The ABC report · attached: ABC report.pdf"]
+    );
+    assert_eq!(preview.reads, [dir.path().join("Invoices/ABC report.pdf")]);
+
+    let sent = provider.invoke(&ctx, &action("mail.send"), &input).unwrap();
+    // The record names what left, and its hash, never its contents.
+    let recorded = &sent.data[AUDIT_DETAIL][0]["attachments"][0];
+    assert_eq!(
+        (&recorded["name"], &recorded["size"]),
+        (&json!("ABC report.pdf"), &json!(pdf.len()))
+    );
+    assert_eq!(recorded["sha256"], glass_managed::sha256_hex(&pdf));
+    assert!(!sent.data.to_string().contains("ABC report\n1 0 obj"));
+    let file = fs::read_dir(dir.path().join("Mail/Sent"))
+        .unwrap()
+        .flatten()
+        .next()
+        .unwrap()
+        .file_name()
+        .into_string()
+        .unwrap();
+    let read = provider
+        .invoke(
+            &ctx,
+            &action("mail.read"),
+            &json!({ "id": format!("sent/{file}") }),
+        )
+        .unwrap();
+    assert!(
+        read.text.ends_with("(attached: ABC report.pdf)"),
+        "{}",
+        read.text
+    );
+    let carried = &read.data["message"]["attachments"][0];
+    assert_eq!(
+        (&carried["name"], &carried["type"], &carried["size"]),
+        (
+            &json!("ABC report.pdf"),
+            &json!("application/pdf"),
+            &json!(pdf.len())
+        )
+    );
+    assert_eq!(
+        read.data["message"]["body"].as_str().unwrap().trim_end(),
+        "Here it is."
+    );
+    // The bytes that left are the file's.
+    let raw = fs::read(dir.path().join("Mail/Sent").join(&file)).unwrap();
+    let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+    assert_eq!(parsed.attachment(0).unwrap().contents(), pdf.as_slice());
+}
+
+#[test]
+fn adr0048_files_outside_the_tasks_folders_or_too_many_never_go() {
+    let (dir, ctx) = setup();
+    fs::create_dir_all(dir.path().join("Private")).unwrap();
+    fs::write(dir.path().join("Private/salaries.csv"), "x").unwrap();
+    let provider = MailProvider::default();
+    for path in [
+        "Private/salaries.csv",
+        "Invoices/../Private/salaries.csv",
+        "/etc/passwd",
+    ] {
+        let input =
+            json!({ "to": ["a@example.com"], "subject": "s", "body": "b", "attachments": [path] });
+        let err = provider
+            .preview(&ctx, &action("mail.draft"), &input)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ActionError::OutOfScope(_) | ActionError::InvalidInput(_)
+            ),
+            "{path}: {err:?}"
+        );
+    }
+    let many: Vec<String> = (0..11).map(|i| format!("Invoices/{i}.pdf")).collect();
+    let input =
+        json!({ "to": ["a@example.com"], "subject": "s", "body": "b", "attachments": many });
+    let err = provider
+        .preview(&ctx, &action("mail.draft"), &input)
+        .unwrap_err();
+    assert!(err.to_string().contains("at most 10 files"), "{err}");
+}
+
+#[test]
+fn adr0048_sending_a_draft_from_mail_sends_the_files_it_carries() {
+    let (dir, ctx) = setup();
+    fs::create_dir_all(dir.path().join("Invoices")).unwrap();
+    fs::write(
+        dir.path().join("Invoices/Q3.csv"),
+        "month,total\nJuly,1200\n",
+    )
+    .unwrap();
+    let provider = MailProvider::default();
+    // An agent drafts it with the file.
+    let drafted = provider
+        .invoke(
+            &ctx,
+            &action("mail.draft"),
+            &json!({ "to": ["susan@example.com"], "subject": "Q3", "body": "Attached.", "attachments": ["Invoices/Q3.csv"] }),
+        )
+        .unwrap();
+    let draft = drafted.data["id"].as_str().unwrap().to_owned();
+    // The person sends it from Mail, which names the draft, not the file.
+    let input = json!({ "messages": [{ "to": ["susan@example.com"], "subject": "Q3", "body": "Attached.", "draft": draft }] });
+    let preview = provider
+        .preview(&ctx, &action("mail.send"), &input)
+        .unwrap();
+    assert_eq!(
+        preview.items,
+        ["To susan@example.com: Q3 · attached: Q3.csv"]
+    );
+    provider.invoke(&ctx, &action("mail.send"), &input).unwrap();
+    let sent = fs::read_dir(dir.path().join("Mail/Sent"))
+        .unwrap()
+        .flatten()
+        .next()
+        .unwrap()
+        .path();
+    let raw = fs::read(sent).unwrap();
+    let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+    assert_eq!(
+        parsed.attachment(0).unwrap().contents(),
+        b"month,total\nJuly,1200\n"
+    );
+    // Only a draft's files: never another folder's message.
+    let err = provider
+        .preview(
+            &ctx,
+            &action("mail.send"),
+            &json!({ "messages": [{ "to": ["a@example.com"], "subject": "s", "body": "b", "draft": "inbox/x.eml" }] }),
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("isn't a draft"), "{err}");
+}

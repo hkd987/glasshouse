@@ -34,6 +34,7 @@ import {
   type Summary,
   displayName,
   draftFor,
+  fileSize,
   fullDate,
   initials,
   listDate,
@@ -607,6 +608,15 @@ function reading(message: Message): HTMLElement {
       showAttribution(message.attribution, "mail") && message.attribution ? attributionChip(message.attribution.text) : null,
     ),
     body(message),
+    message.attachments?.length
+      ? h(
+          "div",
+          { class: "attachments", "data-test": "attachments" },
+          ...message.attachments.map((a) =>
+            h("span", { class: "attachment", title: a.type }, h("span", { class: "clip", "aria-hidden": "true" }, "📎"), a.name, h("span", { class: "muted" }, ` · ${fileSize(a.size)}`)),
+          ),
+        )
+      : null,
     h(
       "div",
       { class: "actions" },
@@ -623,7 +633,7 @@ function reading(message: Message): HTMLElement {
             {
               class: "button primary",
               disabled: state.offline || sent || waiting,
-              onclick: () => void send({ to: message.to, subject: message.subject, body: message.body }),
+              onclick: () => void send({ to: message.to, subject: message.subject, body: message.body, draft: message.id }),
               "data-test": "send-draft",
             },
             sent ? "Sent" : waiting ? "Waiting for approval" : "Send",

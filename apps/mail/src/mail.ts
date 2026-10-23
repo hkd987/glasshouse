@@ -75,11 +75,19 @@ export interface Summary {
   attribution: Attribution | null;
 }
 
+/** A file a message carries, by name: Mail never has its contents. */
+export interface AttachmentInfo {
+  name: string;
+  size: number;
+  type: string;
+}
+
 /** One message as mail.read returns it. */
 export interface Message extends Summary {
   body: string;
   /** Its HTML, handed to Mail only; shown framed, never as markup here. */
   html?: string | null;
+  attachments?: AttachmentInfo[];
 }
 
 /** What mail.draft and mail.send take. */
@@ -87,6 +95,15 @@ export interface Outgoing {
   to: string[];
   subject: string;
   body: string;
+  /** The draft it is: the files that draft carries go with it (ADR 0048). */
+  draft?: string;
+}
+
+/** A file's size as people read it: "240 KB". */
+export function fileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** "Dana Ruiz <dana@northwind.example>" → "Dana Ruiz". */

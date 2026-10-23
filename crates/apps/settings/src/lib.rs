@@ -509,6 +509,19 @@ impl SettingsHandle {
             .collect()
     }
 
+    /// `user`'s list `id` (folders, sites, apps), as [`Self::person`]
+    /// resolves it; empty for one that isn't a list.
+    pub fn list(&self, user: &str, uid: u32, id: &str) -> Vec<String> {
+        self.person(user, uid)
+            .into_iter()
+            .find(|e| e.def.id == id)
+            .and_then(|e| match e.value {
+                SettingValue::List(list) => Some(list),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     /// Whether `user`'s toggle `id` is on, as [`Self::person`] resolves it.
     pub fn on(&self, user: &str, uid: u32, id: &str) -> bool {
         self.person(user, uid)

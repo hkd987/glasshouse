@@ -10,7 +10,7 @@ use glass_managed::meet::AskAgent;
 use glass_runtime::Runtime;
 
 /// The agent a meeting request goes to: the command bar's.
-pub(crate) const AGENT: &str = "desktop-agent";
+pub(crate) const AGENT: &str = glass_api::DESKTOP_AGENT;
 
 #[derive(Debug)]
 pub(crate) struct Asks {

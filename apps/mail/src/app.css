@@ -249,6 +249,24 @@
   max-width: 720px;
 }
 
+/* The files a message carries, by name (ADR 0048). */
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0 12px;
+}
+
+.attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  font-size: 13px;
+}
+
 /* A message's own HTML, framed with no scripts and no network (ADR 0037). */
 .html {
   display: block;
