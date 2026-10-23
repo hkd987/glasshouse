@@ -70,8 +70,9 @@ up() {
 	nohup "$bin/glass-app-bridge" --dev --apps "$repo/apps" --socket "$run/apps.sock" >"$dev/apps.log" 2>&1 &
 	echo $! >"$dev/apps.pid"
 
-	# A connection of its own (not the shared one vm_ssh reuses), holding the forward open.
-	nohup ssh "${SSH_OPTS[@]}" -o ControlPath=none -o ExitOnForwardFailure=yes -o StreamLocalBindUnlink=yes \
+	# A connection of its own (not the shared one vm_ssh reuses), holding the forward open. ssh
+	# keeps an option's first value, so ControlPath=none goes before SSH_OPTS' own.
+	nohup ssh -o ControlPath=none "${SSH_OPTS[@]}" -o ExitOnForwardFailure=yes -o StreamLocalBindUnlink=yes \
 		-p "$VM_SSH_PORT" -N -R "$inside:$run/control.sock" root@127.0.0.1 >"$dev/tunnel.log" 2>&1 &
 	echo $! >"$dev/tunnel.pid"
 	for _ in $(seq 50); do vm_ssh "test -S $inside" 2>/dev/null && break; sleep 0.2; done

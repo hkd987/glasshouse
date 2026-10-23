@@ -548,6 +548,18 @@ pub const MEET: Icon = Icon {
     ],
 };
 
+/// Routines: an arrow coming round again (ADR 0047).
+pub const ROUTINES: Icon = Icon {
+    view_box: (18.0, 18.0),
+    shapes: &[
+        Shape::Path(
+            "M14.94 11.1a6.3 6.3 0 1 1-1.48-6.55L16.7 7.6",
+            StrokeRound(1.6),
+        ),
+        Shape::Path("M16.7 3.4v4.2h-4.2", StrokeRound(1.6)),
+    ],
+};
+
 /// The badge on one of the person's own versions of an app (TL-5): a
 /// pencil, as in "edited, and yours".
 pub const REMIX: Icon = Icon {

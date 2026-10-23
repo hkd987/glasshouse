@@ -1,0 +1,9 @@
+{
+  "name": "@glasshouse/routines",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Routines: what runs for the person with no model, and what they did the same way twice (ADR 0047).",
+  "license": "UNLICENSED",
+  "type": "module",
+  "dependencies": { "@glasshouse/sdk": "0.1.0" }
+}

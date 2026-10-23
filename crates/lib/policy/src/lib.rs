@@ -107,6 +107,7 @@ mod tests {
                 "docs",
                 "mail",
                 "meet",
+                "routines",
                 "settings",
                 "store",
                 "terminal"
@@ -134,6 +135,7 @@ mod tests {
                 "docs",
                 "mail",
                 "meet",
+                "routines",
                 "settings",
                 "store",
                 "terminal"

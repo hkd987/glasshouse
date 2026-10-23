@@ -14,6 +14,8 @@
 # GLASS_DEV_ENROLL=build/console/enrollment.json enrolls this glassd with a
 # development admin console (make console-dev, ADR 0023) as device
 # GLASS_DEV_DEVICE (default dev-host).
+# GLASS_DEV_SCRIPTED_MODEL=1 gives the default policy the scripted model
+# (no network), which calls the tool a prompt names: `Use mail_draft {...}`.
 # GLASS_DEV_POLICY uses that policy file instead of the default policy, and
 # GLASS_DEV_MODEL_SECRETS that model-secrets file (tools/dev/real-model.sh).
 set -euo pipefail
@@ -139,6 +141,26 @@ fi
 {
 	"$bin/glassctl" policy default
 	printf '\n[[label]]\npath = "%s/Finance"\nlabel = "confidential"\n' "$dev/home"
+	if [ -n "${GLASS_DEV_SCRIPTED_MODEL:-}" ]; then
+		cat <<'MODELS'
+
+[models]
+default = "echo"
+
+[[models.provider]]
+id = "scripted"
+kind = "scripted"
+name = "Scripted (no network)"
+
+[[models.model]]
+id = "echo"
+provider = "scripted"
+model = "echo-1"
+name = "Echo"
+usd_per_mtok_in = 3.0
+usd_per_mtok_out = 15.0
+MODELS
+	fi
 } >"$dev/policy.toml"
 
 echo "glassd (host-insecure) — in another shell:"

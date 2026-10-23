@@ -198,7 +198,7 @@ services = ["cron", "ntpd", "openvpn", "cupsd"]
 [[group]]
 name = "everyone"
 agents = ["desktop-agent", "desktop-agent-plan", "it-agent", "invoice-demo", "containment-probe", "claude-code", "skill-evals"]
-apps = ["browser", "mail", "calendar", "chat", "artifacts", "docs", "meet", "store", "settings", "activity-monitor", "terminal"]
+apps = ["browser", "mail", "calendar", "chat", "artifacts", "docs", "meet", "store", "settings", "routines", "activity-monitor", "terminal"]
 
 [[group]]
 name = "it-admins"
@@ -252,6 +252,13 @@ tiers = { "meet.list" = "auto" }
 [[app]]
 id = "settings"
 tiers = { "settings.models_connect" = "auto", "settings.models_agents" = "auto" }
+
+# In Routines the person sees what runs for them, starts it, pauses it,
+# changes when it runs, and keeps what they did the same way twice
+# (ADR 0047). Starting and keeping are theirs alone: never an agent's.
+[[app]]
+id = "routines"
+tiers = { "routines.delete" = "auto", "routines.pause" = "auto", "routines.schedule" = "auto", "routines.run" = "auto", "routines.keep" = "auto" }
 
 # IT self-service (AE-4): diagnoses this computer and fixes what's on IT's
 # list. The only agent allowed the system actions, which glassd runs with its

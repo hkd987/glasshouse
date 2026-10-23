@@ -24,6 +24,11 @@ apps/
   store/      manifest.json, index.html, src/ (main.ts; store.ts: what the org's
               catalog offers you, DV-10, DV-11)
   settings/   the person's device settings, what IT set or locked (UX-1)
+  routines/   what runs for the person with no model (DA-4, ADR 0047): each
+              routine's schedule, next and last run and code; run, pause,
+              reschedule, remove; and keep what they did the same way twice
+              (ADR 0046). routines.ts is the logic without a DOM; keeps
+              nothing
   chat/       the org's chat (CF-91, ADR 0030): glassd seals and opens it; the
               page keeps nothing (bridge.call only, no offline permission) and
               hears of news from app.status waits, ids only. Like Slack (CF-92,

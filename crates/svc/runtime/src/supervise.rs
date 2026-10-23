@@ -116,6 +116,11 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
         state.note(ActivityKind::State, line.clone());
         line
     };
+    // A routine's run: how it went, beside the routine (ADR 0047).
+    if task.routine.is_some() {
+        let (rt, ended) = (Arc::clone(&rt), Arc::clone(&task));
+        let _ = tokio::task::spawn_blocking(move || rt.remember_run(&ended)).await;
+    }
     let mut event = rt.task_event(&task, EventKind::TaskFinished, summary);
     let receipt = task.lock().receipt();
     event.detail = serde_json::json!({

@@ -2,20 +2,23 @@
 //!
 //! Every version saved is a file of its own under glassd's state, root
 //! only, never changed once written: `<root>/<login>/<id>/<n>.json`. Which
-//! version a person uses, and whether they still have the routine, is
-//! their choice, a file in their home ([`MINE`]) written as them, so task
-//! undo restores it like any file a call changed. Writing it by hand only
-//! picks among versions that were saved through the approval.
+//! version a person uses, whether they still have the routine and whether
+//! its schedule is paused, is their choice, a file in their home ([`MINE`])
+//! written as them, so task undo restores it like any file a call changed.
+//! Writing it by hand only picks among versions that were saved through
+//! the approval. Its last runs are glassd's record, beside its versions
+//! (`runs.json`, ADR 0047).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use glass_platform::fs::{ConfinedDir, Owner};
 use glass_types::{AgentId, TaskId, Timestamp};
 use serde::{Deserialize, Serialize};
 
+use crate::host::Host;
 use crate::schedule::Schedule;
 
 /// Which version of each of their routines a person uses, under their home.
@@ -58,6 +61,41 @@ pub struct Routine {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Mine {
     routines: BTreeMap<String, u32>,
+    /// Routines whose schedule is paused: they run only when started.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    paused: BTreeSet<String>,
+}
+
+/// The runs of a routine glassd keeps, newest first.
+pub const KEPT_RUNS: usize = 20;
+const MAX_RUNS_BYTES: u64 = 256 * 1024;
+const RUNS: &str = "runs.json";
+
+/// One run of a routine, as it ended (ADR 0047).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Run {
+    pub task: TaskId,
+    pub version: u32,
+    /// Its schedule started it, rather than the person.
+    pub scheduled: bool,
+    pub started_at: Timestamp,
+    pub ended_at: Timestamp,
+    pub outcome: Outcome,
+    /// A model was asked: the script failed and the agent did the request
+    /// itself.
+    pub model: bool,
+    /// What it said when it was done, the first line, short.
+    pub said: String,
+    /// How many changes it made.
+    pub changes: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Done,
+    Failed,
+    Stopped,
 }
 
 /// glassd's routines, by person: what the provider saves and the runtime
@@ -67,6 +105,8 @@ pub struct Routines {
     root: PathBuf,
     /// Saves one at a time, so two never take the same version number.
     saving: Arc<Mutex<()>>,
+    /// The runtime, for what the Routines app asks of it (ADR 0047).
+    host: Arc<RwLock<Option<Arc<dyn Host>>>>,
 }
 
 impl Routines {
@@ -74,7 +114,20 @@ impl Routines {
         Self {
             root: root.into(),
             saving: Arc::default(),
+            host: Arc::default(),
         }
+    }
+
+    /// The runtime, set at startup, for every clone.
+    pub fn set_host(&self, host: Arc<dyn Host>) {
+        *self.host.write().unwrap_or_else(PoisonError::into_inner) = Some(host);
+    }
+
+    pub fn host(&self) -> Option<Arc<dyn Host>> {
+        self.host
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Nowhere: for listing actions.
@@ -130,6 +183,33 @@ impl Routines {
             .collect()
     }
 
+    /// The runs of `login`'s routine `id` glassd kept, newest first.
+    pub fn runs(&self, login: &str, id: &str) -> Vec<Run> {
+        self.dir(login, id)
+            .map(|dir| dir.join(RUNS))
+            .filter(|path| std::fs::metadata(path).is_ok_and(|m| m.len() <= MAX_RUNS_BYTES))
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    /// Keeps `run` first among `login`'s routine `id`'s runs, at most
+    /// [`KEPT_RUNS`] of them. A routine never saved has nowhere to keep it.
+    pub fn record_run(&self, login: &str, id: &str, run: Run) -> io::Result<()> {
+        let _one_at_a_time = self.saving.lock().unwrap_or_else(PoisonError::into_inner);
+        let dir = self
+            .dir(login, id)
+            .filter(|dir| dir.is_dir())
+            .ok_or_else(|| io::Error::other("not a routine kept here"))?;
+        let mut runs = self.runs(login, id);
+        runs.retain(|r| r.task != run.task);
+        runs.insert(0, run);
+        runs.truncate(KEPT_RUNS);
+        let staged = dir.join(format!(".{RUNS}.new"));
+        std::fs::write(&staged, serde_json::to_vec(&runs)?)?;
+        std::fs::rename(staged, dir.join(RUNS))
+    }
+
     /// Keeps `routine` as the next version of its id, numbered here, and
     /// returns that number.
     pub(crate) fn save(&self, mut routine: Routine) -> io::Result<Routine> {
@@ -181,25 +261,58 @@ fn names(dir: &Path) -> Vec<String> {
     names
 }
 
-/// The versions `home`'s person uses, by routine. Missing or unreadable:
-/// none.
-pub fn chosen(home: &Path) -> BTreeMap<String, u32> {
+fn mine(home: &Path) -> Mine {
     ConfinedDir::open(home)
         .and_then(|dir| dir.read(Path::new(MINE), MAX_MINE_BYTES))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Mine>(&bytes).ok())
-        .map(|m| m.routines)
         .unwrap_or_default()
 }
 
-/// Writes the person's choices through their confined home, as them.
+/// The versions `home`'s person uses, by routine. Missing or unreadable:
+/// none.
+pub fn chosen(home: &Path) -> BTreeMap<String, u32> {
+    mine(home).routines
+}
+
+/// Those of `home`'s person's routines whose schedule they paused.
+pub fn paused(home: &Path) -> BTreeSet<String> {
+    let mine = mine(home);
+    mine.paused
+        .into_iter()
+        .filter(|id| mine.routines.contains_key(id))
+        .collect()
+}
+
+/// Writes the person's choices through their confined home, as them. The
+/// routines they no longer have aren't paused either.
 pub fn choose(home: &Path, owner: Owner, routines: BTreeMap<String, u32>) -> io::Result<()> {
+    let mut paused = mine(home).paused;
+    paused.retain(|id| routines.contains_key(id));
+    write_mine(home, owner, &Mine { routines, paused })
+}
+
+/// Pauses the schedule of `home`'s person's routine `id`, or resumes it.
+pub fn pause(home: &Path, owner: Owner, id: &str, on: bool) -> io::Result<()> {
+    let mut mine = mine(home);
+    if !mine.routines.contains_key(id) {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "not one of theirs"));
+    }
+    if on {
+        mine.paused.insert(id.to_owned());
+    } else {
+        mine.paused.remove(id);
+    }
+    write_mine(home, owner, &mine)
+}
+
+fn write_mine(home: &Path, owner: Owner, mine: &Mine) -> io::Result<()> {
     let dir = ConfinedDir::open(home)?;
     if let Some(folder) = Path::new(MINE).parent()
         && !dir.exists(folder)
     {
         dir.create_dir_all_as(folder, owner)?;
     }
-    let bytes = serde_json::to_vec_pretty(&Mine { routines }).map_err(io::Error::other)?;
+    let bytes = serde_json::to_vec_pretty(mine).map_err(io::Error::other)?;
     dir.write(Path::new(MINE), &bytes, Some(owner)).map(|_| ())
 }

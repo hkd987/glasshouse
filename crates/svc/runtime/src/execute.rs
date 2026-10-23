@@ -96,7 +96,19 @@ impl Runtime {
             && !def.name.as_str().starts_with("routines."))
         .then(|| args.clone());
 
-        let preview = {
+        // What only people take (a meeting's, the person's own) is Never
+        // for an agent whatever it names: refused before the provider sees
+        // its input at all (ADR 0047).
+        let people_only = matches!(
+            task.policy().tier_for(&def.name, def.default_tier).source,
+            glass_policy::RuleSource::PeopleOnly | glass_policy::RuleSource::PersonsOwn
+        );
+        let preview = if people_only {
+            Ok(Preview {
+                summary: def.title.clone(),
+                ..Preview::default()
+            })
+        } else {
             let (provider, ctx, name, input) = (
                 Arc::clone(&provider),
                 task.call_ctx(),

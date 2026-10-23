@@ -641,6 +641,7 @@ mod tests {
                 "docs",
                 "mail",
                 "meet",
+                "routines",
                 "settings",
                 "store"
             ]

@@ -4,12 +4,14 @@
 //! with the same steps before, and so the person can save any of them as a
 //! routine with no model writing it.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
 
 use glass_api::{RoutineDraft, RoutineFromTask, RoutineView};
-use glass_app_routines::{Draft, Scope};
+use glass_app_routines::{Draft, Repeat, Scope};
 use glass_audit::{AuditEvent, EventKind};
-use glass_types::{AgentId, TaskId, Timestamp};
+use glass_types::{AgentId, TaskId, Tier, Timestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::task::Task;
@@ -20,6 +22,10 @@ type Result<T> = std::result::Result<T, RuntimeError>;
 /// The flows kept per person, newest first, and for how long.
 const KEPT: usize = 50;
 const KEPT_SECS: i64 = 30 * 24 * 3600;
+
+/// People's flows files change one at a time: a task's end and the
+/// person dismissing a repeat read and write the same file.
+static WRITING: Mutex<()> = Mutex::new(());
 
 /// One finished task's calls as code.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,16 +143,20 @@ impl Runtime {
         }
         let flow = flow_with(task, replay);
         let login = task.user.name.as_str();
+        let _one_at_a_time = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
         let mut flows = self.load_flows(login);
         let now = Timestamp::now().unix_seconds();
         flows
             .flows
             .retain(|f| f.task != task.id && now - f.at.unix_seconds() < KEPT_SECS);
+        // Offered only for an agent that runs routines: the person's own
+        // harness waits for them, and can't (ADR 0047).
         let earlier = flows
             .flows
             .iter()
             .find(|f| f.key == flow.key && f.shape == flow.shape)
-            .map(|f| f.task);
+            .map(|f| f.task)
+            .filter(|_| self.runs_routines(login, &flow.agent));
         flows.flows.insert(0, flow);
         flows.flows.truncate(KEPT);
         if let Err(e) = self.keep_flows(login, &flows) {
@@ -189,6 +199,83 @@ impl Runtime {
             })
     }
 
+    /// `login`'s requests done more than once with the same steps, the
+    /// latest first, leaving out those already one of their routines
+    /// (ADR 0047).
+    pub(crate) fn repeats_of(&self, login: &str, home: &std::path::Path) -> Vec<Repeat> {
+        let flows = self.load_flows(login).flows;
+        let routines: BTreeSet<String> = self
+            .routines
+            .get()
+            .map(|r| r.current(login, home))
+            .unwrap_or_default()
+            .iter()
+            .map(|r| key(&r.agent, &r.request, &r.read, &r.write))
+            .collect();
+        let mut seen = BTreeSet::new();
+        let mut repeats = Vec::new();
+        for flow in &flows {
+            if routines.contains(&flow.key)
+                || !seen.insert((&flow.key, &flow.shape))
+                || !self.runs_routines(login, &flow.agent)
+            {
+                continue;
+            }
+            let times = flows
+                .iter()
+                .filter(|f| f.key == flow.key && f.shape == flow.shape)
+                .count();
+            if times >= 2 {
+                repeats.push(Repeat {
+                    task: flow.task,
+                    request: flow.prompt.clone(),
+                    agent: flow.agent.clone(),
+                    times,
+                    last_at: flow.at,
+                    script: flow.script.clone(),
+                    steps: flow.steps.clone(),
+                    read: flow.read.clone(),
+                    write: flow.write.clone(),
+                });
+            }
+        }
+        repeats
+    }
+
+    /// Whether `agent` runs routines for `login`: policy lets it read them,
+    /// as it does the desktop agent's. An attended harness's tasks are the
+    /// person's own work, and not one to repeat without them.
+    fn runs_routines(&self, login: &str, agent: &AgentId) -> bool {
+        let read: glass_types::ActionName = glass_app_routines::READ
+            .parse()
+            .unwrap_or_else(|_| unreachable!("a static action name"));
+        self.policy()
+            .effective(login, agent)
+            .is_some_and(|p| p.tier_for(&read, Tier::Auto).tier != Tier::Never)
+            && self
+                .config
+                .catalog
+                .iter()
+                .any(|entry| &entry.id == agent && !entry.attended)
+    }
+
+    /// Forgets the times `login` did the request the flow of `task` did,
+    /// that way, so it isn't offered as a routine until it's done so twice
+    /// again.
+    pub(crate) fn dismiss_repeat(&self, login: &str, task: TaskId) -> Result<()> {
+        let _one_at_a_time = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut flows = self.load_flows(login);
+        let (key, shape) = flows
+            .flows
+            .iter()
+            .find(|f| f.task == task)
+            .map(|f| (f.key.clone(), f.shape.clone()))
+            .ok_or_else(|| RuntimeError::NotFound(format!("no repeat {}", task.short())))?;
+        flows.flows.retain(|f| f.key != key || f.shape != shape);
+        self.keep_flows(login, &flows)
+            .map_err(|e| RuntimeError::Internal(format!("forgetting the repeat: {e}")))
+    }
+
     /// One of the caller's tasks as replay code (ADR 0046).
     pub fn routine_draft(&self, caller: &Caller, task: TaskId) -> Result<RoutineDraft> {
         let flow = self.flow(caller, task)?;
@@ -223,6 +310,12 @@ impl Runtime {
             ));
         }
         let flow = self.flow(caller, request.task)?;
+        if !self.runs_routines(&caller.name, &flow.agent) {
+            return Err(RuntimeError::Invalid(format!(
+                "{} doesn't run routines; ask the desktop agent, and save what it does",
+                flow.agent
+            )));
+        }
         let routine = routines
             .plan(
                 &caller.name,

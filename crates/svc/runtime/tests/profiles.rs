@@ -33,6 +33,7 @@ fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
             ("docs".into(), ProfileAppKind::Web),
             ("mail".into(), ProfileAppKind::Web),
             ("meet".into(), ProfileAppKind::Web),
+            ("routines".into(), ProfileAppKind::Web),
             ("settings".into(), ProfileAppKind::Web),
             ("store".into(), ProfileAppKind::Web),
             ("terminal".into(), ProfileAppKind::Native),
@@ -62,6 +63,7 @@ fn ad7_profiles_offer_everyone_their_apps_and_it_tools_only_to_its_role() {
             "Docs",
             "Mail",
             "Meet",
+            "Routines",
             "Settings",
             "Store",
             "Terminal"

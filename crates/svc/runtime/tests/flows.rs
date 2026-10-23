@@ -10,10 +10,14 @@ mod common;
 
 use std::path::PathBuf;
 
-use glass_api::{AnswerApproval, ApprovalAnswer, ApprovalScope, RoutineFromTask, TileState};
+use glass_api::{
+    AnswerApproval, AppCallResult, AppSession, ApprovalAnswer, ApprovalScope, RoutineFromTask,
+    TileState, app_methods,
+};
+use glass_rpc::Client;
 use glass_runtime::{Caller, RuntimeError};
 use glass_types::TaskId;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::common::{Harness, eventually, harness_with, tool};
 
@@ -276,4 +280,187 @@ async fn nv21_an_agent_saves_what_its_task_did_and_the_person_sees_that_code() {
     done(&h, reader).await;
     let err = h.rt.routine_draft(&h.me, reader).unwrap_err();
     assert!(err.to_string().contains("only read"), "{err}");
+}
+
+/// The Routines app (ADR 0047): a session on the app socket, as its page
+/// has through its bridge.
+struct RoutinesApp {
+    client: Client,
+    session: AppSession,
+}
+
+impl RoutinesApp {
+    async fn open(h: &Harness) -> Self {
+        let client = Client::connect(h.serve_apps()).await.unwrap();
+        let session: AppSession = client
+            .call(app_methods::APP_OPEN, json!({ "app": "routines" }))
+            .await
+            .unwrap();
+        Self { client, session }
+    }
+
+    async fn call(&self, action: &str, input: Value) -> AppCallResult {
+        self.client
+            .call(
+                app_methods::APP_CALL,
+                json!({ "session": self.session.session, "action": action, "input": input }),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn ok(&self, action: &str, input: Value) -> Value {
+        let result = self.call(action, input).await;
+        assert!(result.ok, "{action}: {}", result.text);
+        result.data
+    }
+}
+
+#[tokio::test]
+async fn adr0047_the_person_keeps_runs_pauses_and_reschedules_what_they_did_twice_in_routines() {
+    let h = harness_with(POLICY);
+    let (first, _agent) = note_the_invoices(&h, PROMPT).await;
+    done(&h, first).await;
+    let (second, _agent) = note_the_invoices(&h, PROMPT).await;
+    done(&h, second).await;
+
+    // Done the same way twice: offered, with the code this computer wrote.
+    let app = RoutinesApp::open(&h).await;
+    let repeats = app.ok("routines.repeats", json!({})).await["repeats"].clone();
+    assert_eq!(repeats.as_array().unwrap().len(), 1, "{repeats}");
+    assert_eq!(repeats[0]["task"], json!(second));
+    assert_eq!(repeats[0]["times"], 2);
+    assert!(
+        repeats[0]["script"]
+            .as_str()
+            .unwrap()
+            .contains("for (const item of r0.data.entries || [])"),
+        "{repeats}"
+    );
+
+    // Kept from Routines: the person's own act, no ask.
+    let kept = app
+        .ok(
+            "routines.keep",
+            json!({ "task": second, "name": "Invoice count", "schedule": "fri 17:00" }),
+        )
+        .await;
+    assert_eq!(kept["routine"], "invoice-count");
+    assert!(h.rt.approvals(&h.me).is_empty());
+    let repeats = app.ok("routines.repeats", json!({})).await;
+    assert_eq!(repeats["repeats"], json!([]), "a routine now, not offered");
+    let listed = app.ok("routines.list", json!({})).await["routines"][0].clone();
+    assert_eq!(
+        (&listed["runs"], &listed["paused"], &listed["last_run"]),
+        (&json!("every Friday at 17:00"), &json!(false), &Value::Null)
+    );
+    assert!(listed["next_run_at"].is_string(), "{listed}");
+
+    // Run now: a task of its own, and how it went is kept beside it.
+    let started = app
+        .ok("routines.run", json!({ "routine": "invoice-count" }))
+        .await;
+    let run: TaskId = serde_json::from_value(started["task"].clone()).unwrap();
+    let _agent = play(&h, run).await;
+    done(&h, run).await;
+    eventually(|| {
+        h.rt.get(&h.me, run).is_ok()
+            && common::routines(h.dir.path())
+                .runs(&h.me.name, "invoice-count")
+                .first()
+                .is_some_and(|r| r.task == run)
+    })
+    .await;
+    let read = app
+        .ok("routines.read", json!({ "routine": "invoice-count" }))
+        .await;
+    assert_eq!(read["last_run"]["task"], json!(run));
+    assert_eq!(read["last_run"]["outcome"], "done");
+    assert_eq!(read["last_run"]["model"], false, "no model asked");
+    assert_eq!(read["last_run"]["scheduled"], false);
+    assert_eq!(read["runs_kept"].as_array().unwrap().len(), 1);
+
+    // Paused, its schedule doesn't start it; resumed, it does.
+    app.ok(
+        "routines.pause",
+        json!({ "routine": "invoice-count", "paused": true }),
+    )
+    .await;
+    let listed = app.ok("routines.list", json!({})).await["routines"][0].clone();
+    assert_eq!(
+        (&listed["paused"], &listed["next_run_at"]),
+        (&json!(true), &Value::Null)
+    );
+    let me = h.me.clone();
+    let due = |rt: &std::sync::Arc<glass_runtime::Runtime>| {
+        rt.run_due_routines(glass_app_routines::Weekday::Friday, 17, 0, |_| {
+            Some(me.clone())
+        })
+    };
+    assert!(due(&h.rt).is_empty(), "paused");
+    app.ok(
+        "routines.pause",
+        json!({ "routine": "invoice-count", "paused": false }),
+    )
+    .await;
+    let scheduled = due(&h.rt);
+    assert_eq!(scheduled.len(), 1);
+    let scheduled = scheduled[0].1.as_ref().unwrap().id;
+    let _agent = play(&h, scheduled).await;
+    done(&h, scheduled).await;
+
+    // A new time: its next version, the same code and scope.
+    let moved = app
+        .ok(
+            "routines.schedule",
+            json!({ "routine": "invoice-count", "schedule": "weekdays 09:00" }),
+        )
+        .await;
+    assert_eq!(
+        (&moved["version"], &moved["runs"]),
+        (&json!(2), &json!("every weekday at 09:00"))
+    );
+    let kept = common::routines(h.dir.path());
+    assert_eq!(
+        kept.record(&h.me.name, "invoice-count", 2).unwrap().script,
+        kept.record(&h.me.name, "invoice-count", 1).unwrap().script
+    );
+}
+
+#[tokio::test]
+async fn adr0047_no_agent_starts_or_keeps_routines_and_a_repeat_can_be_let_go() {
+    let h = harness_with(POLICY);
+    let (first, _agent) = note_the_invoices(&h, PROMPT).await;
+    done(&h, first).await;
+    let (second, _agent) = note_the_invoices(&h, PROMPT).await;
+    done(&h, second).await;
+
+    // An agent allowed routines.* still can't take the person's own.
+    let (task, agent) = note_the_invoices(&h, "Count the invoices again").await;
+    for (name, args) in [
+        ("routines_repeats", json!({})),
+        (
+            "routines_keep",
+            json!({ "task": second, "name": "Mine now" }),
+        ),
+        ("routines_dismiss", json!({ "task": second })),
+        ("routines_run", json!({ "routine": "anything" })),
+    ] {
+        let refused = tool(&agent, name, args).await;
+        assert!(refused.is_error, "{name}");
+        assert!(
+            refused.text().contains("only the person"),
+            "{name}: {}",
+            refused.text()
+        );
+    }
+    done(&h, task).await;
+
+    // Not now: it isn't offered again.
+    let app = RoutinesApp::open(&h).await;
+    let repeats = app.ok("routines.repeats", json!({})).await;
+    assert_eq!(repeats["repeats"].as_array().unwrap().len(), 1);
+    app.ok("routines.dismiss", json!({ "task": second })).await;
+    let repeats = app.ok("routines.repeats", json!({})).await;
+    assert_eq!(repeats["repeats"], json!([]));
 }

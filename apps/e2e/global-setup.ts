@@ -125,6 +125,9 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     GLASS_DEV_DIR: DEV,
     GLASS_DEV_RUN: RUN,
     GLASS_DEV_SKIP_BUILD: "1",
+    // The desktop agent on the scripted model: Routines' tests have it do
+    // a request twice the same way (ADR 0047).
+    GLASS_DEV_SCRIPTED_MODEL: "1",
   });
   const started: ChildProcess[] = [glassd];
   try {

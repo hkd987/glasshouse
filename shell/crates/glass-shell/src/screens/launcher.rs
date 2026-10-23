@@ -171,6 +171,7 @@ fn glyph(id: &str, name: &str) -> Glyph {
         "docs" => drawn(&icons::DOC, 0x7AA2F7),
         "meet" => drawn(&icons::MEET, 0xF0707A),
         "settings" => drawn(&icons::GEAR, 0xA9B1BC),
+        "routines" => drawn(&icons::ROUTINES, 0x9BCB4B),
         // IT's console: a gear in the accent, apart from Settings'.
         "console" => drawn(&icons::GEAR, 0x3D6BFF),
         "store" => drawn(&icons::BAG, 0x8F7CF2),
@@ -380,6 +381,7 @@ mod tests {
             ("meet", icons::MEET),
             ("artifacts", icons::ARTIFACT),
             ("docs", icons::DOC),
+            ("routines", icons::ROUTINES),
         ] {
             let app = web(id, id, None);
             assert!(
@@ -397,6 +399,7 @@ mod tests {
             "store",
             "browser",
             "settings",
+            "routines",
         ]
         .iter()
         .filter_map(|id| match glyph(id, id) {
@@ -405,7 +408,7 @@ mod tests {
         })
         .collect();
         let distinct: std::collections::HashSet<&u32> = colors.iter().collect();
-        assert_eq!((colors.len(), distinct.len()), (8, 8));
+        assert_eq!((colors.len(), distinct.len()), (9, 9));
     }
 
     #[test]

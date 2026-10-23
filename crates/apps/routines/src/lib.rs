@@ -13,10 +13,18 @@
 //! - `routines.save` (Ask): a new routine, or a new version of one.
 //! - `routines.delete` (Notify): takes one off their list; undo puts it
 //!   back.
+//! - `routines.pause` (Notify), `routines.schedule` (Ask): pauses a
+//!   routine's schedule or resumes it; changes when it runs, as its next
+//!   version (ADR 0047).
+//! - `routines.run`, `routines.repeats`, `routines.keep`,
+//!   `routines.dismiss`: the person's own, in the Routines app, never an
+//!   agent's (ADR 0047): starting one now, and the requests they did the
+//!   same way more than once, kept as routines or not offered again.
 //!
 //! Versions are kept root only and never change ([`store`]); which ones
 //! the person has is a file in their home.
 
+pub mod host;
 pub mod schedule;
 pub mod store;
 
@@ -31,8 +39,9 @@ use glass_types::{SideEffect, Tier, Timestamp};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+pub use host::{Host, Repeat};
 pub use schedule::{Schedule, local_minute};
-pub use store::{Routine, Routines};
+pub use store::{Outcome, Routine, Routines, Run};
 /// A schedule's days, as [`Schedule::due`] takes them.
 pub use time::Weekday;
 
@@ -40,6 +49,12 @@ pub const LIST: &str = "routines.list";
 pub const READ: &str = "routines.read";
 pub const SAVE: &str = "routines.save";
 pub const DELETE: &str = "routines.delete";
+pub const PAUSE: &str = "routines.pause";
+pub const SCHEDULE: &str = "routines.schedule";
+pub const RUN: &str = "routines.run";
+pub const REPEATS: &str = "routines.repeats";
+pub const KEEP: &str = "routines.keep";
+pub const DISMISS: &str = "routines.dismiss";
 
 /// The longest script kept: a routine is a short program.
 pub const MAX_SCRIPT_BYTES: usize = 32 * 1024;
@@ -191,6 +206,36 @@ struct Named {
 #[serde(deny_unknown_fields)]
 struct Empty {}
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PauseInput {
+    routine: String,
+    paused: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduleInput {
+    routine: String,
+    /// None: it runs only when started.
+    schedule: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeepInput {
+    task: glass_types::TaskId,
+    name: String,
+    #[serde(default)]
+    schedule: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskInput {
+    task: glass_types::TaskId,
+}
+
 /// The actions over [`Routines`].
 #[derive(Debug, Clone)]
 pub struct RoutinesProvider {
@@ -251,8 +296,8 @@ impl RoutinesProvider {
         Ok(ActionOutput {
             text: format!(
                 "Saved the routine {} (version {}). {when}, with no model unless its \
-                 script fails: glassctl routine run {} starts it now.",
-                saved.name, saved.version, saved.id
+                 script fails. It's in Routines, where you can run it now.",
+                saved.name, saved.version
             ),
             data: summary_json(&saved),
             changes: vec![Change {
@@ -266,6 +311,110 @@ impl RoutinesProvider {
                 paths: vec![ctx.home.join(store::MINE)],
             }],
         })
+    }
+
+    fn host(&self) -> Result<std::sync::Arc<dyn Host>, ActionError> {
+        self.routines.host().ok_or_else(|| {
+            ActionError::Failed("routines can't be started from here on this computer".into())
+        })
+    }
+
+    /// `found`'s next version, running on `schedule` (none: when started),
+    /// with the same script, request and scope.
+    fn rescheduled(
+        &self,
+        ctx: &TaskContext,
+        found: &Routine,
+        schedule: Option<String>,
+    ) -> Result<Routine, ActionError> {
+        let parsed = match schedule.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(text) => Some(text.parse::<Schedule>().map_err(invalid)?),
+        };
+        if parsed == found.schedule {
+            return Err(invalid(format!(
+                "{} already runs {}",
+                found.name,
+                runs_text(found.schedule)
+            )));
+        }
+        self.routines
+            .plan(
+                &found.owner,
+                &ctx.home,
+                Draft {
+                    routine: Some(found.id.clone()),
+                    name: None,
+                    request: found.request.clone(),
+                    script: found.script.clone(),
+                    schedule: parsed.map(|s| s.to_string()),
+                    note: format!("Runs {} now", runs_text(parsed)),
+                },
+                Scope {
+                    agent: found.agent.clone(),
+                    read: found.read.clone(),
+                    write: found.write.clone(),
+                    task: ctx.principal.task,
+                },
+            )
+            .map_err(invalid)
+    }
+
+    /// The repeat `task` did, kept as the routine `name` (ADR 0046, 0047).
+    fn kept(&self, ctx: &TaskContext, input: KeepInput) -> Result<Routine, ActionError> {
+        let login = ctx.principal.on_behalf_of.name.as_str();
+        let repeat = self
+            .host()?
+            .repeats(login, ctx.owner.uid)
+            .into_iter()
+            .find(|r| r.task == input.task)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "task {} isn't a request you did the same way twice; routines.repeats lists them",
+                    input.task.short()
+                ))
+            })?;
+        self.routines
+            .plan(
+                login,
+                &ctx.home,
+                Draft {
+                    routine: None,
+                    name: Some(input.name),
+                    request: repeat.request,
+                    script: repeat.script,
+                    schedule: input.schedule,
+                    note: format!(
+                        "Written by this computer from task {}, done the same way {} times",
+                        repeat.task.short(),
+                        repeat.times
+                    ),
+                },
+                Scope {
+                    agent: repeat.agent,
+                    read: repeat.read,
+                    write: repeat.write,
+                    task: repeat.task,
+                },
+            )
+            .map_err(invalid)
+    }
+
+    /// A routine as the Routines app lists it: with whether its schedule is
+    /// paused, when it next runs and how it last ran.
+    fn listed(&self, routine: &Routine, paused: bool, now: Now) -> Value {
+        let mut data = summary_json(routine);
+        let runs = self.routines.runs(&routine.owner, &routine.id);
+        data["paused"] = json!(paused);
+        data["next_run_at"] = json!(if paused {
+            None
+        } else {
+            now.next(routine.schedule)
+        });
+        data["last_run"] = json!(runs.first());
+        data["note"] = json!(routine.note);
+        data["saved_at"] = json!(routine.saved_at);
+        data
     }
 
     fn mine(&self, ctx: &TaskContext, id: &str) -> Result<Routine, ActionError> {
@@ -343,6 +492,35 @@ pub fn calls(script: &str) -> Vec<String> {
     found
 }
 
+/// When a routine runs, in words: "every weekday at 09:00", or "when you
+/// start it".
+fn runs_text(schedule: Option<Schedule>) -> String {
+    schedule.map_or_else(|| "when you start it".to_owned(), |s| s.describe())
+}
+
+/// This minute, in the computer's local time, for when routines next run.
+#[derive(Debug, Clone, Copy)]
+struct Now {
+    unix: i64,
+    offset: i32,
+}
+
+impl Now {
+    fn here() -> Self {
+        Self {
+            unix: Timestamp::now().unix_seconds(),
+            offset: glass_platform::system::utc_offset_secs().unwrap_or(0),
+        }
+    }
+
+    /// When `schedule` next runs; never, without one.
+    fn next(self, schedule: Option<Schedule>) -> Option<Timestamp> {
+        let (day, hour, minute, _) = local_minute(self.unix, self.offset);
+        let ahead = schedule?.minutes_until(day, hour, minute)?;
+        Timestamp::from_unix_seconds(self.unix - self.unix.rem_euclid(60) + i64::from(ahead) * 60)
+    }
+}
+
 fn paths(paths: &[PathBuf]) -> String {
     paths
         .iter()
@@ -370,10 +548,7 @@ fn review(routine: &Routine) -> Vec<String> {
     let mut items = vec![format!("Does: {}", routine.request)];
     items.push(match &routine.schedule {
         Some(schedule) => format!("Runs {}, in this computer's time", schedule.describe()),
-        None => format!(
-            "Runs when you start it (glassctl routine run {})",
-            routine.id
-        ),
+        None => "Runs when you start it, from Routines".to_owned(),
     });
     if !routine.read.is_empty() {
         items.push(format!("Reads: {}", paths(&routine.read)));
@@ -500,6 +675,97 @@ impl ActionProvider for RoutinesProvider {
                     "additionalProperties": false
                 }),
             ),
+            def(
+                PAUSE,
+                "Pause a routine",
+                "Pauses a routine's schedule, or resumes it: paused, it runs only when started. \
+                 Undo puts it back.",
+                SideEffect::LocalReversible,
+                Tier::Notify,
+                json!({
+                    "type": "object",
+                    "properties": { "routine": routine, "paused": { "type": "boolean" } },
+                    "required": ["routine", "paused"],
+                    "additionalProperties": false
+                }),
+            ),
+            def(
+                SCHEDULE,
+                "Change when a routine runs",
+                "Saves a routine's next version with a new schedule, its script and scope as \
+                 they are. The person sees the change before it's saved.",
+                SideEffect::LocalReversible,
+                Tier::Ask,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "routine": routine,
+                        "schedule": {
+                            "type": ["string", "null"],
+                            "description": format!("When it runs by itself: {}; null to run it only when started.", schedule::FORMS)
+                        }
+                    },
+                    "required": ["routine", "schedule"],
+                    "additionalProperties": false
+                }),
+            )
+            .asking("Review the change", "Change it"),
+            // The person's own, in Routines (ADR 0047): policy makes them
+            // Never for every agent.
+            def(
+                RUN,
+                "Run a routine now",
+                "Starts one of the person's routines now, as a task of its own.",
+                SideEffect::None,
+                Tier::Notify,
+                json!({
+                    "type": "object",
+                    "properties": { "routine": routine },
+                    "required": ["routine"],
+                    "additionalProperties": false
+                }),
+            ),
+            def(
+                REPEATS,
+                "Requests done the same way twice",
+                "The person's requests done more than once with the same steps, with the code this \
+                 computer wrote from them (ADR 0046), not yet kept as routines.",
+                SideEffect::None,
+                Tier::Auto,
+                json!({ "type": "object", "additionalProperties": false }),
+            ),
+            def(
+                KEEP,
+                "Keep a repeat as a routine",
+                "Keeps a request the person did the same way more than once as a routine, with \
+                 the code this computer wrote from it.",
+                SideEffect::LocalReversible,
+                Tier::Notify,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "task": { "type": "string", "description": "The repeat's task, as routines.repeats gives it." },
+                        "name": { "type": "string" },
+                        "schedule": { "type": "string", "description": format!("When it runs by itself: {}.", schedule::FORMS) }
+                    },
+                    "required": ["task", "name"],
+                    "additionalProperties": false
+                }),
+            ),
+            def(
+                DISMISS,
+                "Stop offering a repeat",
+                "Stops offering a request done the same way twice, until it's done that way \
+                 twice again.",
+                SideEffect::None,
+                Tier::Auto,
+                json!({
+                    "type": "object",
+                    "properties": { "task": { "type": "string" } },
+                    "required": ["task"],
+                    "additionalProperties": false
+                }),
+            ),
         ]
     }
 
@@ -562,6 +828,69 @@ impl ActionProvider for RoutinesProvider {
                     Vec::new(),
                 ))
             }
+            PAUSE => {
+                let PauseInput { routine, paused } = parse_input(input)?;
+                let found = self.mine(ctx, &routine)?;
+                let summary = if paused {
+                    format!("Pause the routine {}", found.name)
+                } else {
+                    format!("Resume the routine {}", found.name)
+                };
+                Ok(choice_preview(ctx, summary, Vec::new()))
+            }
+            SCHEDULE => {
+                let ScheduleInput { routine, schedule } = parse_input(input)?;
+                let found = self.mine(ctx, &routine)?;
+                let next = self.rescheduled(ctx, &found, schedule)?;
+                Ok(choice_preview(
+                    ctx,
+                    format!(
+                        "Run the routine {} {}",
+                        found.name,
+                        runs_text(next.schedule)
+                    ),
+                    vec![
+                        format!("Was: runs {}", runs_text(found.schedule)),
+                        format!(
+                            "Now: runs {}, in this computer's time",
+                            runs_text(next.schedule)
+                        ),
+                    ],
+                ))
+            }
+            RUN => {
+                let Named { routine } = parse_input(input)?;
+                let found = self.mine(ctx, &routine)?;
+                Ok(Preview {
+                    summary: format!("Run the routine {} now", found.name),
+                    targets: vec![found.name],
+                    ..Preview::default()
+                })
+            }
+            REPEATS => {
+                let Empty {} = parse_input(input)?;
+                Ok(Preview {
+                    summary: "List requests done the same way twice".into(),
+                    targets: vec!["Your routines".into()],
+                    ..Preview::default()
+                })
+            }
+            KEEP => {
+                let routine = self.kept(ctx, parse_input(input)?)?;
+                Ok(choice_preview(
+                    ctx,
+                    format!("Keep the routine {}", routine.name),
+                    review(&routine),
+                ))
+            }
+            DISMISS => {
+                let TaskInput { task } = parse_input(input)?;
+                Ok(Preview {
+                    summary: format!("Stop offering task {}'s request as a routine", task.short()),
+                    targets: vec!["Your routines".into()],
+                    ..Preview::default()
+                })
+            }
             other => Err(ActionError::NotFound(format!("no action {other}"))),
         }
     }
@@ -577,31 +906,41 @@ impl ActionProvider for RoutinesProvider {
             LIST => {
                 let Empty {} = parse_input(input)?;
                 let mine = self.routines.current(login, &ctx.home);
+                let paused = store::paused(&ctx.home);
                 let text = match mine.as_slice() {
                     [] => "No routines yet.".to_owned(),
                     all => all
                         .iter()
                         .map(|r| {
-                            let runs = r
-                                .schedule
-                                .map_or_else(|| "when started".to_owned(), |s| s.describe());
+                            let runs = if paused.contains(&r.id) {
+                                "paused".to_owned()
+                            } else {
+                                r.schedule
+                                    .map_or_else(|| "when started".to_owned(), |s| s.describe())
+                            };
                             format!("{} ({}, version {}): {runs}", r.name, r.id, r.version)
                         })
                         .collect::<Vec<_>>()
                         .join("\n"),
                 };
+                let now = Now::here();
                 Ok(ActionOutput {
                     text,
-                    data: json!({ "routines": mine.iter().map(summary_json).collect::<Vec<_>>() }),
+                    data: json!({ "routines": mine
+                        .iter()
+                        .map(|r| self.listed(r, paused.contains(&r.id), now))
+                        .collect::<Vec<_>>() }),
                     changes: Vec::new(),
                 })
             }
             READ => {
                 let Named { routine } = parse_input(input)?;
                 let found = self.mine(ctx, &routine)?;
-                let mut data = summary_json(&found);
+                let paused = store::paused(&ctx.home).contains(&found.id);
+                let mut data = self.listed(&found, paused, Now::here());
                 data["script"] = json!(found.script);
-                data["note"] = json!(found.note);
+                data["runs_kept"] = json!(self.routines.runs(login, &found.id));
+                data["versions"] = json!(self.routines.versions(login, &found.id).len());
                 Ok(ActionOutput {
                     text: format!(
                         "{} (version {}) runs {}: {}",
@@ -639,6 +978,94 @@ impl ActionProvider for RoutinesProvider {
                         reversible: true,
                         paths: vec![ctx.home.join(store::MINE)],
                     }],
+                })
+            }
+            PAUSE => {
+                let PauseInput { routine, paused } = parse_input(input)?;
+                let found = self.mine(ctx, &routine)?;
+                store::pause(&ctx.home, ctx.owner, &found.id, paused)
+                    .map_err(|e| ActionError::io("your routines", e))?;
+                let text = if paused {
+                    format!(
+                        "Paused {}: it runs only when you start it, until you resume it.",
+                        found.name
+                    )
+                } else {
+                    format!(
+                        "Resumed {}: it runs {} again.",
+                        found.name,
+                        runs_text(found.schedule)
+                    )
+                };
+                Ok(ActionOutput {
+                    text,
+                    data: json!({ "routine": found.id, "paused": paused }),
+                    changes: vec![Change {
+                        kind: ChangeKind::Modified,
+                        target: format!(
+                            "Routine: {} {}",
+                            found.name,
+                            if paused { "paused" } else { "resumed" }
+                        ),
+                        reversible: true,
+                        paths: vec![ctx.home.join(store::MINE)],
+                    }],
+                })
+            }
+            SCHEDULE => {
+                let ScheduleInput { routine, schedule } = parse_input(input)?;
+                let found = self.mine(ctx, &routine)?;
+                let next = self.rescheduled(ctx, &found, schedule)?;
+                self.save(ctx, next)
+            }
+            RUN => {
+                let Named { routine } = parse_input(input)?;
+                let found = self.mine(ctx, &routine)?;
+                let task = self
+                    .host()?
+                    .run(login, ctx.owner.uid, &found.id)
+                    .map_err(ActionError::Failed)?;
+                Ok(ActionOutput {
+                    text: format!(
+                        "Started {}: it runs as task {}, on your desktop.",
+                        found.name,
+                        task.short()
+                    ),
+                    data: json!({ "routine": found.id, "task": task }),
+                    changes: Vec::new(),
+                })
+            }
+            REPEATS => {
+                let Empty {} = parse_input(input)?;
+                let repeats = self.host()?.repeats(login, ctx.owner.uid);
+                let text = match repeats.as_slice() {
+                    [] => "Nothing done the same way twice yet.".to_owned(),
+                    all => all
+                        .iter()
+                        .map(|r| format!("{} times: {}", r.times, r.request))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                };
+                Ok(ActionOutput {
+                    text,
+                    data: json!({ "repeats": repeats }),
+                    changes: Vec::new(),
+                })
+            }
+            KEEP => {
+                let routine = self.kept(ctx, parse_input(input)?)?;
+                self.save(ctx, routine)
+            }
+            DISMISS => {
+                let TaskInput { task } = parse_input(input)?;
+                self.host()?
+                    .dismiss(login, ctx.owner.uid, task)
+                    .map_err(ActionError::Failed)?;
+                Ok(ActionOutput {
+                    text: "It won't be offered again unless it's done the same way twice more."
+                        .into(),
+                    data: json!({ "task": task }),
+                    changes: Vec::new(),
                 })
             }
             other => Err(ActionError::NotFound(format!("no action {other}"))),

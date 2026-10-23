@@ -465,6 +465,7 @@ pub fn apps() -> Vec<AppEntry> {
         ("meet", "Meet", Web, None),
         ("store", "Store", Web, None),
         ("settings", "Settings", Web, None),
+        ("routines", "Routines", Web, None),
         ("browser", "Browser", Native, None),
         ("terminal", "Terminal", Native, None),
         ("activity-monitor", "Activity Monitor", Native, None),

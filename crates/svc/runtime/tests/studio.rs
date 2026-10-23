@@ -265,7 +265,7 @@ async fn tl6_it_turns_remixing_off_and_peoples_apps_wait_for_it() {
     let apps = Client::connect(h.serve_apps()).await.unwrap();
     let remix = open(&apps, "my-chat").await.unwrap();
 
-    let line = r#""meet", "store", "settings", "activity-monitor", "terminal"]"#;
+    let line = r#""meet", "store", "settings", "routines", "activity-monitor", "terminal"]"#;
     let off =
         format!("{line}\n[group.settings]\n\"apps.remix\" = {{ value = false, locked = true }}");
     h.apply_policy_replacing(line, &off, "");

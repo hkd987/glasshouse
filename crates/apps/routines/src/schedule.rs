@@ -26,6 +26,16 @@ const DAYS: [(&str, &str); 7] = [
     ("sat", "Saturday"),
     ("sun", "Sunday"),
 ];
+/// Monday first, as `days` are.
+const DAY_ORDER: [Weekday; 7] = [
+    Weekday::Monday,
+    Weekday::Tuesday,
+    Weekday::Wednesday,
+    Weekday::Thursday,
+    Weekday::Friday,
+    Weekday::Saturday,
+    Weekday::Sunday,
+];
 const EVERY: [bool; 7] = [true; 7];
 const WEEKDAYS: [bool; 7] = [true, true, true, true, true, false, false];
 const WEEKENDS: [bool; 7] = [false, false, false, false, false, true, true];
@@ -43,6 +53,22 @@ impl Schedule {
                 Some(at) => at == (hour, minute),
                 None => minute == 0,
             }
+    }
+
+    /// How many minutes after the minute that starts at `hour:minute` on
+    /// `day` it next runs, in local time; never, for one with no days.
+    pub fn minutes_until(&self, day: Weekday, hour: u8, minute: u8) -> Option<u32> {
+        let start = u32::from(day.number_days_from_monday()) * 24 * 60
+            + u32::from(hour) * 60
+            + u32::from(minute);
+        const WEEK: u32 = 7 * 24 * 60;
+        (1..=WEEK).find(|ahead| {
+            let at = (start + ahead) % WEEK;
+            let day = DAY_ORDER[usize::try_from(at / (24 * 60)).unwrap_or(0)];
+            let hour = u8::try_from(at / 60 % 24).unwrap_or(0);
+            let minute = u8::try_from(at % 60).unwrap_or(0);
+            self.due(day, hour, minute)
+        })
     }
 
     /// In words: "every weekday at 09:00".
@@ -255,5 +281,24 @@ mod tests {
         assert_eq!(kept, r#""weekdays 09:00""#);
         assert_eq!(serde_json::from_str::<Schedule>(&kept).unwrap(), weekdays);
         assert!(serde_json::from_str::<Schedule>(r#""whenever""#).is_err());
+    }
+
+    #[test]
+    fn adr0047_the_next_run_is_the_next_minute_it_is_due() {
+        let friday: Schedule = "fri 17:00".parse().unwrap();
+        // Friday 16:59: a minute away; Friday 17:00 itself: a week.
+        assert_eq!(friday.minutes_until(Weekday::Friday, 16, 59), Some(1));
+        assert_eq!(
+            friday.minutes_until(Weekday::Friday, 17, 0),
+            Some(7 * 24 * 60)
+        );
+        // Sunday night to Monday morning, across the week's end.
+        let weekdays: Schedule = "weekdays 09:00".parse().unwrap();
+        assert_eq!(
+            weekdays.minutes_until(Weekday::Sunday, 23, 30),
+            Some(9 * 60 + 30)
+        );
+        let hourly: Schedule = "hourly".parse().unwrap();
+        assert_eq!(hourly.minutes_until(Weekday::Tuesday, 10, 15), Some(45));
     }
 }

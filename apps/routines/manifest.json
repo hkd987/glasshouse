@@ -1,0 +1,22 @@
+{
+  "id": "routines",
+  "name": "Routines",
+  "version": "0.1.0",
+  "description": "What runs for you, with no model: each routine's code, when it runs and how it went; run, pause or reschedule it, and keep what you did the same way twice.",
+  "actions": [
+    "routines.list",
+    "routines.read",
+    "routines.run",
+    "routines.pause",
+    "routines.schedule",
+    "routines.delete",
+    "routines.repeats",
+    "routines.keep",
+    "routines.dismiss"
+  ],
+  "permissions": [],
+  "labels": [
+    "public",
+    "internal"
+  ]
+}

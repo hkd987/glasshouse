@@ -3,21 +3,65 @@
 //! with the scope it was saved with. Each run is a task like any other:
 //! policy, tiers, asks, audit and undo as they are when it runs.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
-use glass_api::{RoutineView, ScopeRequest, TaskRequest, TaskView};
-use glass_app_routines::{Routine, Routines, Weekday, store};
+use glass_api::{RoutineView, ScopeRequest, TaskRequest, TaskView, TileState};
+use glass_app_routines::{Host, Outcome, Repeat, Routine, Routines, Run, Weekday, store};
+use glass_types::{TaskId, Timestamp};
 
 use crate::runtime::Origin;
-use crate::task::RoutineRun;
+use crate::task::{RoutineRun, Task};
 use crate::{Caller, Runtime, RuntimeError};
 
 type Result<T> = std::result::Result<T, RuntimeError>;
 
+/// The longest a run's answer is kept in its record, in characters.
+const SAID_CHARS: usize = 200;
+
 impl Runtime {
-    /// Where people's routines are kept, set once at startup.
-    pub fn set_routines(&self, routines: Routines) {
+    /// Where people's routines are kept, set once at startup, and the
+    /// runtime as what the Routines app asks of it (ADR 0047).
+    pub fn set_routines(self: &Arc<Self>, routines: Routines) {
+        routines.set_host(Arc::new(RoutinesHost {
+            runtime: Arc::downgrade(self),
+            tokio: tokio::runtime::Handle::try_current().ok(),
+        }));
         let _ = self.routines.set(routines);
+    }
+
+    /// At a routine's run's end: how it went, kept beside the routine
+    /// (ADR 0047).
+    pub(crate) fn remember_run(&self, task: &Task) {
+        let (Some(run), Some(routines)) = (&task.routine, self.routines.get()) else {
+            return;
+        };
+        let record = {
+            let state = task.lock();
+            let receipt = state.receipt();
+            let said = state
+                .answer
+                .as_deref()
+                .and_then(|a| a.lines().find(|l| !l.trim().is_empty()))
+                .unwrap_or_default();
+            Run {
+                task: task.id,
+                version: run.version,
+                scheduled: run.scheduled,
+                started_at: task.started_at,
+                ended_at: Timestamp::now(),
+                outcome: match state.tile {
+                    TileState::Done => Outcome::Done,
+                    TileState::Stopped => Outcome::Stopped,
+                    _ => Outcome::Failed,
+                },
+                model: !receipt.models.is_empty(),
+                said: said.trim().chars().take(SAID_CHARS).collect(),
+                changes: receipt.changes,
+            }
+        };
+        if let Err(e) = routines.record_run(&task.user.name, &run.id, record) {
+            tracing::warn!(task = %task.id, routine = %run.id, "keeping the routine's run: {e}");
+        }
     }
 
     fn current_routines(&self, caller: &Caller) -> Vec<Routine> {
@@ -89,14 +133,66 @@ impl Runtime {
             let Some(caller) = person(&login).filter(|c| c.name == login) else {
                 continue;
             };
+            // A paused routine runs only when started (ADR 0047).
+            let paused = store::paused(&caller.home);
             for routine in routines.current(&login, &caller.home) {
-                if routine.schedule.is_some_and(|s| s.due(day, hour, minute)) {
+                if !paused.contains(&routine.id)
+                    && routine.schedule.is_some_and(|s| s.due(day, hour, minute))
+                {
                     let id = format!("{login}/{}", routine.id);
                     started.push((id, self.start_routine(&caller, &routine.id, true)));
                 }
             }
         }
         started
+    }
+}
+
+/// The runtime as the Routines app's actions reach it (ADR 0047): as the
+/// person the session is for, found by uid and login both.
+#[derive(Debug)]
+struct RoutinesHost {
+    runtime: Weak<Runtime>,
+    /// glassd's, so a run started from an action's worker thread can
+    /// spawn its supervisor.
+    tokio: Option<tokio::runtime::Handle>,
+}
+
+impl RoutinesHost {
+    fn person(&self, login: &str, uid: u32) -> std::result::Result<(Arc<Runtime>, Caller), String> {
+        let runtime = self
+            .runtime
+            .upgrade()
+            .ok_or_else(|| "this computer is shutting down".to_owned())?;
+        let caller = runtime
+            .caller(uid)
+            .filter(|c| c.name == login)
+            .ok_or_else(|| format!("{login} isn't a person on this computer"))?;
+        Ok((runtime, caller))
+    }
+}
+
+impl Host for RoutinesHost {
+    fn run(&self, login: &str, uid: u32, routine: &str) -> std::result::Result<TaskId, String> {
+        let (runtime, caller) = self.person(login, uid)?;
+        let _tokio = self.tokio.as_ref().map(tokio::runtime::Handle::enter);
+        runtime
+            .run_routine(&caller, routine)
+            .map(|view| view.id)
+            .map_err(|e| e.to_string())
+    }
+
+    fn repeats(&self, login: &str, uid: u32) -> Vec<Repeat> {
+        self.person(login, uid)
+            .map(|(runtime, caller)| runtime.repeats_of(login, &caller.home))
+            .unwrap_or_default()
+    }
+
+    fn dismiss(&self, login: &str, uid: u32, task: TaskId) -> std::result::Result<(), String> {
+        let (runtime, _) = self.person(login, uid)?;
+        runtime
+            .dismiss_repeat(login, task)
+            .map_err(|e| e.to_string())
     }
 }
 

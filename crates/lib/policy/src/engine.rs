@@ -400,10 +400,21 @@ pub fn people_only(action: &ActionName) -> bool {
 /// Actions only the person takes, in their own app, because they carry a
 /// secret only the person has (ADR 0037): an agent's call is Never,
 /// whatever its rules say.
-pub const PERSONS_OWN: &[&str] = &["mail.connect", "settings.models_connect"];
+pub const PERSONS_OWN: &[&str] = &[
+    "mail.connect",
+    "settings.models_connect",
+    // Starting a routine runs a task with the scope it was saved with,
+    // which the agent asking may not have; and what the person did twice
+    // is theirs to keep (ADR 0047).
+    "routines.run",
+    "routines.repeats",
+    "routines.keep",
+    "routines.dismiss",
+];
 
-const PERSONS_OWN_WHY: &str = "only the person connects their mail or their AI models, with \
-     their password or key, in Mail or Settings (ADR 0037, ADR 0039); no agent ever does, and \
+const PERSONS_OWN_WHY: &str = "only the person does it, in their own app: connecting their mail \
+     or their AI models with their password or key, in Mail or Settings (ADR 0037, ADR 0039), and \
+     starting their routines or keeping new ones, in Routines (ADR 0047); no agent ever does, and \
      those apps' own [[app]] tiers say what the person does there";
 
 fn is_persons_own(name: &str) -> bool {
@@ -967,6 +978,64 @@ mod tests {
             settings
                 .tier_for(&name("settings.models_connect"), Tier::Never)
                 .tier,
+            Tier::Auto
+        );
+    }
+
+    #[test]
+    fn adr0047_no_agent_starts_or_keeps_routines_and_the_routines_app_does() {
+        // The desktop agent's "routines.*" still leaves starting a routine
+        // and keeping what the person did twice at Never; pausing and
+        // rescheduling stay its, at their tiers.
+        let policy = Policy::from_toml(crate::DEFAULT_POLICY).unwrap();
+        let agent = policy
+            .effective("dana", &"desktop-agent".parse().unwrap())
+            .unwrap();
+        for action in [
+            "routines.run",
+            "routines.repeats",
+            "routines.keep",
+            "routines.dismiss",
+        ] {
+            let decision = agent.tier_for(&name(action), Tier::Auto);
+            assert_eq!(
+                (decision.tier, decision.source),
+                (Tier::Never, RuleSource::PersonsOwn),
+                "{action}"
+            );
+        }
+        assert_eq!(
+            agent.tier_for(&name("routines.pause"), Tier::Notify).tier,
+            Tier::Notify
+        );
+        assert_eq!(
+            agent.tier_for(&name("routines.schedule"), Tier::Ask).tier,
+            Tier::Ask
+        );
+        let declared = [
+            "routines.list",
+            "routines.run",
+            "routines.keep",
+            "routines.repeats",
+            "routines.pause",
+        ]
+        .map(name);
+        let app = policy.for_app(
+            "dana",
+            &"routines".parse().unwrap(),
+            &declared,
+            Label::Internal,
+        );
+        assert_eq!(
+            app.tier_for(&name("routines.run"), Tier::Notify).tier,
+            Tier::Auto
+        );
+        assert_eq!(
+            app.tier_for(&name("routines.keep"), Tier::Notify).tier,
+            Tier::Auto
+        );
+        assert_eq!(
+            app.tier_for(&name("routines.repeats"), Tier::Auto).tier,
             Tier::Auto
         );
     }

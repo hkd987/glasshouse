@@ -737,7 +737,15 @@ mod tests {
             "{:?}",
             docs.refusals
         );
-        for app in ["mail", "calendar", "chat", "settings", "store", "artifacts"] {
+        for app in [
+            "mail",
+            "calendar",
+            "chat",
+            "settings",
+            "store",
+            "artifacts",
+            "routines",
+        ] {
             let found = load(app);
             assert!(found.passed(), "{app}: {:?}", found.refusals);
         }

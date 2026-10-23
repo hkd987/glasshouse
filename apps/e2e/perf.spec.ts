@@ -65,6 +65,8 @@ for (const [app, use] of [
   ["artifacts", async (page: Page) => page.locator("[data-test=share]").click()],
   // Docs too; the console suite times opening a doc and live typing (docs.e2e.ts).
   ["docs", async (page: Page) => page.locator("[data-test=new-doc]").click()],
+  // Routines lists what runs for the person (ADR 0047).
+  ["routines", async (page: Page) => page.locator("[data-test=routines]").hover()],
 ] as const) {
   test(`ui7 ${app} launches cold in under 1 s and uses under 150 MB`, async ({ browser }) => {
     const launches: number[] = [];

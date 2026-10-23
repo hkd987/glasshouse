@@ -141,7 +141,7 @@ apps-build: apps/node_modules ## Build the web apps into apps/<app>/dist (esbuil
 apps-test: apps-build ## Apps: type check, unit tests, Playwright e2e (cold launch and memory budgets) on dev-host glassd
 	cd apps && npm run --silent typecheck
 	cd apps && npm run --silent test:unit
-	cargo build -p glassd -p glassctl -p glass-app-bridge
+	cargo build -p glassd -p glassctl -p glass-app-bridge -p glass-desktop-agent
 	cd apps && PLAYWRIGHT_BROWSERS_PATH=$(APPS_BROWSERS) npx playwright test -c e2e/playwright.config.ts
 
 apps-lint: apps/node_modules ## Apps: types, manifests (DV-3), npm licenses

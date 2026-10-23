@@ -301,9 +301,18 @@ fn test_registry(
     registry
 }
 
-/// People's routines, kept where glassd keeps them (DA-4).
+/// People's routines, kept where glassd keeps them (DA-4): one store per
+/// state, shared by the actions and the runtime, as in glassd.
 pub fn routines(dir: &Path) -> glass_app_routines::Routines {
-    glass_app_routines::Routines::new(dir.join("state/routines"))
+    static KEPT: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, glass_app_routines::Routines>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let root = dir.join("state/routines");
+    KEPT.lock()
+        .unwrap()
+        .entry(root.clone())
+        .or_insert_with(|| glass_app_routines::Routines::new(root))
+        .clone()
 }
 
 /// A harness whose policy is the default plus `policy_extra`, in which
@@ -389,6 +398,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
                 calendar_app(),
                 store_app(),
                 settings_app(),
+                routines_app(),
                 chat_app(),
                 meet_app(),
                 artifacts_app(),
@@ -722,6 +732,16 @@ pub fn settings_app() -> AppManifest {
         "id": "settings", "name": "Settings", "version": "0.1.0",
         "actions": ["settings.list", "settings.set"],
         "permissions": ["offline"], "labels": ["public"]
+    }))
+    .unwrap()
+}
+
+/// Routines as its manifest declares it (ADR 0047).
+pub fn routines_app() -> AppManifest {
+    serde_json::from_value(json!({
+        "id": "routines", "name": "Routines", "version": "0.1.0",
+        "actions": ["routines.list", "routines.read", "routines.run", "routines.pause", "routines.schedule", "routines.delete", "routines.repeats", "routines.keep", "routines.dismiss"],
+        "permissions": [], "labels": ["public", "internal"]
     }))
     .unwrap()
 }
