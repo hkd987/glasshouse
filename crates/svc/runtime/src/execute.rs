@@ -249,9 +249,20 @@ impl Runtime {
             }
         };
 
+        // A reversible step has the person's turn from its snapshot to its
+        // record: another task's write never lands in between (ADR 0051).
+        let _turn = match def.side_effect {
+            SideEffect::LocalReversible => Some(self.writing_turn(task.user.uid).await),
+            _ => None,
+        };
         let mut snapshot = None;
         if def.side_effect == SideEffect::LocalReversible && !preview.snapshot_roots.is_empty() {
-            let needed = verdict.tier() >= Tier::Notify || !task.covered(&preview.snapshot_roots);
+            // An Auto step makes do with the task's last snapshot while it
+            // still has the files as they are (AU-20); once another task
+            // changed one since, it takes its own (ADR 0051).
+            let needed = verdict.tier() >= Tier::Notify
+                || !task.covered(&preview.snapshot_roots)
+                || self.changed_by_others_since(task, &preview.snapshot_roots);
             if needed {
                 match self
                     .take_snapshot(
@@ -412,6 +423,7 @@ impl Runtime {
                         });
                     }
                     let at = Timestamp::now();
+                    let mut ids = Vec::new();
                     for change in output.changes {
                         let id = state.changes.len() as u32;
                         state.changes.push(ChangeEntry {
@@ -430,8 +442,9 @@ impl Runtime {
                         });
                         let paths = change.paths;
                         state.written.touched(id, Touched { paths, before });
+                        ids.push(id);
                     }
-                    state.written.note(seen);
+                    state.written.note_changes(&ids, seen);
                 }
                 self.publish(task);
                 Ok(CallToolResult::ok(output.text, output.data))
@@ -527,7 +540,10 @@ impl Runtime {
         };
         let back_to_work = |note: String| {
             let mut state = task.lock();
-            if state.tile == TileState::NeedsYou {
+            // Another of the task's asks may still be open: Needs you stays
+            // (AW-12). Read under the task lock, which an opening ask takes
+            // to say Needs you (the Approvals model, specs/tla).
+            if state.tile == TileState::NeedsYou && self.desk.pending_for_task(task.id).is_none() {
                 state.tile = TileState::Working;
             }
             state.note(ActivityKind::Approval, note);

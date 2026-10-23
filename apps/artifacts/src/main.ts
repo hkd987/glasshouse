@@ -1151,7 +1151,10 @@ async function live(): Promise<void> {
     try {
       const status = await bridge.status({ waitSecs: 25, since: state.cursor });
       state.cursor = status.cursor;
-      if (status.changed.includes("artifacts") && !state.busy) {
+      if (status.changed.includes("artifacts")) {
+        // A change while a comment is on its way is read once that ends,
+        // never dropped (NV-3, ADR 0051).
+        while (state.busy) await new Promise((resolve) => setTimeout(resolve, 200));
         await loadList();
         await loadArtifact();
         render();
@@ -1185,16 +1188,18 @@ async function start(): Promise<void> {
   } catch (error) {
     state.notice = { text: failure(error, "Artifacts"), tone: "bad" };
   }
-  await loadList();
-  const linked = deepLink(location.hash);
-  if (linked) await openArtifact(linked);
-  else render();
-  ready();
+  // The cursor before the first load, so a change in between is news
+  // (NV-3, ADR 0051).
   try {
     state.cursor = (await bridge.status()).cursor;
   } catch {
     // live() says so.
   }
+  await loadList();
+  const linked = deepLink(location.hash);
+  if (linked) await openArtifact(linked);
+  else render();
+  ready();
   void live();
 }
 

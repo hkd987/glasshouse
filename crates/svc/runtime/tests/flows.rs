@@ -426,18 +426,23 @@ async fn adr0047_the_person_keeps_runs_pauses_and_reschedules_what_they_did_twic
         (&json!(true), &Value::Null)
     );
     let me = h.me.clone();
-    let due = |rt: &std::sync::Arc<glass_runtime::Runtime>| {
-        rt.run_due_routines(glass_app_routines::Weekday::Friday, 17, 0, |_| {
-            Some(me.clone())
-        })
+    // Fridays at 17:00, a week apart: each its own minute.
+    let due = |rt: &std::sync::Arc<glass_runtime::Runtime>, week: i64| {
+        rt.run_due_routines(
+            glass_app_routines::Weekday::Friday,
+            17,
+            0,
+            week * 7 * 24 * 60,
+            |_| Some(me.clone()),
+        )
     };
-    assert!(due(&h.rt).is_empty(), "paused");
+    assert!(due(&h.rt, 1).is_empty(), "paused");
     app.ok(
         "routines.pause",
         json!({ "routine": "invoice-count", "paused": false }),
     )
     .await;
-    let scheduled = due(&h.rt);
+    let scheduled = due(&h.rt, 2);
     assert_eq!(scheduled.len(), 1);
     let scheduled = scheduled[0].1.as_ref().unwrap().id;
     let _agent = play(&h, scheduled).await;

@@ -118,6 +118,23 @@ struct Inner {
     /// When each person's folders last synced.
     fresh: Mutex<HashMap<(String, Role), Instant>>,
     homes: Mutex<BTreeMap<String, Home>>,
+    /// Drafts a call is sending or replacing now, by path.
+    taken: Mutex<BTreeSet<PathBuf>>,
+}
+
+/// Drafts one call has taken, until it ends.
+pub(crate) struct Taken<'a> {
+    handle: &'a MailHandle,
+    drafts: Vec<PathBuf>,
+}
+
+impl Drop for Taken<'_> {
+    fn drop(&mut self) {
+        let mut taken = lock(&self.handle.0.taken);
+        for draft in &self.drafts {
+            taken.remove(draft);
+        }
+    }
 }
 
 /// Mail on this computer, shared by glassd's watcher and the actions.
@@ -163,7 +180,28 @@ impl MailHandle {
             syncing: Mutex::new(HashMap::new()),
             fresh: Mutex::new(HashMap::new()),
             homes: Mutex::new(BTreeMap::new()),
+            taken: Mutex::new(BTreeSet::new()),
         }))
+    }
+
+    /// Takes `drafts` (paths) for one call while it sends or replaces
+    /// them, so each leaves once (DP-30, ADR 0051): refused, with the
+    /// index of the first, when another call has one or this call names
+    /// one twice.
+    pub(crate) fn take_drafts(&self, drafts: Vec<PathBuf>) -> Result<Taken<'_>, usize> {
+        let mut taken = lock(&self.0.taken);
+        let mut named = BTreeSet::new();
+        if let Some(i) = drafts
+            .iter()
+            .position(|d| taken.contains(d) || !named.insert(d))
+        {
+            return Err(i);
+        }
+        taken.extend(drafts.iter().cloned());
+        Ok(Taken {
+            handle: self,
+            drafts,
+        })
     }
 
     /// Mail goes through `remote` from now on (`[mail] service = "imap"`).
@@ -204,6 +242,14 @@ impl MailHandle {
     /// Calls `f` for what glassd should hear: mail that changed.
     pub fn on_notice(&self, f: impl Fn(&Notice) + Send + Sync + 'static) {
         lock(&self.0.listeners).push(Box::new(f));
+    }
+
+    /// Tells glassd `login`'s mail changed on this computer: an action
+    /// drafted, sent, filed or marked it.
+    pub(crate) fn changed(&self, login: &str) {
+        self.notify(&Notice::Changed {
+            login: login.to_owned(),
+        });
     }
 
     fn notify(&self, notice: &Notice) {
@@ -449,8 +495,8 @@ impl MailHandle {
             if uids.is_empty() {
                 continue;
             }
-            match remote.link.mark(&account, &name, &uids, seen) {
-                Ok(()) => {
+            match remote.link.mark(&account, &name, validity, &uids, seen) {
+                Ok(_) => {
                     for uid in &uids {
                         marks.remove(uid);
                         if seen {
@@ -529,11 +575,29 @@ impl MailHandle {
                     ))),
                     _ => remote
                         .link
-                        .mark(&account, &name, uids, seen)
-                        .map_err(SyncError::Link),
+                        .mark(&account, &name, validity, uids, seen)
+                        .map_err(|e| match e {
+                            LinkError::Refused(_) => SyncError::Local(format!(
+                                "{} changed on the server since it was listed; list it again",
+                                cache::dir(role)
+                            )),
+                            e => SyncError::Link(e),
+                        }),
                 });
             match told {
-                Ok(()) => return Ok(true),
+                Ok(found) => {
+                    // A mark of these still waiting is older: the server
+                    // has the newer one now (ADR 0051).
+                    self.forget_waiting(login, role, uids)?;
+                    if found.len() < uids.len() {
+                        return Err(SyncError::Local(format!(
+                            "it isn't in {} on the mail server any more (filed elsewhere, \
+                             perhaps on another device); list the folder again",
+                            cache::dir(role)
+                        )));
+                    }
+                    return Ok(true);
+                }
                 Err(SyncError::Link(e)) if e.is_offline() => {}
                 Err(e) => return Err(e),
             }
@@ -551,6 +615,66 @@ impl MailHandle {
         }
         self.save_state(login, &state)?;
         Ok(false)
+    }
+
+    /// The UIDVALIDITY `role` was last synced under, if it ever was.
+    pub(crate) fn synced_validity(&self, login: &str, role: Role) -> Option<u32> {
+        self.load_state(login)
+            .folders
+            .get(&role)
+            .and_then(|e| e.state)
+            .map(|s| s.uid_validity)
+    }
+
+    /// Marks of `uids` in `role` waiting for the server, gone: the server
+    /// has a newer one, or the message no longer has that UID here.
+    pub(crate) fn forget_waiting(
+        &self,
+        login: &str,
+        role: Role,
+        uids: &[u32],
+    ) -> Result<(), SyncError> {
+        let mut state = self.load_state(login);
+        let Some(entry) = state.folders.get_mut(&role) else {
+            return Ok(());
+        };
+        let before = entry.marks.len();
+        entry.marks.retain(|uid, _| !uids.contains(uid));
+        if entry.marks.len() == before {
+            return Ok(());
+        }
+        self.save_state(login, &state)
+    }
+
+    /// Tells the server of a mark of `uid` (under `validity`) in `role`
+    /// still waiting, before the message moves: the MOVE then takes the
+    /// flag with it, where a mark waiting under the old UID would be lost
+    /// (ADR 0051). The caller holds [`Self::person_lock`].
+    pub(crate) fn tell_waiting(
+        &self,
+        login: &str,
+        role: Role,
+        validity: u32,
+        uid: u32,
+    ) -> Result<(), SyncError> {
+        let waiting = self
+            .load_state(login)
+            .folders
+            .get(&role)
+            .filter(|e| e.state.is_some_and(|s| s.uid_validity == validity))
+            .and_then(|e| e.marks.get(&uid).copied());
+        let Some(seen) = waiting else {
+            return Ok(());
+        };
+        let (remote, account) = self.account(login).ok_or(SyncError::NotConnected)?;
+        let (name, _) = self.folder(login, &remote, &account, role)?;
+        match remote.link.mark(&account, &name, validity, &[uid], seen) {
+            Ok(_) => {}
+            Err(e) if e.is_offline() => return Err(SyncError::Link(e)),
+            // Refused: the server's state stands.
+            Err(_) => {}
+        }
+        self.forget_waiting(login, role, &[uid])
     }
 
     /// The people whose mail glassd watches: signed in, with a home seen.

@@ -7,7 +7,13 @@
 //! written as them, so task undo restores it like any file a call changed.
 //! Writing it by hand only picks among versions that were saved through
 //! the approval. Its last runs are glassd's record, beside its versions
-//! (`runs.json`, ADR 0047).
+//! (`runs.json`, ADR 0047), with the runs going now (`.running.json`) so a
+//! run a restart cut off is kept too.
+//!
+//! Every change to the choices file reads and writes it under one lock,
+//! and a scheduled start checks it under the same lock, so no call's
+//! change is lost to another's and a routine paused is never started by
+//! its schedule after (ADR 0051).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -70,6 +76,23 @@ struct Mine {
 pub const KEPT_RUNS: usize = 20;
 const MAX_RUNS_BYTES: u64 = 256 * 1024;
 const RUNS: &str = "runs.json";
+/// The runs of a routine going now: kept at their end, or as cut off when
+/// glassd starts and finds them here.
+const RUNNING: &str = ".running.json";
+/// The last local minute the schedule started routines in, under the root.
+const SCHEDULED: &str = ".scheduled";
+/// What a run a restart cut off says.
+pub const CUT_OFF: &str = "This computer restarted during the run.";
+
+/// One change to a person's choices file at a time, in this process.
+static CHOICES: Mutex<()> = Mutex::new(());
+
+/// Runs `f` while no choices file changes: a scheduled start checks what
+/// the person chose and starts in one step (ADR 0051).
+pub fn locked<T>(f: impl FnOnce() -> T) -> T {
+    let _one = CHOICES.lock().unwrap_or_else(PoisonError::into_inner);
+    f()
+}
 
 /// One run of a routine, as it ended (ADR 0047).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -194,7 +217,8 @@ impl Routines {
     }
 
     /// Keeps `run` first among `login`'s routine `id`'s runs, at most
-    /// [`KEPT_RUNS`] of them. A routine never saved has nowhere to keep it.
+    /// [`KEPT_RUNS`] of them, and no longer as going. A routine never
+    /// saved has nowhere to keep it.
     pub fn record_run(&self, login: &str, id: &str, run: Run) -> io::Result<()> {
         let _one_at_a_time = self.saving.lock().unwrap_or_else(PoisonError::into_inner);
         let dir = self
@@ -203,11 +227,70 @@ impl Routines {
             .ok_or_else(|| io::Error::other("not a routine kept here"))?;
         let mut runs = self.runs(login, id);
         runs.retain(|r| r.task != run.task);
+        let task = run.task;
         runs.insert(0, run);
         runs.truncate(KEPT_RUNS);
-        let staged = dir.join(format!(".{RUNS}.new"));
-        std::fs::write(&staged, serde_json::to_vec(&runs)?)?;
-        std::fs::rename(staged, dir.join(RUNS))
+        write_json(&dir, RUNS, &runs)?;
+        let mut going = read_json::<Vec<Run>>(&dir.join(RUNNING));
+        if going.iter().any(|r| r.task == task) {
+            going.retain(|r| r.task != task);
+            write_json(&dir, RUNNING, &going)?;
+        }
+        Ok(())
+    }
+
+    /// Notes `run` as going, so if glassd stops before its end the run is
+    /// still kept ([`Routines::recover`]).
+    pub fn run_started(&self, login: &str, id: &str, run: Run) -> io::Result<()> {
+        let _one_at_a_time = self.saving.lock().unwrap_or_else(PoisonError::into_inner);
+        let dir = self
+            .dir(login, id)
+            .filter(|dir| dir.is_dir())
+            .ok_or_else(|| io::Error::other("not a routine kept here"))?;
+        let mut going = read_json::<Vec<Run>>(&dir.join(RUNNING));
+        going.retain(|r| r.task != run.task);
+        going.push(run);
+        write_json(&dir, RUNNING, &going)
+    }
+
+    /// At glassd's start: the runs that were going when it stopped are
+    /// kept as cut off, failed. How many.
+    pub fn recover(&self) -> usize {
+        let mut kept = 0;
+        for login in self.logins() {
+            for id in self.ids(&login) {
+                let Some(dir) = self.dir(&login, &id) else {
+                    continue;
+                };
+                let going = read_json::<Vec<Run>>(&dir.join(RUNNING));
+                for mut run in going {
+                    run.ended_at = Timestamp::now();
+                    run.outcome = Outcome::Failed;
+                    run.said = CUT_OFF.to_owned();
+                    if self.record_run(&login, &id, run).is_ok() {
+                        kept += 1;
+                    }
+                }
+            }
+        }
+        kept
+    }
+
+    /// Claims the local minute `minute` (`local_minute`'s number) for the
+    /// schedule: false when it, or a later one, was claimed already, here
+    /// or before a restart. A clock set back, or a minute that comes again
+    /// when daylight saving ends, starts nothing twice (ADR 0051).
+    pub fn claim_minute(&self, minute: i64) -> io::Result<bool> {
+        let _one_at_a_time = self.saving.lock().unwrap_or_else(PoisonError::into_inner);
+        let last: Option<i64> = std::fs::read_to_string(self.root.join(SCHEDULED))
+            .ok()
+            .and_then(|text| text.trim().parse().ok());
+        if last.is_some_and(|last| minute <= last) {
+            return Ok(false);
+        }
+        std::fs::create_dir_all(&self.root)?;
+        write_json(&self.root, SCHEDULED, &minute)?;
+        Ok(true)
     }
 
     /// Keeps `routine` as the next version of its id, numbered here, and
@@ -275,6 +358,23 @@ pub fn chosen(home: &Path) -> BTreeMap<String, u32> {
     mine(home).routines
 }
 
+/// `f`'s change to the versions `home`'s person uses, read and written
+/// under the choices lock. The routines they no longer have aren't paused
+/// either.
+pub fn change<T>(
+    home: &Path,
+    owner: Owner,
+    f: impl FnOnce(&mut BTreeMap<String, u32>) -> io::Result<T>,
+) -> io::Result<T> {
+    let _one = CHOICES.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut mine = mine(home);
+    let done = f(&mut mine.routines)?;
+    let routines = &mine.routines;
+    mine.paused.retain(|id| routines.contains_key(id));
+    write_mine(home, owner, &mine)?;
+    Ok(done)
+}
+
 /// Those of `home`'s person's routines whose schedule they paused.
 pub fn paused(home: &Path) -> BTreeSet<String> {
     let mine = mine(home);
@@ -287,13 +387,15 @@ pub fn paused(home: &Path) -> BTreeSet<String> {
 /// Writes the person's choices through their confined home, as them. The
 /// routines they no longer have aren't paused either.
 pub fn choose(home: &Path, owner: Owner, routines: BTreeMap<String, u32>) -> io::Result<()> {
-    let mut paused = mine(home).paused;
-    paused.retain(|id| routines.contains_key(id));
-    write_mine(home, owner, &Mine { routines, paused })
+    change(home, owner, |chosen| {
+        *chosen = routines;
+        Ok(())
+    })
 }
 
 /// Pauses the schedule of `home`'s person's routine `id`, or resumes it.
 pub fn pause(home: &Path, owner: Owner, id: &str, on: bool) -> io::Result<()> {
+    let _one = CHOICES.lock().unwrap_or_else(PoisonError::into_inner);
     let mut mine = mine(home);
     if !mine.routines.contains_key(id) {
         return Err(io::Error::new(io::ErrorKind::NotFound, "not one of theirs"));
@@ -304,6 +406,23 @@ pub fn pause(home: &Path, owner: Owner, id: &str, on: bool) -> io::Result<()> {
         mine.paused.remove(id);
     }
     write_mine(home, owner, &mine)
+}
+
+/// glassd's own JSON, read whole; missing or unreadable: the default.
+fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+    std::fs::metadata(path)
+        .ok()
+        .filter(|m| m.len() <= MAX_RUNS_BYTES)
+        .and_then(|_| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Writes glassd's own JSON in `dir`, staged then renamed into place.
+fn write_json(dir: &Path, name: &str, value: &impl Serialize) -> io::Result<()> {
+    let staged = dir.join(format!(".{}.new", name.trim_start_matches('.')));
+    std::fs::write(&staged, serde_json::to_vec(value)?)?;
+    std::fs::rename(staged, dir.join(name))
 }
 
 fn write_mine(home: &Path, owner: Owner, mine: &Mine) -> io::Result<()> {

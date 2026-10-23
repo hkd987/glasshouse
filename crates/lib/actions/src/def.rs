@@ -147,14 +147,17 @@ pub trait ActionProvider: Send + Sync + fmt::Debug {
     }
 
     /// Puts back what undo can't restore from snapshots, for one reversible
-    /// change `action` made: a message moved on the person's mail server
-    /// (ADR 0037). Undo calls it after the change's files are back, with
-    /// the change's host paths, and lists the change as not undone when it
-    /// fails. The default has nothing more to put back.
+    /// change `action` made: a message moved or marked on the person's mail
+    /// server (ADR 0037, 0050). Undo calls it after the change's files are
+    /// back, with the change's kind and host paths, and lists the change as
+    /// not undone when it fails. The kind says what the change did, which
+    /// its files may no longer show by then (ADR 0051). The default has
+    /// nothing more to put back.
     fn revert(
         &self,
         _ctx: &TaskContext,
         _action: &ActionName,
+        _kind: ChangeKind,
         _paths: &[PathBuf],
     ) -> Result<(), ActionError> {
         Ok(())

@@ -9,7 +9,9 @@ mod event;
 mod log;
 
 pub use event::{ApprovalRef, AuditEvent, EventKind, Outcome, PolicyDecision};
-pub use log::{AuditError, AuditLog, AuditRecord, Durability, GENESIS, VerifyReport, read, verify};
+pub use log::{
+    AuditError, AuditLog, AuditRecord, Durability, GENESIS, VerifyReport, read, read_since, verify,
+};
 
 #[cfg(test)]
 mod tests {
@@ -44,6 +46,70 @@ mod tests {
         assert_eq!(records[0].prev, GENESIS);
         assert_eq!(records.iter().map(|r| r.seq).collect::<Vec<_>>(), [0, 1, 2]);
         assert_eq!(records[2].event.summary, "three");
+    }
+
+    #[test]
+    fn a_tasks_records_come_from_the_index_as_a_whole_read_finds_them() {
+        // The speed audit (ADR 0051): a task's records without reading the
+        // whole log, the same as a whole read, before and after appends.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let (a, b) = (TaskId::new(), TaskId::new());
+        let log = AuditLog::open(&path, Durability::Buffered).unwrap();
+        let on = |task: TaskId, summary: &str| {
+            let mut e = event(summary);
+            e.task = Some(task);
+            e
+        };
+        for i in 0..5 {
+            log.append(on(a, &format!("a{i}"))).unwrap();
+            log.append(on(b, &format!("b{i}"))).unwrap();
+            log.append(event("no task")).unwrap();
+        }
+        let whole = |task: TaskId| read(&path, |r| r.event.task == Some(task)).unwrap();
+        assert_eq!(log.task_records(a).unwrap(), whole(a));
+        // Appends after the index is built are found too.
+        log.append(on(b, "b5")).unwrap();
+        let found = log.task_records(b).unwrap();
+        assert_eq!(found, whole(b));
+        assert_eq!(found.last().unwrap().event.summary, "b5");
+        assert!(log.task_records(TaskId::new()).unwrap().is_empty());
+        // Reopened, the index is built afresh from the file.
+        drop(log);
+        let log = AuditLog::open(&path, Durability::Buffered).unwrap();
+        log.append(on(a, "a5")).unwrap();
+        assert_eq!(log.task_records(a).unwrap(), whole(a));
+        assert_eq!(log.task_records(a).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn the_last_day_is_read_from_the_end_as_a_whole_read_finds_it() {
+        // The speed audit (ADR 0051): glassd's report counts the last day's
+        // blocked actions every minute; across many chunks, the same as a
+        // read of the whole log.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let log = AuditLog::open(&path, Durability::Buffered).unwrap();
+        for i in 0..3_000 {
+            let mut e = event(&format!("record {i} {}", "x".repeat(i % 97)));
+            if i % 7 == 0 {
+                e.outcome = Some(Outcome::Blocked);
+            }
+            log.append(e).unwrap();
+        }
+        assert!(std::fs::metadata(&path).unwrap().len() > 4 * 64 * 1024);
+        let blocked = |r: &AuditRecord| r.event.outcome == Some(Outcome::Blocked);
+        let since = read(&path, |_| true).unwrap()[0].ts.unix_seconds();
+        assert_eq!(
+            read_since(&path, since, blocked).unwrap(),
+            read(&path, blocked).unwrap()
+        );
+        assert_eq!(read_since(&path, since, |_| true).unwrap().len(), 3_000);
+        assert!(
+            read_since(&path, since + 3_600, |_| true)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

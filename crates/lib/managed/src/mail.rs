@@ -206,6 +206,10 @@ pub enum LinkError {
     /// The server refused the request, and says why.
     #[error("{0}")]
     Refused(String),
+    /// It may or may not have happened: the request went whole and its
+    /// answer never came, as when a send's last reply is lost (ADR 0051).
+    #[error("{0}")]
+    Unknown(String),
 }
 
 impl LinkError {
@@ -242,11 +246,30 @@ pub trait MailLink: Send + Sync + fmt::Debug {
     /// Files `message` in `folder`, marked `\Seen`. The UID it got there,
     /// when the server says (UIDPLUS).
     fn append(&self, account: &Account, folder: &str, message: &[u8]) -> Result<Option<u32>>;
-    /// Moves a message to another folder. Its UID there, when the server
-    /// says (UIDPLUS).
-    fn move_to(&self, account: &Account, from: &str, uid: u32, to: &str) -> Result<Option<u32>>;
-    /// Marks messages in `folder` read (`\Seen`) or unread (ADR 0050).
-    fn mark(&self, account: &Account, folder: &str, uids: &[u32], seen: bool) -> Result<()>;
+    /// Moves a message to another folder: `uid` as numbered under
+    /// `uid_validity`, refused when the folder has another now (another
+    /// message may have that UID). Its UID there, when the server says
+    /// (UIDPLUS).
+    fn move_to(
+        &self,
+        account: &Account,
+        from: &str,
+        uid_validity: u32,
+        uid: u32,
+        to: &str,
+    ) -> Result<Option<u32>>;
+    /// Marks messages in `folder` read (`\Seen`) or unread (ADR 0050):
+    /// `uids` as numbered under `uid_validity`, refused when the folder has
+    /// another now. The UIDs it found there and marked; one it didn't find
+    /// left the folder (ADR 0051).
+    fn mark(
+        &self,
+        account: &Account,
+        folder: &str,
+        uid_validity: u32,
+        uids: &[u32],
+        seen: bool,
+    ) -> Result<Vec<u32>>;
     /// Waits up to `timeout` for `folder` to change (IMAP IDLE); whether it
     /// did. A link that can't wait returns `Ok(false)` at once.
     fn wait(&self, _account: &Account, _folder: &str, _timeout: Duration) -> Result<bool> {
@@ -283,6 +306,8 @@ pub mod testing {
     pub struct MemoryLink {
         kept: Mutex<Kept>,
         offline: AtomicBool,
+        /// The next submission is taken but its answer lost.
+        lose_reply: AtomicBool,
     }
 
     const FOLDERS: [&str; 6] = ["INBOX", "Drafts", "Sent", "Archive", "Junk", "Trash"];
@@ -309,7 +334,14 @@ pub mod testing {
                     password: password.to_owned(),
                 }),
                 offline: AtomicBool::new(false),
+                lose_reply: AtomicBool::new(false),
             }
+        }
+
+        /// The next message submitted is taken, and the answer to it lost
+        /// on the way back (ADR 0051).
+        pub fn lose_next_reply(&self) {
+            self.lose_reply.store(true, Ordering::SeqCst);
         }
 
         /// Out of reach, or back.
@@ -336,6 +368,26 @@ pub mod testing {
                 .unwrap_or_else(|e| e.into_inner())
                 .submitted
                 .clone()
+        }
+
+        /// `folder` numbered afresh, as a server does when a mailbox is
+        /// recreated: a new UIDVALIDITY, and its mail renumbered from 1 in
+        /// order. The new UIDs, oldest first.
+        pub fn renumber(&self, folder: &str) -> Vec<u32> {
+            let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+            let f = kept.folders.entry(folder.to_owned()).or_default();
+            f.uid_validity += 100;
+            let old = std::mem::take(&mut f.messages);
+            let seen = std::mem::take(&mut f.seen);
+            for (i, (uid, raw)) in old.into_iter().enumerate() {
+                let new = i as u32 + 1;
+                f.messages.insert(new, raw);
+                if seen.contains(&uid) {
+                    f.seen.insert(new);
+                }
+            }
+            f.uid_next = f.messages.len() as u32 + 1;
+            f.messages.keys().copied().collect()
         }
 
         /// The UIDs in `folder` marked read.
@@ -381,6 +433,19 @@ pub mod testing {
         LinkError::Refused(format!("there's no folder {folder:?}"))
     }
 
+    /// Refused, as a server's UIDVALIDITY check would: `folder` was
+    /// numbered afresh since the caller's UIDs.
+    fn renumbered(folder: &str, f: &Folder, uid_validity: u32) -> Result<()> {
+        if f.uid_validity == uid_validity {
+            Ok(())
+        } else {
+            Err(LinkError::Refused(format!(
+                "{folder} was numbered afresh (UIDVALIDITY {} now)",
+                f.uid_validity
+            )))
+        }
+    }
+
     impl MailLink for MemoryLink {
         fn check(&self, account: &Account) -> Result<()> {
             self.reach(account).map(drop)
@@ -415,19 +480,15 @@ pub mod testing {
                 exists: f.messages.len() as u32,
             };
             let reset = since.is_some_and(|s| s.uid_validity != f.uid_validity);
-            let after = match since {
-                Some(s) if !reset => s.uid_next,
-                _ => 0,
-            };
+            // Everything the computer lacks, not only what's new since
+            // UIDNEXT: what it lost comes back too (ADR 0051).
+            let resuming = since.is_some() && !reset;
             let mut new: Vec<RemoteMessage> = f
                 .messages
-                .range(after..)
+                .iter()
+                .filter(|(uid, _)| !resuming || !known.contains(uid))
                 .rev()
-                .take(if since.is_some() && !reset {
-                    usize::MAX
-                } else {
-                    limits.newest
-                })
+                .take(if resuming { usize::MAX } else { limits.newest })
                 .map(|(uid, raw)| {
                     let truncated = raw.len() as u64 > limits.max_bytes;
                     RemoteMessage {
@@ -479,6 +540,12 @@ pub mod testing {
                 outgoing.to.to_vec(),
                 outgoing.message.to_vec(),
             ));
+            if self.lose_reply.swap(false, Ordering::SeqCst) {
+                return Err(LinkError::Unknown(format!(
+                    "{} took the whole message but its answer never came",
+                    account.outgoing.host
+                )));
+            }
             Ok(Submitted {
                 reply: format!("250 2.0.0 queued as m{}", kept.submitted.len()),
             })
@@ -502,6 +569,7 @@ pub mod testing {
             &self,
             account: &Account,
             from: &str,
+            uid_validity: u32,
             uid: u32,
             to: &str,
         ) -> Result<Option<u32>> {
@@ -510,6 +578,7 @@ pub mod testing {
                 return Err(missing(to));
             }
             let source = kept.folders.get_mut(from).ok_or_else(|| missing(from))?;
+            renumbered(from, source, uid_validity)?;
             let message = source
                 .messages
                 .remove(&uid)
@@ -526,20 +595,33 @@ pub mod testing {
             Ok(Some(new))
         }
 
-        fn mark(&self, account: &Account, folder: &str, uids: &[u32], seen: bool) -> Result<()> {
+        fn mark(
+            &self,
+            account: &Account,
+            folder: &str,
+            uid_validity: u32,
+            uids: &[u32],
+            seen: bool,
+        ) -> Result<Vec<u32>> {
             let mut kept = self.reach(account)?;
             let f = kept
                 .folders
                 .get_mut(folder)
                 .ok_or_else(|| missing(folder))?;
-            for uid in uids.iter().filter(|u| f.messages.contains_key(u)) {
+            renumbered(folder, f, uid_validity)?;
+            let found: Vec<u32> = uids
+                .iter()
+                .copied()
+                .filter(|u| f.messages.contains_key(u))
+                .collect();
+            for uid in &found {
                 if seen {
                     f.seen.insert(*uid);
                 } else {
                     f.seen.remove(uid);
                 }
             }
-            Ok(())
+            Ok(found)
         }
     }
 
@@ -593,7 +675,7 @@ pub mod testing {
             let first = link.sync(&a, "INBOX", None, &[], limits).unwrap();
             assert_eq!(first.new.len(), 1);
             let two = link.deliver("INBOX", b"Subject: two\r\n\r\nx\r\n");
-            link.move_to(&a, "INBOX", one, "Archive").unwrap();
+            link.move_to(&a, "INBOX", 1000, one, "Archive").unwrap();
             let next = link
                 .sync(&a, "INBOX", Some(&first.state), &[one], limits)
                 .unwrap();

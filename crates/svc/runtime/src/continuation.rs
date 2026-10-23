@@ -78,8 +78,10 @@ impl Runtime {
                 state.caption = "You finished in your harness".into();
             }
             state.progress = None;
+            state.sleeping = None;
+            // With the tile, under its lock, as end_task does.
+            task.gate.send_replace(Gate::Ended);
         }
-        task.gate.send_replace(Gate::Ended);
         self.desk.end_task(task.id);
         if let Some(stop) = task.stop.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = stop.send(());

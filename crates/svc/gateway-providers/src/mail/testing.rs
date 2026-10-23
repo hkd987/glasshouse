@@ -164,7 +164,21 @@ impl Mox {
             .append(&account, "Inbox", message)
             .expect("mox takes the message")
             .expect("mox gives its UID");
-        link.mark(&account, "Inbox", &[uid], false)
+        let validity = link
+            .sync(
+                &account,
+                "Inbox",
+                None,
+                &[],
+                SyncLimits {
+                    newest: 0,
+                    max_bytes: 0,
+                },
+            )
+            .expect("mox answers")
+            .state
+            .uid_validity;
+        link.mark(&account, "Inbox", validity, &[uid], false)
             .expect("mox marks it unread");
         uid
     }

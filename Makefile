@@ -29,7 +29,7 @@ export DIST_PROFILE := $(FREEBSD_PROFILE)
 .PHONY: help build check test lint lint-all fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
 	test-env image-release legal-base ci clean shell shell-test shell-lint shell-preview shell-vm greeter-vm \
 	apps-build apps-test apps-lint apps-dev freebsd-ports \
-	console-dev console-test console-lint meet-test
+	console-dev console-test console-lint meet-test tla
 
 help: ## List targets
 	@grep -hE '^[a-zA-Z0-9_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -185,7 +185,10 @@ console-lint: apps/node_modules ## Admin console: clippy, types, and no base-sys
 	@! grep -rIil freebsd apps/console/src apps/console/index.html crates/bin/glass-console/src || \
 		{ echo "console-lint: BR-1: the files above name the base system"; exit 1; }
 
-ci: lint-all test shell-lint shell-test apps-lint apps-test console-lint console-test ## What CI runs on every change
+tla: ## Model-check the TLA+ models of key workflows (specs/tla, ADR 0051) with TLC
+	tools/dev/tla.sh check
+
+ci: lint-all test tla shell-lint shell-test apps-lint apps-test console-lint console-test ## What CI runs on every change
 
 clean: ## Remove build outputs (keeps downloaded FreeBSD images in build/cache)
 	cargo clean

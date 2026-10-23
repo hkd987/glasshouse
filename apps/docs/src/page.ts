@@ -1382,15 +1382,17 @@ export async function mount(into: HTMLElement, with_: Bridge): Promise<void> {
   } catch (error) {
     state.notice = { text: failure(error, "Docs"), tone: "bad" };
   }
-  await loadList();
-  const linked = deepLink(location.hash);
-  if (linked) await openDoc(linked);
-  else render();
-  ready();
+  // The cursor before the first load, so a change in between is news
+  // (NV-3, ADR 0051).
   try {
     state.cursor = (await bridge.status()).cursor;
   } catch {
     // news() says so.
   }
+  await loadList();
+  const linked = deepLink(location.hash);
+  if (linked) await openDoc(linked);
+  else render();
+  ready();
   void news();
 }

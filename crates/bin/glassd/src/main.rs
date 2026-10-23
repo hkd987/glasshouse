@@ -560,7 +560,9 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
 
     // People's routines start on their schedules (DA-4), in this computer's
     // local time, each as the person it belongs to. A minute the computer
-    // slept through doesn't run late.
+    // slept through doesn't run late, and one that comes again (a restart,
+    // the clock set back, daylight saving ending) doesn't run twice: the
+    // runtime claims each minute on disk (ADR 0051).
     runtime.set_routines(org.routines.clone());
     {
         let runtime = Arc::clone(&runtime);
@@ -577,10 +579,10 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
                     continue;
                 }
                 let offset = glass_platform::system::utc_offset_secs().unwrap_or(0);
-                let (day, hour, minute, _) = glass_app_routines::local_minute(now, offset);
+                let (day, hour, minute, number) = glass_app_routines::local_minute(now, offset);
                 let runtime = Arc::clone(&runtime);
                 let started = tokio::task::spawn_blocking(move || {
-                    runtime.run_due_routines(day, hour, minute, |login| {
+                    runtime.run_due_routines(day, hour, minute, number, |login| {
                         runtime.caller(glass_platform::users::by_name(login)?.uid)
                     })
                 })

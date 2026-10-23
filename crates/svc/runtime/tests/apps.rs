@@ -198,6 +198,52 @@ agents = []
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn nv3_an_open_app_hears_what_changed_across_a_restart_of_glassd() {
+    // The live-updates model's counterexample (ADR 0051): a restarted
+    // glassd counted from 0 again, so the cursor a page kept from before
+    // was ahead of the changes after, and a change the last run made and
+    // never said was lost; the page waited on, out of date.
+    let before = harness();
+    let socket = before.serve_apps();
+    let apps = Client::connect(&socket).await.unwrap();
+    let session = open(&apps, "calendar").await.session;
+    for _ in 0..3 {
+        before.rt.app_changed(&before.me.name, "calendar");
+    }
+    let kept = status(&apps, session).await.cursor;
+    drop(apps);
+    drop(before);
+
+    // glassd again; the bridge opens the page's session again and relays
+    // its wait as it was.
+    let after = harness();
+    let socket = after.serve_apps();
+    let apps = Client::connect(&socket).await.unwrap();
+    let session = open(&apps, "calendar").await.session;
+    after.rt.app_changed(&after.me.name, "calendar");
+    let started = std::time::Instant::now();
+    let woke: AppStatus = apps
+        .call(
+            app_methods::APP_STATUS,
+            json!({ "session": session, "wait_secs": 5, "since": kept }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(woke.changed, ["calendar"]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(woke.cursor > kept, "its next wait hears what comes next");
+    // From there it waits as before: nothing new, nothing said.
+    let quiet: AppStatus = apps
+        .call(
+            app_methods::APP_STATUS,
+            json!({ "session": session, "wait_secs": 1, "since": woke.cursor }),
+        )
+        .await
+        .unwrap();
+    assert!(quiet.changed.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ad3_dv3_a_policy_it_publishes_reaches_an_app_already_open() {
     // Calendar is open, as it stays all day; IT then makes adding events
     // Never for this person's group. The open app's next call is refused,

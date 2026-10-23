@@ -621,6 +621,54 @@ fn messages(h: &Harness, folder: &str) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn em3_undoing_a_move_puts_the_message_back_as_read_as_it_was() {
+    // The mail model's counterexample (ADR 0051), through the real undo:
+    // a move names the read markers too, so undo puts them back.
+    let h = harness_with("");
+    directory(&h);
+    let name = "1792400000-0-renewal.eml";
+    for dir in ["Mail/Inbox/.read", "Mail/Archive/.read"] {
+        std::fs::create_dir_all(h.home().join(dir)).unwrap();
+    }
+    std::fs::write(
+        h.home().join("Mail/Inbox").join(name),
+        inbox_message("Renewal"),
+    )
+    .unwrap();
+    // The person read it before the agent filed it away.
+    std::fs::write(h.home().join("Mail/Inbox/.read").join(name), "").unwrap();
+    let (task, agent) = claude_code(&h).await;
+    let moved = tool(
+        &agent,
+        "mail_move",
+        json!({ "ids": [format!("inbox/{name}")], "to": "archive" }),
+    )
+    .await;
+    assert!(!moved.is_error, "{}", moved.text());
+    assert!(h.home().join("Mail/Archive/.read").join(name).exists());
+
+    let report =
+        h.rt.undo(
+            &h.me,
+            glass_api::UndoRequest {
+                task,
+                to: None,
+                changes: Vec::new(),
+                dry_run: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(report.not_undone.is_empty(), "{report:?}");
+    assert!(h.home().join("Mail/Inbox").join(name).exists());
+    assert!(
+        h.home().join("Mail/Inbox/.read").join(name).exists(),
+        "read, as it was"
+    );
+    assert!(!h.home().join("Mail/Archive/.read").join(name).exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn em3_an_agents_mark_tells_the_person_and_undo_marks_it_back_on_the_server() {
     let Some(mox) = Mox::start() else { return };
     let uid = mox.deliver(&inbox_message("Renewal"));

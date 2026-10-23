@@ -27,6 +27,12 @@ impl Runtime {
             runtime: Arc::downgrade(self),
             tokio: tokio::runtime::Handle::try_current().ok(),
         }));
+        // Runs going when glassd last stopped ended with it: kept as cut
+        // off (ADR 0051).
+        let cut_off = routines.recover();
+        if cut_off > 0 {
+            tracing::info!(cut_off, "kept the routine runs a restart cut off");
+        }
         let _ = self.routines.set(routines);
     }
 
@@ -87,7 +93,23 @@ impl Runtime {
         self.start_routine(caller, id, false)
     }
 
+    /// Starts a routine as its own task. What the person chose is checked
+    /// and the run started in one step under the choices lock (ADR 0051):
+    /// a routine runs one at a time, and its schedule never starts one the
+    /// person paused, whatever they do meanwhile.
     fn start_routine(
+        self: &Arc<Self>,
+        caller: &Caller,
+        id: &str,
+        scheduled: bool,
+    ) -> Result<TaskView> {
+        let started = store::locked(|| self.start_routine_locked(caller, id, scheduled))?;
+        // Routines' windows show it running.
+        self.app_changed(&caller.name, APP);
+        Ok(started)
+    }
+
+    fn start_routine_locked(
         self: &Arc<Self>,
         caller: &Caller,
         id: &str,
@@ -97,6 +119,19 @@ impl Runtime {
         let routine = version
             .and_then(|v| self.routines.get()?.record(&caller.name, id, v))
             .ok_or_else(|| RuntimeError::NotFound(format!("you have no routine {id}")))?;
+        if let Some(task) = self.routines_running(&caller.name).get(id) {
+            return Err(RuntimeError::Conflict(format!(
+                "{} is running now (task {}): a routine runs one at a time",
+                routine.name,
+                task.short()
+            )));
+        }
+        if scheduled && store::paused(&caller.home).contains(id) {
+            return Err(RuntimeError::Conflict(format!(
+                "{} is paused: it runs only when started",
+                routine.name
+            )));
+        }
         // The request it was saved with, as a new task: policy and the
         // folders' access are checked again, as for any start.
         let request = TaskRequest {
@@ -110,13 +145,29 @@ impl Runtime {
             title: Some(routine.name.clone()),
         };
         let run = RoutineRun {
-            id: routine.id,
+            id: routine.id.clone(),
             version: routine.version,
             scheduled,
         };
         let started = self.start_task(caller, request, Origin::Routine(run))?;
-        // Routines' windows show it running.
-        self.app_changed(&caller.name, APP);
+        // Going: kept even if glassd stops before its end.
+        if let Some(routines) = self.routines.get() {
+            let now = Timestamp::now();
+            let going = Run {
+                task: started.id,
+                version: routine.version,
+                scheduled,
+                started_at: now,
+                ended_at: now,
+                outcome: Outcome::Failed,
+                model: false,
+                said: String::new(),
+                changes: 0,
+            };
+            if let Err(e) = routines.run_started(&caller.name, &routine.id, going) {
+                tracing::warn!(task = %started.id, routine = %routine.id, "noting the routine's run: {e}");
+            }
+        }
         Ok(started)
     }
 
@@ -137,16 +188,30 @@ impl Runtime {
     /// on `day`, in local time, as the person it belongs to (`person` finds
     /// them by login; someone it can't find has none). glassd calls it once
     /// a minute. Returns each start, or why it couldn't.
+    ///
+    /// `local_minute` is that minute's number (`local_minute`'s): it is
+    /// claimed first, on disk, so a minute starts its routines once,
+    /// whether glassd restarts in it or the clock comes back to it (set
+    /// back, or daylight saving ending) (ADR 0051).
     pub fn run_due_routines(
         self: &Arc<Self>,
         day: Weekday,
         hour: u8,
         minute: u8,
+        local_minute: i64,
         person: impl Fn(&str) -> Option<Caller>,
     ) -> Vec<(String, Result<TaskView>)> {
         let Some(routines) = self.routines.get() else {
             return Vec::new();
         };
+        match routines.claim_minute(local_minute) {
+            Ok(true) => {}
+            Ok(false) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!("claiming the schedule's minute: {e}; nothing starts in it");
+                return Vec::new();
+            }
+        }
         let mut started = Vec::new();
         for login in routines.logins() {
             let Some(caller) = person(&login).filter(|c| c.name == login) else {
@@ -224,6 +289,14 @@ impl Host for RoutinesHost {
         if let Some(runtime) = self.runtime.upgrade() {
             runtime.app_changed(login, APP);
         }
+    }
+
+    fn run_of(&self, task: TaskId) -> Option<(String, u32)> {
+        let runtime = self.runtime.upgrade()?;
+        let task = runtime.tasks().get(&task).cloned()?;
+        task.routine
+            .as_ref()
+            .map(|run| (run.id.clone(), run.version))
     }
 }
 

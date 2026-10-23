@@ -19,3 +19,6 @@ __pycache__/
 
 # The desktop shell workspace (shell/README.md).
 /shell/target/
+
+# TLC's working files when a model is checked by hand (tools/dev/tla.sh tlc)
+specs/tla/states/

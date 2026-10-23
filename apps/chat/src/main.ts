@@ -1500,7 +1500,10 @@ async function live(): Promise<void> {
     try {
       const status = await bridge.status({ waitSecs: 25, since: state.cursor });
       state.cursor = status.cursor;
-      if (status.changed.includes("chat") && !state.sending) {
+      if (status.changed.includes("chat")) {
+        // A change while a post is on its way is read once that ends, gone
+        // or not, never dropped (NV-3, ADR 0051).
+        while (state.sending) await new Promise((resolve) => setTimeout(resolve, 200));
         await loadList();
         await loadMessages();
         await loadThread();
@@ -2402,16 +2405,18 @@ async function start(): Promise<void> {
   } catch (error) {
     state.notice = { text: failure(error, "Chat"), tone: "bad" };
   }
-  await loadList();
-  const first = state.conversations[0];
-  if (first) await open(first.id);
-  else render();
-  ready();
+  // The cursor before the first load, so a message in between is news
+  // (NV-3, ADR 0051).
   try {
     state.cursor = (await bridge.status()).cursor;
   } catch {
     // live() says so.
   }
+  await loadList();
+  const first = state.conversations[0];
+  if (first) await open(first.id);
+  else render();
+  ready();
   void live();
 }
 

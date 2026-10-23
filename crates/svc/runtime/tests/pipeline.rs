@@ -721,6 +721,132 @@ async fn sleep_leaves_tasks_the_user_paused_alone() {
     );
 }
 
+/// PM-5, found by the Approvals model (specs/tla): a task the person stops
+/// while it's paused for sleep stays stopped when the machine wakes.
+#[tokio::test]
+async fn pm5_a_task_stopped_while_paused_for_sleep_stays_stopped_after_wake() {
+    let h = harness();
+    let system = Caller {
+        uid: 0,
+        ..h.me.clone()
+    };
+    let task = h.rt.start(&h.me, h.request(&["Invoices"], &[])).unwrap().id;
+    let _agent = h.agent(task).await;
+    assert_eq!(h.rt.suspend(&system).await.unwrap().tasks, 1);
+    h.rt.stop(&h.me, task).unwrap();
+    assert_eq!(h.rt.wake(&system).unwrap().tasks, 0, "nothing to wake");
+    assert_eq!(h.tile(task), TileState::Stopped);
+}
+
+const REPEATER: &str = r#"
+[[group]]
+name = "repeaters"
+members = ["{me}"]
+agents = ["repeater"]
+
+[[agent]]
+id = "repeater"
+allowed_actions = ["files.*"]
+"#;
+
+/// PM-5, found by the Approvals model: an agent that finishes while its
+/// task is paused for sleep leaves it Done; the wake doesn't start it again.
+#[tokio::test]
+async fn pm5_a_task_that_finished_while_paused_for_sleep_stays_done_after_wake() {
+    let h = harness_with(REPEATER);
+    let system = Caller {
+        uid: 0,
+        ..h.me.clone()
+    };
+    let mut request = h.request(&["Invoices"], &[]);
+    request.agent = "repeater".parse().unwrap();
+    let task = h.rt.start(&h.me, request).unwrap().id;
+    let _agent = h.agent(task).await;
+    assert_eq!(h.rt.suspend(&system).await.unwrap().tasks, 1);
+    // Its agent finishes on its own, three seconds in.
+    eventually(|| h.tile(task) == TileState::Done).await;
+    assert_eq!(h.rt.wake(&system).unwrap().tasks, 0, "nothing to wake");
+    assert_eq!(h.tile(task), TileState::Done);
+}
+
+/// PM-5, found by the Approvals model: a resume that lands while the
+/// machine is going to sleep carries on after the wake, not before it.
+#[tokio::test]
+async fn pm5_a_resume_while_going_to_sleep_waits_for_the_wake() {
+    let h = harness();
+    let system = Caller {
+        uid: 0,
+        ..h.me.clone()
+    };
+    let task = h.rt.start(&h.me, h.request(&["Invoices"], &[])).unwrap().id;
+    let agent = Arc::new(h.agent(task).await);
+    h.rt.pause(&h.me, task).unwrap();
+    assert_eq!(h.rt.suspend(&system).await.unwrap().tasks, 0);
+    h.rt.resume(&h.me, task).unwrap();
+    assert_eq!(h.tile(task), TileState::Paused);
+    let call = {
+        let agent = Arc::clone(&agent);
+        tokio::spawn(async move {
+            tool(
+                &agent,
+                "files_read",
+                json!({"path": "Invoices/inv-001.txt"}),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(!call.is_finished(), "nothing runs until the wake");
+    assert_eq!(h.rt.wake(&system).unwrap().tasks, 1);
+    assert!(!call.await.unwrap().is_error);
+    assert_eq!(h.tile(task), TileState::Working);
+}
+
+/// AW-12, found by the Approvals model: while one of a task's asks is still
+/// open, answering another leaves the tile at Needs you.
+#[tokio::test]
+async fn aw12_a_task_still_needs_you_while_another_ask_is_open() {
+    let h = harness();
+    fs::write(h.home().join("Reports/other.txt"), "another report\n").unwrap();
+    let task = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let agent = Arc::new(h.agent(task).await);
+    let delete = |path: &'static str| {
+        let agent = Arc::clone(&agent);
+        tokio::spawn(async move { tool(&agent, "files_delete", json!({ "path": path })).await })
+    };
+    let first = delete("Reports/existing.txt");
+    eventually(|| h.rt.approvals(&h.me).len() == 1).await;
+    let second = delete("Reports/other.txt");
+    eventually(|| h.rt.approvals(&h.me).len() == 2).await;
+    assert_eq!(h.tile(task), TileState::NeedsYou);
+    let asks = h.rt.approvals(&h.me);
+    let answer = |id, answer| {
+        h.rt.answer(
+            &h.me,
+            AnswerApproval {
+                approval: id,
+                answer,
+            },
+        )
+        .unwrap()
+    };
+    answer(asks[0].id, ApprovalAnswer::Deny);
+    assert!(first.await.unwrap().is_error);
+    assert_eq!(
+        h.tile(task),
+        TileState::NeedsYou,
+        "the other ask is still open"
+    );
+    answer(
+        asks[1].id,
+        ApprovalAnswer::Approve {
+            scope: ApprovalScope::Once,
+        },
+    );
+    assert!(!second.await.unwrap().is_error);
+    assert_eq!(h.tile(task), TileState::Working);
+}
+
 #[tokio::test]
 async fn feed_lines_carry_verb_and_target() {
     let h = harness();

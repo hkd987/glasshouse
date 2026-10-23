@@ -7,6 +7,11 @@
 //! notes how the task left each file. A file still as the task left it is the
 //! task's to undo; one that isn't was changed since by someone else (the
 //! user, another app, another task), and undo leaves it alone.
+//!
+//! Each change also keeps how it left its files, apart from anything later
+//! (ADR 0051): once undo put a file back to someone else's version, the
+//! task's earlier change is judged by how that change left the file, not by
+//! how the undo did, or the task would take the other's version back too.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -32,6 +37,15 @@ pub(crate) struct Written {
     /// Paths the task left with nothing under them but what `files` names:
     /// folders a change covered whole (a cache cleanup) and files it removed.
     cleared: BTreeSet<PathBuf>,
+    /// How each change left its files, read right after it.
+    after: BTreeMap<u32, After>,
+}
+
+/// How one change left its files: `files` and `cleared` as in [`Written`].
+#[derive(Debug, Default, Clone)]
+struct After {
+    files: BTreeMap<PathBuf, Option<Left>>,
+    cleared: BTreeSet<PathBuf>,
 }
 
 /// The files one change touched.
@@ -50,10 +64,10 @@ pub(crate) struct Left {
 }
 
 /// Files as a change or an undo left them, read off the disk.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Seen(Vec<Saw>);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Saw {
     File(PathBuf, Left),
     /// A folder and every file in it, or (with no files) nothing at all.
@@ -72,14 +86,26 @@ impl Written {
     /// How the task left `file`: `Some(None)` if it left nothing there,
     /// `None` if it never touched it.
     pub fn left(&self, file: &Path) -> Option<Option<&Left>> {
-        match self.files.get(file) {
-            Some(left) => Some(left.as_ref()),
-            None => self
-                .cleared
-                .iter()
-                .any(|p| file.starts_with(p))
-                .then_some(None),
+        lookup(&self.files, &self.cleared, file)
+    }
+
+    /// How change `id` left `file`, as [`Self::left`]; for a change with no
+    /// record of its own, how the task left it.
+    pub fn left_after(&self, id: u32, file: &Path) -> Option<Option<&Left>> {
+        match self.after.get(&id) {
+            Some(after) => lookup(&after.files, &after.cleared, file),
+            None => self.left(file),
         }
+    }
+
+    /// Notes `seen` as how changes `ids` left their files, and the task.
+    pub fn note_changes(&mut self, ids: &[u32], seen: Seen) {
+        let mut after = After::default();
+        apply(&mut after.files, &mut after.cleared, seen.clone());
+        for id in ids {
+            self.after.insert(*id, after.clone());
+        }
+        self.note(seen);
     }
 
     /// Whether `seen` is exactly how the task left those files.
@@ -91,17 +117,31 @@ impl Written {
     }
 
     pub fn note(&mut self, seen: Seen) {
-        for saw in seen.0 {
-            match saw {
-                Saw::File(path, left) => {
-                    self.files.insert(path, Some(left));
-                }
-                Saw::Tree(path, files) => {
-                    self.files.retain(|f, _| !f.starts_with(&path));
-                    self.files
-                        .extend(files.into_iter().map(|(f, left)| (f, Some(left))));
-                    self.cleared.insert(path);
-                }
+        apply(&mut self.files, &mut self.cleared, seen);
+    }
+}
+
+fn lookup<'a>(
+    files: &'a BTreeMap<PathBuf, Option<Left>>,
+    cleared: &BTreeSet<PathBuf>,
+    file: &Path,
+) -> Option<Option<&'a Left>> {
+    match files.get(file) {
+        Some(left) => Some(left.as_ref()),
+        None => cleared.iter().any(|p| file.starts_with(p)).then_some(None),
+    }
+}
+
+fn apply(files: &mut BTreeMap<PathBuf, Option<Left>>, cleared: &mut BTreeSet<PathBuf>, seen: Seen) {
+    for saw in seen.0 {
+        match saw {
+            Saw::File(path, left) => {
+                files.insert(path, Some(left));
+            }
+            Saw::Tree(path, under) => {
+                files.retain(|f, _| !f.starts_with(&path));
+                files.extend(under.into_iter().map(|(f, left)| (f, Some(left))));
+                cleared.insert(path);
             }
         }
     }

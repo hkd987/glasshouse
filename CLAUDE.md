@@ -25,6 +25,10 @@ details this file leaves out.
 - `make test lint` before every commit. `make lint` checks what changed since
   main (rustfmt, clippy `-D warnings` for host and FreeBSD, layering, art,
   shellcheck); `make lint-all` checks everything, as CI does.
+- `make tla` (about a minute) after changing a workflow `specs/tla` models
+  (approvals, undo, studio versions, routines, managed sync, mail, live
+  updates): TLC checks the model, and a change in behavior changes the
+  model with it (ADR 0051, `specs/tla/README.md`).
 - `make freebsd vm-deploy` (~12 s) to try a change in the VM;
   `make e2e-vm` (~1 min) after any change to agent-facing behavior.
 - `make dev-host` runs glassd locally with the insecure host sandbox.

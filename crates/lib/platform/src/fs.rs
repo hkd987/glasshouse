@@ -26,6 +26,8 @@ pub struct EntryInfo {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
+    /// When it last changed, where the file system says.
+    pub modified: Option<std::time::SystemTime>,
 }
 
 /// What a path names, without following a symlink at its end.
@@ -219,6 +221,7 @@ impl ConfinedDir {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 is_dir: meta.is_dir(),
                 size: meta.len(),
+                modified: meta.modified().ok().map(|t| t.into_std()),
             });
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));

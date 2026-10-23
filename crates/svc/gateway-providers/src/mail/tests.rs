@@ -66,7 +66,13 @@ fn em0_imap_link_lists_syncs_fetches_and_moves_on_a_real_server() {
 
     let third = mox.deliver(&message("third"));
     let moved = link
-        .move_to(&me, "Inbox", first, &name(Role::Archive))
+        .move_to(
+            &me,
+            "Inbox",
+            synced.state.uid_validity,
+            first,
+            &name(Role::Archive),
+        )
         .unwrap();
     assert!(moved.is_some(), "mox says where it went (UIDPLUS)");
     let next = link
@@ -113,7 +119,8 @@ fn em3_read_state_is_the_servers_seen_flag_both_ways() {
     let synced = link.sync(&me, "Inbox", None, &[], LIMITS).unwrap();
     assert_eq!(synced.unseen, [first, second]);
 
-    link.mark(&me, "Inbox", &[first], true).unwrap();
+    let validity = synced.state.uid_validity;
+    link.mark(&me, "Inbox", validity, &[first], true).unwrap();
     let again = link
         .sync(&me, "Inbox", Some(&synced.state), &[first, second], LIMITS)
         .unwrap();
@@ -124,12 +131,53 @@ fn em3_read_state_is_the_servers_seen_flag_both_ways() {
         "a mark shows though nothing arrived"
     );
 
-    link.mark(&me, "Inbox", &[first, second], false).unwrap();
-    link.mark(&me, "Inbox", &[second], true).unwrap();
+    link.mark(&me, "Inbox", validity, &[first, second], false)
+        .unwrap();
+    link.mark(&me, "Inbox", validity, &[second], true).unwrap();
     let last = link
         .sync(&me, "Inbox", Some(&again.state), &[first, second], LIMITS)
         .unwrap();
     assert_eq!(last.unseen, [first]);
+}
+
+#[test]
+fn em3_marks_and_moves_name_their_numbering_and_a_sync_puts_back_what_was_lost() {
+    // What the mail model found (ADR 0051), against a real server.
+    let Some(mox) = Mox::start() else { return };
+    let link = mox.link();
+    let me = mox.account("dana");
+    let first = mox.deliver(&message("first"));
+    let second = mox.deliver(&message("second"));
+    let synced = link.sync(&me, "Inbox", None, &[], LIMITS).unwrap();
+    let validity = synced.state.uid_validity;
+    // Under another numbering: refused, nothing marked or moved.
+    let refused = link.mark(&me, "Inbox", validity + 1, &[first], true);
+    assert!(matches!(refused, Err(LinkError::Refused(_))), "{refused:?}");
+    let refused = link.move_to(&me, "Inbox", validity + 1, first, "Archive");
+    assert!(matches!(refused, Err(LinkError::Refused(_))), "{refused:?}");
+    assert_eq!(mox.unseen("Inbox"), [first, second]);
+    // A UID the folder doesn't have isn't reported marked.
+    let found = link
+        .mark(&me, "Inbox", validity, &[first, 9999], true)
+        .unwrap();
+    assert_eq!(found, [first]);
+    // The computer lost `first` from its copy: the next sync, though
+    // nothing changed on the server, brings it back.
+    let again = link
+        .sync(&me, "Inbox", Some(&synced.state), &[second], LIMITS)
+        .unwrap();
+    assert_eq!(again.new.iter().map(|m| m.uid).collect::<Vec<_>>(), [first]);
+    // And one it holds that the server never had goes.
+    let again = link
+        .sync(
+            &me,
+            "Inbox",
+            Some(&synced.state),
+            &[first, second, 9999],
+            LIMITS,
+        )
+        .unwrap();
+    assert_eq!(again.vanished, [9999]);
 }
 
 #[test]

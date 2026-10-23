@@ -33,12 +33,33 @@ use crate::{Caller, CatalogEntry, PersonalApp, Runtime, RuntimeError};
 
 /// When each person's data in each app last changed: a counter across
 /// the device, and per login and app the count at its last change.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct AppChanges {
     seq: u64,
     last: BTreeMap<(String, String), u64>,
     /// Bumped with each new policy: open apps' tiers may have changed.
     rules: u64,
+    /// Where this run's counter started: the time in microseconds, past
+    /// any cursor an earlier run of glassd gave a page that is still open
+    /// (ADR 0051). A cursor from before it is news: what changed
+    /// meanwhile isn't in this run's memory.
+    base: u64,
+}
+
+impl Default for AppChanges {
+    fn default() -> Self {
+        let base = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| {
+                u64::try_from(d.as_micros()).unwrap_or(u64::MAX >> 12)
+            });
+        Self {
+            seq: base,
+            last: BTreeMap::new(),
+            rules: 0,
+            base,
+        }
+    }
 }
 
 /// Apps one user may have open at once. Each open window is a session.
@@ -558,7 +579,11 @@ impl Runtime {
         let wait = std::time::Duration::from_secs(request.wait_secs.min(APP_STATUS_MAX_WAIT_SECS));
         let mut changes = self.app_changes.subscribe();
         let rules = changes.borrow().rules;
-        let changed = |c: &AppChanges| c.last.get(&key).is_some_and(|at| *at > request.since);
+        // NV-3: a cursor from an earlier run (or a page that has none) is
+        // news, or a change that run made and never said is lost.
+        let changed = |c: &AppChanges| {
+            request.since < c.base || c.last.get(&key).is_some_and(|at| *at > request.since)
+        };
         let _ =
             tokio::time::timeout(wait, changes.wait_for(|c| changed(c) || c.rules != rules)).await;
         let mut status = self.app_status(caller, request.session)?;

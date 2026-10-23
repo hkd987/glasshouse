@@ -130,11 +130,13 @@ impl MailLink for ImapLink {
         &self,
         account: &Account,
         from: &str,
+        uid_validity: u32,
         uid: u32,
         to: &str,
     ) -> Result<Option<u32>, LinkError> {
         self.session(account, |s| {
-            s.open_folder(from, true, None)?;
+            let opened = s.open_folder(from, true, None)?;
+            same_numbering(s, from, &opened, uid_validity)?;
             s.move_to(uid, to)
         })
     }
@@ -143,12 +145,18 @@ impl MailLink for ImapLink {
         &self,
         account: &Account,
         folder: &str,
+        uid_validity: u32,
         uids: &[u32],
         seen: bool,
-    ) -> Result<(), LinkError> {
+    ) -> Result<Vec<u32>, LinkError> {
         self.session(account, |s| {
-            s.open_folder(folder, true, None)?;
-            s.store_seen(uids, seen)
+            let opened = s.open_folder(folder, true, None)?;
+            same_numbering(s, folder, &opened, uid_validity)?;
+            // A STORE of a UID the folder doesn't have is no error to IMAP:
+            // which are there decides what was marked.
+            let found = s.which(uids)?;
+            s.store_seen(&found, seen)?;
+            Ok(found)
         })
     }
 
@@ -158,6 +166,23 @@ impl MailLink for ImapLink {
             s.idle(timeout)
         })
     }
+}
+
+/// Refused when `folder`'s UIDVALIDITY isn't the one the caller's UIDs
+/// were numbered under: another message may have them now (ADR 0051).
+fn same_numbering(
+    s: &Session,
+    folder: &str,
+    opened: &imap::Opened,
+    uid_validity: u32,
+) -> Result<(), LinkError> {
+    if opened.uid_validity == uid_validity {
+        return Ok(());
+    }
+    Err(LinkError::Refused(format!(
+        "{folder} on {} was numbered afresh since it was listed",
+        s.host()
+    )))
 }
 
 fn body(pairs: &[(String, Value)], key: &str) -> Option<Vec<u8>> {
@@ -197,10 +222,15 @@ fn sync(
     };
     // Read state changes without UIDNEXT or EXISTS moving: always asked.
     result.unseen = s.unseen()?;
+    // This computer holds as many as the folder had at the last sync: else
+    // it lost one, or kept one it shouldn't have, and every UID decides
+    // what's missing and what went (ADR 0051).
+    let in_step = since.is_some_and(|st| known.len() as u32 == st.exists);
     // UIDNEXT and EXISTS both unmoved: nothing arrived (UIDNEXT would
     // grow) and so nothing went (EXISTS would shrink).
     if let Some(st) = since
         && !reset
+        && in_step
         && state.uid_next > 0
         && st.uid_next == state.uid_next
         && st.exists == state.exists
@@ -208,27 +238,23 @@ fn sync(
         return Ok(result);
     }
     let mut new = match since {
-        Some(st) if !reset => {
-            let from = st.uid_next.max(1);
-            let new = s.search(Some(from))?;
-            result.vanished = if opened.resynced {
-                opened
-                    .vanished
-                    .iter()
-                    .copied()
-                    .filter(|u| known.contains(u))
-                    .collect()
-            } else if known.is_empty() {
-                Vec::new()
-            } else {
-                let all = s.search(None)?;
-                known
-                    .iter()
-                    .copied()
-                    .filter(|u| all.binary_search(u).is_err())
-                    .collect()
-            };
-            new
+        Some(st) if !reset && in_step && opened.resynced => {
+            result.vanished = opened
+                .vanished
+                .iter()
+                .copied()
+                .filter(|u| known.contains(u))
+                .collect();
+            s.search(Some(st.uid_next.max(1)))?
+        }
+        Some(_) if !reset => {
+            let all = s.search(None)?;
+            result.vanished = known
+                .iter()
+                .copied()
+                .filter(|u| all.binary_search(u).is_err())
+                .collect();
+            all
         }
         _ => s.search(None)?,
     };

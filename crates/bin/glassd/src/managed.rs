@@ -13,6 +13,7 @@
 //! enforcing what it last applied, and `glassctl status` says since when
 //! the console has been out of reach.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ use glass_managed::device;
 use glass_managed::directory::{self, DirectoryRelease};
 use glass_managed::{
     CatalogRelease, ChatRelease, DeviceReport, DocKind, MAX_WAIT_SECS, ModelCredits, PolicyRelease,
-    PublicKey, ReleaseStore, RunningAgent, Signed, SyncRequest, SyncResponse,
+    PublicKey, Refusal, ReleaseStore, RunningAgent, Signed, SyncRequest, SyncResponse,
 };
 use glass_policy::Policy;
 use glass_policy::store::PolicyStore;
@@ -63,6 +64,51 @@ pub struct Managed {
     last_error: Option<String>,
     /// Since when the console has been out of reach.
     offline_since: Option<Timestamp>,
+    /// Releases IT published whose content this computer refused: the
+    /// next syncs ask past them, until IT publishes another (ADR 0051).
+    skip: HashMap<DocKind, u64>,
+    /// A policy release kept on disk but not in force yet (its file
+    /// couldn't be written): a release no newer is refused, and it goes in
+    /// force from disk before the next sync.
+    kept_policy: Option<u64>,
+    /// A release was refused, or couldn't be kept: the loop waits before
+    /// it syncs again.
+    backoff: bool,
+}
+
+/// Why a release didn't go in force (ADR 0051).
+enum Refused {
+    /// A release IT published, signed with a key this computer trusts and
+    /// newer than what it has, whose content it can't use: asked past
+    /// until IT publishes another.
+    Content(String),
+    /// Anything else: forged, replayed or signed with a key not trusted
+    /// yet, or this computer failing to keep or write it. Asked for again
+    /// after a pause; none of them moves what the device asks for, so
+    /// nobody on the way to the console can make it skip a release.
+    Retry(String),
+}
+
+impl Refused {
+    fn why(&self) -> &str {
+        match self {
+            Self::Content(why) | Self::Retry(why) => why,
+        }
+    }
+}
+
+/// A release that didn't open: only one whose signature checked out but
+/// whose payload doesn't parse is IT's to fix.
+fn unopened(e: Refusal) -> Refused {
+    match e {
+        Refusal::Payload(_) => Refused::Content(e.to_string()),
+        other => Refused::Retry(other.to_string()),
+    }
+}
+
+/// This computer couldn't keep or write a release: asked for again later.
+fn local(e: impl std::fmt::Display) -> Refused {
+    Refused::Retry(e.to_string())
 }
 
 impl Managed {
@@ -88,6 +134,9 @@ impl Managed {
             credits_version: None,
             last_error: None,
             offline_since: None,
+            skip: HashMap::new(),
+            kept_policy: None,
+            backoff: false,
         };
         match this.load(DocKind::Catalog) {
             Some(signed) => {
@@ -128,10 +177,16 @@ impl Managed {
                         signed.version
                     );
                     if let Err(e) = this.apply_policy(&signed, true) {
+                        // Kept and verified, but not in force: it still
+                        // holds back anything older (DV-10), and goes in
+                        // from disk before the next sync.
                         this.refused(DocKind::Policy, &signed, &e);
+                        if matches!(e, Refused::Retry(_)) {
+                            this.kept_policy = Some(signed.version);
+                        }
                     }
                 }
-                Err(e) => this.refused(DocKind::Policy, &signed, &e.to_string()),
+                Err(e) => this.refused(DocKind::Policy, &signed, &unopened(e)),
             }
         }
         Some(this)
@@ -258,19 +313,24 @@ impl Managed {
                     }
                 }
             }
-            let request = SyncRequest {
-                device: self.device.clone(),
-                policy: self.policy_version,
-                catalog: self.catalog_version,
-                directory: self.directory_version,
-                chat: self.chat_version,
-                credits: self.credits_version,
-                wait_secs: MAX_WAIT_SECS,
-            };
+            // A policy release kept but not in force goes in from disk first.
+            if self.kept_policy.is_some() && !self.retry_kept() {
+                std::thread::sleep(retry);
+                retry = (retry * 2).min(LAST_RETRY);
+                continue;
+            }
+            let request = self.request();
             match client.sync(&request) {
                 Ok(response) => {
-                    retry = FIRST_RETRY;
                     let changed = self.handle(response);
+                    // A refusal waits before the next sync: the console
+                    // answers at once while it has something newer.
+                    if std::mem::take(&mut self.backoff) {
+                        std::thread::sleep(retry);
+                        retry = (retry * 2).min(LAST_RETRY);
+                    } else {
+                        retry = FIRST_RETRY;
+                    }
                     if changed || reported.is_none_or(|at| at.elapsed() >= REPORT_EVERY) {
                         match client.report(&self.report()) {
                             Ok(()) => reported = Some(Instant::now()),
@@ -283,6 +343,62 @@ impl Managed {
                     self.offline(&e);
                     std::thread::sleep(retry);
                     retry = (retry * 2).min(LAST_RETRY);
+                }
+            }
+        }
+    }
+
+    /// What the next sync asks for: anything newer than what's in force,
+    /// than a policy release kept but not in force yet, and than a release
+    /// whose content this computer refused (ADR 0051).
+    fn request(&self) -> SyncRequest {
+        let past = |kind: DocKind, have: Option<u64>| have.max(self.skip.get(&kind).copied());
+        SyncRequest {
+            device: self.device.clone(),
+            policy: past(DocKind::Policy, self.policy_held()),
+            catalog: past(DocKind::Catalog, self.catalog_version),
+            directory: past(DocKind::Directory, self.directory_version),
+            chat: past(DocKind::Chat, self.chat_version),
+            credits: self.credits_version,
+            wait_secs: MAX_WAIT_SECS,
+        }
+    }
+
+    /// The newest policy release this computer holds: in force, or kept
+    /// and not in force yet. Nothing no newer is applied over it (DV-10).
+    fn policy_held(&self) -> Option<u64> {
+        self.policy_version.max(self.kept_policy)
+    }
+
+    #[cfg(test)]
+    fn backing_off(&self) -> bool {
+        self.backoff
+    }
+
+    /// Puts the policy release kept on disk in force, when it is newer
+    /// than the one in force. Whether there's nothing left to put in.
+    fn retry_kept(&mut self) -> bool {
+        let Some(signed) = self
+            .load(DocKind::Policy)
+            .filter(|s| Some(s.version) > self.policy_version)
+        else {
+            self.kept_policy = None;
+            return true;
+        };
+        match self.apply_policy(&signed, true) {
+            Ok(()) => {
+                self.kept_policy = None;
+                self.runtime.set_policy_source(self.source());
+                true
+            }
+            Err(e) => {
+                self.refused(DocKind::Policy, &signed, &e);
+                match e {
+                    Refused::Retry(_) => false,
+                    Refused::Content(_) => {
+                        self.kept_policy = None;
+                        true
+                    }
                 }
             }
         }
@@ -388,14 +504,15 @@ impl Managed {
 
     /// Verifies, validates whole, writes and swaps in a policy release.
     /// `again` is a release this device applied before, from its disk.
-    fn apply_policy(&mut self, signed: &Signed, again: bool) -> Result<(), String> {
-        let have = if again { None } else { self.policy_version };
+    fn apply_policy(&mut self, signed: &Signed, again: bool) -> Result<(), Refused> {
+        let have = if again { None } else { self.policy_held() };
         let release: PolicyRelease = signed
             .open(DocKind::Policy, &self.managed.org, self.keys(), have)
-            .map_err(|e| e.to_string())?;
-        let policy = Policy::from_toml(&release.policy).map_err(|e| e.to_string())?;
-        let registry =
-            crate::registry(&self.config, &policy, &self.org).map_err(|e| format!("{e:#}"))?;
+            .map_err(unopened)?;
+        let policy =
+            Policy::from_toml(&release.policy).map_err(|e| Refused::Content(e.to_string()))?;
+        let registry = crate::registry(&self.config, &policy, &self.org)
+            .map_err(|e| Refused::Content(format!("{e:#}")))?;
         let warnings = policy.lint(&registry.lint_info());
         for warning in &warnings {
             tracing::warn!("managed policy v{}: {warning}", signed.version);
@@ -405,17 +522,22 @@ impl Managed {
         // the caller audits says. If applying fails after, the kept release
         // is put back at the next start or poll.
         if !again {
-            self.releases.save(signed).map_err(|e| e.to_string())?;
+            self.releases.save(signed).map_err(local)?;
         }
-        self.policies
-            .apply(&self.config.policy, &release.policy)
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = self.policies.apply(&self.config.policy, &release.policy) {
+            // Kept, not in force: it goes in from disk later (ADR 0051).
+            self.kept_policy = self.kept_policy.max(Some(signed.version));
+            return Err(local(e));
+        }
         let _ = self.policies.remember(&glass_policy::store::Loaded {
             policy: policy.clone(),
             text: release.policy.clone(),
             origin: glass_policy::store::Origin::File(self.config.policy.clone()),
         });
         self.policy_version = Some(signed.version);
+        if self.kept_policy <= self.policy_version {
+            self.kept_policy = None;
+        }
         // Its model providers, with the keys this computer has (ADR 0039).
         let models = crate::gateway(&self.config, &policy, &self.org);
         self.runtime.apply_policy(policy, registry, self.source());
@@ -473,14 +595,14 @@ impl Managed {
     }
 
     /// Verifies, checks and swaps in a catalog release.
-    fn apply_catalog(&mut self, signed: &Signed, again: bool) -> Result<(), String> {
+    fn apply_catalog(&mut self, signed: &Signed, again: bool) -> Result<(), Refused> {
         let have = if again { None } else { self.catalog_version };
         let release: CatalogRelease = signed
             .open(DocKind::Catalog, &self.managed.org, self.keys(), have)
-            .map_err(|e| e.to_string())?;
-        release.check()?;
+            .map_err(unopened)?;
+        release.check().map_err(Refused::Content)?;
         if !again {
-            self.releases.save(signed).map_err(|e| e.to_string())?;
+            self.releases.save(signed).map_err(local)?;
         }
         let items = release.items.len();
         self.org.catalog.set(Applied {
@@ -510,21 +632,23 @@ impl Managed {
 
     /// Verifies, checks and swaps in a directory release (AD-1). Its size
     /// is checked before it's read: every change sends the whole list.
-    fn apply_directory(&mut self, signed: &Signed, again: bool) -> Result<(), String> {
+    fn apply_directory(&mut self, signed: &Signed, again: bool) -> Result<(), Refused> {
+        // Checked before it's read, so before its signature: asked for
+        // again later, as anything not shown to be IT's.
         if signed.payload.len() > directory::MAX_PAYLOAD_BYTES {
-            return Err(format!(
+            return Err(Refused::Retry(format!(
                 "{} bytes is more than a directory release may be ({})",
                 signed.payload.len(),
                 directory::MAX_PAYLOAD_BYTES
-            ));
+            )));
         }
         let have = if again { None } else { self.directory_version };
         let release: DirectoryRelease = signed
             .open(DocKind::Directory, &self.managed.org, self.keys(), have)
-            .map_err(|e| e.to_string())?;
-        release.check()?;
+            .map_err(unopened)?;
+        release.check().map_err(Refused::Content)?;
         if !again {
-            self.releases.save(signed).map_err(|e| e.to_string())?;
+            self.releases.save(signed).map_err(local)?;
         }
         let people = release.people.len();
         self.org.directory.set(directory::Applied {
@@ -558,23 +682,26 @@ impl Managed {
 
     /// Verifies and applies IT's Chat release: the compliance key every
     /// epoch this computer makes is sealed to (ADR 0030, decision 4).
-    fn apply_chat(&mut self, signed: &Signed, again: bool) -> Result<(), String> {
+    fn apply_chat(&mut self, signed: &Signed, again: bool) -> Result<(), Refused> {
         let have = if again { None } else { self.chat_version };
         let release: ChatRelease = signed
             .open(DocKind::Chat, &self.managed.org, self.keys(), have)
-            .map_err(|e| e.to_string())?;
+            .map_err(unopened)?;
         let key = release
             .key()
-            .map_err(|e| format!("the compliance key: {e}"))?;
+            .map_err(|e| Refused::Content(format!("the compliance key: {e}")))?;
         if ChatRelease::new(&key) != release {
-            return Err("the compliance key's fingerprint doesn't match it".into());
+            return Err(Refused::Content(
+                "the compliance key's fingerprint doesn't match it".into(),
+            ));
         }
         if !again {
-            self.releases.save(signed).map_err(|e| e.to_string())?;
+            self.releases.save(signed).map_err(local)?;
         }
         self.org
             .chat
-            .set_compliance(&release.compliance, &release.fingerprint)?;
+            .set_compliance(&release.compliance, &release.fingerprint)
+            .map_err(local)?;
         self.chat_version = Some(signed.version);
         let mut event = AuditEvent::new(
             EventKind::ChatLoaded,
@@ -595,8 +722,17 @@ impl Managed {
         Ok(())
     }
 
-    /// A release was refused: audited and reported; nothing changes.
-    fn refused(&mut self, kind: DocKind, signed: &Signed, why: &str) {
+    /// A release was refused: audited and reported; nothing changes but
+    /// what the next syncs ask for, or how soon (ADR 0051).
+    fn refused(&mut self, kind: DocKind, signed: &Signed, refused: &Refused) {
+        match refused {
+            Refused::Content(_) => {
+                let past = self.skip.entry(kind).or_default();
+                *past = (*past).max(signed.version);
+            }
+            Refused::Retry(_) => self.backoff = true,
+        }
+        let why = refused.why();
         tracing::warn!(
             "managed: refused {kind} v{} from {}: {why}; keeping what's in force",
             signed.version,
@@ -723,13 +859,13 @@ pub(crate) fn chat_event(notice: &ChatNotice) -> Option<AuditEvent> {
     }
 }
 
-/// Actions policy blocked in the last 24 hours, from the audit log.
+/// Actions policy blocked in the last 24 hours, from the audit log: read
+/// from its end back, since this runs every minute and the log only grows
+/// (ADR 0051).
 fn blocked_last_day(audit: &Path) -> u32 {
     let since = Timestamp::now().unix_seconds() - 24 * 60 * 60;
-    glass_audit::read(audit, |r| {
-        r.event.kind == EventKind::Action
-            && r.ts.unix_seconds() >= since
-            && r.event.outcome == Some(Outcome::Blocked)
+    glass_audit::read_since(audit, since, |r| {
+        r.event.kind == EventKind::Action && r.event.outcome == Some(Outcome::Blocked)
     })
     .map_or(0, |records| {
         u32::try_from(records.len()).unwrap_or(u32::MAX)
@@ -996,6 +1132,71 @@ mod tests {
         assert_eq!(d.audited(EventKind::ManagedRefused), 5);
         assert!(d.runtime.status().policy.starts_with("managed v2"));
         assert!(m.report().last_error.unwrap().contains("refused policy"));
+    }
+
+    #[tokio::test]
+    async fn dv1_a_proper_release_refused_is_asked_past_and_no_other_refusal_moves_the_ask() {
+        // ADR 0051: a refused release was fetched and refused again on every
+        // sync, at once, without end: the console answers at once while it
+        // has anything newer than what the device names.
+        let key = OrgKey::from_seed([7; 32]);
+        let d = device(&key);
+        let mut m = d.managed();
+        assert!(m.handle(sync(Some(policy_release(&key, 1, &with_tier("ask"))), None)));
+        assert!(!m.handle(sync(
+            Some(policy_release(&key, 2, "version = 1\nnonsense = true\n")),
+            None
+        )));
+        assert_eq!(m.request().policy, Some(2), "asked past what IT must fix");
+        assert!(!m.backing_off());
+        // A forged release, or a replay, never moves what it asks for: the
+        // loop waits a little and asks again.
+        let stranger = OrgKey::from_seed([8; 32]);
+        assert!(!m.handle(sync(
+            Some(policy_release(&stranger, 9, &with_tier("never"))),
+            None
+        )));
+        assert_eq!(m.request().policy, Some(2));
+        assert!(m.backing_off());
+        // What's in force is still what the report says.
+        assert_eq!(m.report().policy_version, Some(1));
+        assert!(m.handle(sync(
+            Some(policy_release(&key, 3, &with_tier("notify"))),
+            None
+        )));
+        assert_eq!(m.request().policy, Some(3));
+    }
+
+    #[tokio::test]
+    async fn dv10_a_kept_release_not_back_in_force_still_refuses_an_older_one() {
+        // ADR 0051: version 3 was kept, then glassd stopped before its file
+        // was written; at the next start writing it failed, the device
+        // forgot which version it held, and a replayed version 1 went in.
+        let key = OrgKey::from_seed([7; 32]);
+        let d = device(&key);
+        let mut m = d.managed();
+        assert!(m.handle(sync(Some(policy_release(&key, 2, &with_tier("ask"))), None)));
+        let v2 = d.policy_text();
+        ReleaseStore::new(d.config.state_dir.join("managed"))
+            .save(&policy_release(&key, 3, &with_tier("notify")))
+            .unwrap();
+        // The disk refuses the policy file at the next start.
+        let aside = d.dir.path().join("policy.aside");
+        std::fs::rename(&d.config.policy, &aside).unwrap();
+        std::fs::create_dir(&d.config.policy).unwrap();
+        let mut m = d.managed();
+        std::fs::remove_dir(&d.config.policy).unwrap();
+        std::fs::rename(&aside, &d.config.policy).unwrap();
+        assert_eq!(m.request().policy, Some(3), "it holds what it kept");
+        assert!(!m.handle(sync(
+            Some(policy_release(&key, 1, &with_tier("never"))),
+            None
+        )));
+        assert_eq!(d.policy_text(), v2, "no rollback");
+        // And the kept one goes in force from disk once it can.
+        assert!(m.retry_kept());
+        assert_eq!(d.policy_text(), with_tier("notify"));
+        assert_eq!(m.report().policy_version, Some(3));
     }
 
     #[tokio::test]

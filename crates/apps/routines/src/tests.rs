@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
+
 use super::*;
 
 /// What Haiku wrote for overdue invoices, as a routine keeps it.
@@ -527,4 +529,117 @@ fn ga1_what_each_action_returns_is_what_it_declares() {
     for def in f.provider.actions() {
         assert!(f.provider.returns(&def.name).is_some(), "{}", def.name);
     }
+}
+
+/// A runtime with one run going: `task`, of `routine` at `version`.
+#[derive(Debug)]
+struct RunOf {
+    task: glass_types::TaskId,
+    routine: String,
+    version: u32,
+}
+
+impl Host for RunOf {
+    fn run(&self, _: &str, _: u32, _: &str) -> Result<glass_types::TaskId, String> {
+        Err("not here".into())
+    }
+    fn repeats(&self, _: &str, _: u32) -> Vec<Repeat> {
+        Vec::new()
+    }
+    fn dismiss(&self, _: &str, _: u32, _: glass_types::TaskId) -> Result<(), String> {
+        Ok(())
+    }
+    fn running(&self, _: &str, _: u32) -> BTreeMap<String, glass_types::TaskId> {
+        BTreeMap::from([(self.routine.clone(), self.task)])
+    }
+    fn changed(&self, _: &str) {}
+    fn run_of(&self, task: glass_types::TaskId) -> Option<(String, u32)> {
+        (task == self.task).then(|| (self.routine.clone(), self.version))
+    }
+}
+
+#[test]
+fn da4_a_run_reads_the_version_it_started_with() {
+    // ADR 0051: a run of version 1 started; version 2 was saved before its
+    // agent read the routine. It runs version 1, as its record says.
+    let f = fixture();
+    f.call(SAVE, overdue()).unwrap();
+    let run = glass_types::TaskId::new();
+    f.routines.set_host(std::sync::Arc::new(RunOf {
+        task: run,
+        routine: "overdue-invoices".into(),
+        version: 1,
+    }));
+    f.call(
+        SCHEDULE,
+        json!({ "routine": "overdue-invoices", "schedule": "daily 18:00" }),
+    )
+    .unwrap();
+    let routine = json!({ "routine": "overdue-invoices" });
+    // Anyone else reads the version in use.
+    assert_eq!(f.call(READ, routine.clone()).unwrap().data["version"], 2);
+    let mut ctx = f.ctx.clone();
+    ctx.principal.task = run;
+    let read = f
+        .provider
+        .invoke(&ctx, &READ.parse().unwrap(), &routine)
+        .unwrap();
+    assert_eq!(read.data["version"], 1);
+    assert_eq!(read.data["schedule"], "weekdays 09:00");
+}
+
+#[test]
+fn da4_a_pause_while_a_version_saves_loses_neither() {
+    // ADR 0051: pausing read the choices file, a new version of another
+    // routine was kept, and the pause wrote what it had read back, taking
+    // the routine back to its old version.
+    let f = fixture();
+    f.call(SAVE, overdue()).unwrap();
+    let mut other = overdue();
+    other["name"] = json!("Paid invoices");
+    f.call(SAVE, other).unwrap();
+    let saved = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+    std::thread::scope(|s| {
+        let (home, owner) = (f.ctx.home.clone(), f.ctx.owner);
+        s.spawn(move || {
+            for i in 0..60 {
+                store::pause(&home, owner, "paid-invoices", i % 2 == 0).unwrap();
+            }
+        });
+        s.spawn(|| {
+            for _ in 0..30 {
+                let next = f
+                    .routines
+                    .plan(
+                        "demo",
+                        &f.ctx.home,
+                        Draft {
+                            routine: Some("overdue-invoices".into()),
+                            name: None,
+                            request: "Tell me which invoices are unpaid.".into(),
+                            script: OVERDUE.into(),
+                            schedule: None,
+                            note: "Again".into(),
+                        },
+                        Scope {
+                            agent: "desktop-agent".parse().unwrap(),
+                            read: Vec::new(),
+                            write: Vec::new(),
+                            task: glass_types::TaskId::new(),
+                        },
+                    )
+                    .unwrap();
+                let kept = f.routines.keep(next, &f.ctx.home, f.ctx.owner).unwrap();
+                saved.store(kept.version, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+    });
+    let chosen = store::chosen(&f.ctx.home);
+    assert_eq!(
+        chosen["overdue-invoices"],
+        saved.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert_eq!(chosen["paid-invoices"], 1);
+    // The last pause (i = 58) paused it, the one after (59) resumed it.
+    assert!(!store::paused(&f.ctx.home).contains("paid-invoices"));
 }

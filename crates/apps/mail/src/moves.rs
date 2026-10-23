@@ -17,6 +17,7 @@ use serde_json::json;
 use glass_actions::{ActionError, ActionOutput, Change, TaskContext};
 
 use crate::cache::{self, Cache};
+use crate::handle;
 use crate::{Folder, MAX_BATCH, MailProvider, Mode, Remote, message, plural};
 
 fn link_failure(doing: &str, e: &LinkError) -> String {
@@ -30,6 +31,7 @@ fn link_failure(doing: &str, e: &LinkError) -> String {
             )
         }
         LinkError::Refused(m) => format!("{doing}: the mail server refused ({m})"),
+        LinkError::Unknown(m) => format!("{doing}: the mail server's answer never came ({m})"),
     }
 }
 
@@ -138,7 +140,14 @@ impl MailProvider {
                 }
             };
             let mut paths = vec![cache.host_path(&cache::rel_dir(from.role()).join(name))];
-            paths.extend(new.map(|n| cache.host_path(&cache::rel_dir(to.role()).join(n))));
+            paths.extend(
+                new.iter()
+                    .map(|n| cache.host_path(&cache::rel_dir(to.role()).join(n))),
+            );
+            // And their read markers: undo puts the message back as read
+            // as it was, and leaves it alone if that changed since (ADR 0051).
+            paths.push(cache.host_path(&cache::rel_read_dir(from.role()).join(name)));
+            paths.extend(new.map(|n| cache.host_path(&cache::rel_read_dir(to.role()).join(n))));
             changes.push(Change {
                 kind: ChangeKind::Moved,
                 target: format!(
@@ -181,113 +190,186 @@ impl MailProvider {
                 .folder(login, remote, account, role)
                 .map_err(|e| format!("finding {}: {e:?}", cache::dir(role)))
         };
-        let (from_name, from_state) = folder(from.role())?;
-        if from_state.is_some_and(|s| s.uid_validity != validity) {
-            return Err(format!(
-                "{} changed on the server since it was listed; list it again",
-                from.dir()
-            ));
-        }
         // The destination's UIDVALIDITY names the moved file: sync it once
-        // if this computer hasn't.
+        // if this computer hasn't (before the lock, which a sync takes).
         if folder(to.role())?.1.is_none() {
             self.mail
                 .sync(login, &ctx.home, ctx.owner, to.role())
                 .map_err(|e| format!("reading {}: {e:?}", to.dir()))?;
         }
-        let (to_name, to_state) = folder(to.role())?;
         let message_id = cache
             .read_start(from.role(), name)
             .ok()
             .and_then(|raw| message::parse(&raw).message_id);
-        let new_uid = remote
-            .link
-            .move_to(account, &from_name, uid, &to_name)
-            .map_err(|e| link_failure("moving it", &e))?;
-        let Some(to_validity) = to_state.map(|s| s.uid_validity) else {
-            cache
-                .remove(from.role(), name)
-                .map_err(|e| format!("updating this computer's copy: {e}"))?;
+        // MOVE to rename under the person's lock: no mark or sync comes
+        // between the server and this computer's copy (ADR 0051).
+        let moved = {
+            let person = self.mail.person_lock(login);
+            let _one = handle::lock(&person);
+            let (from_name, from_state) = folder(from.role())?;
+            if from_state.is_some_and(|s| s.uid_validity != validity) {
+                return Err(format!(
+                    "{} changed on the server since it was listed; list it again",
+                    from.dir()
+                ));
+            }
+            let (to_name, to_state) = folder(to.role())?;
+            // A mark of it still waiting goes first: the MOVE takes the flag
+            // with it, where a mark under its old UID would be lost.
+            self.mail
+                .tell_waiting(login, from.role(), validity, uid)
+                .map_err(|e| format!("telling the server it's {e:?}"))?;
+            let new_uid = remote
+                .link
+                .move_to(account, &from_name, validity, uid, &to_name)
+                .map_err(|e| link_failure("moving it", &e))?;
+            let updating = |e: std::io::Error| format!("updating this computer's copy: {e}");
+            match (to_state.map(|s| s.uid_validity), new_uid) {
+                (Some(to_validity), Some(new_uid)) => {
+                    let new = cache::synced_name(to_validity, new_uid);
+                    cache
+                        .rename((from.role(), name), (to.role(), &new))
+                        .map_err(updating)?;
+                    return Ok(Some(new));
+                }
+                (to_validity, _) => {
+                    cache.remove(from.role(), name).map_err(updating)?;
+                    to_validity
+                }
+            }
+        };
+        // No UIDPLUS: find it in a fresh copy of the destination.
+        let Some(to_validity) = moved else {
             return Ok(None);
         };
-        match new_uid {
-            Some(new_uid) => {
-                let new = cache::synced_name(to_validity, new_uid);
-                cache
-                    .rename((from.role(), name), (to.role(), &new))
-                    .map_err(|e| format!("updating this computer's copy: {e}"))?;
-                Ok(Some(new))
-            }
-            // No UIDPLUS: find it in a fresh copy of the destination.
-            None => {
-                cache
-                    .remove(from.role(), name)
-                    .map_err(|e| format!("updating this computer's copy: {e}"))?;
-                let _ = self.mail.sync(login, &ctx.home, ctx.owner, to.role());
-                Ok(message_id.and_then(|id| find(cache, to.role(), to_validity, &id)))
-            }
-        }
+        let _ = self.mail.sync(login, &ctx.home, ctx.owner, to.role());
+        Ok(message_id.and_then(|id| find(cache, to.role(), to_validity, &id)))
     }
 
     /// Undo's hook (ADR 0037): the files are back; the message goes back on
-    /// the server too.
+    /// the server too, a move like any other: under the person's lock, a
+    /// mark of it waiting first. When the server can't take it back, this
+    /// computer's copy goes back to how the move left it, as the server
+    /// still has it, and the change stays done (ADR 0051).
     pub(crate) fn move_back(
         &self,
         ctx: &TaskContext,
         paths: &[PathBuf],
     ) -> Result<(), ActionError> {
         let login = &ctx.principal.on_behalf_of.name;
-        let [was, now] = paths else {
+        // The message's two files; the others are their read markers.
+        let messages: Vec<&PathBuf> = paths.iter().filter(|p| !is_marker(p)).collect();
+        let [was, now] = messages.as_slice() else {
             // The local store's move, or one whose destination wasn't
             // known: the files are all there is.
             return Ok(());
         };
-        let (Some((from, (validity, _))), Some((to, (_, uid)))) =
+        let (Some((from, (validity, _))), Some((to, (to_validity, uid)))) =
             (place(ctx, was), place(ctx, now))
         else {
             return Ok(());
         };
+        let name = |p: &Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let (restored, moved) = (name(was), name(now));
+        let cache = Self::cache(ctx)?;
+        let resync = {
+            let person = self.mail.person_lock(login);
+            let _one = handle::lock(&person);
+            match self.back_on_server(login, (from, validity), (to, to_validity, uid)) {
+                Err(why) => {
+                    self.as_moved(&cache, login, (from, &restored), (to, &moved, to_validity));
+                    return Err(ActionError::Failed(why));
+                }
+                // The restored file names the UID it had; the server gave
+                // it a new one.
+                Ok((Some(back), Some(state))) if state.uid_validity == validity => {
+                    return cache
+                        .rename(
+                            (from, &restored),
+                            (from, &cache::synced_name(validity, back)),
+                        )
+                        .map_err(|e| ActionError::io("the restored message", e));
+                }
+                Ok(_) => true,
+            }
+        };
+        if resync {
+            let _ = self.mail.sync(login, &ctx.home, ctx.owner, from);
+        }
+        Ok(())
+    }
+
+    /// MOVE back on the server, under the lock the caller holds: the UID
+    /// it got there, and where `from`'s sync left off.
+    fn back_on_server(
+        &self,
+        login: &str,
+        (from, validity): (Role, u32),
+        (to, to_validity, uid): (Role, u32, u32),
+    ) -> Result<(Option<u32>, Option<glass_managed::mail::FolderState>), String> {
         let Mode::Remote(both) = self.mode(login) else {
-            return Err(ActionError::Failed(
-                "the message is back here, but mail isn't connected, so it couldn't be moved \
-                 back on the mail server"
-                    .into(),
-            ));
+            return Err(
+                "mail isn't connected, so it couldn't be moved back on the mail server".into(),
+            );
         };
         let (remote, account) = *both;
-        let cache = Self::cache(ctx)?;
-        let failed = |e: String| ActionError::Failed(e);
         let (to_name, _) = self
             .mail
             .folder(login, &remote, &account, to)
-            .map_err(|e| failed(format!("{e:?}")))?;
+            .map_err(|e| format!("{e:?}"))?;
         let (from_name, from_state) = self
             .mail
             .folder(login, &remote, &account, from)
-            .map_err(|e| failed(format!("{e:?}")))?;
+            .map_err(|e| format!("{e:?}"))?;
+        if from_state.is_some_and(|s| s.uid_validity != validity) {
+            return Err(format!(
+                "{} changed on the server since; it stays in {}",
+                cache::dir(from),
+                cache::dir(to)
+            ));
+        }
+        self.mail
+            .tell_waiting(login, to, to_validity, uid)
+            .map_err(|e| format!("telling the server it's {e:?}"))?;
         let back = remote
             .link
-            .move_to(&account, &to_name, uid, &from_name)
-            .map_err(|e| failed(link_failure("moving it back on the mail server", &e)))?;
-        // The restored file names the UID it had; the server gave it a
-        // new one.
-        let restored = was
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        match (back, from_state) {
-            (Some(back), Some(state)) if state.uid_validity == validity => cache
-                .rename(
-                    (from, &restored),
-                    (from, &cache::synced_name(validity, back)),
-                )
-                .map_err(|e| ActionError::io("the restored message", e)),
-            _ => {
-                let _ = self.mail.sync(login, &ctx.home, ctx.owner, from);
-                Ok(())
-            }
+            .move_to(&account, &to_name, to_validity, uid, &from_name)
+            .map_err(|e| link_failure("moving it back on the mail server", &e))?;
+        Ok((back, from_state))
+    }
+
+    /// This computer's copy as the move left it, which the server still
+    /// has: the moved file back, unless a sync of that folder has it
+    /// already or numbered it afresh; the restored one, and any mark of it
+    /// waiting, gone (the failed undo supersedes them).
+    fn as_moved(
+        &self,
+        cache: &Cache,
+        login: &str,
+        (from, restored): (Role, &str),
+        (to, moved, to_validity): (Role, &str, u32),
+    ) {
+        let kept = cache.names(to).is_ok_and(|n| n.iter().any(|n| n == moved));
+        let _ = if self.mail.synced_validity(login, to) == Some(to_validity) && !kept {
+            cache.rename((from, restored), (to, moved))
+        } else {
+            cache.remove(from, restored)
+        };
+        if let Some((_, uid)) = cache::parse_synced(restored) {
+            let _ = self.mail.forget_waiting(login, from, &[uid]);
         }
     }
+}
+
+/// Whether a change's path is a read marker (`.read/<file>`), not a message.
+fn is_marker(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|d| d == cache::READ_DIR)
 }
 
 /// A file in the person's cache: its folder, and the UIDVALIDITY and UID

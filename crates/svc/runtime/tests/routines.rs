@@ -146,11 +146,14 @@ async fn da4_a_saved_routine_runs_again_with_its_scope_when_started_and_on_its_s
         h.rt.run_routine(&h.me, "not-mine"),
         Err(RuntimeError::NotFound(_))
     ));
+    // One run at a time (ADR 0051).
+    h.rt.stop(&h.me, run.id).unwrap();
+    eventually(|| !h.rt.get(&h.me, run.id).unwrap().view.state.is_live()).await;
 
     // On its schedule: in its minute on a weekday, as its person, and not
     // a minute later or on a Saturday.
     let me = |login: &str| (login == h.me.name).then(|| h.me.clone());
-    let started = h.rt.run_due_routines(Weekday::Thursday, 9, 0, me);
+    let started = h.rt.run_due_routines(Weekday::Thursday, 9, 0, 1000, me);
     assert_eq!(started.len(), 1);
     let (which, scheduled) = &started[0];
     assert_eq!(which, &format!("{}/invoice-count", h.me.name));
@@ -160,21 +163,19 @@ async fn da4_a_saved_routine_runs_again_with_its_scope_when_started_and_on_its_s
         true
     );
     assert!(
-        h.rt.run_due_routines(Weekday::Thursday, 9, 1, me)
+        h.rt.run_due_routines(Weekday::Thursday, 9, 1, 1001, me)
             .is_empty()
     );
     assert!(
-        h.rt.run_due_routines(Weekday::Saturday, 9, 0, me)
+        h.rt.run_due_routines(Weekday::Saturday, 9, 0, 1002, me)
             .is_empty()
     );
     // Someone it can't find has none.
     assert!(
-        h.rt.run_due_routines(Weekday::Thursday, 9, 0, |_| None)
+        h.rt.run_due_routines(Weekday::Thursday, 9, 0, 1003, |_| None)
             .is_empty()
     );
-    for task in [run.id, scheduled.id] {
-        h.rt.stop(&h.me, task).unwrap();
-    }
+    h.rt.stop(&h.me, scheduled.id).unwrap();
 
     // Undoing the task that saved it takes the routine away.
     let report =
@@ -193,7 +194,116 @@ async fn da4_a_saved_routine_runs_again_with_its_scope_when_started_and_on_its_s
     assert!(h.rt.routines_of(&h.me).is_empty());
     assert!(h.rt.run_routine(&h.me, "invoice-count").is_err());
     assert!(
-        h.rt.run_due_routines(Weekday::Thursday, 9, 0, me)
+        h.rt.run_due_routines(Weekday::Thursday, 9, 0, 2000, me)
             .is_empty()
     );
+}
+
+/// `name` kept as one of the test user's routines, as an approved save
+/// keeps it: run by `writer`, on `schedule`.
+fn kept(h: &Harness, name: &str, schedule: Option<&str>) -> String {
+    let routines = common::routines(h.dir.path());
+    let draft = glass_app_routines::Draft {
+        routine: None,
+        name: Some(name.into()),
+        request: "Tell me how many invoices there are.".into(),
+        script: SCRIPT.into(),
+        schedule: schedule.map(str::to_owned),
+        note: "First version".into(),
+    };
+    let scope = glass_app_routines::Scope {
+        agent: "writer".parse().unwrap(),
+        read: vec![h.home().join("Invoices")],
+        write: vec![h.home().join("Reports")],
+        task: TaskId::new(),
+    };
+    let routine = routines.plan(&h.me.name, &h.home(), draft, scope).unwrap();
+    let owner = glass_platform::fs::Owner {
+        uid: h.me.uid,
+        gid: h.me.gid,
+    };
+    routines.keep(routine, &h.home(), owner).unwrap().id
+}
+
+#[tokio::test]
+async fn da4_a_routine_runs_one_at_a_time() {
+    // ADR 0051: Run now twice ran it twice at once, and so did its schedule
+    // while a run was going.
+    let h = harness_with(POLICY);
+    let id = kept(&h, "Invoice count", Some("weekdays 09:00"));
+    let first = h.rt.run_routine(&h.me, &id).unwrap();
+    let again = h.rt.run_routine(&h.me, &id).unwrap_err();
+    assert!(matches!(again, RuntimeError::Conflict(_)), "{again}");
+    assert!(again.to_string().contains("running now"), "{again}");
+    let me = |login: &str| (login == h.me.name).then(|| h.me.clone());
+    let started = h.rt.run_due_routines(Weekday::Thursday, 9, 0, 1000, me);
+    assert_eq!(started.len(), 1);
+    let skipped = started[0].1.as_ref().unwrap_err();
+    assert!(matches!(skipped, RuntimeError::Conflict(_)), "{skipped}");
+    h.rt.stop(&h.me, first.id).unwrap();
+    eventually(|| !h.rt.get(&h.me, first.id).unwrap().view.state.is_live()).await;
+    let next = h.rt.run_routine(&h.me, &id).unwrap();
+    h.rt.stop(&h.me, next.id).unwrap();
+}
+
+#[tokio::test]
+async fn da4_a_scheduled_minute_starts_its_routines_once_whatever_glassd_or_the_clock_do() {
+    // ADR 0051: glassd restarting in the minute a routine started on its
+    // schedule started it again.
+    let h = harness_with(POLICY);
+    kept(&h, "Invoice count", Some("weekdays 09:00"));
+    let me = |login: &str| (login == h.me.name).then(|| h.me.clone());
+    let thursday_nine = 20_000;
+    let first =
+        h.rt.run_due_routines(Weekday::Thursday, 9, 0, thursday_nine, me);
+    assert_eq!(first.len(), 1);
+    let task = first[0].1.as_ref().unwrap().id;
+    h.rt.stop(&h.me, task).unwrap();
+    eventually(|| !h.rt.get(&h.me, task).unwrap().view.state.is_live()).await;
+    // The same minute again: a restarted glassd's first tick, or the clock
+    // set back a minute.
+    let again =
+        h.rt.run_due_routines(Weekday::Thursday, 9, 0, thursday_nine, me);
+    assert!(again.is_empty(), "{again:?}");
+    // A minute that comes again when daylight saving ends: an hour on, the
+    // clock shows 09:00 again, but its local number is the earlier one's.
+    let later =
+        h.rt.run_due_routines(Weekday::Thursday, 9, 0, thursday_nine - 1, me);
+    assert!(later.is_empty(), "{later:?}");
+    // A new store over the same state, as after a restart, holds the claim.
+    let restarted = glass_app_routines::Routines::new(h.dir.path().join("state/routines"));
+    assert!(!restarted.claim_minute(thursday_nine).unwrap());
+    // The next week's 09:00 runs.
+    let next_week =
+        h.rt.run_due_routines(Weekday::Thursday, 9, 0, thursday_nine + 7 * 24 * 60, me);
+    let next = next_week[0].1.as_ref().unwrap().id;
+    h.rt.stop(&h.me, next).unwrap();
+}
+
+#[tokio::test]
+async fn da4_a_run_a_restart_cut_off_is_kept() {
+    // ADR 0051: a run going when glassd stopped was never kept: its end
+    // never came in the process that started it.
+    let h = harness_with(POLICY);
+    let id = kept(&h, "Invoice count", None);
+    let run = h.rt.run_routine(&h.me, &id).unwrap();
+    // glassd stops here; the next one starts over the same state.
+    let restarted = glass_app_routines::Routines::new(h.dir.path().join("state/routines"));
+    assert_eq!(restarted.recover(), 1);
+    let runs = restarted.runs(&h.me.name, &id);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].task, run.id);
+    assert_eq!(runs[0].outcome, glass_app_routines::Outcome::Failed);
+    assert_eq!(runs[0].said, glass_app_routines::store::CUT_OFF);
+    // Kept once: a second start finds nothing more to keep.
+    assert_eq!(restarted.recover(), 0);
+    // And a run that ends in the process that started it is kept once,
+    // as it went.
+    h.rt.stop(&h.me, run.id).unwrap();
+    eventually(|| {
+        restarted.runs(&h.me.name, &id)[0].outcome == glass_app_routines::Outcome::Stopped
+    })
+    .await;
+    assert_eq!(restarted.runs(&h.me.name, &id).len(), 1);
+    assert_eq!(restarted.recover(), 0);
 }

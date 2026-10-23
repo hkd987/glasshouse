@@ -176,14 +176,20 @@ impl MailProvider {
     }
 
     /// Undo's hook (ADR 0050): the read marker is back as it was; the
-    /// server hears so too.
+    /// server hears so too. What it was comes from the change's kind (the
+    /// mark made the marker, or took it away), not the marker: a sync
+    /// between undo's restore and this hook puts the server's state back
+    /// in it (ADR 0051). Under the lock, the marker is set again and the
+    /// server told; a message no longer in the folder here can't be.
     pub(crate) fn mark_back(
         &self,
         ctx: &TaskContext,
+        kind: ChangeKind,
         paths: &[PathBuf],
     ) -> Result<(), ActionError> {
         let login = &ctx.principal.on_behalf_of.name;
         let cache = Self::cache(ctx)?;
+        let read = kind != ChangeKind::Created;
         let person = self.mail.person_lock(login);
         let _one = handle::lock(&person);
         for path in paths {
@@ -191,8 +197,16 @@ impl MailProvider {
                 continue;
             };
             let folder = Folder::of(role);
-            let read = cache.is_read(role, &name);
-            self.tell_server(login, &[&(folder, name)], read)?;
+            if !cache.names(role).is_ok_and(|n| n.contains(&name)) {
+                return Err(ActionError::Failed(format!(
+                    "it isn't in {} on this computer any more",
+                    folder.dir()
+                )));
+            }
+            self.tell_server(login, &[&(folder, name.clone())], read)?;
+            cache
+                .set_read(role, &name, read)
+                .map_err(|e| ActionError::io(format!("{}/{name}", folder.key()), e))?;
         }
         Ok(())
     }

@@ -8,11 +8,20 @@
 mod common;
 
 use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
+use glass_actions::{
+    ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, Registry, TaskContext,
+};
 use glass_api::{ChangeKind, ScopeRequest, TaskRequest, UndoReport, UndoRequest};
+use glass_app_files::FilesProvider;
+use glass_platform::fs::ConfinedDir;
+use glass_policy::{DEFAULT_POLICY, Policy};
 use glass_rpc::Client;
-use glass_types::TaskId;
-use serde_json::json;
+use glass_types::{ActionName, SideEffect, TaskId, Tier};
+use serde_json::{Value, json};
 
 use crate::common::{Harness, eventually, harness, tool};
 
@@ -320,4 +329,343 @@ async fn au20_old_snapshots_go_but_never_while_their_task_can_still_undo() {
         fs::read_to_string(h.home().join("Reports/existing.txt")).unwrap(),
         "clobbered"
     );
+}
+
+// ---- What the TLA+ model of undo found (specs/tla/Undo.tla, ADR 0051) ----
+
+/// A `files.*` action that can stop partway, to put another task's step in
+/// the gap: before it writes (`hold: "before"`), or after it wrote and
+/// before glassd reads how it left the file (`"after"`). `files.gated_note`
+/// is the same at Auto, as a draft is. Its revert hook counts its calls.
+#[derive(Debug, Default)]
+struct Gated {
+    gate: Mutex<GateState>,
+    turned: Condvar,
+    reverts: AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    waiting: bool,
+    open: bool,
+}
+
+impl Gated {
+    fn hold(&self) {
+        let mut gate = self.gate.lock().unwrap();
+        gate.waiting = true;
+        self.turned.notify_all();
+        while !gate.open {
+            gate = self.turned.wait(gate).unwrap();
+        }
+        *gate = GateState::default();
+    }
+
+    async fn reached(&self) {
+        eventually(|| self.gate.lock().unwrap().waiting).await;
+    }
+
+    fn release(&self) {
+        self.gate.lock().unwrap().open = true;
+        self.turned.notify_all();
+    }
+
+    fn reverts(&self) -> usize {
+        self.reverts.load(Ordering::SeqCst)
+    }
+}
+
+impl ActionProvider for Gated {
+    fn actions(&self) -> Vec<ActionDef> {
+        let def = |name: &str, tier| ActionDef {
+            name: name.parse().unwrap(),
+            title: "Write a file, gated".into(),
+            description: "Test only.".into(),
+            input_schema: json!({ "type": "object" }),
+            side_effect: SideEffect::LocalReversible,
+            default_tier: tier,
+            ask: Default::default(),
+        };
+        vec![
+            def("files.gated_write", Tier::Notify),
+            def("files.gated_note", Tier::Auto),
+        ]
+    }
+
+    fn preview(
+        &self,
+        ctx: &TaskContext,
+        _action: &ActionName,
+        input: &Value,
+    ) -> Result<Preview, ActionError> {
+        let r = ctx.resolve_writable(input["path"].as_str().unwrap_or_default())?;
+        Ok(Preview {
+            summary: format!("Write {}", r.display),
+            targets: vec![r.display.clone()],
+            writes: vec![r.host.clone()],
+            snapshot_roots: vec![r.grant.root.clone()],
+            ..Preview::default()
+        })
+    }
+
+    fn invoke(
+        &self,
+        ctx: &TaskContext,
+        _action: &ActionName,
+        input: &Value,
+    ) -> Result<ActionOutput, ActionError> {
+        let r = ctx.resolve_writable(input["path"].as_str().unwrap_or_default())?;
+        if input["hold"] == "before" {
+            self.hold();
+        }
+        let dir = ConfinedDir::open(&r.grant.root).map_err(|e| ActionError::io(&r.display, e))?;
+        let content = input["content"].as_str().unwrap_or_default();
+        dir.write(&r.rel, content.as_bytes(), Some(ctx.owner))
+            .map_err(|e| ActionError::io(&r.display, e))?;
+        if input["hold"] == "after" {
+            self.hold();
+        }
+        Ok(ActionOutput {
+            text: format!("Wrote {}", r.display),
+            data: json!({}),
+            changes: vec![Change {
+                kind: ChangeKind::Modified,
+                target: r.display,
+                reversible: true,
+                paths: vec![r.host],
+            }],
+        })
+    }
+
+    fn revert(
+        &self,
+        _ctx: &TaskContext,
+        _action: &ActionName,
+        _kind: ChangeKind,
+        _paths: &[PathBuf],
+    ) -> Result<(), ActionError> {
+        self.reverts.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Policy's actions are the files actions and `Gated`'s.
+fn gated(h: &Harness) -> Arc<Gated> {
+    let gated = Arc::new(Gated::default());
+    let mut registry = Registry::new();
+    registry.register(Arc::new(FilesProvider)).unwrap();
+    registry
+        .register(gated.clone() as Arc<dyn ActionProvider>)
+        .unwrap();
+    h.rt.apply_policy(Policy::from_toml(DEFAULT_POLICY).unwrap(), registry, "test");
+    gated
+}
+
+async fn gated_write(agent: &Client, tool_name: &str, path: &str, content: &str, hold: &str) {
+    let args = json!({ "path": path, "content": content, "hold": hold });
+    let done = tool(agent, tool_name, args).await;
+    assert!(!done.is_error, "{}", done.text());
+}
+
+/// Long enough for another task's whole step, had it not waited its turn.
+const A_STEP: std::time::Duration = std::time::Duration::from_millis(300);
+
+#[tokio::test]
+async fn adr0051_undoing_an_earlier_change_never_takes_back_another_tasks_later_one() {
+    // AU-21. A writes, B writes, A writes again. Undoing A's last change
+    // puts B's version back; that version is B's, so undoing A's first
+    // change leaves it and says so.
+    let h = harness();
+    let a = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let b = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let (agent_a, agent_b) = (h.agent(a).await, h.agent(b).await);
+    write(&agent_a, "Reports/shared.csv", "a1\n").await;
+    write(&agent_b, "Reports/shared.csv", "b\n").await;
+    write(&agent_a, "Reports/shared.csv", "a2\n").await;
+
+    undo(&h, a, vec![1], false).await;
+    assert_eq!(read(&h, "Reports/shared.csv"), "b\n");
+    let report = undo(&h, a, vec![0], false).await;
+    assert_eq!(read(&h, "Reports/shared.csv"), "b\n");
+    assert_eq!(
+        report.not_undone,
+        [format!("~/Reports/shared.csv — {CHANGED_SINCE}")]
+    );
+    assert_eq!(undone(&h, a), [false, true]);
+}
+
+#[tokio::test]
+async fn adr0051_undoing_an_undone_change_runs_nothing_again() {
+    // AU-21: once undone, a change's revert hook never runs again, asked
+    // again or by two undos at once.
+    let h = harness();
+    let gated = gated(&h);
+    let task = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let agent = h.agent(task).await;
+    gated_write(&agent, "files_gated_write", "Reports/x.txt", "x", "").await;
+    undo(&h, task, vec![], false).await;
+    assert_eq!(gated.reverts(), 1);
+    let again = undo(&h, task, vec![0], false).await;
+    assert_eq!(gated.reverts(), 1);
+    assert!(
+        again.restored.is_empty() && again.removed.is_empty() && again.not_undone.is_empty(),
+        "{again:?}"
+    );
+
+    // Undo held the task (AW-22); the person carries on.
+    h.rt.resume(&h.me, task).unwrap();
+    gated_write(&agent, "files_gated_write", "Reports/y.txt", "y", "").await;
+    let (one, all) = tokio::join!(
+        undo(&h, task, vec![1], false),
+        undo(&h, task, vec![], false)
+    );
+    assert_eq!(gated.reverts(), 2, "{one:?} {all:?}");
+    assert_eq!(undone(&h, task), [true, true]);
+}
+
+#[tokio::test]
+async fn adr0051_another_tasks_write_just_after_a_step_is_never_taken_for_the_steps() {
+    // ADR 0017: glassd reads how a step left its files right after it; a
+    // write of another task's lands after that, not in between, so undoing
+    // the first step leaves the second's version.
+    let h = harness();
+    let gated = gated(&h);
+    let a = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let b = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let (agent_a, agent_b) = (h.agent(a).await, h.agent(b).await);
+    let first = tokio::spawn(async move {
+        gated_write(
+            &agent_a,
+            "files_gated_write",
+            "Reports/shared.csv",
+            "a\n",
+            "after",
+        )
+        .await;
+    });
+    gated.reached().await;
+    let second = tokio::spawn(async move {
+        write(&agent_b, "Reports/shared.csv", "b\n").await;
+    });
+    tokio::time::sleep(A_STEP).await;
+    gated.release();
+    first.await.unwrap();
+    second.await.unwrap();
+
+    let report = undo(&h, a, vec![], false).await;
+    assert_eq!(read(&h, "Reports/shared.csv"), "b\n");
+    assert_eq!(
+        report.not_undone,
+        [format!("~/Reports/shared.csv — {CHANGED_SINCE}")]
+    );
+}
+
+#[tokio::test]
+async fn adr0051_undo_never_takes_back_a_write_made_between_a_steps_snapshot_and_it() {
+    // AU-21: undo puts back the file as it was just before the step. Another
+    // task's write comes before the snapshot or after the step, never in
+    // between, where the snapshot wouldn't hold it.
+    let h = harness();
+    let gated = gated(&h);
+    let a = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let b = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let (agent_a, agent_b) = (h.agent(a).await, h.agent(b).await);
+    let first = tokio::spawn(async move {
+        gated_write(
+            &agent_a,
+            "files_gated_write",
+            "Reports/shared.csv",
+            "a\n",
+            "before",
+        )
+        .await;
+    });
+    gated.reached().await;
+    let second = tokio::spawn(async move {
+        write(&agent_b, "Reports/shared.csv", "b\n").await;
+    });
+    tokio::time::sleep(A_STEP).await;
+    gated.release();
+    first.await.unwrap();
+    second.await.unwrap();
+
+    undo(&h, a, vec![], false).await;
+    assert_eq!(read(&h, "Reports/shared.csv"), "b\n");
+}
+
+#[tokio::test]
+async fn adr0051_an_undone_change_never_comes_back_with_another_tasks_undo() {
+    // AU-21: an undo waits for another task's step under way, so that
+    // step's snapshot never holds what the undo took away.
+    let h = harness();
+    let gated = gated(&h);
+    let a = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let b = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let (agent_a, agent_b) = (h.agent(a).await, h.agent(b).await);
+    write(&agent_a, "Reports/shared.csv", "a\n").await;
+    let step = tokio::spawn(async move {
+        gated_write(
+            &agent_b,
+            "files_gated_write",
+            "Reports/shared.csv",
+            "b\n",
+            "before",
+        )
+        .await;
+    });
+    gated.reached().await;
+    let rt = h.rt.clone();
+    let me = h.me.clone();
+    let undoing = tokio::spawn(async move {
+        let request = UndoRequest {
+            task: a,
+            to: None,
+            changes: vec![],
+            dry_run: false,
+        };
+        rt.undo(&me, request).await.unwrap()
+    });
+    tokio::time::sleep(A_STEP).await;
+    gated.release();
+    step.await.unwrap();
+    undoing.await.unwrap();
+    undo(&h, b, vec![], false).await;
+
+    let content = fs::read_to_string(h.home().join("Reports/shared.csv")).ok();
+    assert!(
+        !(undone(&h, a) == [true] && content.as_deref() == Some("a\n")),
+        "A's change is undone, yet its version is back: {content:?}"
+    );
+}
+
+#[tokio::test]
+async fn adr0051_an_auto_step_after_another_tasks_change_snapshots_afresh() {
+    // AU-20, AU-21: an Auto step needs no snapshot of its own while the
+    // task's snapshot still holds its files as they are; once another task
+    // changed one, undoing the step would put back the older version.
+    let h = harness();
+    let _gated = gated(&h);
+    let a = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let b = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let (agent_a, agent_b) = (h.agent(a).await, h.agent(b).await);
+    gated_write(
+        &agent_a,
+        "files_gated_write",
+        "Reports/other.txt",
+        "o\n",
+        "",
+    )
+    .await;
+    write(&agent_b, "Reports/shared.csv", "b\n").await;
+    gated_write(
+        &agent_a,
+        "files_gated_note",
+        "Reports/shared.csv",
+        "a\n",
+        "",
+    )
+    .await;
+
+    undo(&h, a, vec![1], false).await;
+    assert_eq!(read(&h, "Reports/shared.csv"), "b\n");
 }

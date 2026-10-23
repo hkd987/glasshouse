@@ -80,6 +80,19 @@ cache) and ADR 0049.
 - The test mail server's `deliver` now leaves mail unread. Filing a
   message marks it read, as Sent needs.
 
+## Amended by ADR 0051
+- Its model (`specs/tla/MailReadState.tla`) found where the design lost a
+  mark or put one on the wrong message:
+  - marks and moves now name the folder's numbering (UIDVALIDITY), and the
+    server refuses a mismatch;
+  - a mark still waiting goes to the server before its message is filed;
+  - a newer mark replaces one still waiting;
+  - `revert` is told the change's kind, so an undone mark sends what the
+    undo put back even when a sync came between;
+  - moves hold the person's lock;
+  - a move's change names the read markers.
+- What an agent marks or files wakes an open Mail at once.
+
 ## Not built yet
 - A count across folders for the launcher's tile.
 - Flags other than `\Seen` (flagged, answered).

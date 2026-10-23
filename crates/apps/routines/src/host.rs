@@ -29,6 +29,11 @@ pub trait Host: Send + Sync + fmt::Debug {
     /// Something Routines shows changed for `login`: wakes its open
     /// windows (`app.status`).
     fn changed(&self, login: &str);
+
+    /// The routine `task` is a run of, and the version it started with.
+    fn run_of(&self, _task: TaskId) -> Option<(String, u32)> {
+        None
+    }
 }
 
 /// A request done the same way more than once: what keeping it as a

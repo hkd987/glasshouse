@@ -29,7 +29,9 @@ mod cache;
 mod handle;
 mod message;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use glass_api::{AskLabels, ChangeKind};
 use glass_managed::mail::{Account, LinkError, Outgoing, Role, Secret};
@@ -80,6 +82,25 @@ pub struct MailProvider {
     directory: DirectoryHandle,
     settings: Option<MailSettings>,
     mail: MailHandle,
+    listed: Listed,
+}
+
+/// The most summaries kept for listings, across everyone's folders.
+const MAX_KEPT_SUMMARIES: usize = 20_000;
+
+/// What listings parsed, by file, kept while the file stays the same size
+/// and time: a listing reads a folder's names and parses only what's new or
+/// changed, not the start of every message each time (ADR 0051). Synced
+/// files never change; a draft rewritten changes its time.
+#[derive(Debug, Clone, Default)]
+struct Listed(Arc<Mutex<HashMap<PathBuf, KeptSummary>>>);
+
+#[derive(Debug, Clone)]
+struct KeptSummary {
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    when: i64,
+    summary: Summary,
 }
 
 /// Where a person's mail is, for one call.
@@ -101,6 +122,7 @@ impl MailProvider {
             directory,
             settings: None,
             mail: MailHandle::default(),
+            listed: Listed::default(),
         }
     }
 
@@ -463,6 +485,10 @@ fn message_schema() -> Value {
                 "items": { "type": "string" },
                 "maxItems": MAX_ATTACHMENTS,
                 "description": "Files to send with it, by their paths in this task's folders, as files.list gives them: \"Documents/ABC report.pdf\"."
+            },
+            "draft": {
+                "type": "string",
+                "description": "The draft this is, drafts/<file>, as mail.list or a send that couldn't leave gave it: its files go with it, and sending it (or saving it again) takes its place in Drafts."
             }
         },
         "required": ["to", "subject", "body"],
@@ -501,7 +527,7 @@ fn stale_note(error: &SyncError) -> String {
              what this computer kept"
                 .into()
         }
-        SyncError::Link(LinkError::Refused(e)) | SyncError::Local(e) => {
+        SyncError::Link(LinkError::Refused(e) | LinkError::Unknown(e)) | SyncError::Local(e) => {
             format!("couldn't bring it up to date ({e}), so this is what this computer kept")
         }
     }
@@ -556,13 +582,10 @@ impl MailProvider {
         message.attachments.iter().map(|p| ctx.resolve(p)).collect()
     }
 
-    /// The files the draft `message` comes from carries; none without one.
-    fn draft_files(
-        ctx: &TaskContext,
-        message: &Message,
-    ) -> Result<Vec<message::Attachment>, ActionError> {
+    /// The draft `message` is, by its name in Drafts; none without one.
+    fn draft_of(message: &Message) -> Result<Option<&str>, ActionError> {
         let Some(id) = &message.draft else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         let (folder, name) = Self::message_ref(id)?;
         if folder.role() != Role::Drafts {
@@ -570,10 +593,46 @@ impl MailProvider {
                 "{id} isn't a draft: only a draft's files go with it"
             )));
         }
+        Ok(Some(name))
+    }
+
+    /// The files the draft `message` comes from carries; none without one.
+    fn draft_files(
+        ctx: &TaskContext,
+        message: &Message,
+    ) -> Result<Vec<message::Attachment>, ActionError> {
+        let Some(name) = Self::draft_of(message)? else {
+            return Ok(Vec::new());
+        };
         let raw = Self::cache(ctx)?
-            .read(folder.role(), name)
-            .map_err(|e| ActionError::io(format!("draft {id}"), e))?;
+            .read(Role::Drafts, name)
+            .map_err(|e| ActionError::io(format!("draft drafts/{name}"), e))?;
         Ok(message::attachments_of(&raw))
+    }
+
+    /// Takes the drafts `messages` are for this call, so no other sends or
+    /// replaces one meanwhile and each leaves once (DP-30, ADR 0051).
+    fn take_drafts(
+        &self,
+        cache: &Cache,
+        messages: &[Message],
+        not_done: &str,
+    ) -> Result<handle::Taken<'_>, ActionError> {
+        let mut names = Vec::new();
+        for m in messages {
+            names.extend(Self::draft_of(m)?);
+        }
+        let paths = names
+            .iter()
+            .map(|n| cache.host_path(&cache::rel_dir(Role::Drafts).join(n)))
+            .collect();
+        self.mail.take_drafts(paths).map_err(|i| {
+            ActionError::Failed(format!(
+                "{not_done}: drafts/{} is being sent or saved by another call now, or is named \
+                 twice; nothing left this computer.",
+                names[i]
+            ))
+        })
     }
 
     /// The names of the files `message` carries: its draft's, then those
@@ -749,26 +808,51 @@ impl MailProvider {
     ) -> Result<ActionOutput, ActionError> {
         let note = self.refresh(ctx, folder);
         let cache = Self::cache(ctx)?;
-        let names = cache
-            .names(folder.role())
+        let entries = cache
+            .entries(folder.role())
             .map_err(|e| ActionError::io("mail store", e))?;
         let read = cache
             .read_names(folder.role())
             .map_err(|e| ActionError::io("mail store", e))?;
-        let unread = names.iter().filter(|n| !read.contains(*n)).count();
+        let unread = entries.iter().filter(|e| !read.contains(&e.name)).count();
         // Stored names start with when they were saved or their UID, so
         // the last names are the newest; the Date header orders them.
-        let mut messages: Vec<(i64, Summary)> = names
+        let mut kept = self.listed.0.lock().unwrap_or_else(|e| e.into_inner());
+        if kept.len() > MAX_KEPT_SUMMARIES {
+            kept.clear();
+        }
+        let mut messages: Vec<(i64, Summary)> = entries
             .iter()
             .rev()
             .take(MAX_LISTED)
-            .filter_map(|name| {
-                let raw = cache.read_start(folder.role(), name).ok()?;
-                let parsed = message::parse(&raw);
-                let summary = Self::summary(folder, name, &parsed, !read.contains(name));
-                Some((parsed.when, summary))
+            .filter_map(|entry| {
+                let path = cache.host_path(&cache::rel_dir(folder.role()).join(&entry.name));
+                let fresh = kept
+                    .get(&path)
+                    .filter(|k| k.size == entry.size && k.modified == entry.modified);
+                let (when, mut summary) = match fresh {
+                    Some(k) => (k.when, k.summary.clone()),
+                    None => {
+                        let raw = cache.read_start(folder.role(), &entry.name).ok()?;
+                        let parsed = message::parse(&raw);
+                        let summary = Self::summary(folder, &entry.name, &parsed, false);
+                        kept.insert(
+                            path,
+                            KeptSummary {
+                                size: entry.size,
+                                modified: entry.modified,
+                                when: parsed.when,
+                                summary: summary.clone(),
+                            },
+                        );
+                        (parsed.when, summary)
+                    }
+                };
+                summary.unread = !read.contains(&entry.name);
+                Some((when, summary))
             })
             .collect();
+        drop(kept);
         messages.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.id.cmp(&a.1.id)));
         messages.truncate(limit);
         let messages: Vec<Summary> = messages.into_iter().map(|(_, s)| s).collect();
@@ -832,6 +916,9 @@ impl MailProvider {
 
     fn draft(&self, ctx: &TaskContext, message: &Message) -> Result<ActionOutput, ActionError> {
         let cache = Self::cache(ctx)?;
+        // A draft saved again takes the old one's place, not a place
+        // beside it to be sent too (DP-30).
+        let _taken = self.take_drafts(&cache, std::slice::from_ref(message), "Not saved")?;
         let (from, _) = self.sender(&ctx.principal.on_behalf_of.name);
         let files = Self::attachments(ctx, message)?;
         let raw = self.build(ctx, message, &message::new_message_id(&from), &files);
@@ -841,31 +928,57 @@ impl MailProvider {
         let path = cache.host_path(&rel);
         attribute(ctx, &path);
         let file = rel.file_name().map(|n| n.to_string_lossy().into_owned());
+        let mut text = format!("Saved draft \"{}\"", message.subject);
+        let mut paths = vec![path];
+        let replaced = Self::draft_of(message)?;
+        if let Some(old) = replaced {
+            match cache.remove(Role::Drafts, old) {
+                Ok(()) => paths.push(cache.host_path(&cache::rel_dir(Role::Drafts).join(old))),
+                Err(e) => text.push_str(&format!("; the one before stays in Drafts ({e})")),
+            }
+        }
         Ok(ActionOutput {
-            text: format!("Saved draft \"{}\"", message.subject),
+            text,
             data: json!({
                 "draft": rel.strip_prefix(MAIL_DIR).unwrap_or(&rel).display().to_string(),
                 "id": file.map(|f| format!("drafts/{f}")),
             }),
             changes: vec![Change {
-                kind: ChangeKind::Created,
+                kind: if replaced.is_some() {
+                    ChangeKind::Modified
+                } else {
+                    ChangeKind::Created
+                },
                 target: format!("Drafts: {}", message.subject),
                 reversible: true,
-                paths: vec![path],
+                paths,
             }],
         })
     }
 
-    /// Keeps messages that weren't sent in Drafts; their ids.
+    /// Keeps messages that weren't sent in Drafts; their ids. One that is
+    /// a draft stays that draft, with what this call tried to send
+    /// (DP-30): a copy beside it would be sent again.
     fn keep_unsent(&self, ctx: &TaskContext, cache: &Cache, messages: &[Message]) -> Vec<String> {
         let (from, _) = self.sender(&ctx.principal.on_behalf_of.name);
         messages
             .iter()
             .enumerate()
             .filter_map(|(i, m)| {
+                let draft = Self::draft_of(m).ok().flatten();
+                if let Some(name) = draft {
+                    let kept = cache.read(Role::Drafts, name).ok()?;
+                    let kept = message::parse(&kept);
+                    if (&kept.to, &kept.subject, &kept.body) == (&m.to, &m.subject, &m.body) {
+                        return Some(format!("drafts/{name}"));
+                    }
+                }
                 let files = Self::attachments(ctx, m).unwrap_or_default();
                 let raw = self.build(ctx, m, &message::new_message_id(&from), &files);
-                let rel = cache.save_new(Role::Drafts, &Self::stem(m, i), &raw).ok()?;
+                let rel = match draft {
+                    Some(name) => cache.keep(Role::Drafts, name, &raw).ok()?,
+                    None => cache.save_new(Role::Drafts, &Self::stem(m, i), &raw).ok()?,
+                };
                 attribute(ctx, &cache.host_path(&rel));
                 let name = rel.file_name()?.to_string_lossy().into_owned();
                 Some(format!("drafts/{name}"))
@@ -877,6 +990,7 @@ impl MailProvider {
         let login = &ctx.principal.on_behalf_of.name;
         self.mail.remember(login, &ctx.home, ctx.owner);
         let cache = Self::cache(ctx)?;
+        let _taken = self.take_drafts(&cache, messages, "Not sent")?;
         let (from, _) = self.sender(login);
         let remote = match self.mode(login) {
             Mode::Local => None,
@@ -884,7 +998,8 @@ impl MailProvider {
             Mode::NotConnected(why) => {
                 let kept = self.keep_unsent(ctx, &cache, messages);
                 return Err(ActionError::Failed(format!(
-                    "Not sent: {why}. {} kept in Drafts ({}); send {} once mail is connected.",
+                    "Not sent: {why}. {} kept in Drafts ({}); send {} once mail is connected, \
+                     naming the draft.",
                     if messages.len() == 1 {
                         "It's".to_owned()
                     } else {
@@ -910,6 +1025,7 @@ impl MailProvider {
             .collect::<Result<_, _>>()?;
         let mut changes = Vec::new();
         let mut audit = Vec::new();
+        let mut left_drafts = Vec::new();
         for (index, message) in messages.iter().enumerate() {
             let message_id = message::new_message_id(&from);
             let raw = self.build(ctx, message, &message_id, &files[index]);
@@ -935,6 +1051,47 @@ impl MailProvider {
                             let (path, filed) = self.file_sent(ctx, &cache, remote, account, &raw);
                             (Some(submitted.reply), path, filed)
                         }
+                        // It may have left: kept in Drafts in case it
+                        // didn't, said plainly, and recorded as maybe sent,
+                        // so nobody sends it twice believing it never went
+                        // (DP-30, ADR 0051). Not an error: an agent told it
+                        // failed would send it again.
+                        Err(LinkError::Unknown(m)) => {
+                            let kept = self.keep_unsent(ctx, &cache, &messages[index..]);
+                            audit.push(json!({
+                                "message_id": format!("<{message_id}>"),
+                                "recipients": message.to.len(),
+                                "outcome": "unknown",
+                            }));
+                            let (maybe, rest) = kept
+                                .split_first()
+                                .map_or((String::new(), &[][..]), |(first, rest)| {
+                                    (first.clone(), rest)
+                                });
+                            let mut text = format!(
+                                "{}\"{}\" may have been sent: {m}. It's kept in Drafts ({maybe}) in \
+                                 case it wasn't; check with {} or in Sent on another device \
+                                 before sending it again.",
+                                match index {
+                                    0 => String::new(),
+                                    n => format!("Sent {n} of {}. ", messages.len()),
+                                },
+                                message.subject,
+                                message.to.join(", ")
+                            );
+                            if !rest.is_empty() {
+                                text.push_str(&format!(
+                                    " Not sent: {} waiting in Drafts ({}).",
+                                    plural(rest.len(), "message"),
+                                    rest.join(", ")
+                                ));
+                            }
+                            return Ok(ActionOutput {
+                                text,
+                                data: json!({ "sent": index, "unknown": 1, AUDIT_DETAIL: audit }),
+                                changes,
+                            });
+                        }
                         Err(e) => {
                             let kept = self.keep_unsent(ctx, &cache, &messages[index..]);
                             let why = match &e {
@@ -946,12 +1103,15 @@ impl MailProvider {
                                 LinkError::SignIn(_) => "the mail server no longer accepts your \
                                                          password: connect again in Mail"
                                     .to_owned(),
-                                LinkError::Refused(m) => format!("the mail server refused it: {m}"),
+                                LinkError::Refused(m) | LinkError::Unknown(m) => {
+                                    format!("the mail server refused it: {m}")
+                                }
                             };
                             let waiting = format!(
-                                "{} waiting in Drafts ({})",
+                                "{} waiting in Drafts ({}): send {} again naming the draft",
                                 plural(kept.len(), "message"),
-                                kept.join(", ")
+                                kept.join(", "),
+                                if kept.len() == 1 { "it" } else { "them" }
                             );
                             if index == 0 {
                                 return Err(ActionError::Failed(format!(
@@ -973,6 +1133,13 @@ impl MailProvider {
             };
             if let Some(path) = &path {
                 attribute(ctx, path);
+            }
+            // Sent: the draft it was is done, and isn't there to send again
+            // (DP-30).
+            if let Some(name) = Self::draft_of(message).ok().flatten()
+                && let Err(e) = cache.remove(Role::Drafts, name)
+            {
+                left_drafts.push(format!("drafts/{name} ({e})"));
             }
             audit.push(json!({
                 "message_id": format!("<{message_id}>"),
@@ -1005,6 +1172,12 @@ impl MailProvider {
             text.push_str(&format!(
                 "; {} couldn't be filed in Sent on the mail server",
                 plural(unfiled, "copy")
+            ));
+        }
+        if !left_drafts.is_empty() {
+            text.push_str(&format!(
+                "; still in Drafts, though sent: {}",
+                left_drafts.join(", ")
             ));
         }
         Ok(ActionOutput {
@@ -1093,7 +1266,9 @@ impl MailProvider {
                 LinkError::Unreachable(m) => {
                     format!("The mail server can't be reached ({m}). Nothing was saved; try again when online.")
                 }
-                LinkError::Refused(m) => format!("The mail server refused: {m}. Nothing was saved."),
+                LinkError::Refused(m) | LinkError::Unknown(m) => {
+                    format!("The mail server refused: {m}. Nothing was saved.")
+                }
             })
         })?;
         self.mail
@@ -1111,6 +1286,62 @@ impl MailProvider {
             data: json!({ "connected": true, "user": user }),
             changes: Vec::new(),
         })
+    }
+}
+
+impl MailProvider {
+    /// The action itself; `invoke` tells glassd what it changed.
+    fn act(
+        &self,
+        ctx: &TaskContext,
+        action: &ActionName,
+        input: &Value,
+    ) -> Result<ActionOutput, ActionError> {
+        match action.as_str() {
+            "mail.account" => {
+                let _: NoInput = parse_input(input)?;
+                Ok(self.account(ctx))
+            }
+            "mail.list" => {
+                let ListInput { folder, limit } = parse_input(input)?;
+                let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LISTED);
+                self.list(ctx, folder, limit)
+            }
+            "mail.read" => {
+                let ReadInput { id } = parse_input(input)?;
+                self.read(ctx, &id)
+            }
+            "mail.draft" => {
+                let message: Message = parse_input(input)?;
+                Self::validate(&message)?;
+                self.draft(ctx, &message)
+            }
+            "mail.send" => {
+                let SendInput { messages } = parse_input(input)?;
+                if messages.is_empty() || messages.len() > MAX_BATCH {
+                    return Err(ActionError::InvalidInput(format!(
+                        "send 1 to {MAX_BATCH} messages per call"
+                    )));
+                }
+                messages.iter().try_for_each(Self::validate)?;
+                self.send(ctx, &messages)
+            }
+            "mail.move" => {
+                let MoveInput { ids, to } = parse_input(input)?;
+                self.move_messages(ctx, &ids, to)
+            }
+            "mail.mark" => {
+                let MarkInput { ids, read } = parse_input(input)?;
+                self.mark_messages(ctx, &ids, read)
+            }
+            "mail.connect" => {
+                let input: ConnectInput = parse_input(input)?;
+                self.connect(ctx, &input)
+            }
+            _ => Err(ActionError::InvalidInput(format!(
+                "mail has no action {action}"
+            ))),
+        }
     }
 }
 
@@ -1504,51 +1735,13 @@ impl ActionProvider for MailProvider {
         action: &ActionName,
         input: &Value,
     ) -> Result<ActionOutput, ActionError> {
-        match action.as_str() {
-            "mail.account" => {
-                let _: NoInput = parse_input(input)?;
-                Ok(self.account(ctx))
-            }
-            "mail.list" => {
-                let ListInput { folder, limit } = parse_input(input)?;
-                let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LISTED);
-                self.list(ctx, folder, limit)
-            }
-            "mail.read" => {
-                let ReadInput { id } = parse_input(input)?;
-                self.read(ctx, &id)
-            }
-            "mail.draft" => {
-                let message: Message = parse_input(input)?;
-                Self::validate(&message)?;
-                self.draft(ctx, &message)
-            }
-            "mail.send" => {
-                let SendInput { messages } = parse_input(input)?;
-                if messages.is_empty() || messages.len() > MAX_BATCH {
-                    return Err(ActionError::InvalidInput(format!(
-                        "send 1 to {MAX_BATCH} messages per call"
-                    )));
-                }
-                messages.iter().try_for_each(Self::validate)?;
-                self.send(ctx, &messages)
-            }
-            "mail.move" => {
-                let MoveInput { ids, to } = parse_input(input)?;
-                self.move_messages(ctx, &ids, to)
-            }
-            "mail.mark" => {
-                let MarkInput { ids, read } = parse_input(input)?;
-                self.mark_messages(ctx, &ids, read)
-            }
-            "mail.connect" => {
-                let input: ConnectInput = parse_input(input)?;
-                self.connect(ctx, &input)
-            }
-            _ => Err(ActionError::InvalidInput(format!(
-                "mail has no action {action}"
-            ))),
+        let out = self.act(ctx, action, input);
+        // What an agent drafted, sent, filed or marked shows in an open Mail
+        // at once, as mail a sync brings does (NV-3, ADR 0051).
+        if out.as_ref().is_ok_and(|o| !o.changes.is_empty()) {
+            self.mail.changed(&ctx.principal.on_behalf_of.name);
         }
+        out
     }
 
     fn returns(&self, action: &ActionName) -> Option<Value> {
@@ -1628,11 +1821,12 @@ impl ActionProvider for MailProvider {
         &self,
         ctx: &TaskContext,
         action: &ActionName,
+        kind: ChangeKind,
         paths: &[PathBuf],
     ) -> Result<(), ActionError> {
         match action.as_str() {
             "mail.move" => self.move_back(ctx, paths),
-            "mail.mark" => self.mark_back(ctx, paths),
+            "mail.mark" => self.mark_back(ctx, kind, paths),
             _ => Ok(()),
         }
     }

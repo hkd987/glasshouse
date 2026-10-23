@@ -320,6 +320,24 @@ impl Task {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Moves the gate to `to`, unless the task has ended: an ended task
+    /// never holds or runs again, whoever was halfway through releasing or
+    /// holding it as it ended (the Approvals model, specs/tla).
+    pub fn set_gate(&self, to: Gate) {
+        self.gate.send_if_modified(|gate| {
+            if *gate == Gate::Ended || *gate == to {
+                return false;
+            }
+            *gate = to;
+            true
+        });
+    }
+
+    /// Whether the task has ended: its gate says so before its tile does.
+    pub fn ended(&self) -> bool {
+        *self.gate.borrow() == Gate::Ended
+    }
+
     /// Waits until the agent may act. `Err` once the task has ended.
     pub async fn wait_runnable(&self) -> Result<(), ()> {
         let mut gate = self.gate.subscribe();

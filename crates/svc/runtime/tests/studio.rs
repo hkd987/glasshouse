@@ -340,3 +340,21 @@ async fn ga1_an_agent_making_an_app_reads_what_each_action_takes_and_returns() {
         read.text()
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0051_two_remixes_made_at_once_are_two_apps() {
+    // ADR 0032, GA-3 (specs/tla/StudioVersions.tla): two tasks of one
+    // person remixing Chat at once each get an app of their own, My Chat
+    // and My Chat 2, never one app's two versions. Their saves take turns,
+    // so the second is planned after the first is in the person's apps.
+    let h = harness();
+    let ((_, a), (_, b)) = (claude_code(&h).await, claude_code(&h).await);
+    let (one, two) = tokio::join!(remix_chat(&a), remix_chat(&b));
+    let mut apps = [one["app"].clone(), two["app"].clone()];
+    apps.sort_by_key(|a| a.to_string());
+    assert_eq!(apps, [json!("my-chat"), json!("my-chat-2")], "{one} {two}");
+    assert_eq!(
+        (one["version"].clone(), two["version"].clone()),
+        (json!(1), json!(1))
+    );
+}

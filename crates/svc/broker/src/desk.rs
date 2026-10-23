@@ -27,6 +27,11 @@ pub enum DeskError {
 /// Answered approvals kept for display.
 const HISTORY: usize = 200;
 
+/// Tasks the desk ended, remembered so that a call on its way as its task
+/// ended can't open an ask after (PA-2): such a call is on its way for
+/// moments, not for thousands of tasks.
+const ENDED_KEPT: usize = 4096;
+
 /// Every open and recently answered approval on the machine.
 #[derive(Debug, Default)]
 pub struct ApprovalDesk {
@@ -39,6 +44,9 @@ struct DeskState {
     /// Actions approved "for the rest of this task" (DA-11).
     task_grants: HashMap<TaskId, HashSet<ActionName>>,
     history: VecDeque<ApprovalView>,
+    /// Tasks ended here, oldest first (ENDED_KEPT of them).
+    ended: HashSet<TaskId>,
+    ended_order: VecDeque<TaskId>,
 }
 
 #[derive(Debug)]
@@ -75,17 +83,28 @@ impl ApprovalDesk {
     /// ask's summary and review list (the agent's arguments: recipients,
     /// subjects, file names) become display text that can't forge or hide
     /// part of what the user is approving.
+    ///
+    /// An ask on a task that has ended is withdrawn at once: its call was on
+    /// its way as the task ended (the Approvals model, specs/tla).
     pub fn open(&self, mut view: ApprovalView, owner_uid: u32) -> oneshot::Receiver<Outcome> {
         view.make_display_safe();
         let (reply, rx) = oneshot::channel();
-        self.lock().pending.insert(
-            view.id,
-            Pending {
-                view,
-                owner_uid,
-                reply,
-            },
-        );
+        let pending = Pending {
+            view,
+            owner_uid,
+            reply,
+        };
+        let mut state = self.lock();
+        if state.ended.contains(&pending.view.task) {
+            Self::close(
+                &mut state,
+                pending,
+                Outcome::Withdrawn,
+                ApprovalState::Withdrawn,
+            );
+        } else {
+            state.pending.insert(pending.view.id, pending);
+        }
         rx
     }
 
@@ -146,6 +165,14 @@ impl ApprovalDesk {
     pub fn end_task(&self, task: TaskId) -> Vec<ApprovalView> {
         let mut state = self.lock();
         state.task_grants.remove(&task);
+        if state.ended.insert(task) {
+            state.ended_order.push_back(task);
+            while state.ended_order.len() > ENDED_KEPT {
+                if let Some(old) = state.ended_order.pop_front() {
+                    state.ended.remove(&old);
+                }
+            }
+        }
         let ids: Vec<ApprovalId> = state
             .pending
             .values()
@@ -354,6 +381,36 @@ mod tests {
         assert_eq!(desk.end_task(task).len(), 1);
         assert_eq!(rx_b.await.unwrap(), Outcome::Withdrawn);
         assert!(desk.pending(None).is_empty());
+    }
+
+    /// PA-2, found by the Approvals model (specs/tla): a call on its way
+    /// when its task ended opens its ask after the desk withdrew the task's
+    /// asks. It is withdrawn at once, and no answer can grant the task
+    /// anything.
+    #[tokio::test]
+    async fn pa2_an_ask_opened_after_its_task_ended_is_withdrawn_at_once() {
+        let desk = ApprovalDesk::new();
+        let task = TaskId::new();
+        desk.end_task(task);
+        let late = view(task);
+        let rx = desk.open(late.clone(), 1001);
+        assert!(desk.pending(None).is_empty(), "nothing left open");
+        assert_eq!(rx.await.unwrap(), Outcome::Withdrawn);
+        assert_eq!(
+            desk.answer(
+                late.id,
+                ApprovalAnswer::Approve {
+                    scope: ApprovalScope::Task,
+                },
+                1001,
+            ),
+            Err(DeskError::AlreadyAnswered("withdrawn".into()))
+        );
+        assert!(!desk.has_task_grant(task, &late.action));
+        // Other tasks ask as before.
+        let other = view(TaskId::new());
+        let _rx = desk.open(other.clone(), 1001);
+        assert_eq!(desk.pending(None).len(), 1);
     }
 
     /// What the user approves is what they read (DA-12): an agent's

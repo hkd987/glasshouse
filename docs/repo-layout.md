@@ -20,6 +20,7 @@ apps/                first-party web apps (ADR 0009, 0024): a TypeScript workspa
                      SDK (apps/sdk) and one folder per app with its manifest.json; their OS
                      actions stay in crates/apps (apps/README.md). apps/console is the
                      admin console's web app, a site glass-console serves (ADR 0023)
+specs/tla/           TLA+ models of key workflows, model-checked by TLC (make tla, ADR 0051)
 tools/               developer tooling (checks, dev runners, screenshots, legal notices)
 docs/                architecture, decisions (adr/), developer guides (dev/)
 ```

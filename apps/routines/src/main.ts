@@ -67,6 +67,13 @@ function message(error: unknown): string {
 async function load(): Promise<void> {
   try {
     if (!state.user) state.user = (await bridge.open()).user;
+    // The cursor before the first read, so a change in between is news
+    // (NV-3, ADR 0051); offline, the first wait tries again.
+    if (!state.listening) {
+      state.listening = true;
+      state.cursor = await bridge.status().then((s) => s.cursor, () => 0);
+      void listen();
+    }
     const [listed, repeats] = await Promise.all([
       bridge.call<{ routines: Routine[] }>("routines.list", {}),
       bridge.call<{ repeats: Repeat[] }>("routines.repeats", {}),
@@ -82,10 +89,6 @@ async function load(): Promise<void> {
       if (comparing && (comparing.routine !== state.open || !state.detail?.versions.some((v) => v.version === comparing.version && !v.in_use))) {
         state.comparing = null;
       }
-    }
-    if (!state.listening) {
-      state.listening = true;
-      void listen();
     }
   } catch (error) {
     state.notice = { text: error instanceof Offline ? "Routines can't be loaded right now." : message(error), tone: "bad" };
@@ -127,11 +130,6 @@ function runNow(r: Routine): Promise<void> {
  * paused or removed by their agent or another window. Then loads again.
  */
 async function listen(): Promise<void> {
-  try {
-    state.cursor = (await bridge.status()).cursor;
-  } catch {
-    // Offline: the first wait below tries again.
-  }
   for (;;) {
     try {
       const status = await bridge.status({ waitSecs: 25, since: state.cursor });

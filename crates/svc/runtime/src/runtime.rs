@@ -62,6 +62,9 @@ pub struct Runtime {
     pub(crate) desk: ApprovalDesk,
     pub(crate) sandbox: Arc<dyn Sandbox>,
     pub(crate) snapshots: Arc<dyn Snapshotter>,
+    /// Each person's turn to change their files, by uid: a reversible step
+    /// from its snapshot to its record, and an undo (ADR 0051).
+    pub(crate) writing: Mutex<std::collections::HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
     /// Built anew when policy's providers or their keys change (ADR 0039).
     gateway: RwLock<Arc<Gateway>>,
     /// Device settings (UX-1, ADR 0029).
@@ -70,6 +73,9 @@ pub struct Runtime {
     pub(crate) layers: LayerStore,
     audit: Arc<AuditLog>,
     audit_ok: AtomicBool,
+    /// From pause_for_sleep to the wake (PM-5): a resume or hand back that
+    /// lands meanwhile carries on after the wake, with the rest.
+    going_to_sleep: AtomicBool,
     events: broadcast::Sender<OwnedEvent>,
     tasks: Mutex<BTreeMap<TaskId, Arc<Task>>>,
     supervisors: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -160,9 +166,11 @@ impl Runtime {
             desk: ApprovalDesk::new(),
             sandbox: parts.sandbox,
             snapshots: parts.snapshots,
+            writing: Mutex::new(std::collections::HashMap::new()),
             gateway: RwLock::new(parts.gateway),
             audit: parts.audit,
             audit_ok: AtomicBool::new(true),
+            going_to_sleep: AtomicBool::new(false),
             events,
             tasks: Mutex::new(BTreeMap::new()),
             supervisors: Mutex::new(Vec::new()),
@@ -871,18 +879,25 @@ impl Runtime {
 
     // ---- lifecycle -------------------------------------------------------
 
-    /// Holds the agent at its next safe point and shows `tile`.
-    pub(crate) fn hold(&self, task: &Task, tile: TileState, note: &str) {
-        task.gate.send_replace(Gate::Hold);
+    /// Holds the agent at its next safe point and shows `tile`. A task that
+    /// has ended stays as it ended, so a pause or a timed-out ask that lands
+    /// as it ends never brings it back (the Approvals model, specs/tla).
+    /// Whether it held.
+    pub(crate) fn hold(&self, task: &Task, tile: TileState, note: &str) -> bool {
         let mut state = task.lock();
+        if !state.tile.is_live() || task.ended() {
+            return false;
+        }
+        task.set_gate(Gate::Hold);
         state.tile = tile;
         state.note(ActivityKind::State, note);
+        true
     }
 
     fn live(&self, caller: &Caller, id: TaskId) -> Result<Arc<Task>> {
         let task = self.authorized(caller, id)?;
         if !task.lock().tile.is_live() {
-            return Err(RuntimeError::Conflict("that task has already ended".into()));
+            return Err(ended());
         }
         Ok(task)
     }
@@ -894,7 +909,9 @@ impl Runtime {
 
     pub fn pause(&self, caller: &Caller, id: TaskId) -> Result<TaskView> {
         let task = self.live(caller, id)?;
-        self.hold(&task, TileState::Paused, "Paused by you");
+        if !self.hold(&task, TileState::Paused, "Paused by you") {
+            return Err(ended());
+        }
         self.state_change(&task, "Paused");
         Ok(task.view(self.desk.pending_for_task(id)))
     }
@@ -906,28 +923,48 @@ impl Runtime {
                 "you have control; hand back instead".into(),
             ));
         }
-        self.release(&task, "Resumed");
+        if !self.release(&task, "Resumed") {
+            return Err(ended());
+        }
         self.state_change(&task, "Resumed");
         Ok(task.view(self.desk.pending_for_task(id)))
     }
 
     /// Lets the agent continue; the tile shows "Needs you" again if an ask is
-    /// still open.
-    fn release(&self, task: &Task, note: &str) {
-        let pending = self.desk.pending_for_task(task.id).is_some();
-        {
-            let mut state = task.lock();
-            if let Some(caption) = state.sleeping.take() {
-                state.caption = caption;
-            }
-            state.tile = if pending {
-                TileState::NeedsYou
-            } else {
-                TileState::Working
-            };
-            state.note(ActivityKind::State, note);
+    /// still open. A task that has ended stays as it ended: a resume, a hand
+    /// back or a wake that lands as it ends never runs it again. Whether it
+    /// let the agent go on.
+    fn release(&self, task: &Task, note: &str) -> bool {
+        let mut state = task.lock();
+        if !state.tile.is_live() || task.ended() {
+            return false;
         }
-        task.gate.send_replace(Gate::Run);
+        // The machine is going to sleep (PM-5): it carries on after the
+        // wake, with the tasks sleep paused (the Approvals model).
+        if self.going_to_sleep.load(Ordering::SeqCst) {
+            if state.sleeping.is_none() {
+                let caption = std::mem::replace(&mut state.caption, "Paused for sleep".into());
+                state.sleeping = Some(caption);
+            }
+            state.tile = TileState::Paused;
+            state.note(ActivityKind::State, note);
+            task.set_gate(Gate::Hold);
+            return true;
+        }
+        // Read under the task lock, which an ask takes to say Needs you: an
+        // ask opening now says so after this, not before (AW-12).
+        let pending = self.desk.pending_for_task(task.id).is_some();
+        if let Some(caption) = state.sleeping.take() {
+            state.caption = caption;
+        }
+        state.tile = if pending {
+            TileState::NeedsYou
+        } else {
+            TileState::Working
+        };
+        state.note(ActivityKind::State, note);
+        task.set_gate(Gate::Run);
+        true
     }
 
     /// Take over (AW-20): the agent pauses at its next safe point and the user
@@ -944,7 +981,9 @@ impl Runtime {
                 "that's an app you're using; there's no agent to take over from".into(),
             ));
         }
-        self.hold(&task, TileState::YouAreDriving, "You took over");
+        if !self.hold(&task, TileState::YouAreDriving, "You took over") {
+            return Err(ended());
+        }
         let roots: Vec<PathBuf> = task
             .ctx
             .grants
@@ -994,7 +1033,9 @@ impl Runtime {
             None => "You handed back.".to_owned(),
         };
         task.lock().caption = summary.clone();
-        self.release(&task, &summary);
+        if !self.release(&task, &summary) {
+            return Err(ended());
+        }
         self.state_change(&task, &summary);
         Ok(task.view(self.desk.pending_for_task(id)))
     }
@@ -1011,13 +1052,20 @@ impl Runtime {
     }
 
     /// Ends a live task now, showing `tile`: the supervisor tears it down.
+    /// One that ended meanwhile keeps the tile it ended with.
     pub(crate) fn end_task(&self, task: &Task, tile: TileState, note: &str) {
         {
             let mut state = task.lock();
-            state.tile = tile;
-            state.note(ActivityKind::State, note);
+            if state.tile.is_live() {
+                state.tile = tile;
+                state.note(ActivityKind::State, note);
+            }
+            // Nothing for a wake to resume (PM-5).
+            state.sleeping = None;
+            // With the tile, under its lock: no hold or release lands
+            // between the two (the Approvals model, specs/tla).
+            task.gate.send_replace(Gate::Ended);
         }
-        task.gate.send_replace(Gate::Ended);
         self.desk.end_task(task.id);
         if let Some(stop) = task.stop.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = stop.send(());
@@ -1100,6 +1148,9 @@ impl Runtime {
     }
 
     pub(crate) async fn pause_for_sleep(&self) -> PowerResult {
+        // First, so that a resume landing while this goes round the tasks
+        // waits for the wake too.
+        self.going_to_sleep.store(true, Ordering::SeqCst);
         let tasks: Vec<Arc<Task>> = self.tasks().values().cloned().collect();
         let mut paused = Vec::new();
         for task in tasks {
@@ -1108,10 +1159,12 @@ impl Runtime {
                 state.tile,
                 TileState::Starting | TileState::Working | TileState::NeedsYou
             );
-            if !running || state.sleeping.is_some() {
+            // An ended task's tile can still say Working while its
+            // supervisor tears it down: its gate says it ended.
+            if !running || state.sleeping.is_some() || task.ended() {
                 continue;
             }
-            task.gate.send_replace(Gate::Hold);
+            task.set_gate(Gate::Hold);
             let caption = std::mem::replace(&mut state.caption, "Paused for sleep".into());
             state.sleeping = Some(caption);
             state.tile = TileState::Paused;
@@ -1148,19 +1201,22 @@ impl Runtime {
     }
 
     pub(crate) fn resume_after_sleep(&self) -> PowerResult {
+        self.going_to_sleep.store(false, Ordering::SeqCst);
         let sleeping: Vec<Arc<Task>> = self
             .tasks()
             .values()
             .filter(|t| t.lock().sleeping.is_some())
             .cloned()
             .collect();
+        let mut resumed = 0;
         for task in &sleeping {
-            self.release(task, "Resumed after sleep");
-            self.state_change(task, "Resumed after sleep");
+            // One that ended while the machine slept stays ended.
+            if self.release(task, "Resumed after sleep") {
+                self.state_change(task, "Resumed after sleep");
+                resumed += 1;
+            }
         }
-        PowerResult {
-            tasks: sleeping.len(),
-        }
+        PowerResult { tasks: resumed }
     }
 
     // ---- approvals -------------------------------------------------------
@@ -1211,7 +1267,9 @@ impl Runtime {
     /// Every record for one task, to rebuild it end to end (AU-3).
     pub fn audit_task(&self, caller: &Caller, id: TaskId) -> Result<Vec<AuditRecord>> {
         let task = self.authorized(caller, id)?;
-        blocking(|| glass_audit::read(self.audit.path(), |r| r.event.task == Some(task.id)))
+        // Through the log's index of tasks: not a read of the whole log,
+        // which grows with every action ever taken here (ADR 0051).
+        blocking(|| self.audit.task_records(task.id))
             .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
 
@@ -1276,6 +1334,11 @@ impl Runtime {
 /// glassd's multi-threaded runtime the worker hands its other tasks to
 /// another thread first (docs/dev/performance.md, rule 3). Elsewhere, such
 /// as single-threaded test runtimes, it just runs it.
+/// A press on a task that has ended (or just did).
+fn ended() -> RuntimeError {
+    RuntimeError::Conflict("that task has already ended".into())
+}
+
 pub(crate) fn blocking<R>(work: impl FnOnce() -> R) -> R {
     use tokio::runtime::{Handle, RuntimeFlavor};
     match Handle::try_current() {

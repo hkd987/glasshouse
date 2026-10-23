@@ -30,7 +30,6 @@ pub mod host;
 pub mod schedule;
 pub mod store;
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use glass_actions::{
@@ -165,14 +164,15 @@ impl Routines {
             None | Some("") => None,
             Some(text) => Some(text.parse::<Schedule>()?),
         };
-        let id = match current {
-            Some(current) => current.id,
+        let id = match &current {
+            Some(current) => current.id.clone(),
             None => new_id(&name, &self.ids(login))?,
         };
         Ok(Routine {
+            // The version it follows, numbered when kept; 0 for a new one.
+            version: current.as_ref().map_or(0, |c| c.version),
             id,
             name,
-            version: 0,
             owner: login.to_owned(),
             agent: scope.agent,
             request,
@@ -188,18 +188,32 @@ impl Routines {
     }
 
     /// Keeps `routine` as its next version and makes it the one the person
-    /// has, writing their list as them.
+    /// has, writing their list as them. Numbered and chosen in one step
+    /// under the choices lock (ADR 0051): a next version of a routine
+    /// removed since it was planned isn't kept, and a new one whose id was
+    /// taken meanwhile gets the next free one.
     pub fn keep(
         &self,
-        routine: Routine,
+        mut routine: Routine,
         home: &Path,
         owner: glass_platform::fs::Owner,
     ) -> std::io::Result<Routine> {
-        let saved = self.save(routine)?;
-        let mut chosen = store::chosen(home);
-        chosen.insert(saved.id.clone(), saved.version);
-        store::choose(home, owner, chosen)?;
-        Ok(saved)
+        store::change(home, owner, |chosen| {
+            if routine.version == 0 {
+                if !self.versions(&routine.owner, &routine.id).is_empty() {
+                    routine.id = new_id(&routine.name, &self.ids(&routine.owner))
+                        .map_err(std::io::Error::other)?;
+                }
+            } else if !chosen.contains_key(&routine.id) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("{} was removed meanwhile", routine.name),
+                ));
+            }
+            let saved = self.save(routine)?;
+            chosen.insert(saved.id.clone(), saved.version);
+            Ok(saved)
+        })
     }
 }
 
@@ -1270,6 +1284,15 @@ impl ActionProvider for RoutinesProvider {
             READ => {
                 let ReadInput { routine, version } = parse_input(input)?;
                 let current = self.mine(ctx, &routine)?;
+                // A routine's own run reads the version it started with,
+                // whatever was saved or chosen since (ADR 0051).
+                let version = version.or_else(|| {
+                    self.routines
+                        .host()?
+                        .run_of(ctx.principal.task)
+                        .filter(|(id, _)| *id == current.id)
+                        .map(|(_, v)| v)
+                });
                 let found = match version {
                     Some(v) => self.version_of(&current, v)?,
                     None => current.clone(),
@@ -1311,10 +1334,11 @@ impl ActionProvider for RoutinesProvider {
                 let UseInput { routine, version } = parse_input(input)?;
                 let found = self.mine(ctx, &routine)?;
                 let target = self.used(&found, version)?;
-                let mut chosen: BTreeMap<String, u32> = store::chosen(&ctx.home);
-                chosen.insert(target.id.clone(), target.version);
-                store::choose(&ctx.home, ctx.owner, chosen)
-                    .map_err(|e| ActionError::io("your routines", e))?;
+                store::change(&ctx.home, ctx.owner, |chosen| {
+                    chosen.insert(target.id.clone(), target.version);
+                    Ok(())
+                })
+                .map_err(|e| ActionError::io("your routines", e))?;
                 self.changed(ctx);
                 Ok(ActionOutput {
                     text: format!(
@@ -1337,10 +1361,11 @@ impl ActionProvider for RoutinesProvider {
             DELETE => {
                 let Named { routine } = parse_input(input)?;
                 let found = self.mine(ctx, &routine)?;
-                let mut chosen: BTreeMap<String, u32> = store::chosen(&ctx.home);
-                chosen.remove(&found.id);
-                store::choose(&ctx.home, ctx.owner, chosen)
-                    .map_err(|e| ActionError::io("your routines", e))?;
+                store::change(&ctx.home, ctx.owner, |chosen| {
+                    chosen.remove(&found.id);
+                    Ok(())
+                })
+                .map_err(|e| ActionError::io("your routines", e))?;
                 self.changed(ctx);
                 Ok(ActionOutput {
                     text: format!(

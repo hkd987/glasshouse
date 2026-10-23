@@ -178,7 +178,14 @@ impl Submission {
             return Err(self.refused("the message", &reply));
         }
         self.conn.write_all(&dot_stuffed(outgoing.message))?;
-        let reply = self.read_reply()?;
+        // The whole message went: without the answer, the server may have
+        // taken it, so this is neither sent nor not (ADR 0051).
+        let reply = self.read_reply().map_err(|e| {
+            LinkError::Unknown(format!(
+                "{} took the whole message but its answer never came ({e})",
+                self.conn.host
+            ))
+        })?;
         if !reply.ok() {
             return Err(self.refused("the message", &reply));
         }

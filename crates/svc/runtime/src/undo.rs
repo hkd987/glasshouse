@@ -13,11 +13,20 @@
 //! when a change this undo keeps touched it after that snapshot. Changes that
 //! left the machine are listed, not undone. `dry_run` shows exactly what
 //! would change first.
+//!
+//! Model-checked (specs/tla/Undo.tla, ADR 0051). A person's reversible steps
+//! and undos take turns ([`Runtime::writing_turn`]), from a step's snapshot
+//! to its record and from an undo's plan to its record, so another task's
+//! write never lands between a step's snapshot and its write, between its
+//! write and the record of it, or between undo's look at a file and its
+//! write. A file is judged by how the task's latest change to it still
+//! standing left it, not by how an earlier undo did. A change already undone
+//! is skipped, its revert hook never run again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
 use glass_actions::ActionProvider;
 use glass_api::{
@@ -54,12 +63,6 @@ impl Runtime {
             .filter(|t| caller.is_admin() || t.user.uid == caller.uid)
             .ok_or_else(|| RuntimeError::NotFound(format!("no task {}", request.task.short())))?;
 
-        let Plan {
-            since,
-            ids,
-            items,
-            written,
-        } = plan(&task, &request)?;
         if !request.dry_run && matches!(task.lock().tile, TileState::Working | TileState::NeedsYou)
         {
             // Nothing may change underneath a rollback. The task stays held
@@ -67,13 +70,33 @@ impl Runtime {
             self.hold(&task, TileState::Paused, "Paused for rollback");
             self.publish(&task);
         }
+        // A step already under way (this task's or another's) finishes
+        // first, and nothing else of the person's writes until this undo is
+        // recorded. A dry run changes nothing and waits for nothing.
+        let _turn = match request.dry_run {
+            true => None,
+            false => Some(self.writing_turn(task.user.uid).await),
+        };
+        let Plan {
+            since,
+            ids,
+            items,
+            standing,
+            written,
+        } = plan(&task, &request)?;
 
         let snapshots = Arc::clone(&self.snapshots);
         let owner = task.ctx.owner;
         let home = task.user.home.clone();
         let dry_run = request.dry_run;
+        let undoing = ids.clone();
         let (mut report, done) = tokio::task::spawn_blocking(move || {
-            apply(snapshots.as_ref(), &items, &written, owner, &home, dry_run)
+            let judge = Judge {
+                written: &written,
+                standing: &standing,
+                ids: &undoing,
+            };
+            apply(snapshots.as_ref(), &items, &judge, owner, &home, dry_run)
         })
         .await
         .map_err(|e| RuntimeError::Internal(e.to_string()))?;
@@ -126,7 +149,7 @@ impl Runtime {
             let what = if request.changes.is_empty() {
                 format!("Rolled back to {}", since.clock())
             } else {
-                let n = request.changes.len();
+                let n = ids.len();
                 format!("Undid {n} change{}", if n == 1 { "" } else { "s" })
             };
             let summary = format!(
@@ -172,7 +195,7 @@ impl Runtime {
         blocked: &BTreeSet<u32>,
     ) -> Vec<(u32, String)> {
         let registry = self.registry();
-        let work: Vec<(u32, String, ActionName, Vec<PathBuf>)> = {
+        let work: Vec<(u32, String, ActionName, ChangeKind, Vec<PathBuf>)> = {
             let state = task.lock();
             state
                 .changes
@@ -184,18 +207,18 @@ impl Runtime {
                         .change(c.id)
                         .map(|t| t.paths.clone())
                         .unwrap_or_default();
-                    (c.id, c.target.clone(), c.action.clone(), paths)
+                    (c.id, c.target.clone(), c.action.clone(), c.kind, paths)
                 })
                 .collect()
         };
         let ctx = task.call_ctx();
         tokio::task::spawn_blocking(move || {
             work.into_iter()
-                .filter_map(|(id, target, action, paths)| {
+                .filter_map(|(id, target, action, kind, paths)| {
                     let (_, provider) = registry.get(&action)?;
                     let provider: Arc<dyn ActionProvider> = Arc::clone(provider);
                     provider
-                        .revert(&ctx, &action, &paths)
+                        .revert(&ctx, &action, kind, &paths)
                         .err()
                         .map(|e| (id, format!("{target} — {e}")))
                 })
@@ -203,6 +226,61 @@ impl Runtime {
         })
         .await
         .unwrap_or_default()
+    }
+
+    /// The person's turn to change their files (ADR 0051): a reversible
+    /// step holds it from its snapshot to its record, an undo from its plan
+    /// to its record, so neither lands inside the other. People's turns are
+    /// their own; their tasks take turns only with each other.
+    pub(crate) async fn writing_turn(&self, uid: u32) -> tokio::sync::OwnedMutexGuard<()> {
+        let turn = Arc::clone(
+            self.writing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(uid)
+                .or_default(),
+        );
+        turn.lock_owned().await
+    }
+
+    /// Whether another task of the same person recorded a change under
+    /// `roots` at or after the task's latest snapshot of them (ADR 0051):
+    /// that snapshot no longer has those files as they are, so it can't
+    /// stand in for one taken just before a step.
+    pub(crate) fn changed_by_others_since(&self, task: &Task, roots: &[PathBuf]) -> bool {
+        let since = {
+            let state = task.lock();
+            roots
+                .iter()
+                .map(|root| {
+                    state
+                        .snapshots
+                        .iter()
+                        .rev()
+                        .find(|s| covering_root(&s.handle, root).is_some())
+                        .map(|s| s.marker.at)
+                })
+                .collect::<Option<Vec<Timestamp>>>()
+                .and_then(|at| at.into_iter().min())
+        };
+        let Some(since) = since else {
+            return false;
+        };
+        let others: Vec<Arc<Task>> = self
+            .tasks()
+            .values()
+            .filter(|t| t.id != task.id && t.user.uid == task.user.uid)
+            .cloned()
+            .collect();
+        others.iter().any(|other| {
+            let state = other.lock();
+            state
+                .changes
+                .iter()
+                .filter(|c| c.reversible && c.at >= since)
+                .filter_map(|c| state.written.change(c.id))
+                .any(|t| t.paths.iter().any(|p| roots.iter().any(|r| overlap(p, r))))
+        })
     }
 
     /// Hand back (AW-21): the files the user changed while driving become
@@ -255,6 +333,7 @@ impl Runtime {
             .position(|s| s.marker.id == id)
             .map_or(state.snapshots.len(), |i| i + 1);
         let mut shown = Vec::new();
+        let mut ids = Vec::new();
         for edit in edits {
             let path = display_path(&task.user.home, &edit.path);
             let id = state.changes.len() as u32;
@@ -274,9 +353,10 @@ impl Runtime {
             });
             let paths = vec![edit.path];
             state.written.touched(id, Touched { paths, before });
+            ids.push(id);
             shown.push(path);
         }
-        state.written.note(seen);
+        state.written.note_changes(&ids, seen);
         Ok(shown)
     }
 }
@@ -288,7 +368,34 @@ struct Plan {
     /// The changes it undoes.
     ids: BTreeSet<u32>,
     items: Vec<Item>,
+    /// The task's reversible changes not undone, in order, with their files.
+    standing: Vec<(u32, Vec<PathBuf>)>,
     written: Written,
+}
+
+/// What a file is judged by: how the task's latest change to it still
+/// standing left it, if this undo takes that change back.
+struct Judge<'a> {
+    written: &'a Written,
+    standing: &'a [(u32, Vec<PathBuf>)],
+    ids: &'a BTreeSet<u32>,
+}
+
+impl Judge<'_> {
+    /// How the task left `file`, and whether a change this undo keeps is
+    /// the latest to have touched it.
+    fn left(&self, file: &Path) -> (Option<Option<&Left>>, bool) {
+        let latest = self
+            .standing
+            .iter()
+            .rev()
+            .find(|(_, paths)| paths.iter().any(|p| file.starts_with(p)));
+        match latest {
+            Some((id, _)) if self.ids.contains(id) => (self.written.left_after(*id, file), false),
+            Some(_) => (self.written.left(file), true),
+            None => (self.written.left(file), false),
+        }
+    }
 }
 
 /// A file or folder a change being undone touched.
@@ -333,7 +440,13 @@ fn plan(task: &Task, request: &UndoRequest) -> Result<Plan> {
                 "this task has no change {id}"
             )));
         }
-        request.changes.iter().copied().collect()
+        // Undone already: nothing to put back, and no hook to run twice.
+        request
+            .changes
+            .iter()
+            .copied()
+            .filter(|id| !state.changes.iter().any(|c| c.id == *id && c.undone))
+            .collect()
     };
     let touched = |c: &ChangeEntry| state.written.change(c.id).filter(|_| c.reversible);
 
@@ -373,10 +486,17 @@ fn plan(task: &Task, request: &UndoRequest) -> Result<Plan> {
             }
         })
         .collect();
+    let standing = state
+        .changes
+        .iter()
+        .filter(|c| !c.undone)
+        .filter_map(|c| touched(c).map(|t| (c.id, t.paths.clone())))
+        .collect();
     Ok(Plan {
         since,
         ids,
         items,
+        standing,
         written: state.written.clone(),
     })
 }
@@ -411,7 +531,7 @@ enum Step {
 fn apply(
     snapshots: &dyn Snapshotter,
     items: &[Item],
-    written: &Written,
+    judge: &Judge<'_>,
     owner: Owner,
     home: &Path,
     dry_run: bool,
@@ -456,8 +576,9 @@ fn apply(
             if !handled.insert(file.clone()) {
                 continue;
             }
+            let (left, kept_later) = judge.left(&file);
             let outcome =
-                step(&live, &copy, &rel, written.left(&file), item.kept).and_then(|planned| {
+                step(&live, &copy, &rel, left, item.kept || kept_later).and_then(|planned| {
                     match planned {
                         _ if dry_run => Ok(planned),
                         Step::Remove => {

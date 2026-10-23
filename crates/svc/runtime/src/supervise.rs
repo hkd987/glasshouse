@@ -86,6 +86,8 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
 
     let summary = {
         let mut state = task.lock();
+        // Ended while paused for sleep: nothing for the wake to resume.
+        state.sleeping = None;
         match (&result, state.tile) {
             // Set by Stop, or by hand back on an attended task.
             (_, TileState::Stopped | TileState::Done) => {}
@@ -313,13 +315,20 @@ async fn drive_app(
 }
 
 /// Binds the task socket so only the task's user (and root) can connect.
+/// It's made under another name and renamed into place once it listens and
+/// is theirs: whoever waits for it to appear finds it ready, never in the
+/// moment between its file and its listening (a refused connection).
 fn bind_task_socket(path: &Path, task: &Task) -> std::io::Result<UnixListener> {
-    if path.exists() {
-        fs::remove_file(path)?;
+    let making = path.with_extension("sock.new");
+    for old in [path, making.as_path()] {
+        if old.exists() {
+            fs::remove_file(old)?;
+        }
     }
-    let listener = UnixListener::bind(path)?;
-    std::os::unix::fs::chown(path, Some(task.user.uid), Some(task.user.gid))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    let listener = UnixListener::bind(&making)?;
+    std::os::unix::fs::chown(&making, Some(task.user.uid), Some(task.user.gid))?;
+    fs::set_permissions(&making, fs::Permissions::from_mode(0o600))?;
+    fs::rename(&making, path)?;
     Ok(listener)
 }
 

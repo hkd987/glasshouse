@@ -398,6 +398,21 @@ impl Session {
         Ok(uids)
     }
 
+    /// The server this session is with, for what's said of it.
+    pub(crate) fn host(&self) -> &str {
+        &self.conn.host
+    }
+
+    /// Which of `uids` the open folder has (ADR 0051).
+    pub(crate) fn which(&mut self, uids: &[u32]) -> Result<Vec<u32>, LinkError> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut found = self.search_for(&format!("UID {}", set_of(uids)))?;
+        found.retain(|u| uids.contains(u));
+        Ok(found)
+    }
+
     /// UIDs in the open folder the server has as unread: usually far fewer
     /// than those read (ADR 0050).
     pub(crate) fn unseen(&mut self) -> Result<Vec<u32>, LinkError> {

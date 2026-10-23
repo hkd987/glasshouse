@@ -21,7 +21,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use glass_managed::mail::Role;
-use glass_platform::fs::{ConfinedDir, Owner};
+use glass_platform::fs::{ConfinedDir, EntryInfo, Owner};
 
 pub(crate) const MAIL_DIR: &str = "Mail";
 /// A folder's read markers, by message file name (ADR 0050).
@@ -180,11 +180,16 @@ impl Cache {
 
     /// The message files in a folder, by name.
     pub(crate) fn names(&self, role: Role) -> std::io::Result<Vec<String>> {
+        Ok(self.entries(role)?.into_iter().map(|e| e.name).collect())
+    }
+
+    /// The message files in a folder, by name, with their size and when
+    /// they last changed: what tells a listing's kept summary is still good.
+    pub(crate) fn entries(&self, role: Role) -> std::io::Result<Vec<EntryInfo>> {
         match self.home.list(&rel_dir(role)) {
             Ok(entries) => Ok(entries
                 .into_iter()
                 .filter(|e| !e.is_dir && plain_name(&e.name))
-                .map(|e| e.name)
                 .collect()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(e),

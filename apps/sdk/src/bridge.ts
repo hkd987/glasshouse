@@ -164,6 +164,10 @@ export class Bridge {
    * `waitSecs`, waits (25 s at most) for the person's data in this app to
    * change after `since`, a cursor from an earlier status: `changed` then
    * names this app. Ids only; read what changed with one call (ADR 0030).
+   * Take the first cursor before the first load, and read every change
+   * that is named, after any action of the page's own: a cursor taken after
+   * a load, or a change skipped, is news the page never hears (NV-3,
+   * ADR 0051). A cursor from before glassd restarted, or none, is news.
    */
   async status(wait?: { waitSecs: number; since: number }): Promise<AppStatus> {
     const status = await this.#post<AppStatus>("status", wait ? { wait_secs: wait.waitSecs, since: wait.since } : {});

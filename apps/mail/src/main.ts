@@ -273,7 +273,9 @@ function recent(): Person[] {
 
 function outgoing(compose: Compose): { message: Outgoing; errors: string[] } {
   const { to, bad } = parseRecipients(compose.to);
-  const message = { to, subject: compose.subject.trim(), body: compose.body };
+  // Editing a draft names it: sending or saving it takes its place, so it
+  // isn't left in Drafts to go again (DP-30).
+  const message: Outgoing = { to, subject: compose.subject.trim(), body: compose.body, ...(compose.draft ? { draft: compose.draft } : {}) };
   return { message, errors: problems(message, bad) };
 }
 
@@ -802,17 +804,20 @@ async function start(): Promise<void> {
   } catch (error) {
     state.notice = error instanceof Offline ? "Mail hasn't been loaded on this device yet." : String(error);
   }
+  // The cursor before the first load, so mail that comes in between wakes
+  // the page (NV-3, ADR 0051).
+  try {
+    state.cursor = (await bridge.status()).cursor;
+  } catch {
+    // Offline: what was kept is shown, and the first wait tries again.
+  }
   await Promise.all([refresh(), loadAccount()]);
   // The account may answer after the mail is drawn: draw it too.
   render();
   ready();
-  // From here, new mail wakes the page (ADR 0037).
-  try {
-    state.cursor = (await bridge.status()).cursor;
-    void live();
-  } catch {
-    // Offline: what was loaded is what there is.
-  }
+  // From here, new mail wakes the page (ADR 0037), once the system answers
+  // if it doesn't yet.
+  void live();
 }
 
 void start();
