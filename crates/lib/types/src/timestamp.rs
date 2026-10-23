@@ -32,6 +32,19 @@ impl Timestamp {
         )
     }
 
+    /// The date, `YYYY-MM-DD`, at `offset_secs` east of UTC: the computer's
+    /// own day, given its offset.
+    pub fn date_at(&self, offset_secs: i32) -> String {
+        let local = time::UtcOffset::from_whole_seconds(offset_secs)
+            .map_or(self.0, |offset| self.0.to_offset(offset));
+        format!(
+            "{:04}-{:02}-{:02}",
+            local.year(),
+            u8::from(local.month()),
+            local.day()
+        )
+    }
+
     /// Whole seconds elapsed from `earlier` to `self` (zero if negative).
     pub fn seconds_since(&self, earlier: Timestamp) -> u64 {
         u64::try_from((self.0 - earlier.0).whole_seconds()).unwrap_or(0)

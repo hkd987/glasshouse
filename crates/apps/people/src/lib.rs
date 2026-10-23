@@ -115,6 +115,35 @@ impl ActionProvider for PeopleProvider {
         })
     }
 
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        (action.as_str() == SEARCH).then(|| {
+            json!({
+                "type": "object",
+                "properties": {
+                    "directory_version": { "type": ["integer", "null"], "description": "the directory IT sent; null before one arrives" },
+                    "people": {
+                        "type": "array",
+                        "description": "best match first",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "login": { "type": "string", "description": "their login on the org's computers" },
+                                "name": { "type": "string" },
+                                "email": { "type": "string", "description": "empty for someone with no address" },
+                                "title": { "type": "string", "description": "empty when unknown" },
+                                "department": { "type": "string", "description": "empty when unknown" }
+                            },
+                            "required": ["login", "name", "email", "title", "department"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["directory_version", "people"],
+                "additionalProperties": false
+            })
+        })
+    }
+
     fn invoke(
         &self,
         _ctx: &TaskContext,
@@ -278,6 +307,21 @@ mod tests {
         assert_eq!(all.data["people"].as_array().unwrap().len(), 2);
         let none = search_for(&p, json!({ "query": "zz" })).unwrap();
         assert!(none.text.contains("Nobody"));
+    }
+
+    #[test]
+    fn ga1_what_a_search_returns_is_what_it_declares() {
+        let shape = provider().returns(&SEARCH.parse().unwrap()).unwrap();
+        for (p, query) in [
+            (provider(), "pri"),
+            (
+                PeopleProvider::new(DirectoryHandle::new()).managed(true),
+                "dana",
+            ),
+        ] {
+            let out = search_for(&p, json!({ "query": query })).unwrap();
+            glass_actions::shape::conforms(&out.data, &shape).unwrap();
+        }
     }
 
     #[test]

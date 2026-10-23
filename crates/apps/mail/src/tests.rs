@@ -726,3 +726,51 @@ fn adr0048_sending_a_draft_from_mail_sends_the_files_it_carries() {
         .unwrap_err();
     assert!(err.to_string().contains("isn't a draft"), "{err}");
 }
+
+#[test]
+fn ga1_what_each_action_returns_is_what_it_declares() {
+    let (dir, ctx) = setup();
+    fs::write(
+        dir.path().join("Mail/Inbox/1792400000-0-northwind.eml"),
+        "From: Dana Ruiz <dana@northwind.example>\nTo: demo@corp.example\n\
+         Subject: Renewal terms\nDate: 2026-10-19T08:00:00Z\n\nHi,\n\nCan we talk terms?\n",
+    )
+    .unwrap();
+    let p = MailProvider::default();
+    let run = |name: &str, input: Value| {
+        let mut out = p.invoke(&ctx, &action(name), &input).unwrap();
+        // What the runtime keeps for the record never reaches the caller.
+        if let Some(data) = out.data.as_object_mut() {
+            data.remove(glass_actions::AUDIT_DETAIL);
+        }
+        let shape = p.returns(&action(name)).unwrap();
+        glass_actions::shape::conforms(&out.data, &shape).unwrap_or_else(|e| panic!("{name}: {e}"));
+        out.data
+    };
+    run("mail.account", json!({}));
+    let drafted = run(
+        "mail.draft",
+        json!({ "to": ["dana@northwind.example"], "subject": "Re: Renewal terms", "body": "Yes." }),
+    );
+    let inbox = run("mail.list", json!({ "folder": "inbox" }));
+    run("mail.list", json!({ "folder": "drafts" }));
+    run("mail.read", json!({ "id": inbox["messages"][0]["id"] }));
+    run("mail.read", json!({ "id": drafted["id"] }));
+    run(
+        "mail.send",
+        json!({ "messages": [{ "to": ["dana@northwind.example"], "subject": "Terms", "body": "Agreed." }] }),
+    );
+    run(
+        "mail.move",
+        json!({ "ids": [inbox["messages"][0]["id"]], "to": "archive" }),
+    );
+    // Every action but Mail's own connecting declares what it returns.
+    for def in p.actions() {
+        assert_eq!(
+            p.returns(&def.name).is_some(),
+            def.name.as_str() != "mail.connect",
+            "{}",
+            def.name
+        );
+    }
+}

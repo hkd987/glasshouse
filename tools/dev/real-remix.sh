@@ -49,13 +49,13 @@ up() {
 	rm -rf "$dev"
 	mkdir -p "$dev/console" "$dev/home" "$run" "$out"
 	cd "$repo"
-	cargo build -q -p glass-console -p glass-app-bridge -p glassd -p glassctl -p glass-desktop-agent -p glass-e2e
+	cargo build -q -p glass-console -p glass-app-bridge -p glassd -p glassctl -p glass-desktop-agent -p glass-e2e -p glass-app-try
 	[[ -f apps/console/dist/app.js ]] || make -s apps-build
 
 	local policy=$dev/policy.toml
 	glass-e2e real-model-policy anthropic claude-haiku-5-5 --ladder >"$policy"
-	sed -i -e '/^id = "desktop-agent"$/{n;s/"model.complete"\]$/"model.complete", "apps.*"]/}' "$policy"
-	grep -q '"model.complete", "apps.\*"\]' "$policy" || die "the desktop agent's actions moved; apps.* didn't go in"
+	sed -i -e '/^id = "desktop-agent"$/{n;s/^\(allowed_actions = \[.*\)\]$/\1, "apps.*"]/}' "$policy"
+	grep -q '^allowed_actions = \[.*, "apps.\*"\]$' "$policy" || die "the desktop agent's actions moved; apps.* didn't go in"
 	# The console releases its draft as the org's first policy.
 	python3 -I -c 'import json, sys; json.dump({"draft": open(sys.argv[1]).read(), "versions": [], "rings": {}}, open(sys.argv[2], "w"))' \
 		"$policy" "$dev/console/policy.json"

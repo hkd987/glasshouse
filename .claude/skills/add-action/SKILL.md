@@ -34,6 +34,12 @@ decides permissions.
      `reversible` set honestly.
    - Parse input with `glass_actions::parse_input` into
      `#[serde(deny_unknown_fields)]` structs.
+   - `returns()`: the shape of `invoke()`'s `data`, in `glass_actions::shape`'s
+     subset of JSON Schema, with a `description` on any field whose meaning
+     or format isn't obvious ("local time, YYYY-MM-DDTHH:MM"). Agents making
+     apps read it as TypeScript (`apps.actions`) and apps are tried on
+     samples of it (ADR 0049). Leave it `None` only for an action no app
+     can use.
 3. **Register** a new provider in `crates/svc/first-party/src/lib.rs`
    (`registry()`), the one list `glassd` and `glassctl policy check` share.
    Anything it needs from the daemon (paths, policy lists, a system
@@ -44,7 +50,9 @@ decides permissions.
 5. **Tests.**
    - Provider unit tests in the app crate, built on
      `glass_actions::testing::context`: preview matches invoke; read-only
-     grants refuse; bad input rejected.
+     grants refuse; bad input rejected; what it returns conforms to
+     `returns()` (`shape::conforms`, as `ga1_what_each_action_returns_is_what_it_declares`
+     in Calendar, Mail, People and Files).
    - A pipeline test (`crates/svc/runtime/tests/pipeline.rs`) for its tier
      behavior, especially Ask and undo.
    - If it's reversible, prove `glassctl undo` restores it.

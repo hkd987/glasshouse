@@ -139,6 +139,25 @@ incremental = true
 codegen-units = 256
 opt-level = 1
 
+# The JavaScript engine (ADR 0044's scripts, ADR 0049's try-out of every
+# app saved) interprets each line: at opt-level 1 a try of Mail takes 0.21 s
+# natively against 0.15 s, and 3.3 s against 3.0 s in the emulated VM. It
+# rarely changes, so its longer build is a one-off.
+[profile.vm.package.boa_ast]
+opt-level = 3
+[profile.vm.package.boa_engine]
+opt-level = 3
+[profile.vm.package.boa_gc]
+opt-level = 3
+[profile.vm.package.boa_interner]
+opt-level = 3
+[profile.vm.package.boa_parser]
+opt-level = 3
+[profile.vm.package.boa_string]
+opt-level = 3
+[profile.vm.package.regress]
+opt-level = 3
+
 # What ships in images.
 [profile.release]
 lto = "thin"

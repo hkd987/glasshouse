@@ -46,7 +46,12 @@ pub struct Bundler {
     sdk: PathBuf,
     /// Where build folders go, under glassd's state directory.
     work: PathBuf,
+    /// glass-app-try: what tries each build (ADR 0049).
+    tryout: Option<PathBuf>,
 }
+
+/// How long trying an app may take.
+const TRY_LIMIT: Duration = Duration::from_secs(20);
 
 static BUILDS: AtomicU64 = AtomicU64::new(0);
 
@@ -57,7 +62,92 @@ impl Bundler {
             program,
             sdk,
             work,
+            tryout: None,
         }
+    }
+
+    /// Tries each build with `tryout`, when it's on this computer.
+    pub fn trying_with(mut self, tryout: Option<PathBuf>) -> Self {
+        self.tryout = tryout.filter(|p| p.is_file());
+        self
+    }
+
+    /// Tries `dist`'s script as `setup` (glass-app-try's) says, in a build
+    /// folder and confinement of its own: its report, or why it couldn't
+    /// be tried. None when nothing tries apps here.
+    pub fn try_out(
+        &self,
+        dist: &Dist,
+        setup: &serde_json::Value,
+    ) -> Option<Result<serde_json::Value, String>> {
+        let program = self.tryout.as_ref()?;
+        let name = format!(
+            "glass-try-{}-{}",
+            std::process::id(),
+            BUILDS.fetch_add(1, Ordering::Relaxed)
+        );
+        let dir = self.work.join(&name);
+        let tried = self
+            .prepare_try(&dir, dist, setup)
+            .and_then(|()| self.run_try(&name, &dir, program));
+        let _ = std::fs::remove_dir_all(&dir);
+        Some(tried)
+    }
+
+    fn prepare_try(
+        &self,
+        dir: &Path,
+        dist: &Dist,
+        setup: &serde_json::Value,
+    ) -> Result<(), String> {
+        let script = dist.get("app.js").ok_or("it has no script")?;
+        self.private(dir)
+            .map_err(|e| format!("the build folder: {e}"))?;
+        std::fs::write(dir.join("app.js"), script).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join("try.json"), setup.to_string()).map_err(|e| e.to_string())?;
+        if glass_platform::users::effective_uid() == 0 && self.tools.runs_as_user() {
+            let user = glass_platform::users::by_name(BUILD_USER).ok_or("no build user")?;
+            give(dir, user.uid, user.gid).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn run_try(&self, name: &str, dir: &Path, program: &Path) -> Result<serde_json::Value, String> {
+        let out = self
+            .tools
+            .run_tool(&ToolRun {
+                name: name.to_owned(),
+                program: program.to_owned(),
+                dir: dir.to_owned(),
+                args: vec![".".into()],
+                limit: TRY_LIMIT,
+                user: BUILD_USER.to_owned(),
+            })
+            .map_err(|e| e.to_string())?;
+        if out.timed_out {
+            return Err(format!(
+                "trying it took longer than {} s",
+                TRY_LIMIT.as_secs()
+            ));
+        }
+        if !out.success {
+            return Err(out.stderr.lines().next().unwrap_or("it failed").to_owned());
+        }
+        read(dir, "tried.json")
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .ok_or_else(|| "it said nothing".to_owned())
+    }
+
+    /// `dir`, made, in build folders only root can reach.
+    fn private(&self, dir: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        for private in [self.work.parent(), Some(self.work.as_path())]
+            .into_iter()
+            .flatten()
+        {
+            std::fs::set_permissions(private, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+        }
+        Ok(())
     }
 
     /// Bundles `source` (checked already) as `manifest`'s app: its page,

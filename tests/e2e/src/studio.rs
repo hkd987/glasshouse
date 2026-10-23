@@ -2,7 +2,9 @@
 //! person's own Claude Code reads Mail's source and saves their version;
 //! glassd bundles it in a jail of its own (no network, as nobody, gone with
 //! its mount when the bundler exits) and serves it over the app socket to
-//! its maker only. Undo takes the remix out of their apps again.
+//! its maker only. Each save is tried, statically linked glass-app-try in a
+//! jail of its own with sample data, and the save says what the app showed
+//! (ADR 0049). Undo takes the remix out of their apps again.
 
 use std::time::{Duration, Instant};
 
@@ -13,8 +15,9 @@ use serde_json::{Value, json};
 
 use crate::harness::Harness;
 
-/// Saving an app: the checks, a bundle in a fresh jail, the version kept.
-/// Measured at 2.0 s on the development VM (TCG, no KVM).
+/// Saving an app: the checks, a bundle in a fresh jail, a try of it in
+/// another (ADR 0049), the version kept. Measured at 7.4 s on the
+/// development VM (TCG, no KVM) the first time after a deploy, 6 s after.
 const SAVE_BUDGET: Duration = Duration::from_secs(10);
 
 async fn tool(
@@ -88,15 +91,33 @@ pub async fn studio(h: &Harness) -> anyhow::Result<()> {
         took < SAVE_BUDGET,
         "saving took {took:?} (budget {SAVE_BUDGET:?})"
     );
+    let said = saved.text();
     let app = saved.structured_content.context("what was saved")?["app"]
         .as_str()
         .context("the app's id")?
         .to_owned();
     ensure!(app.starts_with("my-mail"), "{app}");
 
-    // The bundler's jail and its mount went with it.
+    // Tried in the jail: Mail opened on sample data and drew its folders.
     ensure!(
-        !output("jls", &["name"])?.contains("glass-build"),
+        said.contains("Tried here, with sample data") && !said.contains("couldn't be tried"),
+        "the save says how trying it went: {said}"
+    );
+    ensure!(
+        said.contains("Opening it showed:") && said.contains("[Write]"),
+        "the try saw the remix's button: {said}"
+    );
+    println!(
+        "    studio: tried it in a jail: {}",
+        said.lines()
+            .find(|l| l.starts_with("No problems") || l.starts_with("Problems"))
+            .unwrap_or("?")
+    );
+
+    // The bundler's and the try-out's jails and mounts went with them.
+    ensure!(
+        !output("jls", &["name"])?.contains("glass-build")
+            && !output("jls", &["name"])?.contains("glass-try"),
         "a build jail was left"
     );
     ensure!(

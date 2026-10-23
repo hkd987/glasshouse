@@ -14,6 +14,7 @@ set -euo pipefail
 manifest=$FREEBSD_OS_DIR/dist.manifest
 bindir=${CARGO_TARGET_DIR:-$REPO_ROOT/target}/x86_64-unknown-freebsd/${DIST_PROFILE:-release}
 shell_bindir=${SHELL_TARGET_DIR:-$REPO_ROOT/shell/target}/x86_64-unknown-freebsd/${DIST_PROFILE:-release}
+static_bindir=${CARGO_TARGET_DIR:-$REPO_ROOT/target}/static/x86_64-unknown-freebsd/${DIST_PROFILE:-release}
 
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
@@ -29,11 +30,12 @@ while read -r name path mode extra; do
 	[[ $path != /* && $path != *..* ]] || die "dist.manifest:$lineno: path must be relative: $path"
 	from=$bindir/$name
 	[[ $name == shell/* ]] && from=$shell_bindir/${name#shell/}
+	[[ $name == static/* ]] && from=$static_bindir/${name#static/}
 	if [[ ! -f $from ]]; then
 		missing+=("$name")
 		continue
 	fi
-	if [[ $name == shell/* ]]; then shell_shipped+=("${name#shell/}"); else shipped+=("$name"); fi
+	if [[ $name == shell/* ]]; then shell_shipped+=("${name#shell/}"); else shipped+=("${name#static/}"); fi
 	install -p -D -m "$mode" "$from" "$DIST_DIR/$path"
 	n=$((n + 1))
 done <"$manifest"

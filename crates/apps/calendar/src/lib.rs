@@ -1122,6 +1122,73 @@ impl ActionProvider for CalendarProvider {
             ))),
         }
     }
+
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        let event = event_shape();
+        Some(match action.as_str() {
+            "calendar.list" => json!({
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "the range asked for, local time" },
+                    "to": { "type": "string" },
+                    "events": { "type": "array", "items": event, "description": "those overlapping the range, in no set order" }
+                },
+                "required": ["from", "to", "events"],
+                "additionalProperties": false
+            }),
+            "calendar.read" | "calendar.create" | "calendar.hold" | "calendar.update" => json!({
+                "type": "object",
+                "properties": { "event": event },
+                "required": ["event"],
+                "additionalProperties": false
+            }),
+            "calendar.delete" => json!({
+                "type": "object",
+                "properties": { "deleted": { "type": "string", "description": "the event's id" } },
+                "required": ["deleted"],
+                "additionalProperties": false
+            }),
+            "calendar.invite" => json!({
+                "type": "object",
+                "properties": {
+                    "invited": { "type": "array", "items": { "type": "string" }, "description": "addresses the invitation went to" },
+                    "event": { "type": "string", "description": "the event's id" },
+                    "meeting": { "type": ["string", "null"], "description": "the Glasshouse meeting's id, for a meeting" }
+                },
+                "required": ["invited", "event", "meeting"],
+                "additionalProperties": false
+            }),
+            _ => return None,
+        })
+    }
+}
+
+/// An event as actions return it ([`Event`]).
+fn event_shape() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "string", "description": "what calendar.read, calendar.update and calendar.delete take" },
+            "title": { "type": "string" },
+            "start": { "type": "string", "description": "the computer's local time, YYYY-MM-DDTHH:MM" },
+            "end": { "type": "string", "description": "the same, after start" },
+            "kind": { "enum": ["event", "hold"], "description": "a hold is time set aside, tentatively" },
+            "location": { "type": "string", "description": "empty when none" },
+            "notes": { "type": "string", "description": "empty when none" },
+            "attendees": { "type": "array", "items": { "type": "string" }, "description": "email addresses, without the organizer" },
+            "organizer": { "type": "string", "description": "the person's login for their own events; the sender's address for an invitation they got" },
+            "attribution": { "type": "string", "description": "who last made or changed it, \"by <agent> for <person>\"; empty when they did it themselves" },
+            "meeting": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"],
+                "additionalProperties": false,
+                "description": "a Glasshouse meeting: Meet joins it by this id; missing for other events"
+            }
+        },
+        "required": ["id", "title", "start", "end", "kind", "location", "notes", "attendees", "organizer", "attribution"],
+        "additionalProperties": false
+    })
 }
 
 /// A listing's range: real bounds, in order, at most [`MAX_RANGE_DAYS`].
@@ -1503,6 +1570,47 @@ mod tests {
             .unwrap();
         assert!(out.changes[0].reversible);
         assert!(!out.changes[0].paths[0].exists());
+    }
+
+    #[test]
+    fn ga1_what_each_action_returns_is_what_it_declares() {
+        let (dir, ctx) = setup();
+        seed_others(dir.path());
+        let p = CalendarProvider::default();
+        let run = |action: &str, input: Value| {
+            let out = p.invoke(&ctx, &name(action), &input).unwrap();
+            let shape = p.returns(&name(action)).unwrap();
+            glass_actions::shape::conforms(&out.data, &shape)
+                .unwrap_or_else(|e| panic!("{action}: {e}"));
+            out.data
+        };
+        let held = run(
+            "calendar.hold",
+            json!({ "title": "Prep", "start": "2026-10-20T14:00", "end": "2026-10-20T15:00" }),
+        );
+        let made = run(
+            "calendar.create",
+            json!({ "title": "Review", "start": "2026-10-21T09:00", "end": "2026-10-21T09:30", "location": "Room 2", "attendees": ["sam@corp.example"] }),
+        );
+        let id = made["event"]["id"].as_str().unwrap().to_owned();
+        run(
+            "calendar.list",
+            json!({ "from": "2026-10-19", "to": "2026-10-23" }),
+        );
+        run("calendar.read", json!({ "id": "ev-northwind" }));
+        run(
+            "calendar.update",
+            json!({ "id": id, "title": "Design review" }),
+        );
+        run(
+            "calendar.invite",
+            json!({ "id": id, "to": ["sam@corp.example"] }),
+        );
+        run("calendar.delete", json!({ "id": held["event"]["id"] }));
+        // Every action declares what it returns.
+        for def in p.actions() {
+            assert!(p.returns(&def.name).is_some(), "{}", def.name);
+        }
     }
 
     #[test]

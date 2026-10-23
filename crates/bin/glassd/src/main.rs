@@ -236,6 +236,7 @@ impl OrgData {
                 installed: config.apps_dir.clone(),
                 source: config.studio.source.clone(),
                 bundler: config.studio.bundler.clone(),
+                tryout: Some(config.studio.tryout.clone()),
             }),
             routines: glass_first_party::Routines::new(state_dir.join("routines")),
         }

@@ -195,6 +195,63 @@ impl ActionProvider for FilesProvider {
         }
     }
 
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        let path = json!({ "type": "string", "description": "<folder>/<path>, as the other files actions take it" });
+        Some(match action.as_str() {
+            "files.list" => json!({
+                "type": "object",
+                "description": "with an empty path, the task's folders; else one folder's entries",
+                "properties": {
+                    "folders": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "name": { "type": "string" }, "writable": { "type": "boolean" } },
+                            "required": ["name", "writable"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "path": path,
+                    "entries": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "dir": { "type": "boolean", "description": "a folder" },
+                                "size": { "type": "integer", "description": "bytes" }
+                            },
+                            "required": ["name", "dir", "size"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "additionalProperties": false
+            }),
+            // The file's text is the result's text.
+            "files.read" => json!({ "type": "null" }),
+            "files.write" => json!({
+                "type": "object",
+                "properties": { "path": path, "created": { "type": "boolean", "description": "it didn't exist before" } },
+                "required": ["path", "created"],
+                "additionalProperties": false
+            }),
+            "files.delete" => json!({
+                "type": "object",
+                "properties": { "path": path },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            "files.move" => json!({
+                "type": "object",
+                "properties": { "from": path, "to": path },
+                "required": ["from", "to"],
+                "additionalProperties": false
+            }),
+            _ => return None,
+        })
+    }
+
     fn invoke(
         &self,
         ctx: &TaskContext,
@@ -409,6 +466,33 @@ mod tests {
             gid: meta.gid(),
         };
         (dir, ctx)
+    }
+
+    #[test]
+    fn ga1_what_each_action_returns_is_what_it_declares() {
+        let (_dir, ctx) = setup();
+        let p = FilesProvider;
+        for (action, input) in [
+            ("files.list", json!({})),
+            ("files.list", json!({ "path": "Invoices" })),
+            ("files.read", json!({ "path": "Invoices/inv-1.txt" })),
+            (
+                "files.write",
+                json!({ "path": "Reports/a.txt", "content": "one" }),
+            ),
+            (
+                "files.move",
+                json!({ "from": "Reports/a.txt", "to": "Reports/b.txt" }),
+            ),
+            ("files.delete", json!({ "path": "Reports/b.txt" })),
+        ] {
+            let out = p.invoke(&ctx, &name(action), &input).unwrap();
+            glass_actions::shape::conforms(&out.data, &p.returns(&name(action)).unwrap())
+                .unwrap_or_else(|e| panic!("{action}: {e}"));
+        }
+        for def in p.actions() {
+            assert!(p.returns(&def.name).is_some(), "{}", def.name);
+        }
     }
 
     #[test]

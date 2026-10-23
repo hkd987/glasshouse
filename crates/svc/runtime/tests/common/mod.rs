@@ -354,6 +354,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         installed: apps_dir.clone(),
         source,
         bundler: "/nonexistent".into(),
+        tryout: None,
     });
     studio.set_tools(Arc::new(glass_app_studio::testing::FakeBundler::default()));
     let org_apps = Arc::new(MemoryOrgApps::default());

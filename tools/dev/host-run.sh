@@ -28,7 +28,7 @@ bin="${CARGO_TARGET_DIR:-$repo/target}/debug"
 if [ -z "${GLASS_DEV_SKIP_BUILD:-}" ]; then
 	cargo build --manifest-path "$repo/Cargo.toml" -p glassd -p glassctl -p glass-demo-agent -p glass-probe \
 		-p glass-mcp -p glass-app-bridge -p glass-skill-evals -p glass-it-agent -p glass-desktop-agent \
-		-p glass-claude-runner
+		-p glass-claude-runner -p glass-app-try
 fi
 
 mkdir -p "$dev/home" "$dev/state" "$run"
@@ -65,10 +65,11 @@ agent_dirs = ["$bin"]
 [snapshots]
 backend = "copy"
 
-# Remixing and making apps (ADR 0032): the apps workspace's esbuild, and
-# its source in the layout images have.
+# Remixing and making apps (ADR 0032): the apps workspace's esbuild, its
+# source in the layout images have, and what tries each version (ADR 0049).
 [studio]
 bundler = "$repo/apps/node_modules/@esbuild/linux-x64/bin/esbuild"
+tryout = "$bin/glass-app-try"
 source = "$dev/source"
 
 [[agent]]

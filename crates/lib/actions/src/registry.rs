@@ -68,6 +68,12 @@ impl Registry {
         self.actions.get(name).map(|(d, p)| (d, p))
     }
 
+    /// The shape of `name`'s result data, where its provider declares it.
+    pub fn returns(&self, name: &ActionName) -> Option<serde_json::Value> {
+        self.get(name)
+            .and_then(|(_, provider)| provider.returns(name))
+    }
+
     pub fn by_mcp_name(&self, tool: &str) -> Option<(&ActionDef, &Arc<dyn ActionProvider>)> {
         self.by_mcp.get(tool).and_then(|name| self.get(name))
     }

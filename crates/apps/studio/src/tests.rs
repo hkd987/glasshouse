@@ -53,6 +53,36 @@ impl Surroundings for World {
             .map(|(id, name)| (id.parse().unwrap(), (*name).to_owned()))
             .collect()
     }
+    fn capabilities(&self, _login: &str) -> Vec<Capability> {
+        vec![
+            Capability {
+                name: "calendar.read".parse().unwrap(),
+                title: "Read an event".into(),
+                description: "One event, with its attendees.".into(),
+                side_effect: SideEffect::None,
+                tier: Tier::Auto,
+                input: json!({ "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }),
+                returns: Some(json!({
+                    "type": "object",
+                    "properties": { "event": {
+                        "type": "object",
+                        "properties": { "title": { "type": "string" }, "attendees": { "type": "array", "items": { "type": "string" }, "description": "email addresses" } },
+                        "required": ["title", "attendees"]
+                    } },
+                    "required": ["event"]
+                })),
+            },
+            Capability {
+                name: "mail.draft".parse().unwrap(),
+                title: "Draft an email".into(),
+                description: "Saves an email in Drafts.".into(),
+                side_effect: SideEffect::LocalReversible,
+                tier: Tier::Notify,
+                input: json!({ "type": "object", "properties": { "to": { "type": "array", "items": { "type": "string" } }, "subject": { "type": "string" } }, "required": ["to"] }),
+                returns: None,
+            },
+        ]
+    }
 }
 
 struct Fixture {
@@ -71,6 +101,7 @@ fn fixture_with(world: World, bundler: Arc<dyn ToolRunner>, program: PathBuf) ->
         installed: apps(),
         source: source_root(dir.path()),
         bundler: program,
+        tryout: Some(tryout(dir.path())),
     });
     studio.set_tools(bundler);
     studio.set_surroundings(Arc::new(world));
@@ -84,6 +115,14 @@ fn fixture_with(world: World, bundler: Arc<dyn ToolRunner>, program: PathBuf) ->
         studio,
         ctx,
     }
+}
+
+/// Where glass-app-try is, for the stand-in bundler to answer as it.
+fn tryout(dir: &Path) -> PathBuf {
+    let program = dir.join("app-try/glass-app-try");
+    std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+    std::fs::write(&program, "").unwrap();
+    program
 }
 
 fn fixture(world: World) -> Fixture {
@@ -459,6 +498,13 @@ fn ga12_the_store_first_then_a_remix_then_a_new_app() {
     assert!(err.contains("Mail (mail), which you can remix"), "{err}");
     mailish["declined"] = json!(["mail"]);
     assert!(f.call(CREATE, mailish).is_ok());
+
+    // A word in common is chance: Settings "shows", Chat keeps "drafts".
+    let mut today = new_app(&f, &[]);
+    today["need"] = json!("Show today's meetings and draft a running-late note to the attendees");
+    today["manifest"]["name"] = json!("Today");
+    let made = f.call(CREATE, today).unwrap();
+    assert_eq!(made.data["app"], "my-today");
 }
 
 #[test]
@@ -611,5 +657,124 @@ fn ga8_ga13_a_person_shares_their_app_through_the_store_only() {
             json!({ "app": "my-other", "to": "org", "note": "x" })
         )
         .is_err()
+    );
+}
+
+#[test]
+fn ga1_an_agent_making_an_app_sees_what_each_action_takes_and_returns() {
+    let f = fixture(World::default());
+    // Everything an app of theirs may call, with how it runs there.
+    let listed = f.call(ACTIONS, json!({})).unwrap();
+    assert!(
+        listed
+            .text
+            .contains("calendar.read: Read an event (reads; runs without asking)"),
+        "{}",
+        listed.text
+    );
+    assert!(
+        listed.text.contains(
+            "mail.draft: Draft an email (changes things on this computer, undoably; runs and tells the person; its data isn't described yet)"
+        ),
+        "{}",
+        listed.text
+    );
+    // The closest to the need first.
+    let ranked = f
+        .call(ACTIONS, json!({ "need": "draft an email" }))
+        .unwrap();
+    assert_eq!(ranked.data["actions"][0]["name"], "mail.draft");
+
+    // In full: what it takes, and its data as the TypeScript the app reads.
+    let read = f
+        .call(
+            ACTIONS,
+            json!({ "actions": ["calendar.read", "chat.post"] }),
+        )
+        .unwrap();
+    assert!(read.text.contains("const result = await bridge.call(\"calendar.read\", input), where input is:\n{\n  id: string;\n}"), "{}", read.text);
+    assert!(
+        read.text.contains("result.data is:\n{\n  event: {\n    attendees: string[]; // email addresses\n    title: string;\n  };\n}"),
+        "{}",
+        read.text
+    );
+    assert!(
+        read.text
+            .contains("chat.post: not something an app of yours can call here"),
+        "{}",
+        read.text
+    );
+    assert_eq!(read.data["actions"].as_array().unwrap().len(), 1);
+    let draft = f
+        .call(ACTIONS, json!({ "actions": ["mail.draft"] }))
+        .unwrap();
+    assert!(
+        draft
+            .text
+            .contains("not described yet: call it once with your own tool"),
+        "{}",
+        draft.text
+    );
+    let many: Vec<String> = (0..13).map(|i| format!("calendar.x{i}")).collect();
+    assert!(f.call(ACTIONS, json!({ "actions": many })).is_err());
+}
+
+#[test]
+fn ga1_each_version_is_tried_and_the_agent_hears_what_to_fix() {
+    let report = json!({
+        "errors": ["when it opened: ReferenceError: bridge is not defined"],
+        "console_errors": [], "calls": [], "screen": "", "presses": []
+    });
+    let f = fixture_with(
+        World::default(),
+        Arc::new(FakeBundler {
+            tried: Some(report),
+            ..FakeBundler::default()
+        }),
+        "/nonexistent".into(),
+    );
+    let saved = f.call(CREATE, new_app(&f, &[])).unwrap();
+    assert!(
+        saved
+            .text
+            .contains("Tried here, with sample data in place of the person's"),
+        "{}",
+        saved.text
+    );
+    assert!(
+        saved.text.ends_with(
+            "Problems to fix, then save again:\n- when it opened: ReferenceError: bridge is not defined\n- it showed nothing when it opened"
+        ),
+        "{}",
+        saved.text
+    );
+    assert_eq!(saved.data["tried"]["problems"].as_array().unwrap().len(), 2);
+    // Kept with the version, as its checks' notes are.
+    let record = f
+        .studio
+        .store()
+        .record("demo", &"my-vendor-disputes".parse().unwrap(), 1)
+        .unwrap();
+    assert!(
+        record
+            .notes
+            .iter()
+            .any(|n| n == "when tried: when it opened: ReferenceError: bridge is not defined"),
+        "{:?}",
+        record.notes
+    );
+
+    // A quiet try says so.
+    let f = fixture(World::default());
+    let saved = f.call(CREATE, new_app(&f, &[])).unwrap();
+    assert!(
+        saved.text.contains("Opening it showed:\n| New app"),
+        "{}",
+        saved.text
+    );
+    assert!(
+        saved.text.ends_with("No problems when it was tried."),
+        "{}",
+        saved.text
     );
 }

@@ -80,6 +80,11 @@ pub struct StudioConfig {
     /// a jail mounts read-only to bundle in.
     #[serde(default = "default_bundler")]
     pub bundler: PathBuf,
+    /// glass-app-try, which tries each version saved (ADR 0049): statically
+    /// linked and alone in its folder, run in the bundler's jail. Missing,
+    /// and nothing is tried.
+    #[serde(default = "default_tryout")]
+    pub tryout: PathBuf,
     /// Our apps' source, which people remix: `apps/<app>/src` and `sdk/`.
     /// A folder of its own: glassd removes it when IT turns remixing off
     /// (TL-6), and the next update brings it back.
@@ -91,6 +96,7 @@ impl Default for StudioConfig {
     fn default() -> Self {
         Self {
             bundler: default_bundler(),
+            tryout: default_tryout(),
             source: default_source(),
         }
     }
@@ -98,6 +104,10 @@ impl Default for StudioConfig {
 
 fn default_bundler() -> PathBuf {
     "/usr/local/lib/glasshouse/bundler/esbuild".into()
+}
+
+fn default_tryout() -> PathBuf {
+    "/usr/local/lib/glasshouse/app-try/glass-app-try".into()
 }
 
 fn default_source() -> PathBuf {

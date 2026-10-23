@@ -48,7 +48,9 @@ apps/
               (live.ts, docs.ts); keeps nothing, like Chat. The one app built
               on npm libraries (ProseMirror, Yjs: all MIT)
   sdk/template/ where a new app starts (ADR 0032): a manifest without an
-              id and a small src/; apps.source {"template": true} hands it out
+              id and a small src/; apps.source {"template": true} hands it out,
+              apps.actions says what each action takes and returns, and each
+              save is tried with sample data (glass-app-try, ADR 0049)
   console/    the admin console's web app (ADR 0023): a site glass-console serves,
               not a device app (no manifest, no service worker)
   e2e/        Playwright: the apps against dev-host glassd and the bridge;

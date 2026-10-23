@@ -1,0 +1,16 @@
+[package]
+name = "glass-app-try"
+description = "Tries an app someone made, once, as it opens and as each button is pressed, with sample data and nothing real behind it (GA-1, ADR 0049). Runs in the bundler's jail, statically linked."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+boa_engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

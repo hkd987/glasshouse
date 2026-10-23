@@ -1,7 +1,9 @@
 // The starting point for a new app (GA-1, ADR 0032). It reaches the system
 // only through the actions its manifest declares, through the bridge:
 // change the screen and the logic freely, and declare every action you
-// call. Text goes into the page with h() and show(), which make text only.
+// call. apps.actions lists them, with what each takes and what its
+// result's data is. Text goes into the page with h() and show(), which
+// make text only.
 
 import { Bridge, BridgeError, Offline, h, ready, show } from "@glasshouse/sdk";
 

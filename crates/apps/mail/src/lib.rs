@@ -362,6 +362,62 @@ struct Summary {
     attribution: Option<Attribution>,
 }
 
+/// A mailbox, as results name it ([`Folder`]).
+fn folder_shape() -> Value {
+    json!({ "enum": ["inbox", "drafts", "sent", "archive", "junk", "trash"] })
+}
+
+/// A message as listings ([`Summary`]) and, with `read`, reads return it.
+fn summary_shape(read: bool) -> Value {
+    let mut shape = json!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "string", "description": "<folder>/<file>: what mail.read and mail.move take" },
+            "folder": folder_shape(),
+            "from": { "type": "string", "description": "\"Name <address>\" as the message has it" },
+            "to": { "type": "array", "items": { "type": "string" } },
+            "subject": { "type": "string" },
+            "date": { "type": "string", "description": "RFC 3339, UTC; empty when unreadable" },
+            "snippet": { "type": "string", "description": "the start of the body, on one line" },
+            "attribution": {
+                "type": ["object", "null"],
+                "properties": {
+                    "text": { "type": "string", "description": "\"by <agent> for <person>\"" },
+                    "by": { "type": "string" },
+                    "for": { "type": "string" }
+                },
+                "required": ["text", "by", "for"],
+                "additionalProperties": false,
+                "description": "who wrote it, when an agent or app did"
+            }
+        },
+        "required": ["id", "folder", "from", "to", "subject", "date", "snippet", "attribution"],
+        "additionalProperties": false
+    });
+    if read {
+        shape["properties"]["body"] = json!({ "type": "string", "description": "the text" });
+        shape["properties"]["html"] = json!({ "type": ["string", "null"], "description": "only for Mail itself; null for other apps and agents" });
+        shape["properties"]["attachments"] = json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "size": { "type": "integer", "description": "bytes" },
+                    "type": { "type": "string", "description": "its media type" }
+                },
+                "required": ["name", "size", "type"],
+                "additionalProperties": false
+            },
+            "description": "the files it carries, by name; never their contents"
+        });
+        if let Some(required) = shape["required"].as_array_mut() {
+            required.extend(["body", "html", "attachments"].map(|f| json!(f)));
+        }
+    }
+    shape
+}
+
 /// A file's type from its name, for the message that carries it.
 fn content_type(name: &str) -> &'static str {
     let ext = name
@@ -1395,6 +1451,69 @@ impl ActionProvider for MailProvider {
                 "mail has no action {action}"
             ))),
         }
+    }
+
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        Some(match action.as_str() {
+            "mail.list" => json!({
+                "type": "object",
+                "properties": {
+                    "folder": folder_shape(),
+                    "messages": { "type": "array", "items": summary_shape(false), "description": "newest first" }
+                },
+                "required": ["folder", "messages"],
+                "additionalProperties": false
+            }),
+            "mail.read" => json!({
+                "type": "object",
+                "properties": { "message": summary_shape(true) },
+                "required": ["message"],
+                "additionalProperties": false
+            }),
+            "mail.draft" => json!({
+                "type": "object",
+                "properties": {
+                    "draft": { "type": "string", "description": "where it was saved, Drafts/<file>" },
+                    "id": { "type": ["string", "null"], "description": "what mail.read and mail.send's draft take: drafts/<file>" }
+                },
+                "required": ["draft", "id"],
+                "additionalProperties": false
+            }),
+            "mail.send" => json!({
+                "type": "object",
+                "properties": { "sent": { "type": "integer", "description": "how many messages went" } },
+                "required": ["sent"],
+                "additionalProperties": false
+            }),
+            "mail.move" => json!({
+                "type": "object",
+                "properties": {
+                    "moved": { "type": "integer", "description": "how many messages moved" },
+                    "to": folder_shape()
+                },
+                "required": ["moved", "to"],
+                "additionalProperties": false
+            }),
+            "mail.account" => json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": ["string", "null"], "description": "who mail goes as" },
+                    "address": { "type": ["string", "null"], "description": "null when this computer has none for them yet" },
+                    "source": { "type": "string", "description": "where the address came from" },
+                    "service": { "type": ["string", "null"], "description": "IT's mail service, null without one" },
+                    "service_title": { "type": ["string", "null"] },
+                    "tenant": { "type": ["string", "null"] },
+                    "incoming": { "type": ["object", "null"] },
+                    "outgoing": { "type": ["object", "null"] },
+                    "connected": { "type": "boolean", "description": "mail is sent and received through the service" },
+                    "connectable": { "type": "boolean" }
+                },
+                "required": ["name", "address", "source", "service", "connected", "connectable"],
+                "additionalProperties": false
+            }),
+            // Mail's own: the password goes only to the shipped Mail.
+            _ => return None,
+        })
     }
 
     fn revert(

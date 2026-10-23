@@ -21,6 +21,7 @@ pub mod checks;
 pub mod diff;
 pub mod store;
 pub mod testing;
+mod tried;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -49,6 +50,7 @@ pub const CREATE: &str = "apps.create";
 pub const VERSIONS: &str = "apps.versions";
 pub const REVERT: &str = "apps.revert";
 pub const SHARE: &str = "apps.share";
+pub const ACTIONS: &str = "apps.actions";
 
 /// What the studio needs from the rest of the system, which glassd gives it
 /// once the runtime is up.
@@ -64,6 +66,25 @@ pub trait Surroundings: Send + Sync + fmt::Debug {
     /// What the org's catalog offers someone in `groups` for `need`, best
     /// first: id and name (GA-2).
     fn offers(&self, groups: &[String], need: &str) -> Vec<(AgentId, String)>;
+    /// What an app `login` makes may call: each action on this computer
+    /// their policy allows in such an app, with how it runs there, what it
+    /// takes and what it returns (GA-1).
+    fn capabilities(&self, login: &str) -> Vec<Capability>;
+}
+
+/// One action an app someone makes may call ([`Surroundings::capabilities`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Capability {
+    pub name: ActionName,
+    pub title: String,
+    pub description: String,
+    pub side_effect: SideEffect,
+    /// How it runs when their app calls it: Auto, Notify or Ask.
+    pub tier: Tier,
+    /// Its input's JSON Schema.
+    pub input: Value,
+    /// Its result data's shape ([`glass_actions::shape`]), where declared.
+    pub returns: Option<Value>,
 }
 
 /// Where things are, from glassd's configuration.
@@ -79,6 +100,10 @@ pub struct StudioPaths {
     pub source: PathBuf,
     /// esbuild.
     pub bundler: PathBuf,
+    /// glass-app-try, which tries each version saved (GA-1, ADR 0049):
+    /// statically linked, alone in its folder, run in the bundler's jail.
+    /// None, or not there, and nothing is tried.
+    pub tryout: Option<PathBuf>,
 }
 
 /// The studio: the store of apps people make and how they're built. Cheap
@@ -129,17 +154,21 @@ impl Studio {
             installed: "/nonexistent".into(),
             source: "/nonexistent".into(),
             bundler: "/nonexistent".into(),
+            tryout: None,
         })
     }
 
     /// Bundles with `tools`' confinement, in the store's build folder.
     pub fn set_tools(&self, tools: Arc<dyn ToolRunner>) {
-        let _ = self.inner.bundler.set(Bundler::new(
-            tools,
-            self.inner.paths.bundler.clone(),
-            self.inner.paths.source.join("sdk"),
-            self.inner.paths.store.join(".build"),
-        ));
+        let _ = self.inner.bundler.set(
+            Bundler::new(
+                tools,
+                self.inner.paths.bundler.clone(),
+                self.inner.paths.source.join("sdk"),
+                self.inner.paths.store.join(".build"),
+            )
+            .trying_with(self.inner.paths.tryout.clone()),
+        );
     }
 
     pub fn set_surroundings(&self, surroundings: Arc<dyn Surroundings>) {
@@ -649,13 +678,17 @@ impl StudioProvider {
         // only when the person turned those down.
         let offered = self.studio.surroundings()?.offers(&ctx.groups, &input.need);
         let remixable = self.bases(ctx, &input.need)?;
+        // An app meets the need when it has two of its words, or its only
+        // one: a word in common ("drafts", "shows") is chance, and refusing
+        // for it sent the agent back to the person over Settings and Chat.
+        let enough = relevance(&input.need, &input.need).clamp(1, 2);
         let missed: Vec<String> = offered
             .iter()
             .map(|(id, name)| (id, format!("{name} ({id}) in your organization's catalog")))
             .chain(
                 remixable
                     .iter()
-                    .filter(|b| b.score > 0 && b.remixable)
+                    .filter(|b| b.score >= enough && b.remixable)
                     .map(|b| (&b.id, format!("{} ({}), which you can remix", b.name, b.id))),
             )
             .filter(|(id, _)| !input.declined.contains(id))
@@ -663,8 +696,9 @@ impl StudioProvider {
             .collect();
         if !missed.is_empty() {
             return Err(invalid(format!(
-                "Something already meets this need: {}. Suggest it first; if the person still \
-                 wants their own app, name what they turned down in declined.",
+                "Something already meets this need: {}. Suggest it first. If the person \
+                 turns it down, or already asked for an app of their own rather than a change \
+                 to it, name it in declined.",
                 missed.join("; ")
             )));
         }
@@ -724,6 +758,14 @@ impl StudioProvider {
         let dist = bundler
             .bundle(&manifest, &plan.files)
             .map_err(|f| refused(&f))?;
+        // Tried as it opens and as each button is pressed (ADR 0049); what
+        // went wrong is the agent's to fix, and the version is kept anyway.
+        let tried = self.try_version(login, &manifest, bundler, &dist);
+        if let Some(tried) = &tried {
+            found
+                .notes
+                .extend(tried.problems.iter().map(|p| format!("when tried: {p}")));
+        }
         let beyond_base: Vec<ActionName> = match &plan.base {
             Some(_) => manifest
                 .actions
@@ -773,8 +815,16 @@ impl StudioProvider {
                 names(&beyond_base)
             ));
         }
-        for note in &found.notes {
+        for note in found
+            .notes
+            .iter()
+            .filter(|n| !n.starts_with("when tried: "))
+        {
             text.push_str(&format!(" Note: {note}."));
+        }
+        if let Some(tried) = &tried {
+            text.push_str("\n\n");
+            text.push_str(&tried.text);
         }
         Ok(ActionOutput {
             text,
@@ -785,6 +835,7 @@ impl StudioProvider {
                 "based_on": plan.base,
                 "beyond_base": beyond_base,
                 "notes": found.notes,
+                "tried": tried.as_ref().map(|t| json!({ "problems": t.problems })),
             }),
             changes: vec![Change {
                 kind: if version == 1 {
@@ -882,6 +933,173 @@ fn manifest(app: &AgentId, name: &str, version: u32, declares: Declares) -> AppM
 }
 
 /// Something a person may start from.
+impl StudioProvider {
+    /// Tries a built version (ADR 0049): what it showed and did with sample
+    /// data, and its problems. None when nothing tries apps here.
+    fn try_version(
+        &self,
+        login: &str,
+        manifest: &AppManifest,
+        bundler: &Bundler,
+        dist: &bundle::Dist,
+    ) -> Option<tried::Tried> {
+        let capabilities = self.studio.surroundings().ok()?.capabilities(login);
+        let today =
+            Timestamp::now().date_at(glass_platform::system::utc_offset_secs().unwrap_or(0));
+        let permissions = manifest
+            .permissions
+            .iter()
+            .filter_map(|p| serde_json::to_value(p).ok()?.as_str().map(str::to_owned))
+            .collect();
+        let setup = tried::setup(
+            manifest.id.as_str(),
+            &manifest.name,
+            login,
+            permissions,
+            &manifest.actions,
+            &capabilities,
+            &today,
+        );
+        Some(match bundler.try_out(dist, &setup)? {
+            Ok(report) => tried::tell(&report, &manifest.actions, &capabilities),
+            Err(why) => tried::Tried {
+                text: format!("It couldn't be tried here: {why}."),
+                problems: Vec::new(),
+            },
+        })
+    }
+}
+
+/// The most actions `apps.actions` shows in full at once.
+const MAX_DETAILED: usize = 12;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionsInput {
+    #[serde(default)]
+    need: Option<String>,
+    #[serde(default)]
+    actions: Vec<ActionName>,
+}
+
+/// How an action runs when an app calls it, in the person's words.
+fn runs(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Auto => "runs without asking",
+        Tier::Notify => "runs and tells the person",
+        Tier::Ask => "asks the person first, each time",
+        Tier::Never => "never runs",
+    }
+}
+
+fn does(side_effect: SideEffect) -> &'static str {
+    match side_effect {
+        SideEffect::None => "reads",
+        SideEffect::LocalReversible => "changes things on this computer, undoably",
+        SideEffect::Irreversible => "can't be undone (it sends, posts or deletes)",
+        SideEffect::Disclose => "sends what it's given to an AI model, as policy routes it",
+    }
+}
+
+impl StudioProvider {
+    /// `apps.actions` (GA-1): what an app the person makes may call.
+    fn capabilities(
+        &self,
+        ctx: &TaskContext,
+        input: ActionsInput,
+    ) -> Result<ActionOutput, ActionError> {
+        let login = ctx.principal.on_behalf_of.name.as_str();
+        let mut all = self.studio.surroundings()?.capabilities(login);
+        if input.actions.len() > MAX_DETAILED {
+            return Err(invalid(format!(
+                "ask for at most {MAX_DETAILED} actions at once"
+            )));
+        }
+        if !input.actions.is_empty() {
+            let mut text = Vec::new();
+            let mut data = Vec::new();
+            for name in &input.actions {
+                let Some(c) = all.iter().find(|c| &c.name == name) else {
+                    text.push(format!(
+                        "{name}: not something an app of yours can call here (apps.actions lists what is)"
+                    ));
+                    continue;
+                };
+                let takes = glass_actions::shape::typescript(&c.input);
+                let gives = c.returns.as_ref().map_or_else(
+                    || {
+                        "not described yet: call it once with your own tool, if you have it, to see"
+                            .to_owned()
+                    },
+                    glass_actions::shape::typescript,
+                );
+                text.push(format!(
+                    "{} ({}): {}. It {}; in an app it {}.\nconst result = await bridge.call(\"{}\", input), where input is:\n{takes}\nresult.ok is false with result.text saying why when it's refused or fails; otherwise result.data is:\n{gives}",
+                    c.name, c.title, c.description.trim_end_matches('.'), does(c.side_effect), runs(c.tier), c.name
+                ));
+                data.push(json!({
+                    "name": c.name, "title": c.title, "description": c.description,
+                    "side_effect": c.side_effect, "tier": c.tier,
+                    "input": c.input, "returns": c.returns,
+                }));
+            }
+            return Ok(ActionOutput {
+                text: text.join("\n\n"),
+                data: json!({ "actions": data }),
+                changes: Vec::new(),
+            });
+        }
+        if let Some(need) = input.need.as_deref().filter(|n| !n.trim().is_empty()) {
+            // The closest first, as apps.bases ranks; the rest after, by name.
+            let score = |c: &Capability| {
+                relevance(
+                    need,
+                    &format!(
+                        "{} {} {}",
+                        c.name.as_str().replace(['.', '_'], " "),
+                        c.title,
+                        c.description
+                    ),
+                )
+            };
+            all.sort_by(|a, b| {
+                score(b)
+                    .cmp(&score(a))
+                    .then(a.name.as_str().cmp(b.name.as_str()))
+            });
+        }
+        let lines: Vec<String> = all
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}: {} ({}; {}{})",
+                    c.name,
+                    c.title,
+                    does(c.side_effect),
+                    runs(c.tier),
+                    if c.returns.is_some() {
+                        ""
+                    } else {
+                        "; its data isn't described yet"
+                    }
+                )
+            })
+            .collect();
+        Ok(ActionOutput {
+            text: format!(
+                "An app you make may call these, each declared in its manifest's actions. Ask \
+                 for some by name (actions) to see what they take and what their data is.\n{}",
+                lines.join("\n")
+            ),
+            data: json!({ "actions": all.iter().map(|c| json!({
+                "name": c.name, "title": c.title, "side_effect": c.side_effect, "tier": c.tier,
+                "described": c.returns.is_some(),
+            })).collect::<Vec<_>>() }),
+            changes: Vec::new(),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct BaseOffer {
     id: AgentId,
@@ -1278,6 +1496,24 @@ impl ActionProvider for StudioProvider {
                 json!({ "type": "object", "properties": { "need": { "type": "string" } }, "additionalProperties": false }),
             ),
             def(
+                ACTIONS,
+                "What an app can do",
+                "The actions an app this person makes may call, with how each runs (without \
+                 asking, telling them, or asking them first). With actions, each one's full \
+                 detail: what it takes and, as TypeScript, what its result's data is. Read it \
+                 before writing an app's calls: the app gets exactly that data.",
+                SideEffect::None,
+                Tier::Auto,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "need": { "type": "string", "description": "What the app is for: the closest actions first." },
+                        "actions": { "type": "array", "items": { "type": "string" }, "maxItems": MAX_DETAILED, "description": "Actions to show in full, such as calendar.list." }
+                    },
+                    "additionalProperties": false
+                }),
+            ),
+            def(
                 SOURCE,
                 "An app's source",
                 "An app's TypeScript and CSS source and what its manifest declares, to change \
@@ -1304,7 +1540,8 @@ impl ActionProvider for StudioProvider {
                  made (app), from the whole source (files) or from edits to what it starts \
                  from; manifest is what that declares unless sent. glassd checks the source and \
                  what it declares, bundles it and keeps every version; the person can go back \
-                 to any. Refusals say what to fix.",
+                 to any. Refusals say what to fix. apps.actions says what each action an app \
+                 calls takes and returns.",
                 SideEffect::LocalReversible,
                 Tier::Notify,
                 json!({
@@ -1337,16 +1574,17 @@ impl ActionProvider for StudioProvider {
             def(
                 CREATE,
                 "Make a new app",
-                "Makes a new app from the template when nothing in the catalog or apps.bases \
-                 meets the need. Refused while something does, unless the person turned it \
-                 down (declined).",
+                "Makes a new app from the template (apps.source with template) when nothing in \
+                 the catalog or apps.bases meets the need. Refused while something does, unless \
+                 the person turned it down (declined). Before writing its calls, apps.actions \
+                 says what each action takes and what its result's data is, exactly.",
                 SideEffect::LocalReversible,
                 Tier::Ask,
                 json!({
                     "type": "object",
                     "properties": {
                         "need": { "type": "string", "description": "What the app is for, as searched in the catalog." },
-                        "declined": { "type": "array", "items": { "type": "string" }, "description": "Ids the person turned down." },
+                        "declined": { "type": "array", "items": { "type": "string" }, "description": "Ids of what the person turned down for this: what they said not to use or change (\"a new app, not a change to Calendar\" turns down calendar)." },
                         "manifest": manifest_schema(),
                         "files": files_schema(),
                         "note": { "type": "string" }
@@ -1425,10 +1663,11 @@ impl ActionProvider for StudioProvider {
     ) -> Result<Preview, ActionError> {
         self.allowed()?;
         match action.as_str() {
-            BASES | SOURCE | VERSIONS => Ok(Preview {
+            BASES | SOURCE | VERSIONS | ACTIONS => Ok(Preview {
                 summary: match action.as_str() {
                     BASES => "List apps you can start from".into(),
                     SOURCE => "Read an app's source".into(),
+                    ACTIONS => "List what an app can do".into(),
                     _ => "List your apps' versions".into(),
                 },
                 targets: vec!["Your apps".into()],
@@ -1564,6 +1803,7 @@ impl ActionProvider for StudioProvider {
                 self.save(ctx, plan)
             }
             VERSIONS => self.versions(ctx, parse_input(input)?),
+            ACTIONS => self.capabilities(ctx, parse_input(input)?),
             REVERT => self.revert(ctx, parse_input(input)?),
             SHARE => self.share(ctx, parse_input(input)?),
             other => Err(ActionError::NotFound(format!("no action {other}"))),

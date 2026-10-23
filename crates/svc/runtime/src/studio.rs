@@ -9,8 +9,8 @@ use std::path::Path;
 use std::sync::{Arc, Weak};
 
 use glass_api::AppManifest;
-use glass_app_studio::{Studio, Surroundings};
-use glass_types::{AgentId, Tier};
+use glass_app_studio::{Capability, Studio, Surroundings};
+use glass_types::{ActionName, AgentId, Label, Tier};
 
 use crate::{PersonalApp, PersonalApps, Runtime};
 
@@ -116,5 +116,38 @@ impl Surroundings for StudioSurroundings {
 
     fn offers(&self, groups: &[String], need: &str) -> Vec<(AgentId, String)> {
         (self.offers)(groups, need)
+    }
+
+    /// GA-1: what the person's policy lets an app they make call, as
+    /// `refusals` judges a manifest: none of the person's own actions, and
+    /// nothing their policy makes Never in such an app.
+    fn capabilities(&self, login: &str) -> Vec<Capability> {
+        let Some(rt) = self.rt.upgrade() else {
+            return Vec::new();
+        };
+        let (policy, registry) = (rt.policy(), rt.registry());
+        let names: Vec<ActionName> = registry.defs().map(|d| d.name.clone()).collect();
+        let any_app: AgentId = format!("{}app", glass_types::PERSONAL_PREFIX)
+            .parse()
+            .expect("a personal app's id");
+        let effective = policy.for_app(login, &any_app, &names, Label::Internal);
+        let mut found: Vec<Capability> = registry
+            .defs()
+            .filter(|def| !glass_policy::persons_own(&def.name))
+            .filter_map(|def| {
+                let tier = effective.tier_for(&def.name, def.default_tier).tier;
+                (tier != Tier::Never).then(|| Capability {
+                    name: def.name.clone(),
+                    title: def.title.clone(),
+                    description: def.description.clone(),
+                    side_effect: def.side_effect,
+                    tier,
+                    input: def.input_schema.clone(),
+                    returns: registry.returns(&def.name),
+                })
+            })
+            .collect();
+        found.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+        found
     }
 }

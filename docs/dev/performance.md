@@ -64,7 +64,7 @@ fails when one goes over:
 | A page in a three-person call, decoding two videos | 250 MB | UI-7, CF-21 | 168 MB (167–169, `meet.e2e.ts`) |
 | A page in a transcribed call, its speech model loaded (ADR 0045 T2) | 500 MB | UI-7, CF-21 | 360–435 MB (`meet.e2e.ts`); the model and its runtime are about 250 MB of it, for as long as the call lasts |
 | What the person said, as a line of the transcript: from their pause to its text, on the computer | none yet | ADR 0045 T2 | 0.8–1.0 s for 2.3–4.4 s of speech; the model loads in 1.5–1.7 s, while they join (`speech.spec.ts`) |
-| Saving an app someone remixed: the checks, a bundle in a jail of its own, the version kept | 10 s | GA-4, ADR 0032 | 2.0 s for Mail on the VM (scenario `studio`) |
+| Saving an app someone remixed: the checks, a bundle in a jail of its own, a try of it in another (ADR 0049), the version kept | 10 s | GA-4, ADR 0032 | 7.4 s for Mail on the VM, the first save after a deploy; 5.8–6.1 s after (scenario `studio`). The try is 3–5 s of it, 0.15 s natively: the emulated CPU translates a program the first time it runs. 2.0 s before the try |
 
 *Cold launch* is a fresh browser context (no cache, no service worker, no
 stored data), from navigation to the app drawn with its data (the
@@ -278,7 +278,7 @@ fails when one goes over:
 | A page in a three-person call, decoding two videos | 250 MB | UI-7, CF-21 | 168 MB (167–169, `meet.e2e.ts`) |
 | A page in a transcribed call, its speech model loaded (ADR 0045 T2) | 500 MB | UI-7, CF-21 | 360–435 MB (`meet.e2e.ts`); the model and its runtime are about 250 MB of it, for as long as the call lasts |
 | What the person said, as a line of the transcript: from their pause to its text, on the computer | none yet | ADR 0045 T2 | 0.8–1.0 s for 2.3–4.4 s of speech; the model loads in 1.5–1.7 s, while they join (`speech.spec.ts`) |
-| Saving an app someone remixed: the checks, a bundle in a jail of its own, the version kept | 10 s | GA-4, ADR 0032 | 2.0 s for Mail on the VM (scenario `studio`) |
+| Saving an app someone remixed: the checks, a bundle in a jail of its own, a try of it in another (ADR 0049), the version kept | 10 s | GA-4, ADR 0032 | 7.4 s for Mail on the VM, the first save after a deploy; 5.8–6.1 s after (scenario `studio`). The try is 3–5 s of it, 0.15 s natively: the emulated CPU translates a program the first time it runs. 2.0 s before the try |
 
 *Cold launch* is a fresh browser context (no cache, no service worker, no
 stored data), from navigation to the app drawn with its data (the

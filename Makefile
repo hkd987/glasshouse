@@ -13,6 +13,10 @@ REPO_ROOT := $(CURDIR)
 FREEBSD_TARGET := x86_64-unknown-freebsd
 # Binaries shipped in the OS image (see os/freebsd/dist.manifest).
 SHIPPED := glassd glassctl glass-mcp glass-demo-agent glass-it-agent glass-desktop-agent glass-claude-runner glass-skill-evals glass-probe glass-app-bridge
+# Run in the bundler's jail, which holds nothing but its own folder: statically linked, built
+# apart so the flag doesn't rebuild everything else (ADR 0049).
+STATIC_SHIPPED := glass-app-try
+STATIC_TARGET_DIR := $(or $(CARGO_TARGET_DIR),target)/static
 # The sign-in screen and the desktop, from the shell workspace (shell/).
 SHIPPED_SHELL := glass-greeter glass-shell-fb glass-compositor glass-terminal glass-activity
 # Cargo profile for FreeBSD builds. `vm` rebuilds in seconds for the VM loop;
@@ -65,7 +69,7 @@ legal-base: ## Regenerate the base system's notices and source offer from its sr
 BASE_INVENTORY ?= $(lastword $(sort $(wildcard build/images/glasshouse-*-desktop.packages.txt)))
 
 sbom: ## Software bill of materials, admins and security reviews only (BR-4); never ship it
-	tools/legal/notices.py $(addprefix --package ,$(SHIPPED)) $(addprefix --shell-package ,$(SHIPPED_SHELL)) \
+	tools/legal/notices.py $(addprefix --package ,$(SHIPPED) $(STATIC_SHIPPED)) $(addprefix --shell-package ,$(SHIPPED_SHELL)) \
 		$(if $(BASE_INVENTORY),--base-packages $(BASE_INVENTORY)) $(addprefix --third-party ,$(wildcard os/freebsd/images/*.third-party)) \
 		$(if $(wildcard build/dist/freebsd/usr/local/share/licenses),--third-party-licenses build/dist/freebsd/usr/local/share/licenses) \
 		--sbom build/sbom/glasshouse.cdx.json
@@ -75,6 +79,8 @@ timings: ## Profile a clean build; opens target/cargo-timings/cargo-timing.html
 
 freebsd: ## Cross-compile the shipped binaries for FreeBSD (FREEBSD_PROFILE, default vm)
 	cargo build --profile $(FREEBSD_PROFILE) --target $(FREEBSD_TARGET) $(addprefix -p ,$(SHIPPED))
+	CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_RUSTFLAGS="-C target-feature=+crt-static" \
+		cargo build --profile $(FREEBSD_PROFILE) --target $(FREEBSD_TARGET) --target-dir $(STATIC_TARGET_DIR) $(addprefix -p ,$(STATIC_SHIPPED))
 	cargo build $(SHELL_MANIFEST) --profile $(FREEBSD_PROFILE) --target $(FREEBSD_TARGET) $(addprefix -p ,$(SHIPPED_SHELL))
 
 dev-host: ## Run glassd here with the insecure host sandbox (development only)

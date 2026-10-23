@@ -138,6 +138,14 @@ pub trait ActionProvider: Send + Sync + fmt::Debug {
         input: &Value,
     ) -> Result<ActionOutput, ActionError>;
 
+    /// The shape of `action`'s result `data`, as [`crate::shape`] reads
+    /// it, for apps people make and the agents making them (GA-1, ADR
+    /// 0032). None when it isn't declared yet; a provider that declares it
+    /// checks it in its tests with [`crate::shape::conforms`].
+    fn returns(&self, _action: &ActionName) -> Option<Value> {
+        None
+    }
+
     /// Puts back what undo can't restore from snapshots, for one reversible
     /// change `action` made: a message moved on the person's mail server
     /// (ADR 0037). Undo calls it after the change's files are back, with

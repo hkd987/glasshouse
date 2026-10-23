@@ -19,6 +19,7 @@ mod context;
 mod def;
 mod live;
 mod registry;
+pub mod shape;
 pub mod testing;
 
 use std::path::Path;

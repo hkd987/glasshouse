@@ -1103,6 +1103,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-app-try"
+version = "0.1.0"
+dependencies = [
+ "boa_engine",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "glass-audit"
 version = "0.1.0"
 dependencies = [

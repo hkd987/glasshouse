@@ -295,3 +295,40 @@ async fn tl6_it_turns_remixing_off_and_peoples_apps_wait_for_it() {
     assert!(mine(&h), "kept while off, back when on");
     assert!(open(&apps, "my-chat").await.is_ok());
 }
+
+#[tokio::test]
+async fn ga1_an_agent_making_an_app_reads_what_each_action_takes_and_returns() {
+    let h = harness();
+    let (_task, client) = claude_code(&h).await;
+    let listed = tool(&client, "apps_actions", json!({})).await;
+    assert!(!listed.is_error, "{}", listed.text());
+    let names: Vec<String> = listed.structured_content.unwrap()["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(names.contains(&"calendar.read".to_owned()), "{names:?}");
+    // Never Mail's password, nor what policy keeps from apps people make.
+    assert!(!names.contains(&"mail.connect".to_owned()), "{names:?}");
+    assert!(!names.contains(&"meet.list".to_owned()), "{names:?}");
+
+    // In full, as Calendar declares it: the attendees are in data.event.
+    let read = tool(
+        &client,
+        "apps_actions",
+        json!({ "actions": ["calendar.read"] }),
+    )
+    .await;
+    assert!(
+        read.text().contains("result.data is:\n{\n  event: {\n"),
+        "{}",
+        read.text()
+    );
+    assert!(
+        read.text()
+            .contains("attendees: string[]; // email addresses, without the organizer"),
+        "{}",
+        read.text()
+    );
+}

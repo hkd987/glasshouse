@@ -17,6 +17,9 @@ pub struct FakeBundler {
     /// Leaves its stylesheet as a link to this file, as a bundler gone
     /// wrong might.
     pub link: Option<PathBuf>,
+    /// What trying a version reports, standing in for glass-app-try
+    /// (ADR 0049); a quiet try without it.
+    pub tried: Option<serde_json::Value>,
 }
 
 impl ToolRunner for FakeBundler {
@@ -25,6 +28,17 @@ impl ToolRunner for FakeBundler {
             context: "the stand-in bundler".into(),
             source,
         };
+        if run.program.ends_with("glass-app-try") {
+            let report = self.tried.clone().unwrap_or_else(|| {
+                json!({ "errors": [], "console_errors": [], "calls": [], "screen": "New app", "presses": [] })
+            });
+            std::fs::write(run.dir.join("tried.json"), report.to_string()).map_err(failed)?;
+            return Ok(ToolOutput {
+                success: true,
+                stderr: String::new(),
+                timed_out: false,
+            });
+        }
         let mut inputs = serde_json::Map::new();
         for (path, _) in store::read_tree(&run.dir.join("app"), "src").map_err(failed)? {
             inputs.insert(format!("app/{path}"), json!({}));
