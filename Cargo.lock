@@ -1390,6 +1390,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-replay"
+version = "0.1.0"
+dependencies = [
+ "glass-script",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "glass-rpc"
 version = "0.1.0"
 dependencies = [
@@ -1430,6 +1439,7 @@ dependencies = [
  "glass-managed",
  "glass-platform",
  "glass-policy",
+ "glass-replay",
  "glass-rpc",
  "glass-tailoring",
  "glass-types",

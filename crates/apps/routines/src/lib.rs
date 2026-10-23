@@ -62,10 +62,123 @@ struct SaveInput {
     #[serde(default)]
     name: Option<String>,
     request: String,
-    script: String,
+    #[serde(default)]
+    script: Option<String>,
+    /// The runtime writes the script from this task's calls (ADR 0046).
+    #[serde(default)]
+    from_this_task: bool,
     #[serde(default)]
     schedule: Option<String>,
     note: String,
+}
+
+/// A routine, or its next version, as someone asks for it.
+#[derive(Debug, Clone)]
+pub struct Draft {
+    /// One of theirs: this is its next version.
+    pub routine: Option<String>,
+    /// Its name; the routine's own for a next version.
+    pub name: Option<String>,
+    pub request: String,
+    pub script: String,
+    pub schedule: Option<String>,
+    pub note: String,
+}
+
+/// Who runs a routine and with what: the task it's saved from.
+#[derive(Debug, Clone)]
+pub struct Scope {
+    pub agent: glass_types::AgentId,
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+    pub task: glass_types::TaskId,
+}
+
+impl Routines {
+    /// `draft` as `login`'s routine, checked, with `scope`: what keeping it
+    /// will keep, its version numbered then.
+    pub fn plan(
+        &self,
+        login: &str,
+        home: &Path,
+        draft: Draft,
+        scope: Scope,
+    ) -> Result<Routine, String> {
+        let current = match &draft.routine {
+            Some(id) => Some(
+                store::chosen(home)
+                    .get(id)
+                    .and_then(|v| self.record(login, id, *v))
+                    .ok_or_else(|| format!("{id} isn't a routine of yours"))?,
+            ),
+            None => None,
+        };
+        let name = match (draft.name, &current) {
+            (Some(name), _) => name.trim().to_owned(),
+            (None, Some(current)) => current.name.clone(),
+            (None, None) => return Err("name the routine".into()),
+        };
+        if name.is_empty() || name.chars().count() > MAX_NAME_CHARS || name.contains('\n') {
+            return Err(format!(
+                "name it in a line of at most {MAX_NAME_CHARS} characters"
+            ));
+        }
+        let request = draft.request.trim().to_owned();
+        if request.is_empty() || request.chars().count() > MAX_REQUEST_CHARS {
+            return Err(format!(
+                "say what it does, in at most {MAX_REQUEST_CHARS} characters: each run starts with it"
+            ));
+        }
+        if draft.script.trim().is_empty() || draft.script.len() > MAX_SCRIPT_BYTES {
+            return Err(format!(
+                "the script is the routine: at most {} KB of JavaScript",
+                MAX_SCRIPT_BYTES / 1024
+            ));
+        }
+        let note = draft.note.trim().to_owned();
+        if note.is_empty() || note.chars().count() > MAX_NOTE_CHARS {
+            return Err("say in a sentence what this version is".into());
+        }
+        let schedule = match draft.schedule.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(text) => Some(text.parse::<Schedule>()?),
+        };
+        let id = match current {
+            Some(current) => current.id,
+            None => new_id(&name, &self.ids(login))?,
+        };
+        Ok(Routine {
+            id,
+            name,
+            version: 0,
+            owner: login.to_owned(),
+            agent: scope.agent,
+            request,
+            calls: calls(&draft.script),
+            script: draft.script,
+            schedule,
+            read: scope.read,
+            write: scope.write,
+            note,
+            saved_at: Timestamp::now(),
+            saved_in: scope.task,
+        })
+    }
+
+    /// Keeps `routine` as its next version and makes it the one the person
+    /// has, writing their list as them.
+    pub fn keep(
+        &self,
+        routine: Routine,
+        home: &Path,
+        owner: glass_platform::fs::Owner,
+    ) -> std::io::Result<Routine> {
+        let saved = self.save(routine)?;
+        let mut chosen = store::chosen(home);
+        chosen.insert(saved.id.clone(), saved.version);
+        store::choose(home, owner, chosen)?;
+        Ok(saved)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,80 +204,46 @@ impl RoutinesProvider {
 
     /// What a save will keep, worked out from its input and the task alone.
     fn plan(&self, ctx: &TaskContext, input: SaveInput) -> Result<Routine, ActionError> {
-        let login = ctx.principal.on_behalf_of.name.as_str();
-        let current = match &input.routine {
-            Some(id) => Some(
-                store::chosen(&ctx.home)
-                    .get(id)
-                    .and_then(|v| self.routines.record(login, id, *v))
-                    .ok_or_else(|| invalid(format!("{id} isn't a routine of yours")))?,
-            ),
-            None => None,
-        };
-        let name = match (input.name, &current) {
-            (Some(name), _) => name.trim().to_owned(),
-            (None, Some(current)) => current.name.clone(),
-            (None, None) => return Err(invalid("name the routine")),
-        };
-        if name.is_empty() || name.chars().count() > MAX_NAME_CHARS || name.contains('\n') {
-            return Err(invalid(format!(
-                "name it in a line of at most {MAX_NAME_CHARS} characters"
-            )));
+        if input.from_this_task {
+            // The runtime writes the script from the task's calls and takes
+            // the flag off; reaching here, it couldn't.
+            return Err(invalid(
+                "this computer couldn't write the script from this task",
+            ));
         }
-        let request = input.request.trim().to_owned();
-        if request.is_empty() || request.chars().count() > MAX_REQUEST_CHARS {
-            return Err(invalid(format!(
-                "say what it does, in at most {MAX_REQUEST_CHARS} characters: each run starts with it"
-            )));
-        }
-        if input.script.trim().is_empty() || input.script.len() > MAX_SCRIPT_BYTES {
-            return Err(invalid(format!(
-                "the script is the routine: at most {} KB of JavaScript",
-                MAX_SCRIPT_BYTES / 1024
-            )));
-        }
-        let note = input.note.trim().to_owned();
-        if note.is_empty() || note.chars().count() > MAX_NOTE_CHARS {
-            return Err(invalid("say in a sentence what this version is"));
-        }
-        let schedule = match input.schedule.as_deref().map(str::trim) {
-            None | Some("") => None,
-            Some(text) => Some(text.parse::<Schedule>().map_err(invalid)?),
-        };
-        let id = match current {
-            Some(current) => current.id,
-            None => new_id(&name, &self.routines.ids(login))?,
-        };
+        let script = input
+            .script
+            .ok_or_else(|| invalid("send the script, or from_this_task: true for this computer to write it from what this task did"))?;
         // The scope of the task that saves it (DA-4): what each run may
         // read and change. Never from the input.
         let (read, write) = ctx.grants.iter().partition::<Vec<_>, _>(|g| !g.writable);
-        Ok(Routine {
-            id,
-            name,
-            version: 0,
-            owner: login.to_owned(),
-            agent: ctx.principal.agent.clone(),
-            request,
-            calls: calls(&input.script),
-            script: input.script,
-            schedule,
-            read: read.iter().map(|g| g.root.clone()).collect(),
-            write: write.iter().map(|g| g.root.clone()).collect(),
-            note,
-            saved_at: Timestamp::now(),
-            saved_in: ctx.principal.task,
-        })
+        self.routines
+            .plan(
+                &ctx.principal.on_behalf_of.name,
+                &ctx.home,
+                Draft {
+                    routine: input.routine,
+                    name: input.name,
+                    request: input.request,
+                    script,
+                    schedule: input.schedule,
+                    note: input.note,
+                },
+                Scope {
+                    agent: ctx.principal.agent.clone(),
+                    read: read.iter().map(|g| g.root.clone()).collect(),
+                    write: write.iter().map(|g| g.root.clone()).collect(),
+                    task: ctx.principal.task,
+                },
+            )
+            .map_err(invalid)
     }
 
     fn save(&self, ctx: &TaskContext, routine: Routine) -> Result<ActionOutput, ActionError> {
         let saved = self
             .routines
-            .save(routine)
+            .keep(routine, &ctx.home, ctx.owner)
             .map_err(|e| ActionError::io("the routine", e))?;
-        let mut chosen = store::chosen(&ctx.home);
-        chosen.insert(saved.id.clone(), saved.version);
-        store::choose(&ctx.home, ctx.owner, chosen)
-            .map_err(|e| ActionError::io("your routines", e))?;
         let when = match &saved.schedule {
             Some(schedule) => format!("It runs {}", schedule.describe()),
             None => "It runs when you start it".to_owned(),
@@ -204,7 +283,7 @@ impl RoutinesProvider {
 
 /// A name as an id: lowercase letters and digits joined by `-`, 40 at
 /// most, the next free one.
-fn new_id(name: &str, taken: &[String]) -> Result<String, ActionError> {
+fn new_id(name: &str, taken: &[String]) -> Result<String, String> {
     let words: Vec<String> = name
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|w| !w.is_empty())
@@ -229,7 +308,7 @@ fn new_id(name: &str, taken: &[String]) -> Result<String, ActionError> {
             n => format!("{stem}-{n}"),
         })
         .find(|id| !taken.contains(id))
-        .ok_or_else(|| invalid("name it something more its own"))
+        .ok_or_else(|| "name it something more its own".to_owned())
 }
 
 /// The tools a script calls, by name, in the order it first calls them:
@@ -382,10 +461,13 @@ impl ActionProvider for RoutinesProvider {
                 SAVE,
                 "Save a routine",
                 "Saves a task the person wants done again, by name, with a script that does it \
-                 and no model: JavaScript for run_script, whose call(tool, input) makes this \
-                 task's tool calls. Try the script with run_script first. Each run reads and \
-                 changes what this task may, and the agent does the request itself if the \
-                 script fails. The person sees the script before it's saved.",
+                 and no model. For actions, do it once with the tools, then save with \
+                 from_this_task: this computer writes the script from what you did. For an \
+                 answer worked out from what the tools return, write the script yourself: \
+                 JavaScript for run_script, whose call(tool, input) makes this task's tool \
+                 calls; try it first. Each run reads and changes what this task may, and the \
+                 agent does the request itself if the script fails. The person sees the script \
+                 before it's saved.",
                 SideEffect::LocalReversible,
                 Tier::Ask,
                 json!({
@@ -394,11 +476,12 @@ impl ActionProvider for RoutinesProvider {
                         "routine": { "type": "string", "description": "One of theirs, to save its next version." },
                         "name": { "type": "string", "description": "A short name, such as \"Overdue invoices\"." },
                         "request": { "type": "string", "description": "What it does, as the person would ask for it: each run starts with it." },
-                        "script": { "type": "string", "description": "The script, tried with run_script. Its result, a string, is the run's answer." },
+                        "from_this_task": { "type": "boolean", "description": "True: this computer writes the script from the calls this task made, the same way every time, with loops where a call was made for each item of a list. Use it for actions: moving, drafting, filing." },
+                        "script": { "type": "string", "description": "Or a script you wrote and tried with run_script, for an answer worked out from what the tools return. Its result, a string, is the run's answer." },
                         "schedule": { "type": "string", "description": format!("When it runs by itself: {}. Leave out to run it only when asked.", schedule::FORMS) },
                         "note": { "type": "string", "description": "What this version is, in a sentence." }
                     },
-                    "required": ["request", "script", "note"],
+                    "required": ["request", "note"],
                     "additionalProperties": false
                 }),
             )

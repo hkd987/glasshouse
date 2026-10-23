@@ -17,9 +17,9 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use glass_api::{
     AgentSummary, AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalView, AuditVerifyResult,
-    DisplaySafe, Event, HandoffCard, PowerResult, ProfileApp, ProfileAppKind, RoutineRef,
-    RoutineView, ScopeRequest, SystemStatus, TaskDetail, TaskRef, TaskRequest, TaskView, TileState,
-    UndoReport, UndoRequest, methods,
+    DisplaySafe, Event, HandoffCard, PowerResult, ProfileApp, ProfileAppKind, RoutineDraft,
+    RoutineFromTask, RoutineRef, RoutineView, ScopeRequest, SystemStatus, TaskDetail, TaskRef,
+    TaskRequest, TaskView, TileState, UndoReport, UndoRequest, methods,
 };
 use glass_audit::AuditRecord;
 use glass_rpc::Client;
@@ -154,7 +154,8 @@ enum Command {
     /// Your routines: tasks you saved to run again, by themselves or when
     /// you start them (DA-4).
     Routines,
-    /// Start one of your routines now.
+    /// Start a routine, or make one from a task you ran: this computer
+    /// writes its code from the task's steps, with no model.
     #[command(subcommand)]
     Routine(RoutineCommand),
     /// Policy tools (offline).
@@ -169,6 +170,20 @@ enum Command {
 enum RoutineCommand {
     /// Start a routine now, by its id from `glassctl routines`.
     Run { routine: String },
+    /// Show the code this computer writes from a task's steps.
+    Draft { task: String },
+    /// Save a task as a routine, with the code this computer writes from
+    /// its steps.
+    Save {
+        task: String,
+        /// What to call it.
+        #[arg(long)]
+        name: String,
+        /// When it runs by itself: "weekdays 09:00", "daily 18:30",
+        /// "mon,thu 08:30" or "hourly". Without one, when you start it.
+        #[arg(long)]
+        schedule: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -293,6 +308,15 @@ impl Ctl {
     }
 
     /// Resolves a short or full task id among the caller's tasks.
+    /// A task glassd may no longer hold, such as one a routine is made
+    /// from: its full id as given, else as `task` finds it.
+    async fn ended_task(&self, reference: &str) -> anyhow::Result<TaskId> {
+        match reference.parse::<TaskId>() {
+            Ok(id) => Ok(id),
+            Err(_) => self.task(reference).await,
+        }
+    }
+
     async fn task(&self, reference: &str) -> anyhow::Result<TaskId> {
         let tasks: Vec<TaskView> = self.call(methods::TASK_LIST, Value::Null).await?;
         pick(
@@ -513,6 +537,39 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         )
                     })
                     .collect()
+            })
+        }
+        Command::Routine(RoutineCommand::Draft { task }) => {
+            let task = ctl.ended_task(&task).await?;
+            let draft: RoutineDraft = ctl.call(methods::ROUTINE_DRAFT, TaskRef { task }).await?;
+            if ctl.json {
+                return ctl.show(&draft, |_| String::new());
+            }
+            print!("{}", render::routine_draft(&draft));
+            Ok(())
+        }
+        Command::Routine(RoutineCommand::Save {
+            task,
+            name,
+            schedule,
+        }) => {
+            let task = ctl.ended_task(&task).await?;
+            let saved: RoutineView = ctl
+                .call(
+                    methods::ROUTINE_SAVE,
+                    RoutineFromTask {
+                        task,
+                        name,
+                        schedule,
+                    },
+                )
+                .await?;
+            ctl.show(&saved, |r| {
+                format!(
+                    "Saved the routine {} ({}). It runs {}, with no model; \
+                     `glassctl routine run {}` starts it now.\n",
+                    r.name, r.routine, r.runs, r.routine
+                )
             })
         }
         Command::Routine(RoutineCommand::Run { routine }) => {

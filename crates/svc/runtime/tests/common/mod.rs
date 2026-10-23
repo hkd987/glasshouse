@@ -378,6 +378,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
                 claude_code(),
                 writer(),
                 skill_evals(),
+                repeater(),
             ],
             agent_dirs: Vec::new(),
             max_live_tasks_per_user: 4,
@@ -584,6 +585,25 @@ pub fn invoice_demo() -> CatalogEntry {
                 default: Some(serde_json::Value::Bool(true)),
             },
         ],
+    }
+}
+
+/// An agent the test plays that finishes on its own, Done, a few seconds
+/// in: what a task's steps are kept as when it's done (ADR 0046).
+pub fn repeater() -> CatalogEntry {
+    CatalogEntry {
+        id: "repeater".parse().unwrap(),
+        name: "Repeater".into(),
+        version: "1".into(),
+        model: String::new(),
+        description: String::new(),
+        mode: glass_api::AgentMode::Actions,
+        program: "/bin/sleep".into(),
+        attended: false,
+        driver: None,
+        args: vec!["3".into()],
+        plan: vec!["Read".into(), "Note".into()],
+        customize: Vec::new(),
     }
 }
 

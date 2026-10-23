@@ -149,6 +149,9 @@ on ADR 0018 (the gateway), 0041 (tool use, the desktop agent) and 0043
 **Built after the go-ahead, continued** (2026-10-22):
 
 5. **Automations become scripts** (DA-4, NV-21), as `glass-app-routines`.
+   - **Since ADR 0046** the OS writes a routine's code for actions, from
+     what the task did; the model writes a script only for an answer it
+     has to work out, as below.
    - **Written once.** Asked for something regularly ("every weekday at
      9:00, tell me which invoices are unpaid"), the desktop agent writes
      a script against the task's own tools, tries it with `run_script`,

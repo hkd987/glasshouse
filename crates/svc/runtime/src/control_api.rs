@@ -68,6 +68,14 @@ impl Handler for ControlApi {
             methods::TASK_HAND_BACK => to_result(&rt.hand_back(&caller, task_ref(params)?).await?),
             methods::TASK_DISMISS => to_result(&rt.dismiss(&caller, task_ref(params)?)?),
             methods::ROUTINE_LIST => to_result(&blocking(|| rt.routines_of(&caller))),
+            methods::ROUTINE_DRAFT => {
+                let task = task_ref(params)?;
+                to_result(&blocking(|| rt.routine_draft(&caller, task))?)
+            }
+            methods::ROUTINE_SAVE => {
+                let request: glass_api::RoutineFromTask = parse_params(params)?;
+                to_result(&blocking(|| rt.routine_from_task(&caller, request))?)
+            }
             methods::ROUTINE_RUN => {
                 let routine: glass_api::RoutineRef = parse_params(params)?;
                 to_result(&blocking(|| rt.run_routine(&caller, &routine.routine))?)

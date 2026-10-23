@@ -308,6 +308,15 @@ async fn main() -> ExitCode {
                 |()| "opened /var/db/glasshouse/routines".into(),
             ),
         ),
+        // What people's tasks did, as code (ADR 0046): their inputs in it.
+        attempt(
+            "files: open what people's tasks did",
+            Want::Denied,
+            io(
+                std::fs::read_dir("/var/db/glasshouse/flows").map(drop),
+                |()| "opened /var/db/glasshouse/flows".into(),
+            ),
+        ),
         attempt(
             "files: read daemon config",
             Want::Denied,

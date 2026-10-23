@@ -319,6 +319,27 @@ pub fn summary(views: &[TaskView]) -> String {
     format!("{}   {}\n", parts.join("   "), dim(&format!("→ {next}")))
 }
 
+/// A task as the code this computer writes from it (ADR 0046), line by
+/// line: each line safe to print, the code's lines kept as lines.
+pub fn routine_draft(d: &glass_api::RoutineDraft) -> String {
+    let safe = |text: &str| glass_api::display_line(text).into_owned();
+    let mut out = format!("{} {}\n", bold("From task"), d.task.short());
+    let _ = writeln!(out, "  \"{}\"\n\n{}", safe(&d.request), bold("Steps"));
+    for (n, step) in d.steps.iter().enumerate() {
+        let _ = writeln!(out, "  {}. {}", n + 1, safe(step));
+    }
+    let _ = writeln!(out, "\n{}", bold("Code"));
+    for line in d.script.lines() {
+        let _ = writeln!(out, "  {}", safe(line));
+    }
+    let _ = writeln!(
+        out,
+        "\nSave it: glassctl routine save {} --name \"…\" [--schedule \"weekdays 09:00\"]",
+        d.task.short()
+    );
+    out
+}
+
 /// The expanded view as printed: safe to print by its own rules, which
 /// keep the answer's line breaks where the general ones would flatten
 /// them into one line.
@@ -682,6 +703,27 @@ mod tests {
         );
         assert!(printed.contains("All done\\u202e"));
         assert_eq!(serde_json::from_str::<TaskView>(&printed).unwrap(), hostile);
+    }
+
+    /// The code this computer wrote prints as code, a line a line, and
+    /// still without escapes (ADR 0046).
+    #[test]
+    fn nv21_a_drafts_code_prints_in_its_lines() {
+        let (_, view) = sample();
+        let shown = plain(&routine_draft(&glass_api::RoutineDraft {
+            task: view.id,
+            request: "Archive the newsletters".into(),
+            script: "const r0 = call(\"mail_list\", {});\nreturn \"done\x1b[2J\";".into(),
+            steps: vec!["mail_list {}".into()],
+            read: Vec::new(),
+            write: Vec::new(),
+        }));
+        assert!(
+            shown.contains(
+                "Code\n  const r0 = call(\"mail_list\", {});\n  return \"done\u{FFFD}[2J\";\n"
+            ),
+            "{shown}"
+        );
     }
 
     /// An answer keeps its lines (ADR 0041): a routine's is a line per

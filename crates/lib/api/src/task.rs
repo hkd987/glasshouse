@@ -130,6 +130,31 @@ pub struct RoutineRef {
     pub routine: String,
 }
 
+/// A task's calls as replay code, written by this computer with no model
+/// (NV-21, ADR 0046): what saving it as a routine would keep.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutineDraft {
+    pub task: TaskId,
+    /// The request it was, which each run starts with.
+    pub request: String,
+    pub script: String,
+    /// What the script does, step by step.
+    pub steps: Vec<String>,
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+}
+
+/// Save one of the caller's tasks as a routine, its code written from the
+/// task's calls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutineFromTask {
+    pub task: TaskId,
+    pub name: String,
+    /// When it runs by itself (`weekdays 09:00`); only when started without.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+}
+
 /// A tile's state (PRD "Tile states"). "Collapsed" is how the shell shows
 /// tiles, not a task state, so it is not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

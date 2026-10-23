@@ -315,7 +315,8 @@ pub async fn models(h: &Harness) -> anyhow::Result<()> {
     it_agent(h).await?;
     desktop_agent(h, &ws).await?;
     desktop_agent_script(h, &ws).await?;
-    desktop_agent_routine(h, &ws).await
+    desktop_agent_routine(h, &ws).await?;
+    desktop_agent_flow(h).await
 }
 
 /// AE-3, ADR 0041: the desktop agent, in its jail, offers the model its
@@ -417,6 +418,90 @@ async fn desktop_agent_script(h: &Harness, ws: &crate::harness::Workspace) -> an
     let answer = h.detail(task).await?.answer.unwrap_or_default();
     ensure!(answer.contains("The script failed"), "{answer}");
     ensure!(!answer.contains("root:"), "{answer}");
+    Ok(())
+}
+
+/// Code this computer writes from what a task did (NV-21, ADR 0046), in
+/// the jail: the same request done the same way twice says so; saved from
+/// the task, with no model writing it, its run drafts the mail again with
+/// no model.
+async fn desktop_agent_flow(h: &Harness) -> anyhow::Result<()> {
+    let prompt = r#"Draft it. Use mail_draft {"to": ["ana@example.com"], "subject": "Weekly numbers", "body": "Here are this week's numbers."}"#;
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let task = h.start("desktop-agent", prompt, &[], &[]).await?;
+        h.wait_for(task, TileState::Done, Duration::from_secs(60))
+            .await?;
+        tasks.push(task);
+    }
+    let said: Vec<String> = h
+        .detail(tasks[1])
+        .await?
+        .activity
+        .into_iter()
+        .map(|a| a.text)
+        .collect();
+    ensure!(
+        said.iter()
+            .any(|t| t.starts_with(&format!("The same steps as task {}", tasks[0].short()))),
+        "{said:?}"
+    );
+    let draft: glass_api::RoutineDraft = h
+        .call(
+            methods::ROUTINE_DRAFT,
+            glass_api::TaskRef { task: tasks[1] },
+        )
+        .await?;
+    ensure!(
+        draft.script.contains(r#"call("mail_draft", {"#),
+        "{}",
+        draft.script
+    );
+
+    let saved: glass_api::RoutineView = h
+        .call(
+            methods::ROUTINE_SAVE,
+            glass_api::RoutineFromTask {
+                task: tasks[1],
+                name: "Weekly numbers draft".into(),
+                schedule: None,
+            },
+        )
+        .await?;
+    let run: TaskView = h
+        .call(
+            methods::ROUTINE_RUN,
+            glass_api::RoutineRef {
+                routine: saved.routine.clone(),
+            },
+        )
+        .await?;
+    h.wait_for(run.id, TileState::Done, Duration::from_secs(60))
+        .await?;
+    let answer = h.detail(run.id).await?.answer.unwrap_or_default();
+    ensure!(answer.to_lowercase().contains("draft"), "{answer}");
+    let actions: Vec<String> = h
+        .audit(run.id)
+        .await?
+        .iter()
+        .filter(|r| r.event.outcome == Some(Outcome::Completed))
+        .filter_map(|r| r.event.action.as_ref().map(|a| a.as_str().to_owned()))
+        .collect();
+    ensure!(actions.iter().any(|a| a == "mail.draft"), "{actions:?}");
+    ensure!(
+        !actions.iter().any(|a| a == "model.complete"),
+        "no model: {actions:?}"
+    );
+
+    // Off the person's list again.
+    let file =
+        std::path::PathBuf::from(std::env::var("HOME")?).join(glass_app_routines::store::MINE);
+    let mut kept: Value = serde_json::from_slice(&std::fs::read(&file)?)?;
+    kept["routines"]
+        .as_object_mut()
+        .context("the routines file")?
+        .remove(&saved.routine);
+    std::fs::write(&file, serde_json::to_vec(&kept)?)?;
     Ok(())
 }
 

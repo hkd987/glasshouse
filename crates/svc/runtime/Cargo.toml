@@ -13,6 +13,7 @@ glass-api.workspace = true
 glass-app-settings.workspace = true
 glass-app-studio.workspace = true
 glass-app-routines.workspace = true
+glass-replay.workspace = true
 glass-audit.workspace = true
 glass-broker.workspace = true
 glass-gateway.workspace = true

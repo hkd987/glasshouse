@@ -65,6 +65,25 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
         tracing::error!(task = %task.id, error = %e, "sandbox teardown failed");
     }
 
+    // An ended task's calls, compiled and let go; a finished one's code is
+    // kept, and compared with the last time the same request was done (ADR
+    // 0046). Before the tile says Done, so that what it says then is all
+    // there: the note that it repeats, the code to save.
+    let tile = task.lock().tile;
+    let finished = match (&result, tile) {
+        (_, TileState::Done) => true,
+        (_, TileState::Stopped) => false,
+        (Ok(Exit::Finished(status)), _) => status.success(),
+        _ => false,
+    };
+    let repeats = {
+        let (rt, ended) = (Arc::clone(&rt), Arc::clone(&task));
+        tokio::task::spawn_blocking(move || rt.remember_flow(&ended, finished))
+            .await
+            .ok()
+            .flatten()
+    };
+
     let summary = {
         let mut state = task.lock();
         match (&result, state.tile) {
@@ -105,6 +124,7 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
         "undoable": receipt.undoable,
         "left_machine": receipt.left_machine,
         "flagged": receipt.flagged,
+        "repeats": repeats,
         "sandbox_teardown_error": teardown_error,
     });
     rt.audit(event);

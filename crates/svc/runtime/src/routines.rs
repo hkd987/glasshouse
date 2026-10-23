@@ -31,19 +31,7 @@ impl Runtime {
     pub fn routines_of(&self, caller: &Caller) -> Vec<RoutineView> {
         self.current_routines(caller)
             .into_iter()
-            .map(|r| RoutineView {
-                runs: r
-                    .schedule
-                    .map_or_else(|| "when started".to_owned(), |s| s.describe()),
-                routine: r.id,
-                name: r.name,
-                version: r.version,
-                request: r.request,
-                agent: r.agent,
-                calls: r.calls,
-                read: r.read,
-                write: r.write,
-            })
+            .map(view)
             .collect()
     }
 
@@ -109,5 +97,22 @@ impl Runtime {
             }
         }
         started
+    }
+}
+
+/// A routine as the person sees it.
+pub(crate) fn view(r: Routine) -> RoutineView {
+    RoutineView {
+        runs: r
+            .schedule
+            .map_or_else(|| "when started".to_owned(), |s| s.describe()),
+        routine: r.id,
+        name: r.name,
+        version: r.version,
+        request: r.request,
+        agent: r.agent,
+        calls: r.calls,
+        read: r.read,
+        write: r.write,
     }
 }

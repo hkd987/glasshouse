@@ -97,7 +97,7 @@ thumbnails are not started.
 | NV-10 Toolkit requires role + label | Not started | shell |
 | NV-11 A11y tree through the broker | Not started | |
 | NV-20 Screen agents on their own display | Not started | |
-| NV-21 Recorded flows replayed as code; the agent takes over when replay fails | Partial | For actions, not yet screens: a routine (DA-4) is code the agent wrote once, replayed with no model, and when its script fails the desktop agent does the request itself, told what broke, and may save a fixed version (ADR 0044 item 5). Recording a legacy app's flow is not built. VM `models` (`desktop_agent_routine`: a broken script, the model takes over) |
+| NV-21 Recorded flows replayed as code; the agent takes over when replay fails | Partial | For actions, not yet screens (ADR 0046): every task's calls are recorded and compiled into replay code by this computer, deterministically and with no model, with loops over listings and the simplest rule for the items touched. A request done again with the same steps says so, and the person saves it (`glassctl routine save <task>`), or the agent does with `routines.save {from_this_task}`. When a run's call fails, the desktop agent does the request itself, told what broke. Live on Claude Haiku 5.5 (2026-10-22): archiving Vendor News newsletters, done once for $0.0006, recognised the next week, then run with no model for $0. Missing: recording a legacy app's screens; rules on numbers and dates. `glass-replay` `nv21_…`, runtime `flows::nv21_…`, VM `models` (`desktop_agent_flow`, `desktop_agent_routine`) |
 
 ## Data protection and models
 

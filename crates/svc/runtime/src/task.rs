@@ -108,6 +108,78 @@ pub(crate) struct TaskState {
     pub answer: Option<String>,
     /// Where its model calls took what it sent them (`Receipt::models`).
     pub models_sent_to: Vec<String>,
+    /// Its tool calls and what they returned, for replay code (ADR 0046).
+    pub trace: Trace,
+}
+
+/// A task's completed tool calls, in order, with what each returned: what
+/// replay code is compiled from (NV-21, ADR 0046). Past its limits it
+/// stops, marked full, and can't be replayed. When the task ends it is
+/// compiled once and the calls are let go: only the code stays.
+#[derive(Debug, Default)]
+pub(crate) struct Trace {
+    pub calls: Vec<glass_replay::Call>,
+    bytes: usize,
+    pub full: bool,
+    ended: Option<Result<glass_replay::Replay, String>>,
+}
+
+/// The most a trace keeps: its calls' inputs and results.
+const MAX_TRACE_BYTES: usize = 2 * 1024 * 1024;
+
+impl Trace {
+    pub fn push(&mut self, call: glass_replay::Call) {
+        let size = call.input.to_string().len() + call.text.len() + call.data.to_string().len();
+        if self.full
+            || self.calls.len() >= glass_replay::MAX_CALLS
+            || self.bytes + size > MAX_TRACE_BYTES
+        {
+            self.full = true;
+            return;
+        }
+        self.bytes += size;
+        self.calls.push(call);
+    }
+
+    /// What compiling it takes, copied out so that the compiling happens
+    /// with the task's lock let go: a long trace takes a while, and the
+    /// task's views wait on that lock.
+    pub fn taken(&self) -> Traced {
+        if let Some(ended) = &self.ended {
+            return Traced::Compiled(ended.clone());
+        }
+        if self.full {
+            return Traced::Compiled(Err(format!(
+                "it made more calls, or read more, than a routine replays (at most {} calls)",
+                glass_replay::MAX_CALLS
+            )));
+        }
+        Traced::Calls(self.calls.clone())
+    }
+
+    /// At the task's end: what its calls compiled to, kept, and the calls
+    /// let go.
+    pub fn end(&mut self, compiled: Result<glass_replay::Replay, String>) {
+        self.ended = Some(compiled);
+        self.calls = Vec::new();
+        self.bytes = 0;
+    }
+}
+
+/// A trace as it stood, to compile away from the task's lock.
+pub(crate) enum Traced {
+    Compiled(Result<glass_replay::Replay, String>),
+    Calls(Vec<glass_replay::Call>),
+}
+
+impl Traced {
+    /// Its calls as replay code, or why they can't be.
+    pub fn compile(self) -> Result<glass_replay::Replay, String> {
+        match self {
+            Self::Compiled(compiled) => compiled,
+            Self::Calls(calls) => glass_replay::compile(&calls),
+        }
+    }
 }
 
 /// Everything fixed when a task starts.
@@ -237,6 +309,7 @@ impl Task {
                 data_label: None,
                 answer: None,
                 models_sent_to: Vec::new(),
+                trace: Trace::default(),
             }),
         }
     }

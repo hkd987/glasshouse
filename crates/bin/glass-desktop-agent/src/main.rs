@@ -48,9 +48,11 @@ the value, so don't say it was hidden or call it a placeholder. Secrets such as 
 back. For exact figures from what the tools return (dates, sums, counts, sorting), \
 write a short script with run_script and use its result rather than working them out \
 yourself. When the person wants something done again or regularly (each morning, every \
-Monday), and routines_save is among your tools, make it a routine: write a script that \
-does it and returns the answer as a string, try it with run_script, then save it with \
-routines_save, so it runs without a model. When you're done, answer the person in a few short paragraphs of plain words: \
+Monday), and routines_save is among your tools, make it a routine, so it runs without a \
+model. For actions (moving, drafting, filing), do it once with the tools, then save it \
+with routines_save and from_this_task: true; this computer writes the code from what you \
+did. For an answer worked out from what the tools return, write a script that returns it \
+as a string, try it with run_script, and save that. When you're done, answer the person in a few short paragraphs of plain words: \
 what you did and what you found. The answer is shown as plain text, not Markdown: no \
 asterisks, headings or bullet marks, and a blank line between points.";
 

@@ -413,14 +413,17 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     let mail_dir = config.state_dir.join("mail");
     // Drafts and eval results of skills, per person (ADR 0034), root only.
     let skills_dir = config.state_dir.join("skills");
-    // People's routines (DA-4), root only: the probe tries to open them.
+    // People's routines (DA-4), and what their tasks did as code (ADR
+    // 0046), root only: the probe tries to open them.
     let routines_dir = config.state_dir.join("routines");
+    let flows_dir = config.state_dir.join("flows");
     for (dir, mode) in [
         (config.state_dir.as_path(), 0o700),
         (chat_dir.as_path(), 0o700),
         (mail_dir.as_path(), 0o700),
         (skills_dir.as_path(), 0o700),
         (routines_dir.as_path(), 0o700),
+        (flows_dir.as_path(), 0o700),
         (run_dir, 0o755),
     ] {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

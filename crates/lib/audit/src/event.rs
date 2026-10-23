@@ -110,6 +110,9 @@ pub enum EventKind {
     /// A person changed one of their own settings from their desktop, such
     /// as hiding an app from the command bar's search (UX-1, DK-1).
     SettingChosen,
+    /// A person saved one of their tasks as a routine, its script written by
+    /// this computer from the task's calls (DA-4, ADR 0046).
+    RoutineSaved,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

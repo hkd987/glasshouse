@@ -1,0 +1,18 @@
+[package]
+name = "glass-replay"
+description = "Replay code from what a task did (NV-21, DA-4, ADR 0046): its tool calls compiled into a script, deterministically, with no model."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+glass-script.workspace = true
+
+[lints]
+workspace = true

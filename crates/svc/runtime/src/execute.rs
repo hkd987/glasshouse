@@ -76,6 +76,25 @@ impl Runtime {
         if task.wait_runnable().await.is_err() {
             return Ok(CallToolResult::error("This task has ended."));
         }
+        // A routine saved from what this task did: this computer writes its
+        // script from the task's calls, so what the person approves is that
+        // code, the same every time (ADR 0046).
+        let args = match task_script(task, &def, args) {
+            Ok(args) => args,
+            Err(why) => {
+                return Ok(self.refuse_invalid(
+                    task,
+                    &def,
+                    ActionError::InvalidInput(format!("this task can't be replayed: {why}")),
+                ));
+            }
+        };
+        // What the call did goes in the task's trace, for replay code: not
+        // model calls, an app's, or saving routines.
+        let recorded = (!task.is_app()
+            && def.name.as_str() != MODEL_COMPLETE
+            && !def.name.as_str().starts_with("routines."))
+        .then(|| args.clone());
 
         let preview = {
             let (provider, ctx, name, input) = (
@@ -368,6 +387,15 @@ impl Runtime {
                         [first, rest @ ..] => format!("{first} · {} more", rest.len()),
                     };
                     state.record_action(&verb, &target, &preview.summary);
+                    if let Some(input) = recorded {
+                        state.trace.push(glass_replay::Call {
+                            tool: def.mcp_name(),
+                            input,
+                            text: output.text.clone(),
+                            data: output.data.clone(),
+                            changes: def.side_effect != SideEffect::None,
+                        });
+                    }
                     let at = Timestamp::now();
                     for change in output.changes {
                         let id = state.changes.len() as u32;
@@ -768,4 +796,22 @@ impl Drop for InFlight<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// `args` for `routines.save` with `from_this_task`: the flag taken off and
+/// the script compiled from the task's calls so far in its place (ADR 0046).
+/// Any other call's, as they came.
+fn task_script(task: &Task, def: &ActionDef, mut args: Value) -> Result<Value, String> {
+    let asked = def.name.as_str() == glass_app_routines::SAVE
+        && args.get("from_this_task").and_then(Value::as_bool) == Some(true);
+    if !asked {
+        return Ok(args);
+    }
+    let taken = task.lock().trace.taken();
+    let replay = taken.compile()?;
+    if let Some(fields) = args.as_object_mut() {
+        fields.remove("from_this_task");
+        fields.insert("script".into(), Value::String(replay.script));
+    }
+    Ok(args)
 }

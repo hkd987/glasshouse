@@ -38,9 +38,9 @@ pub use tailoring::{
 };
 pub use task::{
     ActivityEntry, ActivityKind, AgentMode, AgentSummary, ChangeEntry, ChangeKind, FeedLine,
-    HandoffCard, Progress, Receipt, RoutineRef, RoutineView, ScopeLine, ScopeRequest,
-    SnapshotMarker, TITLE_MAX_CHARS, TaskDetail, TaskRef, TaskRequest, TaskView, TileState,
-    UndoReport, UndoRequest,
+    HandoffCard, Progress, Receipt, RoutineDraft, RoutineFromTask, RoutineRef, RoutineView,
+    ScopeLine, ScopeRequest, SnapshotMarker, TITLE_MAX_CHARS, TaskDetail, TaskRef, TaskRequest,
+    TaskView, TileState, UndoReport, UndoRequest,
 };
 pub use text::{DisplaySafe, STAND_IN, display_char, display_line, invisible};
 
@@ -100,6 +100,12 @@ pub mod methods {
     /// [`crate::RoutineRef`] → [`crate::TaskView`]: starts one of the
     /// caller's routines now, as a task with the scope it was saved with.
     pub const ROUTINE_RUN: &str = "routine.run";
+    /// [`crate::TaskRef`] → [`crate::RoutineDraft`]: one of the caller's
+    /// tasks as replay code, written by this computer (ADR 0046).
+    pub const ROUTINE_DRAFT: &str = "routine.draft";
+    /// [`crate::RoutineFromTask`] → [`crate::RoutineView`]: saves one of the
+    /// caller's tasks as a routine with that code.
+    pub const ROUTINE_SAVE: &str = "routine.save";
     /// [`crate::TaskRef`] → [`crate::TaskView`]: the Failed tile's Retry.
     /// Starts the ended task's request again as a new task, under today's
     /// policy. What the first run saved stays (and stays undoable there).
