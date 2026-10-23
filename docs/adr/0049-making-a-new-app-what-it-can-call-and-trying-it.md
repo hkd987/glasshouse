@@ -112,11 +112,15 @@ drafts a "running 5 minutes late" email to its attendees.
 - Adding an action now means declaring what it returns (the `add-action`
   skill).
 - Saving takes longer. On the emulated VM, Mail's remix saved in 2.0 s
-  before and takes 7.4 s now on the first save after a deploy, about 6 s
-  after (budget 10 s). The try itself takes 0.15 s natively and 3–5 s
-  emulated, slowest the first time a newly installed program runs. Two
-  things got it there: pressing one of a list's buttons, not each, and
-  building the engine at opt-level 3 in the VM's profile too.
+  before and takes 5.7–6.5 s now. It takes 7.4–9.4 s when the emulator
+  translates the try-out's code afresh, after a deploy or a quiet spell.
+  The try itself takes 0.15 s natively and 3–5 s emulated.
+  - Two things got it there: pressing one of a list's buttons, not each
+    (from 7 s to 3.7 s emulated), and building the engine at opt-level 3
+    in the VM's profile too.
+  - The scenario's budget went from 10 s to 15 s, 1.5× the slowest save
+    measured, as `docs/dev/performance.md` sets ceilings. No PRD number
+    stood behind the 10 s.
 - Tests: `glass-actions` `ga1_…` (shapes, samples, inputs); the four
   providers' `ga1_what_each_action_returns_is_what_it_declares`;
   `glass-app-try` (a working page, what goes wrong and where, a page that

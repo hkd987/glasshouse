@@ -16,9 +16,11 @@ use serde_json::{Value, json};
 use crate::harness::Harness;
 
 /// Saving an app: the checks, a bundle in a fresh jail, a try of it in
-/// another (ADR 0049), the version kept. Measured at 7.4 s on the
-/// development VM (TCG, no KVM) the first time after a deploy, 6 s after.
-const SAVE_BUDGET: Duration = Duration::from_secs(10);
+/// another (ADR 0049), the version kept. Measured on the development VM
+/// (TCG, no KVM) at 5.7–6.5 s, and 7.4–9.4 s when the emulator translates
+/// the try-out's code afresh: after a deploy or a quiet spell. 2.0 s before
+/// the try, which takes 0.15 s natively.
+const SAVE_BUDGET: Duration = Duration::from_secs(15);
 
 async fn tool(
     client: &glass_rpc::Client,
