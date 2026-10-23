@@ -993,9 +993,32 @@ globalThis.__screen = () => {
     .join("\n");
 };
 
-/** The buttons a person could press now. */
-function enabled() {
-  return query(document.body, "button", false).filter((b) => !b.disabled && !hiddenIn(b));
+/** Fields a person types into: text of any kind, not passwords. */
+const TYPED = new Set(["text", "search", "email", "url", "tel", "number", "date", "time", "datetime-local", "month"]);
+
+/** What a person could use now, in one walk of the page: the buttons they
+ * could press, the fields they could type into, and the labels that name
+ * fields by id. Nothing hidden, nor anything in it. */
+function controls() {
+  const buttons = [];
+  const fields = [];
+  const labels = new Map();
+  const walk = (node) => {
+    for (const c of node.childNodes) {
+      if (c.nodeType !== 1 || c.hidden || c.localName === "template" || (c.localName === "dialog" && !c.open)) continue;
+      const tag = c.localName;
+      if (tag === "button") {
+        if (!c.disabled) buttons.push(c);
+      } else if (tag === "input" || tag === "textarea") {
+        if (!c.disabled && !c.readOnly && c.getAttribute("readonly") === null && (tag === "textarea" || TYPED.has(c.type))) fields.push(c);
+      } else {
+        if (tag === "label" && c.getAttribute("for")) labels.set(c.getAttribute("for"), c);
+        walk(c);
+      }
+    }
+  };
+  if (document.body) walk(document.body);
+  return { buttons, fields, labels };
 }
 /** What pressing `b` runs, as its code; null when that can't be read.
  * A list's buttons run the same code on different data: one kind. */
@@ -1005,30 +1028,105 @@ function runs(b) {
     .map((f) => Function.prototype.toString.call(f));
   return code.length && !code.some((c) => c.includes("[native code]")) ? code.join("\n") : null;
 }
-/** One button of each kind, by what it says: the same words, or the same
- * code behind them (a list's rows), make one kind. */
+/** The buttons a person could press now, one of each kind: the same words,
+ * or the same code behind them (a list's rows), make one kind. Each with
+ * its kind, which stays the same as the page redraws. Fields only Enter
+ * submits (a search box) are pressed as "Enter in …". */
 function pressable() {
-  const byLabel = new Map();
+  const found = [];
+  const labels = new Set();
   const kinds = new Set();
-  for (const b of enabled()) {
+  const now = controls();
+  for (const b of now.buttons) {
     const said = label(b);
-    if (byLabel.has(said)) continue;
-    const kind = runs(b);
-    if (kind !== null) {
-      if (kinds.has(kind)) continue;
-      kinds.add(kind);
-    }
-    byLabel.set(said, b);
+    if (labels.has(said)) continue;
+    const code = runs(b);
+    if (code !== null && kinds.has(code)) continue;
+    labels.add(said);
+    if (code !== null) kinds.add(code);
+    found.push({ label: said, kind: code ?? `words: ${said}` });
   }
-  return byLabel;
+  for (const field of entering(now)) {
+    const said = `Enter in ${fieldName(field, now.labels)}`;
+    if (labels.has(said)) continue;
+    labels.add(said);
+    found.push({ label: said, kind: `enter: ${said}` });
+  }
+  return found;
 }
-function hiddenIn(el) {
-  for (let at = el; at && at.nodeType === 1; at = at.parentNode) if (at.hidden || (at.localName === "dialog" && !at.open)) return true;
-  return false;
+
+/** What a field is called on screen. */
+function fieldName(f, labels) {
+  let around = null;
+  for (let at = f.parentNode; at && at.nodeType === 1 && !around; at = at.parentNode) if (at.localName === "label") around = at;
+  const words = ((f.id && labels.get(f.id)) || around)?.textContent?.replace(/\s+/g, " ").trim();
+  return f.getAttribute("aria-label") || words || f.placeholder || f.name || f.id || f.type;
 }
-globalThis.__buttons = () => [...pressable().keys()];
-globalThis.__press = (said) => {
-  const b = enabled().find((b) => label(b) === said);
+/** Fields Enter is how to submit: in a form with no button, or listening for keys. */
+function entering({ buttons, fields }) {
+  return fields.filter((f) => {
+    if (f.localName === "textarea") return false;
+    const form = f.form;
+    if (form) return !buttons.some((b) => b.form === form);
+    return ["keydown", "keyup", "keypress"].some((k) => (f._listeners.get(k) ?? []).length || typeof f[`on${k}`] === "function");
+  });
+}
+/** What a person might type there: by its kind, then by what it's for. */
+function sample(f, labels) {
+  const today = new Date().toISOString().slice(0, 10);
+  const called = fieldName(f, labels);
+  const name = `${called} ${f.name} ${f.id}`.toLowerCase();
+  switch (f.type) {
+    case "email":
+      return "sam@example.com";
+    case "url":
+      return "https://example.com";
+    case "tel":
+      return "+1 555 0100";
+    case "number":
+      return f.getAttribute("min") || "3";
+    case "date":
+      return today;
+    case "time":
+      return "09:30";
+    case "datetime-local":
+      return `${today}T09:30`;
+    case "month":
+      return today.slice(0, 7);
+  }
+  if (f.localName === "textarea") return "Sample text.";
+  if (/e-?mail|\bto\b|recipient|\bcc\b|attendee|invite/.test(name)) return "sam@example.com";
+  if (/search|find|filter|query|look/.test(name)) return "Sample";
+  return `Sample ${called.toLowerCase()}`.slice(0, 60);
+}
+/** Types into each empty field, as a person would before pressing: what went where. */
+globalThis.__fill = () => {
+  const typed = [];
+  const { fields, labels } = controls();
+  for (const f of fields) {
+    if (f.value) continue;
+    const text = sample(f, labels);
+    f.focus();
+    f.value = text;
+    f.dispatchEvent(new Event("input", { bubbles: true }));
+    f.dispatchEvent(new Event("change", { bubbles: true }));
+    typed.push({ field: fieldName(f, labels), text });
+  }
+  return typed;
+};
+globalThis.__buttons = () => pressable();
+/** Presses the button of `kind` that says `said`: two buttons may say the
+ * same (a folder and a move both "Archive") and do different things. */
+globalThis.__press = (said, kind) => {
+  const now = controls();
+  if (kind.startsWith("enter: ")) {
+    const field = entering(now).find((f) => `Enter in ${fieldName(f, now.labels)}` === said);
+    if (!field) return false;
+    for (const type of ["keydown", "keypress", "keyup"]) field.dispatchEvent(new KeyboardEvent(type, { key: "Enter", bubbles: true }));
+    if (field.form) field.form.requestSubmit();
+    return true;
+  }
+  const b = now.buttons.find((b) => label(b) === said && (runs(b) ?? `words: ${said}`) === kind);
   if (b) b.click();
   return !!b;
 };

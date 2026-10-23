@@ -103,6 +103,97 @@ fn ga1_a_lists_rows_are_one_kind_of_button_a_toolbars_are_not() {
 }
 
 #[test]
+fn ga1_fields_are_typed_into_and_a_form_a_press_reveals_is_pressed_next() {
+    // Compose opens a form; Send is pressed before the rest of the page,
+    // with its fields typed into. A search box submits with Enter.
+    let bundle = r#"
+        const root = document.getElementById("app");
+        async function call(action, input) {
+          const r = await fetch("/_bridge/call", { method: "POST", body: JSON.stringify({ action, input }) });
+          return r.json();
+        }
+        const shown = document.createElement("p");
+        const find = document.createElement("form");
+        const query = document.createElement("input");
+        query.type = "search";
+        query.setAttribute("aria-label", "Search mail");
+        find.append(query);
+        find.addEventListener("submit", (e) => { e.preventDefault(); shown.textContent = `Found ${query.value}`; });
+        const compose = document.createElement("button");
+        compose.textContent = "Compose";
+        compose.onclick = () => {
+          const form = document.createElement("form");
+          const to = document.createElement("input");
+          to.placeholder = "To";
+          const when = document.createElement("input");
+          when.type = "date";
+          when.id = "when";
+          const label = document.createElement("label");
+          label.setAttribute("for", "when");
+          label.textContent = "Send on";
+          const body = document.createElement("textarea");
+          body.name = "body";
+          const send = document.createElement("button");
+          send.textContent = "Send";
+          form.append(to, label, when, body, send);
+          form.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const r = await call("mail.draft", { to: [to.value], subject: when.value, body: body.value });
+            shown.textContent = r.ok ? "Drafted" : r.text;
+            form.remove();
+          });
+          root.append(form);
+        };
+        const later = document.createElement("button");
+        later.textContent = "Later";
+        later.onclick = () => { shown.textContent = "Later"; };
+        root.append(find, compose, later, shown);
+    "#;
+    let report = try_app(bundle, &setup()).unwrap();
+    assert_eq!(report.errors, Vec::<String>::new());
+    let pressed: Vec<&str> = report.presses.iter().map(|p| p.button.as_str()).collect();
+    assert_eq!(
+        pressed,
+        ["Compose", "Send", "Later", "Enter in Search mail"]
+    );
+    let send = &report.presses[1];
+    let today = send.typed[1].text.clone();
+    assert_eq!(today.len(), 10, "a date: {today}");
+    assert_eq!(
+        send.typed,
+        [
+            Typed {
+                field: "To".into(),
+                text: "sam@example.com".into()
+            },
+            Typed {
+                field: "Send on".into(),
+                text: today.clone()
+            },
+            Typed {
+                field: "body".into(),
+                text: "Sample text.".into()
+            },
+        ]
+    );
+    // Typed before the first press, the search box is typed once.
+    assert_eq!(
+        report.presses[0].typed,
+        [Typed {
+            field: "Search mail".into(),
+            text: "Sample".into()
+        }]
+    );
+    assert_eq!(send.calls[0].action, "mail.draft");
+    assert_eq!(
+        send.calls[0].input,
+        json!({ "to": ["sam@example.com"], "subject": today, "body": "Sample text." })
+    );
+    assert_eq!(send.appeared, ["Drafted"]);
+    assert_eq!(report.presses[3].appeared, ["Found Sample"]);
+}
+
+#[test]
 fn ga1_what_goes_wrong_says_where() {
     // Today's first try: a bridge it never made.
     let report = try_app("bridge.call('calendar.list', {});", &setup()).unwrap();
@@ -220,6 +311,23 @@ fn ga1_the_template_bundled_with_the_sdk_opens_and_searches() {
         report.screen.starts_with("New app\n[input: Find someone]"),
         "{}",
         report.screen
+    );
+    // It searches as you type: typing alone, a step of its own.
+    let typing = &report.presses[0];
+    assert_eq!(typing.button, "");
+    assert_eq!(
+        typing.typed,
+        [Typed {
+            field: "Find someone".into(),
+            text: "Sample".into()
+        }]
+    );
+    assert_eq!(typing.calls[0].action, "people.search");
+    assert_eq!(typing.calls[0].input["query"], "Sample");
+    assert!(
+        typing.appeared.iter().any(|l| l.contains("Priya Shah")),
+        "{:?}",
+        typing.appeared
     );
     let _ = std::fs::remove_dir_all(out);
 }

@@ -17,7 +17,7 @@ use crate::harness::Harness;
 
 /// Saving an app: the checks, a bundle in a fresh jail, a try of it in
 /// another (ADR 0049), the version kept. Measured on the development VM
-/// (TCG, no KVM) at 5.7–6.5 s, and 7.4–9.4 s when the emulator translates
+/// (TCG, no KVM) at 5.7–6.5 s, and 7.4–10.2 s when the emulator translates
 /// the try-out's code afresh: after a deploy or a quiet spell. 2.0 s before
 /// the try, which takes 0.15 s natively.
 const SAVE_BUDGET: Duration = Duration::from_secs(15);

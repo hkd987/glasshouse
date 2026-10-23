@@ -43,8 +43,12 @@ drafts a "running 5 minutes late" email to its attendees.
    `ActionProvider::returns(action)` gives the shape of its `data`, as a
    small JSON Schema (`glass_actions::shape`: type, properties, required,
    additionalProperties, items, enum, description).
-   - Declared now for Calendar, Mail (but its password flow), People and
-     Files.
+   - Declared for every action an app can call (Mail's password flow
+     aside): first Calendar, Mail, People and Files, then the rest (Chat,
+     Docs, Artifacts, Meet, Routines, Settings, Skills, the catalog, the
+     studio, System, Helpdesk, `model.complete`).
+   - The runtime's test fails when an action `apps.actions` lists has
+     none.
    - Each provider's test runs every action it declares and checks the
      real result against its shape (`shape::conforms`). That caught Mail's
      sender address being null on a computer that doesn't know it.
@@ -69,10 +73,18 @@ drafts a "running 5 minutes late" email to its attendees.
      kind of button once, and reports what the page showed, as text with
      buttons in brackets, what it called with what input, and what was
      thrown or rejected and not caught.
+   - Before each press it types into the empty fields what a person might:
+     an address where the field is for one, today in a date, "Sample" in
+     a search box, "Sample text." in a text box. Typing alone is a step of
+     its own when nothing is left to press (a search as you type), and a
+     field only Enter submits is pressed as "Enter in …".
+   - Buttons a press reveals (a form's Send) are pressed next, before the
+     rest. A press finds the button of its own kind: a folder and a move
+     may both say "Archive".
    - Buttons with the same words are one kind, and so are buttons with the
      same code behind them: a list's rows (Mail's folders, its messages),
-     not a toolbar's buttons, which each run their own. Mail gets three
-     presses, not eight.
+     not a toolbar's buttons, which each run their own. Mail's eight became
+     three, and five with its compose form typed into and sent.
    - The save's words carry it: "Opening it showed: …", "It called …",
      "Pressing [Draft 'running late'] called mail.draft {…}, then it showed
      …", and "Problems to fix, then save again". The problems also cover
@@ -105,21 +117,27 @@ drafts a "running 5 minutes late" email to its attendees.
 - Before: three tries for $0.03, one refused and two broken (no attendees,
   then a crash on opening).
 - The try-out opens our own Mail, Calendar and Store on sample data. Mail
-  draws its folders and messages and every folder button lists that
-  folder. Routines and Settings draw "TypeError" where their actions
-  declare no shape, which the save says ("… has no description of its
-  data yet, so the try gave it none").
+  draws its folders and messages, and every folder button lists that
+  folder.
+  - Before every action had a shape, Routines and Settings drew
+    "TypeError" where theirs had none, and the save said so ("… has no
+    description of its data yet, so the try gave it none").
+  - With typing, Mail's compose form is filled in and sent:
+    `mail.send {to: ["sam@example.com"], …}`, checked against what
+    `mail.send` takes.
 - Adding an action now means declaring what it returns (the `add-action`
   skill).
 - Saving takes longer. On the emulated VM, Mail's remix saved in 2.0 s
-  before and takes 5.7–6.5 s now. It takes 7.4–9.4 s when the emulator
+  before and takes 5.7–6.5 s now. It takes 7.4–10.2 s when the emulator
   translates the try-out's code afresh, after a deploy or a quiet spell.
+  Typing into the compose form and sending it added no time once the page
+  walked its buttons and fields once a press instead of several times.
   The try itself takes 0.15 s natively and 3–5 s emulated.
   - Two things got it there: pressing one of a list's buttons, not each
     (from 7 s to 3.7 s emulated), and building the engine at opt-level 3
     in the VM's profile too.
-  - The scenario's budget went from 10 s to 15 s, 1.5× the slowest save
-    measured, as `docs/dev/performance.md` sets ceilings. No PRD number
+  - The scenario's budget went from 10 s to 15 s, about 1.5× the slowest
+    save measured, as `docs/dev/performance.md` sets ceilings. No PRD number
     stood behind the 10 s.
 - Tests: `glass-actions` `ga1_…` (shapes, samples, inputs); the four
   providers' `ga1_what_each_action_returns_is_what_it_declares`;
@@ -130,10 +148,19 @@ drafts a "running 5 minutes late" email to its attendees.
   scenario tries the remix of Mail in the jail.
 
 ## Not built yet
-- Shapes for the other actions: Chat, Docs, Artifacts, Meet, Routines,
-  Settings, the catalog.
-- Typing into the app's fields when it's tried; only buttons are pressed.
-- Mail's read and unread state (an inbox's unread count).
 - The try-out's page is a stand-in: layout, CSS and some browser APIs
   aren't there, and a gap shows as a problem the agent may not be able to
   fix.
+- Choosing from lists, ticking boxes, and typing into fields that aren't
+  empty.
+
+Built since (2026-10-23, the owner: "let's fix the missing items"):
+shapes for every other action, typing into fields, and Mail's read state
+(ADR 0050), which gives `mail.list` an `unread` count. Live on Claude Haiku
+5.5, the same request asking for "how many unread emails are in my inbox":
+- seven calls, $0.0101, one save refused because the app declared
+  confidential data its maker can't open, which the agent fixed;
+- the try found no problems;
+- on the person's data, Today showed "Unread in inbox: 5" (`mail.list`
+  with `limit: 1`, reading `unread`), as Mail did, and its button saved a
+  draft to the standup's three attendees.

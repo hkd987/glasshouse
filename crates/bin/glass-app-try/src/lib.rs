@@ -11,6 +11,7 @@
 //! each press.
 
 use std::cell::RefCell;
+use std::collections::{BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use boa_engine::builtins::promise::{OperationType, PromiseState};
@@ -54,10 +55,30 @@ pub struct Call {
     pub input: Value,
 }
 
-/// Pressing one button.
+/// What was typed into a field before a press.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+pub struct Typed {
+    /// The field, as the screen names it: its label or placeholder.
+    pub field: String,
+    pub text: String,
+}
+
+/// A kind of button on screen, as the page tells it.
+#[derive(Debug, Deserialize)]
+struct Pressable {
+    label: String,
+    /// The same for a list's rows, and through redraws.
+    kind: String,
+}
+
+/// Pressing one button, or typing alone.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct Press {
+    /// Empty when nothing was pressed: what the typing did by itself.
     pub button: String,
+    /// What was typed into the empty fields just before.
+    #[serde(default)]
+    pub typed: Vec<Typed>,
     pub calls: Vec<Call>,
     pub errors: Vec<String>,
     /// Lines the screen gained.
@@ -156,21 +177,51 @@ pub fn try_app(bundle: &str, setup: &Setup) -> Result<Report, String> {
     report.errors.extend(unhandled(&rejections));
     report.screen = screen(&mut context)?;
 
-    let buttons: Vec<String> = call_global(&mut context, "__buttons", &[])?
-        .to_json(&mut context)
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
+    // Each kind of button once, those a press reveals (a form's) before
+    // the rest; before each press, the empty fields typed into.
+    let mut queue: VecDeque<Pressable> = VecDeque::new();
+    let mut known: BTreeSet<String> = BTreeSet::new();
+    let mut reveal =
+        |context: &mut Context, queue: &mut VecDeque<Pressable>| -> Result<(), String> {
+            let found: Vec<Pressable> = js_json(context, "__buttons")?;
+            let new: Vec<Pressable> = found
+                .into_iter()
+                .filter(|b| known.insert(b.kind.clone()))
+                .collect();
+            for button in new.into_iter().rev() {
+                queue.push_front(button);
+            }
+            Ok(())
+        };
+    reveal(&mut context, &mut queue)?;
     // What each press finds: the calls, errors and screen the last one left.
     let (mut calls_before, mut errors_before) = (report.calls.len(), errors.len());
     let mut shown = report_lines(&report.screen);
-    for label in buttons.into_iter().take(MAX_PRESSES) {
-        call_global(
-            &mut context,
-            "__press",
-            &[JsValue::from(JsString::from(label.as_str()))],
-        )?;
+    let mut typed: Vec<Typed> = Vec::new();
+    while report.presses.len() < MAX_PRESSES {
+        let next = queue.pop_front();
+        typed.extend(js_json::<Vec<Typed>>(&mut context, "__fill")?);
+        let label = match next {
+            Some(Pressable { label, kind }) => {
+                let pressed = call_global(
+                    &mut context,
+                    "__press",
+                    &[
+                        JsValue::from(JsString::from(label.as_str())),
+                        JsValue::from(JsString::from(kind.as_str())),
+                    ],
+                )?;
+                if pressed.as_boolean() != Some(true) {
+                    // Gone since: a redraw took it away.
+                    continue;
+                }
+                label
+            }
+            // Nothing left to press, but a field to type into: a search
+            // as you type answers to the typing alone.
+            None if !typed.is_empty() => String::new(),
+            None => break,
+        };
         let stopped = settle(&mut context);
         let (calls_after, errors_after) = said(&mut context)?;
         let calls_now = calls_after.len();
@@ -187,6 +238,7 @@ pub fn try_app(bundle: &str, setup: &Setup) -> Result<Report, String> {
             .collect();
         report.presses.push(Press {
             button: label,
+            typed: std::mem::take(&mut typed),
             calls: calls_after
                 .into_iter()
                 .skip(calls_before)
@@ -196,6 +248,7 @@ pub fn try_app(bundle: &str, setup: &Setup) -> Result<Report, String> {
             appeared,
         });
         (calls_before, errors_before, shown) = (calls_now, errors_now, now_shown);
+        reveal(&mut context, &mut queue)?;
     }
     report.console_errors = console_errors(&mut context)?;
     report.errors.truncate(MAX_KEPT);
@@ -248,6 +301,15 @@ fn call_global(context: &mut Context, name: &str, args: &[JsValue]) -> Result<Js
 }
 
 /// The calls made and errors seen so far.
+/// A page function's answer, as JSON read into `T`.
+fn js_json<T: serde::de::DeserializeOwned>(context: &mut Context, name: &str) -> Result<T, String> {
+    let value = call_global(context, name, &[])?
+        .to_json(context)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    serde_json::from_value(value).map_err(|e| format!("{name}: {e}"))
+}
+
 fn said(context: &mut Context) -> Result<(Vec<Call>, Vec<String>), String> {
     let said = call_global(context, "__said", &[])?
         .to_json(context)

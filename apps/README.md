@@ -19,7 +19,9 @@ apps/
               Junk, Delete and Not junk (mail.move); a message's HTML framed from
               view.mail.localhost, which the bridge serves through mail.read
               under a CSP with no scripts and no network (no remote images);
-              new mail from app.status waits
+              new mail from app.status waits; unread mail marked, read as it's
+              opened and "Mark unread" (mail.mark, ADR 0050), in step with the
+              server
   calendar/   manifest.json, index.html, src/ (main.ts; week.ts: the week's logic)
   store/      manifest.json, index.html, src/ (main.ts; store.ts: what the org's
               catalog offers you, DV-10, DV-11)
@@ -50,7 +52,8 @@ apps/
   sdk/template/ where a new app starts (ADR 0032): a manifest without an
               id and a small src/; apps.source {"template": true} hands it out,
               apps.actions says what each action takes and returns, and each
-              save is tried with sample data (glass-app-try, ADR 0049)
+              save is tried with sample data, its fields typed into and its
+              buttons pressed (glass-app-try, ADR 0049)
   console/    the admin console's web app (ADR 0023): a site glass-console serves,
               not a device app (no manifest, no service worker)
   e2e/        Playwright: the apps against dev-host glassd and the bridge;

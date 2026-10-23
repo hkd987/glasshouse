@@ -1,7 +1,7 @@
 //! Trying a version as it's saved (GA-1, ADR 0049): what the agent that
 //! wrote it hears. glass-app-try opens the built app with sample data
-//! shaped as each declared action's result, presses each button once and
-//! reports what it saw; here that becomes the save's words: what the app
+//! shaped as each declared action's result, types into its fields, presses
+//! each kind of button once and reports what it saw; here that becomes the save's words: what the app
 //! showed, what it called and with what, and the problems to fix, with
 //! each call's input checked against what its action takes.
 
@@ -105,7 +105,23 @@ pub(crate) fn tell(
         let button = press["button"].as_str().unwrap_or_default();
         let made = calls(&press["calls"], &mut problems);
         let appeared = strings(&press["appeared"]);
-        let mut line = format!("\nPressing [{button}] ");
+        let typed: Vec<String> = press["typed"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|t| {
+                format!(
+                    "{} into [{}]",
+                    quote(&t["text"]),
+                    t["field"].as_str().unwrap_or_default()
+                )
+            })
+            .collect();
+        let mut line = match (typed.as_slice(), button) {
+            ([], _) => format!("\nPressing [{button}] "),
+            (typed, "") => format!("\nTyping {} ", and(typed)),
+            (typed, _) => format!("\nTyping {}, then pressing [{button}] ", and(typed)),
+        };
         line.push_str(&match made.as_slice() {
             [] => "called nothing".to_owned(),
             made => format!("called {}", made.join(", ")),
@@ -115,11 +131,10 @@ pub(crate) fn tell(
         }
         text.push_str(&line);
         text.push('.');
-        problems.extend(
-            strings(&press["errors"])
-                .into_iter()
-                .map(|e| format!("pressing [{button}]: {e}")),
-        );
+        problems.extend(strings(&press["errors"]).into_iter().map(|e| match button {
+            "" => format!("typing: {e}"),
+            _ => format!("pressing [{button}]: {e}"),
+        }));
     }
     // What it called with no shape to sample: what it shows from them is untried.
     let unshaped: Vec<&str> = declared
@@ -156,6 +171,15 @@ pub(crate) fn tell(
         }
     }
     Tried { text, problems }
+}
+
+/// "a", "a and b", "a, b and c".
+fn and(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 fn strings(value: &Value) -> Vec<String> {
@@ -241,6 +265,7 @@ mod tests {
             "screen": "Today\nInbox: 2 emails\n09:00 Sample title 1[Running late]",
             "presses": [
                 { "button": "Running late", "calls": [{ "action": "mail.draft", "input": { "to": [] } }], "errors": [], "appeared": ["Draft saved"] },
+                { "button": "Send", "typed": [{ "field": "To", "text": "sam@example.com" }, { "field": "Subject", "text": "Sample subject" }], "calls": [], "errors": [], "appeared": [] },
                 { "button": "Refresh", "calls": [{ "action": "calendar.list", "input": {} }], "errors": ["on click: TypeError: x is undefined"], "appeared": [] }
             ]
         });
@@ -262,6 +287,13 @@ mod tests {
             tried.text
         );
         assert!(tried.text.contains("Pressing [Running late] called mail.draft {\"to\":[]}, then it showed \"Draft saved\"."), "{}", tried.text);
+        assert!(
+            tried.text.contains(
+                "Typing \"sam@example.com\" into [To] and \"Sample subject\" into [Subject], then pressing [Send] called nothing."
+            ),
+            "{}",
+            tried.text
+        );
         assert!(
             tried
                 .text
