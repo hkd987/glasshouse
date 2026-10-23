@@ -1195,6 +1195,122 @@ impl ActionProvider for DocsProvider {
         ]
     }
 
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        let id = json!({ "type": "string", "description": "the doc's id, cv-…" });
+        let role = role_shape();
+        let label = label_shape();
+        let logins =
+            json!({ "type": "array", "items": { "type": "string" }, "description": "logins" });
+        let empty = json!({ "type": "object", "properties": {}, "additionalProperties": false });
+        let made = |what: &str| {
+            json!({
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": what } },
+                "required": ["id"],
+                "additionalProperties": false
+            })
+        };
+        Some(match action.as_str() {
+            LIST => json!({
+                "type": "object",
+                "properties": {
+                    "docs": {
+                        "type": "array",
+                        "description": "the ones you're in, most recently changed first",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": id,
+                                "title": { "type": "string" },
+                                "label": label,
+                                "owner": { "type": "string", "description": "the owner's login" },
+                                "owner_name": { "type": "string" },
+                                "mine": { "type": "boolean", "description": "you own it" },
+                                "role": role,
+                                "people": people_shape(),
+                                "updated_at": { "type": ["string", "null"], "description": "its last change, RFC 3339; null before any" }
+                            },
+                            "required": ["id", "title", "label", "owner", "owner_name", "mine", "role", "people", "updated_at"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["docs"],
+                "additionalProperties": false
+            }),
+            READ => json!({
+                "type": "object",
+                "properties": {
+                    "id": id,
+                    "title": { "type": "string" },
+                    "label": label,
+                    "role": role,
+                    "markdown": { "type": "string", "description": "the whole doc as Markdown" },
+                    "comments": comments_shape()
+                },
+                "required": ["id", "title", "label", "role", "markdown", "comments"],
+                "additionalProperties": false
+            }),
+            CREATE => json!({
+                "type": "object",
+                "properties": {
+                    "id": id,
+                    "title": { "type": "string" },
+                    "label": label,
+                    "editors": logins,
+                    "commenters": logins
+                },
+                "required": ["id", "title", "label", "editors", "commenters"],
+                "additionalProperties": false
+            }),
+            WRITE => json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "the change's id" },
+                    "doc": id
+                },
+                "required": ["id", "doc"],
+                "additionalProperties": false
+            }),
+            COMMENT => made("the comment's id"),
+            VERSION => made("the version's id"),
+            OPEN => json!({
+                "type": "object",
+                "properties": {
+                    "id": id,
+                    "title": { "type": "string" },
+                    "label": label,
+                    "owner": { "type": "string", "description": "the owner's login" },
+                    "owner_name": { "type": "string" },
+                    "role": role,
+                    "people": people_shape(),
+                    "state": { "type": "string", "description": "the doc's Yjs state, base64, for an editor to load" },
+                    "cursor": { "type": "integer", "description": "where its changes are up to; an editor pulls from here" },
+                    "versions": {
+                        "type": "array",
+                        "description": "named versions, oldest first",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "name": { "type": "string" },
+                                "by_name": { "type": "string" },
+                                "at": { "type": "string", "description": "RFC 3339" }
+                            },
+                            "required": ["id", "name", "by_name", "at"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "comments": comments_shape()
+                },
+                "required": ["id", "title", "label", "owner", "owner_name", "role", "people", "state", "cursor", "versions", "comments"],
+                "additionalProperties": false
+            }),
+            RESOLVE | ROLES => empty,
+            _ => return None,
+        })
+    }
+
     fn preview(
         &self,
         ctx: &TaskContext,
@@ -1443,6 +1559,59 @@ impl Live for DocsProvider {
             })
             .collect()
     }
+}
+
+fn role_shape() -> Value {
+    json!({ "enum": ["owner", "editor", "commenter", "viewer"], "description": "what you may do in it" })
+}
+
+fn label_shape() -> Value {
+    json!({ "enum": ["public", "internal", "confidential", "restricted"], "description": "how sensitive it is" })
+}
+
+fn people_shape() -> Value {
+    json!({
+        "type": "array",
+        "description": "who else is in it",
+        "items": {
+            "type": "object",
+            "properties": {
+                "login": { "type": "string" },
+                "name": { "type": "string" },
+                "role": { "enum": ["owner", "editor", "commenter", "viewer"] }
+            },
+            "required": ["login", "name", "role"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn comments_shape() -> Value {
+    json!({
+        "type": "array",
+        "description": "oldest first, resolved ones too",
+        "items": {
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "by": { "type": "string", "description": "the commenter's login" },
+                "by_name": { "type": "string" },
+                "attribution": { "type": ["string", "null"], "description": "the agent that wrote it for them; null when they did" },
+                "text": { "type": "string" },
+                "anchor": {
+                    "type": ["object", "null"],
+                    "description": "where in the doc; null for the doc as a whole",
+                    "properties": { "path": { "type": "string", "description": "a Yjs relative position, base64" } },
+                    "additionalProperties": false
+                },
+                "reply_to": { "type": ["string", "null"], "description": "the comment it answers" },
+                "resolved": { "type": "boolean" },
+                "at": { "type": "string", "description": "RFC 3339" }
+            },
+            "required": ["id", "by", "by_name", "attribution", "text", "anchor", "reply_to", "resolved", "at"],
+            "additionalProperties": false
+        }
+    })
 }
 
 #[cfg(test)]

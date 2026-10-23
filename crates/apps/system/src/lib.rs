@@ -333,6 +333,122 @@ impl ActionProvider for SystemProvider {
         ]
     }
 
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        let strings = json!({ "type": "array", "items": { "type": "string" } });
+        // Every check says whether all is well and, in plain words, what isn't.
+        let check = |extra: Value, required: &[&str]| {
+            let mut properties = json!({
+                "healthy": { "type": "boolean", "description": "true when nothing was found wrong" },
+                "findings": { "type": "array", "items": { "type": "string" }, "description": "what's wrong, in plain words; empty when healthy" }
+            });
+            if let (Some(all), Some(extra)) = (properties.as_object_mut(), extra.as_object()) {
+                all.extend(extra.clone());
+            }
+            let mut required: Vec<&str> = required.to_vec();
+            required.extend(["healthy", "findings"]);
+            json!({
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": false
+            })
+        };
+        Some(match action.as_str() {
+            "system.network.check" => check(
+                json!({
+                    "interfaces": {
+                        "type": "array",
+                        "description": "network interfaces other than loopback",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "up": { "type": "boolean" },
+                                "addresses": { "type": "array", "items": { "type": "string" }, "description": "IP addresses" }
+                            },
+                            "required": ["name", "up", "addresses"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "gateway": { "type": ["string", "null"], "description": "the default gateway's address; null when there is none" },
+                    "nameservers": strings,
+                    "dns": {
+                        "type": "object",
+                        "description": "looking up a well-known name",
+                        "properties": {
+                            "host": { "type": "string", "description": "the name looked up" },
+                            "ok": { "type": "boolean" },
+                            "addresses": { "type": "array", "items": { "type": "string" }, "description": "what it resolved to, when ok" },
+                            "error": { "type": "string", "description": "why it didn't resolve, when not ok" }
+                        },
+                        "required": ["host", "ok"],
+                        "additionalProperties": false
+                    }
+                }),
+                &["interfaces", "gateway", "nameservers", "dns"],
+            ),
+            "system.storage.check" => check(
+                json!({
+                    "percent_used": { "type": "integer", "description": "of the disk the home folder is on" },
+                    "free_bytes": { "type": "integer" },
+                    "cache_bytes": { "type": "integer", "description": "what cleaning the cache would free" },
+                    "cache_files": { "type": "integer" }
+                }),
+                &["percent_used", "free_bytes", "cache_bytes", "cache_files"],
+            ),
+            "system.performance.check" => check(
+                json!({
+                    "load": {
+                        "type": "object",
+                        "properties": {
+                            "average": { "type": "array", "items": { "type": "number" }, "description": "the 1, 5 and 15 minute load averages" },
+                            "cpus": { "type": "integer" },
+                            "memory_total_mb": { "type": "integer" },
+                            "memory_free_mb": { "type": "integer" }
+                        },
+                        "required": ["average", "cpus", "memory_total_mb", "memory_free_mb"],
+                        "additionalProperties": false
+                    },
+                    "top_processes": {
+                        "type": "array",
+                        "description": "the person's busiest programs, busiest first",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "pid": { "type": "integer" },
+                                "cpu_percent": { "type": "number" },
+                                "memory_mb": { "type": "integer" },
+                                "command": { "type": "string" }
+                            },
+                            "required": ["pid", "cpu_percent", "memory_mb", "command"],
+                            "additionalProperties": false
+                        }
+                    }
+                }),
+                &["load", "top_processes"],
+            ),
+            "system.storage.clean_cache" => json!({
+                "type": "object",
+                "properties": {
+                    "freed_bytes": { "type": "integer" },
+                    "files": { "type": "integer", "description": "how many files were removed" }
+                },
+                "required": ["freed_bytes", "files"],
+                "additionalProperties": false
+            }),
+            "system.service.restart" => json!({
+                "type": "object",
+                "properties": {
+                    "service": { "type": "string" },
+                    "restarted": { "type": "boolean" }
+                },
+                "required": ["service", "restarted"],
+                "additionalProperties": false
+            }),
+            _ => return None,
+        })
+    }
+
     fn preview(
         &self,
         ctx: &TaskContext,
@@ -669,6 +785,39 @@ mod tests {
             "Restarted ntpd"
         );
         assert_eq!(*fake.restarted.lock().unwrap(), ["ntpd"]);
+    }
+
+    #[test]
+    fn ga1_what_each_action_returns_is_what_it_declares() {
+        // The checks run on a stand-in for the computer (`Fake`): the real
+        // one needs the base system's commands. What they return is built
+        // the same way from what either says.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".cache")).unwrap();
+        std::fs::write(home.path().join(".cache/blob"), b"blob").unwrap();
+        let c = ctx(home.path().into());
+        for dns_down in [false, true] {
+            let (_, p) = provider(Fake {
+                dns_down,
+                ..Fake::default()
+            });
+            let mut seen = Vec::new();
+            for def in p.actions() {
+                let input = match def.name.as_str() {
+                    "system.service.restart" => json!({ "service": "ntpd" }),
+                    _ => json!({}),
+                };
+                let mut data = p.invoke(&c, &def.name, &input).unwrap().data;
+                if let Some(data) = data.as_object_mut() {
+                    data.remove(glass_actions::AUDIT_DETAIL);
+                }
+                let shape = p.returns(&def.name).unwrap();
+                glass_actions::shape::conforms(&data, &shape)
+                    .unwrap_or_else(|e| panic!("{}: {e}", def.name));
+                seen.push(def.name.to_string());
+            }
+            assert_eq!(seen.len(), 5, "{seen:?}");
+        }
     }
 
     #[test]

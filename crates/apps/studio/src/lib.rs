@@ -19,6 +19,7 @@
 pub mod bundle;
 pub mod checks;
 pub mod diff;
+mod shapes;
 pub mod store;
 pub mod testing;
 mod tried;
@@ -1481,6 +1482,10 @@ fn choice_preview(ctx: &TaskContext, summary: String, items: Vec<String>) -> Pre
 }
 
 impl ActionProvider for StudioProvider {
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        shapes::returns(action.as_str())
+    }
+
     fn actions(&self) -> Vec<ActionDef> {
         let app =
             json!({ "type": "string", "description": "An app's id, such as mail or my-mail." });

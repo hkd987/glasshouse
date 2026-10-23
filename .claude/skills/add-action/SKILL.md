@@ -39,7 +39,8 @@ decides permissions.
      or format isn't obvious ("local time, YYYY-MM-DDTHH:MM"). Agents making
      apps read it as TypeScript (`apps.actions`) and apps are tried on
      samples of it (ADR 0049). Leave it `None` only for an action no app
-     can use.
+     can use: the runtime's `studio` test fails when `apps.actions` lists
+     one without it.
 3. **Register** a new provider in `crates/svc/first-party/src/lib.rs`
    (`registry()`), the one list `glassd` and `glassctl policy check` share.
    Anything it needs from the daemon (paths, policy lists, a system

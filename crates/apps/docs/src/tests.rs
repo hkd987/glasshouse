@@ -453,3 +453,90 @@ fn dc_others_see_nothing_until_the_person_says_yes() {
         );
     }
 }
+
+#[test]
+fn ga1_what_each_action_returns_is_what_it_declares() {
+    let org = org();
+    let (a, b, _c, id) = planned(&org);
+    let check = |action: &str, out: Result<ActionOutput, ActionError>| {
+        let mut data = out.unwrap_or_else(|e| panic!("{action}: {e}")).data;
+        // What the runtime keeps for the record never reaches the caller.
+        if let Some(fields) = data.as_object_mut() {
+            fields.remove(glass_actions::AUDIT_DETAIL);
+        }
+        let shape = a.docs.returns(&action.parse().unwrap()).unwrap();
+        glass_actions::shape::conforms(&data, &shape).unwrap_or_else(|e| panic!("{action}: {e}"));
+        data
+    };
+    check(
+        WRITE,
+        b.call(
+            "priya",
+            AGENT,
+            WRITE,
+            json!({ "doc": id, "markdown": "- Supplier delay", "at": { "after": "Risks" } }),
+        ),
+    );
+    // A comment anchored in the text, and a reply to it.
+    let commented = check(
+        COMMENT,
+        b.call(
+            "priya",
+            AGENT,
+            COMMENT,
+            json!({ "doc": id, "text": "Which supplier?", "anchor": { "path": base64::encode(b"pos") } }),
+        ),
+    );
+    a.sync();
+    check(
+        COMMENT,
+        a.call(
+            "dana",
+            AGENT,
+            COMMENT,
+            json!({ "doc": id, "text": "Northwind's", "reply_to": commented["id"] }),
+        ),
+    );
+    check(
+        VERSION,
+        a.call("dana", APP, VERSION, json!({ "doc": id, "name": "Draft" })),
+    );
+    check(
+        RESOLVE,
+        a.call(
+            "dana",
+            AGENT,
+            RESOLVE,
+            json!({ "doc": id, "comment": commented["id"] }),
+        ),
+    );
+    check(
+        ROLES,
+        a.call(
+            "dana",
+            APP,
+            ROLES,
+            json!({ "doc": id, "editors": ["priya"], "commenters": ["sam"] }),
+        ),
+    );
+    a.sync();
+    let listed = check(LIST, a.call("dana", AGENT, LIST, json!({})));
+    assert!(!listed["docs"].as_array().unwrap().is_empty());
+    let read = check(READ, a.call("dana", AGENT, READ, json!({ "doc": id })));
+    assert_eq!(read["comments"].as_array().unwrap().len(), 2);
+    let opened = check(OPEN, a.call("dana", APP, OPEN, json!({ "doc": id })));
+    assert_eq!(opened["versions"][0]["name"], "Draft");
+    check(
+        CREATE,
+        a.call(
+            "dana",
+            AGENT,
+            CREATE,
+            json!({ "title": "Notes", "commenters": ["sam"] }),
+        ),
+    );
+    // Every action the provider declares has a shape.
+    for def in a.docs.actions() {
+        assert!(a.docs.returns(&def.name).is_some(), "{}", def.name);
+    }
+}

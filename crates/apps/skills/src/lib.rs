@@ -298,6 +298,45 @@ fn plain_login(login: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
+/// The shape of an eval run's [`Scores`], or null where there may be none
+/// (GA-1, ADR 0049).
+fn scores_shape(nullable: bool) -> Value {
+    json!({
+        "type": if nullable { json!(["object", "null"]) } else { json!("object") },
+        "properties": {
+            "run": { "type": "string", "description": "the eval task's id; a proposal's before and after come from one run" },
+            "model": { "type": "string", "description": "the model that answered" },
+            "runner": { "type": "string", "description": "the eval runner and its version" },
+            "by": { "type": "string", "description": "whose computer ran it, their login" },
+            "at": { "type": "string", "description": "RFC 3339" },
+            "sha256": { "type": "string", "description": "the bundle scored" },
+            "cases": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "passed": { "type": "integer", "description": "how many of its runs passed" },
+                        "runs": { "type": "integer" }
+                    },
+                    "required": ["id", "passed", "runs"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["run", "model", "runner", "by", "at", "sha256", "cases"],
+        "additionalProperties": false
+    })
+}
+
+fn label_shape() -> Value {
+    json!({ "enum": ["public", "internal", "confidential", "restricted"], "description": "where its text may go: restricted, to no model" })
+}
+
+fn files_shape() -> Value {
+    json!({ "type": "object", "description": "each file's text by its path in the skill, such as SKILL.md and evals.json" })
+}
+
 /// How many people improved `skill`: whose proposals were merged.
 fn contributors(skill: &Skill) -> usize {
     let mut by: Vec<&str> = skill
@@ -1184,6 +1223,170 @@ impl ActionProvider for SkillsProvider {
                 AskLabels::new("Review the merge", "Merge"),
             ),
         ]
+    }
+
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        let login = |what: &str| json!({ "type": "string", "description": what });
+        let breaks = json!({ "type": "array", "items": { "type": "string" }, "description": "the cases that passed before and fail with it" });
+        Some(match action.as_str() {
+            LIST => json!({
+                "type": "object",
+                "properties": {
+                    "skills": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "name": { "type": "string" },
+                                "description": { "type": "string", "description": "what its SKILL.md says it does" },
+                                "label": label_shape(),
+                                "owner": login("its owner's login"),
+                                "owner_name": { "type": "string" },
+                                "mine": { "type": "boolean", "description": "the person owns it" },
+                                "version": { "type": ["integer", "null"], "description": "its latest; null before one arrives" },
+                                "score": {
+                                    "type": ["object", "null"],
+                                    "description": "its latest version's evals; null before they ran",
+                                    "properties": {
+                                        "summary": { "type": "string", "description": "such as \"4 of 5 cases (80%)\"" },
+                                        "passed": { "type": "integer", "description": "cases passed" },
+                                        "cases": { "type": "integer" },
+                                        "model": { "type": "string" }
+                                    },
+                                    "required": ["summary", "passed", "cases", "model"],
+                                    "additionalProperties": false
+                                },
+                                "open_proposals": { "type": "integer" },
+                                "contributors": { "type": "integer", "description": "people whose proposals were merged" }
+                            },
+                            "required": ["id", "name", "description", "label", "owner", "owner_name", "mine", "version", "score", "open_proposals", "contributors"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["skills"],
+                "additionalProperties": false
+            }),
+            READ => json!({
+                "type": "object",
+                "description": "a draft read alone has draft, label and files; a skill has the rest",
+                "properties": {
+                    "draft": { "type": "string", "description": "the draft's id" },
+                    "id": { "type": "string" },
+                    "name": { "type": "string" },
+                    "label": label_shape(),
+                    "owner": login("its owner's login"),
+                    "owner_name": { "type": "string" },
+                    "mine": { "type": "boolean" },
+                    "people": {
+                        "type": "array",
+                        "description": "who it's shared with",
+                        "items": {
+                            "type": "object",
+                            "properties": { "login": { "type": "string" }, "name": { "type": "string" } },
+                            "required": ["login", "name"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "sha256": { "type": "string", "description": "the bundle read" },
+                    "files": files_shape(),
+                    "versions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "number": { "type": "integer" },
+                                "note": { "type": "string" },
+                                "by": login("who made it, their login"),
+                                "by_name": { "type": "string" },
+                                "at": { "type": "string", "description": "when it was posted" },
+                                "merged": { "type": ["string", "null"], "description": "the proposal it merged; null for the owner's own" },
+                                "scores": scores_shape(true)
+                            },
+                            "required": ["number", "note", "by", "by_name", "at", "merged", "scores"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "proposals": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "by": login("who proposed it, their login"),
+                                "by_name": { "type": "string" },
+                                "attribution": { "type": ["string", "null"], "description": "the agent that made it for them, such as \"by claude-code for priya\"" },
+                                "note": { "type": "string", "description": "what it changes and why" },
+                                "at": { "type": "string", "description": "when it was posted" },
+                                "base": { "type": "integer", "description": "the version it changes" },
+                                "before": scores_shape(false),
+                                "after": scores_shape(false),
+                                "merged": { "type": "boolean" },
+                                "breaks": breaks
+                            },
+                            "required": ["id", "by", "by_name", "attribution", "note", "at", "base", "before", "after", "merged", "breaks"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "results_here": { "type": "array", "description": "eval runs this computer kept for the bundle read", "items": scores_shape(false) }
+                },
+                "required": ["label", "files"],
+                "additionalProperties": false
+            }),
+            SHARE => json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "the skill's id" },
+                    "name": { "type": "string" },
+                    "label": label_shape(),
+                    "version": { "type": "integer" },
+                    "people": { "type": "array", "items": { "type": "string" }, "description": "logins it's shared with" },
+                    "scores": scores_shape(true)
+                },
+                "required": ["id", "name", "label", "version", "people", "scores"],
+                "additionalProperties": false
+            }),
+            DRAFT => json!({
+                "type": "object",
+                "properties": {
+                    "draft": { "type": "string", "description": "the draft's id, as skill.read, skill.share and skill.propose take it" },
+                    "name": { "type": "string" },
+                    "cases": { "type": "integer", "description": "its eval cases" },
+                    "calls": { "type": "integer", "description": "the model calls one eval run makes" }
+                },
+                "required": ["draft", "name", "cases", "calls"],
+                "additionalProperties": false
+            }),
+            RESULTS => json!({
+                "type": "object",
+                "properties": { "summary": { "type": "string", "description": "such as \"4 of 5 cases (80%)\"" } },
+                "required": ["summary"],
+                "additionalProperties": false
+            }),
+            PROPOSE => json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "the proposal's id" },
+                    "skill": { "type": "string" },
+                    "base": { "type": "integer", "description": "the version it changes" },
+                    "breaks": breaks
+                },
+                "required": ["id", "skill", "base", "breaks"],
+                "additionalProperties": false
+            }),
+            MERGE => json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "the skill's id" },
+                    "version": { "type": "integer", "description": "its new version" },
+                    "merged": { "type": "string", "description": "the proposal merged" }
+                },
+                "required": ["id", "version", "merged"],
+                "additionalProperties": false
+            }),
+            _ => return None,
+        })
     }
 
     fn preview(

@@ -514,3 +514,117 @@ fn sk_others_see_nothing_until_the_person_says_yes() {
         );
     }
 }
+
+#[test]
+fn ga1_what_each_action_returns_is_what_it_declares() {
+    let org = org();
+    let (a, b) = org.pair();
+    let check = |c: &Computer, ctx: &TaskContext, name: &str, input: Value| {
+        let mut out = c
+            .with(ctx, name, input)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        if let Some(data) = out.data.as_object_mut() {
+            data.remove(glass_actions::AUDIT_DETAIL);
+        }
+        let shape = c.skills.returns(&name.parse().unwrap()).unwrap();
+        glass_actions::shape::conforms(&out.data, &shape).unwrap_or_else(|e| panic!("{name}: {e}"));
+        out.data
+    };
+    let dana = a.ctx("dana", AGENT);
+    let priya = b.ctx("priya", AGENT);
+    // Nothing yet, then a draft read alone and scored on this computer.
+    check(&a, &dana, LIST, json!({}));
+    let draft = check(
+        &a,
+        &dana,
+        DRAFT,
+        json!({ "files": files("Refunds take 14 days.") }),
+    );
+    let draft = draft["draft"].as_str().unwrap().to_owned();
+    check(&a, &dana, READ, json!({ "draft": draft }));
+    // Shared before its evals ran: no scores.
+    let unscored = check(
+        &a,
+        &dana,
+        SHARE,
+        json!({ "files": files("Refunds take 7 days."), "with": ["priya"] }),
+    );
+    assert!(unscored["scores"].is_null());
+    let eval = a.ctx("dana", EVALS_AGENT);
+    check(
+        &a,
+        &eval,
+        RESULTS,
+        json!({ "draft": draft, "model": "claude-test", "runner": "skill-evals 1",
+                "cases": [{ "id": "window", "passed": 0, "runs": 3 }, { "id": "tone", "passed": 3, "runs": 3 }] }),
+    );
+    let shared = check(
+        &a,
+        &dana,
+        SHARE,
+        json!({ "draft": draft, "with": ["priya"], "note": "First version" }),
+    );
+    let id = shared["id"].as_str().unwrap().to_owned();
+    b.sync();
+
+    // Priya's change, scored with v1 in one run, proposed and merged.
+    let fix = check(
+        &b,
+        &priya,
+        DRAFT,
+        json!({ "skill": id, "files": files("Refunds take 30 days.") }),
+    );
+    let fix = fix["draft"].as_str().unwrap().to_owned();
+    let eval = b.ctx("priya", EVALS_AGENT);
+    b.report(
+        &eval,
+        json!({ "skill": id, "version": 1 }),
+        &[("window", 0), ("tone", 3)],
+    );
+    b.report(
+        &eval,
+        json!({ "draft": fix }),
+        &[("window", 3), ("tone", 3)],
+    );
+    let proposed = check(
+        &b,
+        &priya,
+        PROPOSE,
+        json!({ "skill": id, "draft": fix, "note": "It's 30 days" }),
+    );
+    let proposal = proposed["id"].as_str().unwrap().to_owned();
+    a.sync();
+    let read = check(&a, &dana, READ, json!({ "skill": id }));
+    assert!(read["versions"][0]["scores"].is_object());
+    assert_eq!(
+        read["proposals"][0]["attribution"],
+        "by claude-code for priya"
+    );
+    check(
+        &a,
+        &dana,
+        READ,
+        json!({ "skill": id, "proposal": proposal }),
+    );
+    check(&a, &dana, READ, json!({ "skill": id, "draft": draft }));
+    check(
+        &a,
+        &a.ctx("dana", APP),
+        MERGE,
+        json!({ "skill": id, "proposal": proposal }),
+    );
+    b.sync();
+    let listed = check(&b, &priya, LIST, json!({}));
+    let merged = listed["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == id.as_str())
+        .unwrap();
+    assert!(merged["score"].is_object(), "{merged}");
+    check(&b, &priya, READ, json!({ "skill": id, "version": 2 }));
+
+    for def in a.skills.actions() {
+        assert!(a.skills.returns(&def.name).is_some(), "{}", def.name);
+    }
+}

@@ -714,3 +714,77 @@ fn adr0045_no_transcript_where_it_isnt_on_and_none_but_meet_adds_to_one() {
         );
     }
 }
+
+#[test]
+fn ga1_what_each_action_returns_is_what_it_declares() {
+    let org = org();
+    let (a, b, id) = org.transcribed_meeting();
+    let check = |action: &str, out: Result<ActionOutput, ActionError>| {
+        let mut data = out.unwrap_or_else(|e| panic!("{action}: {e}")).data;
+        // What the runtime keeps for the record never reaches the caller.
+        if let Some(fields) = data.as_object_mut() {
+            fields.remove(glass_actions::AUDIT_DETAIL);
+        }
+        let shape = a.meet.returns(&action.parse().unwrap()).unwrap();
+        glass_actions::shape::conforms(&data, &shape).unwrap_or_else(|e| panic!("{action}: {e}"));
+        data
+    };
+    let listed = check(LIST, a.call("dana", LIST, json!({})));
+    assert_eq!(listed["meetings"].as_array().unwrap().len(), 1);
+    // Where meetings can't be reached, the list says why.
+    let unmanaged = MeetProvider::new(
+        Arc::new(ChatProvider::new(
+            ChatHandle::new(org.dir.path().join("x")),
+            org.directory.clone(),
+        )),
+        MeetHandle::new(),
+        org.directory.clone(),
+    );
+    let none = check(
+        LIST,
+        unmanaged.invoke(&ctx("dana", "calendar"), &LIST.parse().unwrap(), &json!({})),
+    );
+    assert_eq!(none["available"], false);
+
+    check(
+        JOIN,
+        a.call(
+            "dana",
+            JOIN,
+            json!({ "meeting": id, "offer": "v=0\r\ns=offer from dana\r\n" }),
+        ),
+    );
+    check(
+        JOIN,
+        b.call(
+            "priya",
+            JOIN,
+            json!({ "meeting": id, "offer": "v=0\r\ns=offer from priya\r\n" }),
+        ),
+    );
+    let keys = check(KEYS, b.call("priya", KEYS, json!({ "meeting": id })));
+    assert_eq!(keys["media_keys"].as_array().unwrap().len(), 1);
+    let added = check(
+        TRANSCRIBE,
+        a.call(
+            "dana",
+            TRANSCRIBE,
+            json!({ "meeting": id, "lines": [said("Let's ship on the 14th."), said("Hey Glass, book the room.")] }),
+        ),
+    );
+    assert_eq!(added["asked"], json!(["book the room."]));
+    let read = check(
+        TRANSCRIPT,
+        a.meet.invoke(
+            &ctx("dana", "desktop-agent"),
+            &TRANSCRIPT.parse().unwrap(),
+            &json!({ "meeting": id }),
+        ),
+    );
+    assert_eq!(read["lines"].as_array().unwrap().len(), 2);
+    check(LEAVE, a.call("dana", LEAVE, json!({ "meeting": id })));
+    // Every action the provider declares has a shape.
+    for def in a.meet.actions() {
+        assert!(a.meet.returns(&def.name).is_some(), "{}", def.name);
+    }
+}

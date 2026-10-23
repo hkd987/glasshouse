@@ -165,6 +165,41 @@ fn declares_text(item: &CatalogItem) -> String {
     format!("{actions}; data up to {}; {network}", d.max_label)
 }
 
+/// The shape of a catalog item as the catalog actions give it, with
+/// `more` fields (GA-1, ADR 0049).
+fn item_shape(more: &[(&str, Value)]) -> Value {
+    let properties = serde_json::Map::from_iter(
+        [
+            ("id", json!({ "type": "string", "description": "the agent's or app's id on this computer" })),
+            ("kind", json!({ "enum": ["agent", "app", "flow"], "description": "flow: a recorded flow" })),
+            ("name", json!({ "type": "string" })),
+            ("version", json!({ "type": "string" })),
+            ("publisher", json!({ "type": "string" })),
+            ("publisher_verified", json!({ "type": "boolean", "description": "the publisher proved who they are" })),
+            ("internal", json!({ "type": "boolean", "description": "built by the organization" })),
+            ("install", json!({ "enum": ["required", "available"], "description": "IT installs it for the person, or they may install it" })),
+            ("summary", json!({ "type": "string", "description": "what it's for, in a line" })),
+            ("declares", json!({
+                "type": "object",
+                "description": "what it may do: the OS never lets it do more",
+                "properties": {
+                    "actions": { "type": "array", "items": { "type": "string" }, "description": "action patterns it calls, such as \"files.read\" or \"mail.*\"" },
+                    "default_tiers": { "type": "object", "description": "the tier its publisher suggests, by action" },
+                    "max_label": { "enum": ["public", "internal", "confidential", "restricted"], "description": "the most sensitive data it opens" },
+                    "egress": { "type": "array", "items": { "type": "string" }, "description": "network destinations (host:port); none beyond the model gateway when empty" }
+                },
+                "required": ["actions", "default_tiers", "max_label", "egress"],
+                "additionalProperties": false
+            })),
+        ]
+        .into_iter()
+        .chain(more.iter().cloned())
+        .map(|(k, v)| (k.to_owned(), v)),
+    );
+    let required: Vec<&String> = properties.keys().collect();
+    json!({ "type": "object", "properties": properties, "required": required, "additionalProperties": false })
+}
+
 impl ActionProvider for CatalogProvider {
     fn actions(&self) -> Vec<ActionDef> {
         vec![
@@ -220,6 +255,55 @@ impl ActionProvider for CatalogProvider {
                 "Remove an item this user installed from the org's catalog: it leaves the apps and agents they see.",
             ),
         ]
+    }
+
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        let managed = json!({ "type": "boolean", "description": "an organization manages this computer: with no catalog yet, one is on its way" });
+        let version = json!({ "type": ["integer", "null"], "description": "the catalog IT sent; null before one arrives" });
+        Some(match action.as_str() {
+            SEARCH => json!({
+                "type": "object",
+                "properties": { "catalog_version": version, "items": { "type": "array", "description": "best match first", "items": item_shape(&[]) } },
+                "required": ["catalog_version", "items"],
+                "additionalProperties": false
+            }),
+            LIST => json!({
+                "type": "object",
+                "properties": {
+                    "catalog_version": version,
+                    "items": {
+                        "type": "array",
+                        "items": item_shape(&[
+                            ("installed", json!({ "type": "boolean", "description": "the person has it: installed, or required by IT" })),
+                            ("app", json!({
+                                "type": ["object", "null"],
+                                "description": "an app someone at the organization made; null for anything else",
+                                "properties": {
+                                    "made_by": { "type": "string", "description": "their login" },
+                                    "based_on": { "type": ["string", "null"], "description": "what it remixes, such as \"mail@0.1.0\"; null for an app made new" }
+                                },
+                                "required": ["made_by", "based_on"],
+                                "additionalProperties": false
+                            })),
+                        ])
+                    },
+                    "managed": managed
+                },
+                "required": ["catalog_version", "items", "managed"],
+                "additionalProperties": false
+            }),
+            INSTALL | REMOVE => json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "installed": { "type": "boolean", "description": "it's installed now" },
+                    "managed": managed
+                },
+                "required": ["id", "installed", "managed"],
+                "additionalProperties": false
+            }),
+            _ => return None,
+        })
     }
 
     fn preview(
@@ -694,5 +778,95 @@ mod tests {
             reaches(None, &["everyone"], &none, &id("vendor-disputes")),
             "no catalog: policy's"
         );
+    }
+
+    #[test]
+    fn ga1_what_each_action_returns_is_what_it_declares() {
+        let home = tempfile::tempdir().unwrap();
+        let check = |p: &CatalogProvider, groups: &[&str], name: &str, input: Value| {
+            let mut out = as_in(p, home.path(), groups, name, input)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            if let Some(data) = out.data.as_object_mut() {
+                data.remove(glass_actions::AUDIT_DETAIL);
+            }
+            let shape = p.returns(&name.parse().unwrap()).unwrap();
+            glass_actions::shape::conforms(&out.data, &shape)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            out.data
+        };
+        // No catalog yet.
+        let none = CatalogProvider::new(CatalogHandle::new());
+        check(
+            &none,
+            &["everyone"],
+            SEARCH,
+            json!({ "need": "vendor disputes" }),
+        );
+        check(&none, &["everyone"], LIST, json!({}));
+
+        // An app someone made, one with tiers and a destination, one IT requires.
+        let mut made = item(
+            "mail-with-write",
+            "Mail, with Write",
+            "Write instead of New message",
+            &[("everyone", InstallMode::Available)],
+        );
+        made.app = Some(glass_managed::studio::OrgApp {
+            manifest: serde_json::from_value(json!({
+                "id": "mail-with-write", "name": "Mail, with Write", "version": "1",
+                "actions": ["mail.list"], "labels": ["internal"],
+            }))
+            .unwrap(),
+            bundle_sha256: "00".repeat(32),
+            source_sha256: "11".repeat(32),
+            made_by: "dana".into(),
+            based_on: Some("mail@0.1.0".into()),
+        });
+        let mut vendor = item(
+            "vendor-disputes",
+            "Vendor Disputes",
+            "Track vendor disputes with overdue reminders",
+            &[("everyone", InstallMode::Available)],
+        );
+        vendor.kind = ItemKind::Agent;
+        vendor.declares.default_tiers = BTreeMap::from([("mail.draft".to_owned(), Tier::Notify)]);
+        vendor.declares.egress = vec!["api.vendor.example:443".into()];
+        let required = item(
+            "legal-disputes",
+            "Legal Disputes",
+            "Dispute tracking for Legal",
+            &[("legal", InstallMode::Required)],
+        );
+        let handle = CatalogHandle::new();
+        handle.set(Applied {
+            version: 9,
+            release: CatalogRelease {
+                items: vec![made, vendor, required],
+            },
+        });
+        let p = CatalogProvider::new(handle);
+        let groups = ["everyone", "legal"];
+        let found = check(
+            &p,
+            &groups,
+            SEARCH,
+            json!({ "need": "vendor disputes with reminders" }),
+        );
+        assert!(!found["items"].as_array().unwrap().is_empty());
+        check(&p, &groups, INSTALL, json!({ "id": "vendor-disputes" }));
+        let listed = check(&p, &groups, LIST, json!({}));
+        assert!(
+            listed["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["app"].is_object())
+        );
+        check(&p, &groups, LIST, json!({ "kind": "agent" }));
+        check(&p, &groups, REMOVE, json!({ "id": "vendor-disputes" }));
+
+        for def in p.actions() {
+            assert!(p.returns(&def.name).is_some(), "{}", def.name);
+        }
     }
 }

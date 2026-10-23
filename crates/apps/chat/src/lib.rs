@@ -15,6 +15,7 @@
 
 mod everyday;
 mod fold;
+mod shapes;
 mod store;
 
 use std::collections::BTreeMap;
@@ -1264,6 +1265,10 @@ impl ActionProvider for ChatProvider {
         .collect()
     }
 
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        shapes::of(action.as_str())
+    }
+
     fn preview(
         &self,
         ctx: &TaskContext,
@@ -2407,5 +2412,197 @@ mod tests {
             ),
         )
         .unwrap()
+    }
+
+    /// GA-1 (ADR 0049): every action, run for real between two computers,
+    /// returns what it declares: the first list before Chat is opened, a
+    /// channel with a thread, a mention, a shared card, a reaction, a pin,
+    /// a topic, an edit, a delete, drafts, a level and people added.
+    #[test]
+    fn ga1_what_each_action_returns_is_what_it_declares() {
+        use glass_managed::shared::Part;
+
+        let org = org();
+        let (a, b, c) = (
+            org.computer("dev-a"),
+            org.computer("dev-b"),
+            org.computer("dev-c"),
+        );
+        let mut checked: Vec<String> = Vec::new();
+        let mut check = |action: &str, out: Result<ActionOutput, ActionError>| -> Value {
+            let mut data = out.unwrap_or_else(|e| panic!("{action}: {e}")).data;
+            if let Some(data) = data.as_object_mut() {
+                data.remove(glass_actions::AUDIT_DETAIL);
+            }
+            let shape = shapes::of(action).unwrap_or_else(|| panic!("{action} declares nothing"));
+            glass_actions::shape::conforms(&data, &shape)
+                .unwrap_or_else(|e| panic!("{action}: {e}\n{data:#}"));
+            checked.push(action.to_owned());
+            data
+        };
+
+        // An agent asks before Sam has ever opened Chat here.
+        let before = check(
+            LIST,
+            c.provider.invoke(
+                &ctx("sam", "desktop-agent"),
+                &LIST.parse().unwrap(),
+                &json!({}),
+            ),
+        );
+        assert_eq!(before["opened"], false);
+        for (computer, login) in [(&a, "dana"), (&b, "priya"), (&c, "sam")] {
+            check(LIST, computer.call(login, LIST, json!({})));
+        }
+
+        let made = check(
+            CREATE,
+            a.call(
+                "dana",
+                CREATE,
+                json!({ "name": "launch", "people": ["priya"] }),
+            ),
+        );
+        let id = made["conversation"]["id"].as_str().unwrap().to_owned();
+        let posted = check(
+            POST,
+            a.call(
+                "dana",
+                POST,
+                json!({ "posts": [
+                    { "conversation": id, "text": "@priya can we ship Friday?" },
+                    { "conversation": id, "text": "oops, wrong channel" },
+                    { "to": ["priya"], "text": "Lunch?" }
+                ] }),
+            ),
+        );
+        let root = posted["posted"][0]["id"].as_str().unwrap().to_owned();
+        let oops = posted["posted"][1]["id"].as_str().unwrap().to_owned();
+        sync(&[&b]);
+        check(
+            POST,
+            b.call(
+                "priya",
+                POST,
+                json!({ "posts": [{ "conversation": id, "text": "Monday is safer", "reply_to": root }] }),
+            ),
+        );
+        // A card for an item shared here, as Artifacts posts it.
+        a.provider
+            .post_sealed(
+                "dana",
+                &id,
+                "",
+                Some(Part::Shared {
+                    item: "art-1".into(),
+                    kind: "artifact".into(),
+                    title: "Launch plan".into(),
+                }),
+                None,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        sync(&[&a]);
+
+        let on = json!({ "conversation": id, "message": root, "emoji": "👍" });
+        check(everyday::REACT, a.call("dana", everyday::REACT, on.clone()));
+        check(everyday::REACT, a.call("dana", everyday::REACT, on));
+        check(
+            everyday::PIN,
+            a.call(
+                "dana",
+                everyday::PIN,
+                json!({ "conversation": id, "message": root }),
+            ),
+        );
+        check(
+            everyday::TOPIC,
+            a.call(
+                "dana",
+                everyday::TOPIC,
+                json!({ "conversation": id, "topic": "Launch week" }),
+            ),
+        );
+        check(
+            everyday::EDIT,
+            a.call(
+                "dana",
+                everyday::EDIT,
+                json!({ "conversation": id, "message": root, "text": "@priya can we ship Friday, or Monday?" }),
+            ),
+        );
+        check(
+            everyday::DELETE,
+            a.call(
+                "dana",
+                everyday::DELETE,
+                json!({ "conversation": id, "message": oops }),
+            ),
+        );
+        check(
+            everyday::DRAFT,
+            a.call(
+                "dana",
+                everyday::DRAFT,
+                json!({ "conversation": id, "text": "Monday works if" }),
+            ),
+        );
+        check(
+            everyday::DRAFT,
+            a.call(
+                "dana",
+                everyday::DRAFT,
+                json!({ "conversation": id, "thread": root, "text": "Agreed" }),
+            ),
+        );
+        check(
+            everyday::NOTIFY,
+            a.call(
+                "dana",
+                everyday::NOTIFY,
+                json!({ "conversation": id, "level": "all" }),
+            ),
+        );
+        let add = json!({ "conversation": id, "add": ["sam"] });
+        check(
+            everyday::MEMBERS,
+            a.call("dana", everyday::MEMBERS, add.clone()),
+        );
+        let again = check(everyday::MEMBERS, a.call("dana", everyday::MEMBERS, add));
+        assert_eq!(again["added"], json!([]));
+
+        let read = check(READ, a.call("dana", READ, json!({ "conversation": id })));
+        let messages = read["messages"].as_array().unwrap();
+        assert!(messages.iter().any(|m| m["shared"].is_object()), "{read:#}");
+        assert!(messages.iter().any(|m| m["reactions"][0]["mine"] == true));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m["mentions"][0]["login"] == "priya")
+        );
+        let thread = check(
+            READ,
+            a.call("dana", READ, json!({ "conversation": id, "thread": root })),
+        );
+        assert_eq!(thread["thread"]["draft"], "Agreed");
+        assert_eq!(thread["messages"][1]["thread"], root.as_str());
+        let found = check(
+            everyday::SEARCH,
+            a.call("dana", everyday::SEARCH, json!({ "query": "monday" })),
+        );
+        assert!(!found["hits"].as_array().unwrap().is_empty());
+        let list = check(LIST, b.call("priya", LIST, json!({})));
+        assert!(list["conversations"][0]["last_at"].is_string());
+
+        let every: Vec<String> = a
+            .provider
+            .actions()
+            .iter()
+            .map(|d| d.name.to_string())
+            .collect();
+        for action in &every {
+            assert!(checked.contains(action), "{action} wasn't run");
+        }
     }
 }

@@ -184,6 +184,51 @@ async fn dp3_secrets_and_pii_are_redacted_before_leaving_and_pii_comes_back() {
     assert_eq!(data["redacted"]["email"], 1);
 }
 
+/// GA-1 (ADR 0049): the data beside a reply is what `model.complete`
+/// declares (`glass_gateway::ModelAction`), whether it's words, words with
+/// details redacted, or tools the model asks for with the sealed replay.
+#[tokio::test]
+async fn ga1_what_each_action_returns_is_what_it_declares() {
+    use glass_actions::ActionProvider;
+
+    let h = harness_with(MODELS);
+    let (_, agent) = start(&h, &["Invoices"]).await;
+    let shape = glass_gateway::ModelAction
+        .returns(&glass_gateway::MODEL_COMPLETE.parse().unwrap())
+        .unwrap();
+    let tools: ListToolsResult = agent.call("tools/list", Value::Null).await.unwrap();
+    let list = tools.tools.iter().find(|t| t.name == "files_list").unwrap();
+    let offered = json!([{
+        "name": list.name,
+        "description": list.description,
+        "input_schema": list.input_schema,
+    }]);
+    let mut seen = Vec::new();
+    for input in [
+        ask("Say hello in one line"),
+        ask(&format!(
+            "Tell ana@example.com that key {AWS_KEY} was rotated"
+        )),
+        json!({
+            "messages": [{"role": "user", "content": "What's in my invoices? Use files_list {\"path\": \"Invoices\"}"}],
+            "max_tokens": 200,
+            "tools": offered,
+        }),
+    ] {
+        let reply = tool(&agent, "model_complete", input).await;
+        assert!(!reply.is_error, "{}", reply.text());
+        let mut data = reply.structured_content.unwrap();
+        data.as_object_mut()
+            .unwrap()
+            .remove(glass_actions::AUDIT_DETAIL);
+        glass_actions::shape::conforms(&data, &shape).unwrap_or_else(|e| panic!("{e}: {data}"));
+        seen.push(data);
+    }
+    // Each optional part was there to check.
+    assert_eq!(seen[1]["redacted"]["email"], 1);
+    assert!(seen[2]["tool_calls"].is_array() && seen[2]["replay"].is_object());
+}
+
 #[tokio::test]
 async fn dp5_every_call_is_audited_with_sizes_and_hashes_not_text() {
     let h = harness_with(MODELS);

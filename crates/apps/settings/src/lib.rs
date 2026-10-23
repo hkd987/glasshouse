@@ -101,6 +101,44 @@ impl Effective {
     }
 }
 
+/// What a setting holds: on or off, a number, text, or a list of text.
+fn value_shape() -> Value {
+    json!({ "type": ["boolean", "integer", "string", "array"], "items": { "type": "string" } })
+}
+
+/// The shape of an [`Effective`] setting (GA-1, ADR 0049).
+fn effective_shape() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "string", "description": "such as \"clock.hour24\"" },
+            "section": { "type": "string", "description": "the Settings app's section it is in" },
+            "title": { "type": "string" },
+            "help": { "type": "string" },
+            "kind": {
+                "type": "object",
+                "description": "what it holds; a number's min, max and unit",
+                "properties": {
+                    "type": { "enum": ["toggle", "number", "url", "sites", "time_zone", "apps", "folders"] },
+                    "min": { "type": "integer" },
+                    "max": { "type": "integer" },
+                    "unit": { "type": "string" }
+                },
+                "required": ["type"],
+                "additionalProperties": false
+            },
+            "scope": { "enum": ["person", "device", "seat"], "description": "each person's own, or the computer's" },
+            "default": value_shape(),
+            "value": value_shape(),
+            "locked": { "type": "boolean", "description": "IT locked it: the person can't change it" },
+            "from": { "enum": ["it", "you", "owner", "default"], "description": "who decided it" },
+            "editable": { "type": "boolean", "description": "the person may change it" }
+        },
+        "required": ["id", "section", "title", "help", "kind", "scope", "default", "value", "locked", "from", "editable"],
+        "additionalProperties": false
+    })
+}
+
 type Listener = Box<dyn Fn(Option<u32>) + Send + Sync>;
 type AppNames = Box<dyn Fn(u32) -> BTreeMap<String, String> + Send + Sync>;
 
@@ -838,6 +876,89 @@ impl ActionProvider for SettingsProvider {
                 ask: AskLabels::default(),
             },
         ]
+    }
+
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        Some(match action.as_str() {
+            LIST => json!({
+                "type": "object",
+                "properties": {
+                    "settings": { "type": "array", "description": "every setting, as it applies to the person", "items": effective_shape() },
+                    "device": {
+                        "type": "array",
+                        "description": "the computer's own settings, as they apply to it",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "value": value_shape(),
+                                "locked": { "type": "boolean", "description": "the person can't change it" },
+                                "source": {
+                                    "type": "object",
+                                    "description": "who set it: one of their groups (named in group), everyone's, the computer's owner, or nobody",
+                                    "properties": {
+                                        "from": { "enum": ["group", "everyone", "owner", "default"] },
+                                        "group": { "type": "string" }
+                                    },
+                                    "required": ["from"],
+                                    "additionalProperties": false
+                                }
+                            },
+                            "required": ["id", "value", "locked", "source"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "app_names": {
+                        "type": "object",
+                        "description": "by app id, the names of apps settings list, such as those hidden from search"
+                    }
+                },
+                "required": ["settings", "device", "app_names"],
+                "additionalProperties": false
+            }),
+            SET => json!({
+                "type": "object",
+                "properties": { "setting": effective_shape() },
+                "required": ["setting"],
+                "additionalProperties": false
+            }),
+            MODELS | MODELS_CONNECT | MODELS_AGENTS => json!({
+                "type": "object",
+                "properties": {
+                    "connected": { "type": ["string", "null"], "description": "the service agents reach AI models through, \"openrouter\" or \"anthropic\"; null when none is connected" },
+                    "setup_choice": { "type": ["string", "null"], "description": "how setup said agents should reach AI models; null when it wasn't asked" },
+                    "managed": { "type": "boolean", "description": "an organization sets how agents reach AI models" },
+                    "editable": { "type": "boolean", "description": "the person is this computer's owner and may connect a service" },
+                    "services": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "id": { "type": "string" }, "name": { "type": "string" } },
+                            "required": ["id", "name"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "agents": {
+                        "type": "array",
+                        "description": "on a computer someone owns, the agents that may ask its owner's models",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "name": { "type": "string" },
+                                "on": { "type": "boolean", "description": "it may ask the owner's models" },
+                                "always": { "type": "boolean", "description": "policy lets it ask models whatever the owner chooses" }
+                            },
+                            "required": ["id", "name", "on", "always"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["connected", "setup_choice", "managed", "editable", "services", "agents"],
+                "additionalProperties": false
+            }),
+            _ => return None,
+        })
     }
 
     fn preview(
@@ -1630,5 +1751,70 @@ members = ["dana"]
             )
             .unwrap();
         assert_eq!(done.text, "IT agent may use your AI models now.");
+    }
+
+    #[test]
+    fn ga1_what_each_action_returns_is_what_it_declares() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SettingsHandle::new(dir.path());
+        // A group's setting, a locked one, and apps hidden by name.
+        handle.set_policy(&policy(AP));
+        handle.name_apps(|_| BTreeMap::from([("my-mail-3".to_owned(), "My Mail".to_owned())]));
+        handle.set_model_keys(Arc::new(Chooser(Mutex::new(vec![ModelAgent {
+            id: "it-agent".into(),
+            name: "IT agent".into(),
+            on: true,
+            always: false,
+        }]))));
+        let provider = SettingsProvider::new(handle.clone());
+        let dana = ctx("dana", 1001, APP);
+        let run = |name: &str, input: Value| {
+            let action: ActionName = name.parse().unwrap();
+            provider.preview(&dana, &action, &input).unwrap();
+            let mut out = provider
+                .invoke(&dana, &action, &input)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            if let Some(data) = out.data.as_object_mut() {
+                data.remove(glass_actions::AUDIT_DETAIL);
+            }
+            let shape = provider.returns(&action).unwrap();
+            glass_actions::shape::conforms(&out.data, &shape)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            out.data
+        };
+        run(LIST, json!({}));
+        run(SET, json!({ "id": "clock.hour24", "value": false }));
+        run(
+            SET,
+            json!({ "id": "search.hidden_apps", "value": ["my-mail-3"] }),
+        );
+        run(SET, json!({ "id": "clock.hour24" }));
+        let listed = run(LIST, json!({}));
+        assert_eq!(listed["app_names"]["my-mail-3"], "My Mail");
+        // Managed: IT decides how agents reach models, and lists no agents.
+        run(MODELS, json!({}));
+
+        // A computer Dana owns: her own computer settings, models and agents.
+        handle.set_owner(Some("dana".into()));
+        run(SET, json!({ "id": "devices.usb_storage", "value": false }));
+        let listed = run(LIST, json!({}));
+        assert!(
+            listed["device"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["source"]["from"] == "owner"),
+            "{listed}"
+        );
+        run(
+            MODELS_CONNECT,
+            json!({ "service": "openrouter", "key": "sk-or-v1-own-key-not-real" }),
+        );
+        run(MODELS_AGENTS, json!({ "agent": "it-agent", "on": false }));
+        assert_eq!(run(MODELS, json!({}))["agents"][0]["on"], false);
+
+        for def in provider.actions() {
+            assert!(provider.returns(&def.name).is_some(), "{}", def.name);
+        }
     }
 }

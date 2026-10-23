@@ -416,3 +416,115 @@ fn adr0047_routines_windows_hear_of_every_change_and_see_what_runs() {
     f.call(DELETE, routine).unwrap();
     assert_eq!(woken(), ["demo"], "removed");
 }
+
+/// A runtime that starts routines, offers one repeated request, and has
+/// one run of a routine going.
+#[derive(Debug)]
+struct Runs {
+    repeat: Repeat,
+    running: glass_types::TaskId,
+}
+
+impl Host for Runs {
+    fn run(&self, _: &str, _: u32, _: &str) -> Result<glass_types::TaskId, String> {
+        Ok(glass_types::TaskId::new())
+    }
+    fn repeats(&self, _: &str, _: u32) -> Vec<Repeat> {
+        vec![self.repeat.clone()]
+    }
+    fn dismiss(&self, _: &str, _: u32, _: glass_types::TaskId) -> Result<(), String> {
+        Ok(())
+    }
+    fn running(&self, _: &str, _: u32) -> BTreeMap<String, glass_types::TaskId> {
+        BTreeMap::from([("overdue-invoices".to_owned(), self.running)])
+    }
+    fn changed(&self, _: &str) {}
+}
+
+#[test]
+fn ga1_what_each_action_returns_is_what_it_declares() {
+    let f = fixture();
+    let repeat = Repeat {
+        task: glass_types::TaskId::new(),
+        request: "Total the unpaid invoices".into(),
+        agent: "desktop-agent".parse().unwrap(),
+        times: 3,
+        last_at: Timestamp::now(),
+        script: OVERDUE.into(),
+        steps: vec!["List Invoices".into(), "Read each invoice".into()],
+        read: vec![f.ctx.home.join("Invoices")],
+        write: Vec::new(),
+    };
+    f.routines.set_host(std::sync::Arc::new(Runs {
+        repeat: repeat.clone(),
+        running: glass_types::TaskId::new(),
+    }));
+    let run = |name: &str, input: Value| {
+        let mut out = f
+            .call(name, input)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        if let Some(data) = out.data.as_object_mut() {
+            data.remove(glass_actions::AUDIT_DETAIL);
+        }
+        let shape = f.provider.returns(&name.parse().unwrap()).unwrap();
+        glass_actions::shape::conforms(&out.data, &shape).unwrap_or_else(|e| panic!("{name}: {e}"));
+        out.data
+    };
+    let routine = json!({ "routine": "overdue-invoices" });
+    // Nothing yet: empty lists, nulls where there's no run.
+    run(LIST, json!({}));
+    run(SAVE, overdue());
+    run(LIST, json!({}));
+    // With a run kept, and one going.
+    f.routines
+        .record_run(
+            "demo",
+            "overdue-invoices",
+            Run {
+                task: glass_types::TaskId::new(),
+                version: 1,
+                scheduled: true,
+                started_at: Timestamp::now(),
+                ended_at: Timestamp::now(),
+                outcome: Outcome::Done,
+                model: false,
+                said: "Unpaid: 1,250".into(),
+                changes: 0,
+            },
+        )
+        .unwrap();
+    let listed = run(LIST, json!({}));
+    assert!(listed["routines"][0]["last_run"].is_object());
+    assert!(listed["routines"][0]["running"].is_string());
+    run(
+        SCHEDULE,
+        json!({ "routine": "overdue-invoices", "schedule": "fri 17:00" }),
+    );
+    let read = run(READ, routine.clone());
+    assert_eq!(read["runs_kept"].as_array().unwrap().len(), 1);
+    run(READ, json!({ "routine": "overdue-invoices", "version": 1 }));
+    run(USE, json!({ "routine": "overdue-invoices", "version": 1 }));
+    run(
+        SCHEDULE,
+        json!({ "routine": "overdue-invoices", "schedule": null }),
+    );
+    run(
+        PAUSE,
+        json!({ "routine": "overdue-invoices", "paused": true }),
+    );
+    // Paused and unscheduled: nothing will start it.
+    assert_eq!(run(READ, routine.clone())["next_run_at"], Value::Null);
+    run(RUN, routine.clone());
+    run(REPEATS, json!({}));
+    run(
+        KEEP,
+        json!({ "task": repeat.task, "name": "Unpaid total", "schedule": "mon 08:00" }),
+    );
+    run(DISMISS, json!({ "task": repeat.task }));
+    run(DELETE, routine);
+
+    // Every action declares its data.
+    for def in f.provider.actions() {
+        assert!(f.provider.returns(&def.name).is_some(), "{}", def.name);
+    }
+}

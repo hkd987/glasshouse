@@ -77,6 +77,19 @@ impl ActionProvider for HelpdeskProvider {
         }]
     }
 
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        (action.as_str() == "helpdesk.ticket.create").then(|| {
+            json!({
+                "type": "object",
+                "properties": {
+                    "ticket": { "type": "string", "description": "the ticket's id, such as HD-1A2B3C4D" }
+                },
+                "required": ["ticket"],
+                "additionalProperties": false
+            })
+        })
+    }
+
     fn preview(
         &self,
         _ctx: &TaskContext,
@@ -203,5 +216,40 @@ mod tests {
             json!(format!("{id}-2")),
             "a second ticket gets its own id"
         );
+    }
+
+    #[test]
+    fn ga1_what_each_action_returns_is_what_it_declares() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = HelpdeskProvider::new(dir.path().join("outbox"));
+        let ctx = TaskContext {
+            principal: AgentPrincipal {
+                agent: "it-agent".parse().unwrap(),
+                on_behalf_of: UserRef {
+                    name: "dana".into(),
+                    uid: 1001,
+                },
+                task: TaskId::new(),
+            },
+            owner: Owner {
+                uid: 1001,
+                gid: 1001,
+            },
+            home: dir.path().into(),
+            grants: Vec::new(),
+            groups: Vec::new(),
+            data_label: None,
+        };
+        for def in p.actions() {
+            let input =
+                json!({ "summary": "VPN drops every hour", "details": "Reconnected twice." });
+            let mut data = p.invoke(&ctx, &def.name, &input).unwrap().data;
+            if let Some(data) = data.as_object_mut() {
+                data.remove(glass_actions::AUDIT_DETAIL);
+            }
+            let shape = p.returns(&def.name).unwrap();
+            glass_actions::shape::conforms(&data, &shape)
+                .unwrap_or_else(|e| panic!("{}: {e}", def.name));
+        }
     }
 }

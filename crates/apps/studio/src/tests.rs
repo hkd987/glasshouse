@@ -778,3 +778,51 @@ fn ga1_each_version_is_tried_and_the_agent_hears_what_to_fix() {
         saved.text
     );
 }
+
+#[test]
+fn ga1_what_each_action_returns_is_what_it_declares() {
+    let f = fixture(World::default());
+    let checked = std::cell::RefCell::new(BTreeSet::new());
+    let run = |name: &str, input: Value| {
+        let mut out = f.call(name, input).unwrap();
+        if let Some(data) = out.data.as_object_mut() {
+            data.remove(glass_actions::AUDIT_DETAIL);
+        }
+        let shape = f.provider.returns(&name.parse().unwrap()).unwrap();
+        glass_actions::shape::conforms(&out.data, &shape)
+            .unwrap_or_else(|e| panic!("{name}: {e}\n{}", out.data));
+        checked.borrow_mut().insert(name.to_owned());
+        out.data
+    };
+    run(BASES, json!({ "need": "mail with a write button" }));
+    run(BASES, json!({}));
+    run(ACTIONS, json!({ "need": "draft an email" }));
+    run(
+        ACTIONS,
+        json!({ "actions": ["calendar.read", "mail.draft"] }),
+    );
+    run(SOURCE, json!({ "template": true }));
+    run(SOURCE, json!({ "app": "mail" }));
+    run(SOURCE, json!({ "app": "mail", "path": "src/main.ts" }));
+    run(SAVE, mail_remix(&f));
+    run(SAVE, mail_remix(&f));
+    run(SOURCE, json!({ "app": "my-mail" }));
+    run(CREATE, new_app(&f, &[]));
+    run(VERSIONS, json!({}));
+    run(VERSIONS, json!({ "app": "my-mail" }));
+    run(REVERT, json!({ "app": "my-mail", "version": 1 }));
+    f.studio
+        .set_share(Arc::new(FakeConsole::default()), "dev-1".into());
+    run(
+        SHARE,
+        json!({ "app": "my-mail", "to": "org", "note": "Write" }),
+    );
+    // Every action the studio declares, run and checked.
+    let declared: BTreeSet<String> = f
+        .provider
+        .actions()
+        .iter()
+        .map(|d| d.name.to_string())
+        .collect();
+    assert_eq!(*checked.borrow(), declared);
+}

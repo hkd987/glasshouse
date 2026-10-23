@@ -958,6 +958,155 @@ impl ActionProvider for ArtifactsProvider {
         ]
     }
 
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        let id = json!({ "type": "string", "description": "the artifact's id, cv-…" });
+        let label = json!({ "enum": ["public", "internal", "confidential", "restricted"], "description": "how sensitive it is" });
+        let people = json!({
+            "type": "array",
+            "description": "who else can see it",
+            "items": {
+                "type": "object",
+                "properties": { "login": { "type": "string" }, "name": { "type": "string" } },
+                "required": ["login", "name"],
+                "additionalProperties": false
+            }
+        });
+        let version = json!({ "type": "integer", "description": "its version number, from 1" });
+        Some(match action.as_str() {
+            LIST => json!({
+                "type": "object",
+                "properties": {
+                    "artifacts": {
+                        "type": "array",
+                        "description": "the ones shared with you, most recently updated first",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": id,
+                                "title": { "type": "string" },
+                                "label": label,
+                                "owner": { "type": "string", "description": "its maker's login" },
+                                "owner_name": { "type": "string" },
+                                "mine": { "type": "boolean", "description": "you made it" },
+                                "people": people,
+                                "version": { "type": "integer", "description": "its latest version's number" },
+                                "updated_at": { "type": "string", "description": "its latest version's, RFC 3339" },
+                                "open_comments": { "type": "integer", "description": "threads not resolved" }
+                            },
+                            "required": ["id", "title", "label", "owner", "owner_name", "mine", "people", "version", "updated_at", "open_comments"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["artifacts"],
+                "additionalProperties": false
+            }),
+            READ => json!({
+                "type": "object",
+                "properties": {
+                    "id": id,
+                    "title": { "type": "string" },
+                    "label": label,
+                    "owner": { "type": "string", "description": "its maker's login" },
+                    "owner_name": { "type": "string" },
+                    "mine": { "type": "boolean", "description": "you made it" },
+                    "people": people,
+                    "version": { "type": "integer", "description": "the version read" },
+                    "versions": {
+                        "type": "array",
+                        "description": "oldest first",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "number": version,
+                                "note": { "type": "string", "description": "what changed; empty when its maker said nothing" },
+                                "by": { "type": "string", "description": "its maker's login" },
+                                "by_name": { "type": "string" },
+                                "attribution": { "type": ["string", "null"], "description": "the agent that made it for them; null when they did" },
+                                "at": { "type": "string", "description": "RFC 3339" },
+                                "bytes": { "type": "integer", "description": "the page's size" }
+                            },
+                            "required": ["number", "note", "by", "by_name", "attribution", "at", "bytes"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "comments": {
+                        "type": "array",
+                        "description": "oldest first, resolved ones too",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "by": { "type": "string", "description": "the commenter's login" },
+                                "by_name": { "type": "string" },
+                                "attribution": { "type": ["string", "null"], "description": "the agent that wrote it for them; null when they did" },
+                                "text": { "type": "string" },
+                                "version": { "type": "integer", "description": "the version it was made on" },
+                                "anchor": {
+                                    "type": ["object", "null"],
+                                    "description": "where on the page; null for the page as a whole",
+                                    "properties": {
+                                        "path": { "type": "string", "description": "an element's path" },
+                                        "x": { "type": "integer", "description": "thousandths of the page's width" },
+                                        "y": { "type": "integer", "description": "thousandths of its height" }
+                                    },
+                                    "additionalProperties": false
+                                },
+                                "reply_to": { "type": ["string", "null"], "description": "the comment it answers" },
+                                "resolved": { "type": "boolean", "description": "its thread is resolved" },
+                                "at": { "type": "string", "description": "RFC 3339" }
+                            },
+                            "required": ["id", "by", "by_name", "attribution", "text", "version", "anchor", "reply_to", "resolved", "at"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "html": { "type": "string", "description": "the page" }
+                },
+                "required": ["id", "title", "label", "owner", "owner_name", "mine", "people", "version", "versions", "comments", "html"],
+                "additionalProperties": false
+            }),
+            SHARE => json!({
+                "type": "object",
+                "properties": {
+                    "id": id,
+                    "title": { "type": "string" },
+                    "label": label,
+                    "version": version,
+                    "people": { "type": "array", "items": { "type": "string" }, "description": "the logins it reached, without yours" }
+                },
+                "required": ["id", "title", "label", "version", "people"],
+                "additionalProperties": false
+            }),
+            UPDATE => json!({
+                "type": "object",
+                "properties": { "id": id, "version": version },
+                "required": ["id", "version"],
+                "additionalProperties": false
+            }),
+            COMMENT => json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "the comment's id" },
+                    "artifact": id,
+                    "version": { "type": "integer", "description": "the version it's on" }
+                },
+                "required": ["id", "artifact", "version"],
+                "additionalProperties": false
+            }),
+            RESOLVE => json!({
+                "type": "object",
+                "properties": {
+                    "artifact": id,
+                    "comment": { "type": "string" },
+                    "resolved": { "type": "boolean", "description": "false when it was reopened" }
+                },
+                "required": ["artifact", "comment", "resolved"],
+                "additionalProperties": false
+            }),
+            _ => return None,
+        })
+    }
+
     fn preview(
         &self,
         ctx: &TaskContext,

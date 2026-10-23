@@ -758,3 +758,90 @@ fn adr0034_an_artifact_is_labeled_at_least_what_its_task_read() {
         );
     }
 }
+
+#[test]
+fn ga1_what_each_action_returns_is_what_it_declares() {
+    let org = org();
+    let (a, b) = org.pair();
+    let check = |action: &str, out: Result<ActionOutput, ActionError>| {
+        let mut data = out.unwrap_or_else(|e| panic!("{action}: {e}")).data;
+        // What the runtime keeps for the record never reaches the caller.
+        if let Some(fields) = data.as_object_mut() {
+            fields.remove(glass_actions::AUDIT_DETAIL);
+        }
+        let shape = a.artifacts.returns(&action.parse().unwrap()).unwrap();
+        glass_actions::shape::conforms(&data, &shape).unwrap_or_else(|e| panic!("{action}: {e}"));
+        data
+    };
+    let shared = check(
+        SHARE,
+        a.call(
+            "dana",
+            AGENT,
+            SHARE,
+            json!({ "title": "Q3 forecast", "html": PAGE, "with": ["priya"], "note": "First cut" }),
+        ),
+    );
+    let id = shared["id"].as_str().unwrap().to_owned();
+    b.sync();
+    // A comment pinned to a point, one on an element, and a reply.
+    let pinned = check(
+        COMMENT,
+        b.call(
+            "priya",
+            APP,
+            COMMENT,
+            json!({ "artifact": id, "text": "Is this net?", "anchor": { "x": 400, "y": 120 } }),
+        ),
+    );
+    check(
+        COMMENT,
+        b.call(
+            "priya",
+            AGENT,
+            COMMENT,
+            json!({ "artifact": id, "text": "Source?", "anchor": { "path": "main > table" } }),
+        ),
+    );
+    a.sync();
+    check(
+        COMMENT,
+        a.call(
+            "dana",
+            APP,
+            COMMENT,
+            json!({ "artifact": id, "text": "Gross", "reply_to": pinned["id"] }),
+        ),
+    );
+    check(
+        UPDATE,
+        a.call(
+            "dana",
+            AGENT,
+            UPDATE,
+            json!({ "artifact": id, "html": PAGE_2, "note": "Net figures" }),
+        ),
+    );
+    check(
+        RESOLVE,
+        a.call(
+            "dana",
+            APP,
+            RESOLVE,
+            json!({ "artifact": id, "comment": pinned["id"] }),
+        ),
+    );
+    b.sync();
+    let listed = check(LIST, b.call("priya", APP, LIST, json!({})));
+    assert_eq!(listed["artifacts"][0]["version"], 2);
+    let read = check(
+        READ,
+        b.call("priya", AGENT, READ, json!({ "artifact": id })),
+    );
+    assert_eq!(read["comments"].as_array().unwrap().len(), 3);
+    assert_eq!(read["versions"].as_array().unwrap().len(), 2);
+    // Every action the provider declares has a shape.
+    for def in a.artifacts.actions() {
+        assert!(a.artifacts.returns(&def.name).is_some(), "{}", def.name);
+    }
+}

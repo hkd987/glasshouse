@@ -628,6 +628,93 @@ fn summary_json(routine: &Routine) -> Value {
     })
 }
 
+/// The shape of [`summary_json`], with `more` fields (GA-1, ADR 0049).
+fn summary_shape(more: &[(&str, Value)]) -> Value {
+    let paths =
+        |what: &str| json!({ "type": "array", "items": { "type": "string" }, "description": what });
+    let mut properties = serde_json::Map::from_iter([
+        (
+            "routine".to_owned(),
+            json!({ "type": "string", "description": "its id" }),
+        ),
+        ("name".to_owned(), json!({ "type": "string" })),
+        ("version".to_owned(), json!({ "type": "integer" })),
+        (
+            "request".to_owned(),
+            json!({ "type": "string", "description": "what it does, as the person asked it" }),
+        ),
+        (
+            "schedule".to_owned(),
+            json!({ "type": ["string", "null"], "description": "as routines.schedule takes it, such as \"weekdays 09:00\"; null when it runs only when started" }),
+        ),
+        (
+            "runs".to_owned(),
+            json!({ "type": "string", "description": "when it runs, in words" }),
+        ),
+        (
+            "calls".to_owned(),
+            json!({ "type": "array", "items": { "type": "string" }, "description": "the tools its script calls" }),
+        ),
+        ("read".to_owned(), paths("folders it reads")),
+        ("write".to_owned(), paths("folders it changes")),
+    ]);
+    properties.extend(more.iter().map(|(k, v)| ((*k).to_owned(), v.clone())));
+    let required: Vec<&String> = properties.keys().collect();
+    json!({ "type": "object", "properties": properties, "required": required, "additionalProperties": false })
+}
+
+/// The shape of a routine as [`RoutinesProvider::listed`] lists it, with `more`.
+fn listed_shape(more: &[(&str, Value)]) -> Value {
+    let mut last_run = run_shape();
+    last_run["type"] = json!(["object", "null"]);
+    last_run["description"] = json!("null before its first run");
+    let mut fields = vec![
+        (
+            "running",
+            json!({ "type": ["string", "null"], "description": "the task it runs as now; null when it isn't running" }),
+        ),
+        (
+            "paused",
+            json!({ "type": "boolean", "description": "its schedule is paused: it runs only when started" }),
+        ),
+        (
+            "next_run_at",
+            json!({ "type": ["string", "null"], "description": "RFC 3339; null when nothing will start it" }),
+        ),
+        ("last_run", last_run),
+        (
+            "note",
+            json!({ "type": "string", "description": "what this version changed" }),
+        ),
+        (
+            "saved_at",
+            json!({ "type": "string", "description": "RFC 3339" }),
+        ),
+    ];
+    fields.extend(more.iter().cloned());
+    summary_shape(&fields)
+}
+
+/// One of a routine's runs ([`store::Run`]).
+fn run_shape() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "task": { "type": "string" },
+            "version": { "type": "integer", "description": "the version that ran" },
+            "scheduled": { "type": "boolean", "description": "its schedule started it, not the person" },
+            "started_at": { "type": "string", "description": "RFC 3339" },
+            "ended_at": { "type": "string", "description": "RFC 3339" },
+            "outcome": { "enum": ["done", "failed", "stopped"] },
+            "model": { "type": "boolean", "description": "a model was asked: its script failed" },
+            "said": { "type": "string", "description": "what it said when it was done, the first line" },
+            "changes": { "type": "integer", "description": "how many changes it made" }
+        },
+        "required": ["task", "version", "scheduled", "started_at", "ended_at", "outcome", "model", "said", "changes"],
+        "additionalProperties": false
+    })
+}
+
 /// What the approval shows: everything that will run, and with what.
 fn review(routine: &Routine) -> Vec<String> {
     let mut items = vec![format!("Does: {}", routine.request)];
@@ -888,6 +975,105 @@ impl ActionProvider for RoutinesProvider {
                 .map_err(|e| ActionError::io("your routines' folder", e))?;
         }
         Ok(())
+    }
+
+    fn returns(&self, action: &glass_types::ActionName) -> Option<Value> {
+        let id = json!({ "type": "string", "description": "the routine's id" });
+        let task = json!({ "type": "string", "description": "a task's id" });
+        Some(match action.as_str() {
+            LIST => json!({
+                "type": "object",
+                "properties": { "routines": { "type": "array", "items": listed_shape(&[]) } },
+                "required": ["routines"],
+                "additionalProperties": false
+            }),
+            READ => listed_shape(&[
+                (
+                    "script",
+                    json!({ "type": "string", "description": "the JavaScript it runs" }),
+                ),
+                (
+                    "runs_kept",
+                    json!({ "type": "array", "description": "its last runs, newest first", "items": run_shape() }),
+                ),
+                (
+                    "in_use",
+                    json!({ "type": "boolean", "description": "this is the version that runs" }),
+                ),
+                (
+                    "versions",
+                    json!({
+                        "type": "array",
+                        "description": "its saved versions, newest first",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "version": { "type": "integer" },
+                                "note": { "type": "string" },
+                                "saved_at": { "type": "string", "description": "when, RFC 3339" },
+                                "runs": { "type": "string", "description": "when it runs, in words" },
+                                "in_use": { "type": "boolean" }
+                            },
+                            "required": ["version", "note", "saved_at", "runs", "in_use"],
+                            "additionalProperties": false
+                        }
+                    }),
+                ),
+            ]),
+            SAVE | SCHEDULE | KEEP | USE => summary_shape(&[]),
+            DELETE => json!({
+                "type": "object",
+                "properties": { "routine": id },
+                "required": ["routine"],
+                "additionalProperties": false
+            }),
+            PAUSE => json!({
+                "type": "object",
+                "properties": { "routine": id, "paused": { "type": "boolean" } },
+                "required": ["routine", "paused"],
+                "additionalProperties": false
+            }),
+            RUN => json!({
+                "type": "object",
+                "properties": { "routine": id, "task": { "type": "string", "description": "the task it runs as" } },
+                "required": ["routine", "task"],
+                "additionalProperties": false
+            }),
+            REPEATS => json!({
+                "type": "object",
+                "properties": {
+                    "repeats": {
+                        "type": "array",
+                        "description": "requests done the same way more than once",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task": { "type": "string", "description": "the latest task that did it" },
+                                "request": { "type": "string" },
+                                "agent": { "type": "string" },
+                                "times": { "type": "integer", "description": "how many times it was done this way" },
+                                "last_at": { "type": "string", "description": "RFC 3339" },
+                                "script": { "type": "string", "description": "the code this computer wrote from what the task did" },
+                                "steps": { "type": "array", "items": { "type": "string" }, "description": "what it does, step by step" },
+                                "read": { "type": "array", "items": { "type": "string" }, "description": "folders it reads" },
+                                "write": { "type": "array", "items": { "type": "string" }, "description": "folders it changes" }
+                            },
+                            "required": ["task", "request", "agent", "times", "last_at", "script", "steps", "read", "write"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["repeats"],
+                "additionalProperties": false
+            }),
+            DISMISS => json!({
+                "type": "object",
+                "properties": { "task": task },
+                "required": ["task"],
+                "additionalProperties": false
+            }),
+            _ => return None,
+        })
     }
 
     fn preview(

@@ -900,6 +900,127 @@ impl ActionProvider for MeetProvider {
         ]
     }
 
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        let meeting = json!({ "type": "string", "description": "the meeting's id, cv-…" });
+        let media_key = json!({ "type": "string", "description": "a 32-byte media key, base64" });
+        Some(match action.as_str() {
+            LIST => json!({
+                "type": "object",
+                "properties": {
+                    "meetings": {
+                        "type": "array",
+                        "description": "the ones you're in, earliest first; empty when not available",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": meeting,
+                                "title": { "type": "string" },
+                                "start": { "type": "string", "description": "the organizer's local time, YYYY-MM-DDTHH:MM; empty when unknown" },
+                                "end": { "type": "string", "description": "the same, for its end" },
+                                "organizer": { "type": "string", "description": "the organizer's login" },
+                                "organizer_name": { "type": "string" },
+                                "transcribed": { "type": "boolean", "description": "its people's words are kept as a transcript" },
+                                "people": {
+                                    "type": "array",
+                                    "description": "everyone in it",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": { "login": { "type": "string" }, "name": { "type": "string" } },
+                                        "required": ["login", "name"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "required": ["id", "title", "start", "end", "organizer", "organizer_name", "transcribed", "people"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "available": { "type": "boolean", "description": "false when this computer can't reach meetings yet" },
+                    "note": { "type": "string", "description": "why they aren't available; only when they aren't" }
+                },
+                "required": ["meetings", "available"],
+                "additionalProperties": false
+            }),
+            JOIN => json!({
+                "type": "object",
+                "properties": {
+                    "meeting": meeting,
+                    "title": { "type": "string" },
+                    "answer": { "type": "string", "description": "the relay's WebRTC answer (SDP)" },
+                    "participant": { "type": "integer", "description": "your place in the session, from 1" },
+                    "media_key": media_key,
+                    "media_key_id": { "type": "string" },
+                    "transcribed": { "type": "boolean", "description": "its people's words are kept as a transcript" }
+                },
+                "required": ["meeting", "title", "answer", "participant", "media_key", "media_key_id", "transcribed"],
+                "additionalProperties": false
+            }),
+            KEYS => json!({
+                "type": "object",
+                "properties": {
+                    "meeting": meeting,
+                    "due": { "type": "boolean", "description": "a new key is due: ask again shortly" },
+                    "media_keys": {
+                        "type": "array",
+                        "description": "current first; empty while nobody is in it",
+                        "items": {
+                            "type": "object",
+                            "properties": { "id": { "type": "string" }, "key": media_key },
+                            "required": ["id", "key"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["meeting", "due", "media_keys"],
+                "additionalProperties": false
+            }),
+            LEAVE => json!({
+                "type": "object",
+                "properties": { "meeting": meeting, "left": { "type": "boolean" } },
+                "required": ["meeting", "left"],
+                "additionalProperties": false
+            }),
+            TRANSCRIBE => json!({
+                "type": "object",
+                "properties": {
+                    "meeting": meeting,
+                    "lines": { "type": "integer", "description": "how many lines were added" },
+                    "message": { "type": "string", "description": "the transcript message they went in" },
+                    "asked": { "type": "array", "items": { "type": "string" }, "description": "what \"Hey Glass\" asked your agent, each started" }
+                },
+                "required": ["meeting", "lines", "message", "asked"],
+                "additionalProperties": false
+            }),
+            TRANSCRIPT => json!({
+                "type": "object",
+                "properties": {
+                    "meeting": meeting,
+                    "title": { "type": "string" },
+                    "lines": {
+                        "type": "array",
+                        "description": "in order, the newest when there are many",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "seq": { "type": "integer", "description": "the message it came in; pass the last as since" },
+                                "speaker": { "type": "string", "description": "the speaker's login" },
+                                "name": { "type": "string" },
+                                "at": { "type": "string", "description": "when it was said, RFC 3339" },
+                                "text": { "type": "string" }
+                            },
+                            "required": ["seq", "speaker", "name", "at", "text"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "last_seq": { "type": "integer", "description": "pass as since for what comes after" }
+                },
+                "required": ["meeting", "title", "lines", "last_seq"],
+                "additionalProperties": false
+            }),
+            _ => return None,
+        })
+    }
+
     fn preview(
         &self,
         ctx: &TaskContext,

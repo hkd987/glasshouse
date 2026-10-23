@@ -424,6 +424,53 @@ impl ActionProvider for ModelAction {
         vec![definition()]
     }
 
+    /// What the runtime puts beside the reply's words (`text`) once the
+    /// gateway has answered (`glass_runtime`'s model routing).
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        (action.as_str() == MODEL_COMPLETE).then(|| {
+            json!({
+                "type": "object",
+                "properties": {
+                    "model": { "type": ["string", "null"], "description": "the approved model that answered, by its policy id" },
+                    "provider": { "type": ["string", "null"], "description": "the policy's id for who ran it" },
+                    "label": { "type": "string", "enum": ["public", "internal", "confidential", "restricted"], "description": "the most sensitive data the call carried" },
+                    "input_tokens": { "type": ["integer", "null"] },
+                    "output_tokens": { "type": ["integer", "null"] },
+                    "stop_reason": { "type": ["string", "null"], "description": "why the model stopped: \"end_turn\", \"max_tokens\", \"tool_use\" when it asks for tools, \"refusal\" when it declined" },
+                    "redacted": { "type": "object", "description": "how many of each kind of detail were taken out before the call left, by kind (\"email\": 2); put back in the reply" },
+                    "stronger": { "type": "boolean", "description": "whether a dearer approved model could take the next step (send its id as above)" },
+                    "tool_calls": {
+                        "type": "array",
+                        "description": "the tools the model asks for, only when it asks: make each call, then send what it returned as a user message's tool_results",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "the call's id, which its result names" },
+                                "name": { "type": "string" },
+                                "input": { "description": "the input the model chose for the tool" }
+                            },
+                            "required": ["id", "name", "input"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "replay": {
+                        "type": "object",
+                        "description": "the reply as its provider wrote it, sealed, when there is one: send it back unchanged on this assistant message",
+                        "properties": {
+                            "provider": { "type": "string" },
+                            "blocks": { "type": "array" },
+                            "seal": { "type": "string" }
+                        },
+                        "required": ["provider", "blocks", "seal"],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["model", "provider", "label", "input_tokens", "output_tokens", "stop_reason", "redacted", "stronger"],
+                "additionalProperties": false
+            })
+        })
+    }
+
     fn preview(
         &self,
         _ctx: &TaskContext,
