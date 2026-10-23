@@ -67,6 +67,8 @@ for (const [app, use] of [
   ["docs", async (page: Page) => page.locator("[data-test=new-doc]").click()],
   // Routines lists what runs for the person (ADR 0047).
   ["routines", async (page: Page) => page.locator("[data-test=routines]").hover()],
+  // Settings: the person's settings and what IT set for them (ADR 0029).
+  ["settings", async (page: Page) => page.locator("body").hover()],
 ] as const) {
   test(`ui7 ${app} launches cold in under 1 s and uses under 150 MB`, async ({ browser }) => {
     const launches: number[] = [];

@@ -11,13 +11,13 @@ goes over its budget:
 
 | What the person waits for | Budget (p95) | Source | VM today (p50 / p95) |
 |---|---|---|---|
-| Handoff card (`task.plan`) | 200 ms | ceiling | 3 / 4 ms |
-| Tiles (`task.list`) | 100 ms | ceiling | 3 / 4 ms |
-| Expanded view (`task.get`) | 200 ms | AW-10 | 4 / 4 ms |
-| Take over | 1 s | AW-20 | 203 / 245 ms |
-| An action that needs no snapshot (reads, lookups) | 100 ms | ceiling | 3 / 12 ms |
-| An action that snapshots first (writes) | 750 ms | ceiling | 243 / 391 ms; 2026-10-19: 293–533 / 555–977 ms, over in 3 of 7 runs. Cause: the VM's home dataset held 2,058 snapshots from test runs, all younger than AU-20's 30 days (glassd now removes older ones), and a snapshot there took 0.31 s against 0.17 s. Cleared on 2026-10-19: 294–349 / 431–627 ms, take over p95 265–288 ms. A long-lived dev VM gathers them again; `vm.sh clear-snapshots` clears them (2026-10-21: 942 again, p95 936 ms; cleared, 359 ms) |
-| Start to the agent's first step | 4 s | ceiling | 1.7 / 2.6 s |
+| Handoff card (`task.plan`) | 200 ms | ceiling | 3 / 4 ms; 8–9 / 15–32 ms on 2026-10-23 (ADR 0051), the old build 12 / 15 ms the same hour |
+| Tiles (`task.list`) | 100 ms | ceiling | 3 / 4 ms; 4.4–4.6 / 5.7–8.0 ms on 2026-10-23, the old build 7.6 / 11.8 ms |
+| Expanded view (`task.get`) | 200 ms | AW-10 | 4 / 4 ms; 3.6–4.0 / 4.4–4.9 ms on 2026-10-23 |
+| Take over | 1 s | AW-20 | 203 / 245 ms; 226–260 / 361–656 ms on 2026-10-23, the old build 504 / 776 ms |
+| An action that needs no snapshot (reads, lookups) | 100 ms | ceiling | 3 / 12 ms; 3.5–4.0 / 6.0–9.8 ms on 2026-10-23 |
+| An action that snapshots first (writes) | 750 ms | ceiling | 229–240 / 452–525 ms on 2026-10-23 (ADR 0051: steps that write take turns now, which costs nothing here), with 733 snapshots on the home dataset and a snapshot at 0.24 s; the old build 267 / 563 ms. 243 / 391 ms earlier; 2026-10-19: 293–533 / 555–977 ms, over in 3 of 7 runs. Cause: the VM's home dataset held 2,058 snapshots from test runs, all younger than AU-20's 30 days (glassd now removes older ones), and a snapshot there took 0.31 s against 0.17 s. Cleared on 2026-10-19: 294–349 / 431–627 ms, take over p95 265–288 ms. A long-lived dev VM gathers them again; `vm.sh clear-snapshots` clears them (2026-10-21: 942 again, p95 936 ms; cleared, 359 ms) |
+| Start to the agent's first step | 4 s | ceiling | 1.7 / 2.6 s; 1.8–2.0 / 2.2–2.4 s on 2026-10-23, the old build 2.1 / 2.4 s. The first run after the VM boots is slower (3.7 / 5.7 s): its emulated CPU translates every program afresh |
 | Undo preview (`task.undo` dry run) | 150 ms | ceiling | 6–9 / 58–94 ms (0.8–1.3 s before ADR 0017) |
 | Tiles while two busy agents run (`load`) | 100 ms | ceiling | 5–6 / 13–43 ms |
 | Expanded view while two busy agents run (`load`) | 200 ms | AW-10 | 5–8 / 19–117 ms |
@@ -134,6 +134,60 @@ and glassd verifies, validates, writes and swaps it in. A device that is
 offline gets it on its next sync (backing off to 5 minutes), and a device in
 a later ring when IT promotes the version. These are host numbers; nothing
 here runs in the VM.
+
+### Every feature, on a person's worth of data (ADR 0051)
+
+`crates/svc/runtime/tests/speed.rs` times each feature an agent or app
+calls through the whole path (the task socket, policy, the audit record,
+the snapshot a write takes, the provider) on this host's CPU, with data the
+size a person has. That's a 500-message inbox, a 2,000-file folder, a
+300-meeting month, a 2,000-person directory and an audit log of 20,000
+records. The VM's budgets above hold the emulated numbers; this finds what
+grows with the data. Run it with the shipping optimization:
+`cargo test --profile vm -p glass-runtime --test speed -- --ignored --nocapture --test-threads 1`.
+
+| Feature (2026-10-23, `vm` profile) | p50 | p95 |
+|---|---|---|
+| Start a task, to its socket | 12.0 ms | 12.5 ms |
+| `task.list`, `task.get` | under 0.1 ms | under 0.1 ms |
+| `files.list`, 2,000 files | 16.9 ms | 20.3 ms |
+| `files.read`, 2 KB / 1 MB | 0.6 / 8.2 ms | 0.6 / 12.1 ms |
+| `files.write`, a snapshot first | 2.3 ms | 2.7 ms |
+| Undo preview / undo, 22 writes | 0.7 / 4.3 ms | |
+| `mail.list`, 500-message inbox, 50 listed / a count | 4.7 / 2.3 ms | 5.1 / 3.2 ms |
+| `mail.read` | 0.6 ms | 0.7 ms |
+| `mail.mark` / `mail.draft`, a snapshot first | 3.0 / 1.1 ms | 3.2 / 1.3 ms |
+| `calendar.list`, a week of a 300-meeting month / `calendar.read` | 4.2 / 0.5 ms | 5.7 / 0.7 ms |
+| `people.search`, 2,000 people | 2.7 ms | 4.5 ms |
+| `apps.actions`, the list / 12 in full | 4.7 / 7.0 ms | 5.8 / 7.5 ms |
+| A task's audit, in a log of 20,387 records | 2.4 ms | 2.4 ms |
+| Verifying the whole log, 20,387 records | 76.8 ms | |
+
+What it found growing, and fixed:
+
+- **Mail's listing** read the start of every message in the folder,
+  whatever it was asked for. For 500 messages that was 100 ms in the debug
+  build, for 50 listed or for one.
+  - It keeps what it parsed while each file's size and time stay the same,
+    so a listing reads the names and parses what's new: 10.9 and 5.6 ms in
+    debug, 4.7 and 2.3 ms above.
+  - The Mail app lists four folders on every refresh.
+- **A task's audit** (`glassctl audit`, the replay of a task's calls) read,
+  parsed and hash-checked the whole log, every user's, from the first day:
+  as long as verifying it, 76.8 ms at 20,000 records, and growing. An index
+  of each task's records, kept up by every append, makes it 2.4 ms.
+- **glassd's report to the console**, every minute, counted the last day's
+  blocked actions by reading the whole log. It reads from the end back, and
+  stops at the first record older than a day.
+- **Each step of the desktop agent waits on the model**, so the steps it
+  takes are what a person waits on. Asked to read four files and say what
+  each is, Claude Haiku 5.5 already made the four reads in one step (three
+  model calls, 3.5 to 3.9 s). An instruction to do so changed nothing, and
+  isn't in its prompt.
+
+What takes turns now: a person's reversible steps across their tasks, and
+undo, take turns (ADR 0051, found by the Undo model). A step waits for
+another task's write to the person's files to finish. Reads don't wait.
 
 ## Where the time goes
 
@@ -255,38 +309,6 @@ Traced, the package-list image runs 100 startup scripts and none stands
 out (netif 5.8 s, devfs 4.4 s traced; ours under 1 s each): what's left is
 their number, which the product image's list (no sshd, no nuageinit)
 brings down further.
-
-#### Apps (UI-7)
-
-`make apps-test` holds each first-party web app to the PRD's budgets in
-headless Chromium on the development host (`apps/e2e/perf.spec.ts`) and
-fails when one goes over:
-
-| What the person waits for | Budget | Source | Dev host today |
-|---|---|---|---|
-| Mail, cold launch | 1 s | UI-7 | 176 ms (median of 3: 197, 176, 173) |
-| Calendar, cold launch | 1 s | UI-7 | 184 ms (178, 184, 185) |
-| Mail, memory | 150 MB | UI-7 | 116 MB |
-| Calendar, memory | 150 MB | UI-7 | 117 MB |
-| Chat, cold launch | 1 s | UI-7 | 127 ms (132, 127, 118) |
-| Chat, memory | 150 MB | UI-7 | 106 MB |
-| Meet, cold launch | 1 s | UI-7 | 108 ms (104, 115, 108); with M2's grid and screen sharing, 142 ms (135, 142, 143) page alone, its bridge played by `meet.e2e.ts` |
-| Meet, memory (before joining) | 150 MB | UI-7 | 100 MB |
-| Joining a meeting: Join to the other person on screen, through the computer, the console and the relay | 2 s | UI-7, CF-21 | 1427 ms (`meetings.e2e.ts`, before the page stopped waiting up to 1 s for its ICE candidates; not measured since); page to relay alone (`meet.e2e.ts`) 1311 ms then, 258–355 ms now |
-| Joining a three-person meeting: Join to both others on screen, one of them after a renegotiation over the data channel; page to relay alone | 2 s | UI-7, CF-21 | 392–658 ms (`meet.e2e.ts`, five runs); the two already there see the newcomer at 413–711 ms |
-| A page in a two-person call | 250 MB | UI-7, CF-21 | 169 MB |
-| A page in a three-person call, decoding two videos | 250 MB | UI-7, CF-21 | 168 MB (167–169, `meet.e2e.ts`) |
-| A page in a transcribed call, its speech model loaded (ADR 0045 T2) | 500 MB | UI-7, CF-21 | 360–435 MB (`meet.e2e.ts`); the model and its runtime are about 250 MB of it, for as long as the call lasts |
-| What the person said, as a line of the transcript: from their pause to its text, on the computer | none yet | ADR 0045 T2 | 0.8–1.0 s for 2.3–4.4 s of speech; the model loads in 1.5–1.7 s, while they join (`speech.spec.ts`) |
-| Saving an app someone remixed: the checks, a bundle in a jail of its own, a try of it in another (ADR 0049), the version kept | 15 s (10 s before the try) | GA-4, ADR 0032 | 5.7–6.5 s for Mail on the VM (scenario `studio`); 7.4–10.2 s when the emulated CPU translates the try-out's code afresh, after a deploy or a quiet spell. The try is 3–5 s of it, 0.15 s natively, typing into Mail's compose form and sending it included (5.7–6.2 s and 9.6–10.2 s since). 2.0 s before the try |
-
-*Cold launch* is a fresh browser context (no cache, no service worker, no
-stored data), from navigation to the app drawn with its data (the
-`glass:ready` mark), through the bridge and glassd. *Memory* is the resident
-memory of the app's renderer process (its page and its service worker)
-after it has loaded and been used; the browser and GPU processes are shared
-by every app, so they aren't counted. Each app is one script of about 13 KB
-and one stylesheet of about 6 KB.
 
 ## Where the time goes, and what we changed
 

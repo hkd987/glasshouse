@@ -194,9 +194,10 @@ another task's change:
   - glassd's report to the console, every minute, counted the last day's
     blocked actions by reading the whole log. It reads from the end back
     now, and stops at the first record older than a day.
-- **What the desktop agent waits on:** each step waits on the model, so
-  it's told to make calls that don't need each other's results in one
-  step.
+- **What the desktop agent waits on:** each step waits on the model.
+  Asked to read four files, Claude Haiku 5.5 already read them in one step
+  (three model calls). An instruction to do that changed nothing, so the
+  prompt is unchanged.
 
 ## Consequences
 - **Writes take turns:** a person's reversible steps across their tasks
