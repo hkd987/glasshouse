@@ -172,6 +172,12 @@ another task's change:
    Mail; only a sync woke it. Each mail action that changes something
    wakes it now.
 
+**Found while checking the fixes:**
+39. A task's socket file appeared before it listened, so a client that
+   waited for it could be refused under load, as a test was once. It's
+   made under another name and renamed into place once it listens and
+   belongs to the task's user.
+
 ### 3. The speed audit
 - **Method:** a native benchmark of every feature an agent or app calls,
   through the whole path (task socket, policy, audit record, snapshot,
