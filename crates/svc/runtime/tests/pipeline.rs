@@ -187,6 +187,8 @@ async fn sends_wait_for_one_batched_approval() {
         6,
         "one approval with a review list (DA-12)"
     );
+    // What each says, under it: the person reads what they send (ADR 0045).
+    assert_eq!(ask.texts, vec![vec!["Please pay.".to_owned()]; 6]);
     assert_eq!(h.tile(task), TileState::NeedsYou);
     assert!(h.rt.list(&h.me)[0].needs.is_some());
     assert!(
@@ -237,6 +239,14 @@ async fn sends_wait_for_one_batched_approval() {
     })
     .unwrap();
     assert_eq!(records.len(), 2);
+    // The review showed the words; the record never keeps them.
+    let recorded = glass_audit::read(&h.audit_path(), |_| true).unwrap();
+    assert!(
+        !serde_json::to_string(&recorded)
+            .unwrap()
+            .contains("Please pay."),
+        "an email's body is never recorded"
+    );
     assert_eq!(
         records[0]
             .event

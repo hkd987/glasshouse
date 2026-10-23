@@ -243,6 +243,7 @@ pub fn new_view(
         action,
         summary,
         items,
+        texts: Vec::new(),
         rule,
         requested_at: now,
         expires_at: Timestamp::from_unix_seconds(now.unix_seconds() + timeout_secs as i64)

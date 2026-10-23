@@ -363,6 +363,7 @@ impl ActionProvider for SystemProvider {
                         "{files} cache files, {} in ~/{CACHE}",
                         human(bytes)
                     )],
+                    texts: Vec::new(),
                     reads: Vec::new(),
                     writes: vec![root.clone()],
                     snapshot_roots: vec![root],

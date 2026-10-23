@@ -90,6 +90,7 @@ pub fn tasks() -> Vec<TaskView> {
         ]
         .map(String::from)
         .to_vec(),
+        texts: Vec::new(),
         rule: "org rule expenses.submit".into(),
         requested_at: minutes_ago(1),
         expires_at: now(),
@@ -325,6 +326,89 @@ pub fn expense_detail(task: &TaskView) -> TaskDetail {
         }],
         answer: None,
     }
+}
+
+/// The desktop agent asked during a meeting (ADR 0045): its email waits
+/// for the person, the words it will send under whom it goes to.
+pub fn meeting_email_detail(task: &TaskView) -> TaskDetail {
+    let mut view = task.clone();
+    view.agent = "desktop-agent".parse().expect("valid id");
+    view.agent_name = "Desktop agent".into();
+    view.title = "Email Priya about the signed contract".into();
+    view.caption = "Read the transcript of Northwind renewal".into();
+    view.needs = Some(ApprovalView {
+        id: ApprovalId::new(),
+        task: view.id,
+        agent: view.agent.clone(),
+        action: "mail.send".parse().expect("valid action"),
+        summary: "Send email: Northwind renewal: thanks and next steps".into(),
+        items: vec!["To priya@acme.example: Northwind renewal: thanks and next steps".into()],
+        texts: vec![
+            [
+                "Hi Priya,",
+                "",
+                "Thank you for making time for the Northwind renewal call.",
+                "",
+                "This confirms you'll send the signed Northwind contract tonight.",
+                "",
+                "I'll have last quarter's renewal numbers with you by Thursday, ahead of your \
+                 Friday deadline.",
+                "",
+                "Best regards",
+            ]
+            .map(String::from)
+            .to_vec(),
+        ],
+        rule: "org rule mail.send".into(),
+        requested_at: view.updated_at,
+        expires_at: view.updated_at,
+        state: ApprovalState::Pending,
+        labels: AskLabels::new("Review drafts", "Approve and send"),
+    });
+    let mut detail = expense_detail(&view);
+    detail.prompt = "Email Priya to thank her, confirm she'll send the signed contract tonight, \
+                     and tell her the renewal numbers will be with her by Thursday."
+        .into();
+    detail.now =
+        "Waiting for you to approve: Send email: Northwind renewal: thanks and next steps".into();
+    let at = |m: i64| {
+        Timestamp::from_unix_seconds(view.updated_at.unix_seconds() - m * 60)
+            .unwrap_or_else(Timestamp::now)
+    };
+    detail.activity = [
+        (
+            2,
+            ActivityKind::State,
+            "Started by you in Northwind renewal",
+        ),
+        (
+            2,
+            ActivityKind::Action,
+            "Read the transcript of Northwind renewal",
+        ),
+        (
+            1,
+            ActivityKind::Action,
+            "Looked up \"Priya\" in the org's directory",
+        ),
+        (
+            1,
+            ActivityKind::Approval,
+            "Needs you: Send email: Northwind renewal",
+        ),
+    ]
+    .map(|(m, kind, text)| ActivityEntry {
+        at: at(m),
+        kind,
+        text: text.into(),
+    })
+    .to_vec();
+    detail.cant_touch = ["Join meetings", "Add to meeting transcripts"]
+        .map(String::from)
+        .to_vec();
+    detail.changes = Vec::new();
+    detail.snapshots = Vec::new();
+    detail
 }
 
 /// The desktop under the expanded view: the tiles tucked away and the

@@ -153,6 +153,7 @@ pub(crate) fn preview(
         ),
         targets: vec![item.name.clone()],
         items: vec![format!("Declares {}", declares_text(item))],
+        texts: Vec::new(),
         reads: Vec::new(),
         writes: vec![path(ctx)],
         snapshot_roots: vec![folder],

@@ -365,6 +365,13 @@ fn main() -> anyhow::Result<()> {
         "expanded-review.png",
         expanded_view(&expense, utc(fixtures::now()), Tab::Activity, None),
     )?;
+    // An email the desktop agent wrote in a meeting: what it says is in
+    // the review, under whom it goes to (ADR 0045).
+    let email = fixtures::meeting_email_detail(&tasks[0]);
+    write(
+        "expanded-email.png",
+        expanded_view(&email, utc(fixtures::now()), Tab::Activity, None),
+    )?;
     // The invoice run finished: its receipt.
     let mut done = invoices.clone();
     done.view.state = TileState::Done;

@@ -50,6 +50,10 @@ pub struct Preview {
     pub targets: Vec<String>,
     /// The review list for an approval: one line per affected item (DA-12).
     pub items: Vec<String>,
+    /// What each item says in full, in `items`' order, where it has words
+    /// of its own: an email's body. The review shows it under its item, so
+    /// the person reads what they approve; it is never recorded.
+    pub texts: Vec<String>,
     /// Host paths the call reads. The broker checks their labels.
     pub reads: Vec<PathBuf>,
     /// Host paths the call changes. The broker checks their labels.

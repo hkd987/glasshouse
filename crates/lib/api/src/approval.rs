@@ -52,6 +52,11 @@ pub struct ApprovalView {
     pub summary: String,
     /// The review list: one entry per item the action affects.
     pub items: Vec<String>,
+    /// What each item says in full, by line, in `items`' order, where it
+    /// has words of its own: an email's body. Shown under its item; never
+    /// recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texts: Vec<Vec<String>>,
     /// The rule that put this action at Ask.
     pub rule: String,
     pub requested_at: Timestamp,

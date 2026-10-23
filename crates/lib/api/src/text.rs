@@ -280,6 +280,7 @@ mod views {
                 action: _,
                 summary,
                 items,
+                texts,
                 rule,
                 requested_at: _,
                 expires_at: _,
@@ -288,6 +289,7 @@ mod views {
             } = self;
             summary.make_display_safe();
             items.make_display_safe();
+            texts.make_display_safe();
             rule.make_display_safe();
             labels.make_display_safe();
         }
@@ -450,6 +452,7 @@ mod tests {
                 action: "mail.send".parse().unwrap(),
                 summary: hostile("summary"),
                 items: vec![hostile("item")],
+                texts: vec![vec![hostile("text")]],
                 rule: hostile("rule"),
                 requested_at: Timestamp::now(),
                 expires_at: Timestamp::now(),

@@ -425,6 +425,7 @@ fn choice_preview(ctx: &TaskContext, summary: String, items: Vec<String>) -> Pre
         summary,
         targets: vec!["Your routines".into()],
         items,
+        texts: Vec::new(),
         reads: Vec::new(),
         snapshot_roots: file.parent().map(Path::to_path_buf).into_iter().collect(),
         writes: vec![file],

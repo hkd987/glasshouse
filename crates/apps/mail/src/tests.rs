@@ -49,6 +49,8 @@ fn batched_sends_are_one_preview_with_a_review_list() {
         .unwrap();
     assert_eq!(preview.summary, "Send 6 emails");
     assert_eq!(preview.items.len(), 6);
+    // DA-12, ADR 0045: the review shows what each says, not only to whom.
+    assert_eq!(preview.texts, vec!["Please pay.".to_owned(); 6]);
     assert!(preview.snapshot_roots.is_empty(), "sends are not undoable");
 }
 

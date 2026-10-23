@@ -798,6 +798,7 @@ impl ActionProvider for CalendarProvider {
             summary,
             targets: vec![event.title.clone()],
             items: vec![Self::describe(event)],
+            texts: Vec::new(),
             reads: Vec::new(),
             writes: vec![events.clone()],
             snapshot_roots: vec![events.clone()],
@@ -811,6 +812,7 @@ impl ActionProvider for CalendarProvider {
                     summary: format!("Read the calendar, {}", span_text(from, to)),
                     targets: Vec::new(),
                     items: Vec::new(),
+                    texts: Vec::new(),
                     reads: vec![events.clone()],
                     writes: Vec::new(),
                     snapshot_roots: Vec::new(),
@@ -824,6 +826,7 @@ impl ActionProvider for CalendarProvider {
                     summary: format!("Read calendar event {id}"),
                     targets: vec![id.clone()],
                     items: Vec::new(),
+                    texts: Vec::new(),
                     reads: vec![Self::event_path(ctx, &id)],
                     writes: Vec::new(),
                     snapshot_roots: Vec::new(),
@@ -889,6 +892,7 @@ impl ActionProvider for CalendarProvider {
                         .iter()
                         .map(|addr| format!("To {addr}: {}", Self::describe(&event)))
                         .collect(),
+                    texts: Vec::new(),
                     reads: vec![Self::event_path(ctx, &id)],
                     writes: vec![Self::calendar_dir(ctx).join(SENT)],
                     snapshot_roots: Vec::new(),

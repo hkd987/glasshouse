@@ -597,12 +597,25 @@ fn ask_pane<'a>(
             .color(t.muted),
     ]
     .spacing(8);
-    let items = ask.items.iter().map(|item| {
-        container(text(item.as_str()).size(14).color(t.text))
-            .width(Length::Fill)
-            .padding(Padding::from([11.0, 14.0]))
-            .style(move |_| style::panel(t.raised, 8.0))
-            .into()
+    // Each item, and under it what it says in full where it has words of
+    // its own (an email's body): the person reads what they approve.
+    let items = ask.items.iter().enumerate().map(|(i, item)| {
+        let said = ask.texts.get(i).filter(|lines| !lines.is_empty());
+        let body = said.map(|lines| {
+            text(lines.join("\n"))
+                .size(13)
+                .line_height(1.4)
+                .color(t.muted)
+        });
+        container(
+            column![text(item.as_str()).size(14).color(t.text)]
+                .push(body)
+                .spacing(8),
+        )
+        .width(Length::Fill)
+        .padding(Padding::from([11.0, 14.0]))
+        .style(move |_| style::panel(t.raised, 8.0))
+        .into()
     });
     let count = match ask.items.len() {
         1 => "1 item".to_owned(),

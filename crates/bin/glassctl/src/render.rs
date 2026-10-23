@@ -353,6 +353,11 @@ pub fn detail(d: &TaskDetail) -> String {
     let mut out = tile(&d.view);
     let _ = writeln!(out, "\n{} {}", bold("Now:"), d.now);
     let _ = writeln!(out, "{} \"{}\"", dim("Task:"), d.prompt);
+    // What waits for the person, in full: the tile's Review leads here.
+    if let Some(ask) = &d.view.needs {
+        let _ = writeln!(out, "\n{}", bold(&ask.labels.review));
+        out.push_str(&review(ask));
+    }
     // What the agent told the person when it was done (ADR 0041).
     if let Some(answer) = &d.answer {
         let _ = writeln!(out, "\n{}", bold("Answer"));
@@ -448,9 +453,7 @@ pub fn approvals(views: &[ApprovalView]) -> String {
             dim(&ask.agent.to_string()),
             dim(&ask.id.short())
         );
-        for item in &ask.items {
-            let _ = writeln!(out, "    • {item}");
-        }
+        out.push_str(&review(ask));
         let _ = writeln!(
             out,
             "    {}",
@@ -461,6 +464,20 @@ pub fn approvals(views: &[ApprovalView]) -> String {
             ))
         );
         let _ = writeln!(out, "{}", answers(ask, None));
+    }
+    out
+}
+
+/// An ask's review list: each item, and under it what it says in full
+/// where it has words of its own (an email's body), so the person reads
+/// what they approve (DA-12, ADR 0045).
+fn review(ask: &ApprovalView) -> String {
+    let mut out = String::new();
+    for (i, item) in ask.items.iter().enumerate() {
+        let _ = writeln!(out, "    • {item}");
+        for line in ask.texts.get(i).into_iter().flatten() {
+            let _ = writeln!(out, "      {} {line}", dim("│"));
+        }
     }
     out
 }
@@ -591,6 +608,11 @@ mod tests {
             action: "mail.send".parse().unwrap(),
             summary: "Send 2 emails".into(),
             items: vec!["To a@example.com: Invoice 1".into()],
+            texts: vec![vec![
+                "Hi Ana,".into(),
+                String::new(),
+                "Invoice 1 is due.".into(),
+            ]],
             rule: "default tier".into(),
             requested_at: Timestamp::now(),
             expires_at: Timestamp::now(),
@@ -631,7 +653,14 @@ mod tests {
         assert!(shown.contains(&format!(
             "Review drafts: glassctl show {task}  ·  Approve and send: glassctl approve {approval}"
         )));
-        assert!(plain(&approvals(&[ask])).contains("Approve and send: glassctl approve"));
+        let shown = plain(&approvals(std::slice::from_ref(&ask)));
+        assert!(shown.contains("Approve and send: glassctl approve"));
+        // What it sends, under whom it goes to (DA-12, ADR 0045).
+        assert!(
+            shown.contains(
+                "    • To a@example.com: Invoice 1\n      │ Hi Ana,\n      │ \n      │ Invoice 1 is due.\n"
+            )
+        );
 
         // An older glassd sends no title.
         let untitled = TaskView {

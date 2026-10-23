@@ -465,6 +465,7 @@ impl Runtime {
             timeout,
         );
         view.labels = def.ask.clone();
+        view.texts = review_texts(&preview.texts);
         let id = view.id;
         let mut reply = self.desk.open(view, task.user.uid);
 
@@ -796,6 +797,32 @@ impl Drop for InFlight<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// The most of an item's text an ask shows, in lines; the rest is counted.
+const REVIEW_TEXT_LINES: usize = 60;
+
+/// Each item's text as the review shows it: by line, at most
+/// [`REVIEW_TEXT_LINES`] of each, then how many more there are.
+fn review_texts(texts: &[String]) -> Vec<Vec<String>> {
+    texts
+        .iter()
+        .map(|text| {
+            let lines: Vec<&str> = text.trim_end().lines().collect();
+            let mut shown: Vec<String> = lines
+                .iter()
+                .take(REVIEW_TEXT_LINES)
+                .map(|l| (*l).to_owned())
+                .collect();
+            if lines.len() > REVIEW_TEXT_LINES {
+                shown.push(format!(
+                    "… and {} more lines",
+                    lines.len() - REVIEW_TEXT_LINES
+                ));
+            }
+            shown
+        })
+        .collect()
 }
 
 /// `args` for `routines.save` with `from_this_task`: the flag taken off and

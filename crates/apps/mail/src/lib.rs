@@ -1070,6 +1070,8 @@ impl ActionProvider for MailProvider {
                     },
                     targets: messages.iter().flat_map(|m| m.to.clone()).collect(),
                     items: messages.iter().map(Self::describe).collect(),
+                    // What each says: the person reads what they send.
+                    texts: messages.iter().map(|m| m.body.clone()).collect(),
                     // Sent here; or Drafts, when it can't leave.
                     writes: vec![
                         mail.join(cache::dir(Role::Sent)),
@@ -1122,6 +1124,7 @@ impl ActionProvider for MailProvider {
                     },
                     targets: ids.clone(),
                     items,
+                    texts: Vec::new(),
                     reads: moves
                         .iter()
                         .map(|(f, n)| mail.join(f.dir()).join(n))
