@@ -19,9 +19,11 @@
 //! - Calls made once per item of an earlier list, in blocks of the same
 //!   tools with the same constants, are a loop over that list. When they
 //!   left some items out, the loop keeps the items the simplest rule
-//!   picks: a field equal to one value, not equal to one value, or
-//!   containing one word, tried in that order and field by field. When no
-//!   rule fits, it replays the same calls.
+//!   picks: a field equal to one value, not equal to one value, a number
+//!   over or under a round one ("amount over 1,000"), a date before or
+//!   after a number of days from the day it runs ("due before today",
+//!   "more than 30 days ago"), or containing one word, tried in that order
+//!   and field by field. When no rule fits, it replays the same calls.
 //! - Every call is checked: one that fails stops the script, and the agent
 //!   takes over (NV-21). The answer is what the calls that changed
 //!   something said.
@@ -47,6 +49,10 @@ pub struct Call {
     pub data: Value,
     /// It changed something (its action has a side effect).
     pub changes: bool,
+    /// The day it was made, `YYYY-MM-DD` in the computer's time: what a
+    /// date in its result is "days ago" from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub day: Option<String>,
 }
 
 /// A task's calls as code, and the steps it takes in words.
@@ -289,6 +295,13 @@ struct Loop {
 enum Rule {
     Is(String, Value),
     IsNot(String, Value),
+    /// A number over, or under, a round one.
+    Over(String, f64),
+    Under(String, f64),
+    /// A date more than this many days before the day it runs (negative:
+    /// after), or this many or fewer.
+    Older(String, i64),
+    Newer(String, i64),
     Has(String, String),
 }
 
@@ -429,7 +442,11 @@ fn best_loop(calls: &[Call], sources: &[Vec<Leaf>], i: usize, before: &[Step]) -
             let keep = if items.len() == all {
                 None
             } else {
-                match rule(items_of(&calls[*call].data, list), &items) {
+                match rule(
+                    items_of(&calls[*call].data, list),
+                    &items,
+                    day_of(&calls[*call]),
+                ) {
                     Some(rule) => Some(rule),
                     // No rule picks them: the same calls again.
                     None => continue,
@@ -464,14 +481,17 @@ fn items_of<'a>(data: &'a Value, list: &Path) -> &'a [Value] {
 }
 
 /// The simplest rule that keeps exactly the `chosen` items: a field equal
-/// to one value, not equal to one value, or holding one word, tried in
+/// to one value, not equal to one value, a number over or under a round
+/// one, a date more or fewer days before `today` (the day they were
+/// listed) than one of a few round numbers, or holding one word, tried in
 /// that order, fields in name order. Ids are left out (a field named one,
 /// or whose values all differ and all look like one): a rule on an id
 /// picks those items and no others, ever. One item chosen is one example:
 /// any field whose values all differ would single it out, so its rule must
 /// be on a field other items share values of, and never a word. Likewise
-/// "not this value" needs two items left out that share it.
-fn rule(items: &[Value], chosen: &[usize]) -> Option<Rule> {
+/// "not this value" needs two items left out that share it, and a number
+/// or a date two items chosen and two left out.
+fn rule(items: &[Value], chosen: &[usize], today: Option<i64>) -> Option<Rule> {
     let objects: Vec<&serde_json::Map<String, Value>> =
         items.iter().filter_map(Value::as_object).collect();
     if objects.len() != items.len() || chosen.is_empty() || chosen.len() == items.len() {
@@ -499,10 +519,15 @@ fn rule(items: &[Value], chosen: &[usize]) -> Option<Rule> {
     fields.sort();
     let identifies = |f: &str| {
         let values: BTreeSet<String> = objects.iter().map(|o| o[f].to_string()).collect();
+        // Dates and amounts all differ too, and aren't ids.
+        let measures = objects
+            .iter()
+            .all(|o| number(&o[f]).is_some() || o[f].as_str().and_then(day_number).is_some());
         f == "id"
             || f.ends_with("_id")
             || f.ends_with("Id")
             || (values.len() == objects.len()
+                && !measures
                 && objects.iter().all(|o| o[f].as_str().is_some_and(id_like)))
     };
     let fields: Vec<&String> = fields.into_iter().filter(|f| !identifies(f)).collect();
@@ -548,6 +573,51 @@ fn rule(items: &[Value], chosen: &[usize]) -> Option<Rule> {
             return Some(Rule::IsNot((*f).clone(), value));
         }
     }
+    // Numbers and dates: a line between two chosen and two left out.
+    let enough = chosen.len() >= 2 && left_out >= 2;
+    let picked_and_not = |values: &[f64]| -> (Vec<f64>, Vec<f64>) {
+        let (mut yes, mut no) = (Vec::new(), Vec::new());
+        for (i, v) in values.iter().enumerate() {
+            if picked(i) { yes.push(*v) } else { no.push(*v) }
+        }
+        (yes, no)
+    };
+    let numeric = |f: &str| -> Option<Vec<f64>> { objects.iter().map(|o| number(&o[f])).collect() };
+    for f in fields.iter().filter(|_| enough) {
+        let Some(values) = numeric(f) else { continue };
+        let (yes, no) = picked_and_not(&values);
+        let (yes_lo, yes_hi) = bounds(&yes);
+        let (no_lo, no_hi) = bounds(&no);
+        if let Some(t) = round_between(no_hi, yes_lo, true, false) {
+            return Some(Rule::Over((*f).clone(), t));
+        }
+        if let Some(t) = round_between(yes_hi, no_lo, false, true) {
+            return Some(Rule::Under((*f).clone(), t));
+        }
+    }
+    let dated = |f: &str| -> Option<Vec<i64>> {
+        objects
+            .iter()
+            .map(|o| o[f].as_str().and_then(day_number))
+            .collect()
+    };
+    for f in fields.iter().filter(|_| enough) {
+        let (Some(today), Some(days)) = (today, dated(f)) else {
+            continue;
+        };
+        // How many days before today each is: negative is after.
+        let ages: Vec<f64> = days.iter().map(|d| (today - d) as f64).collect();
+        let (yes, no) = picked_and_not(&ages);
+        let (yes_lo, yes_hi) = bounds(&yes);
+        let (no_lo, no_hi) = bounds(&no);
+        // Older than n: every chosen one's age over n, the others' at most n.
+        if let Some(n) = days_between(no_hi, yes_lo) {
+            return Some(Rule::Older((*f).clone(), n));
+        }
+        if let Some(n) = days_between(yes_hi, no_lo) {
+            return Some(Rule::Newer((*f).clone(), n));
+        }
+    }
     let words = |text: &str| -> BTreeSet<String> {
         text.to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
@@ -557,7 +627,8 @@ fn rule(items: &[Value], chosen: &[usize]) -> Option<Rule> {
     };
     for f in fields.iter().filter(|_| !one) {
         let texts: Vec<Option<&str>> = objects.iter().map(|o| o[f.as_str()].as_str()).collect();
-        if texts.iter().any(Option::is_none) {
+        // A number's or a date's digits aren't words.
+        if texts.iter().any(Option::is_none) || numeric(f).is_some() || dated(f).is_some() {
             continue;
         }
         let mut common: Option<BTreeSet<String>> = None;
@@ -585,6 +656,194 @@ fn rule(items: &[Value], chosen: &[usize]) -> Option<Rule> {
         }
     }
     None
+}
+
+/// A number, or a string that is one as written ("1250", "-3.5").
+fn number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => {
+            let digits = s.strip_prefix('-').unwrap_or(s);
+            let (whole, part) = digits.split_once('.').unwrap_or((digits, "0"));
+            let plain = |d: &str| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit());
+            (plain(whole) && plain(part) && s.len() <= 18)
+                .then(|| s.parse().ok())
+                .flatten()
+        }
+        _ => None,
+    }
+}
+
+/// The smallest and largest of `values`.
+fn bounds(values: &[f64]) -> (f64, f64) {
+    values
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(*v), hi.max(*v))
+        })
+}
+
+/// The roundest number between `lo` and `hi` (each end in or out):
+/// multiples of the largest power of ten there are any of, the one
+/// nearest the middle. "Over 1,000", not "over 1,137" or "over 5,000"
+/// when the others are all under 30.
+fn round_between(lo: f64, hi: f64, lo_in: bool, hi_in: bool) -> Option<f64> {
+    if !lo.is_finite() || !hi.is_finite() || lo > hi {
+        return None;
+    }
+    let inside = |x: f64| (x > lo || (lo_in && x == lo)) && (x < hi || (hi_in && x == hi));
+    let middle = if lo > 0.0 {
+        (lo * hi).sqrt()
+    } else {
+        (lo + hi) / 2.0
+    };
+    for step in (-2..=15).rev().map(|k| 10f64.powi(k)) {
+        let (first, last) = ((lo / step).ceil(), (hi / step).floor());
+        if last - first > 100.0 {
+            continue;
+        }
+        let mut best: Option<f64> = None;
+        let mut m = first;
+        while m <= last {
+            // Whole cents at most, without float dust.
+            let x = (m * step * 100.0).round() / 100.0;
+            if inside(x) && best.is_none_or(|b| (x - middle).abs() < (b - middle).abs()) {
+                best = Some(x);
+            }
+            m += 1.0;
+        }
+        if best.is_some() {
+            return best;
+        }
+    }
+    None
+}
+
+/// The days a date rule may name: today, and so many days before or after.
+const DAY_STEPS: [i64; 13] = [0, 1, -1, 7, -7, 14, -14, 30, -30, 60, 90, 180, 365];
+
+/// A number of days `n` with `lo <= n < hi`: today if it's one, else the
+/// one of [`DAY_STEPS`] nearest the middle.
+fn days_between(lo: f64, hi: f64) -> Option<i64> {
+    let fits = |n: i64| lo <= n as f64 && (n as f64) < hi;
+    if fits(0) {
+        return Some(0);
+    }
+    let middle = (lo + hi) / 2.0;
+    DAY_STEPS
+        .iter()
+        .copied()
+        .filter(|n| fits(*n))
+        .min_by(|a, b| {
+            ((*a as f64) - middle)
+                .abs()
+                .total_cmp(&((*b as f64) - middle).abs())
+        })
+}
+
+/// The day `call` was made, as a day number.
+fn day_of(call: &Call) -> Option<i64> {
+    call.day.as_deref().and_then(day_number)
+}
+
+/// A date's day number (days since 1970-01-01): `YYYY-MM-DD`, or a
+/// timestamp that starts with one, as the script runner's `daysBetween`
+/// reads it.
+fn day_number(text: &str) -> Option<i64> {
+    let date = text.get(..10)?;
+    if !(text.len() == 10 || matches!(text.as_bytes()[10], b'T' | b't' | b' ')) {
+        return None;
+    }
+    let b = date.as_bytes();
+    if b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let digits = |r: std::ops::Range<usize>| -> Option<i64> {
+        let part = date.get(r)?;
+        part.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| part.parse().ok())?
+    };
+    let (y, m, d) = (digits(0..4)?, digits(5..7)?, digits(8..10)?);
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    if !(1..=12).contains(&m) || d < 1 || d > month_days[(m - 1) as usize] {
+        return None;
+    }
+    // Howard Hinnant's days_from_civil.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+/// The date `unix_secs` falls on at `offset_secs` east of UTC, `YYYY-MM-DD`:
+/// the day a call was made, for [`Call::day`].
+pub fn local_day(unix_secs: i64, offset_secs: i32) -> String {
+    let z = (unix_secs + i64::from(offset_secs)).div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// A threshold as code: whole numbers without a point.
+fn number_js(x: f64) -> String {
+    if x.fract() == 0.0 && x.abs() < 1e15 {
+        format!("{}", x as i64)
+    } else {
+        format!("{x}")
+    }
+}
+
+/// A threshold as people write it: "1,000", "12.5".
+fn number_words(x: f64) -> String {
+    let plain = number_js(x);
+    let (sign, digits) = plain
+        .strip_prefix('-')
+        .map_or(("", plain.as_str()), |d| ("-", d));
+    let (whole, part) = digits
+        .split_once('.')
+        .map_or((digits, None), |(w, p)| (w, Some(p)));
+    let mut grouped = String::new();
+    for (i, c) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    match part {
+        Some(p) => format!("{sign}{grouped}.{p}"),
+        None => format!("{sign}{grouped}"),
+    }
+}
+
+fn days_words(n: i64) -> String {
+    if n.abs() == 1 {
+        "1 day".into()
+    } else {
+        format!("{} days", n.abs())
+    }
 }
 
 // ---- code ----------------------------------------------------------------------
@@ -659,9 +918,14 @@ fn js(value: &Value, path: &mut Path, with: &BTreeMap<Path, String>) -> String {
 }
 
 fn rule_js(rule: &Rule) -> String {
+    let field = |f: &String| accessor(&vec![Key::Field(f.clone())]);
     match rule {
-        Rule::Is(f, v) => format!("item{} === {v}", accessor(&vec![Key::Field(f.clone())])),
-        Rule::IsNot(f, v) => format!("item{} !== {v}", accessor(&vec![Key::Field(f.clone())])),
+        Rule::Is(f, v) => format!("item{} === {v}", field(f)),
+        Rule::IsNot(f, v) => format!("item{} !== {v}", field(f)),
+        Rule::Over(f, t) => format!("Number(item{}) > {}", field(f), number_js(*t)),
+        Rule::Under(f, t) => format!("Number(item{}) < {}", field(f), number_js(*t)),
+        Rule::Older(f, n) => format!("daysBetween(item{}, today()) > {n}", field(f)),
+        Rule::Newer(f, n) => format!("daysBetween(item{}, today()) <= {n}", field(f)),
         Rule::Has(f, w) => format!(
             "String(item{}).toLowerCase().includes({})",
             accessor(&vec![Key::Field(f.clone())]),
@@ -674,6 +938,14 @@ fn rule_words(rule: &Rule) -> String {
     match rule {
         Rule::Is(f, v) => format!(" whose {f} is {v}"),
         Rule::IsNot(f, v) => format!(" whose {f} isn't {v}"),
+        Rule::Over(f, t) => format!(" whose {f} is over {}", number_words(*t)),
+        Rule::Under(f, t) => format!(" whose {f} is under {}", number_words(*t)),
+        Rule::Older(f, 0) => format!(" whose {f} is before today"),
+        Rule::Older(f, n) if *n > 0 => format!(" whose {f} is more than {} ago", days_words(*n)),
+        Rule::Older(f, n) => format!(" whose {f} is less than {} from today", days_words(*n)),
+        Rule::Newer(f, 0) => format!(" whose {f} is today or later"),
+        Rule::Newer(f, n) if *n > 0 => format!(" whose {f} is {} ago or later", days_words(*n)),
+        Rule::Newer(f, n) => format!(" whose {f} is {} from today or later", days_words(*n)),
         Rule::Has(f, w) => format!(" whose {f} has the word \"{w}\""),
     }
 }
@@ -871,7 +1143,7 @@ fn lists(
         let items = items_of(&calls[*call].data, list);
         let keep = match chosen.len() == items.len() {
             true => String::new(),
-            false => match rule(items, &chosen) {
+            false => match rule(items, &chosen, day_of(&calls[*call])) {
                 Some(rule) => format!(".filter(item => {})", rule_js(&rule)),
                 None => continue,
             },

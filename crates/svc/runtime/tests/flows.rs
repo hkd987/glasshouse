@@ -518,3 +518,50 @@ async fn adr0047_no_agent_starts_or_keeps_routines_and_a_repeat_can_be_let_go() 
     let repeats = app.ok("routines.repeats", json!({})).await;
     assert_eq!(repeats["repeats"], json!([]));
 }
+
+#[tokio::test]
+async fn adr0046_the_files_it_picked_by_size_are_picked_again_by_a_round_number() {
+    let h = harness_with(POLICY);
+    // Two scans among the small invoices.
+    for (name, size) in [("scan-01.pdf", 6_000), ("scan-02.pdf", 9_000)] {
+        std::fs::write(h.home().join("Invoices").join(name), vec![b'x'; size]).unwrap();
+    }
+    let mut request = h.request(&["Invoices"], &["Reports"]);
+    request.agent = "repeater".parse().unwrap();
+    request.prompt = "Note in Reports each big file in Invoices".into();
+    let task = h.rt.start(&h.me, request).unwrap().id;
+    let agent = h.agent(task).await;
+    let listed = tool(&agent, "files_list", json!({ "path": "Invoices" })).await;
+    let entries = listed.structured_content.unwrap()["entries"].clone();
+    for entry in entries.as_array().unwrap() {
+        if entry["size"].as_u64().unwrap() > 1_000 {
+            let name = entry["name"].as_str().unwrap();
+            let noted = tool(
+                &agent,
+                "files_write",
+                json!({ "path": format!("Reports/{name}"), "content": "Big: check it" }),
+            )
+            .await;
+            assert!(!noted.is_error, "{}", noted.text());
+        }
+    }
+    done(&h, task).await;
+
+    // The code keeps the files over a round size, whatever they're called.
+    let draft = h.rt.routine_draft(&h.me, task).unwrap();
+    assert!(
+        draft
+            .script
+            .contains("if (!(Number(item.size) > 1000)) continue;"),
+        "{}",
+        draft.script
+    );
+    assert!(
+        draft
+            .steps
+            .iter()
+            .any(|s| s.contains("whose size is over 1,000")),
+        "{:?}",
+        draft.steps
+    );
+}

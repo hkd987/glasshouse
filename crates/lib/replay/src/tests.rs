@@ -11,6 +11,7 @@ fn call(tool: &str, input: Value, text: &str, data: Value, changes: bool) -> Cal
         text: text.into(),
         data,
         changes,
+        day: None,
     }
 }
 
@@ -244,31 +245,31 @@ fn nv21_rules_are_tried_in_order_and_ids_never_make_one() {
     ];
     // One value; not one value; a word, in that order.
     assert_eq!(
-        rule(&items, &[1, 2]),
+        rule(&items, &[1, 2], None),
         Some(Rule::Is("status".into(), json!("unpaid")))
     );
     assert_eq!(
-        rule(&items, &[4]),
+        rule(&items, &[4], None),
         Some(Rule::Is("status".into(), json!("void"))),
         "one example, on a field others share values of"
     );
     assert_eq!(
-        rule(&items, &[1, 2, 4]),
+        rule(&items, &[1, 2, 4], None),
         Some(Rule::IsNot("status".into(), json!("paid")))
     );
     assert_eq!(
-        rule(&items, &[0, 1]),
+        rule(&items, &[0, 1], None),
         Some(Rule::Has("subject".into(), "invoice".into()))
     );
     // One example and only names or words pick it: no rule.
-    assert_eq!(rule(&items, &[3]), None);
+    assert_eq!(rule(&items, &[3], None), None);
     // Ids all differ: a rule on one would pick these and none ever again.
     let ids = [
         json!({ "id": "a1" }),
         json!({ "id": "a2" }),
         json!({ "id": "a3" }),
     ];
-    assert_eq!(rule(&ids, &[0]), None);
+    assert_eq!(rule(&ids, &[0], None), None);
 }
 
 /// The tools of a small mailbox, for running replay code.
@@ -501,4 +502,198 @@ fn nv21_what_mail_and_files_say_never_becomes_code() {
         !run.as_ref().is_err_and(|e| e.to_string().contains("pwned")),
         "{run:?}"
     );
+}
+
+#[test]
+fn adr0046_numbers_make_a_rule_over_or_under_a_round_one() {
+    let items = [
+        json!({ "id": "i1", "client": "Acme", "amount": 1250 }),
+        json!({ "id": "i2", "client": "Birch", "amount": 400 }),
+        json!({ "id": "i3", "client": "Cole", "amount": 3200.5 }),
+        json!({ "id": "i4", "client": "Dune", "amount": 980 }),
+        json!({ "id": "i5", "client": "Elm", "amount": "1800" }),
+    ];
+    let over = rule(&items, &[0, 2, 4], None).unwrap();
+    assert_eq!(over, Rule::Over("amount".into(), 1000.0));
+    assert_eq!(rule_words(&over), " whose amount is over 1,000");
+    assert_eq!(rule_js(&over), "Number(item.amount) > 1000");
+    assert_eq!(
+        rule(&items, &[1, 3], None),
+        Some(Rule::Under("amount".into(), 1000.0))
+    );
+    // Not split by any number, nor by one example: no rule.
+    assert_eq!(rule(&items, &[0, 1], None), None);
+    assert_eq!(rule(&items, &[2], None), None);
+    // The roundest number between, nearest the middle.
+    assert_eq!(round_between(120.0, 4500.0, true, false), Some(1000.0));
+    assert_eq!(round_between(25.0, 6000.0, true, false), Some(1000.0));
+    assert_eq!(round_between(1210.0, 1260.0, true, false), Some(1230.0));
+    assert_eq!(round_between(12.31, 12.38, true, false), Some(12.34));
+    assert_eq!(round_between(-5.0, 30.0, true, false), Some(0.0));
+    assert_eq!(round_between(5.0, 5.0, true, false), None);
+    assert_eq!(number_words(1_234_567.5), "1,234,567.5");
+    assert_eq!(number(&json!("12.50")), Some(12.5));
+    assert_eq!(number(&json!("1,250")), None, "as written, or not a number");
+}
+
+#[test]
+fn adr0046_dates_make_a_rule_on_days_before_the_day_it_runs() {
+    let today = day_number("2026-10-23");
+    let due = |dates: &[&str]| -> Vec<Value> {
+        dates
+            .iter()
+            .enumerate()
+            .map(|(i, d)| json!({ "id": format!("inv-{i}"), "due": d }))
+            .collect()
+    };
+    // Overdue: before today, whatever the gap.
+    let items = due(&[
+        "2026-10-01",
+        "2026-10-20",
+        "2026-10-23",
+        "2026-11-05",
+        "2026-10-30T09:00:00Z",
+    ]);
+    let overdue = rule(&items, &[0, 1], today).unwrap();
+    assert_eq!(overdue, Rule::Older("due".into(), 0));
+    assert_eq!(rule_words(&overdue), " whose due is before today");
+    assert_eq!(rule_js(&overdue), "daysBetween(item.due, today()) > 0");
+    // Today or later: the others.
+    assert_eq!(
+        rule(&items, &[2, 3, 4], today),
+        Some(Rule::Newer("due".into(), 0))
+    );
+    // Old mail: the round number of days nearest the gap's middle.
+    let mail = due(&[
+        "2026-09-08",
+        "2026-08-24",
+        "2026-07-25",
+        "2026-10-21",
+        "2026-10-18",
+        "2026-10-13",
+    ]);
+    let old = rule(&mail, &[0, 1, 2], today).unwrap();
+    assert_eq!(old, Rule::Older("due".into(), 30));
+    assert_eq!(rule_words(&old), " whose due is more than 30 days ago");
+    assert_eq!(
+        rule(&mail, &[3, 4, 5], today),
+        Some(Rule::Newer("due".into(), 30))
+    );
+    // Not knowing the day it was listed, no rule on a date.
+    assert_eq!(rule(&items, &[0, 1], None), None);
+    // Day numbers both ways, as the script runner counts days.
+    assert_eq!(today, Some(20_749));
+    assert_eq!(local_day(0, 0), "1970-01-01");
+    assert_eq!(local_day(1_792_674_030, 0), "2026-10-22");
+    assert_eq!(local_day(1_792_674_030 + 12 * 3600, 0), "2026-10-23");
+    assert_eq!(
+        local_day(1_792_674_030 + 12 * 3600, -4 * 3600),
+        "2026-10-22"
+    );
+    assert_eq!(day_number("2024-02-29"), Some(19_782));
+    for wrong in [
+        "2026-02-30",
+        "2026-13-01",
+        "20261023",
+        "2026-10-23x",
+        "Oct 23",
+    ] {
+        assert_eq!(day_number(wrong), None, "{wrong}");
+    }
+}
+
+/// An invoicing app's tools: its invoices, and a reminder for one.
+struct Ledger {
+    invoices: Vec<Value>,
+    reminded: Vec<String>,
+}
+
+impl glass_script::Tools for Ledger {
+    fn call(&mut self, name: &str, input: Value) -> Result<glass_script::Reply, String> {
+        Ok(match name {
+            "invoices_list" => glass_script::Reply {
+                ok: true,
+                text: format!("{} invoices", self.invoices.len()),
+                data: json!({ "invoices": self.invoices }),
+            },
+            "invoices_remind" => {
+                let id = input["id"].as_str().unwrap().to_owned();
+                self.reminded.push(id.clone());
+                glass_script::Reply {
+                    ok: true,
+                    text: format!("Reminded {id}"),
+                    data: Value::Null,
+                }
+            }
+            other => glass_script::Reply {
+                ok: false,
+                text: format!("There's no tool {other:?} here."),
+                data: Value::Null,
+            },
+        })
+    }
+}
+
+fn invoice(id: &str, amount: f64, due: &str) -> Value {
+    json!({ "id": id, "client": "Acme", "amount": amount, "due": due })
+}
+
+#[test]
+fn adr0046_reminders_for_overdue_invoices_run_on_a_later_day_by_that_day() {
+    // "Remind clients of overdue invoices": the agent reminded the two
+    // past their due date on 23 October.
+    let listed = vec![
+        invoice("inv-1", 1200.0, "2026-10-02"),
+        invoice("inv-2", 300.0, "2026-10-30"),
+        invoice("inv-3", 800.0, "2026-10-19"),
+        invoice("inv-4", 2500.0, "2026-11-12"),
+    ];
+    let mut calls = vec![Call {
+        day: Some("2026-10-23".into()),
+        ..call(
+            "invoices_list",
+            json!({}),
+            "4 invoices",
+            json!({ "invoices": listed }),
+            false,
+        )
+    }];
+    for id in ["inv-1", "inv-3"] {
+        calls.push(call(
+            "invoices_remind",
+            json!({ "id": id }),
+            &format!("Reminded {id}"),
+            Value::Null,
+            true,
+        ));
+    }
+    let replay = compile(&calls).unwrap();
+    assert!(
+        replay
+            .script
+            .contains("if (!(daysBetween(item.due, today()) > 0)) continue;"),
+        "{}",
+        replay.script
+    );
+    assert!(
+        replay
+            .steps
+            .iter()
+            .any(|s| s.contains("whose due is before today")),
+        "{:?}",
+        replay.steps
+    );
+    // Two weeks on: what's overdue then, by that day.
+    let ledger = Ledger {
+        invoices: vec![
+            invoice("inv-2", 300.0, "2026-10-30"),
+            invoice("inv-4", 2500.0, "2026-11-12"),
+            invoice("inv-5", 640.0, "2026-11-20"),
+        ],
+        reminded: Vec::new(),
+    };
+    let run = glass_script::run(&replay.script, "2026-11-06", Box::new(ledger)).unwrap();
+    assert_eq!(run.result, json!("Reminded inv-2"));
+    // The same calls on another day compile the same.
+    assert_eq!(compile(&calls).unwrap(), replay);
 }

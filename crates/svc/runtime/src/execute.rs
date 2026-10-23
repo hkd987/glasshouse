@@ -375,6 +375,8 @@ impl Runtime {
                     sent,
                     provided,
                 );
+                // Away from the task's lock: it may ask the system its offset.
+                let day = recorded.as_ref().map(|_| local_day());
                 {
                     let mut state = task.lock();
                     state.data_label = state.data_label.max(read_label);
@@ -406,6 +408,7 @@ impl Runtime {
                             text: output.text.clone(),
                             data: output.data.clone(),
                             changes: def.side_effect != SideEffect::None,
+                            day,
                         });
                     }
                     let at = Timestamp::now();
@@ -853,4 +856,25 @@ fn task_script(task: &Task, def: &ActionDef, mut args: Value) -> Result<Value, S
         fields.insert("script".into(), Value::String(replay.script));
     }
     Ok(args)
+}
+
+/// Today here, `YYYY-MM-DD`: the day a traced call was made, which the
+/// dates in what it returned are days before or after (ADR 0046). The
+/// computer's offset is asked of the system at most once a minute.
+fn local_day() -> String {
+    static OFFSET: std::sync::Mutex<Option<(Instant, i32)>> = std::sync::Mutex::new(None);
+    let offset = {
+        let mut cached = OFFSET
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match *cached {
+            Some((at, offset)) if at.elapsed() < Duration::from_secs(60) => offset,
+            _ => {
+                let offset = glass_platform::system::utc_offset_secs().unwrap_or(0);
+                *cached = Some((Instant::now(), offset));
+                offset
+            }
+        }
+    };
+    glass_replay::local_day(Timestamp::now().unix_seconds(), offset)
 }

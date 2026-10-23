@@ -43,9 +43,24 @@ socket's tools).
      simplest rule that picks exactly those is tried, in a fixed order:
      - a field equal to one value;
      - a field not equal to one value (two items left out sharing it);
+     - a number over, or under, a round one: a multiple of the largest
+       power of ten between the items picked and the others, nearest the
+       middle ("size over 1,000", not "over 5,000" when the others are
+       under 30);
+     - a date before today, or more (or fewer) than 1, 7, 14, 30, 60, 90,
+       180 or 365 days ago, or 1, 7, 14 or 30 days ahead, counted from the
+       day the code runs (`daysBetween(item.due, today()) > 0`, "whose due
+       is before today"). Today first, else the number of days nearest the
+       middle of the gap;
      - a field containing one word (two or more examples).
-     Ids never make a rule. One example makes one only on a field other
-     items share values of. With no rule, the same items again.
+     Ids never make a rule; dates and amounts that all differ aren't ids.
+     One example makes one only on a field other items share values of; a
+     number or a date needs two picked and two left out. With no rule, the
+     same items again.
+   - **The day a call was made** is recorded with it, in the computer's
+     time: a date in its result is so many days before or after that day.
+     So the same calls still compile to the same code, whatever day they
+     are compiled.
    - **Checks and answer.** Every call is checked: one that fails stops
      the script, and the agent takes over (NV-21). The answer is what
      the calls that changed something said.
@@ -99,8 +114,23 @@ socket's tools).
 - Kept flows hold the inputs of people's calls: root only in
   `/var/db/glasshouse/flows`. The probe's new check makes 29.
 
+- **Numbers and dates** (2026-10-23): "remind clients of overdue
+  invoices", done on 23 October for the two past their due date, compiled
+  to a loop keeping the invoices whose due is before today; run on 6
+  November it reminded the one overdue by then (`glass-replay`
+  `adr0046_reminders_for_overdue_invoices_run_on_a_later_day_by_that_day`).
+  An agent that noted each big file in Invoices compiled to a loop over
+  the files "whose size is over 1,000" (runtime
+  `flows::adr0046_the_files_it_picked_by_size_…`). Compiling the worst
+  case (400 calls over a 500-message listing, no rule fitting) took about
+  0.5 s optimized, as before.
+- A rule from one week's numbers can split them where the person
+  wouldn't ("over 1,000" when they meant "over 2,000"): the approval and
+  the steps say it in words, as for any rule.
+
 ## Not built yet
-- Rules on numbers ("amount over 1,000") and dates.
+- Rules that combine two fields ("unpaid and over 1,000"), and ranges
+  ("in the next 7 days").
 - Loops nested in loops, and blocks longer than 4 calls.
 - Offering the save from the desktop when a repeat is noticed: today the
   task's activity says it.
