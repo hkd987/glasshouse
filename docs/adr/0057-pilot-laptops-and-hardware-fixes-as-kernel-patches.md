@@ -1,6 +1,6 @@
 # 0057. Pilot laptops, and hardware fixes as kernel patches
 
-Status: **Accepted** (2026-10-24); slice 1 in progress. The owner,
+Status: **Accepted** (2026-10-24); slice 1 built. The owner,
 after ADR 0056: "Ya let's pick laptops that already support FreeBSD then the
 hardware fixes should be written as kernel patches that apply." That settles
 the question ADR 0056's follow-up left open: hardware fixes may be kernel
@@ -165,6 +165,48 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
    the host can't build the base system's modules.
 2. The agent's tool to write a patch, and the build service.
 3. The store's category, the review queue, and IT's setting.
+
+## Slice 1, as built (2026-10-24)
+- **The first patch builds.** Upstream's fix, applied to 15.1's source,
+  rebuilds GENERIC and `if_iwlwifi.ko`: a 39 MB bundle. The build service
+  stand-in builds the release's kernel once (`zroot/kpatch/kernel@15.1-RELEASE`,
+  1 h 36 min in the emulated VM). On top of it the patch rebuilds three
+  objects and relinks: the whole bundle, kernel and driver, in 9 min 47 s.
+  The patched kernel is the same size as the one a full build of the patch
+  made (27,877,976 bytes).
+- **The owner asked for formal checks and safety for people.**
+  `HardwarePatch.tla` follows a patch past its first start, and
+  `HardwarePatchStack.tla` keeps patches on top of each other. They found
+  three things the first code got wrong. Each is now an Old switch that
+  fails, a test, and a fix:
+  - kept at the first start (`noProbation`): a patch that panics later is
+    then what every start uses;
+  - trust checked only at setup (`trustOnceAtApply`);
+  - a second kernel patch replacing the first (`stackBlind`).
+
+  The models also reject two other ways to do probation, the start-once
+  set at every start or whenever glassd stops: either way, a crash starts
+  the patch again.
+- **In the VM** (`tests/hardware/patch-vm.sh`, 2026-10-24):
+  - the Wi-Fi fix started on its kernel, passed the check (the patched
+    driver loads only against the patched kernel), came back after a
+    clean restart on probation, and was kept after its minutes of use;
+  - a second kernel patch was refused, the fix was taken out, and the next
+    start was the VM's own environment, which removed the patch's;
+  - a module that panics as it loads cost one restart;
+  - one that panics three minutes in, on probation, restarted the VM on
+    its own environment by itself;
+  - one that hangs the start was rolled back after a power cut;
+  - tampered, untrusted, community and wrong-release bundles were refused,
+    each on the audit record;
+  - the audit log verified after each.
+- **Not yet like the release:**
+  - The patched kernel is built without CTF (`MK_CTF=no`, for speed), so
+    DTrace has no type information on it. The release's kernel has it,
+    which is the 1.5 MB difference in size. The build service should
+    build with CTF.
+  - Probation counts minutes awake, not sleeps. A patch for sleep should
+    count resumes too, once sleep works on the certified models (PM-5).
 
 ## Consequences
 - **Community patches are a deliberate exception to containment** (PA-3):
