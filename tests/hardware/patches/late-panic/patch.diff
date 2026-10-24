@@ -1,0 +1,71 @@
+A module that loads and panics three minutes later, on purpose: the kernel
+patch that passes the check at the start and crashes once the computer is in
+use, for tests/hardware/patch-vm.sh (ADR 0057). Never shipped.
+
+diff --git b/sys/dev/glass_late_panic/glass_late_panic.c b/sys/dev/glass_late_panic/glass_late_panic.c
+new file mode 100644
+index 0000000..2fd699f
+--- /dev/null
++++ b/sys/dev/glass_late_panic/glass_late_panic.c
+@@ -0,0 +1,50 @@
++/*
++ * A module that loads and then panics a while later, on purpose: the kernel
++ * patch that passes glassd's check as the computer starts and crashes once
++ * it's in use, as a driver might at its first sleep (ADR 0057,
++ * tests/hardware/patch-vm.sh). Never shipped.
++ */
++#include <sys/param.h>
++#include <sys/callout.h>
++#include <sys/errno.h>
++#include <sys/kernel.h>
++#include <sys/module.h>
++#include <sys/systm.h>
++
++static struct callout glass_late_panic_callout;
++static int glass_late_panic_secs = 180;
++TUNABLE_INT("debug.glass_late_panic_secs", &glass_late_panic_secs);
++
++static void
++glass_late_panic_fire(void *arg __unused)
++{
++	panic("glass_late_panic: panics %d seconds after it loads, on purpose (ADR 0057)",
++	    glass_late_panic_secs);
++}
++
++static int
++glass_late_panic_modevent(module_t mod __unused, int type, void *arg __unused)
++{
++	switch (type) {
++	case MOD_LOAD:
++		callout_init(&glass_late_panic_callout, 1);
++		callout_reset(&glass_late_panic_callout, glass_late_panic_secs * hz,
++		    glass_late_panic_fire, NULL);
++		printf("glass_late_panic: panics in %d seconds, on purpose (ADR 0057)\n",
++		    glass_late_panic_secs);
++		return (0);
++	case MOD_UNLOAD:
++		callout_drain(&glass_late_panic_callout);
++		return (0);
++	default:
++		return (EOPNOTSUPP);
++	}
++}
++
++static moduledata_t glass_late_panic_mod = {
++	"glass_late_panic",
++	glass_late_panic_modevent,
++	NULL
++};
++DECLARE_MODULE(glass_late_panic, glass_late_panic_mod, SI_SUB_DRIVERS, SI_ORDER_ANY);
++MODULE_VERSION(glass_late_panic, 1);
+diff --git b/sys/modules/glass_late_panic/Makefile b/sys/modules/glass_late_panic/Makefile
+new file mode 100644
+index 0000000..37448ed
+--- /dev/null
++++ b/sys/modules/glass_late_panic/Makefile
+@@ -0,0 +1,5 @@
++.PATH: ${SYSDIR}/dev/glass_late_panic
++
++KMOD=	glass_late_panic
++SRCS=	glass_late_panic.c
++.include <bsd.kmod.mk>

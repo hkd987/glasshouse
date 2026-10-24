@@ -2,8 +2,10 @@
 (***************************************************************************)
 (* A kernel patch tried in a boot environment of its own (ADR 0057),       *)
 (* through power cuts and crashes at any step, restarts the person makes,  *)
-(* and a patch that works, panics as the computer starts, or fails         *)
-(* glassd's check.                                                          *)
+(* glassd restarting by itself, IT taking back its trust in the patch, and *)
+(* a patch that works, panics as the computer starts, fails glassd's      *)
+(* check, or panics later, once the computer is in use (at the first      *)
+(* sleep, say).                                                            *)
 (*                                                                         *)
 (* The code:                                                               *)
 (*  - crates/svc/runtime/src/hwpatch.rs `apply`: the trial's record        *)
@@ -14,75 +16,119 @@
 (*  - The loader starts the environment set to start once and clears that  *)
 (*    as it does; otherwise the permanent one. Start.                      *)
 (*  - A patch that panics restarts the computer at once (the image sets    *)
-(*    debug.debugger_on_panic=0). Panic.                                   *)
+(*    debug.debugger_on_panic=0). Panic, LatePanic.                        *)
 (*  - `at_start`, as glassd starts: it reads the record, which environment *)
-(*    runs and whether the trial is still set to start once, and confirms  *)
-(*    (`bectl activate`), says it failed, says it rolled back, or finishes  *)
-(*    staging that a crash cut short. GlassdStart.                          *)
-(*  - `cancel`: the person takes the trial back before restarting. Cancel. *)
-(*  - The environment of a trial that failed is removed once the computer  *)
-(*    isn't running from it. Remove.                                       *)
+(*    runs and whether the trial is still set to start once. On the        *)
+(*    trial's environment it checks the patch and puts it on probation;    *)
+(*    on the one before, it says the trial rolled back, or finishes        *)
+(*    staging that a crash cut short. GlassdStart.                         *)
+(*  - Probation: the patch's environment is not the permanent one until    *)
+(*    the computer has been in use on it for a while (`tick`). The next    *)
+(*    start is set to it, once, only as the computer shuts down cleanly    *)
+(*    (`at_shutdown`, from rc.d's shutdown through `glassctl system        *)
+(*    shutdown`), so a crash or a power cut on probation starts the one    *)
+(*    before. Shutdown, Tick, Promote (`bectl activate`), Confirm.         *)
+(*  - The check again, with the keys and the community setting in force    *)
+(*    now: a patch IT no longer allows fails. FailOnProbation.             *)
+(*  - `cancel`: the person takes the trial back before restarting, or on   *)
+(*    probation. Cancel, TakeBack.                                         *)
+(*  - `undo`: the person takes a kept patch out: the environment before is *)
+(*    the permanent one again (UndoActivate), then the record (UndoEnd).   *)
+(*  - The environment of a trial that ended without being kept is removed  *)
+(*    once the computer isn't running from it. Remove.                     *)
 (*                                                                         *)
 (* glassd's state, the record and the audit log, is on a dataset of its    *)
-(* own, outside the environments (post-install.sh). Old = {"stateInEnv"}   *)
-(* puts it inside them, as it was: what glassd records on the running     *)
-(* environment after the new one is made isn't in the new one, so making  *)
-(* that one permanent loses it (AU-1). Old = {"activateFirst"} sets the    *)
-(* start-once before the modules are all written, and {"permanent"} uses   *)
-(* `bectl activate` for the trial: a patch that panics then starts the    *)
-(* computer into a panic every time.                                      *)
+(* own, outside the environments (post-install.sh).                        *)
+(*                                                                         *)
+(* Old switches, each a version that was wrong:                           *)
+(*  - "stateInEnv": glassd's state inside the environments, as it was:     *)
+(*    what glassd records on the running environment after the new one is *)
+(*    made isn't in the new one, so making that one permanent loses it     *)
+(*    (AU-1).                                                              *)
+(*  - "activateFirst": the start-once set before the modules are all       *)
+(*    written. "permanent": `bectl activate` for the trial, so a patch     *)
+(*    that panics starts the computer into a panic every time.             *)
+(*  - "noProbation": the patch kept at the first start that passes the     *)
+(*    check, as slice 1's first code did: one that panics later (at the    *)
+(*    first sleep) is then what every start uses, and the computer panics  *)
+(*    again after every start.                                             *)
+(*  - "trustOnceAtApply": the keys and the community setting checked only  *)
+(*    when the patch is set up: IT turning them off before the restart     *)
+(*    doesn't stop it being kept.                                          *)
+(*  - "armAtStart", "armAtGlassdStop": probation with the start-once set   *)
+(*    at every start, or whenever glassd stops: a crash then starts the    *)
+(*    patch again.                                                         *)
 (***************************************************************************)
 EXTENDS Naturals
 
 CONSTANTS
     MaxTrials,     \* patches tried, one after another
-    MaxRestarts,   \* power cuts and crashes, at any step
+    MaxRestarts,   \* power cuts, crashes, restarts the person makes, glassd's own
     MaxRecords,    \* audit records agents write meanwhile
+    Probation,     \* ticks of use on the patch before it's kept
     Old
 
 Envs == {"o", "t"}   \* the environment the computer ran from, the trial's
-Records == {"none", "staging", "staged", "confirmed", "failed", "rolledback", "cancelled"}
+Records == {"none", "staging", "staged", "probation", "confirmed", "failed",
+            "rolledback", "cancelled", "undone"}
+Ended == {"confirmed", "failed", "rolledback", "cancelled", "undone"}
 
 VARIABLES
     running,    \* "off", or the environment the computer runs from
-    started,    \* glassd's start check ran since this start
+    started,    \* glassd's start check ran since glassd started
+    closing,    \* the computer is shutting down cleanly
     env,        \* the trial environment: "none", "partial", "complete"
     once,       \* the next start is the trial's, once
     perm,       \* the environment every start uses otherwise
     record,     \* the trial's record, where glassd keeps it
     recordT,    \* with "stateInEnv": the copy inside the trial environment
-    step,       \* how far glassd's `apply` got: "idle", "begun", "made", "written", "activated"
-    quality,    \* what the patch being tried does: "good", "panics", "unhealthy"
+    step,       \* glassd's `apply` or `undo` under way: "idle", "begun",
+                \* "made", "written", "activated", "undoing"
+    quality,    \* "good", "panics" (as it starts), "unhealthy" (fails the
+                \* check), "panicsLater" (once in use)
+    allowed,    \* the keys and the community setting in force allow it
+    ran,        \* ticks the computer was in use on it
     trials,
     restarts,
     records,    \* audit records agents wrote
     onlyInO,    \* with "stateInEnv": a record written on o after t was made
-    lost        \* a record that was written is gone
+    lost,       \* a record that was written is gone
+    earlyCrash, \* the computer stopped while in use on the patch, before
+                \* its probation's worth of use, not shutting down
+    keptRevoked \* the patch was made permanent while IT didn't allow it
 
-vars == <<running, started, env, once, perm, record, recordT, step, quality,
-          trials, restarts, records, onlyInO, lost>>
+vars == <<running, started, closing, env, once, perm, record, recordT, step,
+          quality, allowed, ran, trials, restarts, records, onlyInO, lost,
+          earlyCrash, keptRevoked>>
 
 TypeOK ==
     /\ running \in {"off"} \cup Envs
-    /\ started \in BOOLEAN
+    /\ started \in BOOLEAN /\ closing \in BOOLEAN
     /\ env \in {"none", "partial", "complete"}
     /\ once \in BOOLEAN
     /\ perm \in Envs
     /\ record \in Records /\ recordT \in Records
-    /\ step \in {"idle", "begun", "made", "written", "activated"}
-    /\ quality \in {"good", "panics", "unhealthy"}
+    /\ step \in {"idle", "begun", "made", "written", "activated", "undoing"}
+    /\ quality \in {"good", "panics", "unhealthy", "panicsLater"}
+    /\ allowed \in BOOLEAN
+    /\ ran \in 0..Probation
     /\ trials \in 0..MaxTrials
     /\ restarts \in 0..MaxRestarts
     /\ records \in 0..MaxRecords
-    /\ onlyInO \in BOOLEAN
-    /\ lost \in BOOLEAN
+    /\ onlyInO \in BOOLEAN /\ lost \in BOOLEAN
+    /\ earlyCrash \in BOOLEAN /\ keptRevoked \in BOOLEAN
 
 Init ==
-    /\ running = "o" /\ started = TRUE
+    /\ running = "o" /\ started = TRUE /\ closing = FALSE
     /\ env = "none" /\ once = FALSE /\ perm = "o"
     /\ record = "none" /\ recordT = "none" /\ step = "idle"
-    /\ quality = "good" /\ trials = 0
+    /\ quality = "good" /\ allowed = TRUE /\ ran = 0 /\ trials = 0
     /\ restarts = 0 /\ records = 0 /\ onlyInO = FALSE /\ lost = FALSE
+    /\ earlyCrash = FALSE /\ keptRevoked = FALSE
+
+Probing == "noProbation" \notin Old
+\* What the check takes into account: the keys and setting now in force.
+Trusted == allowed \/ "trustOnceAtApply" \in Old
 
 \* The record glassd reads where it runs.
 Seen == IF "stateInEnv" \in Old /\ running = "t" THEN recordT ELSE record
@@ -101,18 +147,33 @@ Write(r) ==
 Audit ==
     onlyInO' = (onlyInO \/ ("stateInEnv" \in Old /\ running = "o" /\ env # "none"))
 
+\* The trial's environment made permanent: with glassd's state inside the
+\* environments, what was written on o since t was made is gone.
+MakePermanent ==
+    /\ perm' = "t"
+    /\ lost' = (lost \/ onlyInO)
+    /\ keptRevoked' = (keptRevoked \/ ~allowed)
+
+\* The computer stops, as it crashes or loses power or panics.
+Down ==
+    /\ running' = "off" /\ started' = FALSE /\ closing' = FALSE /\ step' = "idle"
+    /\ earlyCrash' = (earlyCrash \/ (running = "t" /\ ran < Probation /\ ~closing))
+
 -----------------------------------------------------------------------------
 \* `apply`, step by step, on the running environment, with no trial open.
+\* It refuses a patch the keys or the community setting don't allow.
 BeginStage ==
-    /\ running = "o" /\ started /\ step = "idle" /\ trials < MaxTrials
-    /\ Seen \in {"none", "failed", "rolledback", "cancelled", "confirmed"}
+    /\ running = "o" /\ started /\ ~closing /\ step = "idle" /\ trials < MaxTrials
+    /\ Seen \in {"none", "failed", "rolledback", "cancelled", "undone"}
     /\ perm = "o" /\ env = "none"
     /\ Write("staging")
     /\ step' = "begun"
-    /\ quality' \in {"good", "panics", "unhealthy"}
+    /\ quality' \in {"good", "panics", "unhealthy", "panicsLater"}
+    /\ allowed' = TRUE /\ ran' = 0 /\ earlyCrash' = FALSE
     /\ trials' = trials + 1
     /\ Audit
-    /\ UNCHANGED <<running, started, env, once, perm, restarts, records, lost>>
+    /\ UNCHANGED <<running, started, closing, env, once, perm, restarts, records,
+                   lost, keptRevoked>>
 
 CreateEnv ==
     /\ running = "o" /\ step = "begun"
@@ -120,16 +181,18 @@ CreateEnv ==
     \* The copy inside t is the record as it was when t was made.
     /\ recordT' = record
     /\ step' = "made"
-    /\ UNCHANGED <<running, started, once, perm, record, quality, trials, restarts,
-                   records, onlyInO, lost>>
+    /\ UNCHANGED <<running, started, closing, once, perm, record, quality, allowed,
+                   ran, trials, restarts, records, onlyInO, lost, earlyCrash,
+                   keptRevoked>>
 
 WriteModules ==
     /\ running = "o"
     /\ IF "activateFirst" \in Old THEN step = "activated" ELSE step = "made"
     /\ env' = "complete"
     /\ step' = "written"
-    /\ UNCHANGED <<running, started, once, perm, record, recordT, quality,
-                   trials, restarts, records, onlyInO, lost>>
+    /\ UNCHANGED <<running, started, closing, once, perm, record, recordT, quality,
+                   allowed, ran, trials, restarts, records, onlyInO, lost,
+                   earlyCrash, keptRevoked>>
 
 ActivateOnce ==
     /\ running = "o"
@@ -138,50 +201,93 @@ ActivateOnce ==
        THEN /\ perm' = "t" /\ UNCHANGED once
        ELSE /\ once' = TRUE /\ UNCHANGED perm
     /\ step' = "activated"
-    /\ UNCHANGED <<running, started, env, record, recordT, quality, trials,
-                   restarts, records, onlyInO, lost>>
+    /\ UNCHANGED <<running, started, closing, env, record, recordT, quality, allowed,
+                   ran, trials, restarts, records, onlyInO, lost, earlyCrash,
+                   keptRevoked>>
 
 MarkStaged ==
     /\ running = "o" /\ step = IF "activateFirst" \in Old THEN "written" ELSE "activated"
     /\ Write("staged")
     /\ step' = "idle"
     /\ Audit
-    /\ UNCHANGED <<running, started, env, once, perm, quality, trials, restarts,
-                   records, lost>>
+    /\ UNCHANGED <<running, started, closing, env, once, perm, quality, allowed, ran,
+                   trials, restarts, records, lost, earlyCrash, keptRevoked>>
 
 \* The person takes the trial back before restarting.
 Cancel ==
-    /\ running = "o" /\ started /\ step = "idle" /\ Seen = "staged" /\ once
+    /\ running = "o" /\ started /\ ~closing /\ step = "idle" /\ Seen = "staged" /\ once
     /\ once' = FALSE
     /\ Write("cancelled")
     /\ Audit
-    /\ UNCHANGED <<running, started, env, perm, step, quality, trials, restarts,
-                   records, lost>>
+    /\ UNCHANGED <<running, started, closing, env, perm, step, quality, allowed, ran,
+                   trials, restarts, records, lost, earlyCrash, keptRevoked>>
 
 \* Agents keep working, and glassd keeps writing their records.
 AgentRecord ==
     /\ running # "off" /\ records < MaxRecords
     /\ records' = records + 1
     /\ Audit
-    /\ UNCHANGED <<running, started, env, once, perm, record, recordT, step,
-                   quality, trials, restarts, lost>>
+    /\ UNCHANGED <<running, started, closing, env, once, perm, record, recordT, step,
+                   quality, allowed, ran, trials, restarts, lost, earlyCrash,
+                   keptRevoked>>
+
+\* IT stops trusting the patch's key, or stops allowing community patches.
+Revoke ==
+    /\ allowed /\ record # "none"
+    /\ allowed' = FALSE
+    /\ UNCHANGED <<running, started, closing, env, once, perm, record, recordT, step,
+                   quality, ran, trials, restarts, records, onlyInO, lost,
+                   earlyCrash, keptRevoked>>
 
 -----------------------------------------------------------------------------
 \* A power cut or a crash, at any step: memory is lost, the disk is kept.
 Stop ==
     /\ running # "off" /\ restarts < MaxRestarts
-    /\ running' = "off" /\ started' = FALSE
-    /\ step' = "idle"
+    /\ Down
     /\ restarts' = restarts + 1
-    /\ UNCHANGED <<env, once, perm, record, recordT, quality, trials, records,
-                   onlyInO, lost>>
+    /\ UNCHANGED <<env, once, perm, record, recordT, quality, allowed, ran, trials,
+                   records, onlyInO, lost, keptRevoked>>
+
+\* The person restarts or shuts down. rc.d stops glassd as the computer
+\* shuts down (`glassctl system shutdown`): on probation, glassd sets the
+\* next start to the patch's environment, once.
+Shutdown ==
+    /\ running # "off" /\ started /\ ~closing /\ step = "idle"
+    /\ restarts < MaxRestarts
+    /\ closing' = TRUE
+    /\ IF running = "t" /\ Seen = "probation" /\ Probing THEN once' = TRUE
+       ELSE UNCHANGED once
+    /\ restarts' = restarts + 1
+    /\ UNCHANGED <<running, started, env, perm, record, recordT, step, quality,
+                   allowed, ran, trials, records, onlyInO, lost, earlyCrash,
+                   keptRevoked>>
 
 \* The person restarts to try a staged patch, when glassd tells them to.
 TryIt ==
-    /\ running = "o" /\ started /\ step = "idle" /\ Seen = "staged"
-    /\ running' = "off" /\ started' = FALSE
-    /\ UNCHANGED <<env, once, perm, record, recordT, step, quality, trials,
-                   restarts, records, onlyInO, lost>>
+    /\ running = "o" /\ started /\ ~closing /\ step = "idle" /\ Seen = "staged"
+    /\ closing' = TRUE
+    /\ UNCHANGED <<running, started, env, once, perm, record, recordT, step, quality,
+                   allowed, ran, trials, restarts, records, onlyInO, lost,
+                   earlyCrash, keptRevoked>>
+
+\* The rest of the shutdown, then off.
+Off ==
+    /\ running # "off" /\ closing
+    /\ Down
+    /\ UNCHANGED <<env, once, perm, record, recordT, quality, allowed, ran, trials,
+                   restarts, records, onlyInO, lost, keptRevoked>>
+
+\* glassd alone stops, crashing or stopped by hand, and daemon(8) or the
+\* person starts it again; the computer keeps running. With
+\* "armAtGlassdStop", glassd sets the next start to the patch as it stops.
+GlassdRestart ==
+    /\ running # "off" /\ started /\ ~closing /\ restarts < MaxRestarts
+    /\ started' = FALSE /\ step' = "idle"
+    /\ IF "armAtGlassdStop" \in Old /\ running = "t" /\ Seen = "probation"
+       THEN once' = TRUE ELSE UNCHANGED once
+    /\ restarts' = restarts + 1
+    /\ UNCHANGED <<running, closing, env, perm, record, recordT, quality, allowed,
+                   ran, trials, records, onlyInO, lost, earlyCrash, keptRevoked>>
 
 \* The loader: the environment set to start once, clearing that, else the
 \* permanent one.
@@ -190,76 +296,192 @@ Start ==
     /\ IF once
        THEN /\ running' = "t" /\ once' = FALSE
        ELSE /\ running' = perm /\ UNCHANGED once
-    /\ UNCHANGED <<started, env, perm, record, recordT, step, quality, trials,
-                   restarts, records, onlyInO, lost>>
+    /\ UNCHANGED <<started, closing, env, perm, record, recordT, step, quality,
+                   allowed, ran, trials, restarts, records, onlyInO, lost,
+                   earlyCrash, keptRevoked>>
 
 \* The patch's module panics as the trial starts: the computer restarts at
 \* once. Not counted against MaxRestarts: it is the patch's, not anyone's.
 Panic ==
     /\ running = "t" /\ ~started /\ quality = "panics" /\ env # "none"
-    /\ running' = "off"
-    /\ UNCHANGED <<started, env, once, perm, record, recordT, step, quality,
-                   trials, restarts, records, onlyInO, lost>>
+    /\ Down
+    /\ UNCHANGED <<env, once, perm, record, recordT, quality, allowed, ran, trials,
+                   restarts, records, onlyInO, lost, keptRevoked>>
+
+\* The patch panics once the computer is in use on it, at any time.
+LatePanic ==
+    /\ running = "t" /\ started /\ quality = "panicsLater"
+    /\ Down
+    /\ UNCHANGED <<env, once, perm, record, recordT, quality, allowed, ran, trials,
+                   restarts, records, onlyInO, lost, keptRevoked>>
+
+\* The computer in use on the patch for a while (`tick`).
+Tick ==
+    /\ running = "t" /\ started /\ ~closing /\ ran < Probation
+    /\ Seen \in {"probation", "confirmed"}
+    /\ ran' = ran + 1
+    /\ UNCHANGED <<running, started, closing, env, once, perm, record, recordT, step,
+                   quality, allowed, trials, restarts, records, onlyInO, lost,
+                   earlyCrash, keptRevoked>>
 
 \* glassd's check as it starts.
 GlassdStart ==
     /\ running # "off" /\ ~started
     /\ ~(running = "t" /\ quality = "panics")
     /\ started' = TRUE
-    /\ LET r == Seen IN
+    /\ LET r == Seen
+           passes == quality \in {"good", "panicsLater"} /\ env = "complete" /\ Trusted
+       IN
        \/ \* Running from the trial, staged or (a crash after the start-once
           \* was set) still staging: check the patch.
           /\ running = "t" /\ r \in {"staging", "staged"}
-          /\ IF quality = "good" /\ env = "complete"
-             THEN /\ perm' = "t" /\ Write("confirmed")
-                  /\ lost' = (lost \/ onlyInO)
-             ELSE /\ Write("failed") /\ UNCHANGED <<perm, lost>>
+          /\ IF passes /\ ~Probing
+             THEN /\ MakePermanent /\ Write("confirmed")
+                  /\ UNCHANGED once
+             ELSE IF passes
+             THEN /\ Write("probation")
+                  /\ once' = ("armAtStart" \in Old)
+                  /\ UNCHANGED <<perm, lost, keptRevoked>>
+             ELSE /\ Write("failed")
+                  /\ UNCHANGED <<once, perm, lost, keptRevoked>>
           /\ Audit
+       \/ \* On probation, started again (a clean restart, or glassd's own):
+          \* the start-once is cleared, so a crash from here goes back.
+          /\ running = "t" /\ r = "probation" /\ perm = "o"
+          /\ once' = ("armAtStart" \in Old)
+          /\ UNCHANGED <<perm, record, recordT, lost, onlyInO, keptRevoked>>
+       \/ \* Made permanent, and a crash before the record said so: it was
+          \* kept.
+          /\ running = "t" /\ r = "probation" /\ perm = "t"
+          /\ Write("confirmed")
+          /\ Audit
+          /\ UNCHANGED <<once, perm, lost, keptRevoked>>
        \/ \* On the environment it came from, the trial still to come.
           /\ running = "o" /\ r \in {"staging", "staged"} /\ once
           /\ Write("staged")
-          /\ UNCHANGED <<perm, lost, onlyInO>>
+          /\ UNCHANGED <<once, perm, lost, onlyInO, keptRevoked>>
        \/ \* On the environment it came from, the trial's start over: it
-          \* didn't come back, or staging never finished.
-          /\ running = "o" /\ r \in {"staging", "staged"} /\ ~once
+          \* didn't come back, staging never finished, or it stopped on
+          \* probation (a crash, a panic or a power cut).
+          /\ running = "o" /\ r \in {"staging", "staged", "probation"} /\ ~once
           /\ Write("rolledback")
           /\ Audit
-          /\ UNCHANGED <<perm, lost>>
-       \/ /\ r \in {"none", "confirmed", "failed", "rolledback", "cancelled"}
-          /\ UNCHANGED <<perm, record, recordT, lost, onlyInO>>
-    /\ UNCHANGED <<running, env, once, step, quality, trials, restarts, records>>
+          /\ UNCHANGED <<once, perm, lost, keptRevoked>>
+       \/ \* Back on the environment before a kept patch, which isn't the
+          \* permanent one any more: an undo a crash cut short.
+          /\ running = "o" /\ r = "confirmed" /\ perm = "o"
+          /\ Write("undone")
+          /\ Audit
+          /\ UNCHANGED <<once, perm, lost, keptRevoked>>
+       \/ /\ \/ r \in {"none", "failed", "rolledback", "cancelled", "undone"}
+             \/ r = "confirmed" /\ ~(running = "o" /\ perm = "o")
+             \/ r = "probation" /\ running = "o" /\ once
+          /\ UNCHANGED <<once, perm, record, recordT, lost, onlyInO, keptRevoked>>
+    /\ UNCHANGED <<running, closing, env, step, quality, allowed, ran, trials,
+                   restarts, records, earlyCrash>>
+
+\* Probation served: the patch's environment is the permanent one (`bectl
+\* activate`), then the record says so; a crash in between and the next
+\* start, from that environment, confirms it.
+Promote ==
+    /\ running = "t" /\ started /\ ~closing /\ step = "idle" /\ Probing
+    /\ Seen = "probation" /\ ran = Probation /\ perm = "o" /\ Trusted
+    /\ MakePermanent
+    /\ UNCHANGED <<running, started, closing, env, once, record, recordT, step,
+                   quality, allowed, ran, trials, restarts, records, onlyInO,
+                   earlyCrash>>
+
+Confirm ==
+    /\ running = "t" /\ started /\ Seen = "probation" /\ perm = "t"
+    /\ Write("confirmed")
+    /\ Audit
+    /\ UNCHANGED <<running, started, closing, env, once, perm, step, quality, allowed,
+                   ran, trials, restarts, records, lost, earlyCrash, keptRevoked>>
+
+\* On probation, the patch no longer allowed: it fails, and the next start
+\* is the one before.
+FailOnProbation ==
+    /\ running = "t" /\ started /\ Seen = "probation" /\ ~Trusted
+    /\ Write("failed")
+    /\ perm' = "o" /\ once' = FALSE
+    /\ Audit
+    /\ UNCHANGED <<running, started, closing, env, step, quality, allowed, ran,
+                   trials, restarts, records, lost, earlyCrash, keptRevoked>>
+
+\* The person takes the patch back on probation.
+TakeBack ==
+    /\ running = "t" /\ started /\ ~closing /\ step = "idle"
+    /\ Seen = "probation" /\ perm = "o"
+    /\ Write("cancelled")
+    /\ once' = FALSE
+    /\ Audit
+    /\ UNCHANGED <<running, started, closing, env, perm, step, quality, allowed, ran,
+                   trials, restarts, records, lost, earlyCrash, keptRevoked>>
+
+\* The person takes a kept patch out: the environment before is the
+\* permanent one again, then the record says so.
+UndoActivate ==
+    /\ running = "t" /\ started /\ ~closing /\ step = "idle"
+    /\ Seen = "confirmed" /\ perm = "t"
+    /\ perm' = "o" /\ step' = "undoing"
+    /\ UNCHANGED <<running, started, closing, env, once, record, recordT, quality,
+                   allowed, ran, trials, restarts, records, onlyInO, lost,
+                   earlyCrash, keptRevoked>>
+
+UndoEnd ==
+    /\ step = "undoing"
+    /\ Write("undone")
+    /\ step' = "idle"
+    /\ Audit
+    /\ UNCHANGED <<running, started, closing, env, once, perm, quality, allowed, ran,
+                   trials, restarts, records, lost, earlyCrash, keptRevoked>>
 
 \* The environment of a trial that ended without being kept is removed once
 \* nothing runs from it or will start it.
 Remove ==
     /\ env # "none" /\ running = "o" /\ started /\ step = "idle"
     /\ perm = "o" /\ ~once
-    /\ Seen \in {"failed", "rolledback", "cancelled"}
+    /\ Seen \in {"failed", "rolledback", "cancelled", "undone"}
     /\ env' = "none"
-    /\ UNCHANGED <<running, started, once, perm, record, recordT, step, quality,
-                   trials, restarts, records, onlyInO, lost>>
+    /\ UNCHANGED <<running, started, closing, once, perm, record, recordT, step,
+                   quality, allowed, ran, trials, restarts, records, onlyInO, lost,
+                   earlyCrash, keptRevoked>>
 
 Next ==
     \/ BeginStage \/ CreateEnv \/ WriteModules \/ ActivateOnce \/ MarkStaged
-    \/ Cancel \/ AgentRecord
-    \/ Stop \/ TryIt \/ Start \/ Panic \/ GlassdStart \/ Remove
+    \/ Cancel \/ AgentRecord \/ Revoke
+    \/ Stop \/ Shutdown \/ TryIt \/ Off \/ GlassdRestart \/ Start \/ Panic
+    \/ LatePanic \/ Tick \/ GlassdStart \/ Promote \/ Confirm \/ FailOnProbation
+    \/ TakeBack \/ UndoActivate \/ UndoEnd \/ Remove
 
-\* The person restarts to try the patch (once it's staged); the computer
-\* starts, glassd checks, a panic restarts it.
+\* The person restarts to try the patch (once it's staged) and uses the
+\* computer; it starts, glassd checks, a panic restarts it.
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(Start) /\ WF_vars(Panic) /\ WF_vars(GlassdStart)
         /\ WF_vars(CreateEnv) /\ WF_vars(WriteModules) /\ WF_vars(ActivateOnce)
-        /\ WF_vars(MarkStaged) /\ WF_vars(TryIt)
+        /\ WF_vars(MarkStaged) /\ WF_vars(TryIt) /\ WF_vars(Off)
+        /\ WF_vars(Tick) /\ WF_vars(Promote) /\ WF_vars(Confirm)
+        /\ WF_vars(FailOnProbation) /\ WF_vars(UndoEnd) /\ WF_vars(Remove)
 
 -----------------------------------------------------------------------------
-\* The environment every start uses runs: o, or a trial that started and
-\* passed glassd's check.
+\* The environment every start uses starts: o, or a trial that passed
+\* glassd's check (one that panics later still starts).
 ADR0057_TheComputerAlwaysStarts ==
-    perm = "o" \/ (env = "complete" /\ quality = "good")
+    perm = "o" \/ (env = "complete" /\ quality \in {"good", "panicsLater"})
 
-\* A trial becomes permanent only after glassd confirmed it.
-ADR0057_OnlyAConfirmedPatchIsKept ==
-    perm = "t" => (record = "confirmed" \/ recordT = "confirmed")
+\* A trial becomes permanent only once the computer was in use on it for
+\* its probation.
+ADR0057_KeptOnlyAfterItsProbation ==
+    perm = "t" => ran = Probation
+
+\* A crash, panic or power cut while the computer is in use on a patch on
+\* probation goes back: the patch isn't what every start uses, and the
+\* computer doesn't start it again.
+ADR0057_ACrashOnProbationGoesBack ==
+    earlyCrash => (perm = "o" /\ running # "t" /\ (running = "off" => ~once))
+
+\* A patch IT no longer allows is never made the one every start uses.
+ADR0057_NoPatchKeptOnceItsTrustIsGone == ~keptRevoked
 
 \* The computer never runs from an environment whose modules aren't all
 \* written.
@@ -269,9 +491,19 @@ ADR0057_NeverStartsAHalfWrittenEnvironment ==
 \* Every record glassd wrote is still there (AU-1).
 AU1_NoRecordLostToAnEnvironment == ~lost
 
-\* A staged patch ends, confirmed, failed or rolled back, once the person
-\* restarts.
+\* A staged patch ends, kept, failed, rolled back or taken back, once the
+\* person restarts and uses the computer.
 ADR0057_ATrialEnds ==
-    (record = "staged") ~> (record \in {"confirmed", "failed", "rolledback", "cancelled"})
+    (record = "staged") ~> (record \in Ended)
+
+\* After a crash on probation the trial ends, back on the environment
+\* before.
+ADR0057_ACrashOnProbationEndsIt ==
+    earlyCrash ~> (running = "o" /\ record \in Ended)
+
+\* A patch taken out leaves nothing behind once the computer is back on the
+\* environment before.
+ADR0057_AnUndoFinishes ==
+    (record = "undone" /\ running = "o") ~> (env = "none" \/ record # "undone")
 
 =============================================================================

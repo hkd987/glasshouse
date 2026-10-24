@@ -132,6 +132,10 @@ impl Handler for ControlApi {
             methods::HARDWARE_PATCH_CANCEL => {
                 to_result(&blocking(|| rt.hardware_patch_cancel(&caller))?)
             }
+            methods::HARDWARE_PATCH_UNDO => {
+                to_result(&blocking(|| rt.hardware_patch_undo(&caller))?)
+            }
+            methods::SYSTEM_SHUTDOWN => to_result(&blocking(|| rt.hardware_at_shutdown(&caller))?),
             methods::EVENTS_SUBSCRIBE => {
                 self.forward_events(caller, conn);
                 Ok(Value::Null)

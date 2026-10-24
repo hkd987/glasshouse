@@ -200,7 +200,7 @@ enum RoutineCommand {
 #[derive(Debug, Subcommand)]
 enum HardwareCommand {
     /// Kernel patches (root; ADR 0057): set one up to try at the next
-    /// start, see where it is, or take it back.
+    /// start, see where it is, take it back, or take a kept one out.
     #[command(subcommand)]
     Patch(PatchCommand),
 }
@@ -214,6 +214,9 @@ enum PatchCommand {
     Status,
     /// Take back a patch set up but not yet tried.
     Cancel,
+    /// Take out the patch the computer runs, on probation or kept: the
+    /// next start is from the boot environment before.
+    Undo,
 }
 
 #[derive(Debug, Subcommand)]
@@ -222,6 +225,9 @@ enum SystemCommand {
     Suspend,
     /// The machine woke: agents paused for sleep carry on.
     Resume,
+    /// The machine is shutting down cleanly: a kernel patch on probation
+    /// is started again by the next start (ADR 0057).
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -697,10 +703,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             until,
             timeout,
         } => wait(&ctl, &task, until, timeout).await,
+        Command::System(SystemCommand::Shutdown) => {
+            let _: Value = ctl.call(methods::SYSTEM_SHUTDOWN, Value::Null).await?;
+            Ok(())
+        }
         Command::System(cmd) => {
             let (method, verb) = match cmd {
                 SystemCommand::Suspend => (methods::SYSTEM_SUSPEND, "Paused"),
                 SystemCommand::Resume => (methods::SYSTEM_RESUME, "Resumed"),
+                SystemCommand::Shutdown => unreachable!("handled above"),
             };
             let result: PowerResult = ctl.call(method, Value::Null).await?;
             ctl.show(&result, |r| {
@@ -731,6 +742,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     ctl.call(methods::HARDWARE_PATCH_CANCEL, Value::Null)
                         .await?
                 }
+                PatchCommand::Undo => ctl.call(methods::HARDWARE_PATCH_UNDO, Value::Null).await?,
             };
             ctl.show(&status, render::patch_status)
         }

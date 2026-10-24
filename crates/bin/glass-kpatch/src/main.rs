@@ -72,6 +72,11 @@ struct PatchFile {
     targets: Vec<String>,
     #[serde(default)]
     requirements: Vec<String>,
+    /// The kept patches it was built on top of (ADR 0057): a computer
+    /// keeping one that rewrites the same files takes this one only if it
+    /// names that one here.
+    #[serde(default)]
+    includes: Vec<String>,
     /// The patch changes code the kernel is built with: the kernel is
     /// rebuilt with the image's configuration and carried too.
     #[serde(default)]
@@ -164,6 +169,7 @@ fn bundle(dir: &Path, modules_dir: &Path, key: &OrgKey) -> anyhow::Result<Bundle
         modules: listed,
         patch_sha256: sha256_hex(patch.as_bytes()),
         requirements: file.requirements,
+        includes: file.includes,
     };
     if !glass_managed::hwpatch::valid_id(&manifest.id) {
         bail!("{:?} isn't a patch id", manifest.id);

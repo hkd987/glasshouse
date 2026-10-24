@@ -1,0 +1,16 @@
+# A test fixture, never shipped: a module the loader loads at every start,
+# which never finishes loading (ADR 0057). After a power cut, the computer
+# must start on the boot environment before.
+id = "hang-test"
+revision = 1
+summary = "A module that hangs as it loads (a test)"
+release = "15.1-RELEASE"
+origin = "glasshouse"
+review = "reviewed"
+targets = []
+requirements = []
+
+[[module]]
+dir = "glass_hang_test"
+file = "glass_hang_test.ko"
+load_at_boot = true

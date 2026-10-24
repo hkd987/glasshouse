@@ -651,28 +651,45 @@ pub fn patch_status(status: &glass_api::PatchStatus) -> String {
 
     let mark = |state: TrialState| match state {
         TrialState::Kept => green("✓"),
-        TrialState::Staging | TrialState::Staged => orange("◉"),
+        TrialState::Staging | TrialState::Staged | TrialState::Probation => orange("◉"),
         TrialState::Failed | TrialState::RolledBack => red("✗"),
-        TrialState::Cancelled => dim("–"),
+        TrialState::Cancelled | TrialState::Undone => dim("–"),
     };
     let mut out = format!("Running from boot environment {}\n", bold(&status.running));
+    if !status.kept.is_empty() {
+        let kept: Vec<String> = status
+            .kept
+            .iter()
+            .map(|t| format!("{} r{}", t.id, t.revision))
+            .collect();
+        let _ = writeln!(out, "Kernel patches kept here: {}", kept.join(", "));
+    }
     match &status.trial {
         Some(t) if t.state.open() => {
+            let probation = if t.state == TrialState::Probation {
+                format!(
+                    " · {} of {} minutes of use",
+                    t.ran_minutes, t.probation_minutes
+                )
+            } else {
+                String::new()
+            };
             let _ = writeln!(
                 out,
-                "\n{} Kernel patch {} r{} · {}\n  {}\n  {} · boot environment {}, from {}\n  Modules: {}",
+                "\n{} Kernel patch {} r{} · {}\n  {}\n  {}{} · boot environment {}, from {}\n  Modules: {}",
                 mark(t.state),
                 bold(&t.id),
                 t.revision,
                 t.review,
                 t.summary,
                 t.state.label(),
+                probation,
                 t.env,
                 t.from_env,
                 t.modules.join(", ")
             );
         }
-        _ => out += "\nNo kernel patch waiting for a restart.\n",
+        _ => out += "\nNo kernel patch being tried.\n",
     }
     if !status.history.is_empty() {
         out += "\nTried before:\n";

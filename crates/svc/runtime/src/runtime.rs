@@ -104,6 +104,8 @@ pub struct Runtime {
     /// Kernel patches tried in boot environments of their own (ADR 0057):
     /// one at a time, under this lock.
     hardware: Mutex<crate::hwpatch::Store>,
+    /// glassd's start check of a kernel patch has run (ADR 0057).
+    hardware_started: AtomicBool,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -166,6 +168,7 @@ impl Runtime {
             device_settings: parts.settings,
             layers: LayerStore::new(parts.config.state_dir.join("layers")),
             hardware: Mutex::new(crate::hwpatch::Store::new(&parts.config.state_dir)),
+            hardware_started: AtomicBool::new(false),
             config: parts.config,
             settings: RwLock::new(Arc::new(Settings {
                 policy: Arc::new(parts.policy),
@@ -1470,7 +1473,7 @@ impl Runtime {
         }
         let bytes = std::fs::read(&request.bundle)
             .map_err(|e| RuntimeError::Invalid(format!("{}: {e}", request.bundle.display())))?;
-        let store = self.hardware.lock().unwrap_or_else(|p| p.into_inner());
+        let store = self.hardware_checked();
         crate::hwpatch::apply(
             &crate::hwpatch::System,
             &store,
@@ -1491,7 +1494,7 @@ impl Runtime {
                 "only root sees kernel patches".into(),
             ));
         }
-        let store = self.hardware.lock().unwrap_or_else(|p| p.into_inner());
+        let store = self.hardware_checked();
         Ok(crate::hwpatch::status(&crate::hwpatch::System, &store))
     }
 
@@ -1502,7 +1505,7 @@ impl Runtime {
                 "only root takes back kernel patches".into(),
             ));
         }
-        let store = self.hardware.lock().unwrap_or_else(|p| p.into_inner());
+        let store = self.hardware_checked();
         crate::hwpatch::cancel(&crate::hwpatch::System, &store, &mut |event| {
             self.audit(event);
         })
@@ -1510,13 +1513,71 @@ impl Runtime {
         Ok(crate::hwpatch::status(&crate::hwpatch::System, &store))
     }
 
-    /// As glassd starts: keeps, fails or rolls back the kernel patch the
-    /// computer was set to try (ADR 0057).
-    pub fn hardware_at_start(&self) {
-        let store = self.hardware.lock().unwrap_or_else(|p| p.into_inner());
-        crate::hwpatch::at_start(&crate::hwpatch::System, &store, &mut |event| {
+    /// Takes out the kernel patch the computer runs, on probation or kept:
+    /// the next start is from the boot environment before. Root only.
+    pub fn hardware_patch_undo(&self, caller: &Caller) -> Result<glass_api::PatchStatus> {
+        if !caller.is_admin() {
+            return Err(RuntimeError::PermissionDenied(
+                "only root takes out kernel patches".into(),
+            ));
+        }
+        let store = self.hardware_checked();
+        crate::hwpatch::undo(&crate::hwpatch::System, &store, &mut |event| {
             self.audit(event);
-        });
+        })
+        .map_err(RuntimeError::Conflict)?;
+        Ok(crate::hwpatch::status(&crate::hwpatch::System, &store))
+    }
+
+    /// As glassd starts: checks the kernel patch the computer was set to
+    /// try and puts it on probation, fails it, or rolls it back (ADR 0057).
+    pub fn hardware_at_start(&self) {
+        drop(self.hardware_checked());
+    }
+
+    /// The patch store, once glassd's start check has run: the check
+    /// clears the start-once [`Self::hardware_at_shutdown`] sets, so it
+    /// never runs after it.
+    fn hardware_checked(&self) -> std::sync::MutexGuard<'_, crate::hwpatch::Store> {
+        let store = self.hardware.lock().unwrap_or_else(|p| p.into_inner());
+        if !self.hardware_started.swap(true, Ordering::SeqCst) {
+            crate::hwpatch::at_start(
+                &crate::hwpatch::System,
+                &store,
+                &self.config.hardware,
+                &mut |event| {
+                    self.audit(event);
+                },
+            );
+        }
+        store
+    }
+
+    /// As the computer shuts down cleanly (rc.d): a kernel patch on
+    /// probation is started again by the next start, once. Root only.
+    pub fn hardware_at_shutdown(&self, caller: &Caller) -> Result<()> {
+        if !caller.is_admin() {
+            return Err(RuntimeError::PermissionDenied(
+                "only root says the computer is shutting down".into(),
+            ));
+        }
+        let store = self.hardware_checked();
+        crate::hwpatch::at_shutdown(&crate::hwpatch::System, &store).map_err(RuntimeError::Internal)
+    }
+
+    /// Minutes of use for a kernel patch on probation, which keep it once
+    /// they reach its probation (ADR 0057).
+    pub fn hardware_tick(&self, minutes: u64) {
+        let store = self.hardware_checked();
+        crate::hwpatch::tick(
+            &crate::hwpatch::System,
+            &store,
+            &self.config.hardware,
+            minutes,
+            &mut |event| {
+                self.audit(event);
+            },
+        );
     }
 
     pub fn audit_verify(&self, caller: &Caller) -> Result<AuditVerifyResult> {

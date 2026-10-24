@@ -1,0 +1,17 @@
+# A test fixture, never shipped: a module the loader loads at every start,
+# which passes glassd's check and panics three minutes later, once the
+# computer is in use (ADR 0057). On probation, that crash must go back to
+# the boot environment before.
+id = "late-panic"
+revision = 1
+summary = "A module that panics three minutes after it loads (a test)"
+release = "15.1-RELEASE"
+origin = "glasshouse"
+review = "reviewed"
+targets = []
+requirements = []
+
+[[module]]
+dir = "glass_late_panic"
+file = "glass_late_panic.ko"
+load_at_boot = true

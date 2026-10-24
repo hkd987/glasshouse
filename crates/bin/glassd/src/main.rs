@@ -536,6 +536,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             hardware: glass_runtime::hwpatch::HardwarePatches {
                 keys: config.hardware.keys.clone(),
                 community: config.hardware.community,
+                probation_minutes: config.hardware.probation_minutes,
             },
         },
         policy: loaded.policy.clone(),
@@ -695,12 +696,27 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // back before anything that follows them is applied (ADR 0031).
     runtime.keep_seat_in(run_dir.join("seat"));
 
-    // A kernel patch the computer was set to try: kept if it started on it
-    // and it passes its check, rolled back if it came back without it
-    // (ADR 0057). Off the start path: the check loads modules.
+    // A kernel patch the computer was set to try: on probation if it
+    // started on it and it passes its check, rolled back if it came back
+    // without it (ADR 0057). Off the start path: the check loads modules.
+    // Then its minutes of use, counted while the computer is awake, keep it
+    // once they reach its probation.
     {
         let runtime = Arc::clone(&runtime);
-        tokio::task::spawn_blocking(move || runtime.hardware_at_start());
+        let every = patch_tick(config.hardware.probation_minutes);
+        tokio::spawn(async move {
+            let at_start = Arc::clone(&runtime);
+            let _ = tokio::task::spawn_blocking(move || at_start.hardware_at_start()).await;
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            // Asleep, it isn't in use: one tick on waking, not the ones missed.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let runtime = Arc::clone(&runtime);
+                let minutes = every.as_secs() / 60;
+                let _ = tokio::task::spawn_blocking(move || runtime.hardware_tick(minutes)).await;
+            }
+        });
     }
 
     // The browser's settings from policy (UX-1), for whoever is signed in:
@@ -783,6 +799,12 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&config.control_socket);
     let _ = std::fs::remove_file(&config.app_socket);
     served
+}
+
+/// How often a kernel patch on probation counts its minutes of use: every
+/// five, or a quarter of a short probation (tests), at least one.
+fn patch_tick(probation_minutes: u64) -> std::time::Duration {
+    std::time::Duration::from_secs((probation_minutes / 4).clamp(1, 5) * 60)
 }
 
 /// How long one wait on an Inbox lasts before it starts again (servers

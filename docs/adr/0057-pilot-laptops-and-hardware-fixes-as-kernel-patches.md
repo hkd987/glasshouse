@@ -91,20 +91,42 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
 - **Tried in a boot environment of its own.** glassd checks:
   - the signature;
   - that the bundle was built for this kernel;
-  - each module's hash.
+  - each module's hash;
+  - that it goes on top of the patches the computer keeps (below).
 
   Then it makes a new boot environment from the running one, puts the
   modules in it, and boots it once (`bectl activate -t`). After that start,
-  glassd confirms: it's running from the new environment, the modules are
-  the bundle's and loaded, and nothing panicked. Only then is the new
-  environment permanent.
+  glassd checks again: it's running from the new environment, the kernel
+  and modules are the bundle's and load, and the keys and community setting
+  in force now still take it (IT may have turned them off since).
+- **On probation, then kept.** A patch that passes is on probation: the
+  computer runs on it, but its environment isn't the permanent one until
+  the computer has been in use on it for a working day
+  (`probation_minutes`, 480 by default; minutes asleep don't count). Until
+  then the next start is set to it only as the computer shuts down
+  cleanly: rc.d's shutdown tells glassd (`glassctl system shutdown`). A
+  crash, a panic or a power cut never gets there, so the start after one is
+  the environment before, and the trial says it rolled back. That's for
+  the patch that starts fine and crashes at the first sleep, exactly where
+  a Wi-Fi fix works.
 
-  Otherwise the next start goes back to the previous one by itself. A panic
-  restarts the computer at once: the image turns off the kernel debugger on
-  panic. A start that hangs needs the chipset's watchdog (`watchdogd`) on
-  the certified models.
-- **Undo** is starting the previous environment, kept until the person
-  removes it. Every step is on the audit record.
+  A patch that panics as the computer starts costs one restart: the image
+  turns off the kernel debugger on panic, and the start-once is spent. A
+  start that hangs is the same once the computer is turned off and on; the
+  chipset's watchdog (`watchdogd`) on the certified models would do that
+  without the person.
+- **On top of each other.** A patch that rewrites a file a kept patch
+  rewrote (any two kernel patches) must have been built on top of it
+  (`includes` in its manifest), or it's refused: kept anyway, it would undo
+  the first patch's fix while the record says both are kept. A patch built
+  on top of one the computer doesn't keep is refused too. `glassctl
+  hardware patch status` lists the patches kept in the running
+  environment.
+- **Taken out** with `glassctl hardware patch undo`: on probation or kept,
+  the environment it was made from is the one every start uses again, and
+  the next start removes the patch's. The loader's menu still lists the
+  environment before until then. Every step, and every refusal, is on the
+  audit record.
 
 ### 3. Who writes them
 - **Us**, for the certified models: backports and fixes, through the same
@@ -156,5 +178,15 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
   bundle of about 40 MB), and two such patches can't both be kept: the
   second must carry the first's change too. The build service builds
   kernel patches on top of those a computer already keeps.
+- **What probation doesn't cover:** a patch that crashes only after its
+  probation, days later, crashes the computer until someone takes it out
+  (`undo` between crashes, or the environment before from the loader's
+  menu). Probation is a working day so that sleep, the network and the
+  person's own devices have all been through it; the pilot carries
+  reviewed patches, upstream's first.
+- **Kernel code is outside every sandbox,** so what the trial proves is
+  that a bad patch is undone, not that a patch is good: a patch that
+  works and does harm quietly is stopped by the signature and the review,
+  never by the trial.
 - **The image turns off the kernel debugger on panic**
   (`debug.debugger_on_panic=0`).

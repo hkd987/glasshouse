@@ -74,16 +74,34 @@ pub struct Config {
     pub agents: Vec<CatalogEntry>,
 }
 
-/// `[hardware]`: who may sign the kernel patches this computer takes, and
-/// whether it takes ones nobody reviewed (ADR 0057). With no keys, it takes
-/// none.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// `[hardware]`: who may sign the kernel patches this computer takes,
+/// whether it takes ones nobody reviewed, and how long a patch is on
+/// probation (ADR 0057). With no keys, it takes none.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HardwareConfig {
     #[serde(default)]
     pub keys: Vec<glass_managed::PublicKey>,
     #[serde(default)]
     pub community: bool,
+    /// Minutes of use on a patch before it's kept: until then a crash goes
+    /// back to the boot environment before. A working day by default.
+    #[serde(default = "default_probation")]
+    pub probation_minutes: u64,
+}
+
+impl Default for HardwareConfig {
+    fn default() -> Self {
+        Self {
+            keys: Vec::new(),
+            community: false,
+            probation_minutes: default_probation(),
+        }
+    }
+}
+
+fn default_probation() -> u64 {
+    8 * 60
 }
 
 /// `[studio]`: what remixing and making apps needs (ADR 0032). glassd

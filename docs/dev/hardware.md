@@ -74,8 +74,9 @@ os/freebsd/scripts/kernel-patch.sh key      # the development signing key, once
 os/freebsd/scripts/kernel-patch.sh build os/freebsd/patches/lkpi-wlan-suspend
 # On the computer, as root:
 glassctl hardware patch apply lkpi-wlan-suspend.bundle.json   # tried at the next start, once
-glassctl hardware patch status
+glassctl hardware patch status                                # on probation: minutes of use so far
 glassctl hardware patch cancel                                # before restarting
+glassctl hardware patch undo                                  # on probation or kept: back to the one before
 ```
 
 What the build does:
@@ -90,12 +91,17 @@ What the build does:
 A computer takes bundles signed by a key its `glassd.toml` names under
 `[hardware] keys`. The image names none.
 
-When the computer starts on the patch, glassd checks it and keeps it, or
-says it failed. A computer that doesn't come back on it is back on the
-environment it was on, by itself.
+When the computer starts on the patch, glassd checks it and puts it on
+probation, or says it failed. On probation, a clean restart comes back to
+it, and a crash, panic or power cut starts the environment before; after a
+working day of use (`[hardware] probation_minutes`) it's kept. A patch that
+rewrites a file a kept one rewrote must say it was built on top of it
+(`includes = ["<id>"]` in `patch.toml`), or it's refused.
 
-`tests/hardware/patch-vm.sh` runs a good patch and a panicking one end to
-end in the VM.
+`tests/hardware/patch-vm.sh` runs it end to end in the VM: the Wi-Fi fix
+through probation to kept and out again, and patches that panic as they
+load, panic three minutes later, or hang, plus the bundles the VM must
+refuse.
 
 ## Known before any laptop is tried
 

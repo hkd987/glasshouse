@@ -42,6 +42,7 @@ glassd_bin="/usr/local/sbin/glassd"
 # message names Glasshouse only).
 command_args="-f -R ${glassd_restart_delay} -C 100 -P ${pidfile} -p /var/run/${name}.pid -o ${glassd_log} ${glassd_bin} --config ${glassd_config} --console-errors"
 start_precmd="glassd_precmd"
+stop_precmd="glassd_stop_precmd"
 extra_commands="suspend resume"
 suspend_cmd="glassd_suspend"
 resume_cmd="glassd_resume"
@@ -57,6 +58,16 @@ glassd_precmd()
 		echo "${out}" >&2
 		return 1
 	fi
+}
+
+glassd_stop_precmd()
+{
+	# As the computer shuts down (rc.shutdown stops it with faststop): a
+	# kernel patch on probation is started again by the next start, once. A
+	# crash never gets here, so the start after one goes back (ADR 0057,
+	# HardwarePatch.tla). Never hold up shutdown on an error.
+	[ -n "${rc_fast}" ] && /usr/local/bin/glassctl system shutdown >/dev/null 2>&1
+	return 0
 }
 
 glassd_suspend()

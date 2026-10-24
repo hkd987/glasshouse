@@ -148,6 +148,14 @@ pub mod methods {
     /// `()` → [`crate::PatchStatus`]. Root only. Takes back a patch set up
     /// but not yet tried.
     pub const HARDWARE_PATCH_CANCEL: &str = "hardware.patch.cancel";
+    /// `()` → [`crate::PatchStatus`]. Root only. Takes out the patch the
+    /// computer runs, on probation or kept: the boot environment it was
+    /// made from is the one the next start uses.
+    pub const HARDWARE_PATCH_UNDO: &str = "hardware.patch.undo";
+    /// `()` → `()`. Root only, from rc.d as the computer shuts down: a
+    /// kernel patch on probation is started again by the next start, once
+    /// (ADR 0057). A crash never runs this, so it goes back instead.
+    pub const SYSTEM_SHUTDOWN: &str = "system.shutdown";
     /// `()` → [`crate::settings::SettingsView`]: the caller's device
     /// settings (UX-1), as their desktop applies them.
     pub const SETTINGS_GET: &str = "settings.get";

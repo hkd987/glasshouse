@@ -39,6 +39,11 @@ pub struct Manifest {
     /// The requirements it serves (PRD ids).
     #[serde(default)]
     pub requirements: Vec<String>,
+    /// The patches it was built on top of: its modules and kernel carry
+    /// their changes too. A patch that rewrites a file a kept patch
+    /// rewrote must name it (`specs/tla/HardwarePatchStack.tla`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub includes: Vec<String>,
 }
 
 /// A module the patch rebuilt, or the kernel itself, replacing the base
@@ -129,8 +134,11 @@ impl Bundle {
             .verify(DocKind::HardwarePatch, org, keys, have)?;
         let manifest: Manifest =
             serde_json::from_str(payload).map_err(|e| BundleError::Manifest(e.to_string()))?;
-        if !valid_id(&manifest.id) {
-            return Err(BundleError::BadName(manifest.id));
+        if let Some(bad) = std::iter::once(&manifest.id)
+            .chain(&manifest.includes)
+            .find(|id| !valid_id(id))
+        {
+            return Err(BundleError::BadName(bad.clone()));
         }
         if manifest.modules.is_empty() {
             return Err(BundleError::NoModules);
@@ -223,6 +231,7 @@ mod tests {
             }],
             patch_sha256: sha256_hex(patch.as_bytes()),
             requirements: vec!["PM-5".into()],
+            includes: vec![],
         };
         let payload = serde_json::to_string(&manifest).unwrap();
         Bundle {

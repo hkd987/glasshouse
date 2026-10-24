@@ -1,26 +1,37 @@
 #!/usr/bin/env bash
-# Usage: tests/hardware/patch-vm.sh [good] [panic]
-# Kernel patches end to end in the dev VM (ADR 0057). With no arguments, both:
+# Usage: tests/hardware/patch-vm.sh [good] [panic] [late] [hang] [refuse]
+# Kernel patches end to end in the dev VM (ADR 0057, specs/tla/HardwarePatch.tla). With no
+# arguments, all of them:
 #
 # - good: the Wi-Fi fix (os/freebsd/patches/lkpi-wlan-suspend) is set up in a boot environment of
-#   its own; the VM restarts onto it; glassd checks it (its modules are the ones signed, and load)
-#   and keeps it. The fix's sysctl shows the patched module is the one running. The VM is then
-#   started from its own environment again and the patch's is removed.
-# - panic: a module that panics as it loads (tests/hardware/patches/panic-test) is set up; the VM
-#   restarts onto it, panics, restarts by itself on the environment it was on; glassd says the
-#   patch rolled back and removes its environment.
+#   its own; the VM restarts onto it; glassd checks it (the kernel and modules are the ones signed,
+#   and load) and puts it on probation. A clean restart on probation comes back to it; after its
+#   minutes of use it's kept, and the fix's sysctl shows the patched kernel runs. A second kernel
+#   patch not built on top of it is refused (HardwarePatchStack.tla). Then it's taken out
+#   (`glassctl hardware patch undo`): the next start is the VM's own environment, which removes the
+#   patch's.
+# - panic: a module that panics as it loads (tests/hardware/patches/panic-test): the VM restarts
+#   by itself on the environment it was on; glassd says the patch rolled back and removes it.
+# - late: a module that passes the check and panics three minutes later (late-panic), on
+#   probation: the VM restarts by itself on the environment before, and the patch rolled back.
+# - hang: a module that never finishes loading (hang-test): after a power cut the VM starts on
+#   the environment before, and the patch rolled back.
+# - refuse: bundles changed after signing, signed by a key the VM doesn't trust, a community
+#   patch, and one built for another release are refused, set nothing up, and are on the audit
+#   record.
 #
 # The audit log verifies after each. Needs the current build deployed (`make freebsd vm-deploy`)
 # and the bundles built (os/freebsd/scripts/kernel-patch.sh build <patch>).
 #
-# The VM trusts the bundles' development key (build/kpatch/dev-key) for this run only: its
-# glassd.toml is put back however the run ends.
+# The VM trusts the bundles' development key (build/kpatch/dev-key), with a five-minute probation,
+# for this run only: its glassd.toml is put back however the run ends.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 vm="$repo/os/freebsd/scripts/vm.sh"
 kpatch=$repo/build/kpatch
 conf=/usr/local/etc/glasshouse/glassd.toml
+work=$(mktemp -d)
 failures=0
 
 # On stderr: stdout carries what functions return.
@@ -32,32 +43,52 @@ fail() {
 in_vm() { "$vm" ssh "$@"; }
 field() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 status() { in_vm 'glassctl --json hardware patch status' | field "$1"; }
+glass_kpatch() { cargo run -q --manifest-path "$repo/Cargo.toml" -p glass-kpatch -- "$@"; }
 
-pub=$(cargo run -q --manifest-path "$repo/Cargo.toml" -p glass-kpatch -- public --key "$kpatch/dev-key")
-in_vm "cp $conf $conf.before-patch-test && printf '\n[hardware]\nkeys = [\"%s\"]\n' '$pub' >>$conf &&
+pub=$(glass_kpatch public --key "$kpatch/dev-key")
+in_vm "cp $conf $conf.before-patch-test &&
+	printf '\n[hardware]\nkeys = [\"%s\"]\nprobation_minutes = 5\n' '$pub' >>$conf &&
 	service glassd restart >/dev/null"
 untrust() {
 	in_vm "if [ -f $conf.before-patch-test ]; then mv $conf.before-patch-test $conf &&
 		service glassd restart >/dev/null; fi" || true
+	rm -rf "$work"
 }
 trap untrust EXIT
 
-# A clean restart; back once glassd answers.
-restart() {
-	in_vm 'shutdown -r now' >/dev/null 2>&1 || true
+# Until the VM is back and glassd answers.
+back() {
 	"$vm" ssh-close
 	sleep 15
 	"$vm" wait >/dev/null
 	for _ in $(seq 60); do in_vm 'glassctl status' >/dev/null 2>&1 && return; sleep 2; done
-	fail "glassd didn't come back after the restart"
+	fail "glassd didn't come back"
 }
 
-# Until glassd's start check has run: the trial isn't open any more.
+# A clean restart, as the person makes one: rc.d tells glassd it's shutting down.
+restart() {
+	in_vm 'shutdown -r now' >/dev/null 2>&1 || true
+	back
+}
+
+# Until glassd's start check has run: the trial isn't waiting for it any more.
 settled() {
 	for _ in $(seq 60); do
 		[[ $(status 'd["trial"]["state"]') != staged ]] && return
 		sleep 2
 	done
+}
+
+# Until the trial is in state $1, for at most $2 seconds, through restarts the VM makes itself.
+until_state() {
+	local want=$1 deadline=$((SECONDS + $2)) got=
+	while ((SECONDS < deadline)); do
+		got=$(status 'd["trial"]["state"]' 2>/dev/null) || { "$vm" ssh-close; got=; }
+		[[ $got == "$want" ]] && return
+		sleep 10
+	done
+	fail "not $want after $2 s (last: ${got:-no answer})"
+	return 1
 }
 
 apply() {
@@ -72,24 +103,65 @@ apply() {
 	echo "$env"
 }
 
+# The bundle is refused with a message containing $2, and nothing is set up.
+refused() {
+	local bundle=$1 why=$2 before after out
+	before=$(in_vm 'bectl list -H | cut -f1 | sort')
+	"$vm" scp-in "$bundle" /tmp/patch.bundle.json >&2
+	if out=$(in_vm 'glassctl hardware patch apply /tmp/patch.bundle.json' 2>&1); then
+		fail "$(basename "$bundle") was taken"
+	elif [[ $out != *"$why"* ]]; then
+		fail "$(basename "$bundle") refused, but not for $why: $out"
+	else
+		log "refused as it should be: ${out##*refused: }"
+	fi
+	in_vm 'rm -f /tmp/patch.bundle.json'
+	after=$(in_vm 'bectl list -H | cut -f1 | sort')
+	[[ $before == "$after" ]] || fail "a refused bundle changed the boot environments"
+}
+
+# The patch's environment is gone once the VM runs from the one before.
+gone() {
+	if in_vm 'bectl list -H' | grep -q "^$1	"; then fail "$1 is still there"; fi
+}
+
 good() {
-	log "good: the Wi-Fi fix"
+	log "good: the Wi-Fi fix, on probation, then kept"
 	local env
 	env=$(apply "$kpatch/lkpi-wlan-suspend.bundle.json") || return
 	restart
 	settled
 	[[ $(status 'd["running"]') == "$env" ]] || fail "good: not running from $env"
-	[[ $(status 'd["trial"]["state"]') == kept ]] || fail "good: not kept: $(status 'd["trial"]')"
+	[[ $(status 'd["trial"]["state"]') == probation ]] ||
+		fail "good: not on probation: $(status 'd["trial"]')"
+	in_vm 'bectl list -H' | grep -q "^$env	N	" || fail "good: $env shouldn't be permanent yet"
+	log "good: a clean restart on probation comes back to it"
+	restart
+	[[ $(status 'd["running"]') == "$env" ]] || fail "good: a clean restart left $env"
+	until_state kept 600 || return
+	in_vm 'bectl list -H' | grep -q "^$env	NR	" || fail "good: $env isn't the one every start uses"
 	in_vm 'kldstat -q -m linuxkpi_wlan && kldstat -q -n if_iwlwifi' || fail "good: its modules aren't loaded"
 	in_vm 'sysctl -n compat.linuxkpi.80211.suspend_type' >/dev/null ||
-		fail "good: no compat.linuxkpi.80211.suspend_type: the module running isn't the patched one"
-	in_vm 'bectl list -H' | grep -q "^$env	NR	" || fail "good: $env isn't the one every start uses"
-	log "good: kept, running from $env; back to the VM's own environment"
-	in_vm 'bectl activate default' >/dev/null
+		fail "good: no compat.linuxkpi.80211.suspend_type: the kernel running isn't the patched one"
+
+	log "good: a second kernel patch, not built on top of it, is refused"
+	mkdir -p "$work/stack/modules"
+	sed -e 's/^id = .*/id = "kernel-test"/' -e 's/^kernel = .*//' \
+		"$repo/os/freebsd/patches/lkpi-wlan-suspend/patch.toml" | sed '/^\[\[module\]\]/,$d' >"$work/stack/patch.toml"
+	printf 'kernel = true\n' >>"$work/stack/patch.toml"
+	cp "$repo/os/freebsd/patches/lkpi-wlan-suspend/patch.diff" "$work/stack/"
+	cp "$kpatch/lkpi-wlan-suspend/modules/kernel" "$work/stack/modules/"
+	glass_kpatch bundle "$work/stack" --modules "$work/stack/modules" --key "$kpatch/dev-key" \
+		--out "$work/stack.bundle.json" >&2
+	refused "$work/stack.bundle.json" "must be built on top of lkpi-wlan-suspend"
+
+	log "good: taken out"
+	in_vm 'glassctl hardware patch undo' >&2
+	in_vm 'bectl list -H' | grep -q "^default	R	" || fail "good: default isn't the one the next start uses"
 	restart
-	if in_vm 'bectl list -H' | grep -q "^$env	"; then
-		in_vm "bectl destroy -o $env" >/dev/null || fail "good: couldn't remove $env"
-	fi
+	[[ $(status 'd["running"]') == default ]] || fail "good: not back on default"
+	[[ $(status 'd["trial"]["state"]') == undone ]] || fail "good: not taken out: $(status 'd["trial"]')"
+	gone "$env"
 }
 
 panic() {
@@ -102,14 +174,91 @@ panic() {
 	[[ $(status 'd["trial"]["state"]') == rolled_back ]] || fail "panic: not rolled back: $(status 'd["trial"]')"
 	grep -aq "glass_panic_test: panics as it loads" "$repo/build/vm/console.log" ||
 		fail "panic: no panic on the console: did it start on $env at all?"
-	if in_vm 'bectl list -H' | grep -q "^$env	"; then fail "panic: $env is still there"; fi
+	gone "$env"
 	in_vm 'grep -c "^glass_panic_test" /boot/loader.conf' >/dev/null 2>&1 &&
 		fail "panic: default's loader.conf loads it"
 	log "panic: rolled back, and $env removed"
 }
 
+late() {
+	log "late: a module that panics three minutes after it loads, on probation"
+	local env
+	env=$(apply "$kpatch/late-panic.bundle.json") || return
+	restart
+	settled
+	[[ $(status 'd["trial"]["state"]') == probation ]] ||
+		fail "late: not on probation before it panicked: $(status 'd["trial"]')"
+	log "late: on probation; waiting for it to panic"
+	until_state rolled_back 600 || return
+	grep -aq "glass_late_panic: panics 180 seconds after it loads" "$repo/build/vm/console.log" ||
+		fail "late: no panic on the console"
+	[[ $(status 'd["running"]') == default ]] || fail "late: not back on default"
+	gone "$env"
+	log "late: $(status 'd["trial"]["note"]')"
+}
+
+hang() {
+	log "hang: a module that never finishes loading"
+	local env
+	env=$(apply "$kpatch/hang-test.bundle.json") || return
+	in_vm 'shutdown -r now' >/dev/null 2>&1 || true
+	"$vm" ssh-close
+	local hung=
+	for _ in $(seq 90); do
+		if grep -aq "glass_hang_test: hangs as it loads" "$repo/build/vm/console.log"; then
+			hung=1
+			break
+		fi
+		sleep 2
+	done
+	[[ -n $hung ]] || fail "hang: it never started loading the module"
+	sleep 20
+	log "hang: the start hangs; a power cut"
+	"$vm" power-cut >&2
+	back
+	settled
+	[[ $(status 'd["running"]') == default ]] || fail "hang: not back on default"
+	[[ $(status 'd["trial"]["state"]') == rolled_back ]] || fail "hang: not rolled back: $(status 'd["trial"]')"
+	gone "$env"
+}
+
+refuse() {
+	log "refuse: what the VM doesn't take"
+	local good=$kpatch/panic-test.bundle.json src=$repo/tests/hardware/patches/panic-test
+	python3 - "$good" "$work/tampered.bundle.json" <<'PY'
+import base64, json, sys
+b = json.load(open(sys.argv[1]))
+name = next(iter(b["modules"]))
+module = bytearray(base64.b64decode(b["modules"][name]))
+module[-1] ^= 1
+b["modules"][name] = base64.b64encode(bytes(module)).decode()
+json.dump(b, open(sys.argv[2], "w"))
+PY
+	refused "$work/tampered.bundle.json" "doesn't match the hash it was signed with"
+
+	glass_kpatch keygen --out "$work/other-key" >/dev/null
+	glass_kpatch bundle "$src" --modules "$kpatch/panic-test/modules" --key "$work/other-key" \
+		--out "$work/other.bundle.json" >&2
+	refused "$work/other.bundle.json" "refused"
+
+	mkdir -p "$work/community" "$work/release"
+	cp "$src/patch.diff" "$work/community/" && cp "$src/patch.diff" "$work/release/"
+	sed 's/^review = .*/review = "community"/' "$src/patch.toml" >"$work/community/patch.toml"
+	sed 's/^release = .*/release = "15.0-RELEASE"/' "$src/patch.toml" >"$work/release/patch.toml"
+	for kind in community release; do
+		glass_kpatch bundle "$work/$kind" --modules "$kpatch/panic-test/modules" \
+			--key "$kpatch/dev-key" --out "$work/$kind.bundle.json" >&2
+	done
+	refused "$work/community.bundle.json" "community patch"
+	refused "$work/release.bundle.json" "built for 15.0-RELEASE"
+
+	local said
+	said=$(in_vm 'grep -c "Kernel patch .* refused" /var/db/glasshouse/audit/audit.log' || true)
+	((said >= 4)) || fail "refuse: $said refusals on the audit record, not 4"
+}
+
 wanted=("$@")
-((${#wanted[@]})) || wanted=(good panic)
+((${#wanted[@]})) || wanted=(refuse good panic late hang)
 for scenario in "${wanted[@]}"; do
 	"$scenario"
 	in_vm 'glassctl verify' || fail "$scenario: the audit log doesn't verify"
