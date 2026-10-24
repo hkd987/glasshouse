@@ -44,3 +44,14 @@ in jails nor per-harness egress exists yet.
   agent behind the same `harness` setting.
 - Leftover sockets from a crash are removed at startup. Jails can't see
   `/var/run/glasshouse` (the probe's control-socket check).
+
+## Amended by ADR 0052
+Its model (`specs/tla/TakeOver.tla`) found where a drive could end
+without its hand back, or the person's edits go unrecorded:
+- a driven task stays driven until its hand back: Pause says "you have
+  control", and a timed-out ask, a rollback or the wake from sleep leave it
+  driving;
+- a second take over changes nothing, so the first one's snapshot stands;
+- take over's snapshot and hand back take the person's writing turn, so
+  one hand back happens, after the snapshot, and an agent's step under way
+  is recorded as the agent's.

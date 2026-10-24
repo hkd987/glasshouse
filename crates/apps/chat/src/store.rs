@@ -4,11 +4,13 @@
 //! (`<state>/chat/<login>/`), never in a home, so a person's own programs
 //! and agents reach chat only through actions.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use glass_crypto::{EpochKey, PublicKey};
@@ -79,6 +81,9 @@ struct Inner {
     compliance: RwLock<Option<Compliance>>,
     /// Writers to the stores, key files and cursor, one at a time.
     write: Mutex<()>,
+    /// Times the cursor went back to the beginning for someone new here: a
+    /// sync that began before one leaves the cursor there (ADR 0052).
+    resets: AtomicU64,
     listeners: Mutex<Vec<Listener>>,
     /// Unsent drafts by (login, conversation, thread), in memory only, so
     /// nothing unsealed is written (ADR 0030 C4a).
@@ -87,6 +92,22 @@ struct Inner {
     /// conversation): how many messages and the newest sequence number
     /// folded, and the result.
     folds: Mutex<HashMap<(String, String), Fold>>,
+    /// Items' logs as read so far, by (login, item).
+    item_logs: Mutex<HashMap<(String, String), ItemLog>>,
+}
+
+/// Where an item's messages are in its log, as read so far. A log only
+/// grows, so each read parses what was appended since, and a reader
+/// asking for what's new reads only that (ADR 0052): at 10,000 messages,
+/// parsing the whole log took 85 ms for every pull, push and open.
+#[derive(Default)]
+struct ItemLog {
+    /// Bytes of the log read.
+    read: u64,
+    ids: HashSet<String>,
+    /// Each message's sequence number, offset and length, in sequence
+    /// order.
+    at: Vec<(u64, u64, usize)>,
 }
 
 /// Chat on this computer, shared by glassd's sync thread and the actions.
@@ -161,9 +182,11 @@ impl ChatHandle {
             connection: RwLock::new(None),
             compliance: RwLock::new(None),
             write: Mutex::new(()),
+            resets: AtomicU64::new(0),
             listeners: Mutex::new(Vec::new()),
             drafts: Mutex::new(HashMap::new()),
             folds: Mutex::new(HashMap::new()),
+            item_logs: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -374,9 +397,16 @@ impl ChatHandle {
             .join(format!("{item}.log"))
     }
 
-    /// Item `item`'s messages on this computer for `login`, each once, in
-    /// order, with any from before items had logs.
-    pub(crate) fn item_messages(&self, login: &str, item: &str, store: &Store) -> Vec<Message> {
+    /// Item `item`'s messages on this computer for `login` after sequence
+    /// number `after`, each once, in order, with any from before items had
+    /// logs.
+    pub(crate) fn item_messages(
+        &self,
+        login: &str,
+        item: &str,
+        store: &Store,
+        after: u64,
+    ) -> Vec<Message> {
         let mut seen = BTreeSet::new();
         let mut out: Vec<Message> = store.messages.get(item).cloned().unwrap_or_default();
         for m in &out {
@@ -384,20 +414,72 @@ impl ChatHandle {
                 seen.insert(h.id);
             }
         }
-        if is_conversation_id(item)
-            && let Ok(text) = fs::read_to_string(self.item_log(login, item))
-        {
-            for line in text.lines() {
-                let Ok(message) = serde_json::from_str::<Message>(line) else {
-                    continue;
-                };
-                if message.header().is_ok_and(|h| seen.insert(h.id)) {
-                    out.push(message);
-                }
-            }
+        out.retain(|m| m.seq > after);
+        if is_conversation_id(item) {
+            let mut logs = self
+                .0
+                .item_logs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let log = logs.entry((login.to_owned(), item.to_owned())).or_default();
+            let path = self.item_log(login, item);
+            let new = Self::read_item_log(&path, log, after).unwrap_or_default();
+            out.extend(
+                new.into_iter()
+                    .filter(|m| seen.is_empty() || m.header().is_ok_and(|h| !seen.contains(&h.id))),
+            );
         }
         out.sort_by_key(|m| m.seq);
         out
+    }
+
+    /// Indexes what was appended to the log at `path` since `log` last read
+    /// it, then reads the messages after sequence number `after`.
+    fn read_item_log(path: &Path, log: &mut ItemLog, after: u64) -> std::io::Result<Vec<Message>> {
+        let mut file = match fs::File::open(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            other => other?,
+        };
+        let len = file.metadata()?.len();
+        if len < log.read {
+            // Not the log it was: read it all again.
+            *log = ItemLog::default();
+        }
+        if len > log.read {
+            let mut bytes = Vec::new();
+            file.seek(SeekFrom::Start(log.read))?;
+            file.read_to_end(&mut bytes)?;
+            // Whole lines only: an append under way is read next time.
+            let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |n| n + 1);
+            let mut offset = 0;
+            for line in bytes[..whole].split_inclusive(|b| *b == b'\n') {
+                let at = log.read + offset as u64;
+                offset += line.len();
+                let Ok(message) = serde_json::from_slice::<Message>(line) else {
+                    continue;
+                };
+                if message.header().is_ok_and(|h| log.ids.insert(h.id)) {
+                    let place = log.at.partition_point(|(seq, ..)| *seq <= message.seq);
+                    log.at.insert(place, (message.seq, at, line.len()));
+                }
+            }
+            log.read += whole as u64;
+        }
+        let from = log.at.partition_point(|(seq, ..)| *seq <= after);
+        let wanted = &log.at[from..];
+        let Some(start) = wanted.iter().map(|(_, at, _)| *at).min() else {
+            return Ok(Vec::new());
+        };
+        let mut bytes = Vec::new();
+        file.seek(SeekFrom::Start(start))?;
+        file.take(log.read - start).read_to_end(&mut bytes)?;
+        Ok(wanted
+            .iter()
+            .filter_map(|(_, at, n)| {
+                let from = usize::try_from(at - start).ok()?;
+                serde_json::from_slice(bytes.get(from..from + n)?).ok()
+            })
+            .collect())
     }
 
     /// Appends `bytes` to `path`, root only, in folders only root can open.
@@ -416,7 +498,9 @@ impl ChatHandle {
         file.sync_data()
     }
 
-    fn cursor(&self) -> u64 {
+    /// Where this computer's syncs have reached: every message up to it is
+    /// kept for each person here (ADR 0052).
+    pub(crate) fn cursor(&self) -> u64 {
         fs::read_to_string(self.0.dir.join("cursor"))
             .ok()
             .and_then(|s| s.trim().parse().ok())
@@ -478,6 +562,7 @@ impl ChatHandle {
                 self.save(login, &store)?;
                 // Fetch this person's conversations from the beginning.
                 self.set_cursor(0);
+                self.0.resets.fetch_add(1, Ordering::SeqCst);
                 Some(Notice::KeyMade {
                     login: login.to_owned(),
                     key: key.id.clone(),
@@ -521,11 +606,15 @@ impl ChatHandle {
 
     /// One round with the console: waits up to `wait_secs` for news for
     /// this computer's people and keeps what checks out. Whether anything
-    /// new arrived.
+    /// new arrived. A store that couldn't be kept is an error, so glassd
+    /// backs off, and the next round asks from the same place.
     pub fn sync_once(&self, wait_secs: u64) -> Result<bool, LinkError> {
         let connection = self
             .connection()
             .map_err(|e| LinkError::Unreachable(e.to_string()))?;
+        // Before the logins: someone starting chat after this is read
+        // isn't asked about, so their reset of the cursor must stand.
+        let resets = self.0.resets.load(Ordering::SeqCst);
         let logins = self.logins();
         if logins.is_empty() {
             return Ok(false);
@@ -540,6 +629,7 @@ impl ChatHandle {
         let mut notices = Vec::new();
         let mut changed = Vec::new();
         let mut kinds = Vec::new();
+        let mut unkept = None;
         {
             let _write = self.lock();
             for login in &logins {
@@ -555,6 +645,7 @@ impl ChatHandle {
                 if news || !refused.is_empty() {
                     if let Err(e) = self.save(login, &store) {
                         refused.push((None, e.to_string()));
+                        unkept = Some(e.to_string());
                     } else if news {
                         changed.push(login.clone());
                     }
@@ -569,9 +660,15 @@ impl ChatHandle {
                         }),
                 );
             }
-            // A person who started chat while this waited reset the place
-            // to the beginning; keep that.
-            if self.cursor() == since {
+            // The cursor moves only past what every person here kept, and
+            // stays at the beginning for someone who started chat while this
+            // waited. Another round may have moved it meanwhile; the newer
+            // place stands (ChatSync.tla).
+            let now = self.cursor();
+            if unkept.is_none()
+                && self.0.resets.load(Ordering::SeqCst) == resets
+                && (now == since || response.cursor > now)
+            {
                 self.set_cursor(response.cursor);
             }
         }
@@ -583,6 +680,9 @@ impl ChatHandle {
         }
         for notice in &notices {
             self.notify(notice);
+        }
+        if let Some(e) = unkept {
+            return Err(LinkError::Refused(e));
         }
         Ok(!changed.is_empty())
     }
@@ -611,6 +711,12 @@ impl ChatHandle {
         file.sync_all()?;
         fs::rename(&tmp, path)
     }
+}
+
+fn hashed(header: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    header.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn short(s: &str) -> &str {
@@ -761,6 +867,19 @@ impl Store {
 
     /// Keeps `message`, in sequence order, once.
     pub(crate) fn keep(&mut self, conversation: &str, message: Message) {
+        if self
+            .messages
+            .get(conversation)
+            .is_some_and(|list| list.iter().any(|m| m.header == message.header))
+        {
+            return;
+        }
+        self.keep_new(conversation, message);
+    }
+
+    /// Keeps `message`, which isn't in the conversation yet, in sequence
+    /// order.
+    fn keep_new(&mut self, conversation: &str, message: Message) {
         // A shared item's messages go to its own log (ADR 0035 §4).
         if self
             .conversations
@@ -782,9 +901,6 @@ impl Store {
             return;
         }
         let list = self.messages.entry(conversation.to_owned()).or_default();
-        if list.iter().any(|m| m.header == message.header) {
-            return;
-        }
         let at = list.partition_point(|m| m.seq <= message.seq);
         list.insert(at, message);
     }
@@ -919,6 +1035,10 @@ impl Store {
                 ),
             }
         }
+        // Each conversation's headers, hashed once per sync: a whole
+        // history arriving (someone new here, or added) is checked against
+        // what's kept without comparing every pair.
+        let mut kept: HashMap<String, HashSet<u64>> = HashMap::new();
         for message in &response.messages {
             let Ok(header) = message.header() else {
                 self.refuse(
@@ -932,10 +1052,20 @@ impl Store {
             let Some(conversation) = self.conversations.get(&header.conversation) else {
                 continue;
             };
-            if self
-                .messages
-                .get(&header.conversation)
-                .is_some_and(|list| list.iter().any(|m| m.header == message.header))
+            let hashes = kept.entry(header.conversation.clone()).or_insert_with(|| {
+                self.messages
+                    .get(&header.conversation)
+                    .into_iter()
+                    .flatten()
+                    .map(|m| hashed(&m.header))
+                    .collect()
+            });
+            let hash = hashed(&message.header);
+            if hashes.contains(&hash)
+                && self
+                    .messages
+                    .get(&header.conversation)
+                    .is_some_and(|list| list.iter().any(|m| m.header == message.header))
             {
                 continue;
             }
@@ -948,7 +1078,8 @@ impl Store {
                     .is_some_and(|k| message.verify(k).is_ok());
             if checks {
                 note(conversation.kind);
-                self.keep(&header.conversation, message.clone());
+                hashes.insert(hash);
+                self.keep_new(&header.conversation, message.clone());
             } else {
                 self.refuse(
                     refused,

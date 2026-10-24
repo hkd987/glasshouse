@@ -20,6 +20,12 @@ Measured on a 4-core cloud container (no KVM), 22 crates, 143 build units.
 | **FreeBSD rebuild after an edit, `vm` profile** (the VM loop) | **1.3–1.8 s** |
 | FreeBSD rebuild after an edit, `release` profile (thin LTO) | 25 s |
 | Rebuild + deploy into the running VM (`make freebsd vm-deploy`) | ~12 s |
+| The runtime's integration tests (one binary, `tests/it`): rebuilt after a runtime change, then run | 17 s, 24 s (were 23 binaries: 33 s, 37 s; ADR 0052) |
+| Shipped FreeBSD binaries from clean, `release` profile | 390 s; 41 MB (glassd 13.3 MB) |
+| Every TLA+ model (`make tla`, four at once) | about 2 min |
+
+The workspace has grown to 49 crates since the first rows were measured;
+`make test` now builds 92 test binaries.
 
 ## What makes it fast
 
@@ -30,8 +36,16 @@ Measured on a 4-core cloud container (no KVM), 22 crates, 143 build units.
   - `vm`: what `make freebsd`, `make vm-deploy` and `make e2e-vm` use. Optimized
     (`opt-level = 1`) but incremental, without LTO, 256 codegen units. A
     one-crate edit rebuilds the FreeBSD binaries in about 3 s instead of 25 s.
-  - `release`: thin LTO, stripped. Only for images people will run
-    (`make image-release`).
+  - `release`: thin LTO, one codegen unit, no symbols. Only for images
+    people will run (`make image-release`). Without symbols each binary is
+    a quarter smaller, and nothing ships with backtraces on (a panic still
+    says what and where); one codegen unit took 18% more off and built as
+    fast, the dependencies being most of the time. 41 MB for what ships,
+    against 65 MB before (ADR 0052).
+- **One test binary per crate.** Each integration test file is a binary
+  that links its crate and everything under it again: the runtime's 23
+  were 70 MB and a link apiece. They're the modules of `tests/it` now,
+  sharing `common`, and their tests run in one process.
 - **LLD everywhere.** Rust ≥ 1.90 links Linux binaries with `rust-lld` by
   default; the FreeBSD wrapper passes `-fuse-ld=lld`.
 - **Many small crates.** Cargo builds independent crates in parallel and
@@ -89,7 +103,9 @@ pays about 25 s once to check the dependencies.
 - Use `make check` (no codegen) while editing; rust-analyzer does the same.
 - Iterate in the VM with the default `vm` profile; never pass `--release`
   in the loop.
-- Run one crate's tests while working on it: `cargo test -p glass-runtime`.
+- Run one crate's tests while working on it: `cargo test -p glass-runtime`;
+  one of the runtime's test modules: `cargo test -p glass-runtime --test it
+  chat::`.
 - A worktree building into the main checkout's target dir (to save disk)
   writes the same files as main: cargo names a workspace crate's build by
   its path within the workspace, so the two overwrite each other and one
@@ -111,10 +127,14 @@ pays about 25 s once to check the dependencies.
    `glass-runtime`.
 4. **A new app is a new crate** in `crates/apps`, depending on lib crates
    only (`add-action` skill).
-5. **No build scripts that compile C.** They serialize builds and complicate
+5. **A new integration test is a module**, not a file of its own: in
+   glass-runtime, `tests/it/<name>.rs` and a `mod` line in `tests/it/main.rs`.
+   Elsewhere, start a crate's `tests/it` the same way once it needs a
+   second file.
+6. **No build scripts that compile C.** They serialize builds and complicate
    cross-compiling.
-6. **Don't turn on LTO or `codegen-units = 1`** outside `release`.
-7. **HTTP and TLS live in `glass-gateway-providers` only**, which only
+7. **Don't turn on LTO or `codegen-units = 1`** outside `release`.
+8. **HTTP and TLS live in `glass-gateway-providers` only**, which only
    `glassd` links (ADR 0018). Another crate that needs the network asks the
    gateway, or makes the case for moving code there.
 
@@ -144,6 +164,13 @@ pays about 25 s once to check the dependencies.
   `Swatinem/rust-cache`), and consider `sccache` for a shared cache once
   several machines build the same commits.
 - **Faster test runs**: `cargo-nextest` runs each test in its own process,
-  in parallel, and is worth adding once the suite takes more than ~30 s.
+  in parallel. Most of `make test`'s time is building and linking test
+  binaries, not running them, so fewer binaries (above) came first.
+- **Crates built in two versions**: `rand` 0.9 and 0.10, `getrandom`,
+  `hashbrown` 0.14, `io-lifetimes` 2, `toml`'s parsers. They come from
+  boa, yrs, str0m and cap-std; `cargo update` resolves none yet.
+- **glassctl** links every app for `glassctl policy check`'s warnings: its
+  own code is 0.5 MB of its 9.6. Asking glassd for them instead would make
+  it a few MB.
 - **mold** links faster than LLD on large binaries; add it per machine with
   `-C link-arg=-fuse-ld=mold` if link time becomes visible.

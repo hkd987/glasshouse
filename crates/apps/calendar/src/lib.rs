@@ -633,6 +633,49 @@ impl CalendarProvider {
         Ok(Some((meetings, meeting.clone(), logins, made.is_none())))
     }
 
+    /// The meeting the invitations sent for event `id` name, the latest
+    /// first, if its conversation is in the person's store: the files in
+    /// `Calendar/Sent` are theirs to write, so a name alone counts for
+    /// nothing.
+    fn invited_meeting(&self, ctx: &TaskContext, cal: &ConfinedDir, id: &str) -> Option<Meeting> {
+        let mut sent: Vec<String> = cal
+            .list(Path::new(SENT))
+            .ok()?
+            .into_iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| e.name)
+            .filter(|name| {
+                name.strip_suffix(".ics")
+                    .and_then(|n| n.split_once('-'))
+                    .is_some_and(|(_, rest)| {
+                        rest == id
+                            || rest
+                                .strip_prefix(id)
+                                .and_then(|n| n.strip_prefix('-'))
+                                .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+                    })
+            })
+            .collect();
+        sent.sort();
+        sent.iter().rev().find_map(|name| {
+            let text = cal
+                .read(&Path::new(SENT).join(name), MAX_EVENT_BYTES)
+                .ok()?;
+            let text = String::from_utf8(text).ok()?;
+            let uid = format!("UID:{id}@glasshouse");
+            if !text.lines().any(|l| l.trim_end() == uid) {
+                return None;
+            }
+            let meeting = Meeting {
+                id: text
+                    .lines()
+                    .find_map(|l| l.trim_end().strip_prefix("X-GLASSHOUSE-MEETING:"))?
+                    .to_owned(),
+            };
+            (is_conversation_id(&meeting.id) && self.invited(ctx, &meeting)).then_some(meeting)
+        })
+    }
+
     fn new_id() -> String {
         let id = uuid::Uuid::now_v7().simple().to_string();
         format!("ev-{}", &id[id.len() - 12..])
@@ -1121,6 +1164,46 @@ impl ActionProvider for CalendarProvider {
                 "calendar has no action {action}"
             ))),
         }
+    }
+
+    /// Undo put an event's file back as it was before a `calendar.update`.
+    /// A meeting whose invitations went out stays on it, as `changed` keeps
+    /// it: everyone invited has it, and its organizer joins from here (CF-21,
+    /// ADR 0052). Which meeting is in the invitations sent for the event,
+    /// and only one in the person's own store counts.
+    fn revert(
+        &self,
+        ctx: &TaskContext,
+        action: &ActionName,
+        _kind: ChangeKind,
+        paths: &[PathBuf],
+    ) -> Result<(), ActionError> {
+        if action.as_str() != "calendar.update" {
+            return Ok(());
+        }
+        let cal = Self::open(ctx)?;
+        for path in paths {
+            let Some(id) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            // Gone, or not an event: nothing to keep a meeting on.
+            let Ok(mut event) = Self::load(&cal, id) else {
+                continue;
+            };
+            if event.meeting.is_some() {
+                continue;
+            }
+            if let Some(meeting) = self.invited_meeting(ctx, &cal, id) {
+                event.meeting = Some(meeting);
+                Self::save(ctx, &cal, &event, false)
+                    .map_err(|e| ActionError::io("saving event", e))?;
+            }
+        }
+        Ok(())
     }
 
     fn returns(&self, action: &ActionName) -> Option<Value> {
@@ -1880,6 +1963,84 @@ mod tests {
             preview.summary,
             "Send 25 meeting invitations: Northwind sync"
         );
+    }
+
+    /// The CalendarInvite model (ADR 0052): undo of the change that made an
+    /// event a meeting, after its invitations went out, puts the event back
+    /// with the meeting still on it, as `calendar.update` itself would.
+    #[test]
+    fn cf21_undoing_the_change_that_made_a_meeting_keeps_the_meeting_once_invited() {
+        let (dir, ctx) = setup();
+        let org = meeting_org(0);
+        let ctx = in_calendar(&ctx);
+        let made = org
+            .calendar
+            .invoke(
+                &ctx,
+                &name("calendar.create"),
+                &json!({ "title": "Northwind sync", "start": "2026-10-20T14:00", "end": "2026-10-20T15:00" }),
+            )
+            .unwrap();
+        let id = made.data["event"]["id"].as_str().unwrap().to_owned();
+        let file = dir.path().join(format!("Calendar/Events/{id}.json"));
+        let before = fs::read(&file).unwrap();
+        let update = name("calendar.update");
+        let out = org
+            .calendar
+            .invoke(&ctx, &update, &json!({ "id": id, "meeting": true }))
+            .unwrap();
+        let meeting = out.data["event"]["meeting"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        org.calendar
+            .invoke(
+                &ctx,
+                &name("calendar.invite"),
+                &json!({ "id": id, "to": ["priya@acme.example"] }),
+            )
+            .unwrap();
+
+        // Undo: the file as the snapshot had it, then the provider's hook.
+        fs::write(&file, &before).unwrap();
+        org.calendar
+            .revert(
+                &ctx,
+                &update,
+                ChangeKind::Modified,
+                std::slice::from_ref(&file),
+            )
+            .unwrap();
+        let event: Event = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(event.meeting.map(|m| m.id), Some(meeting));
+        assert_eq!(event.start, "2026-10-20T14:00");
+
+        // A meeting nobody was invited to goes with the undo.
+        let other = org
+            .calendar
+            .invoke(
+                &ctx,
+                &name("calendar.create"),
+                &json!({ "title": "Prep", "start": "2026-10-21T09:00", "end": "2026-10-21T10:00" }),
+            )
+            .unwrap();
+        let other = other.data["event"]["id"].as_str().unwrap().to_owned();
+        let file = dir.path().join(format!("Calendar/Events/{other}.json"));
+        let before = fs::read(&file).unwrap();
+        org.calendar
+            .invoke(&ctx, &update, &json!({ "id": other, "meeting": true }))
+            .unwrap();
+        fs::write(&file, &before).unwrap();
+        org.calendar
+            .revert(
+                &ctx,
+                &update,
+                ChangeKind::Modified,
+                std::slice::from_ref(&file),
+            )
+            .unwrap();
+        let event: Event = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(event.meeting, None);
     }
 
     #[test]

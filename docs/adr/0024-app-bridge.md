@@ -133,7 +133,7 @@ them with Playwright on the development host.
   app session's changes to undo (open question below).
 
 ## Consequences
-- Tests: `runtime/tests/apps.rs` (attribution, manifest refusals, policy
+- Tests: `runtime/tests/it/apps.rs` (attribution, manifest refusals, policy
   still bounding, asks on the desktop and not on the app socket, sessions
   bound to and ended with their connection), `glassd` config tests
   (installing manifests, `dev_home` refused with jails), the bridge's unit

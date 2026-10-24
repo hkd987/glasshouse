@@ -888,6 +888,19 @@ impl Runtime {
         if !state.tile.is_live() || task.ended() {
             return false;
         }
+        // A task the person drives is held already, and only their hand
+        // back lets it go on, their edits recorded: a pause, a timed-out
+        // ask or a rollback leaves them driving (the TakeOver model).
+        if state.tile == TileState::YouAreDriving {
+            return true;
+        }
+        // Taken over while paused for sleep: the drive replaces the sleep's
+        // pause, so the wake doesn't end it.
+        if tile == TileState::YouAreDriving
+            && let Some(caption) = state.sleeping.take()
+        {
+            state.caption = caption;
+        }
         task.set_gate(Gate::Hold);
         state.tile = tile;
         state.note(ActivityKind::State, note);
@@ -909,6 +922,9 @@ impl Runtime {
 
     pub fn pause(&self, caller: &Caller, id: TaskId) -> Result<TaskView> {
         let task = self.live(caller, id)?;
+        if task.lock().tile == TileState::YouAreDriving {
+            return Err(you_drive());
+        }
         if !self.hold(&task, TileState::Paused, "Paused by you") {
             return Err(ended());
         }
@@ -918,13 +934,11 @@ impl Runtime {
 
     pub fn resume(&self, caller: &Caller, id: TaskId) -> Result<TaskView> {
         let task = self.live(caller, id)?;
-        if task.lock().tile == TileState::YouAreDriving {
-            return Err(RuntimeError::Conflict(
-                "you have control; hand back instead".into(),
-            ));
-        }
-        if !self.release(&task, "Resumed") {
-            return Err(ended());
+        if !self.release(&task, "Resumed", false) {
+            return Err(match task.lock().tile {
+                TileState::YouAreDriving => you_drive(),
+                _ => ended(),
+            });
         }
         self.state_change(&task, "Resumed");
         Ok(task.view(self.desk.pending_for_task(id)))
@@ -932,11 +946,16 @@ impl Runtime {
 
     /// Lets the agent continue; the tile shows "Needs you" again if an ask is
     /// still open. A task that has ended stays as it ended: a resume, a hand
-    /// back or a wake that lands as it ends never runs it again. Whether it
-    /// let the agent go on.
-    fn release(&self, task: &Task, note: &str) -> bool {
+    /// back or a wake that lands as it ends never runs it again. Only a
+    /// `hand_back` ends the person's drive, and it lets go of nothing else:
+    /// a resume or a wake that lands as they take over leaves them driving
+    /// (the TakeOver model). Whether it let the agent go on.
+    fn release(&self, task: &Task, note: &str, hand_back: bool) -> bool {
         let mut state = task.lock();
         if !state.tile.is_live() || task.ended() {
+            return false;
+        }
+        if (state.tile == TileState::YouAreDriving) != hand_back {
             return false;
         }
         // The machine is going to sleep (PM-5): it carries on after the
@@ -981,6 +1000,11 @@ impl Runtime {
                 "that's an app you're using; there's no agent to take over from".into(),
             ));
         }
+        // Taken over already: a second snapshot would hide what the person
+        // changed since the first (the TakeOver model).
+        if task.lock().tile == TileState::YouAreDriving {
+            return Ok(task.view(self.desk.pending_for_task(id)));
+        }
         if !self.hold(&task, TileState::YouAreDriving, "You took over") {
             return Err(ended());
         }
@@ -992,10 +1016,21 @@ impl Runtime {
             .map(|g| g.root.clone())
             .collect();
         if !roots.is_empty() {
-            match self.take_snapshot(&task, &roots, "You took over").await {
-                Ok(handle) => task.lock().takeover = Some(handle),
-                Err(e) => {
-                    tracing::warn!(error = %e, "no snapshot at take over; hand back can't summarize")
+            // Under the person's writing turn, as hand back works: a step of
+            // the agent's under way records first, and a hand back waits for
+            // this snapshot. One a hand back or a stop overtook, or another
+            // take over's, isn't needed.
+            let _turn = self.writing_turn(task.user.uid).await;
+            let wanted = {
+                let state = task.lock();
+                state.tile == TileState::YouAreDriving && state.takeover.is_none()
+            };
+            if wanted {
+                match self.take_snapshot(&task, &roots, "You took over").await {
+                    Ok(handle) => task.lock().takeover = Some(handle),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "no snapshot at take over; hand back can't summarize")
+                    }
                 }
             }
         }
@@ -1010,12 +1045,22 @@ impl Runtime {
         if task.entry.attended {
             return Ok(self.finish_attended(&task));
         }
-        if task.lock().tile != TileState::YouAreDriving {
-            return Err(RuntimeError::Conflict(
-                "you don't have control of that task".into(),
-            ));
-        }
-        let handle = task.lock().takeover.take();
+        // The person's writing turn until the agent may go on (the TakeOver
+        // model): it waits for take over's snapshot, for a step of the
+        // agent's between its write and its record, and for another hand
+        // back, so nothing the agent wrote is taken for the person's.
+        let _turn = self.writing_turn(task.user.uid).await;
+        let handle = {
+            let mut state = task.lock();
+            if state.tile != TileState::YouAreDriving {
+                return Err(if state.tile.is_live() {
+                    RuntimeError::Conflict("you don't have control of that task".into())
+                } else {
+                    ended()
+                });
+            }
+            state.takeover.take()
+        };
         let summary = match handle {
             Some(handle) => {
                 // The user's edits join the task's changes, undoable like
@@ -1033,7 +1078,7 @@ impl Runtime {
             None => "You handed back.".to_owned(),
         };
         task.lock().caption = summary.clone();
-        if !self.release(&task, &summary) {
+        if !self.release(&task, &summary, true) {
             return Err(ended());
         }
         self.state_change(&task, &summary);
@@ -1211,7 +1256,7 @@ impl Runtime {
         let mut resumed = 0;
         for task in &sleeping {
             // One that ended while the machine slept stays ended.
-            if self.release(task, "Resumed after sleep") {
+            if self.release(task, "Resumed after sleep", false) {
                 self.state_change(task, "Resumed after sleep");
                 resumed += 1;
             }
@@ -1337,6 +1382,10 @@ impl Runtime {
 /// A press on a task that has ended (or just did).
 fn ended() -> RuntimeError {
     RuntimeError::Conflict("that task has already ended".into())
+}
+
+fn you_drive() -> RuntimeError {
+    RuntimeError::Conflict("you have control; hand back to let the agent go on, or stop it".into())
 }
 
 pub(crate) fn blocking<R>(work: impl FnOnce() -> R) -> R {

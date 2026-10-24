@@ -127,3 +127,10 @@ Extends ADR 0029.
   person is audited with whom it was applied for.
 - Not this work's, noted so it isn't lost: glassd doesn't check at start
   that it runs as root.
+
+## Amended by ADR 0052
+- Settings changes take turns in the settings handle, so the desktop's
+  and the Settings app's, at once, both hold.
+- A release that only moves people between groups counts as a change, so
+  USB drives, the browser and the desktop follow it
+  (`specs/tla/SettingsLayers.tla`).

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir, Metadata, MetadataExt, OpenOptions};
+use cap_std::fs::{Dir, Metadata, MetadataExt, OpenOptions, OpenOptionsExt};
 
 /// Who should own files the broker creates for a user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,14 +95,23 @@ impl ConfinedDir {
 
     /// Opens a regular file for reading.
     pub fn open_file(&self, rel: &Path) -> io::Result<std::fs::File> {
-        let file = self.dir.open(relative(rel)?)?;
+        Ok(self.open_regular(relative(rel)?)?.into_std())
+    }
+
+    /// Opens `rel` for reading without waiting: a FIFO put where a file was
+    /// would otherwise hold the call, and a write's turn, until something
+    /// wrote to it (ADR 0052).
+    fn open_regular(&self, rel: &Path) -> io::Result<cap_std::fs::File> {
+        let mut options = OpenOptions::new();
+        options.read(true).custom_flags(libc::O_NONBLOCK);
+        let file = self.dir.open_with(rel, &options)?;
         if !file.metadata()?.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "not a regular file",
             ));
         }
-        Ok(file.into_std())
+        Ok(file)
     }
 
     /// Reads a whole file, refusing files larger than `max_bytes`.
@@ -136,9 +145,33 @@ impl ConfinedDir {
         owner: Option<Owner>,
         mode: Option<u32>,
     ) -> io::Result<bool> {
+        self.write_labeled(rel, data, owner, mode, None)
+    }
+
+    /// Like [`write_as`](Self::write_as), the file labeled at least
+    /// `at_least`: what a task writes carries the label of what it read
+    /// (DP-11). A higher label already on the file stays.
+    pub fn write_labeled(
+        &self,
+        rel: &Path,
+        data: &[u8],
+        owner: Option<Owner>,
+        mode: Option<u32>,
+        at_least: Option<glass_types::Label>,
+    ) -> io::Result<bool> {
         let rel = relative(rel)?;
-        let existed = self.dir.symlink_metadata(rel).is_ok();
-        let tmp = self.stage(rel, data, owner, mode)?;
+        let meta = self.dir.symlink_metadata(rel).ok();
+        let existed = meta.is_some();
+        // The rename puts a new file in the old one's place, so a label
+        // stored on the old one goes on the new one first (DP-10, ADR 0052).
+        let kept = match meta {
+            Some(meta) if meta.is_file() => {
+                crate::xattr::read_label_of(&self.open_regular(rel)?.into_std())?
+            }
+            _ => None,
+        };
+        let label = kept.max(at_least.filter(|l| *l > glass_types::Label::Public));
+        let tmp = self.stage(rel, data, owner, mode, label)?;
         let result = self.dir.rename(&tmp, &self.dir, rel);
         if result.is_err() {
             let _ = self.dir.remove_file(&tmp);
@@ -152,20 +185,21 @@ impl ConfinedDir {
     /// fails if the name is taken.
     pub fn write_new(&self, rel: &Path, data: &[u8], owner: Option<Owner>) -> io::Result<()> {
         let rel = relative(rel)?;
-        let tmp = self.stage(rel, data, owner, None)?;
+        let tmp = self.stage(rel, data, owner, None, None)?;
         let result = self.dir.hard_link(&tmp, &self.dir, rel);
         let _ = self.dir.remove_file(&tmp);
         result
     }
 
-    /// A temporary file beside `rel` holding `data`, synced, with its owner
-    /// and mode set. Its name is unique within this process.
+    /// A temporary file beside `rel` holding `data`, synced, with its owner,
+    /// mode and label set. Its name is unique within this process.
     fn stage(
         &self,
         rel: &Path,
         data: &[u8],
         owner: Option<Owner>,
         mode: Option<u32>,
+        label: Option<glass_types::Label>,
     ) -> io::Result<PathBuf> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let name = rel
@@ -194,6 +228,9 @@ impl ConfinedDir {
             }
             if let Some(mode) = mode {
                 std_file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))?;
+            }
+            if let Some(label) = label {
+                crate::xattr::write_label_on(&std_file, label)?;
             }
             Ok(())
         })();
@@ -383,6 +420,85 @@ mod tests {
         std::fs::write(outer.path().join("secret.txt"), "top secret").unwrap();
         let dir = ConfinedDir::open(&outer.path().join("grant")).unwrap();
         (outer, dir)
+    }
+
+    #[test]
+    fn dp10_a_rewrite_keeps_the_label_stored_on_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = ConfinedDir::open(tmp.path()).unwrap();
+        dir.write(Path::new("q3.csv"), b"revenue\n", None).unwrap();
+        let path = tmp.path().join("q3.csv");
+        if crate::xattr::write_label(&path, glass_types::Label::Confidential).is_err() {
+            return; // no user attributes on this filesystem
+        }
+        dir.write(Path::new("q3.csv"), b"revenue, revised\n", None)
+            .unwrap();
+        assert_eq!(
+            crate::xattr::read_label(&path).unwrap(),
+            Some(glass_types::Label::Confidential),
+            "a rewrite dropped the file's label"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"revenue, revised\n");
+    }
+
+    #[test]
+    fn dp11_a_write_carries_the_label_of_what_its_task_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = ConfinedDir::open(tmp.path()).unwrap();
+        let path = tmp.path().join("summary.txt");
+        let internal = Some(glass_types::Label::Internal);
+        dir.write_labeled(Path::new("summary.txt"), b"Q3 up\n", None, None, internal)
+            .unwrap();
+        let Ok(label) = crate::xattr::read_label(&path) else {
+            return; // no user attributes on this filesystem
+        };
+        assert_eq!(label, internal);
+        // A public task's rewrite keeps it; a higher one raises it.
+        dir.write_labeled(
+            Path::new("summary.txt"),
+            b"Q3 up 4%\n",
+            None,
+            None,
+            Some(glass_types::Label::Public),
+        )
+        .unwrap();
+        assert_eq!(crate::xattr::read_label(&path).unwrap(), internal);
+        let confidential = Some(glass_types::Label::Confidential);
+        dir.write_labeled(
+            Path::new("summary.txt"),
+            b"Q3 up 4%\n",
+            None,
+            None,
+            confidential,
+        )
+        .unwrap();
+        assert_eq!(crate::xattr::read_label(&path).unwrap(), confidential);
+        // Public writes no label.
+        dir.write_labeled(
+            Path::new("plain.txt"),
+            b"hi\n",
+            None,
+            None,
+            Some(glass_types::Label::Public),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::xattr::read_label(&tmp.path().join("plain.txt")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_fifo_where_a_file_was_is_refused_without_waiting() {
+        let (outer, dir) = setup();
+        let made = std::process::Command::new("mkfifo")
+            .arg(outer.path().join("grant/pipe"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let err = dir.open_file(Path::new("pipe")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(dir.read(Path::new("pipe"), 1024).is_err());
     }
 
     #[test]

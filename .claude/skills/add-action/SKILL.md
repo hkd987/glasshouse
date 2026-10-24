@@ -54,7 +54,7 @@ decides permissions.
      grants refuse; bad input rejected; what it returns conforms to
      `returns()` (`shape::conforms`, as `ga1_what_each_action_returns_is_what_it_declares`
      in Calendar, Mail, People and Files).
-   - A pipeline test (`crates/svc/runtime/tests/pipeline.rs`) for its tier
+   - A pipeline test (`crates/svc/runtime/tests/it/pipeline.rs`) for its tier
      behavior, especially Ask and undo.
    - If it's reversible, prove `glassctl undo` restores it.
 6. **Docs.** Update `docs/prd-traceability.md` (NV-3 coverage) and the

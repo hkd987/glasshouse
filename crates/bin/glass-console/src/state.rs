@@ -7,7 +7,7 @@
 //!
 //! The org's signing key lives here and nowhere else (DV-1, DV-10).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -195,6 +195,11 @@ pub enum Computer {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FleetState {
     pub devices: BTreeMap<String, Device>,
+    /// The keys of computers IT removed and then forgot (ADR 0030 slice P,
+    /// ADR 0052): one asking to register again is still refused as
+    /// removed, while a computer set up again, with a new key, enrolls.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub removed_keys: BTreeSet<String>,
 }
 
 /// Why a computer's key wasn't registered.
@@ -295,6 +300,10 @@ impl State {
             credits: crate::credits::Credits::load(dir)?,
             usage: crate::credits::Usage::load(dir)?,
         };
+        if crate::chat::open_log(&mut state.chat, &dir.join(CHAT_LOG))? {
+            // Moved to the log: chat.json is kept without them.
+            state.save_chat()?;
+        }
         if state.policy.versions.is_empty() {
             if state.policy.draft.is_empty() {
                 state.policy.draft = format!(
@@ -585,12 +594,22 @@ impl State {
     pub fn approve(
         &mut self,
         id: &str,
+        version: &str,
         group: &str,
         mode: InstallMode,
         pin: bool,
         by: &str,
     ) -> Result<u64, Refused> {
         let entry = self.item_mut(id)?;
+        // GA-13: IT approves the version it reviewed. One shared while IT
+        // read the last never goes out unseen (specs/tla/StoreShare.tla).
+        if entry.item.version != version {
+            return Err(Refused::Rule(format!(
+                "Version {} of {} came in while you were reviewing version {version}; review it \
+                 before you approve it.",
+                entry.item.version, entry.item.name
+            )));
+        }
         entry.review = Review::Approved;
         entry.approved = None;
         entry.item.groups.insert(group.to_owned(), mode);
@@ -1116,8 +1135,19 @@ impl State {
             .ok_or_else(|| Refused::NotFound("No such blob.".into()))
     }
 
+    /// Chat's keys, conversations and epochs; its messages have a log of
+    /// their own ([`save_chat_message`](Self::save_chat_message)).
     pub fn save_chat(&self) -> anyhow::Result<()> {
         write_json(&self.dir.join("chat.json"), &self.chat)
+    }
+
+    /// Keeps the message a post just took: a line on the chat log, not the
+    /// org's history again (ADR 0052).
+    pub fn save_chat_message(&self) -> anyhow::Result<()> {
+        match self.chat.messages.last() {
+            Some(message) => crate::chat::append_log(&self.dir.join(CHAT_LOG), message),
+            None => Ok(()),
+        }
     }
 
     /// Registers a computer's key (ADR 0030 slice P), with the proof that
@@ -1133,6 +1163,9 @@ impl State {
             return Err(RegisterRefused::Invalid("name the device".into()));
         }
         registration.verify().map_err(RegisterRefused::Invalid)?;
+        if self.fleet.removed_keys.contains(&registration.key) {
+            return Err(RegisterRefused::Revoked);
+        }
         if let Some(existing) = self.fleet.devices.get(id) {
             if existing.revoked.is_some() {
                 return Err(RegisterRefused::Revoked);
@@ -1171,6 +1204,22 @@ impl State {
             .map_or(Computer::Unknown, Computer::Key)
     }
 
+    /// Whether `key` (hex) is still the key `id` signs with: checked again
+    /// under the lock after a request's signature was, so a computer IT
+    /// removed or forgot meanwhile gets nothing more, and no entry is made
+    /// for it (ADR 0052, the DeviceEnrollment model).
+    pub fn still_signs(&self, id: &str, key: &str) -> Computer {
+        match self.computer(id) {
+            Computer::Key(found)
+                if self.fleet.devices.get(id).and_then(|d| d.key.as_deref()) == Some(key) =>
+            {
+                Computer::Key(found)
+            }
+            Computer::Revoked => Computer::Revoked,
+            _ => Computer::Unknown,
+        }
+    }
+
     /// IT removes a computer from the organization (ADR 0030 slice P):
     /// from now on the console refuses everything it sends.
     pub fn revoke_device(&mut self, id: &str) -> Result<(), Refused> {
@@ -1198,6 +1247,9 @@ impl State {
             return Err(Refused::Rule(format!(
                 "Remove {id} from the organization first."
             )));
+        }
+        if let Some(key) = device.key.clone() {
+            self.fleet.removed_keys.insert(key);
         }
         self.fleet.devices.remove(id);
         self.fleet_dirty = true;
@@ -1284,6 +1336,9 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<Opti
 }
 
 /// Writes a sibling file and renames it over `path`.
+/// Chat's sealed messages, a line each (ADR 0052).
+const CHAT_LOG: &str = "chat-messages.jsonl";
+
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     let tmp = path.with_extension("json.new");
     std::fs::write(&tmp, serde_json::to_vec(value)?)

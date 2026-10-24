@@ -66,7 +66,7 @@ tool:
   (routes per label), and a group or the agent can narrow the list with
   `models = [...]`. The catalog's `model` is a preference the handoff card
   shows when policy allows it.
-- **Tests**: `crates/svc/runtime/tests/models.rs` has a scripted provider
+- **Tests**: `crates/svc/runtime/tests/it/models.rs` has a scripted provider
   and a model-backed `writer` agent to copy; the e2e `models` scenario runs
   under a test policy (`glass-e2e models-policy`).
 

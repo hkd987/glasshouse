@@ -964,8 +964,18 @@ fn cf21_a_room_has_twenty_five_seats_and_the_console_frees_them() {
         (200, json!({"rooms": 1, "participants": 25}))
     );
 
+    // ADR 0052: who has a seat, for the console to ask.
+    let (status, body) = http(api, "GET", "/rooms/r", None);
+    assert_eq!(status, 200);
+    assert_eq!(body["participants"].as_array().unwrap().len(), 25);
     assert_eq!(http(api, "DELETE", "/rooms/r/participants/24", None).0, 204);
     assert_eq!(http(api, "DELETE", "/rooms/r/participants/24", None).0, 404);
+    let (_, body) = http(api, "GET", "/rooms/r", None);
+    assert_eq!(body["participants"], json!((0..24).collect::<Vec<u32>>()));
+    assert_eq!(
+        http(api, "GET", "/rooms/nobody", None),
+        (200, json!({"participants": []}))
+    );
     assert_eq!(join("r", 25, &offer).0, 200);
     assert_eq!(http(api, "DELETE", "/rooms/r", None), (204, Value::Null));
     assert_eq!(

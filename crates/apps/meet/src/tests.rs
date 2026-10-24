@@ -328,6 +328,143 @@ fn cf21_someone_who_left_cannot_decrypt_after_the_new_key() {
     }
 }
 
+/// ADR 0052, found by `specs/tla/MeetKeys.tla`: a computer that drops out
+/// of the call (its window closed, it slept, it lost the network) never
+/// says so. The console used to keep its seat, so no new key was ever due
+/// and it could open everything said after; nor did a leave the console
+/// heard of only after the others had asked (Meet closes the connection
+/// first, and finishes the transcript before telling glassd).
+#[test]
+fn cf21_someone_who_drops_out_cannot_decrypt_after_the_new_key() {
+    let org = org();
+    let (a, b, c, id) = three(&org);
+    a.join("dana", &id);
+    b.join("priya", &id);
+    let sam = c.join("sam", &id);
+    let held = sam.data["media_key"].as_str().unwrap().to_owned();
+    // The relay sees Sam's connection go; nobody tells the console.
+    org.meet
+        .drop_out(&id, sam.data["participant"].as_u64().unwrap() as u32);
+
+    let priya = b.call("priya", KEYS, json!({ "meeting": id })).unwrap();
+    let new = priya.data["media_keys"][0]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(new, held, "a new key, as when someone leaves");
+    assert_eq!(priya.data["due"], false);
+    let sams_key = Meetings::member(&c.roster, "sam", false)
+        .unwrap()
+        .unwrap()
+        .0;
+    assert!(
+        org.meet.media(&id)[0]
+            .body
+            .envelopes
+            .iter()
+            .all(|e| e.key != sams_key.id),
+        "not sealed to the one who dropped out"
+    );
+    assert_eq!(org.meet.participants(&id).len(), 2);
+    // His meet.leave arriving late changes nothing.
+    c.call("sam", LEAVE, json!({ "meeting": id })).unwrap();
+    let dana = a.call("dana", KEYS, json!({ "meeting": id })).unwrap();
+    assert_eq!(dana.data["media_keys"][0]["key"], new.as_str());
+    assert_eq!(dana.data["due"], false);
+}
+
+/// ADR 0052: a session everyone dropped out of ends, and the console
+/// deletes its keys (ADR 0030), with no request from anyone in it.
+#[test]
+fn cf21_a_call_everyone_dropped_out_of_ends_with_its_keys() {
+    let org = org();
+    let (a, b, id) = org.meeting();
+    let dana = a.join("dana", &id);
+    let priya = b.join("priya", &id);
+    for joined in [&dana, &priya] {
+        org.meet
+            .drop_out(&id, joined.data["participant"].as_u64().unwrap() as u32);
+    }
+    assert!(!org.meet.media(&id).is_empty(), "until the console looks");
+    org.meet.sweep();
+    assert!(
+        org.meet.media(&id).is_empty(),
+        "the session's keys are gone"
+    );
+    assert!(org.meet.participants(&id).is_empty());
+    // The next call is a new session, with a new key.
+    let again = a.join("dana", &id);
+    assert_ne!(again.data["media_key"], dana.data["media_key"]);
+}
+
+/// Meetings that count how often every meeting is opened.
+#[derive(Debug)]
+struct Counting(ChatProvider, std::sync::atomic::AtomicUsize);
+
+impl Meetings for Counting {
+    fn ready(&self) -> Result<(), ChatFailure> {
+        Meetings::ready(&self.0)
+    }
+    fn member(
+        &self,
+        login: &str,
+        make: bool,
+    ) -> Result<Option<(MemberKey, MemberSecret)>, ChatFailure> {
+        Meetings::member(&self.0, login, make)
+    }
+    fn meetings(&self, login: &str) -> Vec<MeetingInfo> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Meetings::meetings(&self.0, login)
+    }
+    fn meeting(&self, login: &str, id: &str) -> Option<MeetingInfo> {
+        Meetings::meeting(&self.0, login, id)
+    }
+    fn create(
+        &self,
+        organizer: &str,
+        make: bool,
+        id: &str,
+        people: &[String],
+        details: &MeetingDetails,
+    ) -> Result<(), ChatFailure> {
+        Meetings::create(&self.0, organizer, make, id, people, details)
+    }
+    fn lookup(&self, logins: &[String]) -> Result<Vec<MemberKey>, ChatFailure> {
+        Meetings::lookup(&self.0, logins)
+    }
+}
+
+/// ADR 0052: a call in a meeting (each `meet.keys` as people come and go,
+/// each batch of transcript lines) opens that meeting alone, not every
+/// meeting the person was ever in.
+#[test]
+fn adr0052_a_call_in_a_meeting_opens_no_other_meeting() {
+    let org = org();
+    let (a, _b, id) = org.transcribed_meeting();
+    let counting = Arc::new(Counting(a.roster.clone(), Default::default()));
+    let handle = MeetHandle::new();
+    handle.connect(org.meet.clone());
+    let meet = MeetProvider::new(counting.clone(), handle, org.directory.clone())
+        .shared(Arc::new(a.roster.clone()));
+    let call = |action: &str, input: Value| {
+        meet.invoke(&ctx("dana", "meet"), &action.parse().unwrap(), &input)
+            .unwrap()
+    };
+    let offer = "v=0\r\ns=offer from dana\r\n";
+    call(JOIN, json!({ "meeting": id, "offer": offer }));
+    call(KEYS, json!({ "meeting": id }));
+    call(
+        TRANSCRIBE,
+        json!({ "meeting": id, "lines": [said("Hello.")] }),
+    );
+    call(TRANSCRIPT, json!({ "meeting": id }));
+    call(LEAVE, json!({ "meeting": id }));
+    assert_eq!(counting.1.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // The list is the list.
+    call(LIST, json!({}));
+    assert_eq!(counting.1.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[test]
 fn cf21_the_media_key_is_never_sealed_to_the_compliance_key() {
     let org = org();
@@ -668,6 +805,67 @@ fn adr0045_only_the_persons_own_hey_glass_starts_their_agent() {
         dana.data["asked"],
         json!(["find the ABC report and send it to Susan."])
     );
+    assert_eq!(a.asked.all().len(), 1);
+}
+
+/// ADR 0052, found by `specs/tla/MeetTranscript.tla`: when the answer to
+/// a `meet.transcribe` is lost after glassd did the work (glassd
+/// restarting, the bridge sending the call again), Meet sends the lines
+/// again. They went into the transcript twice, and "Hey Glass" started
+/// the agent twice. A batch now keeps its id, and glassd answers one it
+/// has had with what it did then.
+#[test]
+fn adr0052_a_batch_sent_again_is_added_once_and_asks_once() {
+    let org = org();
+    let (a, b, id) = org.transcribed_meeting();
+    let batch = json!({
+        "meeting": id,
+        "batch": "b-7f3a",
+        "lines": [said("OK."), said("Hey Glass, find the ABC report and send it to Susan.")],
+    });
+    let first = a.call("dana", TRANSCRIBE, batch.clone()).unwrap();
+    let again = a.call("dana", TRANSCRIBE, batch).unwrap();
+    assert_eq!(again.data, first.data);
+    assert_eq!(a.asked.all().len(), 1, "one task for one request");
+    b.chat.sync_once(0).unwrap();
+    let read = b
+        .call("priya", TRANSCRIPT, json!({ "meeting": id }))
+        .unwrap();
+    assert_eq!(read.data["lines"].as_array().unwrap().len(), 2, "once");
+    // Another batch is another batch, and Priya's own id is hers.
+    let other = json!({ "meeting": id, "batch": "b-7f3b", "lines": [said("Thanks.")] });
+    assert_eq!(
+        a.call("dana", TRANSCRIBE, other.clone()).unwrap().data["lines"],
+        1
+    );
+    let priya = json!({ "meeting": id, "batch": "b-7f3a", "lines": [said("Sure.")] });
+    assert_eq!(b.call("priya", TRANSCRIBE, priya).unwrap().data["lines"], 1);
+}
+
+/// ADR 0052, found by `specs/tla/MeetTranscript.tla`: with the
+/// organization's server out of reach, `meet.transcribe` failed, and Meet
+/// took that for IT turning transcripts off: it stopped hearing and
+/// dropped every line waiting. It is "not added yet" now, and Meet keeps
+/// the lines and tries again.
+#[test]
+fn adr0052_the_server_out_of_reach_is_not_added_yet() {
+    let org = org();
+    let (a, _b, id) = org.transcribed_meeting();
+    let batch = json!({
+        "meeting": id,
+        "batch": "b-1",
+        "lines": [said("Hey Glass, send Priya the notes.")],
+    });
+    org.chat.offline(true);
+    let waiting = a.call("dana", TRANSCRIBE, batch.clone()).unwrap();
+    assert_eq!(waiting.data["added"], false, "{}", waiting.text);
+    assert_eq!(waiting.data["lines"], 0);
+    assert!(waiting.text.contains("tries again"), "{}", waiting.text);
+    assert!(a.asked.all().is_empty(), "nothing asked before it's added");
+    org.chat.offline(false);
+    let added = a.call("dana", TRANSCRIBE, batch).unwrap();
+    assert_eq!(added.data["added"], true);
+    assert_eq!(added.data["lines"], 1);
     assert_eq!(a.asked.all().len(), 1);
 }
 

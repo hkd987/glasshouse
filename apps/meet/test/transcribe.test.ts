@@ -191,23 +191,20 @@ test("adr0045 t2 Hey Glass said alone waits for the request after it, and goes a
   );
 });
 
-test("adr0045 t2 a call takes what meet.transcribe takes, and lines it couldn't add wait in order", () => {
+test("adr0045 t2 a call takes what meet.transcribe takes, and lines wait in order", () => {
   const b = new Batcher();
   for (let i = 0; i < 60; i += 1) b.add(line(`Line ${i}`), i);
   const first = b.take();
   assert.equal(first.length, MAX_TRANSCRIPT_LINES);
+  assert.equal(first[0]!.text, "Line 0", "the oldest go first");
   assert.equal(b.size, 10);
-  b.putBack(first, 100);
-  assert.equal(b.take()[0]!.text, "Line 0", "the oldest go first");
   const wide = new Batcher();
   for (let i = 0; i < 12; i += 1) wide.add(line("x".repeat(MAX_LINE_CHARS)), i);
   assert.equal(wide.take().length, MAX_TRANSCRIBE_CHARS / MAX_LINE_CHARS);
-  // glassd unreachable for long: the newest are kept.
+  // glassd unreachable for long: the newest are kept. (A batch it hasn't
+  // taken waits apart, to go again as it was: ADR 0052.)
   const kept = new Batcher();
-  kept.putBack(
-    Array.from({ length: MAX_WAITING + 5 }, (_, i) => line(`Line ${i}`)),
-    0,
-  );
+  for (let i = 0; i < MAX_WAITING + 5; i += 1) kept.add(line(`Line ${i}`), i);
   assert.equal(kept.size, MAX_WAITING);
   assert.equal(kept.take()[0]!.text, "Line 5");
 });

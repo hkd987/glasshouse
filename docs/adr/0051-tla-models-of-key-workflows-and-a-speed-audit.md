@@ -183,7 +183,7 @@ another task's change:
   through the whole path (task socket, policy, audit record, snapshot,
   provider), on a person's worth of data. That's a 500-message inbox, a
   2,000-file folder, a 300-meeting month and a 2,000-person directory
-  (`crates/svc/runtime/tests/speed.rs`, run by hand with `--profile vm`).
+  (`crates/svc/runtime/tests/it/speed.rs`, run by hand with `--profile vm`).
   The VM's budgets measured before and after.
 - **What grew with the data or the computer's age, and is fixed:**
   - Mail read the start of every message in a folder on every listing,

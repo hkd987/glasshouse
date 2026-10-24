@@ -165,3 +165,10 @@ only, this amends ADR 0018: their prompts cross our servers.
 - Used up, the page says agents' calls on credits go to the next model
   on the route, or nowhere, until they buy more. No email or other
   notice leaves the console yet.
+
+## Amended by ADR 0052
+What its model (`specs/tla/ModelCredits.tla`) shows the design allows:
+- spend can pass the key's limit by the calls already under way when it's
+  reached, at most the console's 64 permits;
+- a call is billed twice only when credits charged it and its answer was
+  lost, so the next model on the route took it too.

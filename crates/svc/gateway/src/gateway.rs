@@ -1029,4 +1029,75 @@ mod tests {
         assert_eq!(r.input_tokens, Some(1_000));
         assert_eq!(r.cost_usd, Some(0.003));
     }
+
+    /// What one step of a long task costs the gateway itself (ADR 0052):
+    /// every step sends the whole conversation, so redacting, fingerprinting
+    /// and restoring it is work per character, as sending it is. Printed
+    /// with `--nocapture`; the bound only catches a step that stops being
+    /// linear.
+    #[test]
+    fn speed_a_steps_cost_grows_only_with_its_conversation() {
+        let redactor = Redactor::new(&Redaction {
+            pii: vec![PiiKind::Email, PiiKind::UsSsn, PiiKind::CardNumber],
+            patterns: vec![glass_policy::document::RedactPattern {
+                name: "employee-id".into(),
+                pattern: "EMP-######".into(),
+            }],
+        });
+        let gateway = Gateway::new().with("ok", Arc::new(Router));
+        let route = route(vec![step("first", "ok")]);
+        // A tool loop's conversation: results of files and mail, with an
+        // address or two in each, as the desktop agent's are.
+        let result = "From: dana@example.com\nSubject: Q3 numbers\nRevenue was up 4% on \
+            the quarter; see the attached sheet for the breakdown by region. "
+            .repeat(4);
+        let per = |chars: usize| {
+            let mut messages = vec![Message::text(Role::User, "Sum up my mail.")];
+            while messages.iter().map(|m| m.content.len()).sum::<usize>() < chars {
+                messages.push(Message::text(Role::Assistant, "Reading the next one."));
+                messages.push(Message::text(Role::User, result.clone()));
+            }
+            let input = CompleteInput {
+                messages,
+                ..input("")
+            };
+            let started = std::time::Instant::now();
+            let rounds = 5;
+            for _ in 0..rounds {
+                let mut vault = Vault::default();
+                for m in &input.messages {
+                    redactor.redact(&m.content, &mut vault);
+                }
+            }
+            let redacting = started.elapsed() / rounds;
+            let started = std::time::Instant::now();
+            for _ in 0..rounds {
+                gateway
+                    .complete(Call {
+                        input: &input,
+                        route: &route,
+                        redactor: &redactor,
+                        log_prompts: false,
+                    })
+                    .unwrap();
+            }
+            (started.elapsed() / rounds, redacting)
+        };
+        let mut last = None;
+        for chars in [10_000, 50_000, 100_000, 400_000] {
+            let (took, redacting) = per(chars);
+            eprintln!(
+                "a step of {chars} characters: {took:?} in the gateway, {redacting:?} of it redacting"
+            );
+            last = Some((chars, took));
+        }
+        let (at_10k, _) = per(10_000);
+        let (chars, at_most) = last.unwrap();
+        // Linear: 40 times the text in well under 40 × 4 the time, however
+        // fast this machine is.
+        assert!(
+            at_most < at_10k * (chars / 10_000) as u32 * 4,
+            "{at_most:?} for {chars} characters against {at_10k:?} for 10,000"
+        );
+    }
 }

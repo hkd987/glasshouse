@@ -54,6 +54,16 @@ pub const TRANSCRIPT: &str = "meet.transcript";
 /// The most lines one `meet.transcript` returns: the newest.
 const MAX_READ_LINES: usize = 400;
 
+/// Batches of transcript lines glassd remembers having added, so one sent
+/// again (its answer lost) isn't added twice, nor asks the agent twice
+/// (ADR 0052). Meet sends one call at a time, so a few suffice.
+const KEPT_BATCHES: usize = 64;
+/// The longest batch id.
+const MAX_BATCH_ID: usize = 64;
+
+/// What a batch of transcript lines did: by person, meeting and batch id.
+type Added = std::collections::VecDeque<((String, String, String), ActionOutput)>;
+
 /// The person's own apps for meetings: a call from one of them makes the
 /// person's member key if they have none, as opening Chat does.
 const PEOPLES_APPS: &[&str] = &["meet", "calendar"];
@@ -117,6 +127,8 @@ pub struct MeetProvider {
     /// Where transcripts are kept: the meetings' conversations in chat's
     /// store (ADR 0045). None where it isn't wired in.
     shared: Option<Arc<dyn Shared>>,
+    /// The batches of lines added lately, and what each did.
+    added: Arc<std::sync::Mutex<Added>>,
 }
 
 impl MeetProvider {
@@ -130,6 +142,7 @@ impl MeetProvider {
             handle,
             directory,
             shared: None,
+            added: Arc::default(),
         }
     }
 
@@ -165,6 +178,10 @@ struct TranscribeInput {
     meeting: String,
     /// What this computer heard its person say since the last call.
     lines: Vec<TranscriptLine>,
+    /// The page's id for these lines, the same each time it sends them
+    /// again: one glassd has had is answered as then (ADR 0052).
+    #[serde(default)]
+    batch: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -223,8 +240,10 @@ impl MeetProvider {
 
     /// Meeting `id`, if the person is in it. Reads this computer's store
     /// only, so a preview can use it.
+    /// The one meeting a call is about: every other meeting's details stay
+    /// sealed, so a call costs the same after a year of meetings.
     fn find(&self, me: &str, id: &str) -> Option<MeetingInfo> {
-        self.meetings.meetings(me).into_iter().find(|m| m.id == id)
+        self.meetings.meeting(me, id)
     }
 
     fn in_it(&self, me: &str, id: &str) -> Result<MeetingInfo, ActionError> {
@@ -632,18 +651,41 @@ impl MeetProvider {
         let title = title(&meeting);
         let shared = self.transcripts(DOING)?;
         let lines = input.lines.len();
-        let id = shared
-            .post(
-                me,
-                &meeting.id,
-                "",
-                Some(Part::Transcript {
-                    lines: input.lines.clone(),
-                }),
-                None,
-                None,
-            )
-            .map_err(|e| failed(DOING, e))?;
+        // A batch it has had: its answer was lost, so Meet sent it again.
+        let batch = input
+            .batch
+            .as_ref()
+            .map(|b| (me.to_owned(), meeting.id.clone(), b.clone()));
+        if let Some(batch) = &batch {
+            let added = self.added.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((_, done)) = added.iter().find(|(b, _)| b == batch) {
+                return Ok(done.clone());
+            }
+        }
+        let id = match shared.post(
+            me,
+            &meeting.id,
+            "",
+            Some(Part::Transcript {
+                lines: input.lines.clone(),
+            }),
+            None,
+            None,
+        ) {
+            Ok(id) => id,
+            // Not a refusal: Meet keeps the lines and sends them again
+            // (ADR 0052). Nothing was added, so nothing is asked yet. Chat
+            // tries a post once more itself, and says when the server took
+            // the whole message but its answer never came: those lines may
+            // show twice, which is better than losing them.
+            Err(ChatFailure::Link(LinkError::Unreachable(_))) => {
+                return Ok(not_added_yet(&meeting.id, &title));
+            }
+            Err(ChatFailure::Local(why)) if why.contains("may have been posted") => {
+                return Ok(not_added_yet(&meeting.id, &title));
+            }
+            Err(e) => return Err(failed(DOING, e)),
+        };
         // Only these lines are the person's own, heard by their own
         // computer: what others said arrives by sync and never asks.
         let mut asked = Vec::new();
@@ -683,16 +725,25 @@ impl MeetProvider {
                 why.trim_end_matches('.')
             ));
         }
-        Ok(ActionOutput {
+        let done = ActionOutput {
             text,
             data: json!({
                 "meeting": meeting.id,
                 "lines": lines,
+                "added": true,
                 "message": id,
                 "asked": asked,
             }),
             changes: Vec::new(),
-        })
+        };
+        if let Some(batch) = batch {
+            let mut added = self.added.lock().unwrap_or_else(PoisonError::into_inner);
+            if added.len() == KEPT_BATCHES {
+                added.pop_front();
+            }
+            added.push_back((batch, done.clone()));
+        }
+        Ok(done)
     }
 
     /// A transcribed meeting's transcript: everyone's lines, in order, each
@@ -867,6 +918,11 @@ impl ActionProvider for MeetProvider {
                                 "required": ["at", "text"],
                                 "additionalProperties": false
                             }
+                        },
+                        "batch": {
+                            "type": "string",
+                            "maxLength": MAX_BATCH_ID,
+                            "description": "The page's id for these lines, the same when it sends them again"
                         }
                     },
                     "required": ["meeting", "lines"],
@@ -985,10 +1041,11 @@ impl ActionProvider for MeetProvider {
                 "properties": {
                     "meeting": meeting,
                     "lines": { "type": "integer", "description": "how many lines were added" },
-                    "message": { "type": "string", "description": "the transcript message they went in" },
+                    "added": { "type": "boolean", "description": "false when the organization's server couldn't be reached: nothing was added, and the lines are to be sent again" },
+                    "message": { "type": "string", "description": "the transcript message they went in; empty when not added" },
                     "asked": { "type": "array", "items": { "type": "string" }, "description": "what \"Hey Glass\" asked your agent, each started" }
                 },
-                "required": ["meeting", "lines", "message", "asked"],
+                "required": ["meeting", "lines", "added", "message", "asked"],
                 "additionalProperties": false
             }),
             TRANSCRIPT => json!({
@@ -1122,6 +1179,7 @@ impl ActionProvider for MeetProvider {
                 let input: TranscribeInput = parse_input(input)?;
                 check_meeting(&input.meeting)?;
                 check_lines(&input.lines)?;
+                check_batch(input.batch.as_deref())?;
                 self.transcribe(ctx, input)
             }
             TRANSCRIPT => {
@@ -1161,6 +1219,40 @@ fn check_lines(lines: &[TranscriptLine]) -> Result<(), ActionError> {
         }
     }
     Ok(())
+}
+
+/// What `meet.transcribe` answers when the organization's server can't be
+/// reached: nothing added, and Meet sends the lines again (ADR 0052).
+fn not_added_yet(meeting: &str, title: &str) -> ActionOutput {
+    ActionOutput {
+        text: format!(
+            "Not added to the transcript of {title} yet: your organization's server can't be \
+             reached. Meet keeps the lines and tries again."
+        ),
+        data: json!({
+            "meeting": meeting,
+            "lines": 0,
+            "added": false,
+            "message": "",
+            "asked": [],
+        }),
+        changes: Vec::new(),
+    }
+}
+
+fn check_batch(batch: Option<&str>) -> Result<(), ActionError> {
+    match batch {
+        Some(b)
+            if b.is_empty()
+                || b.len() > MAX_BATCH_ID
+                || !b.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') =>
+        {
+            Err(ActionError::InvalidInput(format!(
+                "a batch id is 1 to {MAX_BATCH_ID} letters, digits and dashes"
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn check_offer(offer: &str) -> Result<(), ActionError> {

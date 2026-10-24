@@ -136,10 +136,13 @@ pub fn kept(path: &Path, device: &str) -> Result<DeviceKey, String> {
 /// its owner alone; `what` names it in errors. A key others can read isn't
 /// used. The billing relay keeps its key this way too (ADR 0040).
 pub fn kept_secret(path: &Path, what: &str) -> Result<SecretKey, String> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::MetadataExt;
     let shown = path.display();
     match std::fs::metadata(path) {
+        // Empty: made and never written, by a glassd that stopped in
+        // between before keys were written whole (ADR 0052). It never held
+        // a key, so none was registered: a new one takes its place.
+        Ok(meta) if meta.len() == 0 => write_secret(path, what, true),
         Ok(meta) => {
             if meta.mode() & 0o077 != 0 {
                 return Err(format!(
@@ -151,22 +154,52 @@ pub fn kept_secret(path: &Path, what: &str) -> Result<SecretKey, String> {
                 hex::decode(text.trim()).map_err(|_| format!("{what} {shown} is damaged"))?;
             SecretKey::from_bytes(&bytes).map_err(|_| format!("{what} {shown} is damaged"))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let key = SecretKey::generate().map_err(|e| e.to_string())?;
-            let bytes = key.to_bytes().map_err(|e| e.to_string())?;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(path)
-                .map_err(|e| format!("{what} {shown}: {e}"))?;
-            file.write_all(hex::encode(bytes).as_bytes())
-                .and_then(|()| file.sync_all())
-                .map_err(|e| format!("{what} {shown}: {e}"))?;
-            Ok(key)
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => write_secret(path, what, false),
         Err(e) => Err(format!("{what} {shown}: {e}")),
     }
+}
+
+/// A new key at `path`, written whole under another name first and then
+/// given the name (the DeviceEnrollment model, ADR 0052): stopped at any
+/// point, it leaves the key whole or not there. Unless `replace`, one
+/// another process gave the name first is the key.
+fn write_secret(path: &Path, what: &str, replace: bool) -> Result<SecretKey, String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let shown = path.display();
+    let failed = |e: std::io::Error| format!("{what} {shown}: {e}");
+    let key = SecretKey::generate().map_err(|e| e.to_string())?;
+    let bytes = key.to_bytes().map_err(|e| e.to_string())?;
+    let new = path.with_extension(format!("new-{}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&new)
+        .map_err(failed)?;
+    let named = file
+        .write_all(hex::encode(bytes).as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| match replace {
+            true => std::fs::rename(&new, path),
+            // A link fails if the name is taken, where a rename replaces.
+            false => std::fs::hard_link(&new, path),
+        });
+    let _ = std::fs::remove_file(&new);
+    match named {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return kept_secret(path, what);
+        }
+        Err(e) => return Err(failed(e)),
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .map_err(failed)?;
+    }
+    Ok(key)
 }
 
 /// `POST /device/v1/register`, with the enrollment token: a computer's
@@ -298,5 +331,40 @@ mod tests {
             "{shown}"
         );
         assert!(DeviceKey::from_bytes("lab-07", &[1, 2, 3]).is_err());
+    }
+
+    /// glassd stopping between making the key file and writing it left it
+    /// empty: "damaged", and the computer never synced again until someone
+    /// deleted it by hand (the DeviceEnrollment model, ADR 0052). An empty
+    /// file never held a key, so none was registered: a new one is made,
+    /// and it's written whole before it has the name.
+    #[test]
+    fn adr0030_a_key_half_made_when_glassd_stopped_is_made_again() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device.key");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        let key = kept(&path, "lab-07").unwrap();
+        let again = kept(&path, "lab-07").unwrap();
+        assert_eq!(
+            again.registration().unwrap().key,
+            key.registration().unwrap().key
+        );
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        // Nothing left beside it.
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["device.key"]);
+        // A key with something in it that isn't one stays refused.
+        std::fs::write(&path, "not a key").unwrap();
+        assert!(kept(&path, "lab-07").unwrap_err().contains("damaged"));
     }
 }

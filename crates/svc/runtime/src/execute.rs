@@ -251,10 +251,39 @@ impl Runtime {
 
         // A reversible step has the person's turn from its snapshot to its
         // record: another task's write never lands in between (ADR 0051).
-        let _turn = match def.side_effect {
-            SideEffect::LocalReversible => Some(self.writing_turn(task.user.uid).await),
-            _ => None,
+        // So does a step the person approved, from its second look to its
+        // record: what runs is what they saw (DA-11, ADR 0052). A model
+        // call carries what it sends in its input, and holds no turn.
+        let second_look = approval.is_some() && def.name.as_str() != MODEL_COMPLETE;
+        let _turn = if def.side_effect == SideEffect::LocalReversible || second_look {
+            Some(self.writing_turn(task.user.uid).await)
+        } else {
+            None
         };
+        if second_look
+            && let Some(why) = self
+                .changed_since_asked(task, &def, &provider, &args, &preview)
+                .await
+        {
+            let failure = AuditOutcome::Failed { error: why.clone() };
+            self.record(
+                task,
+                &def,
+                &preview,
+                &verdict,
+                approval.clone(),
+                None,
+                failure,
+                started,
+                None,
+            );
+            task.lock().note(
+                ActivityKind::Blocked,
+                format!("Not done: {} changed before it ran", preview.summary),
+            );
+            self.publish(task);
+            return Ok(CallToolResult::error(why));
+        }
         let mut snapshot = None;
         if def.side_effect == SideEffect::LocalReversible && !preview.snapshot_roots.is_empty() {
             // An Auto step makes do with the task's last snapshot while it
@@ -388,6 +417,15 @@ impl Runtime {
                 );
                 // Away from the task's lock: it may ask the system its offset.
                 let day = recorded.as_ref().map(|_| local_day());
+                // A write that landed after the preview carries its label on
+                // what was read, so the labels are read again (DP-11,
+                // ModelGateway.tla).
+                let read_label = preview
+                    .reads
+                    .iter()
+                    .filter_map(|path| label_of(path).ok().flatten())
+                    .max()
+                    .max(read_label);
                 {
                     let mut state = task.lock();
                     state.data_label = state.data_label.max(read_label);
@@ -668,6 +706,52 @@ impl Runtime {
             self.publish(task);
         }
         CallToolResult::error(error.to_string())
+    }
+
+    /// Why an approved call no longer does what the person approved, if it
+    /// doesn't: previewed again once they answered (the person's turn held,
+    /// so no reversible step lands before it runs), it must say and touch
+    /// exactly what the ask showed. An invitation to an event moved while
+    /// they decided, or a delete of a folder that has gained a file, is
+    /// refused, and the agent can ask again (DA-11, ADR 0052).
+    async fn changed_since_asked(
+        &self,
+        task: &Arc<Task>,
+        def: &ActionDef,
+        provider: &Arc<dyn ActionProvider>,
+        args: &Value,
+        asked: &Preview,
+    ) -> Option<String> {
+        let (provider, ctx, name, input) = (
+            Arc::clone(provider),
+            task.call_ctx(),
+            def.name.clone(),
+            args.clone(),
+        );
+        let now = match tokio::task::spawn_blocking(move || provider.preview(&ctx, &name, &input))
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => Err(ActionError::Failed(e.to_string())),
+        };
+        match now {
+            Ok(now) if &now == asked => None,
+            Ok(now) => Some(format!(
+                "Not done: \"{}\" changed while the person was deciding, so it isn't what they \
+                 approved; now it would be \"{}\"{}. Nothing was done; ask again if it's still \
+                 wanted.",
+                asked.summary,
+                now.summary,
+                match now.items.first() {
+                    Some(item) if now.items != asked.items => format!(" ({item})"),
+                    _ => String::new(),
+                }
+            )),
+            Err(e) => Some(format!(
+                "Not done: \"{}\" changed while the person was deciding: {e}. Nothing was done.",
+                asked.summary
+            )),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

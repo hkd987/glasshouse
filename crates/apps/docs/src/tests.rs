@@ -398,6 +398,170 @@ fn dc3_versions_and_snapshots_keep_the_doc_whole_for_a_fresh_reader() {
     assert_eq!(opened.data["versions"][0]["by_name"], "Dana Ruiz");
 }
 
+/// `login`'s page on `computer`, opened by `ctx`: its state and cursor.
+fn opened(computer: &Computer, ctx: &TaskContext, id: &str) -> (String, u64) {
+    let out = computer.with(ctx, OPEN, json!({ "doc": id })).unwrap();
+    (
+        out.data["state"].as_str().unwrap().to_owned(),
+        out.data["cursor"].as_u64().unwrap(),
+    )
+}
+
+/// What a computer that opens the doc from its log reads.
+fn fresh_read(org: &Org, computer: &Computer, login: &str, id: &str) -> String {
+    computer.sync();
+    DocsProvider::new(computer.roster.clone(), org.directory.clone())
+        .invoke(
+            &computer.ctx(login, AGENT),
+            &READ.parse().unwrap(),
+            &json!({ "doc": id }),
+        )
+        .unwrap()
+        .data["markdown"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn dc3_an_edit_that_arrives_after_ones_own_later_one_still_lands() {
+    // DocsCollab.tla, pastGaps: a computer keeps its own post at once, so
+    // Priya's earlier edit, still on its way, arrived after it and fell
+    // behind the cursor: Dana's computer and page never had it.
+    let org = org();
+    let (a, b, _c, id) = planned(&org);
+    a.sync();
+    let dana = a.ctx("dana", APP);
+    let priya = b.ctx("priya", APP);
+    let (state_a, cursor) = opened(&a, &dana, &id);
+    let (state_b, _) = opened(&b, &priya, &id);
+    b.docs
+        .push(&priya, &id, "", &typed(&state_b, "Priya's line."))
+        .unwrap();
+    a.docs
+        .push(&dana, &id, "", &typed(&state_a, "Dana's line."))
+        .unwrap();
+    let early = a.docs.pull(&dana, &id, "", cursor).unwrap();
+    a.sync();
+    let late = a.docs.pull(&dana, &id, "", early.cursor).unwrap();
+    assert!(
+        late.updates.iter().any(|u| u["by"] == "priya"),
+        "Dana's page hears Priya's line: {late:?}"
+    );
+    let md = a.markdown("dana", &id);
+    assert!(
+        md.contains("Priya's line.") && md.contains("Dana's line."),
+        "{md}"
+    );
+}
+
+#[test]
+fn dc3_a_version_named_while_an_edit_is_on_its_way_doesnt_drop_it() {
+    // DocsCollab.tla, byPosition: a fresh reader skipped every edit before
+    // the newest snapshot, though Dana's computer hadn't had Priya's.
+    let org = org();
+    let (a, b, c, id) = planned(&org);
+    a.sync();
+    let priya = b.ctx("priya", APP);
+    let (state_b, _) = opened(&b, &priya, &id);
+    b.docs
+        .push(&priya, &id, "", &typed(&state_b, "Priya's line."))
+        .unwrap();
+    a.call("dana", APP, VERSION, json!({ "doc": id, "name": "Draft" }))
+        .unwrap();
+    let md = fresh_read(&org, &c, "sam", &id);
+    assert!(md.contains("Priya's line."), "{md}");
+    assert!(md.starts_with("# Q3 plan"), "{md}");
+}
+
+#[test]
+fn dc4_an_edit_made_while_its_author_edited_reaches_every_page() {
+    // DocsCollab.tla, rolesNow: a pull judged each update by who edits
+    // now, so Dana's page lost what Priya wrote before Dana made her a
+    // viewer, though Dana's computer kept it.
+    let org = org();
+    let (a, b, _c, id) = planned(&org);
+    a.sync();
+    let dana = a.ctx("dana", APP);
+    let priya = b.ctx("priya", APP);
+    let (_, cursor) = opened(&a, &dana, &id);
+    let (state_b, _) = opened(&b, &priya, &id);
+    b.docs
+        .push(&priya, &id, "", &typed(&state_b, "Priya's line."))
+        .unwrap();
+    a.sync();
+    a.call("dana", APP, ROLES, json!({ "doc": id, "editors": [] }))
+        .unwrap();
+    a.sync();
+    let pulled = a.docs.pull(&dana, &id, "", cursor).unwrap();
+    assert!(
+        pulled.updates.iter().any(|u| u["by"] == "priya"),
+        "{pulled:?}"
+    );
+    assert!(a.markdown("dana", &id).contains("Priya's line."));
+}
+
+#[test]
+fn dc4_a_version_posted_after_its_author_stopped_editing_isnt_taken() {
+    // DocsCollab.tla, finalRoles: a fresh reader judged the newest
+    // snapshot's sender by who edits now, so it took a version Priya
+    // posted while a viewer, with her refused edit, once she edited again.
+    let org = org();
+    let (a, b, c, id) = planned(&org);
+    let priya = b.ctx("priya", APP);
+    let (state_b, _) = opened(&b, &priya, &id);
+    a.sync();
+    a.call("dana", APP, ROLES, json!({ "doc": id, "editors": [] }))
+        .unwrap();
+    // Before Priya's computer hears it, she types and names a version.
+    b.docs
+        .push(&priya, &id, "", &typed(&state_b, "Priya, too late."))
+        .unwrap();
+    b.call("priya", APP, VERSION, json!({ "doc": id, "name": "Mine" }))
+        .unwrap();
+    a.sync();
+    a.call(
+        "dana",
+        APP,
+        ROLES,
+        json!({ "doc": id, "editors": ["priya"] }),
+    )
+    .unwrap();
+    let following = a.markdown("dana", &id);
+    assert!(!following.contains("Priya, too late."), "{following}");
+    let md = fresh_read(&org, &c, "sam", &id);
+    assert!(!md.contains("Priya, too late."), "{md}");
+    assert!(md.starts_with("# Q3 plan"), "{md}");
+}
+
+#[test]
+fn dc4_an_edit_posted_after_its_author_stopped_editing_leaves_their_computer_too() {
+    // DocsCollab.tla, keepRefused and pastGaps: Priya's computer kept her
+    // refused edit, and, having pulled her own post first, never heard
+    // that she views it now.
+    let org = org();
+    let (a, b, _c, id) = planned(&org);
+    let priya = b.ctx("priya", APP);
+    let (state_b, _) = opened(&b, &priya, &id);
+    a.sync();
+    a.call("dana", APP, ROLES, json!({ "doc": id, "editors": [] }))
+        .unwrap();
+    b.docs
+        .push(&priya, &id, "", &typed(&state_b, "Priya, too late."))
+        .unwrap();
+    b.docs.pull(&priya, &id, "", 0).unwrap();
+    b.sync();
+    a.sync();
+    assert!(!a.markdown("dana", &id).contains("Priya, too late."));
+    let md = b.markdown("priya", &id);
+    assert!(!md.contains("Priya, too late."), "{md}");
+    let again = b.docs.push(&priya, &id, "", &typed(&state_b, "Again."));
+    assert!(
+        again.unwrap_err().to_string().contains("not edit"),
+        "she views it now"
+    );
+}
+
 #[test]
 fn adr0034_a_doc_is_labeled_and_takes_nothing_from_a_task_that_read_more() {
     let org = org();
@@ -539,4 +703,119 @@ fn ga1_what_each_action_returns_is_what_it_declares() {
     for def in a.docs.actions() {
         assert!(a.docs.returns(&def.name).is_some(), "{}", def.name);
     }
+}
+
+/// DC-1 speed (ADR 0052): a doc with 10,000 updates, a snapshot every
+/// 200 as Docs posts them. By hand:
+/// `cargo test -p glass-app-docs --profile vm -- --ignored --nocapture dc1_`.
+#[test]
+#[ignore = "a measurement, run by hand"]
+fn dc1_opening_a_doc_with_10000_updates() {
+    const UPDATES: usize = 10_000;
+    let org = org();
+    let (a, b, _c, id) = planned(&org);
+    a.sync();
+    let dana = a.ctx("dana", APP);
+    let (state, _) = opened(&a, &dana, &id);
+    // The page's document, typed into a line at a time.
+    let page = ydoc::doc_from(&[base64::decode(&state).unwrap()]).unwrap();
+    let fragment = page.get_or_insert_xml_fragment(ydoc::FRAGMENT);
+    let started = Instant::now();
+    let mut upto = 0;
+    for n in 0..UPDATES {
+        let before = page.transact().state_vector();
+        {
+            let mut txn = page.transact_mut();
+            let len = fragment.len(&txn);
+            let p = fragment.insert(&mut txn, len, yrs::XmlElementPrelim::empty("paragraph"));
+            let t = p.push_back(&mut txn, XmlTextPrelim::new(""));
+            t.insert(&mut txn, 0, &format!("Line {n} of the plan."));
+        }
+        let update = page.transact().encode_state_as_update_v1(&before);
+        a.roster
+            .post(
+                "dana",
+                &id,
+                "",
+                Some(Part::Update {
+                    data: base64::encode(&update),
+                }),
+                None,
+                None,
+            )
+            .unwrap();
+        if (n + 1) % SNAPSHOT_EVERY == 0 {
+            upto = a
+                .roster
+                .since("dana", &id, upto)
+                .unwrap()
+                .messages
+                .last()
+                .unwrap()
+                .seq;
+            let state = ydoc::state(&page);
+            let (blob, key, sha256, bytes) = a.docs.blob("dana", &id, &state).unwrap();
+            a.roster
+                .post(
+                    "dana",
+                    &id,
+                    "",
+                    Some(Part::Snapshot {
+                        blob,
+                        key,
+                        sha256,
+                        bytes,
+                        upto,
+                        name: None,
+                    }),
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+    }
+    a.sync();
+    b.sync();
+    eprintln!("posted {UPDATES} updates in {:?}", started.elapsed());
+    let time = |what: &str, f: &mut dyn FnMut()| {
+        let mut runs: Vec<std::time::Duration> = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                f();
+                t.elapsed()
+            })
+            .collect();
+        runs.sort();
+        eprintln!("{what}: median {:?} (fastest {:?})", runs[2], runs[0]);
+    };
+    let priya = b.ctx("priya", APP);
+    time(
+        "doc.open, first on this computer (from the log)",
+        &mut || {
+            let fresh = DocsProvider::new(b.roster.clone(), org.directory.clone());
+            let out = fresh
+                .invoke(&priya, &OPEN.parse().unwrap(), &json!({ "doc": id }))
+                .unwrap();
+            assert!(out.data["state"].as_str().unwrap().len() > 100_000);
+        },
+    );
+    let out = b.with(&priya, OPEN, json!({ "doc": id })).unwrap();
+    let cursor = out.data["cursor"].as_u64().unwrap();
+    time("doc.open again (kept in memory)", &mut || {
+        b.with(&priya, OPEN, json!({ "doc": id })).unwrap();
+    });
+    time("a pull with nothing new", &mut || {
+        b.docs.pull(&priya, &id, "", cursor).unwrap();
+    });
+    let state = out.data["state"].as_str().unwrap().to_owned();
+    let mut n = 0;
+    time("a push", &mut || {
+        n += 1;
+        b.docs
+            .push(&priya, &id, "", &typed(&state, &format!("Priya {n}")))
+            .unwrap();
+    });
+    time("doc.read (Markdown)", &mut || {
+        b.call("priya", AGENT, READ, json!({ "doc": id })).unwrap();
+    });
 }

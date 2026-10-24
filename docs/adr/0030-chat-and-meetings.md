@@ -574,7 +574,7 @@ Every test name carries its PRD id. Nothing reaches a pilot org before slices C2
   - `cf91_a_stale_epoch_message_is_refused`
   - `cf91_an_epoch_without_a_compliance_envelope_is_refused`
   - `cf91_a_post_wakes_waiting_computers_within_a_second`
-- Runtime tests, in `crates/svc/runtime/tests/chat.rs`, with a fake `ChatLink`:
+- Runtime tests, in `crates/svc/runtime/tests/it/chat.rs`, with a fake `ChatLink`:
   - `cf91_agents_read_chat_at_auto_and_each_read_is_audited_without_text`
   - `cf91_an_agents_chat_post_asks_and_a_decline_is_a_readable_result`. The result is `is_error` with "declined", audited Denied, and the fake saw no post.
   - `cf91_a_group_rule_making_chat_post_never_is_a_readable_refusal`. The refusal names the rule, is audited Blocked, and nothing is posted.
@@ -590,7 +590,7 @@ Every test name carries its PRD id. Nothing reaches a pilot org before slices C2
   - a channel made in Chat, read on the colleague's computer, its name never on the console;
   - Chat keeps nothing in the page's storage (localStorage, IndexedDB, caches);
   - and in `perf.spec.ts`, Chat's cold launch and memory against UI-7.
-- `app.status` waits: `cf91_chat_hears_of_a_new_message_without_reading_it` in `crates/svc/runtime/tests/chat.rs`.
+- `app.status` waits: `cf91_chat_hears_of_a_new_message_without_reading_it` in `crates/svc/runtime/tests/it/chat.rs`.
 
 **C2. Several computers, membership, presence.** Pilot gate, part one.
 - Built (2026-10-20), adding people:
@@ -857,3 +857,22 @@ and come after.
    stays readable through IT's export only. The compliance key is for
    retention, holds and eDiscovery, nothing routine.
 
+## Amended by ADR 0052
+Its models (`specs/tla/ChatSync.tla`, `ChatPost.tla`,
+`DeviceEnrollment.tla`) found:
+- a computer's sync cursor moves only past what every person there kept,
+  and stays at the beginning for someone who started Chat while a sync
+  waited;
+- the newest view marks a conversation read only up to what the computer
+  has fetched;
+- a post whose answer was lost is asked again with the same message, which
+  the console takes or refuses as posted already, never posts twice;
+- slice P: the console keeps the keys of computers IT forgot and refuses
+  them as removed; long polls and reports check the key again before they
+  answer; the device key is written whole before it gets its name.
+- §6, as built: the console asks the relay who is still connected
+  (`GET /rooms/{room}`, the relay's private API) before it answers for
+  keys, and every 30 s, so a computer that dropped out of a call leaves it;
+  a seat's stamp keeps that check from judging a join in progress; pages
+  ask for keys once they're in, and for as long as a new key is due
+  (`specs/tla/MeetKeys.tla`).

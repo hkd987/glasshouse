@@ -173,7 +173,7 @@ Builds on ADRs 0013, 0014, 0023, 0024 and 0026.
   Devices page shows it as "Apps people made".
 - Tests:
   - the studio's own tests;
-  - the runtime's `tests/studio.rs`;
+  - the runtime's `tests/it/studio.rs`;
   - the console's `ga10_…`;
   - `apps/e2e/studio.spec.ts`, where Claude Code remixes Mail over MCP
     and it runs on its own origin;
@@ -340,3 +340,10 @@ edition of it (decision 6). On a computer:
   be the same code as the computer's, so they can't drift.
 - Our own apps become what customers start from, so their source must
   stay readable: it is now product.
+
+## Amended by ADR 0052
+- IT's Approve names the version IT reviewed; another one waiting is
+  refused (409) until it's reviewed (`POST /api/catalog/<id>/approve`
+  takes `version`).
+- A computer whose fetch of an approved bundle failed fetches it again at
+  a later sync, at most once a minute (`specs/tla/StoreShare.tla`).

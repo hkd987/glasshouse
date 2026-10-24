@@ -19,7 +19,7 @@
 pub mod markdown;
 pub mod ydoc;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -123,8 +123,16 @@ struct Version {
 struct Cached {
     id: String,
     doc: yrs::Doc,
-    /// The newest message applied.
+    /// Every message up to here is taken in, in order: no other can still
+    /// arrive before it (`Shared::through`, ADR 0052).
     seq: u64,
+    /// This computer's own posts past `seq`, taken in as they were kept, and
+    /// whether each changed roles. Another computer's message from before
+    /// them can still arrive.
+    ahead: BTreeMap<u64, bool>,
+    /// Edits (updates, snapshots) the doc refused: their sender didn't
+    /// edit it then. A pull judges by them.
+    refused: BTreeSet<String>,
     title: String,
     label: Label,
     owner: String,
@@ -161,7 +169,8 @@ struct Opened {
     since: Instant,
     /// Messages this session posted and the page that pushed each, so a
     /// pull doesn't echo a page's own edits but does bring another
-    /// window's.
+    /// window's; and those a pull brought a page ahead of its cursor, so
+    /// it doesn't bring them twice.
     posted: Vec<(String, String)>,
 }
 
@@ -327,15 +336,23 @@ impl DocsProvider {
         }
     }
 
-    /// Applies `messages` (in order) to `cached`.
-    fn absorb(&self, login: &str, cached: &mut Cached, messages: Vec<ItemMessage>) {
+    /// Applies `messages` (in order) to `cached`. Whether one of `login`'s
+    /// own edits was refused: posted just after they stopped editing, it's
+    /// in `cached`'s Yjs document already (a push applies it first).
+    fn absorb(&self, login: &str, cached: &mut Cached, messages: Vec<ItemMessage>) -> bool {
         let item = cached.id.clone();
+        let mut stale = false;
         for m in messages {
-            cached.seq = cached.seq.max(m.seq);
             cached.updated_at.clone_from(&m.at);
             let Some(part) = m.part else { continue };
             let role = cached.role(&m.sender);
             match &part {
+                Part::Update { .. } | Part::UpdateBlob { .. } | Part::Snapshot { .. }
+                    if !role.edits() =>
+                {
+                    cached.refused.insert(m.id.clone());
+                    stale |= m.sender == login;
+                }
                 Part::Update { .. } | Part::UpdateBlob { .. } if role.edits() => {
                     if let Some(bytes) = self.update_bytes(login, &item, &part) {
                         let _ = ydoc::apply(&cached.doc, &[bytes]);
@@ -382,6 +399,61 @@ impl DocsProvider {
                 _ => {}
             }
         }
+        stale
+    }
+
+    /// Takes `messages`, those after `cached.seq`, into `cached`, with
+    /// `through` read before them. False when it must be loaded again, in
+    /// order: when another computer's message from before this one's own,
+    /// taken in already, changes roles or comes with a change of roles
+    /// among them, and when it refused its person's own edit. Otherwise an
+    /// earlier message merges the same as in order (Yjs) and is judged the
+    /// same (DocsCollab.tla).
+    fn take_in(
+        &self,
+        login: &str,
+        cached: &mut Cached,
+        messages: Vec<ItemMessage>,
+        through: u64,
+    ) -> bool {
+        let fresh: Vec<ItemMessage> = messages
+            .into_iter()
+            .filter(|m| !cached.ahead.contains_key(&m.seq))
+            .collect();
+        let roles = |m: &ItemMessage| matches!(m.part, Some(Part::Roles { .. }));
+        if let Some((&newest, _)) = cached.ahead.last_key_value()
+            && fresh.iter().any(|m| m.seq < newest)
+            && (cached.ahead.values().any(|r| *r) || fresh.iter().any(roles))
+        {
+            return false;
+        }
+        let taken: Vec<(u64, bool)> = fresh.iter().map(|m| (m.seq, roles(m))).collect();
+        let stale = self.absorb(login, cached, fresh);
+        let newest = taken
+            .iter()
+            .map(|(seq, _)| *seq)
+            .chain(cached.ahead.keys().copied())
+            .fold(cached.seq, u64::max);
+        cached.seq = cached.seq.max(through.min(newest));
+        cached.ahead.extend(taken);
+        let seq = cached.seq;
+        cached.ahead.retain(|s, _| *s > seq);
+        !stale
+    }
+
+    /// Doc `id` for `login` from its whole log.
+    fn reload(&self, login: &str, id: &str) -> Result<Cached, ActionError> {
+        let through = self.shared.through(login);
+        let item = self
+            .shared
+            .item(login, id)
+            .filter(|i| i.kind == ConversationKind::Doc)
+            .ok_or_else(|| {
+                ActionError::NotFound(format!(
+                    "no doc {id} is shared with you; doc.list shows them"
+                ))
+            })?;
+        Ok(self.load(login, item, through))
     }
 
     /// Doc `id` for `login`, brought up to date, under the state lock.
@@ -396,22 +468,17 @@ impl DocsProvider {
         let mut state = self.state();
         match state.docs.get_mut(&key) {
             Some(cached) => {
+                // Before the messages: nothing up to it can arrive later.
+                let through = self.shared.through(login);
                 if let Some(item) = self.shared.since(login, id, cached.seq) {
                     cached.members = item.members.clone();
-                    self.absorb(login, cached, item.messages);
+                    if !self.take_in(login, cached, item.messages, through) {
+                        *cached = self.reload(login, id)?;
+                    }
                 }
             }
             None => {
-                let item = self
-                    .shared
-                    .item(login, id)
-                    .filter(|i| i.kind == ConversationKind::Doc)
-                    .ok_or_else(|| {
-                        ActionError::NotFound(format!(
-                            "no doc {id} is shared with you; doc.list shows them"
-                        ))
-                    })?;
-                let cached = self.load(login, item);
+                let cached = self.reload(login, id)?;
                 state.docs.insert(key.clone(), cached);
             }
         }
@@ -422,12 +489,15 @@ impl DocsProvider {
         f(cached)
     }
 
-    /// A doc from its whole log: its newest snapshot, then what came after.
-    fn load(&self, login: &str, item: Item) -> Cached {
+    /// A doc from its whole log, `through` read before it: its newest
+    /// snapshot whose sender edited it then, and what that doesn't cover.
+    fn load(&self, login: &str, item: Item, through: u64) -> Cached {
         let mut cached = Cached {
             id: item.id.clone(),
             doc: yrs::Doc::new(),
             seq: 0,
+            ahead: BTreeMap::new(),
+            refused: BTreeSet::new(),
             title: item.title.clone(),
             label: item.label,
             owner: item.created_by.clone(),
@@ -439,40 +509,45 @@ impl DocsProvider {
             since_snapshot: 0,
             updated_at: String::new(),
         };
-        // Roles first, so the snapshot's sender is judged by them.
-        let roles: Vec<ItemMessage> = item
-            .messages
-            .iter()
-            .filter(|m| matches!(m.part, Some(Part::Roles { .. })))
-            .cloned()
-            .collect();
-        self.absorb(login, &mut cached, roles);
-        let newest = item.messages.iter().rposition(|m| {
-            matches!(m.part, Some(Part::Snapshot { .. })) && cached.role(&m.sender).edits()
-        });
-        let mut skip = 0;
-        if let Some(at) = newest {
-            // Older edits are in it; comments, versions and roles are not.
-            skip = at;
+        // Who edits, in order, judges each edit as of when it was posted,
+        // covered by the snapshot or not (a pull asks).
+        let mut editors: Vec<String> = Vec::new();
+        let mut newest = None;
+        for (n, m) in item.messages.iter().enumerate() {
+            let edits = m.sender == item.created_by || editors.contains(&m.sender);
+            match &m.part {
+                Some(Part::Roles { editors: e, .. }) if m.sender == item.created_by => {
+                    editors = e
+                        .iter()
+                        .filter(|l| item.members.contains(l))
+                        .cloned()
+                        .collect();
+                }
+                Some(Part::Update { .. } | Part::UpdateBlob { .. } | Part::Snapshot { .. })
+                    if !edits =>
+                {
+                    cached.refused.insert(m.id.clone());
+                }
+                Some(Part::Snapshot { upto, .. }) => newest = Some((n, *upto)),
+                _ => {}
+            }
         }
+        // It holds every update up to `upto` (its computer had them all);
+        // comments, versions and roles aren't in it.
+        let (at, upto) = newest.unwrap_or((0, 0));
         let messages: Vec<ItemMessage> = item
             .messages
             .into_iter()
             .enumerate()
-            .filter(|(n, m)| {
-                *n >= skip
-                    || !matches!(
-                        m.part,
-                        Some(
-                            Part::Update { .. }
-                                | Part::UpdateBlob { .. }
-                                | Part::Snapshot { name: None, .. }
-                        )
-                    )
+            .filter(|(n, m)| match m.part {
+                Some(Part::Update { .. } | Part::UpdateBlob { .. }) => m.seq > upto,
+                Some(Part::Snapshot { name: None, .. }) => *n >= at,
+                _ => true,
             })
             .map(|(_, m)| m)
             .collect();
-        self.absorb(login, &mut cached, messages);
+        // Its Yjs document starts empty: nothing refused is in it.
+        self.take_in(login, &mut cached, messages, through);
         cached
     }
 
@@ -1516,29 +1591,48 @@ impl Live for DocsProvider {
                     .collect()
             })
             .ok_or_else(|| invalid("this doc isn't open in this window; open it again"))?;
-        let fresh = self
-            .shared
-            .since(me, item, since)
-            .ok_or_else(|| invalid("no such doc"))?;
-        // Bring the cache up to date too, and judge senders by its roles.
-        self.with_doc(me, item, |cached| {
+        // The cache brought up to date first: what came after the cursor,
+        // each update as the cache judged it when it was posted. The
+        // cursor moves only as far as nothing earlier can still arrive.
+        let (pulled, ahead) = self.with_doc(me, item, |cached| {
+            let fresh = self
+                .shared
+                .since(me, item, since)
+                .ok_or_else(|| invalid("no such doc"))?;
+            let cursor = since.max(cached.seq);
             let mut updates = Vec::new();
-            let mut cursor = since;
+            let mut ahead = Vec::new();
             for m in &fresh.messages {
-                cursor = cursor.max(m.seq);
                 let Some(part) = &m.part else { continue };
-                if !matches!(part, Part::Update { .. } | Part::UpdateBlob { .. } | Part::Snapshot { .. })
-                    || !cached.role(&m.sender).edits()
+                let taken = m.seq <= cached.seq || cached.ahead.contains_key(&m.seq);
+                if !taken
+                    || !matches!(part, Part::Update { .. } | Part::UpdateBlob { .. } | Part::Snapshot { .. })
+                    || cached.refused.contains(&m.id)
                     || posted.contains(&m.id)
                 {
                     continue;
                 }
                 if let Some(bytes) = self.update_bytes(me, item, part) {
                     updates.push(json!({ "update": base64::encode(&bytes), "by": m.sender, "by_name": self.name(&m.sender) }));
+                    if m.seq > cursor {
+                        ahead.push(m.id.clone());
+                    }
                 }
             }
-            Ok(Pulled { updates, cursor })
-        })
+            Ok((Pulled { updates, cursor }, ahead))
+        })?;
+        if !ahead.is_empty()
+            && let Some(opened) = self
+                .state()
+                .sessions
+                .get_mut(&session)
+                .and_then(|s| s.get_mut(item))
+        {
+            opened
+                .posted
+                .extend(ahead.into_iter().map(|id| (client.to_owned(), id)));
+        }
+        Ok(pulled)
     }
 
     fn closed(&self, session: &TaskId) -> Vec<String> {

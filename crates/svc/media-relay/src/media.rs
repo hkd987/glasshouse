@@ -93,6 +93,11 @@ pub(crate) enum Command {
     Health {
         reply: oneshot::Sender<Health>,
     },
+    /// Who has a seat in a room: admitted, and their connection not gone.
+    Room {
+        room: String,
+        reply: oneshot::Sender<Vec<u32>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -340,6 +345,14 @@ impl Media {
                     rooms: self.rooms.len(),
                     participants: self.peers.len(),
                 });
+            }
+            Command::Room { room, reply } => {
+                let seats = self
+                    .rooms
+                    .get(&room)
+                    .map(|seats| seats.keys().copied().collect())
+                    .unwrap_or_default();
+                let _ = reply.send(seats);
             }
         }
     }

@@ -9,6 +9,11 @@
 //!   409 ([`SEATS`](crate::SEATS)). A bad offer is 400. The name, if given,
 //!   is what the others' pages show with that person's video (the `peers`
 //!   line's `names`); without one they show "Participant N".
+//! - `GET /rooms/{room}`: 200 `{"participants": [<u32>, …]}`, who has a
+//!   seat: admitted, and their connection not closed or dropped. A room
+//!   nobody is in lists nobody. The console asks before it answers for a
+//!   meeting's keys, so whoever dropped out counts as having left (ADR
+//!   0052).
 //! - `DELETE /rooms/{room}/participants/{participant}`: 204, and everyone
 //!   left gets a `peers` message.
 //! - `DELETE /rooms/{room}`: 204, and everyone in it is disconnected.
@@ -87,6 +92,16 @@ async fn respond(request: &Request, media: &mpsc::Sender<Command>) -> Response {
             match ask(media, command, answer).await {
                 Ok(true) => no_content(),
                 Ok(false) => error(404, "no such participant in the room"),
+                Err(response) => response,
+            }
+        }
+        ("GET", ["rooms", room]) => {
+            let Some(room) = room_id(room) else {
+                return error(400, "not a room id");
+            };
+            let (reply, answer) = oneshot::channel();
+            match ask(media, Command::Room { room, reply }, answer).await {
+                Ok(participants) => Response::json(200, &json!({ "participants": participants })),
                 Err(response) => response,
             }
         }
@@ -209,8 +224,12 @@ mod tests {
             503
         );
         assert_eq!(
-            status(respond(&request("GET", "/rooms/a", ""), &media).await),
+            status(respond(&request("PUT", "/rooms/a", ""), &media).await),
             405
+        );
+        assert_eq!(
+            status(respond(&request("GET", "/rooms/a", ""), &media).await),
+            503
         );
         assert_eq!(
             status(respond(&request("PUT", "/rooms/a/participants/1", ""), &media).await),

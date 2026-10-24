@@ -17,6 +17,13 @@
 //! first participant's computer to ask makes one, sealed to exactly the
 //! people present ([`Rooms::rekey`]); a joiner who can't open the current
 //! key brings one with its join.
+//!
+//! Someone whose computer drops out of the call (its window closed, the
+//! computer asleep or off the network) never says so; the relay sees the
+//! connection go. So the console asks the relay who it has before it
+//! answers for a meeting's keys, and on a sweep, and anyone it seated
+//! before it asked whom the relay no longer has has left
+//! ([`Rooms::connected`], ADR 0052).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -66,6 +73,9 @@ struct Session {
     next: u32,
     /// Member keys that left holding the current media key.
     left: BTreeSet<String>,
+    /// When the relay took each seat ([`Rooms::admitted`]), on the rooms'
+    /// clock. A seat not in it yet is never judged by what the relay has.
+    admitted: BTreeMap<(String, String), u64>,
 }
 
 impl Session {
@@ -96,12 +106,25 @@ impl Session {
         self.media.truncate(KEPT);
         self.left.clear();
     }
+
+    /// `who` is gone: holding the current key, a new one is due.
+    fn remove(&mut self, who: &(String, String)) -> Option<u32> {
+        let participant = self.participants.remove(who);
+        self.admitted.remove(who);
+        if participant.is_some() && self.holders().contains(who.1.as_str()) {
+            self.left.insert(who.1.clone());
+        }
+        participant
+    }
 }
 
 /// Every meeting's session now.
 #[derive(Debug, Default)]
 pub struct Rooms {
     sessions: BTreeMap<String, Session>,
+    /// Counts the relay's admissions, to tell which seats an answer of the
+    /// relay's speaks for ([`Self::mark`]).
+    clock: u64,
 }
 
 /// A seat in a meeting's session.
@@ -120,6 +143,14 @@ pub struct Seat {
 #[derive(Debug)]
 pub struct Left {
     pub participant: Option<u32>,
+    pub ended: bool,
+}
+
+/// Who dropped out of the call without saying so, and whether the session
+/// ended with them ([`Rooms::connected`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Dropped {
+    pub participants: Vec<u32>,
     pub ended: bool,
 }
 
@@ -232,6 +263,9 @@ impl Rooms {
             checked(facts, meeting, &people, media, Some(&sealed_to))?;
             session.replace(media.clone());
         }
+        // The relay is about to take (or retake) the seat's connection:
+        // until it has, what it says of the seat is out of date.
+        session.admitted.remove(&who);
         let (participant, new) = match session.participants.get(&who) {
             Some(n) => (*n, false),
             None => {
@@ -254,10 +288,63 @@ impl Rooms {
         let who = (request.body.login.clone(), request.body.key.clone());
         if let Some(session) = self.sessions.get_mut(meeting) {
             session.participants.remove(&who);
+            session.admitted.remove(&who);
             if session.participants.is_empty() {
                 self.sessions.remove(meeting);
             }
         }
+    }
+
+    /// The relay took the request's seat (or answered about it): from now
+    /// on, a seat the relay no longer has is gone ([`Self::connected`]).
+    pub fn admitted(&mut self, meeting: &str, request: &MeetRequest) {
+        let who = (request.body.login.clone(), request.body.key.clone());
+        if let Some(session) = self.sessions.get_mut(meeting)
+            && session.participants.contains_key(&who)
+        {
+            self.clock += 1;
+            session.admitted.insert(who, self.clock);
+        }
+    }
+
+    /// Where the rooms' clock is: taken before asking the relay who it
+    /// has, and handed to [`Self::connected`] with its answer.
+    pub fn mark(&self) -> u64 {
+        self.clock
+    }
+
+    /// The relay's answer, asked at `mark`: the participants with a seat
+    /// in meeting `meeting`'s room. Each seat it had taken by then that it
+    /// no longer has dropped out of the call without saying so (ADR 0052):
+    /// it leaves, as [`Self::leave`] would, and a new key is due if it held
+    /// the current one; the last one out ends the session. A seat taken
+    /// after `mark`, or being taken, isn't judged.
+    pub fn connected(&mut self, meeting: &str, mark: u64, connected: &BTreeSet<u32>) -> Dropped {
+        let Some(session) = self.sessions.get_mut(meeting) else {
+            return Dropped::default();
+        };
+        let gone: Vec<(String, String)> = session
+            .participants
+            .iter()
+            .filter(|(who, n)| {
+                session.admitted.get(*who).is_some_and(|at| *at <= mark) && !connected.contains(n)
+            })
+            .map(|(who, _)| who.clone())
+            .collect();
+        let participants = gone.iter().filter_map(|who| session.remove(who)).collect();
+        let ended = !gone.is_empty() && session.participants.is_empty();
+        if ended {
+            self.sessions.remove(meeting);
+        }
+        Dropped {
+            participants,
+            ended,
+        }
+    }
+
+    /// The meetings with a session now.
+    pub fn meetings(&self) -> Vec<String> {
+        self.sessions.keys().cloned().collect()
     }
 
     /// The session's media keys, for anyone in the meeting: a computer
@@ -348,10 +435,7 @@ impl Rooms {
                 ended: false,
             });
         };
-        let participant = session.participants.remove(&who);
-        if participant.is_some() && session.holders().contains(who.1.as_str()) {
-            session.left.insert(who.1);
-        }
+        let participant = session.remove(&who);
         let ended = session.participants.is_empty();
         if ended {
             self.sessions.remove(meeting);
@@ -378,5 +462,138 @@ impl Rooms {
                     .collect()
             })
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::chat::{MemberSecret, new_conversation_id};
+    use crate::meet::{MediaKey, MeetBody};
+
+    struct Org {
+        keys: HashMap<String, (MemberKey, MemberSecret)>,
+        meeting: String,
+    }
+
+    impl Facts for Org {
+        fn key(&self, id: &str) -> Option<MemberKey> {
+            self.keys
+                .values()
+                .find(|(k, _)| k.id == id)
+                .map(|(k, _)| k.clone())
+        }
+        fn meeting(&self, id: &str) -> Option<Vec<String>> {
+            (id == self.meeting).then(|| self.keys.keys().cloned().collect())
+        }
+    }
+
+    fn org() -> Org {
+        let mut keys = HashMap::new();
+        for login in ["dana", "priya"] {
+            let secret = MemberSecret::generate().unwrap();
+            keys.insert(
+                login.to_owned(),
+                (
+                    secret.public(login, &format!("dev-{login}")).unwrap(),
+                    secret,
+                ),
+            );
+        }
+        Org {
+            keys,
+            meeting: new_conversation_id().unwrap(),
+        }
+    }
+
+    impl Org {
+        fn request(&self, login: &str, op: MeetOp) -> MeetRequest {
+            let (key, secret) = &self.keys[login];
+            let body = MeetBody {
+                meeting: self.meeting.clone(),
+                op,
+                device: key.device.clone(),
+                login: login.into(),
+                key: key.id.clone(),
+                at: "2026-10-24T00:00:00Z".into(),
+            };
+            MeetRequest::sign(body, secret).unwrap()
+        }
+
+        /// `login` joins, bringing the session's first key if it has none.
+        fn join(&self, rooms: &mut Rooms, login: &str) -> Seat {
+            let (key, secret) = &self.keys[login];
+            let members: Vec<MemberKey> = self.keys.values().map(|(k, _)| k.clone()).collect();
+            let media = MediaKeyRecord::make(
+                &self.meeting,
+                &MediaKey::generate().unwrap(),
+                &members,
+                (key, secret),
+            )
+            .unwrap();
+            let op = MeetOp::Join {
+                offer: "v=0".into(),
+                media: Some(media),
+            };
+            rooms
+                .join(self, &self.meeting, &self.request(login, op))
+                .unwrap()
+        }
+    }
+
+    /// ADR 0052, found by `specs/tla/MeetKeys.tla` with a first version
+    /// of the fix: the relay's answer to a question asked before a seat
+    /// was taken doesn't have it, and must not count it as dropped out.
+    #[test]
+    fn adr0052_an_answer_from_before_a_seat_was_taken_doesnt_judge_it() {
+        let org = org();
+        let mut rooms = Rooms::default();
+        let dana = org.join(&mut rooms, "dana");
+        rooms.admitted(&org.meeting, &org.request("dana", MeetOp::Leave));
+        // Dana's page asks for keys: the console asks the relay...
+        let mark = rooms.mark();
+        // ...while Priya joins and the relay takes her.
+        let priya = org.join(&mut rooms, "priya");
+        rooms.admitted(&org.meeting, &org.request("priya", MeetOp::Leave));
+        // The relay's answer, from before Priya's seat.
+        let dropped = rooms.connected(&org.meeting, mark, &[dana.participant].into());
+        assert_eq!(dropped, Dropped::default());
+        assert_eq!(rooms.participants(&org.meeting).len(), 2);
+        // Asked after, an answer without her means she dropped out.
+        let mark = rooms.mark();
+        let dropped = rooms.connected(&org.meeting, mark, &[dana.participant].into());
+        assert_eq!(dropped.participants, vec![priya.participant]);
+        assert!(!dropped.ended);
+        let keys = rooms
+            .keys(&org, &org.meeting, &org.request("dana", MeetOp::Keys))
+            .unwrap();
+        assert!(keys.due, "she held the key: a new one is due");
+    }
+
+    /// ADR 0052: a computer joining again under its seat isn't judged by
+    /// the relay until the relay has taken its new connection.
+    #[test]
+    fn adr0052_a_seat_being_taken_again_isnt_judged_until_the_relay_has_it() {
+        let org = org();
+        let mut rooms = Rooms::default();
+        let dana = org.join(&mut rooms, "dana");
+        rooms.admitted(&org.meeting, &org.request("dana", MeetOp::Leave));
+        // Its connection dropped; it joins again before anyone asked.
+        let again = org.join(&mut rooms, "dana");
+        assert_eq!(again.participant, dana.participant);
+        let mark = rooms.mark();
+        assert_eq!(
+            rooms.connected(&org.meeting, mark, &BTreeSet::new()),
+            Dropped::default()
+        );
+        // The last seat the relay lost ends the session, keys and all.
+        rooms.admitted(&org.meeting, &org.request("dana", MeetOp::Leave));
+        let mark = rooms.mark();
+        let dropped = rooms.connected(&org.meeting, mark, &BTreeSet::new());
+        assert!(dropped.ended);
+        assert!(rooms.media(&org.meeting).is_empty());
+        assert!(rooms.meetings().is_empty());
     }
 }

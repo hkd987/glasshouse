@@ -12,7 +12,11 @@
 //! Slice C1 runs on the enrollment token (signed device requests come with
 //! ADR 0028's device keys) and allows one computer per person.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::Write;
+use std::path::Path;
+
+use anyhow::Context;
 
 use glass_managed::chat::{
     COMPLIANCE, ChatSyncRequest, ChatSyncResponse, Conversation, ConversationKind,
@@ -47,9 +51,16 @@ pub struct ChatState {
     pub keys: Vec<MemberKey>,
     #[serde(default)]
     pub conversations: BTreeMap<String, Stored>,
-    /// Sealed messages, by sequence number.
-    #[serde(default)]
+    /// Sealed messages, by sequence number. They're kept in their own log
+    /// (`chat-messages.jsonl`), a line each as it's posted, so a post
+    /// writes one line, not the org's history; consoles before ADR 0052
+    /// kept them here, and [`open_log`] moves them.
+    #[serde(default, skip_serializing)]
     pub messages: Vec<Message>,
+    /// Each posted message's conversation and id, made once from the
+    /// history, so a post isn't checked against every message.
+    #[serde(skip)]
+    posted: Posted,
     /// The last sequence number given out, across the org.
     #[serde(default)]
     pub seq: u64,
@@ -67,6 +78,66 @@ fn rule(m: impl Into<String>) -> Refused {
 
 fn invalid(m: impl Into<String>) -> Refused {
     Refused::Invalid(vec![m.into()])
+}
+
+/// An index of [`ChatState::messages`], not state of its own: two states
+/// with the same messages have the same one.
+#[derive(Debug, Clone, Default)]
+struct Posted(Option<HashSet<(String, String)>>);
+
+impl PartialEq for Posted {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+/// Reads the chat log at `path` into `chat` after what `chat.json` held.
+/// Messages an older console kept in `chat.json` are written to the log
+/// first (the caller then saves `chat.json` without them), and a line a
+/// crash cut short is dropped.
+pub fn open_log(chat: &mut ChatState, path: &Path) -> anyhow::Result<bool> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let torn = !text.is_empty() && !text.ends_with('\n');
+    let mut logged = Vec::new();
+    for line in text.split_inclusive('\n') {
+        match serde_json::from_str::<Message>(line.trim_end()) {
+            Ok(message) => logged.push(message),
+            Err(_) if torn && !line.ends_with('\n') => {}
+            Err(e) => return Err(e).with_context(|| format!("parsing {}", path.display())),
+        }
+    }
+    let moving = !chat.messages.is_empty();
+    let last = chat.messages.last().map_or(0, |m| m.seq);
+    chat.messages
+        .extend(logged.into_iter().filter(|m| m.seq > last));
+    chat.seq = chat.seq.max(chat.messages.last().map_or(0, |m| m.seq));
+    if moving || torn {
+        let mut whole = Vec::new();
+        for message in &chat.messages {
+            serde_json::to_writer(&mut whole, message)?;
+            whole.push(b'\n');
+        }
+        let tmp = path.with_extension("jsonl.new");
+        std::fs::write(&tmp, whole).with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(moving)
+}
+
+/// Appends `message` to the chat log at `path`.
+pub fn append_log(path: &Path, message: &Message) -> anyhow::Result<()> {
+    let mut line = serde_json::to_vec(message)?;
+    line.push(b'\n');
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(&line))
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 impl ChatState {
@@ -335,10 +406,15 @@ impl ChatState {
         message
             .verify(sender)
             .map_err(|_| rule("The message's signature doesn't check."))?;
-        if self.messages.iter().any(|m| {
-            m.header()
-                .is_ok_and(|h| h.conversation == header.conversation && h.id == header.id)
-        }) {
+        let messages = &self.messages;
+        let posted = self.posted.0.get_or_insert_with(|| {
+            messages
+                .iter()
+                .filter_map(|m| m.header().ok())
+                .map(|h| (h.conversation, h.id))
+                .collect()
+        });
+        if !posted.insert((header.conversation, header.id)) {
             return Err(rule("That message was posted already."));
         }
         self.seq += 1;
@@ -381,8 +457,15 @@ impl ChatState {
             })
             .map(|s| s.conversation.id.as_str())
             .collect();
-        let messages: Vec<Message> = self
-            .messages
+        // In sequence order: what's new starts past the cursor, unless
+        // someone here was added since, whose conversation's history is
+        // theirs too.
+        let from = if joined.is_empty() {
+            self.messages.partition_point(|m| m.seq <= request.since)
+        } else {
+            0
+        };
+        let messages: Vec<Message> = self.messages[from..]
             .iter()
             .filter(|m| {
                 m.header().is_ok_and(|h| {
@@ -442,10 +525,11 @@ mod tests {
         Joined, MediaKey, MediaKeyRecord, MediaKeys, MeetBody, MeetOp, MeetRequest,
     };
 
+    use super::{ChatState, append_log, open_log};
     use crate::directory::LocalDirectory;
     use crate::relay::Relay;
     use crate::server::Console;
-    use crate::state::State;
+    use crate::state::{Refused, State};
 
     struct Org {
         dir: tempfile::TempDir,
@@ -825,6 +909,12 @@ mod tests {
         assert!(
             places.iter().any(|(p, _)| p.ends_with("chat.json")),
             "chat.json was searched"
+        );
+        assert!(
+            places
+                .iter()
+                .any(|(p, _)| p.ends_with("chat-messages.jsonl")),
+            "the messages' log was searched"
         );
 
         // The search finds what it looks for: a planted copy, in each form.
@@ -1436,6 +1526,11 @@ mod tests {
                     .unwrap_or_default()
                     .to_owned();
                 let response = match request.method.as_str() {
+                    // Who has a seat (ADR 0052): asked before keys.
+                    "GET" => glass_http::Response::json(
+                        200,
+                        &json!({ "participants": seats.get(&room).cloned().unwrap_or_default() }),
+                    ),
                     "POST" => {
                         let body: Value = serde_json::from_slice(&request.body).unwrap();
                         let n = body["participant"].as_u64().unwrap();
@@ -1639,6 +1734,22 @@ mod tests {
             (status, body["error"].as_str()),
             (409, Some("This meeting is full: 25 people are in it."))
         );
+        // ADR 0052: Priya's computer drops out without a word; the relay
+        // sees its connection go. Asked for keys, the console asks the
+        // relay first: she has left, holding the key, so a new one is due,
+        // for Dana alone.
+        Relay::new(&relay).unwrap().leave(&three, 2).await.unwrap();
+        let (status, keys) = org.meet(&dana, &three, MeetOp::Keys).await;
+        assert_eq!(status, 200, "{keys}");
+        let keys: MediaKeys = serde_json::from_value(keys).unwrap();
+        assert!(keys.due);
+        assert_eq!(
+            keys.participants
+                .iter()
+                .map(|k| &k.login)
+                .collect::<Vec<_>>(),
+            ["dana"]
+        );
 
         // Leaving frees the seat; the last one out ends the session, and
         // its media key goes with it.
@@ -1669,6 +1780,192 @@ mod tests {
             assert!(
                 !found_in(&bytes, media_key.as_bytes()),
                 "the media key is in {path}"
+            );
+        }
+    }
+
+    /// An org's chat after a pilot's weeks: `n` messages in 40 channels.
+    /// The people are priya and dana; returns them with the first channel.
+    async fn long_history(org: &Org, n: usize) -> (Computer, Computer, String, EpochKey) {
+        let priya = org.computer("laptop-priya", "priya").await;
+        let dana = org.computer("laptop-dana", "dana").await;
+        let mut channels = Vec::new();
+        for i in 0..40 {
+            let (status, id, key) = org
+                .channel(&priya, &["priya", "dana"], &format!("#c{i}"))
+                .await;
+            assert_eq!(status, 200);
+            channels.push((id, key));
+        }
+        {
+            let mut state = org.console.state();
+            for i in 0..n {
+                let (conversation, key) = &channels[i % channels.len()];
+                let header = Header {
+                    v: 1,
+                    org: "acme".into(),
+                    conversation: conversation.clone(),
+                    epoch: 1,
+                    id: new_message_id(1_760_000_000_000 + i as u64).unwrap(),
+                    sender: priya.key.login.clone(),
+                    key: priya.key.id.clone(),
+                };
+                let body = Body {
+                    text: format!("Message {i} about the quarter's numbers and who's on it"),
+                    attribution: None,
+                    reply_to: None,
+                    sent_at: "2026-10-19T14:02:11Z".into(),
+                    part: None,
+                    mentions: Vec::new(),
+                };
+                let mut message = Message::seal(&header, &body, key, &priya.secret).unwrap();
+                state.chat.seq += 1;
+                message.seq = state.chat.seq;
+                message.at = Some("2026-10-19T14:02:11Z".into());
+                state.chat.messages.push(message);
+            }
+            state.save_chat().unwrap();
+        }
+        let (id, key) = channels.swap_remove(0);
+        (priya, dana, id, key)
+    }
+
+    /// The messages' log (ADR 0052): a post adds a line, a restart reads
+    /// them back in order with the sequence number past them, a message
+    /// posted again after it is still refused, and syncs still bring
+    /// what's new and, to someone added, the whole history.
+    #[tokio::test]
+    async fn cf91_messages_are_a_log_that_outlives_a_restart() {
+        let org = Org::new().await;
+        let (priya, dana, cv, key) = long_history(&org, 5).await;
+        // Seeded straight into memory: kept as a post keeps them.
+        {
+            let state = org.console.state();
+            let log = org.dir.path().join("chat-messages.jsonl");
+            let _ = std::fs::remove_file(&log);
+            for message in &state.chat.messages {
+                append_log(&log, message).unwrap();
+            }
+        }
+        let header = Header {
+            v: 1,
+            org: "acme".into(),
+            conversation: cv.clone(),
+            epoch: 1,
+            id: new_message_id(1_760_000_100_000).unwrap(),
+            sender: priya.key.login.clone(),
+            key: priya.key.id.clone(),
+        };
+        let body = Body {
+            text: "after the restart?".into(),
+            attribution: None,
+            reply_to: None,
+            sent_at: "2026-10-19T14:02:11Z".into(),
+            part: None,
+            mentions: Vec::new(),
+        };
+        let message = Message::seal(&header, &body, &key, &priya.secret).unwrap();
+        let (status, _) = org
+            .post(
+                "chat/messages",
+                &json!({ "device": priya.name, "message": message }),
+            )
+            .await;
+        assert_eq!(status, 200);
+        let before = org.console.state().chat.clone();
+        assert_eq!(before.messages.len(), 6);
+        let chat_json = std::fs::read_to_string(org.dir.path().join("chat.json")).unwrap();
+        assert!(
+            !chat_json.contains("\"messages\""),
+            "chat.json keeps no messages"
+        );
+
+        let directory = LocalDirectory::starter("root");
+        let reopened = State::open(org.dir.path(), "acme", "Acme Corp", &directory).unwrap();
+        assert_eq!(reopened.chat.messages, before.messages);
+        assert_eq!(reopened.chat.seq, before.seq);
+        let mut chat = reopened.chat;
+        let again = chat.post(&priya.name, "acme", message);
+        assert!(
+            matches!(&again, Err(Refused::Rule(m)) if m.contains("posted already")),
+            "{again:?}"
+        );
+        let request = glass_managed::chat::ChatSyncRequest {
+            device: dana.name.clone(),
+            logins: vec![dana.key.login.clone()],
+            since: before.seq - 1,
+            wait_secs: 0,
+        };
+        assert_eq!(chat.sync(&request).messages.len(), 1);
+        let request = glass_managed::chat::ChatSyncRequest {
+            since: 0,
+            ..request
+        };
+        assert_eq!(chat.sync(&request).messages.len(), 6);
+    }
+
+    /// A console before ADR 0052 kept messages in chat.json: they move to
+    /// the log, once. A line a crash cut short is dropped.
+    #[test]
+    fn cf91_messages_kept_in_chat_json_move_to_the_log_and_a_torn_line_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("chat-messages.jsonl");
+        let message = |seq: u64| Message {
+            header: "{}".into(),
+            nonce: String::new(),
+            ct: String::new(),
+            signature: String::new(),
+            seq,
+            at: None,
+        };
+        let mut old = ChatState {
+            messages: vec![message(1), message(2)],
+            seq: 2,
+            ..ChatState::default()
+        };
+        assert!(open_log(&mut old, &log).unwrap(), "moved");
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
+        // A third posted, a fourth cut short.
+        append_log(&log, &message(3)).unwrap();
+        let mut torn = std::fs::read(&log).unwrap();
+        torn.extend_from_slice(br#"{"header":"{}","no"#);
+        std::fs::write(&log, torn).unwrap();
+        let mut reopened = ChatState::default();
+        assert!(!open_log(&mut reopened, &log).unwrap());
+        let seqs: Vec<u64> = reopened.messages.iter().map(|m| m.seq).collect();
+        assert_eq!(seqs, [1, 2, 3]);
+        assert_eq!(reopened.seq, 3);
+        assert!(std::fs::read_to_string(&log).unwrap().ends_with('\n'));
+    }
+
+    /// What a post and a computer's sync cost on a long history. Run by
+    /// hand: `cargo test -p glass-console --release speed_ -- --ignored
+    /// --nocapture`.
+    #[tokio::test]
+    #[ignore = "the speed check: run by hand"]
+    #[allow(clippy::print_stdout)]
+    async fn speed_chat_on_a_pilots_history() {
+        for n in [2_000, 20_000] {
+            let org = Org::new().await;
+            let (priya, dana, cv, key) = long_history(&org, n).await;
+            let since = org.console.state().chat.seq;
+            let mut posts = Vec::new();
+            let mut syncs = Vec::new();
+            for i in 0..10 {
+                let started = std::time::Instant::now();
+                let (status, _) = org.say(&priya, &cv, 1, &key, &format!("new {i}")).await;
+                assert_eq!(status, 200);
+                posts.push(started.elapsed());
+                let started = std::time::Instant::now();
+                let answer = org.sync(&dana, since + i, 0).await;
+                assert_eq!(answer.messages.len(), 1);
+                syncs.push(started.elapsed());
+            }
+            posts.sort();
+            syncs.sort();
+            println!(
+                "{n} messages: post p50 {:?} max {:?}; sync of what's new p50 {:?} max {:?}",
+                posts[5], posts[9], syncs[5], syncs[9]
             );
         }
     }

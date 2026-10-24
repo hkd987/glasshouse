@@ -137,14 +137,14 @@ here runs in the VM.
 
 ### Every feature, on a person's worth of data (ADR 0051)
 
-`crates/svc/runtime/tests/speed.rs` times each feature an agent or app
+`crates/svc/runtime/tests/it/speed.rs` times each feature an agent or app
 calls through the whole path (the task socket, policy, the audit record,
 the snapshot a write takes, the provider) on this host's CPU, with data the
 size a person has. That's a 500-message inbox, a 2,000-file folder, a
 300-meeting month, a 2,000-person directory and an audit log of 20,000
 records. The VM's budgets above hold the emulated numbers; this finds what
 grows with the data. Run it with the shipping optimization:
-`cargo test --profile vm -p glass-runtime --test speed -- --ignored --nocapture --test-threads 1`.
+`cargo test --profile vm -p glass-runtime --test it speed:: -- --ignored --nocapture --test-threads 1`.
 
 | Feature (2026-10-23, `vm` profile) | p50 | p95 |
 |---|---|---|

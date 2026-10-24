@@ -138,6 +138,8 @@ lto = false
 incremental = true
 codegen-units = 256
 opt-level = 1
+# Keeps its symbols, for a backtrace in the VM (RUST_BACKTRACE=1).
+strip = "debuginfo"
 
 # The JavaScript engine (ADR 0044's scripts, ADR 0049's try-out of every
 # app saved) interprets each line: at opt-level 1 a try of Mail takes 0.21 s
@@ -158,7 +160,10 @@ opt-level = 3
 [profile.vm.package.regress]
 opt-level = 3
 
-# What ships in images.
+# What ships in images, 38% smaller than with symbols and 16 codegen units
+# (docs/dev/build-performance.md): a panic still says what and where, and
+# nothing ships with backtraces on. One codegen unit built as fast here.
 [profile.release]
 lto = "thin"
-strip = "debuginfo"
+codegen-units = 1
+strip = "symbols"

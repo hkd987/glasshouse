@@ -75,6 +75,25 @@ impl Relay {
         }
     }
 
+    /// Who has a seat in `room`: admitted, and their connection not gone
+    /// (ADR 0052). Nobody for a room the relay doesn't have.
+    pub async fn participants(
+        &self,
+        room: &str,
+    ) -> Result<std::collections::BTreeSet<u32>, RelayError> {
+        match self.call("GET", &format!("/rooms/{room}"), None).await? {
+            (200, reply) => reply["participants"]
+                .as_array()
+                .map(|all| {
+                    all.iter()
+                        .filter_map(|p| p.as_u64().and_then(|p| u32::try_from(p).ok()))
+                        .collect()
+                })
+                .ok_or_else(|| RelayError::Down("the relay answered nonsense".into())),
+            (status, reply) => Err(refusal(status, &reply)),
+        }
+    }
+
     /// Ends `room`: everyone in it is disconnected.
     pub async fn end(&self, room: &str) -> Result<(), RelayError> {
         match self.call("DELETE", &format!("/rooms/{room}"), None).await? {

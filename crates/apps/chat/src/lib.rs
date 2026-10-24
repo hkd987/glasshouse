@@ -479,10 +479,39 @@ impl ChatProvider {
                 key: member.key.id.clone(),
             };
             let mut message = Message::seal(&header, body, &key, &member.secret)?;
-            match connection.link.post(&PostMessage {
+            let request = PostMessage {
                 device: connection.device.clone(),
                 message: message.clone(),
-            }) {
+            };
+            let mut answer = connection.link.post(&request);
+            if let Err(LinkError::Unreachable(lost)) = &answer {
+                // The console may have taken it and the answer been lost, or
+                // may take it yet. The same message again is taken now or
+                // refused as posted already, never posted twice; any other
+                // answer can't tell (ChatPost.tla).
+                answer = match connection.link.post(&request) {
+                    Err(LinkError::Refused(m)) if m.contains("posted already") => {
+                        // Taken the first time: a sync brings its number.
+                        let _ = self.handle.sync_once(0);
+                        let seq = self
+                            .handle
+                            .load(me)
+                            .messages
+                            .get(&conversation.id)
+                            .and_then(|kept| kept.iter().find(|m| m.header == message.header))
+                            .map_or(0, |m| m.seq);
+                        self.handle.changed(me, conversation.kind);
+                        return Ok((conversation, header.id, seq));
+                    }
+                    Ok(seq) => Ok(seq),
+                    Err(_) => {
+                        return Err(ChatFailure::Local(format!(
+                            "your organization's server didn't answer ({lost}), so the message may have been posted. If it was, it shows in the conversation once the server answers; look there before posting it again"
+                        )));
+                    }
+                };
+            }
+            match answer {
                 Ok(seq) => {
                     message.seq = seq;
                     message.at = Some(Timestamp::now().to_string());
@@ -636,6 +665,8 @@ impl ChatProvider {
             .member(ctx)
             .map_err(failed)?
             .ok_or_else(|| ActionError::NotFound(Self::not_opened(me)))?;
+        // Every message up to here is in the store read next.
+        let fetched = self.handle.cursor();
         let store = self.handle.load(me);
         let conversation = store
             .conversations
@@ -690,13 +721,16 @@ impl ChatProvider {
         let lines: Vec<String> = shown.iter().map(|m| self.line(m)).collect();
         // What the person reads in Chat is read; an agent reading for
         // them leaves it unread. The newest view marks everything read,
-        // edits and reactions included.
+        // edits and reactions included, up to what this computer has
+        // fetched: a message from before the person's own post that
+        // arrives after it wasn't shown (ChatSync.tla).
         if ctx.principal.agent.as_str() == APP && input.before.is_none() && input.thread.is_none() {
             let _write = self.handle.lock();
             let mut store = self.handle.load(me);
             let seen = store.seen.entry(conversation.id.clone()).or_insert(0);
-            if folded.newest > *seen {
-                *seen = folded.newest;
+            let newest = folded.newest.min(fetched);
+            if newest > *seen {
+                *seen = newest;
                 self.handle.save(me, &store).map_err(failed)?;
             }
         }
@@ -913,12 +947,21 @@ fn open_item(
 }
 
 impl ChatProvider {
-    /// Conversation `c`'s messages here: a shared item's from its log.
-    fn messages_of(&self, login: &str, store: &Store, c: &Conversation) -> Vec<Message> {
+    /// Conversation `c`'s messages here after sequence number `after`: a
+    /// shared item's from its log.
+    fn messages_of(
+        &self,
+        login: &str,
+        store: &Store,
+        c: &Conversation,
+        after: u64,
+    ) -> Vec<Message> {
         if c.kind.is_item() {
-            self.handle.item_messages(login, &c.id, store)
+            self.handle.item_messages(login, &c.id, store, after)
         } else {
-            store.messages.get(&c.id).cloned().unwrap_or_default()
+            let mut messages = store.messages.get(&c.id).cloned().unwrap_or_default();
+            messages.retain(|m| m.seq > after);
+            messages
         }
     }
 }
@@ -948,7 +991,7 @@ impl glass_managed::shared::Shared for ChatProvider {
             .values()
             .filter(|c| c.kind == kind && c.members.iter().any(|m| m == login))
             .filter_map(|c| {
-                let messages = self.messages_of(login, &store, c);
+                let messages = self.messages_of(login, &store, c, 0);
                 open_item(&store, &member, c, &messages)
             })
             .collect()
@@ -962,7 +1005,7 @@ impl glass_managed::shared::Shared for ChatProvider {
             .get(id)
             .filter(|c| c.members.iter().any(|m| m == login))
             .and_then(|c| {
-                let messages = self.messages_of(login, &store, c);
+                let messages = self.messages_of(login, &store, c, 0);
                 open_item(&store, &member, c, &messages)
             })
     }
@@ -974,9 +1017,14 @@ impl glass_managed::shared::Shared for ChatProvider {
             .conversations
             .get(id)
             .filter(|c| c.members.iter().any(|m| m == login))?;
-        let mut messages = self.messages_of(login, &store, c);
-        messages.retain(|m| m.seq > seq);
+        let messages = self.messages_of(login, &store, c, seq);
         open_item(&store, &member, c, &messages)
+    }
+
+    fn through(&self, _login: &str) -> u64 {
+        // A sync keeps everyone's messages, then moves the cursor; a post
+        // keeps this computer's own at once (DocsCollab.tla).
+        self.handle.cursor()
     }
 
     fn create(
@@ -1098,6 +1146,22 @@ impl Meetings for ChatProvider {
                 details: store.meeting(&member, c),
             })
             .collect()
+    }
+
+    /// One meeting, opening only its details: Meet asks on every call
+    /// (ADR 0052).
+    fn meeting(&self, login: &str, id: &str) -> Option<MeetingInfo> {
+        let member = self.handle.existing(login)?;
+        let store = self.handle.load(login);
+        let c = store.conversations.get(id).filter(|c| {
+            c.kind == ConversationKind::Meeting && c.members.iter().any(|m| m == login)
+        })?;
+        Some(MeetingInfo {
+            id: c.id.clone(),
+            organizer: c.created_by.clone(),
+            members: c.members.clone(),
+            details: store.meeting(&member, c),
+        })
     }
 
     fn create(
@@ -1403,9 +1467,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use glass_crypto::SecretKey;
-    use glass_managed::chat::COMPLIANCE;
     use glass_managed::chat::testing::MemoryLink;
+    use glass_managed::chat::{COMPLIANCE, ChatLink};
     use glass_managed::directory::Applied;
+    use glass_managed::shared::BlobLink;
     use glass_managed::{ChatRelease, DirectoryRelease, Person};
 
     use super::*;
@@ -1454,8 +1519,13 @@ mod tests {
     impl Org {
         /// A managed computer in this org, with IT's Chat release applied.
         fn computer(&self, name: &str) -> Computer {
+            self.computer_through(name, self.link.clone())
+        }
+
+        /// One that reaches the console through `link`.
+        fn computer_through(&self, name: &str, link: Arc<dyn ChatLink>) -> Computer {
             let handle = ChatHandle::new(self.dir.path().join(name));
-            handle.connect("acme", name, self.link.clone());
+            handle.connect("acme", name, link);
             let release = ChatRelease::new(&self.it.public().unwrap());
             handle
                 .set_compliance(&release.compliance, &release.fingerprint)
@@ -2604,5 +2674,255 @@ mod tests {
         for action in &every {
             assert!(checked.contains(action), "{action} wasn't run");
         }
+    }
+
+    /// The org's console, where a sync can be held while things happen
+    /// (glassd's long poll waiting), and answers to posts lost.
+    struct Held {
+        console: Arc<MemoryLink>,
+        /// When set, the next sync says it's waiting and waits for a go.
+        hold: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+        /// Posts the console takes whose answers are lost.
+        lose: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Held {
+        fn new(console: Arc<MemoryLink>) -> Self {
+            Self {
+                console,
+                hold: Mutex::new(None),
+                lose: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl std::fmt::Debug for Held {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Held")
+        }
+    }
+
+    impl BlobLink for Held {
+        fn put(&self, r: &glass_managed::shared::PutBlob) -> Result<(), LinkError> {
+            self.console.put(r)
+        }
+        fn get(
+            &self,
+            r: &glass_managed::shared::GetBlob,
+        ) -> Result<glass_managed::shared::SealedBlob, LinkError> {
+            self.console.get(r)
+        }
+    }
+
+    impl ChatLink for Held {
+        fn register(&self, r: &glass_managed::chat::RegisterKey) -> Result<(), LinkError> {
+            self.console.register(r)
+        }
+        fn lookup(&self, r: &LookupKeys) -> Result<glass_managed::chat::Keys, LinkError> {
+            self.console.lookup(r)
+        }
+        fn create(&self, r: &CreateConversation) -> Result<u64, LinkError> {
+            self.console.create(r)
+        }
+        fn post(&self, r: &PostMessage) -> Result<u64, LinkError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let answer = self.console.post(r);
+            if self
+                .lose
+                .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(LinkError::Unreachable("timed out".into()));
+            }
+            answer
+        }
+        fn rotate(&self, r: &glass_managed::chat::RotateEpoch) -> Result<u64, LinkError> {
+            self.console.rotate(r)
+        }
+        fn sync(
+            &self,
+            r: &glass_managed::chat::ChatSyncRequest,
+        ) -> Result<glass_managed::chat::ChatSyncResponse, LinkError> {
+            let hold = self.hold.lock().unwrap().take();
+            if let Some((waiting, go)) = hold {
+                waiting.send(()).unwrap();
+                go.recv().unwrap();
+            }
+            self.console.sync(r)
+        }
+    }
+
+    // ChatSync.tla: a store that couldn't be kept moved the cursor on, so
+    // what it held was never fetched again on this computer.
+    #[test]
+    fn cf91_what_a_full_disk_kept_out_arrives_once_there_is_room() {
+        let org = org();
+        let (a, b) = (org.computer("dev-a"), org.computer("dev-b"));
+        b.call("priya", LIST, json!({})).unwrap();
+        a.call(
+            "dana",
+            POST,
+            json!({ "posts": [{ "to": ["priya"], "text": "The terms are in" }] }),
+        )
+        .unwrap();
+        // Priya's store can't be written, as on a full disk.
+        let blocked = org.dir.path().join("dev-b/priya/.store.json.new");
+        std::fs::create_dir(&blocked).unwrap();
+        let full = b.handle.sync_once(0);
+        std::fs::remove_dir(&blocked).unwrap();
+        b.handle.sync_once(0).unwrap();
+        let list = b.call("priya", LIST, json!({})).unwrap();
+        assert_eq!(list.data["conversations"][0]["unread"], 1, "{}", list.text);
+        assert!(full.is_err(), "glassd backs off: {full:?}");
+        assert!(b.notices.lock().unwrap().iter().any(
+            |n| matches!(n, Notice::Refused { reason, .. } if reason.contains("keeping chat"))
+        ));
+    }
+
+    // ChatSync.tla: Sam starting chat while Priya's sync waited reset the
+    // cursor to the beginning; the sync, begun at the beginning too, moved
+    // it on past his first message.
+    #[test]
+    fn cf91_someone_starting_chat_during_a_sync_gets_what_was_sent_meanwhile() {
+        let org = org();
+        let held = Arc::new(Held::new(org.link.clone()));
+        let (a, b) = (
+            org.computer("dev-a"),
+            org.computer_through("dev-b", held.clone()),
+        );
+        b.call("priya", LIST, json!({})).unwrap();
+        let (waiting, waited) = std::sync::mpsc::channel();
+        let (go, went) = std::sync::mpsc::channel();
+        *held.hold.lock().unwrap() = Some((waiting, went));
+        let polling = b.handle.clone();
+        let poll = std::thread::spawn(move || polling.sync_once(25));
+        waited.recv().unwrap();
+        // While the long poll waits: Sam opens chat on the same computer and
+        // Dana writes to him.
+        b.call("sam", LIST, json!({})).unwrap();
+        a.call(
+            "dana",
+            POST,
+            json!({ "posts": [{ "to": ["sam"], "text": "Welcome, Sam" }] }),
+        )
+        .unwrap();
+        go.send(()).unwrap();
+        poll.join().unwrap().unwrap();
+        b.handle.sync_once(0).unwrap();
+        let list = b.call("sam", LIST, json!({})).unwrap();
+        assert_eq!(list.data["conversations"][0]["unread"], 1, "{}", list.text);
+    }
+
+    // ChatSync.tla: the newest view marked everything up to Priya's own
+    // reply seen, so Dana's message sent before it, fetched after, was never
+    // unread.
+    #[test]
+    fn cf92_a_message_fetched_after_the_persons_own_reply_is_unread() {
+        let org = org();
+        let (a, b) = (org.computer("dev-a"), org.computer("dev-b"));
+        b.call("priya", LIST, json!({})).unwrap();
+        a.call(
+            "dana",
+            POST,
+            json!({ "posts": [{ "to": ["priya"], "text": "Lunch?" }] }),
+        )
+        .unwrap();
+        b.handle.sync_once(0).unwrap();
+        let list = b.call("priya", LIST, json!({})).unwrap();
+        let id = list.data["conversations"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        b.call("priya", READ, json!({ "conversation": id }))
+            .unwrap();
+        let unread = |c: &Computer| {
+            c.call("priya", LIST, json!({})).unwrap().data["conversations"][0]["unread"].clone()
+        };
+        assert_eq!(unread(&b), 0);
+        a.call(
+            "dana",
+            POST,
+            json!({ "posts": [{ "conversation": id, "text": "Or the board call at 1?" }] }),
+        )
+        .unwrap();
+        // Priya answers the first before her computer has the second, and
+        // her Chat shows the conversation.
+        b.call(
+            "priya",
+            POST,
+            json!({ "posts": [{ "conversation": id, "text": "Lunch, yes" }] }),
+        )
+        .unwrap();
+        b.call("priya", READ, json!({ "conversation": id }))
+            .unwrap();
+        b.handle.sync_once(0).unwrap();
+        assert_eq!(unread(&b), 1, "Dana's second message wasn't shown");
+        b.call("priya", READ, json!({ "conversation": id }))
+            .unwrap();
+        assert_eq!(unread(&b), 0);
+    }
+
+    // ChatPost.tla: the console took a message and its answer was lost.
+    // Chat said "Nothing was queued; try again", and trying again posted it
+    // twice.
+    #[test]
+    fn cf91_a_post_whose_answer_was_lost_is_posted_once() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let org = org();
+        let held = Arc::new(Held::new(org.link.clone()));
+        let (a, b) = (
+            org.computer_through("dev-a", held.clone()),
+            org.computer("dev-b"),
+        );
+        b.call("priya", LIST, json!({})).unwrap();
+        let post = |text: &str| {
+            a.call(
+                "dana",
+                POST,
+                json!({ "posts": [{ "to": ["priya"], "text": text }] }),
+            )
+        };
+        held.lose.store(1, SeqCst);
+        let sent = post("Signed");
+        assert!(sent.is_ok(), "asked again with the same message: {sent:?}");
+        assert_eq!(org.link.messages().len(), 1);
+
+        // Both answers lost: the first was taken, the second refused as
+        // posted already. Chat can't tell, and says so.
+        held.lose.store(2, SeqCst);
+        let maybe = post("Countersigned").unwrap_err().to_string();
+        assert!(maybe.contains("may have been posted"), "{maybe}");
+        assert_eq!(org.link.messages().len(), 2);
+        b.handle.sync_once(0).unwrap();
+        let list = b.call("priya", LIST, json!({})).unwrap();
+        assert_eq!(list.data["conversations"][0]["unread"], 2, "{}", list.text);
+    }
+
+    // A console sending a message again, in one answer or a later one, under
+    // another number: kept once (absorb checks hashed headers now).
+    #[test]
+    fn cf91_a_message_sent_again_is_kept_once() {
+        let org = org();
+        let (a, b) = (org.computer("dev-a"), org.computer("dev-b"));
+        b.call("priya", LIST, json!({})).unwrap();
+        a.call(
+            "dana",
+            POST,
+            json!({ "posts": [{ "to": ["priya"], "text": "Once" }] }),
+        )
+        .unwrap();
+        let again = org.link.messages()[0].clone();
+        org.link.inject(again.clone());
+        b.handle.sync_once(0).unwrap();
+        org.link.inject(again);
+        b.handle.sync_once(0).unwrap();
+        let list = b.call("priya", LIST, json!({})).unwrap();
+        assert_eq!(list.data["conversations"][0]["unread"], 1, "{}", list.text);
+        let id = list.data["conversations"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let kept = &b.handle.load("priya").messages[&id];
+        assert_eq!(kept.len(), 1);
     }
 }

@@ -55,6 +55,8 @@ pub struct Managed {
     /// Versions in force, from releases this device verified.
     policy_version: Option<u64>,
     catalog_version: Option<u64>,
+    /// When a bundle the catalog lists was last fetched again (GA-13).
+    org_apps_retried: Option<Instant>,
     directory_version: Option<u64>,
     chat_version: Option<u64>,
     /// The model credits version the console last told this computer of
@@ -129,6 +131,7 @@ impl Managed {
             org,
             policy_version: None,
             catalog_version: None,
+            org_apps_retried: None,
             directory_version: None,
             chat_version: None,
             credits_version: None,
@@ -289,7 +292,7 @@ impl Managed {
                     .studio
                     .set_share(Arc::clone(&share), self.device.clone());
                 self.org.org_apps.connect(share);
-                self.fetch_org_apps();
+                self.fetch_org_apps(false);
             }
             Err(e) => tracing::error!("managed: sharing apps: {e}"),
         }
@@ -427,10 +430,12 @@ impl Managed {
             match self.apply_catalog(&signed, false) {
                 Ok(()) => {
                     changed = true;
-                    self.fetch_org_apps();
+                    self.fetch_org_apps(false);
                 }
                 Err(e) => self.refused(DocKind::Catalog, &signed, &e),
             }
+        } else {
+            self.retry_org_apps();
         }
         if let Some(signed) = response.directory {
             match self.apply_directory(&signed, false) {
@@ -566,8 +571,9 @@ impl Managed {
     }
 
     /// Fetches the bundles of the org apps the catalog lists (R2): each
-    /// kept only if it matches the signed digest, and on the record.
-    fn fetch_org_apps(&self) {
+    /// kept only if it matches the signed digest, and on the record. Tried
+    /// `again`, a refusal already on the record is only logged.
+    fn fetch_org_apps(&self, again: bool) {
         for fetched in self.org.org_apps.fetch() {
             let event = match fetched {
                 crate::org_apps::Fetched::Installed { app, version } => {
@@ -581,6 +587,9 @@ impl Managed {
                 }
                 crate::org_apps::Fetched::Refused { app, why } => {
                     tracing::warn!(%app, "managed: org app refused: {why}");
+                    if again {
+                        continue;
+                    }
                     let mut event = AuditEvent::new(
                         EventKind::ManagedRefused,
                         format!("App {app} from the org's catalog refused: {why}"),
@@ -592,6 +601,26 @@ impl Managed {
             };
             self.runtime.append_audit(event);
         }
+    }
+
+    /// Fetches again, once a minute, a bundle the catalog in force lists
+    /// and this computer lacks: one whose fetch failed after its sync (the
+    /// network dropped) is otherwise never fetched until the next catalog
+    /// (GA-13, specs/tla/StoreShare.tla).
+    fn retry_org_apps(&mut self) {
+        let listed = self.org.catalog.current().map_or(0, |c| {
+            c.release.items.iter().filter(|i| i.app.is_some()).count()
+        });
+        let kept = glass_runtime::OrgApps::apps(&self.org.org_apps).len();
+        if kept >= listed
+            || self
+                .org_apps_retried
+                .is_some_and(|at| at.elapsed() < REPORT_EVERY)
+        {
+            return;
+        }
+        self.org_apps_retried = Some(Instant::now());
+        self.fetch_org_apps(true);
     }
 
     /// Verifies, checks and swaps in a catalog release.
@@ -1233,6 +1262,86 @@ mod tests {
         let again = Managed::start(&d.config, Arc::clone(&d.runtime), fresh.clone()).unwrap();
         assert_eq!(fresh.catalog.current().unwrap().version, 5);
         assert_eq!(again.catalog_version, Some(5));
+    }
+
+    /// The console, whose first bundle fetch drops.
+    #[derive(Debug)]
+    struct Flaky(
+        std::sync::atomic::AtomicUsize,
+        glass_managed::studio::Bundle,
+    );
+
+    impl glass_managed::studio::ShareLink for Flaky {
+        fn submit(
+            &self,
+            _: &glass_managed::studio::Submission,
+        ) -> Result<glass_managed::studio::Submitted, String> {
+            Err("no".into())
+        }
+        fn bundle(
+            &self,
+            _: &glass_managed::studio::BundleRequest,
+        ) -> Result<glass_managed::studio::Bundle, String> {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Err("the network dropped".into());
+            }
+            Ok(self.1.clone())
+        }
+    }
+
+    /// GA-13 (specs/tla/StoreShare.tla): an approved app whose bundle
+    /// fetch failed after the sync reaches the computer at a later sync,
+    /// without waiting for IT's next catalog.
+    #[tokio::test]
+    async fn ga13_a_bundle_whose_fetch_failed_is_fetched_again() {
+        use glass_runtime::OrgApps;
+        let key = OrgKey::from_seed([7; 32]);
+        let d = device(&key);
+        let bundle = glass_managed::studio::Bundle {
+            app: "mail-with-write".parse().unwrap(),
+            version: "1".into(),
+            files: [(
+                "index.html".to_owned(),
+                "<title>Mail, with Write</title>".to_owned(),
+            )]
+            .into(),
+        };
+        let manifest: glass_api::AppManifest = serde_json::from_value(serde_json::json!({
+            "id": "mail-with-write", "name": "Mail, with Write", "version": "1",
+            "actions": ["mail.list"], "labels": ["internal"],
+        }))
+        .unwrap();
+        let mut item = serde_json::from_str::<CatalogRelease>(&catalog_release(&key, 1).payload)
+            .unwrap()
+            .items
+            .remove(0);
+        item.id = "mail-with-write".parse().unwrap();
+        item.app = Some(glass_managed::studio::OrgApp {
+            manifest,
+            bundle_sha256: bundle.digest(),
+            source_sha256: String::new(),
+            made_by: "dana".into(),
+            based_on: None,
+        });
+        let release = key.sign(
+            DocKind::Catalog,
+            "acme",
+            2,
+            serde_json::to_string(&CatalogRelease { items: vec![item] }).unwrap(),
+        );
+        d.org.org_apps.connect(Arc::new(Flaky(0.into(), bundle)));
+        let mut m = d.managed();
+        assert!(m.handle(sync(None, Some(release))));
+        assert!(d.org.org_apps.apps().is_empty(), "the first fetch dropped");
+        // The next sync brings no new catalog; the bundle is fetched again.
+        m.handle(sync(None, None));
+        assert_eq!(d.org.org_apps.apps().len(), 1);
+        assert!(
+            d.org
+                .org_apps
+                .files(&"mail-with-write".parse().unwrap())
+                .is_some()
+        );
     }
 
     #[test]

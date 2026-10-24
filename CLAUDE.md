@@ -25,7 +25,7 @@ details this file leaves out.
 - `make test lint` before every commit. `make lint` checks what changed since
   main (rustfmt, clippy `-D warnings` for host and FreeBSD, layering, art,
   shellcheck); `make lint-all` checks everything, as CI does.
-- `make tla` (about a minute) after changing a workflow `specs/tla` models
+- `make tla` (about two minutes) after changing a workflow `specs/tla` models
   (approvals, undo, studio versions, routines, managed sync, mail, live
   updates): TLC checks the model, and a change in behavior changes the
   model with it (ADR 0051, `specs/tla/README.md`).

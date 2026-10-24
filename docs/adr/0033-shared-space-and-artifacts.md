@@ -159,3 +159,7 @@ Builds on ADR 0030 (chat), 0024 (the app bridge), 0026 (apps) and 0032
   - IT's inventory page (AR-6);
   - retention, holds and quotas for blobs, and cleaning up orphans.
 - **D1:** Docs. **S1:** Sheets.
+
+## Amended by ADR 0052
+Updates of one artifact take turns on each computer, so two at once make
+two versions (`specs/tla/ArtifactsShare.tla`).

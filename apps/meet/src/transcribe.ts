@@ -3,8 +3,9 @@
 // into what was said between pauses, and each piece goes to the speech
 // model in a worker (speech.ts); its words come back as a line. Lines go
 // to glassd together every twelve seconds, and at once when the person
-// speaks to their agent ("Hey Glass, …"). Nothing here keeps audio: a
-// piece is dropped once it's text.
+// speaks to their agent ("Hey Glass, …"); a batch glassd hasn't taken goes
+// again as it was (main.ts, ADR 0052). Nothing here keeps audio: a piece
+// is dropped once it's text.
 
 /** The speech model's rate. */
 export const RATE = 16_000;
@@ -326,12 +327,6 @@ export class Batcher {
       this.#lines.shift();
     }
     return out;
-  }
-
-  /** Lines a call didn't add: they go first next time, the oldest dropped past [`MAX_WAITING`]. */
-  putBack(lines: Line[], now: number): void {
-    if (this.#lines.length === 0) this.#since = now;
-    this.#lines = [...lines, ...this.#lines].slice(-MAX_WAITING);
   }
 
   /** Everything, "Hey Glass" waiting too: when the person leaves. */

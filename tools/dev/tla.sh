@@ -9,7 +9,9 @@
 #                violated invariant, property or deadlock. Without Java it says so and passes, as the
 #                mail tests do without mox.
 #   tlc ARGS     run TLC with ARGS (exploring a model by hand)
-# TLA_WORKERS sets TLC's worker threads (default 2).
+# TLA_WORKERS sets each TLC's worker threads (default 1) and TLA_JOBS how many models are checked at
+# once (default: the cores over TLA_WORKERS). TLC gains less from a second worker than from a
+# second model: four models at once check every one in about two minutes on four cores.
 set -euo pipefail
 
 version=1.7.4
@@ -54,24 +56,40 @@ check() {
 			names+=("$(basename "$f" .cfg)")
 		done
 	fi
-	local failed=0 out
+	local failed=0 out name
 	out=$(mktemp -d)
 	trap 'rm -rf "$out"' RETURN
+	# Several models at once, each with TLA_WORKERS threads: the cores, shared.
+	local parallel=${TLA_JOBS:-$(($(nproc) / ${TLA_WORKERS:-1}))}
+	((parallel >= 1)) || parallel=1
 	for name in "${names[@]}"; do
-		local cfg=$specs/$name.cfg
-		local spec=$specs/${name%%_*}.tla
-		[[ -f $spec ]] || spec=$specs/$name.tla
-		local log=$out/$name.log started=$SECONDS
-		if (cd "$specs" && tlc -workers "${TLA_WORKERS:-2}" -metadir "$out/$name.states" -config "$cfg" "$spec") >"$log" 2>&1; then
-			printf '  ok    %-28s %5ss  %s\n' "$name" "$((SECONDS - started))" \
-				"$(grep -oE '[0-9,]+ distinct states found' "$log" | tail -1)"
-		else
-			printf '  FAIL  %-28s %5ss\n' "$name" "$((SECONDS - started))"
-			sed -n '/^Error:/,$p' "$log" | head -80
-			failed=1
-		fi
+		while (($(jobs -rp | wc -l) >= parallel)); do
+			wait -n || true
+		done
+		check_one "$name" "$out" >"$out/$name.result" &
+	done
+	wait
+	for name in "${names[@]}"; do
+		cat "$out/$name.result"
+		grep -q '^  FAIL' "$out/$name.result" && failed=1
 	done
 	return $failed
+}
+
+# One model against its .cfg: a line saying how it went, and TLC's trace if it failed.
+check_one() {
+	local name=$1 out=$2
+	local cfg=$specs/$name.cfg
+	local spec=$specs/${name%%_*}.tla
+	[[ -f $spec ]] || spec=$specs/$name.tla
+	local log=$out/$name.log started=$SECONDS
+	if (cd "$specs" && tlc -workers "${TLA_WORKERS:-1}" -metadir "$out/$name.states" -config "$cfg" "$spec") >"$log" 2>&1; then
+		printf '  ok    %-28s %5ss  %s\n' "$name" "$((SECONDS - started))" \
+			"$(grep -oE '[0-9,]+ distinct states found' "$log" | tail -1)"
+	else
+		printf '  FAIL  %-28s %5ss\n' "$name" "$((SECONDS - started))"
+		sed -n '/^Error:/,$p' "$log" | head -80
+	fi
 }
 
 case ${1:-check} in

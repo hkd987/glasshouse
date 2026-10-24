@@ -406,6 +406,126 @@ fn sk3_a_change_that_breaks_a_case_merges_only_with_a_reason() {
     );
 }
 
+/// ADR 0034 §7 (specs/tla/SkillMerge.tla): Dana merges two of Priya's
+/// changes to v1 at once, from two computers. Both post v2 and every
+/// computer keeps the first. A change Dana makes on her other computer's
+/// v2 before it syncs never replaces the change the first merge made.
+#[test]
+fn sk4_two_merges_at_once_lose_no_change() {
+    let org = org();
+    let a2 = org.computer("dev-a2");
+    a2.call("dana", APP, LIST, json!({})).unwrap();
+    let (a, b, id) = shared(&org);
+    a2.sync();
+    let eval = b.ctx("priya", EVALS_AGENT);
+    b.report(&eval, json!({ "skill": id }), &[("window", 0), ("tone", 3)]);
+    let mut proposals = Vec::new();
+    for (policy, note) in [
+        ("Refunds take 30 days.", "It's 30 days"),
+        ("Refunds take 14 days. Be kind.", "Kinder"),
+    ] {
+        let draft = b
+            .call(
+                "priya",
+                AGENT,
+                DRAFT,
+                json!({ "skill": id, "files": files(policy) }),
+            )
+            .unwrap()
+            .data["draft"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        b.report(
+            &eval,
+            json!({ "draft": draft }),
+            &[("window", 3), ("tone", 3)],
+        );
+        let proposed = b
+            .call(
+                "priya",
+                AGENT,
+                PROPOSE,
+                json!({ "skill": id, "draft": draft, "note": note }),
+            )
+            .unwrap();
+        proposals.push(proposed.data["id"].as_str().unwrap().to_owned());
+    }
+    a.sync();
+    a2.sync();
+    let merge = |c: &Computer, proposal: &str| {
+        c.call(
+            "dana",
+            APP,
+            MERGE,
+            json!({ "skill": id, "proposal": proposal }),
+        )
+    };
+    assert_eq!(merge(&a, &proposals[0]).unwrap().data["version"], 2);
+    // The second computer hasn't seen that merge yet.
+    assert_eq!(merge(&a2, &proposals[1]).unwrap().data["version"], 2);
+
+    // On it, Dana changes the v2 it has, and merges that.
+    let draft = a2
+        .call(
+            "dana",
+            AGENT,
+            DRAFT,
+            json!({ "skill": id, "files": files("Refunds take 14 days. Be kind. Say sorry.") }),
+        )
+        .unwrap()
+        .data["draft"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mine = a2.ctx("dana", EVALS_AGENT);
+    a2.report(&mine, json!({ "skill": id }), &[("window", 0), ("tone", 3)]);
+    a2.report(
+        &mine,
+        json!({ "draft": draft }),
+        &[("window", 0), ("tone", 3)],
+    );
+    let sorry = a2
+        .call(
+            "dana",
+            AGENT,
+            PROPOSE,
+            json!({ "skill": id, "draft": draft, "note": "Say sorry" }),
+        )
+        .unwrap();
+    let _ = merge(&a2, sorry.data["id"].as_str().unwrap());
+
+    // Everyone reads the same skill: v2 is the first merge, with its
+    // change; the other two changes wait, open, to be proposed again.
+    for c in [&a, &a2, &b] {
+        c.sync();
+        let read = c.call("dana", AGENT, READ, json!({ "skill": id }));
+        let read = read.or_else(|_| c.call("priya", AGENT, READ, json!({ "skill": id })));
+        let read = read.unwrap();
+        let versions = read.data["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 2, "{versions:?}");
+        assert_eq!(versions[1]["merged"], proposals[0].as_str());
+        assert!(
+            read.data["files"]["SKILL.md"]
+                .as_str()
+                .unwrap()
+                .contains("30 days"),
+            "the first merge's change is kept"
+        );
+    }
+    b.sync();
+    let list = b.call("priya", APP, LIST, json!({})).unwrap();
+    assert_eq!(list.data["skills"][0]["version"], 2);
+    assert_eq!(list.data["skills"][0]["open_proposals"], 2);
+    // Merging the other change now says why it can't.
+    a2.sync();
+    let again = merge(&a2, &proposals[1]);
+    assert!(
+        matches!(again, Err(ActionError::InvalidInput(_))),
+        "{again:?}"
+    );
+}
+
 #[test]
 fn sk5_only_the_eval_agent_reports_results_and_runs_compare_only_with_themselves() {
     let org = org();

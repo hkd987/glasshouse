@@ -99,14 +99,19 @@ SetGate(g) ==
 (* Ended gate as it is).                                                   *)
 Holdable == tile \in Live /\ gate # "Ended"
 
+\* A task the person drives is held already: a hold leaves it driving, and
+\* taking over one sleep paused ends the sleep's pause (ADR 0052, the
+\* TakeOver model).
 Hold(kind) ==
-    IF Holdable
-      THEN SetGate("Hold") /\ tile' = kind /\ UNCHANGED sleeping
+    IF Holdable /\ tile # "Driving"
+      THEN SetGate("Hold") /\ tile' = kind
+           /\ sleeping' = (sleeping /\ kind # "Driving")
       ELSE UNCHANGED taskVars
 
 \* While the machine goes to sleep, a release waits for the wake instead.
-Release ==
-    CASE ~Holdable -> UNCHANGED taskVars
+\* Only a hand back ends a drive, and it releases nothing else (ADR 0052).
+Release(handBack) ==
+    CASE ~Holdable \/ (tile = "Driving") # handBack -> UNCHANGED taskVars
       [] goingToSleep ->
            SetGate("Hold") /\ sleeping' = TRUE /\ tile' = "Paused"
       [] OTHER ->
@@ -254,7 +259,7 @@ Press(to) ==
     /\ UNCHANGED <<taskVars, deskVars, callVars, sysVars, powerVars>>
 
 \* pause, and take_over (not for an app): hold.
-Pause == Press("pause")
+Pause == tile # "Driving" /\ Press("pause")
 TakeOver == ~App /\ Press("drive")
 
 UserHold ==
@@ -264,12 +269,12 @@ UserHold ==
     /\ UNCHANGED <<deskVars, callVars, ops, sysVars, powerVars>>
 
 \* resume (not while driving) and hand_back (only while driving): release.
-Resume == tile # "Driving" /\ Press("release")
-HandBack == tile = "Driving" /\ Press("release")
+Resume == tile # "Driving" /\ Press("resume")
+HandBack == tile = "Driving" /\ Press("handback")
 
 UserRelease ==
-    /\ Awake /\ upc = "release"
-    /\ Release
+    /\ Awake /\ upc \in {"resume", "handback"}
+    /\ Release(upc = "handback")
     /\ upc' = "idle"
     /\ UNCHANGED <<deskVars, callVars, ops, sysVars, powerVars>>
 
@@ -364,7 +369,7 @@ Wake ==
 
 WakeRelease ==
     /\ ppc = "wake.release"
-    /\ Release
+    /\ Release(FALSE)
     /\ ppc' = "woke"
     /\ UNCHANGED <<deskVars, callVars, userVars, sysVars, goingToSleep, asleep>>
 

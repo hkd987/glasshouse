@@ -167,7 +167,8 @@ async function person(browser: Browser, seat: Seat): Promise<Page> {
         const keys = roomKeys.get(seat.room) ?? [seat.mediaKey];
         served.set(`${seat.room}/${seat.participant}`, keyId(keys[0]!));
         return route.fulfill({
-          json: { ok: true, text: "Keys", data: { meeting: seat.room, media_keys: keys.map((k) => ({ id: keyId(k), key: base64(k) })) } },
+          // As glassd answers: no new key due (the page asks until none is, ADR 0052).
+          json: { ok: true, text: "Keys", data: { meeting: seat.room, media_keys: keys.map((k) => ({ id: keyId(k), key: base64(k) })), due: false } },
         });
       }
       if (action === "meet.leave") {

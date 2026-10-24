@@ -179,3 +179,9 @@ share).
   - the catalog listing and joining from it;
   - usage counts;
   - evals that drive a whole harness, scripts included.
+
+## Amended by ADR 0052
+A version counts only if it is the next number, its proposal was made on
+the version before it (number and SHA-256), and that proposal wasn't
+merged already; merge refuses a base whose SHA-256 differs. Two merges at
+once no longer lose a change (`specs/tla/SkillMerge.tla`).

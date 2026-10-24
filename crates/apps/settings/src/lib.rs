@@ -154,6 +154,10 @@ struct Inner {
     owner: RwLock<Option<String>>,
     /// Where the owner's AI models key goes (ADR 0039).
     model_keys: RwLock<Option<Arc<dyn ModelKeys>>>,
+    /// Held from a change's check through its write: the desktop's
+    /// `settings.set` and the Settings app's can come at once, and each
+    /// rewrites the whole file (ADR 0052).
+    writing: Mutex<()>,
 }
 
 /// Device settings on this computer: policy's, and each person's choices.
@@ -168,15 +172,23 @@ impl std::fmt::Debug for SettingsHandle {
     }
 }
 
+/// What a person's settings are resolved from: each group's name, members
+/// and settings, in order. A release that only moves someone into or out
+/// of a group changes theirs too (ADR 0052).
+#[allow(clippy::type_complexity)]
 fn group_settings(
     policy: Option<&Policy>,
-) -> Vec<(String, BTreeMap<String, glass_policy::document::Managed>)> {
+) -> Vec<(
+    String,
+    Vec<String>,
+    BTreeMap<String, glass_policy::document::Managed>,
+)> {
     policy
         .map(|p| {
             p.document()
                 .groups
                 .iter()
-                .map(|g| (g.name.clone(), g.settings.clone()))
+                .map(|g| (g.name.clone(), g.members.clone(), g.settings.clone()))
                 .collect()
         })
         .unwrap_or_default()
@@ -192,6 +204,7 @@ impl SettingsHandle {
             app_names: RwLock::new(None),
             owner: RwLock::new(None),
             model_keys: RwLock::new(None),
+            writing: Mutex::new(()),
         }))
     }
 
@@ -615,6 +628,11 @@ impl SettingsHandle {
         if def.scope != Scope::Person {
             return self.choose_for_computer(user, uid, def, value);
         }
+        let writing = self
+            .0
+            .writing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let now = self.person(user, uid);
         let current = now.iter().find(|e| e.def.id == id).expect("in the table");
         if current.locked {
@@ -648,6 +666,7 @@ impl SettingsHandle {
             &serde_json::to_vec_pretty(&choices).unwrap_or_default(),
         )
         .map_err(|e| ActionError::io("saving your settings", e))?;
+        drop(writing);
         self.notify(Some(uid));
         Ok(self
             .person(user, uid)
@@ -689,6 +708,11 @@ impl SettingsHandle {
                 .find(|e| e.def.id == def.id)
                 .expect("in the table")
         };
+        let writing = self
+            .0
+            .writing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let now = current(self);
         if now.locked {
             return Err(ActionError::Failed(format!(
@@ -715,6 +739,7 @@ impl SettingsHandle {
             &serde_json::to_vec_pretty(&choices).unwrap_or_default(),
         )
         .map_err(|e| ActionError::io("saving the computer's settings", e))?;
+        drop(writing);
         // Everyone's: the computer applies it for whoever is at the screen.
         self.notify(None);
         Ok(current(self))
@@ -1304,6 +1329,96 @@ members = ["dana"]
         let before = heard.lock().unwrap().len();
         handle.set_policy(&policy(&locked));
         assert_eq!(heard.lock().unwrap().len(), before);
+    }
+
+    /// The SettingsLayers model (ADR 0052): the desktop and Settings change
+    /// settings at once, each a read and a write of the person's choices;
+    /// none of the changes is lost, and none fails.
+    #[test]
+    fn ux1_settings_changed_at_once_all_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SettingsHandle::new(dir.path());
+        handle.set_policy(&policy(""));
+        let defs: Vec<&'static SettingDef> = settings::table()
+            .iter()
+            .filter(|d| d.scope == Scope::Person && !settings::narrow_only(d.id))
+            .filter(|d| {
+                matches!(d.kind, settings::Kind::Number { .. })
+                    || matches!(d.default, SettingValue::Bool(_))
+            })
+            .collect();
+        assert!(defs.len() >= 3, "{}", defs.len());
+        let value = |def: &SettingDef, round: usize| match def.kind {
+            settings::Kind::Number { min, max, .. } => {
+                SettingValue::Number(if round.is_multiple_of(2) { min } else { max })
+            }
+            _ => SettingValue::Bool(!round.is_multiple_of(2)),
+        };
+        const ROUNDS: usize = 20;
+        std::thread::scope(|s| {
+            for def in &defs {
+                let handle = handle.clone();
+                s.spawn(move || {
+                    for round in 0..ROUNDS {
+                        handle
+                            .choose("dana", 1001, def.id, Some(value(def, round)))
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        let now = handle.person("dana", 1001);
+        for def in &defs {
+            let effective = now.iter().find(|e| e.def.id == def.id).unwrap();
+            assert_eq!(effective.value, value(def, ROUNDS - 1), "{}", def.id);
+            assert_eq!(effective.from, SettingFrom::You, "{}", def.id);
+        }
+    }
+
+    /// The SettingsLayers model (ADR 0052): a release that only moves the
+    /// person into a group, its settings the same, changes what's in force
+    /// for them, so whoever listens hears: the desktop, and glassd applying
+    /// the computer's settings for whoever is signed in.
+    #[test]
+    fn adr0031_a_release_that_only_moves_people_between_groups_is_heard() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SettingsHandle::new(dir.path());
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let h = Arc::clone(&heard);
+        handle.on_change(move |uid| h.lock().unwrap().push(uid));
+        let finance = |members: &str| {
+            policy(&format!(
+                "[[group]]\nname = \"finance\"\nmembers = [{members}]\n[group.settings]\n\
+                 \"devices.usb_storage\" = {{ value = false, locked = true }}\n\
+                 \"lock.after_minutes\" = {{ value = 2, locked = true }}\n"
+            ))
+        };
+        handle.set_policy(&finance(""));
+        heard.lock().unwrap().clear();
+        let usb = |handle: &SettingsHandle| {
+            handle
+                .computer(Some("dana"))
+                .into_iter()
+                .find(|r| r.id == "devices.usb_storage")
+                .unwrap()
+                .value
+        };
+        assert_eq!(usb(&handle), SettingValue::Bool(true));
+
+        handle.set_policy(&finance("\"dana\""));
+        assert_eq!(*heard.lock().unwrap(), [None]);
+        assert_eq!(usb(&handle), SettingValue::Bool(false));
+        assert!(
+            handle
+                .person("dana", 1001)
+                .iter()
+                .any(|e| e.def.id == "lock.after_minutes" && e.locked)
+        );
+
+        // And out again.
+        handle.set_policy(&finance(""));
+        assert_eq!(*heard.lock().unwrap(), [None, None]);
+        assert_eq!(usb(&handle), SettingValue::Bool(true));
     }
 
     #[test]

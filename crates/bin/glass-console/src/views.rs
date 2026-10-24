@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::access::Access;
 use crate::directory::{ADMINS, Directory, EVERYONE};
 use crate::impact::Titles;
-use crate::state::{Review, State};
+use crate::state::{ConsoleItem, Review, State};
 
 /// The approval tiers IT sets, by action class (AD-2): each row sets the
 /// tier of every pattern in it.
@@ -316,6 +316,17 @@ pub fn item(state: &State, directory: &dyn Directory, titles: &Titles, id: &str)
         .items
         .iter()
         .find(|i| i.item.id.as_str() == id)?;
+    Some(entry_view(entry, directory, titles, &doc))
+}
+
+/// One catalog item, with IT's draft (for the actions' titles) parsed once
+/// by the caller: the catalog page shows hundreds.
+fn entry_view(
+    entry: &ConsoleItem,
+    directory: &dyn Directory,
+    titles: &Titles,
+    doc: &PolicyDocument,
+) -> Value {
     let i = &entry.item;
     let actions: Vec<Value> = i
         .declares
@@ -324,7 +335,7 @@ pub fn item(state: &State, directory: &dyn Directory, titles: &Titles, id: &str)
         .map(|a| {
             let title = a
                 .parse::<ActionPattern>()
-                .map_or_else(|_| a.clone(), |p| titles.of(&doc, &p));
+                .map_or_else(|_| a.clone(), |p| titles.of(doc, &p));
             json!({
                 "action": a,
                 "title": title,
@@ -332,7 +343,7 @@ pub fn item(state: &State, directory: &dyn Directory, titles: &Titles, id: &str)
             })
         })
         .collect();
-    Some(json!({
+    json!({
         "id": i.id,
         "kind": i.kind,
         "kind_name": i.kind.as_str(),
@@ -355,8 +366,8 @@ pub fn item(state: &State, directory: &dyn Directory, titles: &Titles, id: &str)
         },
         "public_store": i.public_store_check().err().map(|e| e.to_string()),
         "approved_version": entry.approved.as_ref().map(|a| &a.version),
-        "shared": entry.shared.as_ref().map(|s| shared(s, directory, titles, &doc, i)),
-    }))
+        "shared": entry.shared.as_ref().map(|s| shared(s, directory, titles, doc, i)),
+    })
 }
 
 /// A shared app's review (ADR 0032, R2; GA-8): who made it from what, the
@@ -408,12 +419,18 @@ fn shared(
 
 /// The catalog page (AD-5, DV-10, DV-11).
 pub fn catalog(state: &State, directory: &dyn Directory, titles: &Titles) -> Value {
+    // The draft parsed once for the page, not once an item.
     let items: Vec<Value> = state
-        .catalog
-        .items
-        .iter()
-        .filter_map(|i| item(state, directory, titles, i.item.id.as_str()))
-        .collect();
+        .draft()
+        .map(|doc| {
+            state
+                .catalog
+                .items
+                .iter()
+                .map(|entry| entry_view(entry, directory, titles, &doc))
+                .collect()
+        })
+        .unwrap_or_default();
     let count = |r: Review| state.catalog.items.iter().filter(|i| i.review == r).count();
     json!({
         "version": state.catalog.released.as_ref().map(|s| s.version),

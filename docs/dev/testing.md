@@ -5,11 +5,11 @@ Three levels, each proving something the one below can't.
 | Level | Where | Runs on | Proves |
 |---|---|---|---|
 | Unit | `#[cfg(test)]` in each crate | any host, `make test` | Policy math, hash chains, framing, path confinement, label rules |
-| Pipeline integration | `crates/svc/runtime/tests/` (`pipeline.rs`, `models.rs`, …) | any host, `make test` | The whole action pipeline (tiers, asks, labels, snapshots, undo, pause, sleep, take over, isolation, model calls through the gateway with a scripted provider) on development backends, with the test playing the agent over the real MCP socket |
+| Pipeline integration | `crates/svc/runtime/tests/it/` (`pipeline.rs`, `models.rs`, …: modules of one test binary; `cargo test -p glass-runtime --test it pipeline::`) | any host, `make test` | The whole action pipeline (tiers, asks, labels, snapshots, undo, pause, sleep, take over, isolation, model calls through the gateway with a scripted provider) on development backends, with the test playing the agent over the real MCP socket |
 | End to end | `tests/e2e` + `tests/e2e/run-vm.sh` | the FreeBSD VM, `make e2e-vm` | Real jails, real ZFS, real users: containment (PA-1), teardown (PA-2), xattr labels, cross-user isolation, sleep through the rc.d hooks (PM-5), crash recovery |
 
 Mail against a real server (ADR 0037): the tests that need IMAP and SMTP
-(`glass-gateway-providers`' `mail::tests`, `crates/svc/runtime/tests/mail.rs`)
+(`glass-gateway-providers`' `mail::tests`, `crates/svc/runtime/tests/it/mail.rs`)
 each start their own `mox localserve` on a loopback address of their own.
 mox (0.0.17, MIT) is a build-time test tool, never in the image:
 `tools/dev/mox.sh build` builds it from Go's module proxy into the main

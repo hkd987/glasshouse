@@ -204,7 +204,9 @@ function render(
               "data-test": "approve",
               onclick: () =>
                 act(async () => {
+                  // The version on screen: one shared since is refused (GA-13).
                   const r = await api<{ catalog_version: number }>("POST", `/api/catalog/${item.id}/approve`, {
+                    version: item.version,
                     group: groupPick.value,
                     mode: modePick.value,
                     pin: pin.checked,

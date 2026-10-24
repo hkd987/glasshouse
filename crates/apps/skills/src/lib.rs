@@ -17,7 +17,7 @@
 //!   reported by the `skill-evals` agent and nothing else.
 //! - `skill.share`, `skill.propose`, `skill.merge` (Ask; others see it).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -164,12 +164,39 @@ impl Skill {
                 _ => {}
             }
         }
-        versions.sort_by_key(|v| v.number);
-        versions.dedup_by_key(|v| v.number);
+        // In seq order, a version counts when it is the next number and,
+        // merging a proposal, that proposal changes the version before it
+        // (its number and SHA-256) and nothing before merged it. Two merges
+        // on one base at once both post its next number: every computer
+        // keeps the first, and nothing built on the other counts either, so
+        // no merged change is lost (ADR 0034 §7, specs/tla/SkillMerge.tla).
+        // Each proposal and each merge looked up once: a skill's messages
+        // grow with every version and proposal.
+        let mut counted: Vec<Version> = Vec::with_capacity(versions.len());
+        let mut merged: BTreeSet<String> = BTreeSet::new();
+        {
+            let by_id: BTreeMap<&str, &Proposal> =
+                proposals.iter().map(|p| (p.id.as_str(), p)).collect();
+            for version in versions {
+                let before = counted.last();
+                let fits = version.number == before.map_or(1, |b| b.number + 1)
+                    && version.merged.as_deref().is_none_or(|id| {
+                        !merged.contains(id)
+                            && by_id.get(id).is_none_or(|p| {
+                                before.is_some_and(|b| {
+                                    p.base == b.number && p.before.sha256 == b.sha256
+                                })
+                            })
+                    });
+                if fits {
+                    merged.extend(version.merged.clone());
+                    counted.push(version);
+                }
+            }
+        }
+        let versions = counted;
         for proposal in &mut proposals {
-            proposal.merged = versions
-                .iter()
-                .any(|v| v.merged.as_deref() == Some(proposal.id.as_str()));
+            proposal.merged = merged.contains(&proposal.id);
         }
         Self {
             id: item.id,
@@ -1052,6 +1079,13 @@ impl SkillsProvider {
             return Err(invalid(format!(
                 "it changes v{}, and {} is at v{} now; it needs proposing again on v{}",
                 p.base, skill.name, latest.number, latest.number
+            )));
+        }
+        if p.before.sha256 != latest.sha256 {
+            return Err(invalid(format!(
+                "it changes a v{} that another merge replaced at the same moment; it needs \
+                 proposing again on v{}",
+                p.base, latest.number
             )));
         }
         let breaks = p.before.broken_by(&p.after);

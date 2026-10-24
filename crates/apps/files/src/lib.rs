@@ -331,8 +331,16 @@ impl ActionProvider for FilesProvider {
                     dir.create_dir_all(parent)
                         .map_err(|e| ActionError::io(&r.display, e))?;
                 }
+                // What the task read decides the label of what it writes
+                // (DP-11): a summary of an internal file stays internal.
                 let created = dir
-                    .write(&r.rel, content.as_bytes(), Some(ctx.owner))
+                    .write_labeled(
+                        &r.rel,
+                        content.as_bytes(),
+                        Some(ctx.owner),
+                        None,
+                        ctx.data_label,
+                    )
                     .map_err(|e| ActionError::io(&r.display, e))?;
                 attribute(ctx, &r.host);
                 let kind = if created {

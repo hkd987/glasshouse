@@ -1097,6 +1097,12 @@ pub mod testing {
             if !key.is_some_and(|k| request.message.verify(k).is_ok()) {
                 return refused("The message's signature doesn't check.");
             }
+            if kept.messages.iter().any(|m| {
+                m.header()
+                    .is_ok_and(|h| h.conversation == header.conversation && h.id == header.id)
+            }) {
+                return refused("That message was posted already.");
+            }
             kept.seq += 1;
             let mut message = request.message.clone();
             message.seq = kept.seq;

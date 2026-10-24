@@ -179,3 +179,14 @@ shared space), 0034 (item labels), 0030 (chat) and 0024 (the app bridge).
   - Word in and PDF out (DC-5, P1);
   - membership changes after creation, which need chat C2;
   - IT's compliance view rendering docs and sheets.
+
+## Amended by ADR 0052
+Its model (`specs/tla/DocsCollab.tla`) found edits lost on their way
+between computers:
+- a doc's copy on a computer moves only as far as the sync has everything
+  (`Shared::through`); its own posts beyond that wait as "ahead", and a late
+  message that involves a change of roles loads the copy again, in order;
+- opening skips only the edits the newest snapshot covers, and takes the
+  newest snapshot whose sender could edit when they posted it;
+- pages get what their computer's copy accepted, judged by who could edit
+  when each edit was made.

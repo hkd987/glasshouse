@@ -188,3 +188,11 @@ the gateway, and the local model (DP-20).
   `model_complete` and treat refusals as information (add-agent skill).
 - If the gateway outgrows glassd (ADR 0003), it moves behind the same
   action with no change for agents.
+
+## Amended by ADR 0052
+- A file's stored label stays when it's rewritten: the new file gets it
+  before the rename (DP-10).
+- What a task writes with `files.write` is labeled with what it had read,
+  the higher of that and the file's own (DP-11), and a read's labels are
+  read again after it, so a write landing meanwhile counts
+  (`specs/tla/ModelGateway.tla`).

@@ -18,6 +18,7 @@
 
 import { Bridge, BridgeError, h, Offline, ready, show } from "@glasshouse/sdk";
 
+import { askForKeys, type Keys } from "./keys.ts";
 import { Batcher, type FromSpeech, type Line, type ToSpeech } from "./transcribe.ts";
 
 interface Joined {
@@ -31,13 +32,6 @@ interface Joined {
   participant: number;
   /** IT turned transcripts on for its organizer (ADR 0045). */
   transcribed?: boolean;
-}
-
-/** `meet.keys`: the session's media keys, current first. */
-interface Keys {
-  media_keys: { id: string; key: string }[];
-  /** A new key is still due; ask again shortly. */
-  due?: boolean;
 }
 
 /** One of this page's receiving lines, as the relay's `peers` line says. */
@@ -112,6 +106,16 @@ let speech: Worker | null = null;
 let heard: MediaStreamTrack | null = null;
 const batch = new Batcher();
 let sending: Promise<void> = Promise.resolve();
+/**
+ * Lines glassd hasn't taken yet, with their batch's id: they go again as
+ * they were, before anything newer, so a batch whose answer was lost is
+ * added once and asks once (ADR 0052).
+ */
+let unsent: { batch: string; lines: Line[] } | null = null;
+/** When `unsent` last went. */
+let lastTry = 0;
+/** A request to the agent is waiting behind `unsent`. */
+let urgent = false;
 let ticking = 0;
 let clearHeard = 0;
 let heardAll: () => void = () => undefined;
@@ -186,21 +190,18 @@ function useKeys(keys: { id: string; key: string }[]): boolean {
 /**
  * Someone joined or left: someone who left mustn't read what follows, and
  * a computer whose key came late brings a new media key. The first
- * computer to ask makes the new key (ADR 0030 §6). Asks glassd, backing
- * off, until there is a new key or none is due.
+ * computer to ask makes the new key (ADR 0030 §6). Asks glassd until
+ * there is a new key or none is due (keys.ts). Also once joined: a key
+ * made while this page joined isn't the one its seat came with, and no
+ * one coming or going may tell it (ADR 0052).
  */
 async function awaitNewKey(): Promise<void> {
   const mine = (rekeying += 1);
-  for (const wait of [250, 500, 1000, 2000, 4000, 8000]) {
-    await new Promise((done) => setTimeout(done, wait));
-    if (mine !== rekeying || state.phase !== "in") return;
-    try {
-      const result = await bridge.call<Keys>("meet.keys", { meeting });
-      if (result.ok && (useKeys(result.data?.media_keys ?? []) || result.data?.due === false)) return;
-    } catch {
-      // Not reachable right now: try again.
-    }
-  }
+  await askForKeys(
+    () => bridge.call<Keys>("meet.keys", { meeting }),
+    useKeys,
+    () => mine === rekeying && state.phase === "in",
+  );
 }
 
 /** One line to the relay. */
@@ -307,6 +308,7 @@ async function join(): Promise<void> {
   state.phase = "in";
   if (state.transcribed && audio) hear(audio);
   draw();
+  void awaitNewKey();
 }
 
 /**
@@ -330,7 +332,10 @@ function hear(microphone: MediaStreamTrack): void {
       state.hearing = "on";
     } else if (data.type === "line") {
       showHeard(data.line.text);
-      if (batch.add(data.line, Date.now())) void send();
+      if (batch.add(data.line, Date.now())) {
+        urgent = true;
+        void send();
+      }
     } else if (data.type === "done") {
       heardAll();
       return;
@@ -344,7 +349,8 @@ function hear(microphone: MediaStreamTrack): void {
   if (!state.mic) speech.postMessage({ type: "muted", on: true } satisfies ToSpeech);
   state.hearing = "loading";
   ticking = window.setInterval(() => {
-    if (batch.due(Date.now())) void send();
+    const now = Date.now();
+    if (unsent ? now - lastTry >= RETRY_MS : batch.due(now)) void send();
   }, 1000);
 }
 
@@ -358,26 +364,59 @@ function showHeard(text: string): void {
   }, 8000);
 }
 
-/** Adds the waiting lines to the transcript, one call at a time; lines glassd couldn't take wait for the next. */
-function send(lines?: Line[]): Promise<void> {
+/** How often lines glassd couldn't take go again. */
+const RETRY_MS = 5_000;
+/** Times what is left goes again as the person leaves, a second more each time. */
+const LEAVING_TRIES = 5;
+
+/** A batch's id: the same each time its lines go again (ADR 0052). */
+function batchId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return `b-${[...bytes].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/**
+ * Adds the waiting lines to the transcript, one call at a time: first a
+ * batch glassd hasn't taken, as it was, then a new one (with `all`, what
+ * is left, "Hey Glass" waiting too, until nothing is). Lines glassd
+ * couldn't take, or whose answer was lost, wait to go again.
+ */
+function send(all = false): Promise<void> {
   sending = sending.then(async () => {
-    const taking = lines ?? batch.take();
-    if (taking.length === 0) return;
-    try {
-      const result = await bridge.call<{ asked?: string[] }>("meet.transcribe", { meeting, lines: taking });
-      if (!result.ok) {
-        // Refused: IT turned transcripts off, or this meeting isn't one.
-        state.notice = result.text;
-        state.hearing = "failed";
-        void stopHearing(false);
-      } else {
+    for (;;) {
+      const going = unsent ?? { batch: batchId(), lines: all ? batch.drain() : batch.take() };
+      if (going.lines.length === 0) return;
+      unsent = going;
+      lastTry = Date.now();
+      try {
+        const result = await bridge.call<{ added?: boolean; asked?: string[] }>("meet.transcribe", {
+          meeting,
+          batch: going.batch,
+          lines: going.lines,
+        });
+        if (!result.ok) {
+          // Refused: IT turned transcripts off, or this meeting isn't one.
+          unsent = null;
+          state.notice = result.text;
+          state.hearing = "failed";
+          void stopHearing(false);
+          return;
+        }
+        // Not added yet: the organization's server is out of reach.
+        if (result.data?.added === false) return;
+        unsent = null;
         const asked = result.data?.asked ?? [];
         if (asked.length > 0) state.asked = asked[asked.length - 1]!;
+      } catch {
+        // glassd didn't answer, or its answer was lost: the same again later.
+        return;
+      } finally {
+        draw();
       }
-    } catch {
-      batch.putBack(taking, Date.now());
+      // What a request waited behind went: the request goes now too.
+      if (!all && !urgent) return;
+      urgent = false;
     }
-    draw();
   });
   return sending;
 }
@@ -399,7 +438,14 @@ async function stopHearing(rest = true): Promise<void> {
   heard = null;
   await done;
   worker.terminate();
-  for (let lines = batch.drain(); lines.length > 0; lines = batch.drain()) if (rest) await send(lines);
+  if (!rest) return;
+  // What is left goes; glassd out of reach, it tries a while, then the
+  // lines go with the page.
+  for (let tries = 1; ; tries += 1) {
+    await send(true);
+    if (!unsent || tries === LEAVING_TRIES) return;
+    await new Promise((done) => setTimeout(done, tries * 1000));
+  }
 }
 
 function fail(message: string): void {

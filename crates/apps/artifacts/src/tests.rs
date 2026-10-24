@@ -475,6 +475,136 @@ fn ar1_a_share_that_fails_partway_shares_nothing() {
 }
 
 #[test]
+fn ar4_two_updates_at_once_make_two_versions() {
+    // ArtifactsShare.tla: an update read the newest version's number, then
+    // posted the next. Two at once on one computer (the person in the app
+    // and an agent) posted the same number; the later was never shown,
+    // though its call said "is at version 2".
+    let org = org();
+    let (a, _b, id) = shared(&org);
+    use std::sync::atomic::Ordering;
+    type Racer = (ArtifactsProvider, TaskContext, String);
+    type Answer = Result<ActionOutput, ActionError>;
+    struct Racing {
+        inner: ChatProvider,
+        other: std::sync::OnceLock<Racer>,
+        fired: std::sync::atomic::AtomicBool,
+        raced: std::sync::Mutex<Option<std::thread::JoinHandle<Answer>>>,
+    }
+    impl std::fmt::Debug for Racing {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Racing")
+        }
+    }
+    impl Shared for Racing {
+        fn ready(&self, l: &str, m: bool) -> Result<(), glass_managed::chat::ChatFailure> {
+            self.inner.ready(l, m)
+        }
+        fn items(&self, l: &str, k: ConversationKind) -> Vec<Item> {
+            self.inner.items(l, k)
+        }
+        fn item(&self, l: &str, id: &str) -> Option<Item> {
+            Shared::item(&self.inner, l, id)
+        }
+        fn create(
+            &self,
+            l: &str,
+            k: ConversationKind,
+            t: &str,
+            label: Label,
+            m: &[String],
+        ) -> Result<String, glass_managed::chat::ChatFailure> {
+            self.inner.create(l, k, t, label, m)
+        }
+        fn post(
+            &self,
+            l: &str,
+            to: &str,
+            t: &str,
+            p: Option<Part>,
+            a: Option<String>,
+            r: Option<String>,
+        ) -> Result<String, glass_managed::chat::ChatFailure> {
+            // The first version posted: the other update runs meanwhile,
+            // as far as it gets in a second.
+            if matches!(p, Some(Part::Version { .. })) && !self.fired.swap(true, Ordering::SeqCst) {
+                let (provider, ctx, id) = self.other.get().unwrap().clone();
+                let other = std::thread::spawn(move || {
+                    provider.invoke(
+                        &ctx,
+                        &UPDATE.parse().unwrap(),
+                        &json!({ "artifact": id, "html": PAGE, "note": "The agent's" }),
+                    )
+                });
+                for _ in 0..100 {
+                    if other.is_finished() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                *self.raced.lock().unwrap() = Some(other);
+            }
+            self.inner.post(l, to, t, p, a, r)
+        }
+        fn put_blob(
+            &self,
+            l: &str,
+            blob: &glass_managed::shared::SealedBlob,
+        ) -> Result<(), glass_managed::chat::ChatFailure> {
+            self.inner.put_blob(l, blob)
+        }
+        fn get_blob(
+            &self,
+            l: &str,
+            i: &str,
+            id: &str,
+        ) -> Result<glass_managed::shared::SealedBlob, glass_managed::chat::ChatFailure> {
+            self.inner.get_blob(l, i, id)
+        }
+    }
+    let racing = Arc::new(Racing {
+        inner: a.roster.clone(),
+        other: std::sync::OnceLock::new(),
+        fired: std::sync::atomic::AtomicBool::new(false),
+        raced: std::sync::Mutex::new(None),
+    });
+    let provider = ArtifactsProvider::new(racing.clone(), org.directory.clone());
+    racing
+        .other
+        .set((provider.clone(), a.ctx("dana", AGENT), id.clone()))
+        .unwrap();
+    let mine = provider
+        .invoke(
+            &a.ctx("dana", APP),
+            &UPDATE.parse().unwrap(),
+            &json!({ "artifact": id, "html": PAGE_2, "note": "Mine" }),
+        )
+        .unwrap();
+    let other = racing.raced.lock().unwrap().take().unwrap();
+    let theirs = other.join().unwrap().unwrap();
+    let (mine, theirs) = (mine.data["version"].clone(), theirs.data["version"].clone());
+    assert_ne!(mine, theirs, "two versions, two numbers");
+    for (number, html, note) in [(&mine, PAGE_2, "Mine"), (&theirs, PAGE, "The agent's")] {
+        let read = a
+            .call(
+                "dana",
+                APP,
+                READ,
+                json!({ "artifact": id, "version": number }),
+            )
+            .unwrap();
+        assert_eq!(read.data["html"], html, "v{number} is what its call posted");
+        let versions = read.data["versions"].as_array().unwrap();
+        assert!(
+            versions
+                .iter()
+                .any(|v| v["number"] == *number && v["note"] == note),
+            "{versions:?}"
+        );
+    }
+}
+
+#[test]
 fn ar1_a_page_comes_from_a_granted_folder_and_only_from_one() {
     let org = org();
     let (a, _b) = org.pair();

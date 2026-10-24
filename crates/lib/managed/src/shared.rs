@@ -349,6 +349,14 @@ pub trait Shared: Send + Sync + std::fmt::Debug {
         item.messages.retain(|m| m.seq > seq);
         Some(item)
     }
+    /// Every message of `login`'s items up to this sequence number is on
+    /// this computer: none before it can still arrive. Past it, `since`
+    /// may hold this computer's own posts, kept as they were made, ahead
+    /// of another computer's earlier one still on its way. Read it before
+    /// the messages (ADR 0052).
+    fn through(&self, _login: &str) -> u64 {
+        u64::MAX
+    }
     /// A new item of `kind` titled `title` and labeled `label`, for
     /// `login` and `members`, sealed to their computers and IT's
     /// compliance key. Its id.

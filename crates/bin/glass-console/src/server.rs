@@ -118,6 +118,9 @@ struct CreditsService {
 /// Model calls forwarded at once, for every computer: more wait for none
 /// and fail over (ADR 0039).
 const MAX_MODEL_CALLS: usize = 64;
+/// How often meetings' sessions are checked against the relay's rooms, so
+/// one that everybody dropped out of ends, and its keys go (ADR 0052).
+const MEETINGS_SWEEP: Duration = Duration::from_secs(30);
 
 /// `POST /api/credits/checkout`: what an admin buys.
 #[derive(Deserialize)]
@@ -201,6 +204,17 @@ pub(crate) async fn signed_for_tests(
 
 /// What a removed computer is told.
 const REMOVED: &str = "This computer was removed from the organization.";
+const NOT_REGISTERED: &str = "This computer isn't registered with this organization.";
+
+/// The refusal for a computer whose signature was good when its request
+/// arrived but no longer is: IT removed or forgot it meanwhile (ADR 0052).
+fn signer_gone(now: Computer) -> Option<Response> {
+    match now {
+        Computer::Key(_) => None,
+        Computer::Revoked => Some(error(403, REMOVED)),
+        Computer::Unknown => Some(error(401, NOT_REGISTERED)),
+    }
+}
 
 /// The computer a device request's body names, wherever its kind of
 /// request keeps it: a sync's or a post's `device`, a member key's, a
@@ -280,6 +294,8 @@ struct Rollback {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Approve {
+    /// The version IT reviewed (GA-13): another is refused.
+    version: String,
     group: String,
     mode: InstallMode,
     #[serde(default)]
@@ -924,6 +940,15 @@ impl Console {
                 }
             }
         });
+        // Meetings' sessions end with the call, even when everyone
+        // dropped out without saying so (ADR 0052).
+        let sweeper = Arc::clone(&self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(MEETINGS_SWEEP).await;
+                sweeper.sweep_meetings().await;
+            }
+        });
         loop {
             let (stream, _) = listener.accept().await?;
             let console = Arc::clone(&self);
@@ -1278,9 +1303,14 @@ impl Console {
                 {
                     return error(400, &format!("no group {}", approve.group));
                 }
-                let result =
-                    self.state()
-                        .approve(id, &approve.group, approve.mode, approve.pin, &user);
+                let result = self.state().approve(
+                    id,
+                    &approve.version,
+                    &approve.group,
+                    approve.mode,
+                    approve.pin,
+                    &user,
+                );
                 match result {
                     Ok(version) => {
                         self.released();
@@ -1377,8 +1407,8 @@ impl Console {
         if path == "register" {
             return self.register_device(request);
         }
-        let device = match self.signed_by(path, request) {
-            Ok(device) => device,
+        let (device, key) = match self.signed_by(path, request) {
+            Ok(signer) => signer,
             Err(response) => return response,
         };
         if let Some(named) = named_device(&request.body)
@@ -1404,7 +1434,13 @@ impl Console {
                 }
                 let wait = Duration::from_secs(sync.wait_secs.min(MAX_WAIT_SECS));
                 let mut changed = self.releases.subscribe();
-                let first = self.state().sync(&sync);
+                let first = {
+                    let mut state = self.state();
+                    if let Some(gone) = signer_gone(state.still_signs(&device, &key)) {
+                        return gone;
+                    }
+                    state.sync(&sync)
+                };
                 if first.policy.is_some()
                     || first.catalog.is_some()
                     || first.directory.is_some()
@@ -1413,9 +1449,16 @@ impl Console {
                 {
                     return ok(serde_json::to_value(first).unwrap_or_default());
                 }
-                // Long poll: answer as soon as something is released.
+                // Long poll: answer as soon as something is released, to a
+                // computer IT hasn't removed while it waited (DV-1).
                 let _ = tokio::time::timeout(wait, changed.changed()).await;
-                let answer = self.state().sync(&sync);
+                let answer = {
+                    let mut state = self.state();
+                    if let Some(gone) = signer_gone(state.still_signs(&device, &key)) {
+                        return gone;
+                    }
+                    state.sync(&sync)
+                };
                 ok(serde_json::to_value(answer).unwrap_or_default())
             }
             "report" => {
@@ -1423,7 +1466,11 @@ impl Console {
                     Ok(b) => b,
                     Err(r) => return r,
                 };
-                self.state().report(report);
+                let mut state = self.state();
+                if let Some(gone) = signer_gone(state.still_signs(&device, &key)) {
+                    return gone;
+                }
+                state.report(report);
                 ok(json!({}))
             }
             "chat/keys" => {
@@ -1507,7 +1554,7 @@ impl Console {
                 let result = state.chat.post(&post.device, &org, post.message);
                 match result {
                     Ok(seq) => {
-                        if let Err(e) = state.save_chat() {
+                        if let Err(e) = state.save_chat_message() {
                             return error(500, &format!("{e:#}"));
                         }
                         drop(state);
@@ -1529,9 +1576,14 @@ impl Console {
                         serde_json::to_value(self.state().chat.sync(&sync)).unwrap_or_default()
                     );
                 }
-                // Long poll: answer as soon as chat changes.
+                // Long poll: answer as soon as chat changes, to a computer
+                // IT hasn't removed while it waited (ADR 0052).
                 let _ = tokio::time::timeout(wait, changed.changed()).await;
-                ok(serde_json::to_value(self.state().chat.sync(&sync)).unwrap_or_default())
+                let state = self.state();
+                if let Some(gone) = signer_gone(state.still_signs(&device, &key)) {
+                    return gone;
+                }
+                ok(serde_json::to_value(state.chat.sync(&sync)).unwrap_or_default())
             }
             "blobs" => {
                 let put: glass_managed::shared::PutBlob = match body(request) {
@@ -1596,8 +1648,8 @@ impl Console {
 
     /// The computer that signed `request`, or the response refusing it: a
     /// registered key's signature over this route and body, from within
-    /// [`MAX_SKEW_SECS`] of now, not seen before.
-    fn signed_by(&self, path: &str, request: &Request) -> Result<String, Response> {
+    /// [`MAX_SKEW_SECS`] of now, not seen before. With the key, as hex.
+    fn signed_by(&self, path: &str, request: &Request) -> Result<(String, String), Response> {
         let unsigned = || {
             error(
                 401,
@@ -1618,14 +1670,15 @@ impl Console {
                 "This request's time is too far from the console's. Check the computer's clock.",
             ));
         }
-        let key = match self.state().computer(device) {
-            Computer::Key(key) => key,
-            Computer::Revoked => return Err(error(403, REMOVED)),
-            Computer::Unknown => {
-                return Err(error(
-                    401,
-                    "This computer isn't registered with this organization.",
-                ));
+        let (key, hex) = {
+            let state = self.state();
+            match state.computer(device) {
+                Computer::Key(key) => {
+                    let hex = state.fleet.devices.get(device).and_then(|d| d.key.clone());
+                    (key, hex.unwrap_or_default())
+                }
+                Computer::Revoked => return Err(error(403, REMOVED)),
+                Computer::Unknown => return Err(error(401, NOT_REGISTERED)),
             }
         };
         let full = format!("/device/v1/{path}");
@@ -1639,7 +1692,7 @@ impl Console {
         if seen.insert(signature.to_owned(), time).is_some() {
             return Err(error(401, "This request was already received."));
         }
-        Ok(device.to_owned())
+        Ok((device.to_owned(), hex))
     }
 
     // ---- apps people share (ADR 0032, R2) -------------------------------
@@ -1711,6 +1764,7 @@ impl Console {
         match op {
             "join" => self.meet_join(meeting, &meet).await,
             "keys" => {
+                self.reconcile(meeting).await;
                 let state = self.state();
                 let keys = lock(&self.rooms).keys(&state.chat, meeting, &meet);
                 match keys {
@@ -1756,6 +1810,8 @@ impl Console {
         let name = self.directory.display_name(&request.body.login);
         match relay.join(meeting, seat.participant, &name, offer).await {
             Ok(answer) => {
+                // From now on, a seat the relay no longer has is gone.
+                lock(&self.rooms).admitted(meeting, request);
                 tracing::info!(meeting, login = %request.body.login, participant = seat.participant, "meet: joined");
                 let joined = Joined {
                     answer,
@@ -1768,6 +1824,10 @@ impl Console {
             Err(e) => {
                 if seat.new {
                     lock(&self.rooms).unseat(meeting, request);
+                } else {
+                    // Joining again: the relay says whether the seat's old
+                    // connection is still there.
+                    lock(&self.rooms).admitted(meeting, request);
                 }
                 match e {
                     RelayError::Refused(m) => error(409, &m),
@@ -1777,6 +1837,39 @@ impl Console {
                     }
                 }
             }
+        }
+    }
+
+    /// Whoever's computer dropped out of meeting `meeting`'s call without
+    /// saying so (its window closed, it slept or lost the network) has
+    /// left (ADR 0052): the relay saw the connection go. Asked before
+    /// answering for keys, so the others' computers make a new key the
+    /// one who left can't open, and on a sweep, so a session nobody is in
+    /// ends and its keys go.
+    async fn reconcile(&self, meeting: &str) {
+        let Some(relay) = self.relay.get() else {
+            return;
+        };
+        let mark = lock(&self.rooms).mark();
+        match relay.participants(meeting).await {
+            Ok(live) => {
+                let dropped = lock(&self.rooms).connected(meeting, mark, &live);
+                if !dropped.participants.is_empty() {
+                    tracing::info!(meeting, participants = ?dropped.participants, ended = dropped.ended, "meet: dropped out");
+                }
+            }
+            Err(e) => tracing::warn!(meeting, "meet: asking the relay who is in: {e:?}"),
+        }
+    }
+
+    /// Every meeting's session against the relay's, now and then.
+    async fn sweep_meetings(&self) {
+        if self.relay.get().is_none() {
+            return;
+        }
+        let meetings = lock(&self.rooms).meetings();
+        for meeting in meetings {
+            self.reconcile(&meeting).await;
         }
     }
 
@@ -2647,7 +2740,7 @@ mod tests {
             (
                 "POST",
                 "/api/catalog/x/approve",
-                json!({ "group": "everyone", "mode": "available" }),
+                json!({ "version": "1", "group": "everyone", "mode": "available" }),
             ),
             ("POST", "/api/catalog/x/block", json!({})),
             ("POST", "/api/catalog/x/public", json!({})),
@@ -3380,6 +3473,129 @@ mod tests {
         assert_eq!(status, 401);
     }
 
+    /// A forgotten computer heard "isn't registered" and glassd registered
+    /// its key again with the enrollment token: IT removed it, and it was
+    /// back in the org by itself (the DeviceEnrollment model, ADR 0052).
+    #[tokio::test]
+    async fn adr0030_a_removed_computer_stays_removed_once_forgotten() {
+        let t = console().await;
+        let body = json!({ "device": "lab-07" });
+        assert_eq!(t.device("/device/v1/sync", body.clone()).await.status, 200);
+        for step in ["revoke", "forget"] {
+            let (status, _) = t
+                .call("POST", &format!("/api/fleet/lab-07/{step}"), json!({}))
+                .await;
+            assert_eq!(status, 200, "{step}");
+        }
+        assert_eq!(t.device("/device/v1/sync", body.clone()).await.status, 401);
+        let auth = format!("Bearer {}", t.token);
+        let register = |registration: Value| {
+            let console = Arc::clone(&t.console);
+            let auth = auth.clone();
+            async move {
+                console
+                    .handle(&request(
+                        "POST",
+                        "/device/v1/register",
+                        &registration,
+                        &[("authorization", &auth)],
+                    ))
+                    .await
+            }
+        };
+        let same =
+            serde_json::to_value(lock(&t.devices)["lab-07"].registration().unwrap()).unwrap();
+        let r = register(same.clone()).await;
+        assert_eq!(r.status, 403, "{}", String::from_utf8_lossy(&r.body));
+        assert!(String::from_utf8_lossy(&r.body).contains("removed from the organization"));
+        assert_eq!(t.device("/device/v1/sync", body).await.status, 401);
+        // After the console restarts too.
+        let directory = LocalDirectory::starter("root");
+        let mut reopened = State::open(t._dir.path(), "acme", "Acme Corp", &directory).unwrap();
+        let registration: glass_managed::device::RegisterDevice =
+            serde_json::from_value(same).unwrap();
+        assert_eq!(
+            reopened.register_device(&registration),
+            Err(RegisterRefused::Revoked)
+        );
+        // Set up again, with a new key, it enrolls under the same id.
+        let fresh = glass_managed::device::DeviceKey::generate("lab-07").unwrap();
+        let fresh = serde_json::to_value(fresh.registration().unwrap()).unwrap();
+        assert_eq!(register(fresh).await.status, 200);
+    }
+
+    /// A long poll checked the computer's signature, waited, then answered
+    /// with whatever IT had released meanwhile, though IT had removed the
+    /// computer while it waited (DV-1, the DeviceEnrollment model).
+    #[tokio::test]
+    async fn dv1_a_computer_removed_while_it_waits_gets_nothing_released_after() {
+        let t = Arc::new(console().await);
+        let v1 = t.sync("lab-07", None, 0).await.policy.unwrap().version;
+        let waiting = {
+            let t = Arc::clone(&t);
+            tokio::spawn(async move {
+                let body = json!({ "device": "lab-07", "policy": v1, "wait_secs": 20 });
+                t.device("/device/v1/sync", body).await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (status, _) = t.call("POST", "/api/fleet/lab-07/revoke", json!({})).await;
+        assert_eq!(status, 200);
+        publish_a_policy(&t).await;
+        let answer = waiting.await.unwrap();
+        assert_eq!(
+            answer.status,
+            403,
+            "{}",
+            String::from_utf8_lossy(&answer.body)
+        );
+    }
+
+    /// The same long poll, the computer forgotten while it waited: the
+    /// answer made an entry without a key for it, a computer on the Devices
+    /// page that never registered (AD-4).
+    #[tokio::test]
+    async fn ad4_a_computer_forgotten_while_it_waits_leaves_no_entry() {
+        let t = Arc::new(console().await);
+        let v1 = t.sync("lab-07", None, 0).await.policy.unwrap().version;
+        let waiting = {
+            let t = Arc::clone(&t);
+            tokio::spawn(async move {
+                let body = json!({ "device": "lab-07", "policy": v1, "wait_secs": 20 });
+                t.device("/device/v1/sync", body).await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for step in ["revoke", "forget"] {
+            let (status, _) = t
+                .call("POST", &format!("/api/fleet/lab-07/{step}"), json!({}))
+                .await;
+            assert_eq!(status, 200, "{step}");
+        }
+        publish_a_policy(&t).await;
+        assert_eq!(waiting.await.unwrap().status, 401);
+        let (_, fleet) = t.call("GET", "/api/fleet", Value::Null).await;
+        assert!(
+            !fleet["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["id"] == "lab-07"),
+            "{fleet}"
+        );
+    }
+
+    async fn publish_a_policy(t: &Test) {
+        t.call(
+            "POST",
+            "/api/policy/edit",
+            json!({ "edit": "tier", "group": "everyone", "class": "export", "tier": "never" }),
+        )
+        .await;
+        let (status, _) = t.call("POST", "/api/policy/publish", json!({})).await;
+        assert_eq!(status, 200);
+    }
+
     #[tokio::test]
     async fn adr0030_another_key_under_an_enrolled_id_is_refused() {
         let t = console().await;
@@ -3478,7 +3694,7 @@ mod tests {
             .call(
                 "POST",
                 "/api/catalog/mail-with-write/approve",
-                json!({ "group": "ap-ops", "mode": "available", "pin": false }),
+                json!({ "version": "1", "group": "ap-ops", "mode": "available", "pin": false }),
             )
             .await;
         assert_eq!(status, 200, "{approved}");
@@ -3520,6 +3736,37 @@ mod tests {
         );
         assert_eq!(bundle("1").await.status, 200);
         assert_eq!(bundle("2").await.status, 404);
+        // GA-13: IT approves the version it reviewed. Approving from a page
+        // that still shows version 1 doesn't send version 2 out unseen
+        // (specs/tla/StoreShare.tla); nothing is signed.
+        let signed = t.console.state().catalog.released.as_ref().unwrap().version;
+        let (status, stale) = t
+            .call(
+                "POST",
+                "/api/catalog/mail-with-write/approve",
+                json!({ "version": "1", "group": "ap-ops", "mode": "required" }),
+            )
+            .await;
+        assert_eq!(status, 409, "{stale}");
+        assert!(
+            stale["error"].as_str().unwrap().contains(
+                "Version 2 of Mail, with Write came in while you were reviewing version 1"
+            ),
+            "{stale}"
+        );
+        assert_eq!(
+            t.console.state().catalog.released.as_ref().unwrap().version,
+            signed
+        );
+        assert_eq!(bundle("2").await.status, 404);
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/catalog/mail-with-write/approve",
+                json!({ "group": "ap-ops", "mode": "required" }),
+            )
+            .await;
+        assert_eq!(status, 400, "the version IT reviewed is required");
         // A new version the person didn't name keeps its name in the store,
         // whatever the computer calls it; one they named takes that name.
         let mut unnamed = next.clone();
@@ -3586,6 +3833,59 @@ mod tests {
         );
     }
 
+    /// The catalog page with hundreds of items shows each as its own page
+    /// does, from IT's draft parsed once for the page, not once an item.
+    #[tokio::test]
+    async fn ad5_a_catalog_of_hundreds_shows_each_item_as_its_page_does() {
+        let t = console().await;
+        let directory = t.console.directory.as_ref();
+        let mut state = t.console.state();
+        for n in 0..300 {
+            state.catalog.items.push(crate::state::ConsoleItem {
+                item: glass_managed::CatalogItem {
+                    id: format!("agent-{n}").parse().unwrap(),
+                    kind: glass_managed::ItemKind::Agent,
+                    name: format!("Agent {n}"),
+                    version: "1.0.0".into(),
+                    publisher: "Clause Labs".into(),
+                    publisher_verified: true,
+                    internal: false,
+                    summary: "Redlines".into(),
+                    keywords: Vec::new(),
+                    declares: glass_managed::Declared {
+                        actions: vec!["mail.send".into(), "files.read".into()],
+                        ..Default::default()
+                    },
+                    groups: [("legal-ops".to_owned(), InstallMode::Available)].into(),
+                    pinned: false,
+                    provenance: Default::default(),
+                    app: None,
+                },
+                review: crate::state::Review::Waiting,
+                requested_by: "Legal Operations".into(),
+                checks: Vec::new(),
+                decided_by: None,
+                shared: None,
+                approved: None,
+            });
+        }
+        let titles = &t.console.titles;
+        let started = std::time::Instant::now();
+        let page = crate::views::catalog(&state, directory, titles);
+        let once = started.elapsed();
+        let started = std::time::Instant::now();
+        let each: Vec<Value> = (0..300)
+            .map(|n| crate::views::item(&state, directory, titles, &format!("agent-{n}")))
+            .map(Option::unwrap)
+            .collect();
+        eprintln!(
+            "catalog page, 300 items: {once:?}; parsing the draft for each: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(page["items"].as_array().unwrap(), &each);
+        assert_eq!(page["counts"]["waiting"], 300);
+    }
+
     #[tokio::test]
     async fn dv11_approve_for_a_group_and_dv13_never_to_the_public_store() {
         let t = console().await;
@@ -3622,7 +3922,7 @@ mod tests {
             .call(
                 "POST",
                 "/api/catalog/contract-review/approve",
-                json!({ "group": "legal-ops", "mode": "available", "pin": true }),
+                json!({ "version": "1.4.0", "group": "legal-ops", "mode": "available", "pin": true }),
             )
             .await;
         assert_eq!(status, 200, "{approved}");

@@ -184,3 +184,10 @@ desktop agent).
 - **Later**: starting and stopping a transcript during a meeting; the wake
   phrase IT names; Teams, Zoom and Meet in the browser (CF-20), which our
   pages don't hear.
+
+## Amended by ADR 0052
+T2, as built: a batch of transcript lines keeps its id until glassd has
+it and goes again exactly as it was; glassd answers a batch it has had as
+it did then. The organization's server out of reach is "not added yet",
+not a refusal, so Meet keeps hearing and sends the lines again; leaving
+tries five times with backoff (`specs/tla/MeetTranscript.tla`).

@@ -20,7 +20,7 @@
 //! it Auto, as Chat's do; agents ask.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use glass_actions::{
     ActionDef, ActionError, ActionOutput, ActionProvider, Preview, TaskContext, parse_input,
@@ -273,11 +273,18 @@ fn yes() -> bool {
 pub struct ArtifactsProvider {
     shared: Arc<dyn Shared>,
     directory: DirectoryHandle,
+    /// One update at a time on this computer: each reads the newest
+    /// version's number and posts the next (ArtifactsShare.tla).
+    updating: Arc<Mutex<()>>,
 }
 
 impl ArtifactsProvider {
     pub fn new(shared: Arc<dyn Shared>, directory: DirectoryHandle) -> Self {
-        Self { shared, directory }
+        Self {
+            shared,
+            directory,
+            updating: Arc::new(Mutex::new(())),
+        }
     }
 
     fn me(ctx: &TaskContext) -> &str {
@@ -689,6 +696,7 @@ impl ArtifactsProvider {
     fn update(&self, ctx: &TaskContext, input: UpdateInput) -> Result<ActionOutput, ActionError> {
         self.ready(ctx)?;
         let me = Self::me(ctx);
+        let _turn = self.updating.lock().unwrap_or_else(PoisonError::into_inner);
         let artifact = self.artifact(me, &input.artifact)?;
         if artifact.owner != me {
             return Err(invalid(format!(

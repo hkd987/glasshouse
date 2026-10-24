@@ -517,6 +517,12 @@ pub trait Meetings: Send + Sync + fmt::Debug {
     /// The meetings `login` is in on this computer.
     fn meetings(&self, login: &str) -> Vec<MeetingInfo>;
 
+    /// Meeting `id`, if `login` is in it on this computer, without opening
+    /// every other meeting's details.
+    fn meeting(&self, login: &str, id: &str) -> Option<MeetingInfo> {
+        self.meetings(login).into_iter().find(|m| m.id == id)
+    }
+
     /// Makes meeting `id`'s conversation of `people` (the organizer
     /// included): its title and time sealed under its first epoch key,
     /// sealed to each of their member keys and to IT, signed by the
@@ -549,11 +555,13 @@ pub mod testing {
     use crate::chat::testing::MemoryLink;
 
     /// The console's meetings in memory: the same [`Rooms`] the console
-    /// runs, beside a [`MemoryLink`]'s chat.
+    /// runs, beside a [`MemoryLink`]'s chat, and the relay's rooms as the
+    /// console asks them (who has a seat, by participant index).
     #[derive(Debug)]
     pub struct MemoryMeet {
         chat: Arc<MemoryLink>,
         rooms: Mutex<Rooms>,
+        relay: Mutex<std::collections::BTreeMap<String, std::collections::BTreeSet<u32>>>,
         offers: Mutex<Vec<String>>,
         offline: AtomicBool,
     }
@@ -582,9 +590,45 @@ pub mod testing {
             Self {
                 chat,
                 rooms: Mutex::new(Rooms::default()),
+                relay: Mutex::new(Default::default()),
                 offers: Mutex::new(Vec::new()),
                 offline: AtomicBool::new(false),
             }
+        }
+
+        /// Participant `participant`'s computer drops out of meeting
+        /// `id`'s call (its window closed, it slept or lost the network):
+        /// the relay sees its connection go; nobody tells the console.
+        pub fn drop_out(&self, id: &str, participant: u32) {
+            if let Some(room) = self.relay().get_mut(id) {
+                room.remove(&participant);
+            }
+        }
+
+        /// The console's sweep (ADR 0052): each session's seats checked
+        /// against the relay's.
+        pub fn sweep(&self) {
+            let meetings = self.rooms().meetings();
+            for id in meetings {
+                self.reconcile(&id);
+            }
+        }
+
+        fn relay(
+            &self,
+        ) -> std::sync::MutexGuard<
+            '_,
+            std::collections::BTreeMap<String, std::collections::BTreeSet<u32>>,
+        > {
+            self.relay.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        /// As the console does before it answers for keys: whoever the
+        /// relay no longer has has left.
+        fn reconcile(&self, id: &str) {
+            let mark = self.rooms().mark();
+            let live = self.relay().get(id).cloned().unwrap_or_default();
+            self.rooms().connected(id, mark, &live);
         }
 
         /// Out of reach, or back.
@@ -633,6 +677,12 @@ pub mod testing {
                 .rooms()
                 .join(&ChatFacts(&self.chat), meeting, request)
                 .map_err(refused)?;
+            // The relay takes the offer, then the console marks the seat.
+            self.relay()
+                .entry(meeting.clone())
+                .or_default()
+                .insert(seat.participant);
+            self.rooms().admitted(meeting, request);
             self.offers
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -650,6 +700,7 @@ pub mod testing {
 
         fn keys(&self, request: &MeetRequest) -> std::result::Result<MediaKeys, LinkError> {
             self.online()?;
+            self.reconcile(&request.body.meeting);
             self.rooms()
                 .keys(&ChatFacts(&self.chat), &request.body.meeting, request)
                 .map_err(refused)
@@ -664,10 +715,23 @@ pub mod testing {
 
         fn leave(&self, request: &MeetRequest) -> std::result::Result<(), LinkError> {
             self.online()?;
-            self.rooms()
+            let left = self
+                .rooms()
                 .leave(&ChatFacts(&self.chat), &request.body.meeting, request)
-                .map(|_| ())
-                .map_err(refused)
+                .map_err(refused)?;
+            if let Some(room) = self.relay().get_mut(&request.body.meeting) {
+                match left {
+                    super::rooms::Left { ended: true, .. } => room.clear(),
+                    super::rooms::Left {
+                        participant: Some(n),
+                        ..
+                    } => {
+                        room.remove(&n);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
         }
     }
 }
