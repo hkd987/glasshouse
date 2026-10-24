@@ -4,7 +4,8 @@
 # `glassctl hardware` sees each part as the OS drives it (DK-12): sound with and without a
 # microphone, USB sound, Intel's and Realtek's Ethernet, a TPM 2.0, and 2 GB of memory with an
 # agent running in it. Sound has to play: what the VM plays lands in a WAV file here, which must
-# hold more than silence, and the microphone has to record.
+# hold more than silence. The microphone has to record a second (QEMU's WAV backend has no input,
+# so that profile records QEMU's silence instead).
 #
 # What QEMU can't emulate (Wi-Fi radios, cameras, Bluetooth, modern standby, batteries, GPUs)
 # is checked on laptops with `glassctl hardware` (docs/dev/hardware.md).
@@ -23,7 +24,7 @@ failures=0
 
 # name | QEMU arguments | memory (MB) | what the report must say: kind=status[~a device has this]
 profiles=(
-	"hda-mic|-audiodev wav,id=snd0,path=$out/hda-mic.wav -device ich9-intel-hda -device hda-micro,audiodev=snd0||audio=works~hdac0"
+	"hda-mic|-audiodev none,id=snd0 -device ich9-intel-hda -device hda-micro,audiodev=snd0||audio=works~hdac0"
 	"hda-out|-audiodev wav,id=snd0,path=$out/hda-out.wav -device intel-hda -device hda-output,audiodev=snd0||audio=limited~hdac0"
 	"usb-audio|-audiodev wav,id=snd0,path=$out/usb-audio.wav -device usb-audio,audiodev=snd0||audio=limited"
 	"intel-nic|-netdev user,id=net1 -device e1000e,netdev=net1 -netdev user,id=net2 -device igb,netdev=net2||ethernet=works~em0 ethernet=works~igb0"
@@ -68,10 +69,9 @@ PY
 }
 
 # Sound plays: a second of noise to the default device lands in the WAV file as more than
-# silence. And, with a microphone, a second records.
-check_sound() {
-	local name=$1 record=$2
-	: >"$out/$name.wav.before"
+# silence.
+check_playback() {
+	local name=$1
 	"$vm" ssh 'dd if=/dev/random of=/dev/dsp bs=8000 count=1 2>/dev/null' ||
 		{ fail "$name: nothing plays"; return; }
 	sleep 2
@@ -83,11 +83,14 @@ loud = max((abs(s) for s in samples), default=0)
 print(f"played: {len(samples)} samples, loudest {loud}")
 sys.exit(0 if loud > 1000 else 1)
 PY
-	if [[ $record == yes ]]; then
-		"$vm" ssh 'timeout 10 dd if=/dev/dsp of=/dev/null bs=8000 count=1 2>&1 | tail -1' ||
-			fail "$name: the microphone didn't record"
-	fi
-	rm -f "$out/$name.wav.before"
+}
+
+# The microphone records: a second of it (8,000 bytes at the default format) reads back.
+check_recording() {
+	local name=$1 said
+	said=$("$vm" ssh 'dd if=/dev/dsp of=/dev/null bs=8000 count=1 2>&1 | tail -1')
+	echo "recorded: $said"
+	[[ $said == "8000 bytes transferred"* ]] || fail "$name: the microphone didn't record"
 }
 
 wanted=("$@")
@@ -117,8 +120,8 @@ for profile in "${profiles[@]}"; do
 		check_report "$name" "$expect" || fail "$name: the report doesn't match"
 	fi
 	case $name in
-	hda-mic) check_sound "$name" yes ;;
-	hda-out | usb-audio) check_sound "$name" no ;;
+	hda-mic) check_recording "$name" ;;
+	hda-out | usb-audio) check_playback "$name" ;;
 	small)
 		said=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["memory_mb"])' <"$out/$name.json")
 		((said < 2100)) || fail "$name: the report says $said MB"
