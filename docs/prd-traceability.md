@@ -30,7 +30,7 @@ Tests: *unit* = crate unit tests, *pipeline* =
 | PA-3 Escapes are P0 bugs, bounty | Process | — | — |
 | PA-4 On-behalf-of tokens downstream | Not started | — | needs identity federation |
 | PA-5 Upstream FreeBSD + our layers | **Done** | `os/freebsd`, ADR 0002 | VM boots pinned 15.1-RELEASE |
-| PA-6 FDE, secure boot, TPM keys by default | Not started | — | image build work |
+| PA-6 FDE, secure boot, TPM keys by default | Not started | — | image build work. The image loads the TPM driver at startup (it didn't, so a TPM sat unattached), and `glassctl hardware` reports the TPM (ADR 0056) |
 | PA-7 Each agent its own directory identity with a human owner | Not started | catalog has id + version only | ADR 0008 (proposed) |
 | AD-14 Agents in Microsoft Agent 365 registry | Not started | | |
 | AD-15 Policy from Intune and Entra too | Not started | Managed policy from our own console is built (ADR 0021, 0023): boot from the last applied policy on disk, fetch in the background, verify, validate, apply whole with the previous version kept; Intune and Entra would feed the same path | unit `store::tests` (fallback, apply, rollback) |

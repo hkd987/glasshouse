@@ -1,0 +1,3 @@
+smbios.system.maker="QEMU"
+smbios.system.product="Standard PC (Q35 + ICH9, 2009)"
+smbios.system.version="pc-q35-8.2"

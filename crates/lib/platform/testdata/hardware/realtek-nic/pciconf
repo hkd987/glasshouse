@@ -1,0 +1,52 @@
+hostb0@pci0:0:0:0:	class=0x060000 rev=0x00 hdr=0x00 vendor=0x8086 device=0x29c0 subvendor=0x1af4 subdevice=0x1100
+    vendor     = 'Intel Corporation'
+    device     = '82G33/G31/P35/P31 Express DRAM Controller'
+    class      = bridge
+    subclass   = HOST-PCI
+virtio_pci0@pci0:0:1:0:	class=0x020000 rev=0x00 hdr=0x00 vendor=0x1af4 device=0x1000 subvendor=0x1af4 subdevice=0x0001
+    vendor     = 'Red Hat, Inc.'
+    device     = 'Virtio network device'
+    class      = network
+    subclass   = ethernet
+virtio_pci1@pci0:0:2:0:	class=0x00ff00 rev=0x00 hdr=0x00 vendor=0x1af4 device=0x1005 subvendor=0x1af4 subdevice=0x0004
+    vendor     = 'Red Hat, Inc.'
+    device     = 'Virtio RNG'
+    class      = old
+vgapci0@pci0:0:3:0:	class=0x030000 rev=0x02 hdr=0x00 vendor=0x1234 device=0x1111 subvendor=0x1af4 subdevice=0x1100
+    class      = display
+    subclass   = VGA
+xhci0@pci0:0:4:0:	class=0x0c0330 rev=0x01 hdr=0x00 vendor=0x1b36 device=0x000d subvendor=0x1af4 subdevice=0x1100
+    vendor     = 'Red Hat, Inc.'
+    device     = 'QEMU XHCI Host Controller'
+    class      = serial bus
+    subclass   = USB
+re0@pci0:0:5:0:	class=0x020000 rev=0x20 hdr=0x00 vendor=0x10ec device=0x8139 subvendor=0x1af4 subdevice=0x1100
+    vendor     = 'Realtek Semiconductor Co., Ltd.'
+    device     = 'RTL-8100/8101L/8139 PCI Fast Ethernet Adapter'
+    class      = network
+    subclass   = ethernet
+virtio_pci2@pci0:0:6:0:	class=0x010000 rev=0x00 hdr=0x00 vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002
+    vendor     = 'Red Hat, Inc.'
+    device     = 'Virtio block device'
+    class      = mass storage
+    subclass   = SCSI
+virtio_pci3@pci0:0:7:0:	class=0x010000 rev=0x00 hdr=0x00 vendor=0x1af4 device=0x1001 subvendor=0x1af4 subdevice=0x0002
+    vendor     = 'Red Hat, Inc.'
+    device     = 'Virtio block device'
+    class      = mass storage
+    subclass   = SCSI
+isab0@pci0:0:31:0:	class=0x060100 rev=0x02 hdr=0x00 vendor=0x8086 device=0x2918 subvendor=0x1af4 subdevice=0x1100
+    vendor     = 'Intel Corporation'
+    device     = '82801IB (ICH9) LPC Interface Controller'
+    class      = bridge
+    subclass   = PCI-ISA
+ahci0@pci0:0:31:2:	class=0x010601 rev=0x02 hdr=0x00 vendor=0x8086 device=0x2922 subvendor=0x1af4 subdevice=0x1100
+    vendor     = 'Intel Corporation'
+    device     = '82801IR/IO/IH (ICH9R/DO/DH) 6 port SATA Controller [AHCI mode]'
+    class      = mass storage
+    subclass   = SATA
+ichsmb0@pci0:0:31:3:	class=0x0c0500 rev=0x02 hdr=0x00 vendor=0x8086 device=0x2930 subvendor=0x1af4 subdevice=0x1100
+    vendor     = 'Intel Corporation'
+    device     = '82801I (ICH9 Family) SMBus Controller'
+    class      = serial bus
+    subclass   = SMBus

@@ -81,6 +81,13 @@ case $(getconf ifconfig_DEFAULT) in
 *SYNCDHCP*) setconf /etc/rc.conf ifconfig_DEFAULT="$(getconf ifconfig_DEFAULT | sed 's/SYNCDHCP/DHCP/')" ;;
 esac
 setconf /etc/rc.conf rc_startmsgs=NO
+# The TPM (PA-6): nothing loads its driver by the device's id, so it's loaded
+# at startup, and takes a TPM 2.0 behind either interface; with none, it
+# takes nothing (ADR 0056).
+case " $(getconf kld_list) " in
+*" tpm "*) ;;
+*) list=$(getconf kld_list) && setconf /etc/rc.conf kld_list="${list:+$list }tpm" ;;
+esac
 service glasshouse_identity start >/dev/null
 # Space ZFS frees goes back to the disk as it's freed: SSDs keep their write
 # speed, and a VM's sparse disk doesn't grow with every file rewritten (busy

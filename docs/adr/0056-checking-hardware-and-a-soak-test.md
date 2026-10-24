@@ -67,7 +67,27 @@ VM once per profile:
 | small | 2 GB of memory | 2 GB, and an agent runs |
 
 Sound has to play: what the VM plays lands in a WAV file on the host,
-which must hold more than silence, and the microphone has to record.
+which must hold more than silence. The microphone has to record a second.
+QEMU's WAV backend has no input, so that profile records QEMU's silence.
+
+**Run 2026-10-24: every profile passes.** What each saw is now a test
+fixture (`testdata/hardware/<profile>`,
+`dk12_emulated_devices_read_as_the_matrix_expects`). What it found:
+- **The image left a TPM unattached.** Nothing loaded the `tpm` driver: no
+  file names it for the device's id, so the base system's device list
+  (`devmatch`) can't. The TPM sat in the firmware's table as an unknown
+  device, and the report said so. Loaded, it attaches as `tpmcrb0`.
+  `post-install.sh` now loads it at startup (`kld_list`); with no TPM, it
+  attaches to nothing. The report named no TPM device until it knew the
+  driver names `tpmcrb` and `tpmtis`.
+- **Three bugs in the matrix itself:**
+  - the microphone check took `tail`'s exit status, not `dd`'s, so it
+    passed with nothing recorded;
+  - an extra network card on the dev network's subnet made the VM answer
+    SSH through the wrong card, so each card now has a subnet of its own;
+  - the TPM's state shared a directory with that profile's capture, which
+    deleted it under a running swtpm.
+- QEMU's Realtek card is an 8139C+, which `re` drives, not `rl`.
 
 ### 3. A soak test: `tests/soak/soak.sh`
 Agents work without a break for hours, as demo, in rounds:
@@ -89,6 +109,27 @@ The audit log is verified every half hour. It fails on:
 - memory or open files growing within one run of glassd.
 
 A failure carries the command's error and exit status.
+
+**Run 2026-10-24, 1 h 51 min: passed.**
+- **What ran:** 319 rounds, 638 agent tasks and 106 undos. glassd was
+  killed 5 times and the power was cut twice, so it made 8 runs.
+- **The checks:**
+  - every round finished;
+  - the audit log verified each half hour and at the end (24,890 records);
+  - no sandbox was left once no task was live;
+  - open files held at 16.
+- **Round times:** the median was 11 to 13 s in every block of 50 rounds,
+  while snapshots grew from 582 to 1,536 (the prune is daily). The
+  slowest round (40 s) was the one my host's disk filled during.
+- **The second power cut:** the VM took 5.5 minutes to come back, not
+  under 2. The time went before the kernel started, in the emulated
+  firmware or loader; once started, it booted as fast as ever. To be
+  timed on a laptop.
+- **An earlier run** reported a `glassctl wait` failing 3 s after its
+  task finished, and two sandbox checks failing. My own commands ran
+  alongside it then, and the host's disk was filling. The script threw
+  away stderr, so I couldn't tell which. It keeps it now, and the
+  2-hour run had neither.
 
 **glassd's memory under the soak.** In the VM, glassd's resident memory
 rose from about 25 MB to 34 MB over its first 25 rounds, then by 35 to

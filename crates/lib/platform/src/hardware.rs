@@ -638,12 +638,15 @@ fn battery(info: Option<&str>) -> Part {
     part(Kind::Battery, status, vec![format!("{design} mWh")], note)
 }
 
+/// The TPM drivers in `tpm.ko`: a TPM 2.0 behind either interface.
+const TPM_DRIVERS: [&str; 2] = ["tpmcrb", "tpmtis"];
+
 fn tpm(devices: &[Device], dev: &[String]) -> Part {
     let gap = "disk encryption and keys in the TPM; nothing uses it yet (PA-6)";
     if dev.iter().any(|n| n == "tpm0") {
         let found = devices
             .iter()
-            .filter(|d| d.driver() == "tpm")
+            .filter(|d| TPM_DRIVERS.contains(&d.driver()))
             .map(Device::describe)
             .collect();
         return with_gap(part(Kind::Tpm, Status::Works, found, "A TPM, driven"), gap);
@@ -1060,7 +1063,7 @@ hdac0@pci0:0:31:3:\tclass=0x040300 rev=0x20 hdr=0x00 vendor=0x8086 device=0xa0c8
             .into(),
             devinfo: "\
           hmt0 <PIXA3854:00 093A:0274 TouchPad> pnpinfo page=0x000d usage=0x0005 bus=0x18 at index=1
-    tpm0 <Trusted Platform Module 2.0, CRB mode> pnpinfo _HID=MSFT0101 _UID=1 _CID=none at handle=\\_SB_.TPM_
+    tpmcrb0 <Trusted Platform Module 2.0, CRB mode> pnpinfo _HID=MSFT0101 _UID=1 _CID=none at handle=\\_SB_.TPM_
 "
             .into(),
             usb: Some(
@@ -1106,6 +1109,10 @@ ugen0.2: <Realtek Laptop Camera> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr
         ] {
             assert_eq!(status(&report, kind), want, "{kind:?}: {report:#?}");
         }
+        assert_eq!(
+            part_of(&report, Kind::Tpm).devices,
+            ["Trusted Platform Module 2.0, CRB mode (tpmcrb0)"]
+        );
         // PM-6: a battery holding 70% of its design is worn.
         let battery = part_of(&report, Kind::Battery);
         assert_eq!(battery.status, Status::Limited);
@@ -1183,6 +1190,58 @@ ugen0.2: <Realtek Laptop Camera> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr
         assert_eq!(status(&assess(&sources), Kind::Wifi), Status::Works);
         sources.dmesg = "rtwn0: could not load firmware image rtwn-rtl8192cfwU\n".into();
         assert_eq!(status(&assess(&sources), Kind::Wifi), Status::Unsupported);
+    }
+
+    /// What the matrix's emulated devices read as, from what
+    /// `tests/hardware/capture.sh` saved in each (2026-10-24).
+    #[test]
+    fn dk12_emulated_devices_read_as_the_matrix_expects() {
+        let expect: [(&str, Kind, Status, &str); 7] = [
+            ("hda-mic", Kind::Audio, Status::Works, "(hdac0)"),
+            ("hda-out", Kind::Audio, Status::Limited, "(hdac0)"),
+            (
+                "usb-audio",
+                Kind::Audio,
+                Status::Limited,
+                "QEMU QEMU USB Audio",
+            ),
+            (
+                "intel-nic",
+                Kind::Ethernet,
+                Status::Works,
+                "82576 Gigabit Network Connection (igb0)",
+            ),
+            (
+                "realtek-nic",
+                Kind::Ethernet,
+                Status::Works,
+                "8139 PCI Fast Ethernet Adapter (re0)",
+            ),
+            (
+                "tpm-crb",
+                Kind::Tpm,
+                Status::Works,
+                "Trusted Platform Module 2.0, CRB mode (tpmcrb0)",
+            ),
+            ("tpm-unattached", Kind::Tpm, Status::Unsupported, "MSFT0101"),
+        ];
+        for (name, kind, want, device) in expect {
+            let report = assess(&captured(name));
+            let part = part_of(&report, kind);
+            assert_eq!(part.status, want, "{name}: {part:#?}");
+            assert!(
+                part.devices.iter().any(|d| d.contains(device)),
+                "{name}: no {device} in {:?}",
+                part.devices
+            );
+        }
+        let intel = assess(&captured("intel-nic"));
+        assert!(
+            part_of(&intel, Kind::Ethernet)
+                .devices
+                .iter()
+                .any(|d| d.ends_with("(em0)"))
+        );
     }
 
     #[test]

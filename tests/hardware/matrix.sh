@@ -31,7 +31,7 @@ profiles=(
 	"usb-audio|-audiodev wav,id=snd0,path=$out/usb-audio.wav -device usb-audio,audiodev=snd0||audio=limited"
 	"intel-nic|-netdev user,id=net1,net=10.0.3.0/24 -device e1000e,netdev=net1 -netdev user,id=net2,net=10.0.4.0/24 -device igb,netdev=net2||ethernet=works~em0 ethernet=works~igb0"
 	"realtek-nic|-netdev user,id=net1,net=10.0.3.0/24 -device rtl8139,netdev=net1||ethernet=works~re0"
-	"tpm|-chardev socket,id=chrtpm,path=$out/tpm/sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-crb,tpmdev=tpm0||tpm=works"
+	"tpm|-chardev socket,id=chrtpm,path=$out/swtpm/sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-crb,tpmdev=tpm0||tpm=works"
 	"small||2048|"
 )
 
@@ -111,10 +111,11 @@ for profile in "${profiles[@]}"; do
 	tpm_pid=
 	if [[ $name == tpm ]]; then
 		command -v swtpm >/dev/null || { log "$name: skipped, no swtpm here (apt-get install swtpm)"; continue; }
-		rm -rf "$out/tpm" && mkdir -p "$out/tpm"
-		swtpm socket --tpm2 --tpmstate "dir=$out/tpm" --ctrl "type=unixio,path=$out/tpm/sock" \
-			--terminate --daemon --pid "file=$out/tpm/pid"
-		tpm_pid=$(cat "$out/tpm/pid")
+		# Its state apart from the profile's capture, which replaces $out/tpm.
+		rm -rf "$out/swtpm" && mkdir -p "$out/swtpm"
+		swtpm socket --tpm2 --tpmstate "dir=$out/swtpm" --ctrl "type=unixio,path=$out/swtpm/sock" \
+			--terminate --daemon --pid "file=$out/swtpm/pid"
+		tpm_pid=$(cat "$out/swtpm/pid")
 	fi
 	rm -f "$out/$name.wav"
 	boot "$devices" "$memory" || { fail "$name: didn't boot (build/vm/console.log)"; continue; }
