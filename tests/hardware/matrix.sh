@@ -23,12 +23,14 @@ mkdir -p "$out"
 failures=0
 
 # name | QEMU arguments | memory (MB) | what the report must say: kind=status[~a device has this]
+# Each extra network card is on a subnet of its own: on the dev network's, the VM would answer SSH
+# through the wrong card.
 profiles=(
 	"hda-mic|-audiodev none,id=snd0 -device ich9-intel-hda -device hda-micro,audiodev=snd0||audio=works~hdac0"
 	"hda-out|-audiodev wav,id=snd0,path=$out/hda-out.wav -device intel-hda -device hda-output,audiodev=snd0||audio=limited~hdac0"
 	"usb-audio|-audiodev wav,id=snd0,path=$out/usb-audio.wav -device usb-audio,audiodev=snd0||audio=limited"
-	"intel-nic|-netdev user,id=net1 -device e1000e,netdev=net1 -netdev user,id=net2 -device igb,netdev=net2||ethernet=works~em0 ethernet=works~igb0"
-	"realtek-nic|-netdev user,id=net1 -device rtl8139,netdev=net1||ethernet=works~rl0"
+	"intel-nic|-netdev user,id=net1,net=10.0.3.0/24 -device e1000e,netdev=net1 -netdev user,id=net2,net=10.0.4.0/24 -device igb,netdev=net2||ethernet=works~em0 ethernet=works~igb0"
+	"realtek-nic|-netdev user,id=net1,net=10.0.3.0/24 -device rtl8139,netdev=net1||ethernet=works~rl0"
 	"tpm|-chardev socket,id=chrtpm,path=$out/tpm/sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-crb,tpmdev=tpm0||tpm=works"
 	"small||2048|"
 )
@@ -42,9 +44,15 @@ fail() {
 boot() {
 	"$vm" down >/dev/null 2>&1 || true
 	"$vm" ssh-close >/dev/null 2>&1 || true
-	VM_DEVICES=$1 VM_MEM=${2:-4096} "$vm" up >/dev/null
-	"$vm" wait >/dev/null
+	VM_DEVICES=$1 VM_MEM=${2:-4096} "$vm" up >/dev/null &&
+		VM_BOOT_TIMEOUT=${3:-300} "$vm" wait >/dev/null
 }
+# However it ends, the dev VM starts again as `make vm-up` does.
+restore() {
+	log "starting the dev VM as usual"
+	boot "" "" 900 || log "FAIL the dev VM didn't start again"
+}
+trap restore EXIT
 
 # The report says what `expect` asks: kind=status, and with ~text, a device naming it.
 check_report() {
@@ -109,13 +117,13 @@ for profile in "${profiles[@]}"; do
 		tpm_pid=$(cat "$out/tpm/pid")
 	fi
 	rm -f "$out/$name.wav"
-	boot "$devices" "$memory"
+	boot "$devices" "$memory" || { fail "$name: didn't boot (build/vm/console.log)"; continue; }
 	"$vm" ssh 'glassctl --json hardware' >"$out/$name.json" 2>/dev/null ||
 		{ fail "$name: glassctl hardware failed"; continue; }
 	"$vm" scp-in "$repo/tests/hardware/capture.sh" /tmp/capture.sh
 	rm -rf "${out:?}/$name"
 	"$vm" ssh "rm -rf /tmp/$name && sh /tmp/capture.sh /tmp/$name >/dev/null && tar -C /tmp -cf - $name" |
-		tar -C "$out" -xf - || fail "$name: capture.sh failed"
+		tar -C "$out" -mxf - || fail "$name: capture.sh failed"
 	if [[ -n $expect ]]; then
 		check_report "$name" "$expect" || fail "$name: the report doesn't match"
 	fi
@@ -137,8 +145,6 @@ for profile in "${profiles[@]}"; do
 	log "$name: done"
 done
 
-log "starting the dev VM as usual"
-boot "" ""
 if ((failures)); then
 	log "hardware matrix: $failures failures"
 	exit 1
