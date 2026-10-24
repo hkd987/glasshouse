@@ -36,10 +36,14 @@
 (* Abstractions: one person, p; the policy file holds v1, v2 or something  *)
 (* that doesn't validate (an edit by hand, IT's next version); a power cut *)
 (* empties memory, the kernel's jails and /var/run, and keeps the disk;    *)
-(* glassd crashing keeps jails and /var/run, and someone or something      *)
-(* starts it again. Each step of `create_person` is one command.           *)
+(* glassd crashing keeps jails and /var/run, and its supervisor (daemon -r *)
+(* in rc.d/glassd, ADR 0055) starts it again a few seconds later. Each     *)
+(* step of `create_person` is one command.                                 *)
 (*                                                                         *)
-(* Old is the set of fixes switched off, the code before ADR 0053:         *)
+(* Old is the set of fixes switched off. "noSupervisor" is the code       *)
+(* before ADR 0055: nothing started glassd again after a crash, so the     *)
+(* computer ran without agents, sleep or the seat until it restarted. The  *)
+(* rest are the code before ADR 0053:                                      *)
 (*  - "ownerAtStart": glassd read the owner only as it started. At first   *)
 (*    boot that is before setup made them, so for their whole first        *)
 (*    session the computer treated them as IT-managed.                     *)
@@ -214,7 +218,8 @@ GlassdCrash ==
     /\ UNCHANGED <<disk, seatFile, session, rc, origin, gr, told, gaveUp,
                    everInForce, cuts, edits>>
 
-\* Started again (by hand, or by its supervisor): once the boot's rc ran.
+\* Started again by its supervisor after a crash, or after it refused to
+\* start (ADR 0055); without it ("noSupervisor") only by hand, if ever.
 GlassdRestart ==
     /\ gd \in {"down", "failed"} /\ rc = "done"
     /\ gd' = "starting"
@@ -355,7 +360,8 @@ Next ==
 Fairness ==
     /\ WF_vars(GlassdLaunch) /\ WF_vars(GreeterStart)
     /\ WF_vars(Prepare) /\ WF_vars(Cleanup) /\ WF_vars(Ready)
-    /\ WF_vars(Remember) /\ WF_vars(GlassdRestart)
+    /\ WF_vars(Remember)
+    /\ IF Fixed("noSupervisor") THEN WF_vars(GlassdRestart) ELSE TRUE
     /\ WF_vars(SetupSubmit) /\ WF_vars(MakeDataset) /\ WF_vars(AddAccount)
     /\ WF_vars(Chown) /\ WF_vars(Record)
     /\ WF_vars(SignIn) /\ WF_vars(TellBegin) /\ WF_vars(TellEnd)
@@ -406,4 +412,8 @@ ADR0031_GlassdLearnsWhoIsAtTheScreen ==
 \* ADR 0021: the sign-in screen (or setup) always comes.
 ADR0021_TheScreenComes ==
     <>(gr \in {"setup", "screen", "session"})
+\* ADR 0055: after a crash, glassd runs again by itself (or, with no good
+\* policy, refuses again, saying why).
+ADR0055_GlassdComesBackAfterACrash ==
+    (gd = "down" /\ rc = "done") ~> (gd \in {"ready", "failed"})
 =============================================================================

@@ -12,6 +12,8 @@
 #
 # glassd_config  (path)  Config file. Default /usr/local/etc/glasshouse/glassd.toml
 # glassd_log     (path)  Daemon log. Default /var/log/glassd.log
+# glassd_restart_delay (secs)  How long after a crash glassd starts again.
+#                              Default 3
 
 # rc.subr reads the rc variables below, and FreeBSD's sh has `local`.
 # shellcheck disable=SC1091,SC2034,SC3043
@@ -24,15 +26,21 @@ load_rc_config "$name"
 : "${glassd_enable:=NO}"
 : "${glassd_config:=/usr/local/etc/glasshouse/glassd.toml}"
 : "${glassd_log:=/var/log/glassd.log}"
+: "${glassd_restart_delay:=3}"
 
-pidfile="/var/run/${name}.pid"
-procname="/usr/local/sbin/glassd"
+# daemon(8) supervises glassd and starts it again a few seconds after it
+# stops without being asked to, at most 100 times (ADR 0055, Boot.tla):
+# a crash doesn't leave the computer without agents until it restarts.
+# rc tracks the supervisor (-P); stopping it forwards the stop to glassd
+# and nothing starts it again. glassd's own pid stays in glassd.pid.
+pidfile="/var/run/${name}_supervisor.pid"
+procname="/usr/sbin/daemon"
 command="/usr/sbin/daemon"
-# -p records glassd's own pid (not the supervisor's) so rc.subr can track it.
+glassd_bin="/usr/local/sbin/glassd"
 # glassd checks its config and policy as it starts and, with
 # --console-errors, says on the console why if it won't run (BR-1: the
 # message names Glasshouse only).
-command_args="-f -p ${pidfile} -o ${glassd_log} ${procname} --config ${glassd_config} --console-errors"
+command_args="-f -R ${glassd_restart_delay} -C 100 -P ${pidfile} -p /var/run/${name}.pid -o ${glassd_log} ${glassd_bin} --config ${glassd_config} --console-errors"
 start_precmd="glassd_precmd"
 extra_commands="suspend resume"
 suspend_cmd="glassd_suspend"
@@ -45,7 +53,7 @@ glassd_precmd()
 	# by hand, check first, so a refusal shows on the terminal that asked.
 	[ -n "${rc_fast}" ] && return 0
 	local out
-	if ! out=$("${procname}" --config "${glassd_config}" --check 2>&1); then
+	if ! out=$("${glassd_bin}" --config "${glassd_config}" --check 2>&1); then
 		echo "${out}" >&2
 		return 1
 	fi

@@ -86,6 +86,12 @@ if [ -f "$post" ]; then
 fi
 if [ -f /usr/local/etc/rc.d/glassd ]; then
 	if service glassd enabled; then
+		# A glassd started before it had a supervisor that starts it again
+		# (ADR 0055) isn't the one the new rc script tracks: stop it first.
+		if [ ! -f /var/run/glassd_supervisor.pid ] && pgrep -qx glassd; then
+			pkill -TERM -x glassd
+			for _ in $(jot 120); do pgrep -qx glassd || break; sleep 0.5; done
+		fi
 		hook service glassd restart
 	else
 		echo "deploy: glassd_enable is not YES; not restarting glassd"

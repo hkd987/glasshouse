@@ -7,8 +7,9 @@
 #   2. isolation: a second user can't see, stop or answer demo's task, and
 #      its jail has its resource limits while it runs
 #   3. sleep: that task pauses before the machine sleeps and resumes after
-#   4. crash recovery: kill -9 glassd mid-task; on restart it removes the
-#      orphaned jail and its limits, and the audit log is intact
+#   4. crash recovery: kill -9 glassd mid-task; its supervisor starts it
+#      again, which removes the orphaned jail and its limits, and the audit
+#      log is intact
 #   5. the model gateway with the scripted provider, under a test policy
 #   6. branding: no base-system name where a user looks (BR-1, BR-2)
 #   7. boot: the settings a fast boot depends on (no reboot; see
@@ -74,12 +75,16 @@ su demo -c '$e2e release $task'"
 
 step "crash recovery"
 task=$("$vm" run "su demo -c '$e2e hold'" | tail -1)
-before=$("$vm" run "kill -9 \$(cat /var/run/glassd.pid); sleep 2; $glass_jails")
+killed=$("$vm" run "cat /var/run/glassd.pid")
+before=$("$vm" run "kill -9 $killed; sleep 1; $glass_jails")
 [[ $before -ge 1 ]] || { echo "FAIL expected an orphaned jail after kill -9, found $before"; exit 1; }
-# The killed daemon's socket file is still there, so wait until the new one
-# answers: it removes orphans before it listens.
-"$vm" run "service glassd start >/tmp/glassd-start.log 2>&1
-for i in \$(jot 120); do glassctl status >/dev/null 2>&1 && break; sleep 0.5; done"
+# Its supervisor starts glassd again on its own, a few seconds later (ADR
+# 0055). The killed daemon's socket file is still there, so wait until the
+# new one answers: it removes orphans before it listens.
+"$vm" run "for i in \$(jot 120); do glassctl status >/dev/null 2>&1 && break; sleep 0.5; done
+glassctl status >/dev/null 2>&1 || { echo 'FAIL glassd did not start again after a crash'; exit 1; }
+test \"\$(cat /var/run/glassd.pid)\" != $killed || { echo 'FAIL glassd.pid is the killed one'; exit 1; }
+service glassd status >/dev/null || { echo 'FAIL rc does not see glassd running'; exit 1; }"
 after=$("$vm" run "$glass_jails")
 [[ $after -eq 0 ]] || { echo "FAIL $after orphaned jails survived the restart"; exit 1; }
 left=$("$vm" run "$glass_limits")

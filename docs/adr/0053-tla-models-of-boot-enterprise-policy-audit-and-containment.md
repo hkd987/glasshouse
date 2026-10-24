@@ -179,3 +179,8 @@ Both items it left open are closed:
   lost (`specs/tla/AuditLog.tla`, `AU1_AChangeIsOnRecordBeforeItRuns`);
 - support roles and the console's access by role are modelled
   (`specs/tla/SupportAccess.tla`), and the three bugs it found fixed.
+
+## Amended by ADR 0055
+glassd is started again after a crash, by `daemon -R` in rc.d/glassd; the
+Boot model's restart step is the supervisor's, and
+`ADR0055_GlassdComesBackAfterACrash` checks it.
