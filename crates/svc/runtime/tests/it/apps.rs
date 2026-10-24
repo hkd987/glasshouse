@@ -47,8 +47,13 @@ fn reply() -> Value {
     json!({ "to": ["dana@northwind.example"], "subject": "Re: Renewal terms", "body": "Tuesday works." })
 }
 
+/// A session's records, but those its changes write before they run
+/// (ADR 0054).
 fn records(h: &Harness, session: TaskId) -> Vec<glass_audit::AuditRecord> {
-    glass_audit::read(&h.audit_path(), |r| r.event.task == Some(session)).unwrap()
+    glass_audit::read(&h.audit_path(), |r| {
+        r.event.task == Some(session) && r.event.kind != glass_audit::EventKind::ActionStarted
+    })
+    .unwrap()
 }
 
 #[tokio::test]

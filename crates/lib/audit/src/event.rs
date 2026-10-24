@@ -63,12 +63,23 @@ pub enum EventKind {
     TaskStarted,
     TaskStateChanged,
     TaskFinished,
-    /// One agent action and its final outcome.
+    /// One agent action and its final outcome. One that changed something
+    /// or sent data off this computer names its [`EventKind::ActionStarted`]
+    /// record in `detail.started` (its `seq`).
     Action,
+    /// An agent's call that changes something or sends data off this
+    /// computer, about to run: on the record before it runs, so glassd
+    /// stopping, or a full disk, can't leave it off. Without an `Action`
+    /// naming it, its outcome was never recorded (AU-1, ADR 0054).
+    ActionStarted,
     ApprovalRequested,
     ApprovalAnswered,
     SnapshotTaken,
     Rollback,
+    /// An undo about to change files, before it does, as for
+    /// [`EventKind::ActionStarted`]; its `Rollback` names it in
+    /// `detail.started` (ADR 0054).
+    RollbackStarted,
     /// A user saved, switched or turned off a layer on an agent, or a new
     /// agent version re-checked it (TL-2, TL-13).
     LayerChanged,

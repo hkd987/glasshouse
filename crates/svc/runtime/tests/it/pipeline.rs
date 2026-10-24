@@ -1409,7 +1409,8 @@ async fn nv3_calendar_holds_notify_invitations_ask_and_undo_takes_the_hold_back(
     let detail = h.rt.get(&h.me, task).unwrap();
     assert_eq!(detail.view.feed.last().unwrap().verb, "hold");
     let records = glass_audit::read(&h.audit_path(), |r| {
-        r.event.action.as_ref().map(|a| a.as_str()) == Some("calendar.hold")
+        r.event.kind == glass_audit::EventKind::Action
+            && r.event.action.as_ref().map(|a| a.as_str()) == Some("calendar.hold")
     })
     .unwrap();
     let decision = records[0].event.decision.as_ref().unwrap();

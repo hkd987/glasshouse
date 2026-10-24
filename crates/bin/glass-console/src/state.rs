@@ -246,6 +246,9 @@ pub struct State {
     pub credits: crate::credits::Credits,
     /// What each computer spent on them.
     pub usage: crate::credits::Usage,
+    /// The pilot version's support roles, parsed once: every console
+    /// request reads them, and a version's text never changes (ADR 0054).
+    support: std::sync::Mutex<Option<(u64, glass_policy::document::Support)>>,
 }
 
 impl State {
@@ -299,6 +302,7 @@ impl State {
             fleet_dirty: false,
             credits: crate::credits::Credits::load(dir)?,
             usage: crate::credits::Usage::load(dir)?,
+            support: std::sync::Mutex::new(None),
         };
         if crate::chat::open_log(&mut state.chat, &dir.join(CHAT_LOG))? {
             // Moved to the log: chat.json is kept without them.
@@ -422,10 +426,23 @@ impl State {
     /// The remote help roles in force (ADR 0028): the newest policy's, the
     /// one the pilot ring runs. None before anything is published.
     pub fn support_in_force(&self) -> glass_policy::document::Support {
-        self.in_force(Ring::Pilot)
-            .and_then(|v| toml::from_str::<PolicyDocument>(&v.text).ok())
+        let Some(pilot) = self.in_force(Ring::Pilot) else {
+            return Default::default();
+        };
+        let mut kept = self
+            .support
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((version, support)) = kept.as_ref()
+            && *version == pilot.version
+        {
+            return support.clone();
+        }
+        let support = toml::from_str::<PolicyDocument>(&pilot.text)
             .map(|doc| doc.support)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        *kept = Some((pilot.version, support.clone()));
+        support
     }
 
     pub fn latest_version(&self) -> u64 {

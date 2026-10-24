@@ -2,7 +2,9 @@
 //! nothing an agent asks runs while the log can't record it, reads
 //! included; what a read found reaches the agent only once it's on the
 //! record; a record the log couldn't take waits, in order, and is written
-//! once there's room, without glassd restarting.
+//! once there's room, without glassd restarting. What changes something is
+//! on the record before it runs, so glassd stopping can't leave it off
+//! (ADR 0054).
 
 #![allow(clippy::unwrap_used)]
 
@@ -128,9 +130,10 @@ async fn au1_a_change_the_log_cant_record_is_recorded_once_there_is_room() {
     // The task's first change takes its snapshot, on the record.
     assert!(!write("total\n").await.is_error);
 
-    // The disk fills after the next change's snapshot, before its record:
-    // the change happened, so the agent hears so, and its record waits.
-    h.audit.fail_writes_for_tests(1, u32::MAX);
+    // The disk fills after the next change's record ahead of it and its
+    // snapshot, before its outcome: the change happened, so the agent
+    // hears so, and its outcome waits.
+    h.audit.fail_writes_for_tests(2, u32::MAX);
     let second = write("total,505.75\n").await;
     assert!(!second.is_error, "{}", second.text());
     assert_eq!(
@@ -160,4 +163,182 @@ async fn au1_a_change_the_log_cant_record_is_recorded_once_there_is_room() {
     );
     assert!(records[0].event.detail.get("happened_at").is_none());
     assert!(records[1].event.detail.get("happened_at").is_some());
+}
+
+fn kind(h: &Harness, kind: EventKind) -> Vec<AuditRecord> {
+    glass_audit::read(&h.audit_path(), |r| r.event.kind == kind).unwrap()
+}
+
+#[tokio::test]
+async fn au1_a_change_is_on_the_record_before_it_runs_so_a_stop_cant_leave_it_off() {
+    let h = harness();
+    let task =
+        h.rt.start(&h.me, h.request(&["Invoices"], &["Reports"]))
+            .unwrap()
+            .id;
+    let agent = h.agent(task).await;
+    let write = |content: &'static str| {
+        tool(
+            &agent,
+            "files_write",
+            json!({"path": "Reports/summary.csv", "content": content}),
+        )
+    };
+    assert!(!write("total\n").await.is_error);
+    let first = kind(&h, EventKind::Action);
+    let started = kind(&h, EventKind::ActionStarted);
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(first[0].event.detail["started"], started[0].seq);
+
+    // The disk fills after the next change's record ahead of it and its
+    // snapshot: the change runs, and its outcome can't be written.
+    h.audit.fail_writes_for_tests(2, u32::MAX);
+    assert!(!write("total,505.75\n").await.is_error);
+    // glassd stops now, losing the outcome waiting in memory: what's on
+    // disk still says the change was made, by whom, and that its outcome
+    // wasn't recorded (no outcome names it).
+    let started = kind(&h, EventKind::ActionStarted);
+    assert_eq!(started.len(), 2, "{started:?}");
+    let last = &started[1];
+    assert_eq!(last.event.task, Some(task));
+    assert_eq!(last.event.action.as_ref().unwrap().as_str(), "files.write");
+    assert_eq!(last.event.targets, ["Reports/summary.csv"]);
+    assert!(
+        !kind(&h, EventKind::Action)
+            .iter()
+            .any(|r| r.event.detail["started"] == last.seq)
+    );
+
+    // Without a stop, the outcome goes once there's room, naming it.
+    h.audit.fail_writes_for_tests(0, 0);
+    assert!(
+        !tool(&agent, "files_list", json!({"path": "Reports"}))
+            .await
+            .is_error
+    );
+    let writes: Vec<_> = kind(&h, EventKind::Action)
+        .into_iter()
+        .filter(|r| {
+            r.event
+                .action
+                .as_ref()
+                .is_some_and(|a| a.as_str() == "files.write")
+        })
+        .collect();
+    assert_eq!(writes[1].event.detail["started"], last.seq);
+    // Reads write nothing ahead: what they find waits for their record.
+    assert_eq!(kind(&h, EventKind::ActionStarted).len(), 2);
+}
+
+#[tokio::test]
+async fn au1_an_undo_is_on_the_record_before_it_changes_files_and_waits_for_the_log() {
+    let h = harness();
+    let task =
+        h.rt.start(&h.me, h.request(&["Invoices"], &["Reports"]))
+            .unwrap()
+            .id;
+    let agent = h.agent(task).await;
+    let wrote = tool(
+        &agent,
+        "files_write",
+        json!({"path": "Reports/summary.csv", "content": "total\n"}),
+    )
+    .await;
+    assert!(!wrote.is_error, "{}", wrote.text());
+    let undo = |dry_run| glass_api::UndoRequest {
+        task,
+        to: None,
+        changes: Vec::new(),
+        dry_run,
+    };
+
+    // The log can't take records: nothing is undone.
+    h.audit.fail_writes_for_tests(0, u32::MAX);
+    let refused = h.rt.undo(&h.me, undo(false)).await.unwrap_err();
+    assert!(
+        refused.to_string().contains("Nothing was undone"),
+        "{refused}"
+    );
+    assert!(h.home().join("Reports/summary.csv").exists());
+
+    h.audit.fail_writes_for_tests(0, 0);
+    let report = h.rt.undo(&h.me, undo(false)).await.unwrap();
+    assert!(report.not_undone.is_empty(), "{report:?}");
+    assert!(!h.home().join("Reports/summary.csv").exists());
+    let started = kind(&h, EventKind::RollbackStarted);
+    assert_eq!(started.len(), 1, "{started:?}");
+    // The refused undo is on the record too, written once there was room.
+    let rollback = kind(&h, EventKind::Rollback);
+    assert_eq!(rollback.len(), 2, "{rollback:?}");
+    assert!(rollback[0].event.summary.starts_with("Not done:"));
+    assert_eq!(rollback[1].event.detail["started"], started[0].seq);
+    assert!(started[0].seq < rollback[1].seq);
+}
+
+#[tokio::test]
+async fn au1_a_change_refused_for_a_full_log_keeps_it_down_and_is_recorded_once_there_is_room() {
+    let h = harness();
+    let task =
+        h.rt.start(&h.me, h.request(&["Invoices"], &["Reports"]))
+            .unwrap()
+            .id;
+    let agent = h.agent(task).await;
+    let write = |content: &'static str| {
+        tool(
+            &agent,
+            "files_write",
+            json!({"path": "Reports/summary.csv", "content": content}),
+        )
+    };
+    assert!(!write("total\n").await.is_error);
+    // The disk fills: the next change's record ahead of it can't be
+    // written, so it doesn't run.
+    h.audit.fail_writes_for_tests(0, u32::MAX);
+    let refused = write("total,505.75\n").await;
+    assert!(
+        refused.text().contains("can't take records"),
+        "{}",
+        refused.text()
+    );
+    assert_eq!(
+        fs::read_to_string(h.home().join("Reports/summary.csv")).unwrap(),
+        "total\n"
+    );
+    // The log is down until that refusal is written: reads don't run.
+    let read = tool(
+        &agent,
+        "files_read",
+        json!({"path": "Invoices/inv-001.txt"}),
+    )
+    .await;
+    assert!(
+        read.text().contains("can't take records"),
+        "{}",
+        read.text()
+    );
+
+    h.audit.fail_writes_for_tests(0, 0);
+    let read = tool(
+        &agent,
+        "files_read",
+        json!({"path": "Invoices/inv-001.txt"}),
+    )
+    .await;
+    assert!(!read.is_error, "{}", read.text());
+    let writes: Vec<_> = kind(&h, EventKind::Action)
+        .into_iter()
+        .filter(|r| {
+            r.event
+                .action
+                .as_ref()
+                .is_some_and(|a| a.as_str() == "files.write")
+        })
+        .collect();
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    assert!(
+        writes[1].event.summary.starts_with("Not done:"),
+        "{writes:?}"
+    );
+    assert!(writes[1].event.detail.get("happened_at").is_some());
+    assert_eq!(kind(&h, EventKind::ActionStarted).len(), 1);
 }

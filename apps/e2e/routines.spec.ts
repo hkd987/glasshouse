@@ -99,7 +99,7 @@ test("adr0047 a request done twice the same way is kept, run with no model, resc
   await expect(page.locator("[data-test=empty]")).toBeVisible();
 
   // On the record, by Routines for the person.
-  const byRoutines = audit().filter((r) => r.event.agent === "routines" && r.event.outcome?.status === "completed");
+  const byRoutines = audit().filter((r) => r.event.kind === "action" && r.event.agent === "routines" && r.event.outcome?.status === "completed");
   for (const action of ["routines.keep", "routines.run", "routines.schedule", "routines.use", "routines.pause", "routines.delete"]) {
     expect(byRoutines.some((r) => r.event.action === action), action).toBe(true);
   }

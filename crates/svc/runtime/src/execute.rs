@@ -314,6 +314,35 @@ impl Runtime {
             self.publish(task);
             return Ok(CallToolResult::error(why));
         }
+        // Fail closed (AU-1): nothing an agent asks runs while the log can't
+        // record it, reads included (AuditLog.tla).
+        if !self.audit_healthy() {
+            return Ok(CallToolResult::error(LOG_DOWN));
+        }
+        // What changes something or sends data off this computer is on the
+        // record before it runs, so glassd stopping, or the disk filling,
+        // can't leave it off; its outcome names this record, and the
+        // snapshot taken next (AU-1, ADR 0054). Written before the
+        // snapshot, its sync doesn't wait behind the snapshot's. A read
+        // needs none: what it finds is given only once its record is
+        // written.
+        let ahead = if def.side_effect == SideEffect::None {
+            None
+        } else {
+            let mut event =
+                self.task_event(task, EventKind::ActionStarted, preview.summary.clone());
+            event.action = Some(def.name.clone());
+            event.targets = preview.targets.clone();
+            event.decision = Some(PolicyDecision {
+                tier: verdict.tier(),
+                rule: verdict.rule().to_owned(),
+            });
+            event.approval = approval.clone();
+            match self.audit_ahead(event) {
+                Some(seq) => Some(seq),
+                None => return Ok(CallToolResult::error(LOG_DOWN)),
+            }
+        };
         let mut snapshot = None;
         if def.side_effect == SideEffect::LocalReversible && !preview.snapshot_roots.is_empty() {
             // An Auto step makes do with the task's last snapshot while it
@@ -336,7 +365,7 @@ impl Runtime {
                         let failure = AuditOutcome::Failed {
                             error: format!("snapshot failed: {e}"),
                         };
-                        self.record(
+                        self.record_with(
                             task,
                             &def,
                             &preview,
@@ -346,6 +375,8 @@ impl Runtime {
                             failure,
                             started,
                             None,
+                            None,
+                            ahead,
                         );
                         return Ok(CallToolResult::error(format!(
                             "Not done: couldn't take the snapshot that makes this undoable ({e})."
@@ -353,14 +384,6 @@ impl Runtime {
                     }
                 }
             }
-        }
-
-        // Fail closed (AU-1): nothing an agent asks runs while the log can't
-        // record it, reads included (AuditLog.tla).
-        if !self.audit_healthy() {
-            return Ok(CallToolResult::error(
-                "Not done: the audit log can't take records right now, so the OS is refusing what agents ask until it can.",
-            ));
         }
 
         // Undo needs the snapshots that existed as the call ran, and how it
@@ -446,6 +469,7 @@ impl Runtime {
                     started,
                     sent,
                     provided,
+                    ahead,
                 );
                 // What a read found reaches the agent only once it's on the
                 // record (AU-1); its record waits for the log (AuditLog.tla).
@@ -531,8 +555,9 @@ impl Runtime {
                 let failure = AuditOutcome::Failed {
                     error: e.to_string(),
                 };
-                self.record(
+                self.record_with(
                     task, &def, &preview, &verdict, approval, snapshot, failure, started, sent,
+                    None, ahead,
                 );
                 task.lock().note(
                     ActivityKind::Notice,
@@ -808,12 +833,13 @@ impl Runtime {
         model: Option<Value>,
     ) -> bool {
         self.record_with(
-            task, def, preview, verdict, approval, snapshot, outcome, started, model, None,
+            task, def, preview, verdict, approval, snapshot, outcome, started, model, None, None,
         )
     }
 
     /// [`record`](Self::record), with what the app gave for the record
-    /// (`detail.<app>`).
+    /// (`detail.<app>`) and the record written before the call ran
+    /// (`detail.started`, its `seq`).
     #[allow(clippy::too_many_arguments)]
     fn record_with(
         &self,
@@ -827,6 +853,7 @@ impl Runtime {
         started: Instant,
         model: Option<Value>,
         provided: Option<(String, Value)>,
+        ahead: Option<u64>,
     ) -> bool {
         let mut event: AuditEvent =
             self.task_event(task, EventKind::Action, preview.summary.clone());
@@ -841,9 +868,12 @@ impl Runtime {
             event.detail["model"] = model;
         }
         if let Some((app, detail)) = provided
-            && !matches!(app.as_str(), "elapsed_ms" | "model")
+            && !matches!(app.as_str(), "elapsed_ms" | "model" | "started")
         {
             event.detail[app] = detail;
+        }
+        if let Some(seq) = ahead {
+            event.detail["started"] = seq.into();
         }
         event.action = Some(def.name.clone());
         event.targets = preview.targets.clone();
@@ -956,6 +986,9 @@ impl Drop for InFlight<'_> {
 
 /// The most of an item's text an ask shows, in lines; the rest is counted.
 const REVIEW_TEXT_LINES: usize = 60;
+
+/// What a call is told while the audit log can't take records (AU-1).
+const LOG_DOWN: &str = "Not done: the audit log can't take records right now, so the OS is refusing what agents ask until it can.";
 
 /// Each item's text as the review shows it: by line, at most
 /// [`REVIEW_TEXT_LINES`] of each, then how many more there are.

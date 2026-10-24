@@ -125,7 +125,7 @@ test("dc4 the person makes a doc shared with Priya, choosing what she may do, an
   await expect(page.locator("[data-test=title]")).toHaveText("Q3 launch plan");
   // What the person did in Docs was theirs: nothing asked.
   expect(glassctlJson<ApprovalView[]>("approvals")).toHaveLength(0);
-  const made = docsCalls().filter((r) => r.event.action === "doc.create");
+  const made = docsCalls().filter((r) => r.event.kind === "action" && r.event.action === "doc.create");
   expect(made.map((r) => r.event.decision?.tier)).toEqual(["auto"]);
 
   // Writing, with the Markdown-ish rules: a heading, a line, a checklist, a callout.

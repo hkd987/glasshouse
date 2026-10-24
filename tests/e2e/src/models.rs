@@ -276,7 +276,10 @@ pub async fn models(h: &Harness) -> anyhow::Result<()> {
     let records = h.audit(done.id).await?;
     let calls: Vec<_> = records
         .iter()
-        .filter(|r| r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete"))
+        .filter(|r| {
+            r.event.kind == EventKind::Action
+                && r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete")
+        })
         .collect();
     ensure!(
         calls.len() == 2,
@@ -336,7 +339,10 @@ async fn desktop_agent(h: &Harness, ws: &crate::harness::Workspace) -> anyhow::R
     let records = h.audit(task).await?;
     let models: Vec<_> = records
         .iter()
-        .filter(|r| r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete"))
+        .filter(|r| {
+            r.event.kind == EventKind::Action
+                && r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete")
+        })
         .collect();
     ensure!(models.len() == 2, "{} model calls", models.len());
     let first = &models[0].event.detail["model"];
@@ -392,7 +398,10 @@ async fn desktop_agent_script(h: &Harness, ws: &crate::harness::Workspace) -> an
     );
     let first = records
         .iter()
-        .find(|r| r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete"))
+        .find(|r| {
+            r.event.kind == EventKind::Action
+                && r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete")
+        })
         .context("a model call")?;
     ensure!(
         first.event.detail["model"]["tools_called"] == json!(["run_script"]),
@@ -620,11 +629,10 @@ async fn desktop_agent_routine(h: &Harness, ws: &crate::harness::Workspace) -> a
         "{:?}",
         detail.activity
     );
-    let called = h
-        .audit(run.id)
-        .await?
-        .iter()
-        .any(|r| r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete"));
+    let called = h.audit(run.id).await?.iter().any(|r| {
+        r.event.kind == EventKind::Action
+            && r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete")
+    });
     ensure!(called, "the model took over");
 
     // The person takes them off their list, as they may by hand.
@@ -668,7 +676,10 @@ async fn it_agent(h: &Harness) -> anyhow::Result<()> {
         .audit(task)
         .await?
         .into_iter()
-        .filter(|r| r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete"))
+        .filter(|r| {
+            r.event.kind == EventKind::Action
+                && r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete")
+        })
         .collect();
     ensure!(
         calls.len() == 2,

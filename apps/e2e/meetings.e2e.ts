@@ -213,7 +213,7 @@ test("cf21 a meeting made in Calendar: both people see and hear each other throu
   await priyas.screenshot({ path: join(CONSOLE_SHOTS, "meeting-priya.png") });
 
   // Attendance is on this computer's record; the media key never is.
-  const joined = audit().filter((r) => r.event.action === "meet.join" && r.event.user === me);
+  const joined = audit().filter((r) => r.event.kind === "action" && r.event.action === "meet.join" && r.event.user === me);
   expect(joined.length).toBeGreaterThan(0);
 
   await priyas.click("[data-test=leave]");
@@ -324,10 +324,10 @@ test("adr0045 IT turns transcripts on: what Priya says is in the transcript, and
   const shown = glassctlJson<{ view: { title: string }; answer?: string }>("show", task);
   expect(shown.view.title).toBe("what did Priya say she would send?");
   expect(shown.answer).toContain("I'll send the signed contract tonight.");
-  const read = audit().find((r) => r.event.action === "meet.transcript" && r.event.agent === "desktop-agent");
+  const read = audit().find((r) => r.event.kind === "action" && r.event.action === "meet.transcript" && r.event.agent === "desktop-agent");
   expect(read).toBeTruthy();
   // The words never went into the record of adding them.
-  const added = audit().filter((r) => r.event.action === "meet.transcribe");
+  const added = audit().filter((r) => r.event.kind === "action" && r.event.action === "meet.transcribe");
   expect(JSON.stringify(added)).not.toContain("Priya say");
   await context.close();
 });

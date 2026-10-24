@@ -90,7 +90,7 @@ test("adr0039 the owner connects their own AI models in Settings, and the key st
   const file = join(DEV, "state/models/personal.toml");
   expect(statSync(file).mode & 0o077).toBe(0);
   expect(JSON.stringify(audit())).not.toContain("e2e-own-key");
-  expect(audit().some((r) => r.event.action === "settings.models_connect")).toBe(true);
+  expect(audit().some((r) => r.event.kind === "action" && r.event.action === "settings.models_connect")).toBe(true);
   for (const log of ["glassd.log", "bridge.log"]) {
     const path = join(DEV, log);
     if (existsSync(path)) expect(readFileSync(path, "utf8")).not.toContain("e2e-own-key");
@@ -110,7 +110,7 @@ test("adr0039 the owner connects their own AI models in Settings, and the key st
   await expect(page.locator(".banner")).toContainText("IT agent no longer uses your AI models.");
   await expect(it.locator("input[type=checkbox]")).not.toBeChecked();
   expect(model()).toBe("No model (scripted agent)");
-  expect(audit().some((r) => r.event.action === "settings.models_agents")).toBe(true);
+  expect(audit().some((r) => r.event.kind === "action" && r.event.action === "settings.models_agents")).toBe(true);
   await it.locator("input[type=checkbox]").check();
   await expect(page.locator(".banner")).toContainText("IT agent may use your AI models now.");
   expect(model()).not.toBe("No model (scripted agent)");

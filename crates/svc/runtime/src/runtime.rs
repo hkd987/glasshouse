@@ -430,6 +430,45 @@ impl Runtime {
         self.audit_ok.load(Ordering::SeqCst) || self.write_audit(None)
     }
 
+    /// Writes `event` before what it records happens: a call that changes
+    /// something or sends data off this computer, or an undo. The records
+    /// waiting go first. Its `seq`, or `None` if the log can't take it:
+    /// then what it records mustn't happen. That it was refused waits to
+    /// be written instead, so the log stays down until it has room. Once
+    /// written, glassd stopping can't leave it off the record (AU-1, ADR
+    /// 0054, `specs/tla/AuditLog.tla`).
+    pub(crate) fn audit_ahead(&self, event: AuditEvent) -> Option<u64> {
+        let mut waiting = self
+            .audit_waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !self.flush_audit(&mut waiting) {
+            return None;
+        }
+        let mut refused = event.clone();
+        match blocking(|| self.audit.append(event)) {
+            Ok(record) => Some(record.seq),
+            Err(e) => {
+                self.audit_failed(&e);
+                refused.kind = match refused.kind {
+                    EventKind::RollbackStarted => EventKind::Rollback,
+                    _ => EventKind::Action,
+                };
+                refused.summary = format!("Not done: {}", refused.summary);
+                refused.outcome = Some(glass_audit::Outcome::Failed {
+                    error: "the audit log couldn't take its record, so it didn't run".into(),
+                });
+                refused.detail = serde_json::json!({ "happened_at": Timestamp::now().to_string() });
+                if waiting.events.len() < AUDIT_WAITING_MAX {
+                    waiting.events.push_back(refused);
+                } else {
+                    waiting.lost += 1;
+                }
+                None
+            }
+        }
+    }
+
     /// The records waiting, then `event`, in order: whether all were written.
     fn write_audit(&self, event: Option<AuditEvent>) -> bool {
         let mut waiting = self
@@ -443,6 +482,20 @@ impl Runtime {
                 waiting.lost += 1;
             }
         }
+        self.flush_audit(&mut waiting)
+    }
+
+    fn audit_failed(&self, e: &glass_audit::AuditError) {
+        if self.audit_ok.swap(false, Ordering::SeqCst) {
+            tracing::error!(
+                error = %e,
+                "audit append failed; refusing what agents ask until the log takes records"
+            );
+        }
+    }
+
+    /// Writes the records waiting, in order: whether none are left.
+    fn flush_audit(&self, waiting: &mut AuditWaiting) -> bool {
         if waiting.lost > 0 && waiting.events.is_empty() {
             let mut note = AuditEvent::new(
                 EventKind::LogRecovered,
@@ -458,12 +511,7 @@ impl Runtime {
         while let Some(next) = waiting.events.front() {
             let next = next.clone();
             if let Err(e) = blocking(|| self.audit.append(next)) {
-                if self.audit_ok.swap(false, Ordering::SeqCst) {
-                    tracing::error!(
-                        error = %e,
-                        "audit append failed; refusing what agents ask until the log takes records"
-                    );
-                }
+                self.audit_failed(&e);
                 // When each happened, for the record written later.
                 let now = Timestamp::now().to_string();
                 for event in &mut waiting.events {

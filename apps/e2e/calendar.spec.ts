@@ -41,7 +41,7 @@ test("ui5 a new event on the user's own calendar runs at notify", async ({ page 
   const created = page.locator(".event", { hasText: "Contract review" });
   await expect(created).toHaveCount(1);
   await expect(created).not.toContainText("by ");
-  const record = audit().find((r) => r.event.action === "calendar.create" && r.event.agent === "calendar");
+  const record = audit().find((r) => r.event.kind === "action" && r.event.action === "calendar.create" && r.event.agent === "calendar");
   expect(record && outcome(record)).toBe("completed");
   expect(record?.event.decision?.tier).toBe("notify");
 });
@@ -67,9 +67,9 @@ test("ui5 nv3 invitations to people typed in wait for approval on the desktop, t
   await page.screenshot({ path: join(SHOTS, "calendar-invite-waiting.png") });
   glassctl("approve", ask!.id);
   await expect(page.locator("[data-test=notice]")).not.toContainText("waits for your approval", { timeout: 10_000 });
-  const created = audit().find((r) => r.event.action === "calendar.create" && r.event.summary.includes("Renewal kickoff"));
+  const created = audit().find((r) => r.event.kind === "action" && r.event.action === "calendar.create" && r.event.summary.includes("Renewal kickoff"));
   expect(created?.event.decision?.tier).toBe("notify");
-  const invited = audit().filter((r) => r.event.action === "calendar.invite" && r.event.agent === "calendar");
+  const invited = audit().filter((r) => r.event.kind === "action" && r.event.action === "calendar.invite" && r.event.agent === "calendar");
   expect(invited.map(outcome)).toContain("completed");
   expect(invited.at(-1)?.event.decision?.tier).toBe("ask");
 });
@@ -77,7 +77,7 @@ test("ui5 nv3 invitations to people typed in wait for approval on the desktop, t
 test("cf21 a Glasshouse meeting needs a managed computer, and the page says so", async ({ page }) => {
   await openCalendar(page);
   // Calendar asked which meetings the person is in: none here, quietly.
-  const listed = audit().filter((r) => r.event.action === "meet.list" && r.event.agent === "calendar");
+  const listed = audit().filter((r) => r.event.kind === "action" && r.event.action === "meet.list" && r.event.agent === "calendar");
   expect(listed.map(outcome)).toContain("completed");
   expect(listed.at(-1)?.event.decision?.tier).toBe("auto");
   await expect(page.locator("[data-test=meetings]")).toHaveCount(0);

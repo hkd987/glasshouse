@@ -255,7 +255,7 @@ test("adr0039 ae4 IT lets the IT agent ask models, and its calls go through the 
   glassctl("approve", ask!.id);
   glassctl("wait", task.id, "--timeout", "60");
 
-  const calls = audit().filter((r) => r.event.action === "model.complete" && r.event.agent === "it-agent");
+  const calls = audit().filter((r) => r.event.kind === "action" && r.event.action === "model.complete" && r.event.agent === "it-agent");
   expect(calls).toHaveLength(2);
   for (const call of calls) {
     expect(outcome(call)).toBe("completed");
@@ -295,12 +295,12 @@ test("adr0039 ae4 IT lets the IT agent ask models, and its calls go through the 
     "--yes",
   );
   glassctl("wait", desk.id, "--timeout", "60");
-  const deskCalls = audit().filter((r) => r.event.action === "model.complete" && r.event.agent === "desktop-agent");
+  const deskCalls = audit().filter((r) => r.event.kind === "action" && r.event.action === "model.complete" && r.event.agent === "desktop-agent");
   expect(deskCalls).toHaveLength(2);
   const asked = (deskCalls[0]?.event.detail as { model: Record<string, unknown> } | undefined)?.model;
   expect(asked?.provider).toBe("credits");
   expect(asked?.tools_called).toEqual(["calendar_list"]);
-  const listed = audit().find((r) => r.event.action === "calendar.list" && r.event.agent === "desktop-agent");
+  const listed = audit().find((r) => r.event.kind === "action" && r.event.action === "calendar.list" && r.event.agent === "desktop-agent");
   expect(listed && outcome(listed)).toBe("completed");
   const answered = glassctlJson<{ answer?: string }>("show", desk.id);
   expect(answered.answer).toContain("Answered on model credits. The tools returned:");
@@ -359,7 +359,7 @@ test("dv11 ga2 an item IT approves reaches catalog.search on the device", async 
   const text = found?.content.map((c) => c.text).join("\n") ?? "";
   expect(text).toContain("Contract Review agent");
   expect(text).toContain("they can install it themselves");
-  const call = audit().find((r) => r.event.action === "catalog.search");
+  const call = audit().find((r) => r.event.kind === "action" && r.event.action === "catalog.search");
   expect(call?.event.decision?.tier).toBe("auto");
   expect(outcome(call!)).toBe("completed");
   await close();
@@ -383,7 +383,7 @@ test("dv11 the Store shows what IT made available and installs it", async ({ bro
   await expect(page.locator(".banner.done")).toContainText("Installed Contract Review agent");
   await expect(page.locator("section", { hasText: "Yours" }).locator("article[data-id=contract-review]")).toHaveCount(1);
   await page.screenshot({ path: join(CONSOLE_SHOTS, "store-installed.png") });
-  const call = audit().find((r) => r.event.action === "catalog.install");
+  const call = audit().find((r) => r.event.kind === "action" && r.event.action === "catalog.install");
   expect(call?.event.decision?.tier).toBe("notify");
   expect(outcome(call!)).toBe("completed");
 
@@ -416,7 +416,7 @@ test("ad1 ui5 Mail and Calendar suggest people from the org's directory as you t
   await page.screenshot({ path: join(CONSOLE_SHOTS, "mail-people-suggested.png") });
   await to.press("Enter");
   await expect(to).toHaveValue("priya@acme.example, ");
-  const call = audit().find((r) => r.event.action === "people.search" && r.event.agent === "mail");
+  const call = audit().find((r) => r.event.kind === "action" && r.event.action === "people.search" && r.event.agent === "mail");
   expect(call?.event.decision?.tier).toBe("auto");
   expect(outcome(call!)).toBe("completed");
 
@@ -461,7 +461,7 @@ test("nv3 ad2 the mail service IT sets in the console shows in Mail on the devic
   await mail.click("[data-test=compose]");
   await expect(mail.locator("[data-test=from]")).toContainText("@acme.example>");
   await mail.screenshot({ path: join(CONSOLE_SHOTS, "mail-account-from-console.png") });
-  const call = audit().find((r) => r.event.action === "mail.account" && r.event.agent === "mail");
+  const call = audit().find((r) => r.event.kind === "action" && r.event.action === "mail.account" && r.event.agent === "mail");
   expect(call?.event.decision?.tier).toBe("auto");
   await mail.close();
 });

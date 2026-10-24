@@ -85,7 +85,7 @@ test("tl5 ga3 ga4 claude code remixes mail into the person's own, checked, versi
   expect(saved.structuredContent?.app).toBe("my-mail");
   expect(text(saved)).toContain("Saved My Mail version 1, your version of Mail");
   // Notify: saving their own version asks nothing, and it's on the record.
-  const save = audit().find((r) => r.event.action === "apps.save" && outcome(r) === "completed");
+  const save = audit().find((r) => r.event.kind === "action" && r.event.action === "apps.save" && outcome(r) === "completed");
   expect(save?.event.decision?.tier).toBe("notify");
 
   // In the launcher's list, and on its own origin, built from the remix.

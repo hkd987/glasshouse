@@ -556,10 +556,17 @@ pub fn fleet(state: &State, directory: &dyn Directory, console_url: &str) -> Val
 
 /// The Support page (CF-80, CF-81): the person's roles and tools, which
 /// role has the tools they don't, and the computers their roles reach,
-/// most recently heard from first. Seeing and controlling a screen come
-/// with sessions (ADR 0028, slice b): every tool says it isn't ready yet.
-pub fn support(state: &State, directory: &dyn Directory, access: &Access) -> Value {
+/// with only the people on them it reaches, most recently heard from
+/// first. Seeing and controlling a screen come with sessions (ADR 0028,
+/// slice b): every tool says it isn't ready yet. `None` if `user` holds no
+/// role. Everything on it is from one read of the policy in force, the
+/// one their access was decided by (SupportAccess.tla).
+pub fn support(state: &State, directory: &dyn Directory, user: &str) -> Option<Value> {
     let support = state.support_in_force();
+    let access = Access::of(user, directory, &support);
+    if access.roles.is_empty() {
+        return None;
+    }
     let mine = access.tools();
     let tools: Vec<Value> = SupportTool::ALL
         .iter()
@@ -621,7 +628,9 @@ pub fn support(state: &State, directory: &dyn Directory, access: &Access) -> Val
                 "unattended": unattended,
                 "online": now - d.last_seen.unix_seconds() <= ONLINE_SECS,
                 "last_seen": d.last_seen,
-                "users": r.map(|r| r.users.iter().map(|u| directory.display_name(u)).collect::<Vec<_>>()).unwrap_or_default(),
+                // Only the people the role may help: others on the same
+                // computer aren't theirs to see (CF-81).
+                "users": r.map(|r| r.users.iter().filter(|u| everyone || reach.contains(u.as_str())).map(|u| directory.display_name(u)).collect::<Vec<_>>()).unwrap_or_default(),
                 "os_version": r.map(|r| r.os_version.clone()),
             })
         })
@@ -640,13 +649,13 @@ pub fn support(state: &State, directory: &dyn Directory, access: &Access) -> Val
             })
         })
         .collect();
-    json!({
+    Some(json!({
         "roles": roles,
         "tools": tools,
         "devices": devices,
         "answer_within_secs": support.answer_within_secs,
         "policy_version": state.in_force(Ring::Pilot).map(|v| v.version),
-    })
+    }))
 }
 
 /// The Remote help page (CF-81): the draft's support roles, who holds

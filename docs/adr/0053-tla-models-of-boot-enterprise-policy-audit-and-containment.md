@@ -170,3 +170,12 @@ AW-11, AU-20):
   built.
 - **Containment:** attended tasks and app sessions have no sandbox; tool
   jails; a failing `jail -r` (reported, retried at the next start).
+
+## Amended by ADR 0054
+Both items it left open are closed:
+- a change is on the record before it runs (`ActionStarted`, and
+  `RollbackStarted` for an undo), so glassd stopping, on a full disk or
+  not, can't leave it off; only its outcome, or glassd's own notes, can be
+  lost (`specs/tla/AuditLog.tla`, `AU1_AChangeIsOnRecordBeforeItRuns`);
+- support roles and the console's access by role are modelled
+  (`specs/tla/SupportAccess.tla`), and the three bugs it found fixed.

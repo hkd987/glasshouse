@@ -151,3 +151,17 @@ can narrow it.)
    admins (decision 2, as built).
 4. **Recording:** events, not video (decision 3's audit).
 5. **What remote control never reaches:** decision 6, as proposed.
+
+## Amended by ADR 0054
+`specs/tla/SupportAccess.tla` models slice (a), request by request, while
+IT publishes and rolls back roles:
+- a request from someone who is no longer an admin and in no role ends
+  their session (401, with the sign-in list), and it stays ended if the
+  role returns;
+- the Support page is built from one read of the roles in force, and
+  names only the people the role reaches.
+
+The gaps listed under "Before slice (b)":
+- control calls by uid only: half closed by ADR 0031 (`seat.active`
+  accepts the desktop by peer pid; slice (b)'s calls must reuse it);
+- signed releases without expiry or device binding: still open.

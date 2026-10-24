@@ -70,7 +70,7 @@ test("cf91 two people message each other in Chat, live and sealed end to end", a
 
   // Her answer shows without a reload, from an app.status wait: one read
   // per change, not one per poll.
-  const reads = audit().filter((r) => r.event.action === "chat.read").length;
+  const reads = audit().filter((r) => r.event.kind === "action" && r.event.action === "chat.read").length;
   priya("say", me, ANSWER);
   const said = Date.now();
   await expect(page.locator("[data-test=messages]")).toContainText(ANSWER, { timeout: 5000 });
@@ -80,7 +80,7 @@ test("cf91 two people message each other in Chat, live and sealed end to end", a
   // Read where it is open: no unread count on it.
   await expect(page.locator(".row.active .badge")).toHaveCount(0);
   await page.waitForTimeout(500);
-  expect(audit().filter((r) => r.event.action === "chat.read").length - reads).toBeLessThanOrEqual(2);
+  expect(audit().filter((r) => r.event.kind === "action" && r.event.action === "chat.read").length - reads).toBeLessThanOrEqual(2);
   await page.screenshot({ path: join(CONSOLE_SHOTS, "chat-two-people.png") });
 
   // GT-3: the console holds neither message.
@@ -477,7 +477,7 @@ test.describe("C4a: like Slack, inside the seal", { tag: "@c4a" }, () => {
     await search.press("Escape");
     await expect(page.locator(".pane-head h1")).toHaveText(CHANNEL);
     // Neither the query nor what it found is in the audit log (ADR 0030 C4a).
-    const searched = audit().filter((r) => r.event.action === "chat.search");
+    const searched = audit().filter((r) => r.event.kind === "action" && r.event.action === "chat.search");
     expect(searched.length).toBeGreaterThan(0);
     expect(JSON.stringify(searched)).not.toContain("printouts");
     expect(JSON.stringify(searched)).not.toContain("shared folder");
@@ -575,7 +575,7 @@ test.describe("C4a: like Slack, inside the seal", { tag: "@c4a" }, () => {
       return JSON.stringify(parts);
     });
     for (const words of [DRAFT, "Thread draft", MY_REPLY, HER_TOPIC, "numbers"]) expect(stored).not.toContain(words);
-    const kept = audit().filter((r) => r.event.action === "chat.draft");
+    const kept = audit().filter((r) => r.event.kind === "action" && r.event.action === "chat.draft");
     expect(kept.length).toBeGreaterThan(0);
     expect(JSON.stringify(kept)).not.toContain("pricing tiers");
     await close();

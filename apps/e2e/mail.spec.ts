@@ -90,7 +90,7 @@ test("ui5 a send outside the team waits for approval on the desktop, then goes",
   await expect(page.locator(".row", { hasText: "Re: Renewal terms for next year" })).toHaveCount(1);
 
   // Audited as the app acting for the user, approved on the desktop.
-  const send = audit().filter((r) => r.event.action === "mail.send" && r.event.agent === "mail");
+  const send = audit().filter((r) => r.event.kind === "action" && r.event.action === "mail.send" && r.event.agent === "mail");
   expect(send.map(outcome)).toContain("completed");
   expect(send.at(-1)?.event.decision?.tier).toBe("ask");
 });
@@ -106,7 +106,7 @@ test("ui5 a send declined on the desktop is a result the app shows", async ({ pa
   const ask = await pendingAsk();
   glassctl("deny", ask.id);
   await expect(page.locator("[data-test=refused]")).toContainText("Declined on the desktop; not sent");
-  expect(audit().some((r) => r.event.agent === "mail" && outcome(r) === "denied")).toBe(true);
+  expect(audit().some((r) => r.event.kind === "action" && r.event.agent === "mail" && outcome(r) === "denied")).toBe(true);
 });
 
 test("dv3 the page can call only what Mail's manifest declares, and only its own bridge", async ({ page }) => {
@@ -121,7 +121,7 @@ test("dv3 the page can call only what Mail's manifest declares, and only its own
   });
   expect(refused.ok).toBe(false);
   expect(refused.text).toContain("doesn't declare calendar.create");
-  expect(audit().some((r) => r.event.agent === "mail" && r.event.action === "calendar.create" && outcome(r) === "blocked")).toBe(true);
+  expect(audit().some((r) => r.event.kind === "action" && r.event.agent === "mail" && r.event.action === "calendar.create" && outcome(r) === "blocked")).toBe(true);
 
   // Calendar's bridge is another origin: the browser won't let Mail's page call it.
   const crossOrigin = await page.evaluate(async (url) => {
@@ -169,7 +169,7 @@ test("em0 mail is archived and rescued from junk, each a move the app makes", as
   await page.click("[data-folder=archive]");
   await expect(page.locator(".row", { hasText: "Laptop updates tonight" })).toHaveCount(1);
   // The person's own moves, in Mail: run without asking, audited.
-  const moved = audit().filter((r) => r.event.action === "mail.move" && r.event.agent === "mail");
+  const moved = audit().filter((r) => r.event.kind === "action" && r.event.action === "mail.move" && r.event.agent === "mail");
   expect(moved.map(outcome)).toEqual(["completed", "completed", "completed"]);
 });
 
@@ -181,7 +181,7 @@ test("em3 opening a message marks it read, and Mark unread brings it back", asyn
   await expect(row).toHaveClass(/unread/);
   const before = Number(await count.textContent());
   expect(before).toBeGreaterThan(0);
-  const marks = () => audit().filter((r) => r.event.action === "mail.mark" && r.event.agent === "mail");
+  const marks = () => audit().filter((r) => r.event.kind === "action" && r.event.action === "mail.mark" && r.event.agent === "mail");
   const marked = marks().length;
 
   await row.click();

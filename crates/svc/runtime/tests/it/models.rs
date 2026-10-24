@@ -115,9 +115,12 @@ fn ask(text: &str) -> Value {
     })
 }
 
+/// The task's model calls' outcomes (not the records each writes before
+/// it's sent, ADR 0054).
 fn model_records(h: &Harness, task: TaskId) -> Vec<AuditRecord> {
     glass_audit::read(&h.audit_path(), |r| {
         r.event.task == Some(task)
+            && r.event.kind == glass_audit::EventKind::Action
             && r.event.action.as_ref().map(|a| a.as_str()) == Some("model.complete")
     })
     .unwrap()

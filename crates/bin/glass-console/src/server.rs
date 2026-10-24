@@ -1024,14 +1024,27 @@ impl Console {
 
     // ---- admins ----------------------------------------------------------
 
-    fn signed_in(&self, request: &Request) -> Option<String> {
-        let cookies = request.header("cookie")?;
-        let token = cookies
+    /// The session cookie's token, if the request carries one.
+    fn token(request: &Request) -> Option<&str> {
+        request
+            .header("cookie")?
             .split(';')
             .filter_map(|c| c.trim().split_once('='))
             .find(|(k, _)| *k == COOKIE)
-            .map(|(_, v)| v)?;
-        lock(&self.sessions).get(token).cloned()
+            .map(|(_, v)| v)
+    }
+
+    fn signed_in(&self, request: &Request) -> Option<String> {
+        lock(&self.sessions).get(Self::token(request)?).cloned()
+    }
+
+    /// Ends the request's session: someone no longer an admin and holding
+    /// no role signs in again, even once a role comes back (ADR 0054,
+    /// SupportAccess.tla).
+    fn end_session(&self, request: &Request) {
+        if let Some(token) = Self::token(request) {
+            lock(&self.sessions).remove(token);
+        }
     }
 
     /// What `user` may do now, by the directory and the roles in force.
@@ -1077,6 +1090,7 @@ impl Console {
                 let access = self.access(&user);
                 // A role taken away while signed in ends the session.
                 if !access.any() {
+                    self.end_session(request);
                     return self.signed_out();
                 }
                 let roles: Vec<Value> = access
@@ -1163,6 +1177,12 @@ impl Console {
             _ => Need::Admin,
         };
         let access = self.access(&user);
+        if !access.any() {
+            // Their role was taken away while signed in: the session ends,
+            // and the page shows who may sign in, as GET /api/session does.
+            self.end_session(request);
+            return self.signed_out();
+        }
         if !access.allows(need) {
             return error(
                 403,
@@ -1173,7 +1193,12 @@ impl Console {
             );
         }
         match (request.method.as_str(), segments.as_slice()) {
-            ("GET", ["support"]) => ok(views::support(&self.state(), directory, &access)),
+            // Decided again with the page, from one read of the roles in
+            // force: a publish between can't mix two policies on it.
+            ("GET", ["support"]) => match views::support(&self.state(), directory, &user) {
+                Some(page) => ok(page),
+                None => error(403, "Only support staff can open remote help."),
+            },
             ("GET", ["settings"]) => {
                 let group = query(request, "group").unwrap_or(crate::directory::EVERYONE);
                 if group != crate::directory::EVERYONE && directory.group(group).is_none() {
@@ -2878,7 +2903,85 @@ mod tests {
         let (status, _) = t.call_as(&jordan, "GET", "/api/session", Value::Null).await;
         assert_eq!(status, 401);
         let (status, _) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
-        assert_eq!(status, 403);
+        assert_eq!(status, 401, "the session ended");
+    }
+
+    /// SupportAccess.tla: a session that found its person no admin and in
+    /// no role ended, and stays ended when the role comes back: they sign
+    /// in again (ADR 0054). It used to work again as it was.
+    #[tokio::test]
+    async fn adr0054_a_session_ended_by_losing_its_role_stays_ended_when_the_role_comes_back() {
+        let t = console().await;
+        let jordan = sign_in(&t.console, "jordan").await.unwrap();
+        let with_role = t.console.state().in_force(Ring::Pilot).unwrap().version;
+        t.call(
+            "POST",
+            "/api/policy/edit",
+            json!({ "edit": "support_role", "id": "help-desk", "role": null }),
+        )
+        .await;
+        let (status, _) = t.publish("").await;
+        assert_eq!(status, 200);
+        let (status, _) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
+        assert_ne!(status, 200, "no role, no remote help");
+
+        // IT rolls back: the role is in force again.
+        let (status, _) = t
+            .call("POST", "/api/policy/rollback", json!({ "to": with_role }))
+            .await;
+        assert_eq!(status, 200);
+        let (status, _) = t.call_as(&jordan, "GET", "/api/session", Value::Null).await;
+        assert_eq!(status, 401, "an ended session stays ended");
+        let (status, _) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
+        assert_eq!(status, 401);
+        let jordan = sign_in(&t.console, "jordan").await.unwrap();
+        let (status, _) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
+        assert_eq!(status, 200);
+    }
+
+    /// CF-81, SupportAccess.tla: the Support page names, on each computer,
+    /// only the people the role may help; someone else signed in to the
+    /// same computer isn't theirs to see. A role for everyone sees all.
+    #[tokio::test]
+    async fn cf81_the_support_page_names_only_the_people_the_role_reaches() {
+        let t = console().await;
+        t.sync("d", None, 0).await;
+        let report = json!({
+            "device": "d",
+            "name": "Dana's laptop",
+            "os_version": "Glasshouse 0.1.0",
+            "users": ["dana", "priya"],
+            "reported_at": "2026-10-19T23:00:00Z",
+        });
+        let r = t.device("/device/v1/report", report).await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let jordan = sign_in(&t.console, "jordan").await.unwrap();
+        let users = |page: &Value| page["devices"][0]["users"].clone();
+        let (_, page) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
+        assert_eq!(users(&page), json!(["Dana Ruiz", "Priya Shah"]), "everyone");
+
+        let (_, roles) = t.call("GET", "/api/roles", Value::Null).await;
+        let mut role = json!({});
+        for field in ["id", "name", "groups", "tools", "unattended", "max_minutes"] {
+            role[field] = roles["roles"][0][field].clone();
+        }
+        role["people"] = json!(["ap-ops"]);
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/policy/edit",
+                json!({ "edit": "support_role", "id": "help-desk", "role": role }),
+            )
+            .await;
+        assert_eq!(status, 200);
+        let (status, _) = t.publish("").await;
+        assert_eq!(status, 200);
+        let (_, page) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
+        assert_eq!(
+            page["devices"][0]["id"], "d",
+            "Dana is AP's: the role reaches her laptop"
+        );
+        assert_eq!(users(&page), json!(["Dana Ruiz"]), "{page}");
     }
 
     #[tokio::test]

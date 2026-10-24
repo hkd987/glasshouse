@@ -20,18 +20,24 @@
 (*                                   couldn't be written wait, in order),  *)
 (*                                   audit_healthy                         *)
 (*   crates/svc/runtime/src/execute.rs  call_tool: the check that the log  *)
-(*                                   is healthy, the provider's invoke,    *)
-(*                                   record_with, and what the agent gets  *)
+(*                                   is healthy, a change's record written *)
+(*                                   before it runs (audit_ahead), the     *)
+(*                                   provider's invoke, record_with, and   *)
+(*                                   what the agent gets; undo.rs writes   *)
+(*                                   its own ahead of an undo the same way *)
 (*                                                                         *)
-(* A line is the record of one event: a call's (named for the call), or a *)
-(* log_recovered note ("lr"). Writing one is two steps a reader can fall   *)
+(* A line is the record of one event: a change's record written before it  *)
+(* runs ("start", ActionStarted), a call's outcome ("end", Action), that a *)
+(* change was refused because its start record couldn't be written        *)
+(* ("refused"), or a log_recovered note ("lr"). Writing one is two steps a *)
+(* reader can fall                                                         *)
 (* between: its bytes start to land (the line is unfinished), then the     *)
 (* rest and the fsync. Positions stand for byte offsets. Complete lines    *)
 (* are never altered: tampering is verify's unit tests' (AU-2).            *)
 (*                                                                         *)
 (* The calls are an agent's: Reads are reads (no side effect), the rest    *)
-(* change something. Each call runs once: the check, the provider, then    *)
-(* its record.                                                             *)
+(* change something or send data off the computer. Each call runs once:    *)
+(* the check, a change's start record, the provider, then its outcome.     *)
 (*                                                                         *)
 (* Old holds the code before ADR 0053, for showing each fix is needed:     *)
 (*   "tornIsCorrupt"     readers took an unfinished last line (a write     *)
@@ -44,6 +50,16 @@
 (*   "readsWhileDown"    reads ran while the log was down                  *)
 (*   "readGiven"         a read whose record couldn't be written still     *)
 (*                       gave the agent what it read                       *)
+(* and before ADR 0054:                                                    *)
+(*   "noWriteAhead"      a change ran before anything of it was on the     *)
+(*                       record, so glassd stopping before its outcome     *)
+(*                       was written left it off for good                  *)
+(*   "refusalNotKept"    the first version of that fix: a start record the *)
+(*                       log couldn't take left nothing waiting, so the    *)
+(*                       log never counted as down again (TLC: the log     *)
+(*                       never recovers), or, as the code then read an     *)
+(*                       empty queue, counted as up while the disk was     *)
+(*                       still full                                        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -61,7 +77,8 @@ None == "none"
 View == ReadTask
 TaskOf == [c \in Calls |-> IF c \in Reads THEN ReadTask ELSE OtherTask]
 
-Line(id, task, done) == [id |-> id, task |-> task, done |-> done]
+Line(id, kind, task, done) == [id |-> id, kind |-> kind, task |-> task, done |-> done]
+Note == Line("lr", "lr", None, TRUE)
 
 VARIABLES
     file,       \* the log's lines, in order
@@ -70,19 +87,20 @@ VARIABLES
     wlen,       \* the writer's length: the lines appended and acknowledged
     lock,       \* who holds the writer: None or a call
     call,       \* each call's step
+    ahead,      \* the calls whose append under way is their start record
     ran,        \* the calls whose provider ran (ghost)
     saw,        \* calls that saw the log healthy as they were checked (ghost)
     acked,      \* records whose append returned Ok (ghost)
     lost,       \* records glassd lost by stopping before they were written (ghost)
     healthy,    \* the runtime's audit_ok
-    pending,    \* records waiting to be written, in order
+    pending,    \* records waiting to be written, in order: [id, kind]
     index,      \* the task index: built or not, how far, and its positions
     view,       \* a task's records being read (task_records)
     vfy,        \* verify / read
     rep,        \* read_since for the console's report: "none", "ok", "corrupt"
     full, fulls, crashes
 
-vars == <<file, up, wok, wlen, lock, call, ran, saw, acked, lost, healthy,
+vars == <<file, up, wok, wlen, lock, call, ahead, ran, saw, acked, lost, healthy,
           pending, index, view, vfy, rep, full, fulls, crashes>>
 
 NoIndex == [built |-> FALSE, to |-> 0, at |-> <<>>]
@@ -93,7 +111,8 @@ Last(s) == s[Len(s)]
 Unfinished == Len(file) > 0 /\ ~Last(file).done
 \* The file without an unfinished last line.
 Finished == IF Unfinished THEN SubSeq(file, 1, Len(file) - 1) ELSE file
-Recorded(id) == \E i \in DOMAIN file : file[i].id = id /\ file[i].done
+Recorded(id) == \E i \in DOMAIN file : file[i].id = id /\ file[i].kind = "end" /\ file[i].done
+Started(id) == \E i \in DOMAIN file : file[i].id = id /\ file[i].kind = "start" /\ file[i].done
 \* Positions of f's lines with a task, from lo to hi, in order.
 RECURSIVE TaskLinesIn(_, _, _)
 TaskLinesIn(f, lo, hi) ==
@@ -112,7 +131,7 @@ Indexed(n) ==
 
 Init ==
     /\ file = <<>> /\ up = TRUE /\ wok = TRUE /\ wlen = 0 /\ lock = None
-    /\ call = [c \in Calls |-> "idle"] /\ ran = {} /\ saw = {}
+    /\ call = [c \in Calls |-> "idle"] /\ ahead = {} /\ ran = {} /\ saw = {}
     /\ acked = {} /\ lost = {} /\ healthy = TRUE /\ pending = <<>>
     /\ index = NoIndex /\ view = NoView /\ vfy = [pc |-> "idle", pos |-> 0]
     /\ rep = "none" /\ full = FALSE /\ fulls = 0 /\ crashes = 0
@@ -124,16 +143,20 @@ Init ==
 Check(c) ==
     /\ up /\ call[c] = "idle"
     /\ LET refused == ~healthy /\ (c \notin Reads \/ "readsWhileDown" \notin Old)
-       IN call' = [call EXCEPT ![c] = IF refused THEN "refused" ELSE "checked"]
+           first == c \notin Reads /\ "noWriteAhead" \notin Old
+       IN /\ call' = [call EXCEPT ![c] = IF refused THEN "refused"
+                                         ELSE IF first THEN "append" ELSE "checked"]
+          /\ ahead' = IF ~refused /\ first THEN ahead \cup {c} ELSE ahead
     /\ saw' = IF healthy THEN saw \cup {c} ELSE saw
     /\ UNCHANGED <<file, up, wok, wlen, lock, ran, acked, lost, healthy, pending,
                    index, view, vfy, rep, full, fulls, crashes>>
 
+\* A read, or a change once its start record is written.
 Invoke(c) ==
-    /\ up /\ call[c] = "checked"
+    /\ up /\ call[c] \in {"checked", "started"}
     /\ ran' = ran \cup {c}
     /\ call' = [call EXCEPT ![c] = "append"]
-    /\ UNCHANGED <<file, up, wok, wlen, lock, saw, acked, lost, healthy, pending,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, saw, acked, lost, healthy, pending,
                    index, view, vfy, rep, full, fulls, crashes>>
 
 \* AuditLog::reopen, when a write failed earlier: an unfinished last line
@@ -141,7 +164,7 @@ Invoke(c) ==
 \* be written and the writer stays unusable (the cut may have happened).
 ReopenOk ==
     /\ ~full
-    /\ file' = IF Unfinished THEN Finished \o <<Line("lr", None, TRUE)>> ELSE file
+    /\ file' = IF Unfinished THEN Finished \o <<Note>> ELSE file
     /\ wok' = TRUE /\ wlen' = Len(file')
     /\ index' = IF Unfinished THEN Indexed(Len(file')) ELSE index
 
@@ -160,7 +183,7 @@ Lock(c) ==
           /\ file' \in {file, Finished}
           /\ call' = [call EXCEPT ![c] = "failed"]
           /\ UNCHANGED <<lock, wok, wlen, index>>
-    /\ UNCHANGED <<up, ran, saw, acked, lost, healthy, pending, view, vfy, rep,
+    /\ UNCHANGED <<ahead, up, ran, saw, acked, lost, healthy, pending, view, vfy, rep,
                    full, fulls, crashes>>
 
 \* The record's bytes start to land; on a full disk none do.
@@ -170,10 +193,11 @@ Begin(c) ==
        THEN /\ wok' = FALSE /\ lock' = None
             /\ call' = [call EXCEPT ![c] = "failed"]
             /\ UNCHANGED file
-       ELSE /\ file' = Append(file, Line(c, TaskOf[c], FALSE))
+       ELSE /\ file' = Append(file, Line(c, IF c \in ahead THEN "start" ELSE "end",
+                                         TaskOf[c], FALSE))
             /\ call' = [call EXCEPT ![c] = "landing"]
             /\ UNCHANGED <<wok, lock>>
-    /\ UNCHANGED <<up, wlen, ran, saw, acked, lost, healthy, pending, index, view,
+    /\ UNCHANGED <<ahead, up, wlen, ran, saw, acked, lost, healthy, pending, index, view,
                    vfy, rep, full, fulls, crashes>>
 
 \* The rest lands and is fsynced: acknowledged.
@@ -181,8 +205,14 @@ End(c) ==
     /\ up /\ call[c] = "landing" /\ ~full
     /\ file' = [file EXCEPT ![Len(file)].done = TRUE]
     /\ wlen' = Len(file) /\ index' = Indexed(Len(file))
-    /\ acked' = acked \cup {c} /\ lock' = None
-    /\ call' = [call EXCEPT ![c] = "written"]
+    /\ lock' = None
+    /\ IF c \in ahead
+       THEN /\ call' = [call EXCEPT ![c] = "started"]
+            /\ ahead' = ahead \ {c}
+            /\ UNCHANGED acked
+       ELSE /\ call' = [call EXCEPT ![c] = "written"]
+            /\ acked' = acked \cup {c}
+            /\ UNCHANGED ahead
     /\ UNCHANGED <<up, wok, ran, saw, lost, healthy, pending, view, vfy, rep,
                    full, fulls, crashes>>
 
@@ -192,29 +222,38 @@ Cut(c) ==
     /\ up /\ call[c] = "landing" /\ full
     /\ wok' = FALSE /\ lock' = None
     /\ call' = [call EXCEPT ![c] = "failed"]
-    /\ UNCHANGED <<file, up, wlen, ran, saw, acked, lost, healthy, pending, index,
+    /\ UNCHANGED <<ahead, file, up, wlen, ran, saw, acked, lost, healthy, pending, index,
                    view, vfy, rep, full, fulls, crashes>>
 
 \* What the agent gets once the record is written.
 Given(c) ==
     /\ up /\ call[c] = "written"
     /\ call' = [call EXCEPT ![c] = "given"]
-    /\ UNCHANGED <<file, up, wok, wlen, lock, ran, saw, acked, lost, healthy,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, ran, saw, acked, lost, healthy,
                    pending, index, view, vfy, rep, full, fulls, crashes>>
 
 \* Runtime::audit on a failed append: the log is unhealthy. The record
 \* waits to be written; a read's result is withheld, since what it read
 \* isn't on the record, and a change's result goes back (it happened).
+\* A start record that can't be written: the change doesn't run, and that
+\* it was refused waits to be written instead (audit_ahead), so the log
+\* stays down until there's room.
 Failed(c) ==
     /\ up /\ call[c] = "failed"
     /\ healthy' = FALSE
-    /\ IF "unrecordedDropped" \in Old
+    /\ IF c \in ahead
+       THEN /\ call' = [call EXCEPT ![c] = "refused"]
+            /\ ahead' = ahead \ {c}
+            /\ pending' = IF "refusalNotKept" \in Old THEN pending
+                          ELSE Append(pending, [id |-> c, kind |-> "refused"])
+       ELSE IF "unrecordedDropped" \in Old
        THEN /\ call' = [call EXCEPT ![c] = "given"]
-            /\ UNCHANGED pending
-       ELSE /\ pending' = Append(pending, c)
+            /\ UNCHANGED <<pending, ahead>>
+       ELSE /\ pending' = Append(pending, [id |-> c, kind |-> "end"])
             /\ call' = [call EXCEPT ![c] =
                           IF c \in Reads /\ "readGiven" \notin Old
                           THEN "withheld" ELSE "given"]
+            /\ UNCHANGED ahead
     /\ UNCHANGED <<file, up, wok, wlen, lock, ran, saw, acked, lost, index, view,
                    vfy, rep, full, fulls, crashes>>
 
@@ -225,22 +264,22 @@ Flush ==
     /\ up /\ lock = None /\ pending # <<>> /\ "unrecordedDropped" \notin Old
     /\ \/ /\ ~full /\ (wok \/ "poisonedForever" \notin Old)
           /\ LET reopened == IF ~wok /\ Unfinished
-                             THEN Finished \o <<Line("lr", None, TRUE)>>
+                             THEN Finished \o <<Note>>
                              ELSE file
                  head == Head(pending)
-             IN /\ file' = reopened \o <<Line(head, TaskOf[head], TRUE)>>
+             IN /\ file' = reopened \o <<Line(head.id, head.kind, TaskOf[head.id], TRUE)>>
                 /\ index' = IF index.built
                             THEN [built |-> TRUE, to |-> Len(file'),
                                   at |-> index.at \o TaskLinesIn(file', index.to + 1, Len(file'))]
                             ELSE index
           /\ wok' = TRUE /\ wlen' = Len(file')
-          /\ acked' = acked \cup {Head(pending)}
+          /\ acked' = acked \cup {Head(pending).id}
           /\ pending' = Tail(pending)
           /\ healthy' = (Tail(pending) = <<>>)
        \/ /\ full
           /\ wok' = FALSE
           /\ UNCHANGED <<file, index, wlen, acked, pending, healthy>>
-    /\ UNCHANGED <<up, lock, call, ran, saw, lost, view, vfy, rep, full, fulls,
+    /\ UNCHANGED <<ahead, up, lock, call, ran, saw, lost, view, vfy, rep, full, fulls,
                    crashes>>
 
 -----------------------------------------------------------------------------
@@ -249,13 +288,13 @@ Flush ==
 DiskFills ==
     /\ ~full /\ fulls < MaxFull
     /\ full' = TRUE /\ fulls' = fulls + 1
-    /\ UNCHANGED <<file, up, wok, wlen, lock, call, ran, saw, acked, lost,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, call, ran, saw, acked, lost,
                    healthy, pending, index, view, vfy, rep, crashes>>
 
 \* The person frees space (their own files, not through glassd).
 DiskFreed ==
     /\ full /\ full' = FALSE
-    /\ UNCHANGED <<file, up, wok, wlen, lock, call, ran, saw, acked, lost,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, call, ran, saw, acked, lost,
                    healthy, pending, index, view, vfy, rep, fulls, crashes>>
 
 \* glassd stops without warning. A line under way may be gone, cut short,
@@ -269,11 +308,12 @@ Crash ==
           /\ UNCHANGED file
        \/ /\ ~Unfinished /\ UNCHANGED file
     /\ up' = FALSE /\ crashes' = crashes + 1
-    /\ lost' = lost \cup Range(pending)
+    /\ lost' = lost \cup {pending[i].id : i \in DOMAIN pending}
                \cup {c \in ran : call[c] \in {"append", "write", "landing", "failed"}}
     /\ pending' = <<>> /\ lock' = None /\ wok' = FALSE
     /\ call' = [c \in Calls |-> IF call[c] \in {"given", "withheld", "refused"}
                                 THEN call[c] ELSE "dead"]
+    /\ ahead' = {}
     /\ index' = NoIndex /\ view' = [NoView EXCEPT !.n = view.n]
     /\ vfy' = [pc |-> IF vfy.pc = "run" THEN "dead" ELSE vfy.pc, pos |-> 0]
     /\ UNCHANGED <<wlen, ran, saw, acked, healthy, rep, full, fulls>>
@@ -283,9 +323,9 @@ Crash ==
 \* doesn't start (fail closed).
 Restart ==
     /\ ~up /\ ~full
-    /\ file' = IF Unfinished THEN Finished \o <<Line("lr", None, TRUE)>> ELSE file
+    /\ file' = IF Unfinished THEN Finished \o <<Note>> ELSE file
     /\ up' = TRUE /\ wok' = TRUE /\ wlen' = Len(file') /\ healthy' = TRUE
-    /\ UNCHANGED <<lock, call, ran, saw, acked, lost, pending, index, view, vfy,
+    /\ UNCHANGED <<ahead, lock, call, ran, saw, acked, lost, pending, index, view, vfy,
                    rep, full, fulls, crashes>>
 
 -----------------------------------------------------------------------------
@@ -300,20 +340,20 @@ ViewStart ==
                             !.n = @ + 1,
                             !.must = {c \in acked : TaskOf[c] = View},
                             !.at = index.at]
-    /\ UNCHANGED <<file, up, wok, wlen, lock, call, ran, saw, acked, lost,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, call, ran, saw, acked, lost,
                    healthy, pending, index, vfy, rep, full, fulls, crashes>>
 
 ViewLen ==
     /\ up /\ view.pc = "len" /\ lock = None
     /\ view' = IF wok THEN [view EXCEPT !.pc = "scan", !.len1 = wlen]
                ELSE [view EXCEPT !.pc = "error"]
-    /\ UNCHANGED <<file, up, wok, wlen, lock, call, ran, saw, acked, lost,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, call, ran, saw, acked, lost,
                    healthy, pending, index, vfy, rep, full, fulls, crashes>>
 
 ViewScan ==
     /\ up /\ view.pc = "scan"
     /\ view' = [view EXCEPT !.pc = "rest", !.at = TaskLines(1, view.len1)]
-    /\ UNCHANGED <<file, up, wok, wlen, lock, call, ran, saw, acked, lost,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, call, ran, saw, acked, lost,
                    healthy, pending, index, vfy, rep, full, fulls, crashes>>
 
 ViewRest ==
@@ -324,27 +364,27 @@ ViewRest ==
                /\ view' = [view EXCEPT !.pc = "read", !.at = at]
        ELSE /\ view' = [view EXCEPT !.pc = "error"]
             /\ UNCHANGED index
-    /\ UNCHANGED <<file, up, wok, wlen, lock, call, ran, saw, acked, lost,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, call, ran, saw, acked, lost,
                    healthy, pending, vfy, rep, full, fulls, crashes>>
 
 ViewRead ==
     /\ up /\ view.pc = "read"
     /\ view' = [view EXCEPT !.pc = "done",
                   !.got = [i \in DOMAIN view.at |-> file[view.at[i]]]]
-    /\ UNCHANGED <<file, up, wok, wlen, lock, call, ran, saw, acked, lost,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, call, ran, saw, acked, lost,
                    healthy, pending, index, vfy, rep, full, fulls, crashes>>
 
 ViewAgain ==
     /\ view.pc \in {"done", "error"}
     /\ view' = [NoView EXCEPT !.n = view.n]
-    /\ UNCHANGED <<file, up, wok, wlen, lock, call, ran, saw, acked, lost,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, call, ran, saw, acked, lost,
                    healthy, pending, index, vfy, rep, full, fulls, crashes>>
 
 \* verify / read: line by line from the start while writers append.
 VerifyStart ==
     /\ up /\ vfy.pc = "idle"
     /\ vfy' = [pc |-> "run", pos |-> 1]
-    /\ UNCHANGED <<file, up, wok, wlen, lock, call, ran, saw, acked, lost,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, call, ran, saw, acked, lost,
                    healthy, pending, index, view, rep, full, fulls, crashes>>
 
 VerifyStep ==
@@ -353,14 +393,14 @@ VerifyStep ==
               ELSE IF file[vfy.pos].done THEN [vfy EXCEPT !.pos = @ + 1]
               ELSE IF "tornIsCorrupt" \in Old THEN [vfy EXCEPT !.pc = "corrupt"]
               ELSE [vfy EXCEPT !.pc = "ok"]
-    /\ UNCHANGED <<file, up, wok, wlen, lock, call, ran, saw, acked, lost,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, call, ran, saw, acked, lost,
                    healthy, pending, index, view, rep, full, fulls, crashes>>
 
 \* read_since, every minute for the console's report: from the end back.
 Report ==
     /\ up /\ rep = "none"
     /\ rep' = IF Unfinished /\ "tornIsCorrupt" \in Old THEN "corrupt" ELSE "ok"
-    /\ UNCHANGED <<file, up, wok, wlen, lock, call, ran, saw, acked, lost,
+    /\ UNCHANGED <<ahead, file, up, wok, wlen, lock, call, ran, saw, acked, lost,
                    healthy, pending, index, view, vfy, full, fulls, crashes>>
 
 -----------------------------------------------------------------------------
@@ -382,6 +422,8 @@ LiveSpec == Spec /\ Fairness
 -----------------------------------------------------------------------------
 TypeOK ==
     /\ \A i \in DOMAIN file : file[i].id \in Calls \cup {"lr"}
+    /\ \A i \in DOMAIN file : file[i].kind \in {"start", "end", "refused", "lr"}
+    /\ ahead \subseteq Calls \ Reads
     /\ healthy \in BOOLEAN /\ wok \in BOOLEAN /\ full \in BOOLEAN
     /\ rep \in {"none", "ok", "corrupt"}
 
@@ -408,7 +450,8 @@ AU3_ATaskHasEveryRecordOnce ==
 \* record waits to be written; only glassd stopping first can lose it.
 AU1_WhatRanIsRecorded ==
     \A c \in ran : call[c] \in {"given", "withheld"} =>
-        Recorded(c) \/ c \in Range(pending) \/ c \in lost
+        \/ Recorded(c) \/ c \in lost
+        \/ \E i \in DOMAIN pending : pending[i].id = c /\ pending[i].kind = "end"
 
 \* AU-1: nothing an agent read reaches it unless it's on the record.
 AU1_NoUnrecordedReadReachesTheAgent ==
@@ -416,6 +459,18 @@ AU1_NoUnrecordedReadReachesTheAgent ==
 
 \* Fail closed: a call runs only if the log was healthy when it asked.
 AU1_NothingRunsWhileTheLogIsDown == ran \subseteq saw
+
+\* AU-1 (ADR 0054): a change runs only once its start record is on disk,
+\* so glassd stopping, with its outcome waiting for a full disk or not
+\* yet written, can't leave it off the record. Only its outcome can be lost.
+AU1_AChangeIsOnRecordBeforeItRuns == \A c \in ran \ Reads : Started(c)
+
+\* A change's outcome, once written, follows its start record.
+AU1_AnOutcomeFollowsItsStart ==
+    \A i \in DOMAIN file :
+        (file[i].kind = "end" /\ file[i].id \notin Reads) =>
+            \E j \in 1..(i - 1) :
+                file[j].id = file[i].id /\ file[j].kind = "start" /\ file[j].done
 
 \* Without a restart, the log takes records again once the disk has room.
 AU1_TheLogRecovers == (up /\ ~healthy) ~> (healthy \/ ~up)

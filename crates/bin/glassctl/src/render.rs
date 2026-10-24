@@ -532,8 +532,22 @@ pub fn undo(report: &UndoReport) -> String {
 }
 
 pub fn audit(records: &[AuditRecord]) -> String {
+    // A call's record written before it ran (ADR 0054) shows only when no
+    // outcome names it: glassd stopped, or the log couldn't take one,
+    // while it ran. Otherwise its outcome says it all.
+    let answered: std::collections::BTreeSet<u64> = records
+        .iter()
+        .filter_map(|r| r.event.detail.get("started").and_then(|s| s.as_u64()))
+        .collect();
     let mut out = String::new();
     for r in records {
+        let starting = matches!(
+            r.event.kind,
+            glass_audit::EventKind::ActionStarted | glass_audit::EventKind::RollbackStarted
+        );
+        if starting && answered.contains(&r.seq) {
+            continue;
+        }
         let decision = r
             .event
             .decision
@@ -553,7 +567,10 @@ pub fn audit(records: &[AuditRecord]) -> String {
                         .unwrap_or_default()
                 )
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| match starting {
+                true => " → no outcome recorded".into(),
+                false => String::new(),
+            });
         let _ = writeln!(
             out,
             "{:>5} {} {:<18} {}{}{}",
@@ -775,6 +792,44 @@ mod tests {
             shown.contains(
                 "Answer\n  Unpaid invoices: 2\n  INV-1 | 120.00\n  INV-3 | 462.80\u{FFFD}[2J\n"
             ),
+            "{shown}"
+        );
+    }
+
+    /// A call's record from before it ran shows only when no outcome names
+    /// it (AU-3, ADR 0054).
+    #[test]
+    fn au3_a_call_started_shows_once_and_one_never_finished_says_so() {
+        let record = |seq: u64, kind, summary: &str, detail| AuditRecord {
+            seq,
+            ts: Timestamp::now(),
+            prev: "0".repeat(64),
+            event: glass_audit::AuditEvent {
+                detail,
+                ..glass_audit::AuditEvent::new(kind, summary)
+            },
+        };
+        use glass_audit::EventKind::{Action, ActionStarted};
+        let mut done = record(
+            2,
+            Action,
+            "Write Reports/a.csv",
+            serde_json::json!({ "started": 1 }),
+        );
+        done.event.outcome = Some(glass_audit::Outcome::Completed);
+        let shown = plain(&audit(&[
+            record(
+                1,
+                ActionStarted,
+                "Write Reports/a.csv",
+                serde_json::Value::Null,
+            ),
+            done,
+            record(3, ActionStarted, "Send 3 emails", serde_json::Value::Null),
+        ]));
+        assert_eq!(shown.matches("Write Reports/a.csv").count(), 1, "{shown}");
+        assert!(
+            shown.contains("Send 3 emails → no outcome recorded"),
             "{shown}"
         );
     }

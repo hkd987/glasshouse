@@ -108,7 +108,7 @@ test("ga8 ga13 dv4 a remix of Mail is shared, reviewed in the console and instal
   expect(shared.isError ?? false, text(shared)).toBe(false);
   expect(shared.structuredContent?.id).toBe(APP);
   expect(text(shared)).toContain(`Sent ${NAME} to IT for review`);
-  const call = audit().find((r) => r.event.action === "apps.share" && outcome(r) === "completed");
+  const call = audit().find((r) => r.event.kind === "action" && r.event.action === "apps.share" && outcome(r) === "completed");
   expect(call?.event.decision?.tier).toBe("ask");
   expect(measured.share_round_trip_ms, "share: approved on the desktop to kept for review").toBeLessThan(SHARE_BUDGET_MS);
 

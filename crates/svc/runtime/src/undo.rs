@@ -45,6 +45,10 @@ use crate::{Caller, Runtime, RuntimeError};
 
 /// The action the user's own edits while driving are recorded under.
 const BY_YOU: &str = "you.edit";
+/// Why an undo didn't start: it changes files, and the audit log can't
+/// record that right now (AU-1).
+const UNDO_LOG_DOWN: &str =
+    "Nothing was undone: the audit log can't take records right now; undo once it can.";
 
 /// Why a file was left as it is.
 const CHANGED_SINCE: &str = "changed since this task, so it was left as it is";
@@ -63,6 +67,11 @@ impl Runtime {
             .filter(|t| caller.is_admin() || t.user.uid == caller.uid)
             .ok_or_else(|| RuntimeError::NotFound(format!("no task {}", request.task.short())))?;
 
+        // An undo changes files, so it waits for the audit log as agents'
+        // calls do (AU-1, ADR 0054).
+        if !request.dry_run && !self.audit_healthy() {
+            return Err(RuntimeError::Conflict(UNDO_LOG_DOWN.into()));
+        }
         if !request.dry_run && matches!(task.lock().tile, TileState::Working | TileState::NeedsYou)
         {
             // Nothing may change underneath a rollback. The task stays held
@@ -85,6 +94,23 @@ impl Runtime {
             written,
         } = plan(&task, &request)?;
 
+        // On the record before any file changes, as an agent's call is
+        // (ADR 0054); the Rollback that follows names it.
+        let ahead = if request.dry_run {
+            None
+        } else {
+            let mut event = self.task_event(
+                &task,
+                EventKind::RollbackStarted,
+                format!("Undoing {} of its changes", ids.len()),
+            );
+            event.snapshot = request.to;
+            event.detail = serde_json::json!({ "changes": request.changes });
+            match self.audit_ahead(event) {
+                Some(seq) => Some(seq),
+                None => return Err(RuntimeError::Conflict(UNDO_LOG_DOWN.into())),
+            }
+        };
         let snapshots = Arc::clone(&self.snapshots);
         let owner = task.ctx.owner;
         let home = task.user.home.clone();
@@ -172,6 +198,9 @@ impl Runtime {
                 "removed": report.removed,
                 "not_undone": report.not_undone,
             });
+            if let Some(seq) = ahead {
+                event.detail["started"] = seq.into();
+            }
             self.audit(event);
             {
                 let mut state = task.lock();
