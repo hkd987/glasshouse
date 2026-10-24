@@ -30,7 +30,7 @@ profiles=(
 	"hda-out|-audiodev wav,id=snd0,path=$out/hda-out.wav -device intel-hda -device hda-output,audiodev=snd0||audio=limited~hdac0"
 	"usb-audio|-audiodev wav,id=snd0,path=$out/usb-audio.wav -device usb-audio,audiodev=snd0||audio=limited"
 	"intel-nic|-netdev user,id=net1,net=10.0.3.0/24 -device e1000e,netdev=net1 -netdev user,id=net2,net=10.0.4.0/24 -device igb,netdev=net2||ethernet=works~em0 ethernet=works~igb0"
-	"realtek-nic|-netdev user,id=net1,net=10.0.3.0/24 -device rtl8139,netdev=net1||ethernet=works~rl0"
+	"realtek-nic|-netdev user,id=net1,net=10.0.3.0/24 -device rtl8139,netdev=net1||ethernet=works~re0"
 	"tpm|-chardev socket,id=chrtpm,path=$out/tpm/sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-crb,tpmdev=tpm0||tpm=works"
 	"small||2048|"
 )

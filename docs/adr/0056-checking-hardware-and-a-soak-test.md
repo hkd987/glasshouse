@@ -62,7 +62,7 @@ VM once per profile:
 | hda-out | HD Audio, line out only | sound limited, no microphone |
 | usb-audio | USB speakers | sound limited |
 | intel-nic | Intel 82574L and 82576 | Ethernet works (em, igb) |
-| realtek-nic | Realtek 8139 | Ethernet works (rl) |
+| realtek-nic | Realtek 8139C+ | Ethernet works (re) |
 | tpm | a TPM 2.0 (swtpm), CRB | the TPM works |
 | small | 2 GB of memory | 2 GB, and an agent runs |
 
