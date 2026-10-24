@@ -59,6 +59,14 @@ with sample invoices by `post-install.sh`.
 - **Emulated hardware** (`tests/hardware/matrix.sh [profile...]`): boots the
   VM with HD Audio, USB sound, Intel and Realtek Ethernet, a TPM 2.0 and
   2 GB, and checks `glassctl hardware` against each, and that sound plays.
+- **Where memory goes:** resident memory in the soak counts the allocator's
+  free pages, stacks and code too. To see what glassd's data holds, run
+  `make dev-host` once, then glassd under `heaptrack -o build/heap target/debug/glassd
+  --config build/dev/glassd.toml`. Drive it with the soak's rounds,
+  dismiss everything, and `kill -9` it, so all it held counts. Then compare
+  two lengths of run with `heaptrack_print -F <out> --flamegraph-cost-type
+  leaked` (`cargo install rustfilt` reads Rust's names). See ADR 0056 for a
+  worked run.
 - **Laptops:** [hardware.md](hardware.md).
 
 ## Manual testing

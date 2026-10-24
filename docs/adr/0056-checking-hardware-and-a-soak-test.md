@@ -90,6 +90,25 @@ The audit log is verified every half hour. It fails on:
 
 A failure carries the command's error and exit status.
 
+**glassd's memory under the soak.** In the VM, glassd's resident memory
+rose from about 25 MB to 34 MB over its first 25 rounds, then by 35 to
+50 KB a round, slowing, and the same again after each restart. A heap
+profile on the dev host (heaptrack, the soak's rounds, everything
+dismissed, then glassd killed so that all it held counts) found no leak:
+
+| | After 100 rounds | After 500 rounds |
+|---|---|---|
+| Heap at its peak | 2.48 MB | 2.69 MB |
+| Held at the end | 1,111 KB | 1,313 KB |
+| Answered asks the desk remembers (`HISTORY`, 200) | 151 KB | 300 KB, full |
+| Ended tasks it remembers (PA-2, `ENDED_KEPT`, 4,096) | 8 KB | 50 KB |
+
+Everything else held stays the same from round 100 to 500: action
+definitions, policy, the event channel's buffer, and OpenSSL's random
+state per thread. Resident memory on the host grew by 24 KB in the last
+50 rounds. The rest of the resident memory is the allocator's free pages,
+thread stacks and the program's code, not data.
+
 ### 4. Laptops: `docs/dev/hardware.md`
 How to put the image on a laptop and in as root:
 - the dev VM's seed on a second stick;
