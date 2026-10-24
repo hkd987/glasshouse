@@ -190,6 +190,74 @@ pub fn report() -> Result<Report> {
     Ok(assess(&sources))
 }
 
+/// The release the running kernel was built from: `15.1-RELEASE`, or
+/// `15.1-RELEASE-p2` with a patch level.
+pub fn kernel_release() -> Result<String> {
+    if !cfg!(target_os = "freebsd") {
+        return Err(PlatformError::Unsupported("the kernel's release".into()));
+    }
+    Ok(cmd::run("sysctl", &["-n", "kern.osrelease"])?
+        .trim()
+        .to_owned())
+}
+
+/// Whether modules built for `built_for` (`15.1-RELEASE`) run on a kernel
+/// of release `running`: the same release, at any patch level, which keeps
+/// the kernel's interface for modules.
+pub fn release_takes(running: &str, built_for: &str) -> bool {
+    let base = match running.rsplit_once("-p") {
+        Some((base, level)) if !level.is_empty() && level.bytes().all(|b| b.is_ascii_digit()) => {
+            base
+        }
+        _ => running,
+    };
+    base == built_for
+}
+
+/// Whether kernel module `name` (`if_iwlwifi`) is loaded.
+pub fn module_loaded(name: &str) -> bool {
+    cfg!(target_os = "freebsd")
+        && crate::hardware::module_name(name)
+        && cmd::run("kldstat", &["-q", "-n", name]).is_ok()
+}
+
+/// Loads kernel module `name` with what it depends on, unless it's loaded:
+/// proof it links against this kernel.
+pub fn load_module(name: &str) -> Result<()> {
+    if !cfg!(target_os = "freebsd") {
+        return Err(PlatformError::Unsupported("loading kernel modules".into()));
+    }
+    if !module_name(name) {
+        return Err(PlatformError::Unsupported(format!(
+            "a module named {name:?}"
+        )));
+    }
+    cmd::run("kldload", &["-n", name]).map(|_| ())
+}
+
+/// The kernel's last `count` messages naming `name`, or about loading
+/// modules (`link_elf`, `KLD`): why a module didn't load.
+pub fn kernel_messages(name: &str, count: usize) -> Vec<String> {
+    let Ok(text) = cmd::run("dmesg", &[]) else {
+        return Vec::new();
+    };
+    let mut lines: Vec<String> = text
+        .lines()
+        .filter(|l| l.contains(name) || l.contains("link_elf") || l.contains("KLD"))
+        .map(|l| l.trim().to_owned())
+        .collect();
+    let skip = lines.len().saturating_sub(count);
+    lines.drain(..skip);
+    lines
+}
+
+fn module_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// What the tools' output says about each part.
 pub fn assess(s: &Sources) -> Report {
     let pci = parse_pciconf(&s.pciconf);
@@ -1242,6 +1310,16 @@ ugen0.2: <Realtek Laptop Camera> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr
                 .iter()
                 .any(|d| d.ends_with("(em0)"))
         );
+    }
+
+    #[test]
+    fn adr0057_modules_run_on_their_release_at_any_patch_level() {
+        assert!(release_takes("15.1-RELEASE", "15.1-RELEASE"));
+        assert!(release_takes("15.1-RELEASE-p3", "15.1-RELEASE"));
+        assert!(!release_takes("15.2-RELEASE", "15.1-RELEASE"));
+        assert!(!release_takes("15.1-STABLE", "15.1-RELEASE"));
+        assert!(!release_takes("15.1-RELEASE-px", "15.1-RELEASE"));
+        assert!(module_name("if_iwlwifi") && !module_name("../x") && !module_name("-v"));
     }
 
     #[test]

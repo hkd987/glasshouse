@@ -42,6 +42,13 @@ max_processes = 256
 [snapshots]
 backend = "zfs"
 
+# Kernel patches (ADR 0057): the keys one of which must have signed a patch
+# this computer takes, and whether it takes community patches nobody here
+# reviewed. With no keys, it takes none; this image names none yet.
+# [hardware]
+# keys = ["ed25519:<the patch service's key>"]
+# community = false
+
 # The agent catalog (AD-5): what IT has published to this machine. What each
 # agent may do is set by policy, not here.
 

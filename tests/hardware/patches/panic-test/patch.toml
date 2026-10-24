@@ -1,0 +1,16 @@
+# A test fixture, never shipped: a module the loader loads at every start,
+# which panics as it loads (ADR 0057). The computer must come back on the
+# boot environment it was on.
+id = "panic-test"
+revision = 1
+summary = "A module that panics as it loads (a test)"
+release = "15.1-RELEASE"
+origin = "glasshouse"
+review = "reviewed"
+targets = []
+requirements = []
+
+[[module]]
+dir = "glass_panic_test"
+file = "glass_panic_test.ko"
+load_at_boot = true

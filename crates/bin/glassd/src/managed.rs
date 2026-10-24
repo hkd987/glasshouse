@@ -1007,6 +1007,7 @@ mod tests {
                 org_catalog: Arc::new(crate::OrgCatalog(org.catalog.clone())),
                 personal: Arc::new(org.studio.clone()),
                 org_apps: Arc::new(org.org_apps.clone()),
+                hardware: Default::default(),
             },
             policy,
             policy_source: "policy file".into(),

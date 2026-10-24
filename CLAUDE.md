@@ -37,6 +37,9 @@ details this file leaves out.
   hardware` (as root) says what this OS makes of each part of a computer;
   `tests/hardware/matrix.sh` checks it on emulated devices in the VM;
   `tests/soak/soak.sh --hours N` runs agents for hours through crashes.
+  Kernel patches (ADR 0057): `os/freebsd/scripts/kernel-patch.sh build
+  <patch>` builds and signs one, `glassctl hardware patch apply` tries it in
+  a boot environment of its own, `tests/hardware/patch-vm.sh` runs it end to end.
 - `make check` while editing; never `--release` in the loop
   (`docs/dev/build-performance.md`).
 - The desktop shell is its own workspace (`shell/README.md`): `make shell-test

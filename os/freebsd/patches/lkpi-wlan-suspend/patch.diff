@@ -1,0 +1,772 @@
+From 0c0f66541aa220af38261af6360713ded6e3f15d Mon Sep 17 00:00:00 2001
+From: "Bjoern A. Zeeb" <bz@FreeBSD.org>
+Date: Wed, 9 Apr 2025 18:00:20 +0000
+Subject: LinuxKPI: 802.11: add support for suspend/resume
+
+Add support for automatic suspend/resume as we know it for wireless.
+The problem is that the PCI driver which would normally gets the code
+is the LinuxKPI PCI framework/Linux wireless driver, which we cannot
+ammend or generally add extra suspend/resume code to.
+A further problem is that with growing support, the LinuxKPI 802.11
+(mac80211) layer also is involved in suspend/resume for WoWLAN (not
+yet supported) meaning that we need to hook the suspend/resume
+framework into that as well.  Unlike Linux we do not have a general
+suspend/resume "hook" we can hang into and we need to tie this one
+to the hardware so cannot indepedently (after the driver one) run it.
+
+The solution for FreeBSD, in order to not mangle the Linux native
+drivers and get extra maintanace overhead, is to add a bus child
+which inherits the general framework and thus is 2 lines + #includes
+for each driver extra to add to.
+
+The general suspend/resume framework lives in LinuxKPI (linuxkpi_80211_pm)
+and imitates the normal suspend/resume path overloading it (there is
+a slight code/logic duplication from the PCI code).
+Given we are passed the LinuxKPI p(ci)dev, we can go and peel out the
+net80211 ic from the native bsddev and that way get access to the
+wireless stack.  We then call into LinuxKPI 802.11 in order to do
+the suspend/resume dance there, and, if needed also call the
+official suspend/resume routine from the device driver after
+(reverse for resume).
+If any in this fails, suspend will be blocked as we will return the
+error (no different to any native driver could do).
+
+The LinuxKPI 802.11 suspend/resume code has the initial code for
+doing a WoWLAN suspend (one could change the sysctl) but other bits
+like access to ifnet flags etc. has to be sorted out before we can
+go and support that.
+The default code path calles into net80211 to clear everything
+like native wireless drivers do.  The one thing we need to do in
+addition is to remove the vif devices from the firmware and restore
+them prior to net80211 resume.
+We also check for a possible HW SCAN to still be runinng on resume
+and warn as that may cause problems though the scan should be stopped
+before suspend (we may still get a callback).  You can easily see
+these problems if you suspend/resume without stopping the wlan.
+
+Enable the PM framework for iwlwifi in the module Makefile to
+be able to use all this; others can follow as tested.
+
+In case anyone has problems with this, they can change the sysctl
+back to 0 until we can figure out any further problems.
+The linuxkpi_wlan.4 man page got adjusted to document this.
+
+Sponsored by:	The FreeBSD Foundation
+Tested on:	Dell XPS 13 (AX200), Lenovo TP X270 (AX210)
+PR:		263632
+
+(cherry picked from commit 11d69a4558de2a5427d8191caed315c5f7e9a5d6)
+---
+ share/man/man4/linuxkpi_wlan.4                     |   8 +-
+ sys/compat/linuxkpi/common/src/linux_80211.c       | 137 +++++++++++++
+ sys/compat/linuxkpi/common/src/linux_80211.h       |  16 +-
+ .../linuxkpi/common/src/linux_80211_macops.c       | 116 +++++++++++
+ sys/compat/linuxkpi/common/src/linuxkpi_80211_pm.c | 214 +++++++++++++++++++++
+ sys/conf/files                                     |   2 +
+ sys/contrib/dev/iwlwifi/lkpi_iwlwifi_pm.c          |   8 +
+ sys/contrib/dev/rtw88/lkpi_rtw88_pm.c              |   8 +
+ sys/contrib/dev/rtw89/lkpi_rtw89_pm.c              |   8 +
+ sys/modules/iwlwifi/Makefile                       |   3 +-
+ sys/modules/linuxkpi_wlan/Makefile                 |   1 +
+ sys/modules/rtw88/Makefile                         |   1 +
+ sys/modules/rtw89/Makefile                         |   3 +-
+ 13 files changed, 521 insertions(+), 4 deletions(-)
+ create mode 100644 sys/compat/linuxkpi/common/src/linuxkpi_80211_pm.c
+ create mode 100644 sys/contrib/dev/iwlwifi/lkpi_iwlwifi_pm.c
+ create mode 100644 sys/contrib/dev/rtw88/lkpi_rtw88_pm.c
+ create mode 100644 sys/contrib/dev/rtw89/lkpi_rtw89_pm.c
+
+diff --git a/share/man/man4/linuxkpi_wlan.4 b/share/man/man4/linuxkpi_wlan.4
+index 65c77d8d7631..fa0b15b5e0b1 100644
+--- a/share/man/man4/linuxkpi_wlan.4
++++ b/share/man/man4/linuxkpi_wlan.4
+@@ -6,7 +6,7 @@
+ .\" This documentation was written by Bj\xc3\xb6rn Zeeb under sponsorship from
+ .\" the FreeBSD Foundation.
+ .\"
+-.Dd December 28, 2025
++.Dd May 23, 2026
+ .Dt LINUXKPI_WLAN 4
+ .Os
+ .Sh NAME
+@@ -107,6 +107,12 @@ debug messages.
+ See
+ .Pa sys/compat/linuxkpi/common/src/linux_80211.h
+ for details.
++.It Va compat.linuxkpi.80211.suspend_type
++For the time being this variable allows suspend/resume to be
++enabled/disabled.
++The default is 1 which enables normal suspend/resume.
++To disable any suspend/resume set it to 0.
++Other values may enable specific features in the future.
+ .It Va compat.linuxkpi.80211.IF.dump_stas
+ Print statistics for a given, associated
+ .Xr wlan 4
+diff --git a/sys/compat/linuxkpi/common/src/linux_80211.c b/sys/compat/linuxkpi/common/src/linux_80211.c
+index efd1d9bae3cc..cade61e8446f 100644
+--- a/sys/compat/linuxkpi/common/src/linux_80211.c
++++ b/sys/compat/linuxkpi/common/src/linux_80211.c
+@@ -105,6 +105,11 @@ SYSCTL_DECL(_compat_linuxkpi);
+ SYSCTL_NODE(_compat_linuxkpi, OID_AUTO, 80211, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+     "LinuxKPI 802.11 compatibility layer");
+ 
++static int lkpi_suspend_type = 1;
++SYSCTL_INT(_compat_linuxkpi_80211, OID_AUTO, suspend_type, CTLFLAG_RW,
++    &lkpi_suspend_type, 0,
++    "LinuxKPI 802.11 suspend type bitmask (0=off, 1=net80211, 2=wowlan");
++
+ static bool lkpi_order_scanlist = false;
+ SYSCTL_BOOL(_compat_linuxkpi_80211, OID_AUTO, order_scanlist, CTLFLAG_RW,
+     &lkpi_order_scanlist, 0, "Enable LinuxKPI 802.11 scan list shuffeling");
+@@ -6859,10 +6864,19 @@ linuxkpi_set_ieee80211_dev(struct ieee80211_hw *hw)
+ 	/*
+ 	 * Set a proper name before ieee80211_ifattach() if dev is set.
+ 	 * ath1xk also unset the dev so we need to check.
++	 * Also we will (ab)use this opportunity to register the
++	 * power management sub-children if thay exist (for suspend/resume).
+ 	 */
+ 	dev = wiphy_dev(hw->wiphy);
+ 	if (dev != NULL) {
+ 		ic->ic_name = dev_name(dev);
++		if (dev->bsddev != NULL) {
++			bus_identify_children(dev->bsddev);
++			bus_enumerate_hinted_children(dev->bsddev);
++			bus_topo_lock();
++			bus_attach_children(dev->bsddev);
++			bus_topo_unlock();
++		}
+ 	} else {
+ 		TODO("adjust arguments to still have the old dev or go through "
+ 		    "the hoops of getting the bsddev from hw and detach; "
+@@ -9538,7 +9552,130 @@ ieee80211_emulate_switch_vif_chanctx(struct ieee80211_hw *hw,
+ }
+ 
+ /* -------------------------------------------------------------------------- */
++/* LinuxKPI 802.11 PM. */
++int
++lkpi_80211_suspend(struct ieee80211com *ic, pm_message_t state)
++{
++	struct lkpi_hw *lhw;
++	struct ieee80211_hw *hw;
++	int error;
++
++	lhw = ic->ic_softc;
++	hw = LHW_TO_HW(lhw);
++	error = 0;
++
++	/* Check:
++	 * - device_set_wakeup_capable() / device_can_wakeup()
++	 * - hw->wiphy->wowlan to be non-NULL, if so contents.
++	 * - hw->wiphy->max_sched_scan_ssids (rtw88)
++	 */
++	if ((lkpi_suspend_type & 0x2) != 0) {
++		struct cfg80211_wowlan wowlan;
++
++		IMPROVE("various options for WoWLAN");
++		memset(&wowlan, 0, sizeof(wowlan));
++		wiphy_lock(hw->wiphy);
++		error = lkpi_80211_mo_suspend(hw, &wowlan);
++		wiphy_unlock(hw->wiphy);
++		if (error == EOPNOTSUPP)
++			error = 0;
++	}
++	if ((lkpi_suspend_type & 0x1) != 0) {
++		struct lkpi_vif *lvif;
++
++		ieee80211_suspend_all(ic);
+ 
++		wiphy_lock(hw->wiphy);
++		/*
++		 * At the end of this net80211 will run a task to call
++		 * (*ic_parent)() which is entirely unhelpful as we do not
++		 * know when it will happen.  So deal with it here.
++		 */
++		TAILQ_FOREACH(lvif, &lhw->lvif_head, lvif_entry) {
++			lkpi_80211_mo_remove_interface(hw, LVIF_TO_VIF(lvif));
++		}
++
++		if ((lhw->sc_flags & LKPI_MAC80211_DRV_STARTED) != 0)
++			lkpi_80211_mo_stop(hw, true);
++		wiphy_unlock(hw->wiphy);
++	}
++
++	if (error < 0)
++		error = -error;
++
++	if (error != 0)
++		ic_printf(ic, "%s: SUSPEND FAILED: %d\n", __func__, error);
++
++	return (error);
++}
++
++int
++lkpi_80211_resume(struct ieee80211com *ic)
++{
++	struct lkpi_hw *lhw;
++	struct ieee80211_hw *hw;
++	int error;
++	bool hw_scan_running;
++
++	lhw = ic->ic_softc;
++	hw = LHW_TO_HW(lhw);
++	error = 0;
++
++	/*
++	 * Ongoing HW scans during suspend are a problem on resume.
++	 * Be verbose about that.
++	 */
++	LKPI_80211_LHW_SCAN_LOCK(lhw);
++	hw_scan_running = (lhw->scan_flags & (LKPI_LHW_SCAN_RUNNING|LKPI_LHW_SCAN_HW)) != 0;
++	LKPI_80211_LHW_SCAN_UNLOCK(lhw);
++	if (hw_scan_running)
++		ic_printf(ic, "%s: WARNING: ongoing hw scan on resume!\n", __func__);
++
++	if ((lkpi_suspend_type & 0x1) != 0) {
++		struct lkpi_vif *lvif;
++
++		wiphy_lock(hw->wiphy);
++		error = lkpi_80211_mo_start(hw);
++		if (error != 0 && error != EEXIST) {
++			ic_printf(ic, "%s: mo_start failed: %d\n",
++			    __func__, error);
++			wiphy_unlock(hw->wiphy);
++			goto err;
++		}
++
++		TAILQ_FOREACH(lvif, &lhw->lvif_head, lvif_entry) {
++			error = lkpi_80211_mo_add_interface(hw, LVIF_TO_VIF(lvif));
++			if (error != 0) {
++				struct ieee80211vap *vap;
++
++				vap = LVIF_TO_VAP(lvif);
++				ic_printf(ic, "%s: mo_add_interface %s failed: %d\n",
++				    __func__, if_name(vap->iv_ifp), error);
++				wiphy_unlock(hw->wiphy);
++				goto err;
++			}
++		}
++		wiphy_unlock(hw->wiphy);
++
++		ieee80211_resume_all(ic);
++	}
++
++	if ((lkpi_suspend_type & 0x2) != 0) {
++		wiphy_lock(hw->wiphy);
++		error = lkpi_80211_mo_resume(hw);
++		wiphy_unlock(hw->wiphy);
++		if (error == EOPNOTSUPP)
++			error = 0;
++	}
++
++err:
++	if (error < 0)
++		error = -error;
++
++	return (error);
++}
++
++/* -------------------------------------------------------------------------- */
+ MODULE_VERSION(linuxkpi_wlan, 1);
+ MODULE_DEPEND(linuxkpi_wlan, linuxkpi, 1, 1, 1);
+ MODULE_DEPEND(linuxkpi_wlan, wlan, 1, 1, 1);
+diff --git a/sys/compat/linuxkpi/common/src/linux_80211.h b/sys/compat/linuxkpi/common/src/linux_80211.h
+index 569c4f12f6d6..89416edfae73 100644
+--- a/sys/compat/linuxkpi/common/src/linux_80211.h
++++ b/sys/compat/linuxkpi/common/src/linux_80211.h
+@@ -1,6 +1,6 @@
+ /*-
+  * Copyright (c) 2020-2026 The FreeBSD Foundation
+- * Copyright (c) 2020-2021 Bjoern A. Zeeb
++ * Copyright (c) 2020-2025 Bjoern A. Zeeb
+  *
+  * This software was developed by Björn Zeeb under sponsorship from
+  * the FreeBSD Foundation.
+@@ -44,6 +44,9 @@
+ 
+ #include "opt_wlan.h"
+ 
++#include <linux/skbuff.h>
++#include <net/mac80211.h>
++
+ #if defined(IEEE80211_DEBUG) && !defined(LINUXKPI_DEBUG_80211)
+ #define	LINUXKPI_DEBUG_80211
+ #endif
+@@ -504,5 +507,16 @@ int lkpi_80211_mo_ampdu_action(struct ieee80211_hw *, struct ieee80211_vif *,
+     struct ieee80211_ampdu_params *);
+ int lkpi_80211_mo_sta_statistics(struct ieee80211_hw *, struct ieee80211_vif *,
+     struct ieee80211_sta *, struct station_info *);
++int lkpi_80211_mo_suspend(struct ieee80211_hw *, struct cfg80211_wowlan *);
++int lkpi_80211_mo_resume(struct ieee80211_hw *);
++int lkpi_80211_mo_set_wakeup(struct ieee80211_hw *, bool);
++int lkpi_80211_mo_set_rekey_data(struct ieee80211_hw *,
++    struct ieee80211_vif *, struct cfg80211_gtk_rekey_data *);
++int lkpi_80211_mo_set_default_unicast_key(struct ieee80211_hw *,
++    struct ieee80211_vif *, int);
++
++/* LinuxKPI 802.11 PM. */
++int lkpi_80211_suspend(struct ieee80211com *, pm_message_t);
++int lkpi_80211_resume(struct ieee80211com *);
+ 
+ #endif	/* _LKPI_SRC_LINUX_80211_H */
+diff --git a/sys/compat/linuxkpi/common/src/linux_80211_macops.c b/sys/compat/linuxkpi/common/src/linux_80211_macops.c
+index 42067e36c953..aa6b158b70a7 100644
+--- a/sys/compat/linuxkpi/common/src/linux_80211_macops.c
++++ b/sys/compat/linuxkpi/common/src/linux_80211_macops.c
+@@ -819,3 +819,119 @@ lkpi_80211_mo_sta_statistics(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+ out:
+ 	return (error);
+ }
++
++int
++lkpi_80211_mo_suspend(struct ieee80211_hw *hw, struct cfg80211_wowlan *wowlan)
++{
++	struct lkpi_hw *lhw;
++	int error;
++
++	might_sleep();
++	lockdep_assert_wiphy(hw->wiphy);
++
++	lhw = HW_TO_LHW(hw);
++	if (lhw->ops->suspend == NULL) {
++		error = EOPNOTSUPP;
++		goto out;
++	}
++
++	LKPI_80211_TRACE_MO("hw %p wowlan %p", hw, wowlan);
++	error = lhw->ops->suspend(hw, wowlan);
++
++out:
++	return (error);
++}
++
++int
++lkpi_80211_mo_resume(struct ieee80211_hw *hw)
++{
++	struct lkpi_hw *lhw;
++	int error;
++
++	might_sleep();
++	lockdep_assert_wiphy(hw->wiphy);
++
++	lhw = HW_TO_LHW(hw);
++	if (lhw->ops->resume == NULL) {
++		error = EOPNOTSUPP;
++		goto out;
++	}
++
++	LKPI_80211_TRACE_MO("hw %p", hw);
++	error = lhw->ops->resume(hw);
++
++out:
++	return (error);
++}
++
++int
++lkpi_80211_mo_set_wakeup(struct ieee80211_hw *hw, bool enable)
++{
++	struct lkpi_hw *lhw;
++	int error;
++
++	might_sleep();
++	lockdep_assert_wiphy(hw->wiphy);
++
++	lhw = HW_TO_LHW(hw);
++	if (lhw->ops->set_wakeup == NULL) {
++		error = EOPNOTSUPP;
++		goto out;
++	}
++
++	LKPI_80211_TRACE_MO("hw %p enable %d", hw, enable);
++	lhw->ops->set_wakeup(hw, enable);
++	error = 0;
++
++out:
++	return (error);
++}
++
++int
++lkpi_80211_mo_set_rekey_data(struct ieee80211_hw *hw,
++    struct ieee80211_vif *vif, struct cfg80211_gtk_rekey_data *grd)
++{
++	struct lkpi_hw *lhw;
++	int error;
++
++	might_sleep();
++	lockdep_assert_wiphy(hw->wiphy);
++
++	lhw = HW_TO_LHW(hw);
++	if (lhw->ops->set_rekey_data == NULL) {
++		error = EOPNOTSUPP;
++		goto out;
++	}
++
++	LKPI_80211_TRACE_MO("hw %p vif %p grd %p", hw, vif, grd);
++	lhw->ops->set_rekey_data(hw, vif, grd);
++	error = 0;
++
++out:
++	return (error);
++}
++
++int
++lkpi_80211_mo_set_default_unicast_key(struct ieee80211_hw *hw,
++    struct ieee80211_vif *vif, int idx)
++{
++	struct lkpi_hw *lhw;
++	int error;
++
++	might_sleep();
++	lockdep_assert_wiphy(hw->wiphy);
++
++	lhw = HW_TO_LHW(hw);
++	if (lhw->ops->set_default_unicast_key == NULL) {
++		error = EOPNOTSUPP;
++		goto out;
++	}
++
++	LKPI_80211_TRACE_MO("hw %p vif %p idx %d", hw, vif, idx);
++	lhw->ops->set_default_unicast_key(hw, vif, idx);
++	error = 0;
++
++out:
++	return (error);
++}
++
+diff --git a/sys/compat/linuxkpi/common/src/linuxkpi_80211_pm.c b/sys/compat/linuxkpi/common/src/linuxkpi_80211_pm.c
+new file mode 100644
+index 000000000000..c69288bd5886
+--- /dev/null
++++ b/sys/compat/linuxkpi/common/src/linuxkpi_80211_pm.c
+@@ -0,0 +1,214 @@
++/*
++ * Copyright (c) 2025 The FreeBSD Foundation
++ *
++ * This software was developed by Björn Zeeb under sponsorship from
++ * the FreeBSD Foundation.
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ */
++
++#include <sys/param.h>
++#include <sys/kernel.h>
++#include <sys/bus.h>
++#include <sys/module.h>
++
++#include <linux/pci.h>
++#include "linux_80211.h"
++
++#include <net80211/ieee80211_var.h>
++
++struct lkpi_80211_pm_softc {
++	/* PCI */
++	int  (*suspend) (struct pci_dev *pdev, pm_message_t state);
++	int  (*resume) (struct pci_dev *pdev);
++};
++
++static int
++lkpi_80211_pm_suspend(struct pci_dev *pdev, pm_message_t state)
++{
++	const struct dev_pm_ops *pmops;
++	struct lkpi_80211_pm_softc *sc;
++	struct ieee80211com *ic;
++	device_t dev;
++	int error;
++
++	dev = device_find_child(pdev->dev.bsddev, "lkpi80211_pm",
++	    DEVICE_UNIT_ANY);
++	if (dev == NULL) {
++		/* Must not happen, so abort suspend if it does. */
++		device_printf(pdev->dev.bsddev,
++		    "%s: cannot find lkpi80211_pm child for %s\n",
++		    __func__, device_get_name(pdev->dev.bsddev));
++		return (ENXIO);
++	}
++	sc = device_get_softc(dev);
++	error = 0;
++
++	/* Call order: wireless then pdev. */
++
++	ic = ieee80211_find_com(device_get_nameunit(pdev->dev.bsddev));
++	if (ic != NULL) {
++		error = lkpi_80211_suspend(ic, state);
++	} else {
++		device_printf(pdev->dev.bsddev,
++		    "%s: WARNING: wireless device not found\n", __func__);
++	}
++	if (error != 0)
++		goto err;
++
++	/* Logic duplicated from linux_pci_suspend(). */
++	pmops = pdev->pdrv->driver.pm;
++	if (sc->suspend != NULL)
++		error = sc->suspend(pdev, state);
++	else if (pmops != NULL && pmops->suspend != NULL) {
++		error = -pmops->suspend(&pdev->dev);
++		if (error == 0 && pmops->suspend_late != NULL)
++			error = -pmops->suspend_late(&pdev->dev);
++		if (error == 0 && pmops->suspend_noirq != NULL)
++			error = -pmops->suspend_noirq(&pdev->dev);
++	}
++
++err:
++	if (error < 0)
++		error = -error;
++
++	if (error != 0)
++		device_printf(pdev->dev.bsddev,
++		    "%s: WARNING: SUSPEND FAILED: %d\n", __func__, error);
++
++	return (error);
++}
++
++static int
++lkpi_80211_pm_resume(struct pci_dev *pdev)
++{
++	const struct dev_pm_ops *pmops;
++	struct lkpi_80211_pm_softc *sc;
++	struct ieee80211com *ic;
++	device_t dev;
++	int error;
++
++	dev = device_find_child(pdev->dev.bsddev, "lkpi80211_pm",
++	    DEVICE_UNIT_ANY);
++	if (dev == NULL) {
++		/* Must not happen, so abort suspend if it does. */
++		device_printf(pdev->dev.bsddev,
++		    "%s: cannot find lkpi80211_pm child\n", __func__);
++		return (ENXIO);
++	}
++	sc = device_get_softc(dev);
++	error = 0;
++
++	/* Call order: pdev then wireless. */
++
++	/* Logic duplicated from linux_pci_resume(). */
++	pmops = pdev->pdrv->driver.pm;
++	if (sc->resume != NULL) {
++		error = sc->resume(pdev);
++	} else if (pmops != NULL && pmops->resume != NULL) {
++		if (pmops->resume_early != NULL)
++			error = -pmops->resume_early(&pdev->dev);
++		if (error == 0 && pmops->resume != NULL)
++			error = -pmops->resume(&pdev->dev);
++	}
++	if (error != 0)
++		device_printf(pdev->dev.bsddev, "%s: resume failed!\n", __func__);
++	/* Do not error out but give wireless also a chance. */
++
++	ic = ieee80211_find_com(device_get_nameunit(pdev->dev.bsddev));
++	if (ic != NULL) {
++		error = lkpi_80211_resume(ic);
++	} else {
++		device_printf(pdev->dev.bsddev,
++		    "%s: WARNING: wireless device not found\n", __func__);
++	}
++
++	if (error < 0)
++		error = -error;
++
++	return (error);
++}
++
++/* -------------------------------------------------------------------------- */
++static void
++lkpi_80211_pm_identify(driver_t *driver, device_t parent)
++{
++
++	/* Make sure we're not being doubly invoked per parent. */
++	if (device_find_child(parent, driver->name, DEVICE_UNIT_ANY) != NULL)
++		return;
++
++	/* Make sure this is PCI for now. */
++	if (device_get_devclass(parent) == devclass_find("pci"))
++		return;
++
++	if (BUS_ADD_CHILD(parent, 0, driver->name, DEVICE_UNIT_ANY) == NULL)
++		device_printf(parent, "%s: failed to add child\n", __func__);
++}
++
++static int
++lkpi_80211_pm_probe(device_t dev)
++{
++	device_set_descf(dev, "LinuxKPI 802.11 %s mac80211 PM",
++	    device_get_nameunit(device_get_parent(dev)));
++	return (BUS_PROBE_DEFAULT);
++}
++
++static int
++lkpi_80211_pm_attach(device_t dev)
++{
++	struct lkpi_80211_pm_softc *sc;
++	struct pci_dev *pdev;
++
++	sc = device_get_softc(dev);
++	pdev = device_get_softc(device_get_parent(dev));
++
++	/* Intercept the driver suspend/resume calls. */
++	sc->suspend = pdev->pdrv->suspend;
++	pdev->pdrv->suspend = lkpi_80211_pm_suspend;
++	sc->resume = pdev->pdrv->resume;
++	pdev->pdrv->resume = lkpi_80211_pm_resume;
++
++	return (0);
++}
++
++static int
++lkpi_80211_pm_detach(device_t dev)
++{
++	struct lkpi_80211_pm_softc *sc;
++	struct pci_dev *pdev;
++
++	sc = device_get_softc(dev);
++	pdev = device_get_softc(device_get_parent(dev));
++
++	/* Restore the original notifications. */
++	pdev->pdrv->suspend = sc->suspend;
++	pdev->pdrv->resume = sc->resume;
++
++	return (0);
++}
++
++static device_method_t lkpi_80211_pm_methods[] = {
++	/* Device interface */
++	DEVMETHOD(device_identify,	lkpi_80211_pm_identify),
++	DEVMETHOD(device_probe,		lkpi_80211_pm_probe),
++	DEVMETHOD(device_attach,	lkpi_80211_pm_attach),
++	DEVMETHOD(device_detach,	lkpi_80211_pm_detach),
++	/*
++	 * Do not think about device_suspend/resume here.
++	 * We are not a PCI device and LinuxKPI PCI linux_pci_suspend/resume
++	 * are getting the notifications so we have to hijack the
++	 * LinuxKPI upcalls.
++	 */
++
++	DEVMETHOD_END
++};
++
++driver_t lkpi_80211_pm_driver = {
++	"lkpi80211_pm",
++	lkpi_80211_pm_methods,
++	sizeof(struct lkpi_80211_pm_softc),
++};
++
++MODULE_DEPEND(lkpi80211_pm, linuxkpi_wlan, 1, 1, 1);
++MODULE_VERSION(lkpi80211_pm, 1);
+diff --git a/sys/conf/files b/sys/conf/files
+index 7f925bfc3f23..670ae0c7f469 100644
+--- a/sys/conf/files
++++ b/sys/conf/files
+@@ -4636,6 +4636,8 @@ compat/linuxkpi/common/src/linux_80211.c	optional compat_linuxkpi wlan \
+ 	compile-with "${LINUXKPI_C}"
+ compat/linuxkpi/common/src/linux_80211_macops.c	optional compat_linuxkpi wlan \
+ 	compile-with "${LINUXKPI_C}"
++compat/linuxkpi/common/src/linuxkpi_80211_pm.c	optional compat_linuxkpi wlan \
++	compile-with "${LINUXKPI_C}"
+ compat/linuxkpi/common/src/linux_kmod.c		optional compat_linuxkpi \
+ 	compile-with "${LINUXKPI_C}"
+ compat/linuxkpi/common/src/linux_acpi.c		optional compat_linuxkpi acpi \
+diff --git a/sys/contrib/dev/iwlwifi/lkpi_iwlwifi_pm.c b/sys/contrib/dev/iwlwifi/lkpi_iwlwifi_pm.c
+new file mode 100644
+index 000000000000..7843e27d559c
+--- /dev/null
++++ b/sys/contrib/dev/iwlwifi/lkpi_iwlwifi_pm.c
+@@ -0,0 +1,8 @@
++#include <sys/types.h>
++#include <sys/bus.h>
++#include <sys/kernel.h>
++#include <sys/module.h>
++
++extern driver_t lkpi_80211_pm_driver;
++DRIVER_MODULE(lkpi80211_pm, iwlwifi, lkpi_80211_pm_driver, 0, 0);
++
+diff --git a/sys/contrib/dev/rtw88/lkpi_rtw88_pm.c b/sys/contrib/dev/rtw88/lkpi_rtw88_pm.c
+new file mode 100644
+index 000000000000..53da7b2ea715
+--- /dev/null
++++ b/sys/contrib/dev/rtw88/lkpi_rtw88_pm.c
+@@ -0,0 +1,8 @@
++#include <sys/types.h>
++#include <sys/bus.h>
++#include <sys/kernel.h>
++#include <sys/module.h>
++
++extern driver_t lkpi_80211_pm_driver;
++DRIVER_MODULE(lkpi80211_pm, rtw88, lkpi_80211_pm_driver, 0, 0);
++
+diff --git a/sys/contrib/dev/rtw89/lkpi_rtw89_pm.c b/sys/contrib/dev/rtw89/lkpi_rtw89_pm.c
+new file mode 100644
+index 000000000000..6f75557fa7ca
+--- /dev/null
++++ b/sys/contrib/dev/rtw89/lkpi_rtw89_pm.c
+@@ -0,0 +1,8 @@
++#include <sys/types.h>
++#include <sys/bus.h>
++#include <sys/kernel.h>
++#include <sys/module.h>
++
++extern driver_t lkpi_80211_pm_driver;
++DRIVER_MODULE(lkpi80211_pm, rtw89, lkpi_80211_pm_driver, 0, 0);
++
+diff --git a/sys/modules/iwlwifi/Makefile b/sys/modules/iwlwifi/Makefile
+index 471509c2bb1c..0212830835df 100644
+--- a/sys/modules/iwlwifi/Makefile
++++ b/sys/modules/iwlwifi/Makefile
+@@ -4,7 +4,7 @@ DEVIWLWIFIDIR=	${SRCTOP}/sys/contrib/dev/iwlwifi
+ 
+ .PATH: ${DEVIWLWIFIDIR}
+ 
+-IWLWIFI_CONFIG_PM=	0
++IWLWIFI_CONFIG_PM=	1
+ IWLWIFI_DEBUGFS=	0
+ .if ${KERN_OPTS:MDEV_ACPI}
+ IWLWIFI_CONFIG_ACPI=	1
+@@ -59,6 +59,7 @@ CFLAGS+=	-DCONFIG_MAC80211_DEBUGFS
+ .if defined(IWLWIFI_CONFIG_PM) && ${IWLWIFI_CONFIG_PM} > 0
+ SRCS+=	mvm/d3.c
+ SRCS+=	mld/d3.c
++SRCS+=	lkpi_iwlwifi_pm.c
+ CFLAGS+=	-DCONFIG_PM
+ CFLAGS+=	-DCONFIG_PM_SLEEP
+ .endif
+diff --git a/sys/modules/linuxkpi_wlan/Makefile b/sys/modules/linuxkpi_wlan/Makefile
+index bafeb2d5d22a..a8dd06f06bc0 100644
+--- a/sys/modules/linuxkpi_wlan/Makefile
++++ b/sys/modules/linuxkpi_wlan/Makefile
+@@ -3,6 +3,7 @@
+ KMOD=	linuxkpi_wlan
+ SRCS=	linux_80211.c \
+ 	linux_80211_macops.c
++SRCS+=	linuxkpi_80211_pm.c
+ 
+ # QCA ath11k support.
+ SRCS+=	linux_mhi.c
+diff --git a/sys/modules/rtw88/Makefile b/sys/modules/rtw88/Makefile
+index 1978e2392da9..d9dfd5c2efb1 100644
+--- a/sys/modules/rtw88/Makefile
++++ b/sys/modules/rtw88/Makefile
+@@ -66,6 +66,7 @@ CFLAGS+=	-DCONFIG_RTW88_USB
+ 
+ .if defined(RTW88_CONFIG_PM) && ${RTW88_CONFIG_PM} > 0
+ SRCS+=	wow.c
++SRCS+=	lkpi_rtw88_pm.c
+ CFLAGS+=	-DCONFIG_PM=${RTW88_CONFIG_PM}
+ .endif
+ 
+diff --git a/sys/modules/rtw89/Makefile b/sys/modules/rtw89/Makefile
+index b7f8dc7a2c6e..682bd2ed9b53 100644
+--- a/sys/modules/rtw89/Makefile
++++ b/sys/modules/rtw89/Makefile
+@@ -54,8 +54,9 @@ SRCS+=	rtw8852cu.c
+ .endif
+ 
+ .if defined(RTW89_CONFIG_PM) && ${RTW89_CONFIG_PM} > 0
+-CFLAGS+=	-DCONFIG_PM=${RTW89_CONFIG_PM}
+ SRCS+=	wow.c
++SRCS+=	lkpi_rtw89_pm.c
++CFLAGS+=	-DCONFIG_PM=${RTW89_CONFIG_PM}
+ .endif
+ 
+ .if defined(RTW89_DEBUGFS) && ${RTW89_DEBUGFS} > 0
+-- 
+cgit v1.3
+

@@ -122,6 +122,16 @@ impl Handler for ControlApi {
             }
             methods::SYSTEM_SUSPEND => to_result(&rt.suspend(&caller).await?),
             methods::SYSTEM_RESUME => to_result(&rt.wake(&caller)?),
+            methods::HARDWARE_PATCH_APPLY => {
+                let request: glass_api::PatchApply = parse_params(params)?;
+                to_result(&blocking(|| rt.hardware_patch_apply(&caller, request))?)
+            }
+            methods::HARDWARE_PATCH_STATUS => {
+                to_result(&blocking(|| rt.hardware_patch_status(&caller))?)
+            }
+            methods::HARDWARE_PATCH_CANCEL => {
+                to_result(&blocking(|| rt.hardware_patch_cancel(&caller))?)
+            }
             methods::EVENTS_SUBSCRIBE => {
                 self.forward_events(caller, conn);
                 Ok(Value::Null)

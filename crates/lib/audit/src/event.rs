@@ -124,6 +124,9 @@ pub enum EventKind {
     /// A person saved one of their tasks as a routine, its script written by
     /// this computer from the task's calls (DA-4, ADR 0046).
     RoutineSaved,
+    /// A kernel patch set up in a boot environment of its own, kept, failed,
+    /// rolled back or taken back (ADR 0057).
+    HardwarePatch,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

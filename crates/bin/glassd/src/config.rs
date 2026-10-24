@@ -67,8 +67,23 @@ pub struct Config {
     pub managed: Option<ManagedConfig>,
     #[serde(default)]
     pub studio: StudioConfig,
+    /// Which kernel patches this computer takes (ADR 0057).
+    #[serde(default)]
+    pub hardware: HardwareConfig,
     #[serde(default, rename = "agent")]
     pub agents: Vec<CatalogEntry>,
+}
+
+/// `[hardware]`: who may sign the kernel patches this computer takes, and
+/// whether it takes ones nobody reviewed (ADR 0057). With no keys, it takes
+/// none.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HardwareConfig {
+    #[serde(default)]
+    pub keys: Vec<glass_managed::PublicKey>,
+    #[serde(default)]
+    pub community: bool,
 }
 
 /// `[studio]`: what remixing and making apps needs (ADR 0032). glassd

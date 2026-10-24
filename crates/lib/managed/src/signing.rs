@@ -40,6 +40,8 @@ pub enum DocKind {
     Directory,
     /// Chat's settings: IT's compliance key and retention (ADR 0030).
     Chat,
+    /// A kernel patch and the modules built from it (ADR 0057).
+    HardwarePatch,
 }
 
 impl DocKind {
@@ -49,6 +51,7 @@ impl DocKind {
             Self::Catalog => "catalog",
             Self::Directory => "directory",
             Self::Chat => "chat",
+            Self::HardwarePatch => "hardware_patch",
         }
     }
 }

@@ -119,6 +119,8 @@ pub struct RuntimeConfig {
     /// Apps people made that IT approved, fetched and checked (ADR 0032);
     /// they reach people by the catalog's rules (DV-11).
     pub org_apps: Arc<dyn OrgApps>,
+    /// Which kernel patches this computer takes (ADR 0057).
+    pub hardware: crate::hwpatch::HardwarePatches,
 }
 
 /// Whether the org's catalog lets an agent or app reach a person, asked

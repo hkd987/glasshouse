@@ -28,6 +28,7 @@ mod control_api;
 mod error;
 mod execute;
 mod flows;
+pub mod hwpatch;
 mod labels;
 mod model;
 mod routines;

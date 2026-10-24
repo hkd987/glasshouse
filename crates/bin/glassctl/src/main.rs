@@ -169,6 +169,8 @@ enum Command {
         /// saved there, instead of this one.
         #[arg(long)]
         from: Option<PathBuf>,
+        #[command(subcommand)]
+        patch: Option<HardwareCommand>,
     },
     /// Machine power events (root; run by the rc.d suspend/resume hooks).
     #[command(subcommand)]
@@ -193,6 +195,25 @@ enum RoutineCommand {
         #[arg(long)]
         schedule: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum HardwareCommand {
+    /// Kernel patches (root; ADR 0057): set one up to try at the next
+    /// start, see where it is, or take it back.
+    #[command(subcommand)]
+    Patch(PatchCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum PatchCommand {
+    /// Check a patch's bundle and set it up in a boot environment of its
+    /// own; the next start tries it, once.
+    Apply { bundle: PathBuf },
+    /// The patch being tried, and the ones tried before.
+    Status,
+    /// Take back a patch set up but not yet tried.
+    Cancel,
 }
 
 #[derive(Debug, Subcommand)]
@@ -375,7 +396,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     if let Command::Policy(cmd) = &cli.command {
         return policy(cmd);
     }
-    if let Command::Hardware { from } = &cli.command {
+    if let Command::Hardware { from, patch: None } = &cli.command {
         let report = match from {
             Some(dir) => {
                 glass_platform::hardware::assess(&glass_platform::hardware::Sources::read_dir(dir)?)
@@ -686,6 +707,32 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 let noun = if r.tasks == 1 { "agent" } else { "agents" };
                 format!("{verb} {} {noun}\n", r.tasks)
             })
+        }
+        Command::Hardware {
+            patch: Some(HardwareCommand::Patch(cmd)),
+            ..
+        } => {
+            let status: glass_api::PatchStatus = match cmd {
+                PatchCommand::Apply { bundle } => {
+                    // glassd reads the bundle: by its absolute path.
+                    let bundle = std::fs::canonicalize(&bundle)
+                        .with_context(|| format!("{}", bundle.display()))?;
+                    ctl.call(
+                        methods::HARDWARE_PATCH_APPLY,
+                        glass_api::PatchApply { bundle },
+                    )
+                    .await?
+                }
+                PatchCommand::Status => {
+                    ctl.call(methods::HARDWARE_PATCH_STATUS, Value::Null)
+                        .await?
+                }
+                PatchCommand::Cancel => {
+                    ctl.call(methods::HARDWARE_PATCH_CANCEL, Value::Null)
+                        .await?
+                }
+            };
+            ctl.show(&status, render::patch_status)
         }
         Command::Policy(_) | Command::Hardware { .. } => {
             unreachable!("handled before connecting")

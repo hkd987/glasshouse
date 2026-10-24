@@ -1,0 +1,22 @@
+# The first kernel patch (ADR 0057): Wi-Fi works again after sleep.
+# Upstream's fix, in stable/15 after 15.1 was cut; 15.2 will carry it.
+id = "lkpi-wlan-suspend"
+revision = 1
+summary = "Wi-Fi works again after sleep (Intel's iwlwifi cards)"
+release = "15.1-RELEASE"
+origin = "https://cgit.freebsd.org/src/commit/?id=0c0f66541aa220af38261af6360713ded6e3f15d"
+review = "reviewed"
+# Intel Wi-Fi 6 and 6E on iwlwifi: AX200, AX201 (CNVi), AX210/AX211, and the
+# pilot's ThinkPad T14 Gen 2 (ADR 0057).
+targets = ["pci:8086:2723", "pci:8086:a0f0", "pci:8086:2725", "pci:8086:51f0", "model:LENOVO ThinkPad T14 Gen 2i"]
+requirements = ["PM-5", "CF-12"]
+
+# The 802.11 layer the drivers share is built into 15.1's kernel (GENERIC
+# has `wlan` and COMPAT_LINUXKPI), so the kernel is rebuilt with it; then
+# Intel's driver, a module. Realtek's (rtw88, rtw89) keep their own suspend
+# until a patch rebuilds them too.
+kernel = true
+
+[[module]]
+dir = "iwlwifi"
+file = "if_iwlwifi.ko"

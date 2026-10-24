@@ -1,0 +1,23 @@
+[package]
+name = "glass-kpatch"
+description = "The build service's side of kernel patches (ADR 0057): its signing key, and the signed bundle of a patch and the modules built from it. Runs where patches are built, never on a device."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+glass-crypto.workspace = true
+glass-managed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

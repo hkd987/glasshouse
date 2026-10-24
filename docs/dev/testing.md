@@ -59,6 +59,13 @@ with sample invoices by `post-install.sh`.
 - **Emulated hardware** (`tests/hardware/matrix.sh [profile...]`): boots the
   VM with HD Audio, USB sound, Intel and Realtek Ethernet, a TPM 2.0 and
   2 GB, and checks `glassctl hardware` against each, and that sound plays.
+- **Kernel patches** (`tests/hardware/patch-vm.sh`, ADR 0057): a good patch
+  and one whose module panics as it loads, each set up in a boot
+  environment of its own and the VM restarted onto it. The good one must be
+  kept, the panicking one rolled back by the next start. It needs the
+  bundles built (`os/freebsd/scripts/kernel-patch.sh build`). The first
+  patch that rebuilds the kernel builds the release's kernel once (about two
+  hours in the emulated VM); later ones rebuild only what they change.
 - **Where memory goes:** resident memory in the soak counts the allocator's
   free pages, stacks and code too. To see what glassd's data holds, run
   `make dev-host` once, then glassd under `heaptrack -o build/heap target/debug/glassd

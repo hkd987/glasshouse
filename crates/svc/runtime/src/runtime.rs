@@ -101,6 +101,9 @@ pub struct Runtime {
     pub(crate) seat_user: tokio::sync::watch::Sender<Option<String>>,
     /// People's routines (DA-4), set once at startup. Unset, nobody has any.
     pub(crate) routines: std::sync::OnceLock<glass_app_routines::Routines>,
+    /// Kernel patches tried in boot environments of their own (ADR 0057):
+    /// one at a time, under this lock.
+    hardware: Mutex<crate::hwpatch::Store>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -162,6 +165,7 @@ impl Runtime {
         let rt = Arc::new(Self {
             device_settings: parts.settings,
             layers: LayerStore::new(parts.config.state_dir.join("layers")),
+            hardware: Mutex::new(crate::hwpatch::Store::new(&parts.config.state_dir)),
             config: parts.config,
             settings: RwLock::new(Arc::new(Settings {
                 policy: Arc::new(parts.policy),
@@ -1441,6 +1445,78 @@ impl Runtime {
         // which grows with every action ever taken here (ADR 0051).
         blocking(|| self.audit.task_records(task.id))
             .map_err(|e| RuntimeError::Internal(e.to_string()))
+    }
+
+    /// Checks a kernel patch's bundle and sets it up in a boot environment
+    /// of its own, which the next start tries once (ADR 0057). Root only.
+    pub fn hardware_patch_apply(
+        &self,
+        caller: &Caller,
+        request: glass_api::PatchApply,
+    ) -> Result<glass_api::PatchStatus> {
+        if !caller.is_admin() {
+            return Err(RuntimeError::PermissionDenied(
+                "only root sets up kernel patches".into(),
+            ));
+        }
+        let size = std::fs::metadata(&request.bundle)
+            .map_err(|e| RuntimeError::Invalid(format!("{}: {e}", request.bundle.display())))?
+            .len();
+        if size > crate::hwpatch::MAX_BUNDLE_BYTES {
+            return Err(RuntimeError::Invalid(format!(
+                "{} is {size} bytes, more than a patch bundle may be",
+                request.bundle.display()
+            )));
+        }
+        let bytes = std::fs::read(&request.bundle)
+            .map_err(|e| RuntimeError::Invalid(format!("{}: {e}", request.bundle.display())))?;
+        let store = self.hardware.lock().unwrap_or_else(|p| p.into_inner());
+        crate::hwpatch::apply(
+            &crate::hwpatch::System,
+            &store,
+            &self.config.hardware,
+            &bytes,
+            &mut |event| {
+                self.audit(event);
+            },
+        )
+        .map_err(RuntimeError::Invalid)?;
+        Ok(crate::hwpatch::status(&crate::hwpatch::System, &store))
+    }
+
+    /// The kernel patch being tried and the ones tried before. Root only.
+    pub fn hardware_patch_status(&self, caller: &Caller) -> Result<glass_api::PatchStatus> {
+        if !caller.is_admin() {
+            return Err(RuntimeError::PermissionDenied(
+                "only root sees kernel patches".into(),
+            ));
+        }
+        let store = self.hardware.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(crate::hwpatch::status(&crate::hwpatch::System, &store))
+    }
+
+    /// Takes back a kernel patch set up but not yet tried. Root only.
+    pub fn hardware_patch_cancel(&self, caller: &Caller) -> Result<glass_api::PatchStatus> {
+        if !caller.is_admin() {
+            return Err(RuntimeError::PermissionDenied(
+                "only root takes back kernel patches".into(),
+            ));
+        }
+        let store = self.hardware.lock().unwrap_or_else(|p| p.into_inner());
+        crate::hwpatch::cancel(&crate::hwpatch::System, &store, &mut |event| {
+            self.audit(event);
+        })
+        .map_err(RuntimeError::Conflict)?;
+        Ok(crate::hwpatch::status(&crate::hwpatch::System, &store))
+    }
+
+    /// As glassd starts: keeps, fails or rolls back the kernel patch the
+    /// computer was set to try (ADR 0057).
+    pub fn hardware_at_start(&self) {
+        let store = self.hardware.lock().unwrap_or_else(|p| p.into_inner());
+        crate::hwpatch::at_start(&crate::hwpatch::System, &store, &mut |event| {
+            self.audit(event);
+        });
     }
 
     pub fn audit_verify(&self, caller: &Caller) -> Result<AuditVerifyResult> {

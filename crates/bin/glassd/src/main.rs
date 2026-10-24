@@ -533,6 +533,10 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             org_catalog: Arc::new(OrgCatalog(org.catalog.clone())),
             personal: Arc::new(org.studio.clone()),
             org_apps: Arc::new(org.org_apps.clone()),
+            hardware: glass_runtime::hwpatch::HardwarePatches {
+                keys: config.hardware.keys.clone(),
+                community: config.hardware.community,
+            },
         },
         policy: loaded.policy.clone(),
         policy_source: policy_source.clone(),
@@ -690,6 +694,14 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // Who is at the screen outlasts a restart of glassd, not a reboot; taken
     // back before anything that follows them is applied (ADR 0031).
     runtime.keep_seat_in(run_dir.join("seat"));
+
+    // A kernel patch the computer was set to try: kept if it started on it
+    // and it passes its check, rolled back if it came back without it
+    // (ADR 0057). Off the start path: the check loads modules.
+    {
+        let runtime = Arc::clone(&runtime);
+        tokio::task::spawn_blocking(move || runtime.hardware_at_start());
+    }
 
     // The browser's settings from policy (UX-1), for whoever is signed in:
     // written now, and again whenever a policy changes them or someone

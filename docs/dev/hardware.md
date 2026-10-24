@@ -50,6 +50,53 @@ Not yet tried on a laptop: these steps follow how the dev VM is set up.
    on LAN from another machine (`ifconfig <port> wol_magic`, where the
    model wakes from S3 by its network port), or a USB key presser.
 
+## The pilot's models (ADR 0057)
+
+Laptops 15.1 already drives, whose firmware still offers S3:
+
+1. **Lenovo ThinkPad T14 Gen 2 (Intel)**: set the firmware's Config >
+   Power > Sleep State to "Linux S3".
+2. **Dell Latitude 7490**: S3 by default.
+3. **Lenovo ThinkPad X1 Carbon Gen 9**: "Linux S3", as the T14 Gen 2.
+
+Check one unit of each with `capture.sh` from 15.1's own USB stick before
+buying more.
+
+## Kernel patches (ADR 0057)
+
+A hardware fix is a patch to the base system's source:
+`os/freebsd/patches/<id>/` holds `patch.diff` and `patch.toml`, which says
+what it fixes and what it rebuilds: modules, and the kernel when the code
+it changes is built into it (`kernel = true`).
+
+```sh
+os/freebsd/scripts/kernel-patch.sh key      # the development signing key, once
+os/freebsd/scripts/kernel-patch.sh build os/freebsd/patches/lkpi-wlan-suspend
+# On the computer, as root:
+glassctl hardware patch apply lkpi-wlan-suspend.bundle.json   # tried at the next start, once
+glassctl hardware patch status
+glassctl hardware patch cancel                                # before restarting
+```
+
+What the build does:
+- builds in the dev VM, which stands in for the build service, from the
+  release's own source (`zroot/kpatch/src@15.1-RELEASE`);
+- for a kernel patch, starts from the release's kernel built once
+  (`zroot/kpatch/kernel@15.1-RELEASE`: about two hours in the emulated
+  VM), so the patch rebuilds only the files it changes and those that
+  include them;
+- signs the bundle with `build/kpatch/dev-key`.
+
+A computer takes bundles signed by a key its `glassd.toml` names under
+`[hardware] keys`. The image names none.
+
+When the computer starts on the patch, glassd checks it and keeps it, or
+says it failed. A computer that doesn't come back on it is back on the
+environment it was on, by itself.
+
+`tests/hardware/patch-vm.sh` runs a good patch and a panicking one end to
+end in the VM.
+
 ## Known before any laptop is tried
 
 From the image's contents and the base system's source (ADR 0056):

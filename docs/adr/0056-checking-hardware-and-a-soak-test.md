@@ -199,3 +199,9 @@ An Intel model with AX211 Wi-Fi comes to about 65 MB more.
 - The report doesn't count screens, docks or Thunderbolt.
 - glassd doesn't send the report to the console. A fleet's hardware isn't
   in IT's inventory.
+
+## Amended by ADR 0057
+The models are chosen (ThinkPad T14 Gen 2 Intel, Dell Latitude 7490,
+ThinkPad X1 Carbon Gen 9), and hardware fixes are kernel patches, tried in a
+boot environment of their own. glassd's state moved outside the boot
+environments, so trying one loses no audit record.

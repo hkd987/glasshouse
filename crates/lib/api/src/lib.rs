@@ -16,6 +16,7 @@
 
 mod approval;
 mod apps;
+mod hardware;
 pub mod settings;
 mod tailoring;
 mod task;
@@ -32,6 +33,7 @@ pub use apps::{
     AppStatusRequest, AppWaiting, DEFAULT_APP_SOCKET, LiveOp, ProfileApp, ProfileAppKind,
     app_bridge_port, app_methods,
 };
+pub use hardware::{PatchApply, PatchStatus, PatchTrial, TrialState};
 pub use tailoring::{
     CheckResult, CustomizationPoint, LayerChange, LayerCheck, LayerLine, LayerRef, LayerRevert,
     LayerStatus, LayerVersion, LayerView, PointKind,
@@ -137,6 +139,15 @@ pub mod methods {
     /// `()` → [`crate::PowerResult`]. Root only. The machine woke: agents
     /// paused for sleep carry on.
     pub const SYSTEM_RESUME: &str = "system.resume";
+    /// [`crate::PatchApply`] → [`crate::PatchStatus`]. Root only. Checks a
+    /// kernel patch's bundle and sets it up in a boot environment of its
+    /// own, which the next start tries once (ADR 0057).
+    pub const HARDWARE_PATCH_APPLY: &str = "hardware.patch.apply";
+    /// `()` → [`crate::PatchStatus`]. Root only.
+    pub const HARDWARE_PATCH_STATUS: &str = "hardware.patch.status";
+    /// `()` → [`crate::PatchStatus`]. Root only. Takes back a patch set up
+    /// but not yet tried.
+    pub const HARDWARE_PATCH_CANCEL: &str = "hardware.patch.cancel";
     /// `()` → [`crate::settings::SettingsView`]: the caller's device
     /// settings (UX-1), as their desktop applies them.
     pub const SETTINGS_GET: &str = "settings.get";

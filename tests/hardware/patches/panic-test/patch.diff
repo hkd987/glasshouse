@@ -1,0 +1,44 @@
+A module that panics as it loads, on purpose: the kernel patch that doesn't
+start, for tests/hardware/patch-vm.sh (ADR 0057). Never shipped.
+
+diff --git b/sys/dev/glass_panic_test/glass_panic_test.c b/sys/dev/glass_panic_test/glass_panic_test.c
+new file mode 100644
+index 0000000..c57640f
+--- /dev/null
++++ b/sys/dev/glass_panic_test/glass_panic_test.c
+@@ -0,0 +1,24 @@
++/*
++ * A module that panics as it loads, on purpose: the kernel patch that
++ * doesn't start (ADR 0057, tests/hardware/patch-vm.sh). Never shipped.
++ */
++#include <sys/param.h>
++#include <sys/kernel.h>
++#include <sys/module.h>
++#include <sys/systm.h>
++
++static int
++glass_panic_test_modevent(module_t mod __unused, int type, void *arg __unused)
++{
++	if (type == MOD_LOAD)
++		panic("glass_panic_test: panics as it loads, on purpose (ADR 0057)");
++	return (0);
++}
++
++static moduledata_t glass_panic_test_mod = {
++	"glass_panic_test",
++	glass_panic_test_modevent,
++	NULL
++};
++DECLARE_MODULE(glass_panic_test, glass_panic_test_mod, SI_SUB_DRIVERS, SI_ORDER_ANY);
++MODULE_VERSION(glass_panic_test, 1);
+diff --git b/sys/modules/glass_panic_test/Makefile b/sys/modules/glass_panic_test/Makefile
+new file mode 100644
+index 0000000..2ec71ee
+--- /dev/null
++++ b/sys/modules/glass_panic_test/Makefile
+@@ -0,0 +1,5 @@
++.PATH: ${SYSDIR}/dev/glass_panic_test
++
++KMOD=	glass_panic_test
++SRCS=	glass_panic_test.c
++.include <bsd.kmod.mk>

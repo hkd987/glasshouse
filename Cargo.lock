@@ -1327,6 +1327,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-kpatch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "glass-crypto",
+ "glass-managed",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "glass-managed"
 version = "0.1.0"
 dependencies = [

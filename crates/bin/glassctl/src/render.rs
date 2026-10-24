@@ -644,6 +644,58 @@ pub fn hardware(report: &glass_platform::hardware::Report) -> String {
     out
 }
 
+/// `glassctl hardware patch`: the patch being tried, then the ones before
+/// (ADR 0057).
+pub fn patch_status(status: &glass_api::PatchStatus) -> String {
+    use glass_api::TrialState;
+
+    let mark = |state: TrialState| match state {
+        TrialState::Kept => green("✓"),
+        TrialState::Staging | TrialState::Staged => orange("◉"),
+        TrialState::Failed | TrialState::RolledBack => red("✗"),
+        TrialState::Cancelled => dim("–"),
+    };
+    let mut out = format!("Running from boot environment {}\n", bold(&status.running));
+    match &status.trial {
+        Some(t) if t.state.open() => {
+            let _ = writeln!(
+                out,
+                "\n{} Kernel patch {} r{} · {}\n  {}\n  {} · boot environment {}, from {}\n  Modules: {}",
+                mark(t.state),
+                bold(&t.id),
+                t.revision,
+                t.review,
+                t.summary,
+                t.state.label(),
+                t.env,
+                t.from_env,
+                t.modules.join(", ")
+            );
+        }
+        _ => out += "\nNo kernel patch waiting for a restart.\n",
+    }
+    if !status.history.is_empty() {
+        out += "\nTried before:\n";
+        for t in &status.history {
+            let when = t.ended_at.unwrap_or(t.staged_at);
+            let _ = writeln!(
+                out,
+                "  {} {:<12} {} r{}  {}{}",
+                mark(t.state),
+                t.state.label().split(':').next().unwrap_or_default(),
+                t.id,
+                t.revision,
+                dim(&when.to_string()),
+                t.note
+                    .as_deref()
+                    .map(|n| format!("\n      {n}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    out
+}
+
 /// "1 change", "3 changes".
 fn plural(n: u32, noun: &str) -> String {
     if n == 1 {

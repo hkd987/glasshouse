@@ -9,6 +9,32 @@
 
 set -eu
 
+# glassd's state, the audit log above all, outlives any one boot environment:
+# a dataset of its own, outside them, so that a change tried in a new one
+# (ADR 0057) or an update (EP-1) keeps every record. Moved there once, with
+# glassd stopped and nothing of a task mounted under it.
+state=/var/db/glasshouse
+root=$(zfs list -H -o name / 2>/dev/null || true)
+pool=${root%%/*}
+if [ -n "$pool" ] && ! zfs list -H "$pool/glasshouse" >/dev/null 2>&1; then
+	if [ -f /usr/local/etc/rc.d/glassd ]; then
+		service glassd onestop >/dev/null 2>&1 || true
+	fi
+	if mount -p | awk '{ print $2 }' | grep -q "^$state/"; then
+		echo "post-install: something is mounted under $state; its state stays where it is" >&2
+	else
+		zfs create -o mountpoint="$state.new" -o atime=off "$pool/glasshouse"
+		chmod 0700 "$state.new"
+		if [ -d "$state" ]; then
+			(cd "$state" && tar -cf - .) | (cd "$state.new" && tar -xpf -)
+			mv "$state" "$state.old"
+		fi
+		zfs set mountpoint="$state" "$pool/glasshouse"
+		rm -rf "$state.old"
+		rmdir "$state.new" 2>/dev/null || true
+		echo "post-install: glassd's state is on $pool/glasshouse, outside the boot environments"
+	fi
+fi
 install -d -o root -g wheel -m 0700 /var/db/glasshouse
 install -d -o root -g wheel -m 0755 /var/run/glasshouse
 
@@ -109,6 +135,19 @@ if ! grep -qx 'kern.ipc.shm_allow_removed=1' /etc/sysctl.conf; then
 	echo 'kern.ipc.shm_allow_removed=1' >>/etc/sysctl.conf
 fi
 sysctl -q kern.ipc.shm_allow_removed=1 >/dev/null
+# A panic restarts the computer instead of waiting at the kernel debugger's
+# prompt: a module that panics while a change is tried in a boot environment
+# of its own then costs one restart, back to the environment before it
+# (ADR 0057). As loader tunables too: a module the loader loads panics before
+# sysctl.conf is read.
+for setting in debug.debugger_on_panic=0 kern.panic_reboot_wait_time=5; do
+	if ! grep -qx "$setting" /etc/sysctl.conf; then
+		sed -i '' -e "/^${setting%%=*}=/d" /etc/sysctl.conf
+		echo "$setting" >>/etc/sysctl.conf
+	fi
+	sysctl -q "$setting" >/dev/null
+	loader_tunable "${setting%%=*}" "${setting#*=}"
+done
 # Console login: the full mark before the prompt, and a banner that names the
 # product, not the base system (%s).
 install -C -o root -g wheel -m 0644 "$branding/issue" /etc/issue
