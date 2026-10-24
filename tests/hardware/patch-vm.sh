@@ -56,6 +56,12 @@ untrust() {
 }
 trap untrust EXIT
 
+# The serial console since now (the log grows across the VM's restarts): `since=$(console_at)`,
+# then `console_since "$since"`. The kernel's own messages are behind the splash; the loader's,
+# and panics, aren't.
+console_at() { stat -c %s "$repo/build/vm/console.log"; }
+console_since() { tail -c +$(($1 + 1)) "$repo/build/vm/console.log"; }
+
 # Until the VM is back and glassd answers.
 back() {
 	"$vm" ssh-close
@@ -140,7 +146,10 @@ good() {
 	[[ $(status 'd["running"]') == "$env" ]] || fail "good: a clean restart left $env"
 	until_state kept 600 || return
 	in_vm 'bectl list -H' | grep -q "^$env	NR	" || fail "good: $env isn't the one every start uses"
-	in_vm 'kldstat -q -m linuxkpi_wlan && kldstat -q -n if_iwlwifi' || fail "good: its modules aren't loaded"
+	# The VM has no Intel card, so nothing loads the driver by itself: it loads against the kernel
+	# running only if that is the patched one (it needs the fix's lkpi_80211_pm_driver).
+	in_vm 'kldload -n if_iwlwifi && kldstat -q -n if_iwlwifi' ||
+		fail "good: the patched Wi-Fi driver doesn't load against the kernel running"
 	in_vm 'sysctl -n compat.linuxkpi.80211.suspend_type' >/dev/null ||
 		fail "good: no compat.linuxkpi.80211.suspend_type: the kernel running isn't the patched one"
 
@@ -168,11 +177,13 @@ panic() {
 	log "panic: a module that panics as it loads"
 	local env
 	env=$(apply "$kpatch/panic-test.bundle.json") || return
+	local since
+	since=$(console_at)
 	restart
 	settled
 	[[ $(status 'd["running"]') == default ]] || fail "panic: not back on default"
 	[[ $(status 'd["trial"]["state"]') == rolled_back ]] || fail "panic: not rolled back: $(status 'd["trial"]')"
-	grep -aq "glass_panic_test: panics as it loads" "$repo/build/vm/console.log" ||
+	console_since "$since" | grep -aq "glass_panic_test: panics as it loads" ||
 		fail "panic: no panic on the console: did it start on $env at all?"
 	gone "$env"
 	in_vm 'grep -c "^glass_panic_test" /boot/loader.conf' >/dev/null 2>&1 &&
@@ -184,13 +195,15 @@ late() {
 	log "late: a module that panics three minutes after it loads, on probation"
 	local env
 	env=$(apply "$kpatch/late-panic.bundle.json") || return
+	local since
+	since=$(console_at)
 	restart
 	settled
 	[[ $(status 'd["trial"]["state"]') == probation ]] ||
 		fail "late: not on probation before it panicked: $(status 'd["trial"]')"
 	log "late: on probation; waiting for it to panic"
 	until_state rolled_back 600 || return
-	grep -aq "glass_late_panic: panics 180 seconds after it loads" "$repo/build/vm/console.log" ||
+	console_since "$since" | grep -aq "glass_late_panic: panics 180 seconds after it loads" ||
 		fail "late: no panic on the console"
 	[[ $(status 'd["running"]') == default ]] || fail "late: not back on default"
 	gone "$env"
@@ -201,18 +214,22 @@ hang() {
 	log "hang: a module that never finishes loading"
 	local env
 	env=$(apply "$kpatch/hang-test.bundle.json") || return
+	local since loaded=
+	since=$(console_at)
 	in_vm 'shutdown -r now' >/dev/null 2>&1 || true
 	"$vm" ssh-close
-	local hung=
-	for _ in $(seq 90); do
-		if grep -aq "glass_hang_test: hangs as it loads" "$repo/build/vm/console.log"; then
-			hung=1
+	for _ in $(seq 120); do
+		if console_since "$since" | grep -aq "glass_hang_test.ko size"; then
+			loaded=1
 			break
 		fi
 		sleep 2
 	done
-	[[ -n $hung ]] || fail "hang: it never started loading the module"
-	sleep 20
+	[[ -n $loaded ]] || fail "hang: the loader never loaded the module"
+	# Behind the splash, a start that hangs is one SSH never answers.
+	if "$vm" wait 240 >/dev/null 2>&1; then
+		fail "hang: the VM started anyway"
+	fi
 	log "hang: the start hangs; a power cut"
 	"$vm" power-cut >&2
 	back
