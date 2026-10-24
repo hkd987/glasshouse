@@ -79,8 +79,9 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
   glassd's check caught exactly that in the VM: the patch failed its
   check, the next start went back by itself, and its environment was
   removed.
-- **Built off the computer** (BS-4). The build service builds the modules
-  from the image's exact source, reproducibly. It signs the bundle (the
+- **Built off the computer** (BS-4). The build service builds the modules,
+  and the kernel when the patch needs it, from the image's exact source,
+  reproducibly. It signs the bundle (the
   patch, the manifest, the modules and their SHA-256s) with `glass-managed`'s
   envelope, as a document kind of its own:
   - with our key, for patches we reviewed;
@@ -108,8 +109,9 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
 ### 3. Who writes them
 - **Us**, for the certified models: backports and fixes, through the same
   pipeline, into the image and the store. The first is the LinuxKPI 802.11
-  suspend and resume fix: Wi-Fi works again after sleep on Intel's and
-  Realtek's cards.
+  suspend and resume fix: Wi-Fi works again after sleep on Intel's cards
+  (`iwlwifi`). Realtek's (`rtw88`, `rtw89`) need their modules rebuilt with
+  it too, a later revision.
 - **Agents**, at a person's request, when `glassctl hardware` marks a part
   ✗. The agent reads the base system's source (read only), the report and
   the kernel's messages, and writes a patch. It never builds or installs
