@@ -31,6 +31,7 @@ mod cmd;
 #[allow(unsafe_code)]
 pub mod framebuffer;
 pub mod fs;
+pub mod hardware;
 #[allow(unsafe_code)]
 pub mod input;
 #[cfg(target_os = "freebsd")]

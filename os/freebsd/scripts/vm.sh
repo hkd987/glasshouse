@@ -25,7 +25,8 @@
 #   usb-stick plug|unplug    plug a 16 MB USB drive into the running VM, or pull it out (tests of
 #                            IT's devices.usb_storage setting, ADR 0031)
 # Env knobs: VM_DIR VM_SSH_PORT VM_CPUS VM_CPU_MODEL VM_ACCEL VM_MEM VM_DISK_SIZE VM_BOOT_TIMEOUT VM_BASE_IMAGE
-#   VM_FIRMWARE=uefi|bios VM_SCREEN VM_EXTRA_DISK (see lib.sh).
+#   VM_FIRMWARE=uefi|bios VM_SCREEN VM_EXTRA_DISK (see lib.sh), VM_DEVICES (more QEMU arguments:
+#   emulated hardware, as tests/hardware/matrix.sh adds).
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -75,6 +76,9 @@ cmd_up() {
 		[[ -f $VM_EXTRA_DISK ]] || die "VM_EXTRA_DISK $VM_EXTRA_DISK doesn't exist"
 		extra=(-drive "if=virtio,file=$VM_EXTRA_DISK,format=qcow2,discard=unmap")
 	fi
+	# More emulated hardware (tests/hardware/matrix.sh): QEMU arguments, split on spaces.
+	local devices=()
+	[[ -n ${VM_DEVICES:-} ]] && read -ra devices <<<"$VM_DEVICES"
 	rm -f "$VM_MONITOR" "$VM_QMP"
 	qemu-system-x86_64 \
 		-name glasshouse-dev -machine q35 -accel "$VM_ACCEL" -cpu "$VM_CPU_MODEL" \
@@ -85,7 +89,7 @@ cmd_up() {
 		-device virtio-net-pci,netdev=net0 -device virtio-rng-pci \
 		-vga none -device "VGA,xres=${VM_SCREEN%x*},yres=${VM_SCREEN#*x}" \
 		-device qemu-xhci -device usb-kbd -device usb-tablet \
-		"${firmware[@]}" \
+		"${firmware[@]}" "${devices[@]}" \
 		-display none -monitor "unix:$VM_MONITOR,server,nowait" -qmp "unix:$VM_QMP,server,nowait" \
 		-serial "file:$VM_CONSOLE" \
 		-daemonize -pidfile "$VM_PIDFILE"

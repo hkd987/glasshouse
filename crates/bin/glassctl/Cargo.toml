@@ -13,6 +13,7 @@ clap.workspace = true
 glass-first-party.workspace = true
 glass-api.workspace = true
 glass-audit.workspace = true
+glass-platform.workspace = true
 glass-policy.workspace = true
 glass-rpc.workspace = true
 glass-types.workspace = true

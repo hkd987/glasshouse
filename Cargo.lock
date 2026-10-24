@@ -1527,6 +1527,7 @@ dependencies = [
  "glass-api",
  "glass-audit",
  "glass-first-party",
+ "glass-platform",
  "glass-policy",
  "glass-rpc",
  "glass-types",

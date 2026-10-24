@@ -33,6 +33,10 @@ details this file leaves out.
 - `make freebsd vm-deploy` (~12 s) to try a change in the VM;
   `make e2e-vm` (~1 min) after any change to agent-facing behavior.
 - `make dev-host` runs glassd locally with the insecure host sandbox.
+- Hardware and endurance (ADR 0056, `docs/dev/hardware.md`): `glassctl
+  hardware` (as root) says what this OS makes of each part of a computer;
+  `tests/hardware/matrix.sh` checks it on emulated devices in the VM;
+  `tests/soak/soak.sh --hours N` runs agents for hours through crashes.
 - `make check` while editing; never `--release` in the loop
   (`docs/dev/build-performance.md`).
 - The desktop shell is its own workspace (`shell/README.md`): `make shell-test

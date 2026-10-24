@@ -161,6 +161,15 @@ enum Command {
     /// Policy tools (offline).
     #[command(subcommand)]
     Policy(PolicyCommand),
+    /// This computer's parts and whether this OS drives each: for checking
+    /// a laptop before a pilot (DK-12). As root, to read USB devices and
+    /// the battery.
+    Hardware {
+        /// Judge another computer from what `tests/hardware/capture.sh`
+        /// saved there, instead of this one.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
     /// Machine power events (root; run by the rc.d suspend/resume hooks).
     #[command(subcommand)]
     System(SystemCommand),
@@ -365,6 +374,20 @@ fn pick<T: Copy>(
 async fn run(cli: Cli) -> anyhow::Result<()> {
     if let Command::Policy(cmd) = &cli.command {
         return policy(cmd);
+    }
+    if let Command::Hardware { from } = &cli.command {
+        let report = match from {
+            Some(dir) => {
+                glass_platform::hardware::assess(&glass_platform::hardware::Sources::read_dir(dir)?)
+            }
+            None => glass_platform::hardware::report()?,
+        };
+        if cli.json {
+            println!("{}", render::json(&report, true)?);
+        } else {
+            print!("{}", render::hardware(&render::display_safe(&report)?));
+        }
+        return Ok(());
     }
     let client = Client::connect(&cli.socket)
         .await
@@ -664,7 +687,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 format!("{verb} {} {noun}\n", r.tasks)
             })
         }
-        Command::Policy(_) => unreachable!("handled before connecting"),
+        Command::Policy(_) | Command::Hardware { .. } => {
+            unreachable!("handled before connecting")
+        }
     }
 }
 

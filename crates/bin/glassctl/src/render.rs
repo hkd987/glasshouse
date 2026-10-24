@@ -18,7 +18,7 @@ use glass_types::TaskId;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::style::{bold, dim, orange, red, state_label, state_marker};
+use crate::style::{bold, dim, green, orange, red, state_label, state_marker};
 
 /// A copy of `value` with every string in it passed through
 /// `glass_api::display_line`, for rendering as text.
@@ -585,6 +585,65 @@ pub fn audit(records: &[AuditRecord]) -> String {
     out
 }
 
+/// `glassctl hardware`: a line per part, marked by what this OS makes of
+/// it, then what keeps the computer off the certified list (DK-12).
+pub fn hardware(report: &glass_platform::hardware::Report) -> String {
+    use glass_platform::hardware::Status;
+
+    let gb = (report.memory_mb + 512) / 1024;
+    let machine = [report.maker.as_str(), report.model.as_str()]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out = format!(
+        "{}\n{} · {gb} GB memory\n\n",
+        bold(if machine.is_empty() {
+            "This computer"
+        } else {
+            &machine
+        }),
+        report.processor
+    );
+    for part in &report.parts {
+        let marker = match part.status {
+            Status::Works => green("✓"),
+            Status::Limited => orange("~"),
+            Status::Unsupported => red("✗"),
+            Status::Absent => dim("–"),
+            Status::Unknown => dim("?"),
+        };
+        let found = if part.devices.is_empty() {
+            part.note.clone()
+        } else {
+            part.devices.join(", ")
+        };
+        let _ = writeln!(out, "{marker} {:<15}{found}", part.kind.label());
+        if !part.devices.is_empty() {
+            let _ = writeln!(out, "  {:<15}{}", "", part.note);
+        }
+        if let Some(gap) = &part.gap {
+            let _ = writeln!(out, "  {:<15}{}", "", dim(&format!("Not built yet: {gap}")));
+        }
+    }
+    let blockers: Vec<&str> = report.blockers().map(|p| p.kind.label()).collect();
+    out.push('\n');
+    if blockers.is_empty() {
+        out += &green("Nothing on this computer that this OS can't drive.");
+    } else {
+        out += &red(&format!(
+            "Not ready for the certified list (DK-12): {}.",
+            blockers.join(", ")
+        ));
+    }
+    out.push('\n');
+    if !report.complete {
+        out += &dim("Run it as root to read USB devices and the battery.\n");
+    }
+    out
+}
+
 /// "1 change", "3 changes".
 fn plural(n: u32, noun: &str) -> String {
     if n == 1 {
@@ -852,5 +911,79 @@ mod tests {
         let shown = audit(&display_safe(&vec![record]).unwrap());
         assert!(only_colors(&shown), "{shown:?}");
         assert!(plain(&shown).contains("Write Reports/x\u{FFFD}[2J\u{FFFD}.csv"));
+    }
+
+    /// DK-12: a line per part, what keeps the computer off the certified
+    /// list, and a USB device's name printed as text, not run as a
+    /// terminal command (its strings are the device's to set).
+    #[test]
+    fn dk12_hardware_names_the_parts_that_keep_a_computer_off_the_list() {
+        use glass_platform::hardware::{Kind, Part, Report, Status};
+
+        let part = |kind, status, devices: &[&str], note: &str, gap: Option<&str>| Part {
+            kind,
+            status,
+            devices: devices.iter().map(|d| d.to_string()).collect(),
+            note: note.into(),
+            gap: gap.map(str::to_owned),
+        };
+        let mut report = Report {
+            maker: "LENOVO".into(),
+            model: "21AH00FGUS".into(),
+            processor: "12th Gen Intel(R) Core(TM) i7-1265U".into(),
+            memory_mb: 16069,
+            parts: vec![
+                part(
+                    Kind::Wifi,
+                    Status::Works,
+                    &["Intel AX211 (iwlwifi0)"],
+                    "Loaded",
+                    Some("the Wi-Fi pane (CF-12)"),
+                ),
+                part(
+                    Kind::Camera,
+                    Status::Unsupported,
+                    &["Cam\x1b]0;owned\x07"],
+                    "No driver",
+                    None,
+                ),
+                part(Kind::Battery, Status::Unknown, &[], "Needs root", None),
+            ],
+            complete: false,
+        };
+        let shown = hardware(&display_safe(&report).unwrap());
+        assert!(only_colors(&shown), "{shown:?}");
+        let text = plain(&shown);
+        assert!(
+            text.starts_with(
+                "LENOVO 21AH00FGUS\n12th Gen Intel(R) Core(TM) i7-1265U · 16 GB memory\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("✓ Wi-Fi          Intel AX211 (iwlwifi0)\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Not built yet: the Wi-Fi pane (CF-12)"),
+            "{text}"
+        );
+        assert!(text.contains("✗ Camera"), "{text}");
+        assert!(text.contains("? Battery        Needs root\n"), "{text}");
+        assert!(
+            text.contains("Not ready for the certified list (DK-12): Camera."),
+            "{text}"
+        );
+        assert!(text.contains("Run it as root"), "{text}");
+        assert!(!text.to_lowercase().contains("freebsd"), "BR-1: {text}");
+
+        report.parts.remove(1);
+        report.complete = true;
+        let text = plain(&hardware(&report));
+        assert!(
+            text.contains("Nothing on this computer that this OS can't drive."),
+            "{text}"
+        );
+        assert!(!text.contains("Run it as root"), "{text}");
     }
 }

@@ -12,6 +12,7 @@ declare -A pkg=(
 	[ssh]=openssh-client [scp]=openssh-client [ssh-keygen]=openssh-client
 	[xorriso]=xorriso [xz]=xz-utils [curl]=curl [tar]=tar
 	[clang]=clang [ld.lld]=lld [shellcheck]=shellcheck [pkg-config]=pkg-config
+	[swtpm]=swtpm # the emulated TPM in tests/hardware/matrix.sh
 )
 missing=()
 for cmd in $(printf '%s\n' "${!pkg[@]}" | sort); do

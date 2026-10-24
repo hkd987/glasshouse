@@ -1,0 +1,72 @@
+# Checking hardware
+
+Glasshouse V1 runs on a short certified list of laptops from one or two
+makers (DK-12, PM-10), so what matters is that those models work, part by
+part. Three tools check that. ADR 0056 explains the split between them.
+
+| Tool | Runs on | Checks |
+|---|---|---|
+| `glassctl hardware` | any computer running the image, as root | each part (graphics, Wi-Fi, Ethernet, Bluetooth, camera, sound, touchpad, sleep, battery, TPM) and whether this OS drives it; `--json` for the certified list |
+| `tests/hardware/matrix.sh` | the dev VM, with emulated devices | that the report sees what QEMU can emulate (HD Audio with and without a microphone, USB sound, Intel's and Realtek's Ethernet, a TPM 2.0, 2 GB of memory), and that sound reaches the speakers |
+| `tests/soak/soak.sh` | the dev VM, for hours | agents working without a break through glassd crashes and power cuts: memory, open files, sandboxes, snapshots and the audit log stay bounded and intact |
+
+## What the VM can't stand in for
+
+QEMU has no Wi-Fi radio, camera, Bluetooth controller, battery, GPU with a
+driver, dock or Thunderbolt, and its firmware sleeps only with S3. The
+base system's simulated radio (`wtap`) does ad hoc and mesh networks only,
+so it can't play a laptop joining an access point (its source:
+`ic_caps = IEEE80211_C_MBSS | IEEE80211_C_IBSS`). Those parts are checked on
+the laptops themselves.
+
+## Checking a laptop
+
+Not yet tried on a laptop: these steps follow how the dev VM is set up.
+
+1. **The image on a USB stick.** `make image-release` (or a test image),
+   then `qemu-img convert -O raw build/images/glasshouse-*.qcow2 /dev/sdX`.
+   Turn Secure Boot off in the firmware (the loader isn't signed yet,
+   PA-6) and boot from the stick.
+2. **A way in as root.** The image has no `sudo`. Plug in Ethernet (a USB
+   adapter on thin laptops; the image asks for DHCP on every wired port)
+   and give it the dev VM's seed: write `build/vm/seed.iso` to a second
+   stick. First boot reads it (label `cidata`) and takes the dev key, so
+   `ssh -i build/vm/ssh/id_ed25519 root@<laptop>` works.
+3. **The report.** `glassctl hardware` as root, and `glassctl --json
+   hardware > <model>.json` for the record. Anything marked ✗ keeps the
+   model off the list until fixed; ~ works with the limit it names.
+4. **What only a person can check,** each against its requirement:
+   - Wi-Fi joins WPA2 and WPA2-Enterprise networks, by hand until the
+     Wi-Fi pane exists (CF-10, CF-12);
+   - the camera and the headset in a meeting in the browser (DK-11, CF-20);
+   - sound from the speakers and the headphone jack, and the built-in
+     microphone;
+   - closing the lid sleeps it and opening it wakes it, agents paused and
+     resumed (PM-1, PM-5), timed;
+   - a dock and an external screen (DK-11, CF-32);
+   - battery life against Windows on the same model (PM-6).
+5. **Sleep cycles (PM-4).** 1,000 cycles need something to wake the
+   laptop each time: the base system can't set a wake alarm, so use Wake
+   on LAN from another machine (`ifconfig <port> wol_magic`, where the
+   model wakes from S3 by its network port), or a USB key presser.
+
+## Known before any laptop is tried
+
+From the image's contents and the base system's source (ADR 0056):
+
+- **Sleep:** this OS version (15.1) sleeps with S3 only; suspend to idle
+  is in the base system's development branch. Laptops whose firmware
+  offers only modern standby can't sleep at all.
+- **Wi-Fi:** the image carries firmware for Intel's older cards (`iwm`,
+  up to the 9000 series). Wi-Fi 6, 6E and 7 cards (AX200 to BE200, on
+  `iwlwifi`) and Realtek's `rtw88`/`rtw89` need firmware packages it
+  doesn't have.
+- **Cameras:** the image has no camera driver (`webcamd`), and the cameras
+  behind Intel's image processor (IPU6, most Intel laptops since 2021) have
+  none on this OS. USB (UVC) cameras would work with `webcamd`.
+- **Graphics:** no graphics driver (`drm-kmod`): one screen, at the
+  resolution the firmware set, with no brightness control.
+- **Sound:** HD Audio works; laptops that route their microphone through
+  Intel's audio DSP have no driver for it.
+- **Bluetooth:** Intel's controllers need firmware (`iwmbt`) the image
+  doesn't have; Settings has no Bluetooth pane (CF-13).

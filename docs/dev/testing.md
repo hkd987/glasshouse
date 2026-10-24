@@ -48,6 +48,19 @@ Run one scenario while working on it: `make freebsd vm-deploy`, then
 The VM has a `demo` user (uid 1001) whose home is its own ZFS dataset, seeded
 with sample invoices by `post-install.sh`.
 
+## Hours, and hardware
+
+- **Soak** (`tests/soak/soak.sh --hours N`, ADR 0056): agents work in the VM
+  without a break, glassd is killed every `--crash-every` minutes and the
+  VM loses power every `--power-cut-every`, and each round samples glassd's
+  memory, open files, sandboxes, snapshots and the audit log into
+  `build/soak/<time>/metrics.csv`. It fails on a round that doesn't finish,
+  an audit log that doesn't verify, a sandbox left behind, or growth.
+- **Emulated hardware** (`tests/hardware/matrix.sh [profile...]`): boots the
+  VM with HD Audio, USB sound, Intel and Realtek Ethernet, a TPM 2.0 and
+  2 GB, and checks `glassctl hardware` against each, and that sound plays.
+- **Laptops:** [hardware.md](hardware.md).
+
 ## Manual testing
 
 In the VM (`make vm-ssh`), as the demo user:
