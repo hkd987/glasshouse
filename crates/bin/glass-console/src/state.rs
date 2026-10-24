@@ -342,6 +342,12 @@ impl State {
         Ok(toml::from_str(&self.policy.draft)?)
     }
 
+    /// What names the draft as it is now: a preview shows it, and publish
+    /// takes only the draft its preview showed (AD-3, ADR 0053).
+    pub fn draft_digest(&self) -> String {
+        glass_managed::sha256_hex(self.policy.draft.as_bytes())
+    }
+
     /// Replaces the draft, if it validates as devices will check it.
     pub fn save_draft(&mut self, doc: &PolicyDocument) -> Result<(), Refused> {
         if let Err(e) = Policy::from_document(doc.clone()) {
@@ -478,13 +484,24 @@ impl State {
         Ok(version)
     }
 
-    /// Publishes the draft to the pilot ring as the next version (AD-3).
+    /// Publishes the draft to the pilot ring as the next version (AD-3):
+    /// the draft `previewed` names ([`draft_digest`](Self::draft_digest)),
+    /// so another admin's edit since IT's preview never goes out unseen
+    /// (specs/tla/PolicyConsole.tla).
     pub fn publish(
         &mut self,
         directory: &dyn Directory,
         note: &str,
         by: &str,
+        previewed: &str,
     ) -> Result<u64, Refused> {
+        if previewed != self.draft_digest() {
+            return Err(Refused::Rule(
+                "The draft changed since you previewed it, by another admin or by you: \
+                 preview it again, then publish."
+                    .into(),
+            ));
+        }
         let draft = self.draft_for_devices(directory).map_err(internal)?;
         if self.in_force(Ring::Pilot).is_some_and(|v| v.text == draft) {
             return Err(Refused::Rule(
@@ -500,7 +517,9 @@ impl State {
     }
 
     /// Moves the next ring up to the one before it: pilot → early → broad.
-    pub fn promote(&mut self, to: Ring) -> Result<u64, Refused> {
+    /// `seen` is the version IT saw the ring before run: one published or
+    /// promoted since goes on only once IT has seen it (DV-12, ADR 0053).
+    pub fn promote(&mut self, to: Ring, seen: u64) -> Result<u64, Refused> {
         let from = match to {
             Ring::Early => Ring::Pilot,
             Ring::Broad => Ring::Early,
@@ -515,6 +534,13 @@ impl State {
             .rings
             .get(&from)
             .ok_or_else(|| Refused::Rule("Nothing to promote.".into()))?;
+        if version != seen {
+            return Err(Refused::Rule(format!(
+                "The {} ring runs v{version} now, not the v{seen} you saw: see how it runs, \
+                 then promote it.",
+                from.as_str()
+            )));
+        }
         if self.policy.rings.get(&to) == Some(&version) {
             return Err(Refused::Rule(format!(
                 "The {} ring already runs v{version}.",
@@ -528,12 +554,14 @@ impl State {
 
     /// Puts an earlier version's content back everywhere at once, as a new
     /// version: versions only go up, so devices can refuse replays (AD-3).
+    /// The draft becomes that content too; whether that threw away edits
+    /// not yet published, which IT is then told (AD-2, ADR 0053).
     pub fn rollback(
         &mut self,
         directory: &dyn Directory,
         to: u64,
         by: &str,
-    ) -> Result<u64, Refused> {
+    ) -> Result<(u64, bool), Refused> {
         let earlier = self
             .policy
             .versions
@@ -543,6 +571,10 @@ impl State {
         let release: PolicyRelease =
             serde_json::from_str(&earlier.signed.payload).map_err(internal)?;
         let draft: PolicyDocument = toml::from_str(&release.policy).map_err(internal)?;
+        let unpublished = self.draft_for_devices(directory).map_err(internal)?;
+        let discarded = self
+            .in_force(Ring::Pilot)
+            .is_none_or(|v| v.text != unpublished);
         self.policy.draft = toml::to_string(&draft).map_err(internal)?;
         let version = self
             .release_policy(directory, &format!("Rolled back to v{to}"), by, Some(to))
@@ -551,7 +583,7 @@ impl State {
             self.policy.rings.insert(ring, version);
         }
         self.save_policy().map_err(internal)?;
-        Ok(version)
+        Ok((version, discarded))
     }
 
     fn save_policy(&self) -> anyhow::Result<()> {

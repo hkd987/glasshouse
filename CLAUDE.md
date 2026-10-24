@@ -26,9 +26,10 @@ details this file leaves out.
   main (rustfmt, clippy `-D warnings` for host and FreeBSD, layering, art,
   shellcheck); `make lint-all` checks everything, as CI does.
 - `make tla` (about two minutes) after changing a workflow `specs/tla` models
-  (approvals, undo, studio versions, routines, managed sync, mail, live
-  updates): TLC checks the model, and a change in behavior changes the
-  model with it (ADR 0051, `specs/tla/README.md`).
+  (its README lists them: boot, policy, the audit log, containment, tasks
+  and approvals, undo, chat, docs, mail, meetings and more): TLC checks the
+  model, and a change in behavior changes the model with it (ADRs 0051 to
+  0053).
 - `make freebsd vm-deploy` (~12 s) to try a change in the VM;
   `make e2e-vm` (~1 min) after any change to agent-facing behavior.
 - `make dev-host` runs glassd locally with the insecure host sandbox.

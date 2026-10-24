@@ -73,9 +73,14 @@ pub struct Runtime {
     pub(crate) layers: LayerStore,
     audit: Arc<AuditLog>,
     audit_ok: AtomicBool,
+    /// Records the log couldn't take yet (a full disk), in order.
+    audit_waiting: Mutex<AuditWaiting>,
     /// From pause_for_sleep to the wake (PM-5): a resume or hand back that
     /// lands meanwhile carries on after the wake, with the rest.
     going_to_sleep: AtomicBool,
+    /// Set by [`shutdown`](Self::shutdown) under the tasks' lock: no task
+    /// starts after its stops, to run on once glassd has gone (ADR 0053).
+    closing: AtomicBool,
     events: broadcast::Sender<OwnedEvent>,
     tasks: Mutex<BTreeMap<TaskId, Arc<Task>>>,
     supervisors: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -170,7 +175,9 @@ impl Runtime {
             gateway: RwLock::new(parts.gateway),
             audit: parts.audit,
             audit_ok: AtomicBool::new(true),
+            audit_waiting: Mutex::new(AuditWaiting::default()),
             going_to_sleep: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
             events,
             tasks: Mutex::new(BTreeMap::new()),
             supervisors: Mutex::new(Vec::new()),
@@ -203,12 +210,15 @@ impl Runtime {
     /// Stops every live task and waits (bounded) for their sandboxes to be
     /// torn down. Called when the daemon exits.
     pub async fn shutdown(&self) {
-        let live: Vec<Arc<Task>> = self
-            .tasks()
-            .values()
-            .filter(|t| t.lock().tile.is_live())
-            .cloned()
-            .collect();
+        let live: Vec<Arc<Task>> = {
+            let tasks = self.tasks();
+            self.closing.store(true, Ordering::SeqCst);
+            tasks
+                .values()
+                .filter(|t| t.lock().tile.is_live())
+                .cloned()
+                .collect()
+        };
         for task in &live {
             self.stop_task(task, "Stopped because the system is shutting down");
         }
@@ -403,19 +413,77 @@ impl Runtime {
 
     // ---- recording -------------------------------------------------------
 
-    /// Appends to the audit log. A failed append marks the log unhealthy, and
-    /// the action pipeline then refuses side effects (fail closed). The
-    /// append waits for the disk (fsync), which takes long while agents
-    /// write a lot, so it runs off the async workers that answer the shell.
-    pub(crate) fn audit(&self, event: AuditEvent) {
-        if let Err(e) = blocking(|| self.audit.append(event)) {
-            tracing::error!(error = %e, "audit append failed; refusing further side effects");
-            self.audit_ok.store(false, Ordering::SeqCst);
-        }
+    /// Appends to the audit log, after the records it couldn't take
+    /// before; whether it took `event`. A failed append marks the log
+    /// unhealthy, and the action pipeline then refuses what agents ask
+    /// (fail closed); the record waits, in order, and the log is healthy
+    /// again once every record waiting is written (AU-1, ADR 0053,
+    /// `specs/tla/AuditLog.tla`). The append waits for the disk (fsync),
+    /// which takes long while agents write a lot, so it runs off the async
+    /// workers that answer the shell.
+    pub(crate) fn audit(&self, event: AuditEvent) -> bool {
+        self.write_audit(Some(event))
     }
 
+    /// Whether the log takes records, writing those waiting first.
     pub(crate) fn audit_healthy(&self) -> bool {
-        self.audit_ok.load(Ordering::SeqCst)
+        self.audit_ok.load(Ordering::SeqCst) || self.write_audit(None)
+    }
+
+    /// The records waiting, then `event`, in order: whether all were written.
+    fn write_audit(&self, event: Option<AuditEvent>) -> bool {
+        let mut waiting = self
+            .audit_waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(event) = event {
+            if waiting.events.len() < AUDIT_WAITING_MAX {
+                waiting.events.push_back(event);
+            } else {
+                waiting.lost += 1;
+            }
+        }
+        if waiting.lost > 0 && waiting.events.is_empty() {
+            let mut note = AuditEvent::new(
+                EventKind::LogRecovered,
+                format!(
+                    "{} records were lost while the audit log couldn't take them",
+                    waiting.lost
+                ),
+            );
+            note.detail = serde_json::json!({ "lost_records": waiting.lost });
+            waiting.events.push_back(note);
+            waiting.lost = 0;
+        }
+        while let Some(next) = waiting.events.front() {
+            let next = next.clone();
+            if let Err(e) = blocking(|| self.audit.append(next)) {
+                if self.audit_ok.swap(false, Ordering::SeqCst) {
+                    tracing::error!(
+                        error = %e,
+                        "audit append failed; refusing what agents ask until the log takes records"
+                    );
+                }
+                // When each happened, for the record written later.
+                let now = Timestamp::now().to_string();
+                for event in &mut waiting.events {
+                    if event.detail.is_null() {
+                        event.detail = serde_json::json!({});
+                    }
+                    if let Some(detail) = event.detail.as_object_mut() {
+                        detail
+                            .entry("happened_at")
+                            .or_insert_with(|| now.clone().into());
+                    }
+                }
+                return false;
+            }
+            waiting.events.pop_front();
+        }
+        if !self.audit_ok.swap(true, Ordering::SeqCst) {
+            tracing::warn!("the audit log takes records again");
+        }
+        true
     }
 
     /// An audit event pre-filled with the task's principal.
@@ -727,8 +795,16 @@ impl Runtime {
             _ => self.with_agent_folders(caller, request),
         };
         let prepared = self.prepare(caller, &request)?;
-        let live = self
-            .tasks()
+        // Counted and inserted under one lock, so starts at once can't all
+        // fit under the limit, nor one land after shutdown's stops
+        // (specs/tla/Containment.tla).
+        let mut tasks = self.tasks();
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(RuntimeError::Conflict(
+                "the system is shutting down; start it again once it's back".into(),
+            ));
+        }
+        let live = tasks
             .values()
             .filter(|t| t.user.uid == caller.uid && !t.is_app() && t.lock().tile.is_live())
             .count();
@@ -808,7 +884,8 @@ impl Runtime {
             title_fixed: request.title.is_some(),
             stop: stop_tx,
         }));
-        self.tasks().insert(id, Arc::clone(&task));
+        tasks.insert(id, Arc::clone(&task));
+        drop(tasks);
 
         let mut event = self.task_event(
             &task,
@@ -1329,6 +1406,7 @@ impl Runtime {
         Ok(AuditVerifyResult {
             records: report.records,
             last_hash: report.last_hash,
+            unfinished: report.unfinished,
         })
     }
 
@@ -1387,6 +1465,18 @@ fn ended() -> RuntimeError {
 fn you_drive() -> RuntimeError {
     RuntimeError::Conflict("you have control; hand back to let the agent go on, or stop it".into())
 }
+
+/// Records the audit log couldn't take yet.
+#[derive(Debug, Default)]
+struct AuditWaiting {
+    events: std::collections::VecDeque<AuditEvent>,
+    /// Records past [`AUDIT_WAITING_MAX`], noted once the log takes records.
+    lost: u64,
+}
+
+/// Records kept waiting for the log at most: agents' calls are refused
+/// meanwhile, so only the computer's own events and people's add to them.
+const AUDIT_WAITING_MAX: usize = 10_000;
 
 pub(crate) fn blocking<R>(work: impl FnOnce() -> R) -> R {
     use tokio::runtime::{Handle, RuntimeFlavor};

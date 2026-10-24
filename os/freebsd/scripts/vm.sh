@@ -10,6 +10,7 @@
 #   scp-in <src...> <dest>   copy host files into the VM
 #   exec <binary> [args]     copy a host binary into the VM and run it (usable as a cargo runner)
 #   reset              stop and delete the overlay + seed (next `up` is a fresh first boot)
+#   power-cut          restart the VM at once, as if unplugged (nothing shut down or written first)
 #   clear-snapshots    destroy the tasks' `@glass-` snapshots test runs piled up (they slow every
 #                      snapshot, docs/dev/performance.md), with glassd stopped meanwhile
 #   console-log [-f]   print (or follow) the serial console log
@@ -145,6 +146,11 @@ cmd_wait() {
 
 # qmp_input <json events>: sends input events through QMP.
 qmp_input() {
+	qmp "{\"execute\": \"input-send-event\", \"arguments\": {\"events\": $1}}"
+}
+
+# qmp <json command>: sends one command through QMP.
+qmp() {
 	vm_running || die "VM is not running"
 	[[ -S $VM_QMP ]] || die "no QMP socket (restart the VM: vm.sh down && vm.sh up)"
 	python3 - "$VM_QMP" "$1" <<'PY'
@@ -153,8 +159,7 @@ s = socket.socket(socket.AF_UNIX)
 s.connect(sys.argv[1])
 f = s.makefile("rw")
 f.readline()  # greeting
-for command in ({"execute": "qmp_capabilities"},
-                {"execute": "input-send-event", "arguments": {"events": json.loads(sys.argv[2])}}):
+for command in ({"execute": "qmp_capabilities"}, json.loads(sys.argv[2])):
     f.write(json.dumps(command) + "\n")
     f.flush()
     while True:
@@ -361,6 +366,13 @@ for i in \$(jot 120); do glassctl status >/dev/null 2>&1 && break; sleep 0.5; do
 echo \"destroyed \$n snapshots\""
 }
 
+# A power cut: the VM restarts at once, as if unplugged (nothing is shut down
+# or written first), and boots again.
+cmd_power_cut() {
+	qmp '{"execute": "system_reset"}'
+	log "power cut; the VM is booting again (vm.sh wait)"
+}
+
 cmd_reset() {
 	cmd_down
 	rm -f "$VM_DISK" "$VM_SEED" "$VM_CONSOLE" "$VM_CONSOLE.prev"
@@ -396,6 +408,7 @@ keyup) cmd_keyupdown false "$@" ;;
 type) cmd_type "$@" ;;
 usb-stick) cmd_usb_stick "$@" ;;
 reset) cmd_reset ;;
+power-cut) cmd_power_cut ;;
 clear-snapshots) cmd_clear_snapshots ;;
 console-log)
 	[[ ${1:-} == -f ]] && exec tail -F "$VM_CONSOLE"

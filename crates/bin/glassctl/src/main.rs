@@ -637,10 +637,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Verify => {
             let result: AuditVerifyResult = ctl.call(methods::AUDIT_VERIFY, Value::Null).await?;
             ctl.show(&result, |r| {
+                let unfinished = match r.unfinished {
+                    0 => String::new(),
+                    n => format!(", then {n} bytes of a record not finished"),
+                };
                 format!(
-                    "Audit log intact: {} records, chain head {}\n",
+                    "Audit log intact: {} records, chain head {}{unfinished}\n",
                     r.records,
-                    &r.last_hash[..16]
+                    r.last_hash.get(..16).unwrap_or(&r.last_hash)
                 )
             })
         }

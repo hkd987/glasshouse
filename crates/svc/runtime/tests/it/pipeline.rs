@@ -590,6 +590,78 @@ async fn stopping_tears_down_the_sandbox_and_withdraws_asks() {
     .await;
 }
 
+/// The Containment model's look before the agent starts: a task stopped
+/// while it is being set up never starts its agent, and says only that it
+/// stopped (AW-11, ADR 0053).
+#[tokio::test]
+async fn aw11_a_task_stopped_as_it_starts_never_starts_its_agent() {
+    let h = harness();
+    let task = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    // On this test's one thread the supervisor hasn't run yet.
+    h.rt.stop(&h.me, task).unwrap();
+    eventually(|| {
+        glass_audit::read(&h.audit_path(), |r| {
+            r.event.kind == EventKind::TaskFinished && r.event.task == Some(task)
+        })
+        .is_ok_and(|r| r.len() == 1)
+    })
+    .await;
+    assert_eq!(h.tile(task), TileState::Stopped);
+    let log = h.dir.path().join(format!("state/tasks/{task}/agent.log"));
+    assert!(!log.exists(), "the agent was started");
+    let activity = h.rt.get(&h.me, task).unwrap().activity;
+    assert!(
+        !activity.iter().any(|a| a.text.starts_with("Agent running")),
+        "{activity:?}"
+    );
+}
+
+/// The person's live-task limit holds however many starts land at once:
+/// they're counted and inserted under one lock (ADR 0053). A burst of
+/// starts, again and again: the race it closed was a few microseconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_live_task_limit_holds_for_starts_at_once() {
+    let h = harness();
+    for round in 0..20 {
+        let starts = 16;
+        let barrier = Arc::new(std::sync::Barrier::new(starts));
+        let calls: Vec<_> = (0..starts)
+            .map(|_| {
+                let (rt, me) = (Arc::clone(&h.rt), h.me.clone());
+                let request = h.request(&[], &["Reports"]);
+                let barrier = Arc::clone(&barrier);
+                tokio::task::spawn_blocking(move || {
+                    barrier.wait();
+                    rt.start(&me, request).map(|view| view.id)
+                })
+            })
+            .collect();
+        let mut started = Vec::new();
+        for call in calls {
+            if let Ok(id) = call.await.unwrap() {
+                started.push(id);
+            }
+        }
+        for id in &started {
+            let _ = h.rt.stop(&h.me, *id);
+        }
+        assert_eq!(started.len(), 4, "round {round}: the limit is 4 live tasks");
+    }
+}
+
+/// Once glassd is shutting down, no task starts: one landing after its
+/// stops would run on after glassd had gone (ADR 0053).
+#[tokio::test]
+async fn pa2_no_task_starts_once_shutting_down() {
+    let h = harness();
+    h.rt.shutdown().await;
+    let refused = h.rt.start(&h.me, h.request(&[], &["Reports"]));
+    assert!(
+        matches!(&refused, Err(RuntimeError::Conflict(m)) if m.contains("shutting down")),
+        "{refused:?}"
+    );
+}
+
 #[tokio::test]
 async fn other_users_cannot_see_drive_or_answer_a_task() {
     let h = harness();

@@ -505,7 +505,7 @@ impl ChatProvider {
                     }
                     Ok(seq) => Ok(seq),
                     Err(_) => {
-                        return Err(ChatFailure::Local(format!(
+                        return Err(ChatFailure::MaybePosted(format!(
                             "your organization's server didn't answer ({lost}), so the message may have been posted. If it was, it shows in the conversation once the server answers; look there before posting it again"
                         )));
                     }

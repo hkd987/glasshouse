@@ -105,6 +105,8 @@ export interface Impact {
   org_wide: boolean;
   changes: string[];
   warnings: string[];
+  /** The draft this preview shows: publishing names it (AD-3, ADR 0053). */
+  draft: string;
 }
 
 export interface Item {

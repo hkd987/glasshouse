@@ -64,6 +64,8 @@ pub struct Harness {
     pub studio: Studio,
     /// Org apps glassd fetched (R2); none until a test sets them.
     pub org_apps: Arc<MemoryOrgApps>,
+    /// The audit log the runtime writes, for a test to fill its disk.
+    pub audit: Arc<AuditLog>,
 }
 
 impl Harness {
@@ -379,6 +381,8 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         ))),
     );
 
+    let audit =
+        Arc::new(AuditLog::open(dir.path().join("audit.log"), Durability::Buffered).unwrap());
     let rt = Runtime::new(RuntimeParts {
         config: RuntimeConfig {
             state_dir: dir.path().join("state"),
@@ -419,9 +423,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         registry,
         sandbox: Arc::new(HostSandbox),
         snapshots: Arc::new(CopySnapshotter::new(dir.path().join("snapshots"))),
-        audit: Arc::new(
-            AuditLog::open(dir.path().join("audit.log"), Durability::Buffered).unwrap(),
-        ),
+        audit: Arc::clone(&audit),
         gateway: Arc::new(gateway),
         settings: settings.clone(),
     });
@@ -475,6 +477,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         mail,
         studio,
         org_apps,
+        audit,
     }
 }
 

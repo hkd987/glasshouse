@@ -98,3 +98,77 @@ async fn ad7_an_app_outside_the_profile_doesnt_open_and_the_refusal_is_audited()
         Some("calendar")
     );
 }
+
+/// AD-3 (PolicyApply.tla): an open app's call that waited on the desktop
+/// for an answer, while IT's release blocking it was applied, is decided
+/// again once answered: approving it then sends nothing. The app's next
+/// call is refused as before, and an agent's task keeps its own policy.
+#[tokio::test]
+async fn ad3_an_answer_given_after_it_blocked_the_action_sends_nothing() {
+    use std::sync::Arc;
+
+    use glass_api::{
+        AnswerApproval, AppCallResult, AppSession, ApprovalAnswer, ApprovalScope, app_methods,
+    };
+    use glass_rpc::Client;
+    use serde_json::json;
+
+    let h = harness();
+    let apps = Arc::new(Client::connect(h.serve_apps()).await.unwrap());
+    let mail: AppSession = apps
+        .call(app_methods::APP_OPEN, json!({ "app": "mail" }))
+        .await
+        .unwrap();
+    let session = mail.session;
+    let reply = json!({ "messages": [{ "to": ["dana@northwind.example"],
+        "subject": "Re: Renewal terms", "body": "Tuesday works." }] });
+    let sending = {
+        let (apps, reply) = (Arc::clone(&apps), reply.clone());
+        tokio::spawn(async move {
+            let sent: AppCallResult = apps
+                .call(
+                    app_methods::APP_CALL,
+                    json!({ "session": session, "action": "mail.send", "input": reply }),
+                )
+                .await
+                .unwrap();
+            sent
+        })
+    };
+    common::eventually(|| !h.rt.approvals(&h.me).is_empty()).await;
+    // While the person decides, IT's release makes sending mail Never.
+    h.apply_policy(
+        r#"
+[[group]]
+name = "frontdesk"
+members = ["{me}"]
+agents = []
+[group.tiers]
+"mail.send" = "never"
+"#,
+        "managed v2",
+    );
+    let ask = h.rt.approvals(&h.me).remove(0);
+    h.rt.answer(
+        &h.me,
+        AnswerApproval {
+            approval: ask.id,
+            answer: ApprovalAnswer::Approve {
+                scope: ApprovalScope::Once,
+            },
+        },
+    )
+    .unwrap();
+    let sent = sending.await.unwrap();
+    assert!(!sent.ok, "sent after IT blocked it: {}", sent.text);
+    assert!(sent.text.starts_with("Blocked by policy"), "{}", sent.text);
+    let sent_dir = h.home().join("Mail/Sent");
+    let kept = std::fs::read_dir(&sent_dir).map_or(0, Iterator::count);
+    assert_eq!(kept, 0, "nothing left");
+    let blocked = glass_audit::read(&h.audit_path(), |r| {
+        r.event.outcome == Some(glass_audit::Outcome::Blocked)
+            && r.event.action.as_ref().map(|a| a.as_str()) == Some("mail.send")
+    })
+    .unwrap();
+    assert_eq!(blocked.len(), 1, "the refusal is on the record");
+}

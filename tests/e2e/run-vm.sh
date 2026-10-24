@@ -13,8 +13,8 @@
 #   6. branding: no base-system name where a user looks (BR-1, BR-2)
 #   7. boot: the settings a fast boot depends on (no reboot; see
 #      tools/boot/timeline.py for a whole boot)
-#   8. root checks: audit chain verifies, no jails, mounts or limits left
-#      behind
+#   8. root checks: audit chain verifies, no jails, mounts, limits or
+#      sandbox roots left behind
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -120,6 +120,8 @@ step "root checks"
 test \$($glass_jails) -eq 0 || { echo 'FAIL jails left behind'; exit 1; }
 test \$($glass_limits) -eq 0 || { echo 'FAIL resource limits left behind'; exit 1; }
 if mount -p | grep -q /var/db/glasshouse/sandboxes; then echo 'FAIL mounts left behind'; exit 1; fi
+# Roots and their specs, which a power cut once left for good (ADR 0053).
+if ls -d /var/db/glasshouse/sandboxes/glass-* 2>/dev/null; then echo 'FAIL sandboxes left behind'; exit 1; fi
 echo 'PASS nothing left behind'"
 
 step "all end-to-end checks passed in ${SECONDS}s"

@@ -92,6 +92,25 @@ impl Runtime {
                 "only the sign-in screen says who is at the screen".into(),
             ));
         }
+        // The sign-in screen tells again until glassd hears (ADR 0053): the
+        // same session told twice is one sign-in, and one whose `su` has
+        // ended, told late, is none.
+        if self
+            .seat_lock()
+            .as_ref()
+            .is_some_and(|s| s.user == begin.user && s.session_pid == begin.session_pid)
+        {
+            if let Some(path) = self.seat_file.get() {
+                let _ = keep(path, &begin);
+            }
+            return Ok(());
+        }
+        if glass_platform::system::process_age(begin.session_pid).is_none() {
+            return Err(RuntimeError::NotFound(format!(
+                "{}'s session has ended",
+                begin.user
+            )));
+        }
         let seat = Seat::new(begin.clone())?;
         tracing::info!(user = %begin.user, session = begin.session_pid, "seat: signed in");
         self.audit(seat_event(&begin.user, true));

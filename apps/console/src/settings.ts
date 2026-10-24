@@ -259,11 +259,12 @@ export async function settingsPage(root: HTMLElement, group: string): Promise<vo
               {
                 class: "button primary",
                 "data-test": "publish",
-                disabled: !page.changed,
+                disabled: !page.changed || !impact,
                 onclick: () =>
                   act(async () => {
                     const r = await api<{ version: number }>("POST", "/api/policy/publish", {
                       note: impact?.changes.find((c) => c.startsWith(page.group.display)) ?? `Settings for ${page.group.display}`,
+                      previewed: impact?.draft,
                     });
                     impact = null;
                     return `Published v${r.version} to the pilot ring. Pilot computers apply it in about a second.`;

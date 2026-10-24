@@ -44,6 +44,9 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 const PAM_SERVICE: &str = "glasshouse";
 /// After a refused password, the wait before the next try.
 const AFTER_REFUSAL: Duration = Duration::from_secs(2);
+/// How long the sign-in screen waits before telling glassd again who is at
+/// the screen, while glassd doesn't answer (starting, starting again).
+const TELL_AGAIN: Duration = Duration::from_secs(2);
 /// The longest line taken from the desktop at once: a password fits many
 /// times over, and nothing the desktop writes makes this root process hold
 /// more than that.
@@ -108,6 +111,24 @@ fn main() -> anyhow::Result<()> {
 async fn supervise(args: &Args) -> anyhow::Result<()> {
     let me = std::env::current_exe().context("finding this program")?;
     let mut terminate = signal(SignalKind::terminate())?;
+    // A setup a power cut interrupted is finished or undone before anything
+    // shows (ADR 0053).
+    match recover_setup(
+        Path::new(SETUP_MAKING),
+        Path::new(SETUP_RECORD),
+        |login| users::by_name(login).is_some(),
+        |login| Ok(users::finish_person(login)?),
+        |login, since| Ok(users::undo_person(login, since)?),
+    ) {
+        Ok(Some(Recovered::Finished(login))) => {
+            eprintln!("glass-greeter: finished the setup a power cut interrupted for {login}")
+        }
+        Ok(Some(Recovered::Undone(login))) => eprintln!(
+            "glass-greeter: took back what an interrupted setup made for {login}; setup asks again"
+        ),
+        Ok(None) => {}
+        Err(e) => eprintln!("glass-greeter: finishing an interrupted setup: {e:#}"),
+    }
     loop {
         hand_devices(&args.tty, 0, 0);
         let screen = Command::new(&me)
@@ -177,26 +198,31 @@ async fn supervise(args: &Args) -> anyhow::Result<()> {
             .context("starting the desktop")?;
         let su = session.id();
         // glassd learns who is at the screen and which `su` runs their
-        // desktop (ADR 0031), so the computer can sleep for them.
-        if let Some(pid) = su {
-            tell_glassd(
-                glass_api::methods::SEAT_BEGIN,
-                serde_json::json!({ "user": user, "session_pid": pid }),
-            )
-            .await;
-        }
+        // desktop (ADR 0031), so the computer can sleep for them and what
+        // follows them (the owner, USB drives, the browser) does. It may
+        // be starting, or starting again, as they sign in: it's told until
+        // it hears (ADR 0053).
+        let telling = su.map(|pid| tokio::spawn(tell_seat(user.clone(), pid)));
         let tty_name = tty_name(&args.tty);
         let serving = serve(&mut session, &user, &tty_name);
-        let Some(status) = until_stopped(serving, &mut terminate, || {
+        let ended = until_stopped(serving, &mut terminate, || {
             su.into_iter().for_each(end_session);
         })
-        .await
-        else {
+        .await;
+        // Never told after they left: glassd refuses a session that has
+        // ended, should a try already under way land late.
+        if let Some(telling) = telling {
+            telling.abort();
+        }
+        let Some(status) = ended else {
             eprintln!("glass-greeter: ended {user}'s session");
             return stopped(&args.tty);
         };
         eprintln!("glass-greeter: {user}'s session ended ({status:?})");
-        tell_glassd(glass_api::methods::SEAT_END, serde_json::Value::Null).await;
+        match tell_glassd(glass_api::methods::SEAT_END, serde_json::Value::Null).await {
+            Told::Heard => {}
+            Told::Refused(why) | Told::NotHeard(why) => eprintln!("glass-greeter: {why}"),
+        }
         // What the session left running goes with it before the screen
         // and input devices go to anyone else (agents, in jails, stay).
         if let Err(e) = users::end_processes(&user) {
@@ -308,9 +334,48 @@ async fn unlock(user: &str, tty_name: &str, password: session::Password) -> &'st
     }
 }
 
-/// Tells glassd about the seat (ADR 0031). Best effort: the desktop works
-/// without it; the computer just doesn't sleep on its own.
-async fn tell_glassd(method: &str, params: serde_json::Value) {
+/// Tells glassd who signed in (`seat.begin`) until it hears, every
+/// [`TELL_AGAIN`] while it doesn't answer; a refusal is final. The log says
+/// the first time it didn't answer, and when it heard after all.
+async fn tell_seat(user: String, session_pid: u32) {
+    let begin = serde_json::json!({ "user": user, "session_pid": session_pid });
+    let mut waited = false;
+    loop {
+        match tell_glassd(glass_api::methods::SEAT_BEGIN, begin.clone()).await {
+            Told::Heard => {
+                if waited {
+                    eprintln!("glass-greeter: glassd heard {user} signed in");
+                }
+                return;
+            }
+            Told::Refused(why) => {
+                eprintln!("glass-greeter: {why}");
+                return;
+            }
+            Told::NotHeard(why) => {
+                if !waited {
+                    eprintln!("glass-greeter: {why}; telling it again until it hears");
+                }
+                waited = true;
+            }
+        }
+        tokio::time::sleep(TELL_AGAIN).await;
+    }
+}
+
+/// What came of telling glassd something.
+enum Told {
+    Heard,
+    /// glassd answered no.
+    Refused(String),
+    /// glassd isn't there, or didn't answer in time.
+    NotHeard(String),
+}
+
+/// Tells glassd about the seat (ADR 0031). The desktop works without it;
+/// the computer just doesn't sleep on its own, and its settings don't
+/// follow who is at the screen.
+async fn tell_glassd(method: &str, params: serde_json::Value) -> Told {
     let socket = std::env::var_os(glass_api::CONTROL_SOCKET_ENV).map_or_else(
         || PathBuf::from(glass_api::DEFAULT_CONTROL_SOCKET),
         PathBuf::from,
@@ -320,9 +385,12 @@ async fn tell_glassd(method: &str, params: serde_json::Value) {
         client.call::<serde_json::Value>(method, params).await
     };
     match tokio::time::timeout(Duration::from_secs(2), told).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => eprintln!("glass-greeter: telling glassd {method}: {e}"),
-        Err(_) => eprintln!("glass-greeter: glassd didn't answer {method}"),
+        Ok(Ok(_)) => Told::Heard,
+        Ok(Err(e @ glass_rpc::ClientError::Rpc(_))) => {
+            Told::Refused(format!("glassd refused {method}: {e}"))
+        }
+        Ok(Err(e)) => Told::NotHeard(format!("telling glassd {method}: {e}")),
+        Err(_) => Told::NotHeard(format!("glassd didn't answer {method}")),
     }
 }
 
@@ -553,6 +621,11 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
 const GLASSD_CONFIG: &str = "/usr/local/etc/glasshouse/glassd.toml";
 /// What first-run setup recorded, beside glassd's state.
 const SETUP_RECORD: &str = "/var/db/glasshouse/setup.toml";
+/// What setup is making, written whole before it makes anything and put in
+/// [`SETUP_RECORD`]'s place once the account is whole: a setup a power cut
+/// interrupted is finished or undone when the greeter next starts (UX-2,
+/// ADR 0053, specs/tla/Boot.tla).
+const SETUP_MAKING: &str = "/var/db/glasshouse/setup.making.toml";
 
 /// First-run setup instead of the sign-in screen (UX-2): nobody can sign in
 /// yet, and no organization manages the computer. An enrolled computer
@@ -627,8 +700,9 @@ async fn setup(tty: &Path) -> anyhow::Result<String> {
                         Some(SetupEffect::Create { login, full_name, mut password, models }) => {
                             draw(&mut display, &setup);
                             let (who, name) = (login.clone(), full_name.clone());
+                            let record = setup_record(&login, models.map(ModelChoice::id));
                             let created = tokio::task::spawn_blocking(move || {
-                                let created = users::create_person(&who, &name, &password);
+                                let created = make_account(&who, &name, &password, &record);
                                 auth::wipe(&mut password);
                                 created
                             })
@@ -638,12 +712,11 @@ async fn setup(tty: &Path) -> anyhow::Result<String> {
                             match created {
                                 Ok(()) => {
                                     eprintln!("glass-greeter: set up {login}");
-                                    record_setup(&login, models.map(ModelChoice::id));
                                     display.hand_over();
                                     return Ok(login);
                                 }
                                 Err(e) => {
-                                    eprintln!("glass-greeter: creating {login}: {e}");
+                                    eprintln!("glass-greeter: creating {login}: {e:#}");
                                     setup.failed("Your account couldn't be created. Try again.");
                                     // The password is to type again.
                                     display.focus(
@@ -669,18 +742,107 @@ async fn setup(tty: &Path) -> anyhow::Result<String> {
     }
 }
 
-/// Records what setup asked that the account doesn't hold: how agents
-/// should reach AI models (MP-1), for Settings and the model gateway, and
-/// whose computer it is (ADR 0038): its owner changes its own settings.
-fn record_setup(owner: &str, models: Option<&str>) {
-    let record = format!(
+/// What setup records that the account doesn't hold: how agents should
+/// reach AI models (MP-1), for Settings and the model gateway, and whose
+/// computer it is (ADR 0038): its owner changes its own settings.
+fn setup_record(owner: &str, models: Option<&str>) -> String {
+    format!(
         "# First-run setup (UX-2), {}\nowner = \"{owner}\"\nmodels = \"{}\"\n",
         OffsetDateTime::now_utc().date(),
         models.unwrap_or("later")
-    );
-    if let Err(e) = std::fs::write(SETUP_RECORD, record) {
-        eprintln!("glass-greeter: {SETUP_RECORD}: {e}");
+    )
+}
+
+/// Setup's account, all or nothing across a power cut (ADR 0053): what it's
+/// making is written first, then the account is made and the record put in
+/// its place. A refusal takes the journal back; a power cut leaves it for
+/// [`recover_setup`].
+fn make_account(login: &str, full_name: &str, password: &str, record: &str) -> anyhow::Result<()> {
+    let making = Path::new(SETUP_MAKING);
+    write_whole(making, record)?;
+    if let Err(e) = users::create_person(login, full_name, password) {
+        let _ = std::fs::remove_file(making);
+        return Err(e.into());
     }
+    keep_record(making, Path::new(SETUP_RECORD))
+}
+
+/// What a setup a power cut interrupted left (ADR 0053), finished or
+/// undone: with its account made, the home is made theirs and the record
+/// kept; with none, the home it made goes, so the name can be chosen again
+/// and setup asks again. Whose setup it was, if there was one.
+/// What a start did about a setup a power cut interrupted.
+#[derive(Debug, PartialEq, Eq)]
+enum Recovered {
+    /// The account was there: its home made theirs, the record kept.
+    Finished(String),
+    /// It wasn't: the home setup made taken back, and setup asks again.
+    Undone(String),
+}
+
+fn recover_setup(
+    making: &Path,
+    record: &Path,
+    exists: impl Fn(&str) -> bool,
+    finish: impl Fn(&str) -> anyhow::Result<()>,
+    undo: impl Fn(&str, std::time::SystemTime) -> anyhow::Result<()>,
+) -> anyhow::Result<Option<Recovered>> {
+    let Ok(text) = std::fs::read_to_string(making) else {
+        return Ok(None);
+    };
+    let since = std::fs::metadata(making)?.modified()?;
+    let Some(login) = recorded_owner(&text) else {
+        std::fs::remove_file(making)?;
+        return Ok(None);
+    };
+    if exists(&login) {
+        finish(&login)?;
+        keep_record(making, record)?;
+        Ok(Some(Recovered::Finished(login)))
+    } else {
+        undo(&login, since)?;
+        std::fs::remove_file(making)?;
+        Ok(Some(Recovered::Undone(login)))
+    }
+}
+
+/// The `owner = "<login>"` line setup writes.
+fn recorded_owner(record: &str) -> Option<String> {
+    record.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("owner")?.trim_start();
+        let login = value
+            .strip_prefix('=')?
+            .trim()
+            .strip_prefix('"')?
+            .strip_suffix('"')?;
+        users::valid_login(login).then(|| login.to_owned())
+    })
+}
+
+/// Puts the journal in the record's place, for good.
+fn keep_record(making: &Path, record: &Path) -> anyhow::Result<()> {
+    std::fs::rename(making, record).with_context(|| format!("keeping {}", record.display()))?;
+    sync_dir(record)
+}
+
+/// Writes `path` whole: a temporary file, synced, renamed into place.
+fn write_whole(path: &Path, text: &str) -> anyhow::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
+    let tmp = path.with_extension("new");
+    let mut file =
+        std::fs::File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    sync_dir(path)
+}
+
+fn sync_dir(path: &Path) -> anyhow::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .with_context(|| format!("syncing {}", dir.display()))
 }
 
 /// Waits until `at`, or forever without one.
@@ -732,6 +894,61 @@ mod tests {
             !super::wants_setup(true, false, None),
             "a config it can't read might be an enrolled computer's"
         );
+    }
+
+    /// Boot.tla's "noJournal": a power cut between setup's steps left a
+    /// home with no account (that name refused for good) or an account
+    /// whose home wasn't theirs. The next start finishes or undoes it.
+    #[test]
+    fn ux2_a_setup_a_power_cut_interrupted_is_finished_or_undone() {
+        use std::cell::RefCell;
+        let dir = std::env::temp_dir().join(format!("glass-greeter-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (making, record) = (dir.join("setup.making.toml"), dir.join("setup.toml"));
+        let text = super::setup_record("dana", Some("api_key"));
+        let done = RefCell::new(Vec::new());
+        let recover = |account: bool| {
+            super::recover_setup(
+                &making,
+                &record,
+                |_| account,
+                |login| {
+                    done.borrow_mut().push(format!("finish {login}"));
+                    Ok(())
+                },
+                |login, _| {
+                    done.borrow_mut().push(format!("undo {login}"));
+                    Ok(())
+                },
+            )
+            .unwrap()
+        };
+        // Nothing interrupted: nothing to do.
+        assert_eq!(recover(true), None);
+
+        // Cut after `pw useradd`: the home is made theirs, the record kept.
+        super::write_whole(&making, &text).unwrap();
+        assert_eq!(
+            recover(true),
+            Some(super::Recovered::Finished("dana".into()))
+        );
+        assert_eq!(done.borrow().as_slice(), ["finish dana"]);
+        assert_eq!(std::fs::read_to_string(&record).unwrap(), text);
+        assert!(!making.exists());
+
+        // Cut before it: the home goes, and setup asks again.
+        std::fs::remove_file(&record).unwrap();
+        super::write_whole(&making, &text).unwrap();
+        assert_eq!(
+            recover(false),
+            Some(super::Recovered::Undone("dana".into()))
+        );
+        assert_eq!(done.borrow().last().unwrap(), "undo dana");
+        assert!(!making.exists() && !record.exists());
+
+        assert_eq!(super::recorded_owner(&text).as_deref(), Some("dana"));
+        assert_eq!(super::recorded_owner("owner = \"../root\"\n"), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

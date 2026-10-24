@@ -96,11 +96,14 @@ impl Runtime {
             && !def.name.as_str().starts_with("routines."))
         .then(|| args.clone());
 
+        // The session's policy, read once: one call is judged by one whole
+        // policy (AD-3, PolicyApply.tla).
+        let policy = task.policy();
         // What only people take (a meeting's, the person's own) is Never
         // for an agent whatever it names: refused before the provider sees
         // its input at all (ADR 0047).
         let people_only = matches!(
-            task.policy().tier_for(&def.name, def.default_tier).source,
+            policy.tier_for(&def.name, def.default_tier).source,
             glass_policy::RuleSource::PeopleOnly | glass_policy::RuleSource::PersonsOwn
         );
         let preview = if people_only {
@@ -126,28 +129,8 @@ impl Runtime {
         };
 
         let home = task.user.home.clone();
-        let policy = task.policy();
         let label_of = |path: &std::path::Path| labels::label_of(&policy, &home, path);
-        let paths = preview
-            .reads
-            .iter()
-            .chain(&preview.writes)
-            .map(PathBuf::as_path);
-        let verdict = decide(&policy, &def.name, def.default_tier, paths, &label_of);
-        // An item of the shared space is held to its label like a file
-        // (ADR 0034 §5).
-        let verdict = match (verdict, preview.label) {
-            (verdict @ Verdict::Block { .. }, _) | (verdict, None) => verdict,
-            (_, Some(label)) if !policy.may_open(label) => Verdict::Block {
-                reason: format!(
-                    "{} is labeled {label}; this agent may only open data up to {}",
-                    preview.targets.first().map_or("It", String::as_str),
-                    policy.max_label()
-                ),
-                rule: format!("data label {label}"),
-            },
-            (verdict, _) => verdict,
-        };
+        let verdict = judge(&policy, &def, &preview, &home);
         // What the call reads, so a successful one raises the task's label
         // (DP-11).
         let read_label = preview
@@ -260,6 +243,53 @@ impl Runtime {
         } else {
             None
         };
+        // A release IT made while the call waited for its answer or the
+        // turn: it's decided again by the policy its session has now (an
+        // open app follows IT's; an agent's task keeps the one it started
+        // with). What that blocks doesn't run, nor what now asks unasked
+        // (AD-3, ADR 0053, PolicyApply.tla).
+        let now = task.policy();
+        if _turn.is_some() && !Arc::ptr_eq(&now, &policy) {
+            let refusal = match judge(&now, &def, &preview, &home) {
+                again @ Verdict::Block { .. } => Some(again),
+                Verdict::Ask { rule }
+                    if approval.is_none() && !self.desk.has_task_grant(task.id, &def.name) =>
+                {
+                    Some(Verdict::Block {
+                        reason: "your organization's policy changed while it waited, and it \
+                                 asks first now; call it again"
+                            .into(),
+                        rule,
+                    })
+                }
+                _ => None,
+            };
+            if let Some(again @ Verdict::Block { .. }) = refusal {
+                let Verdict::Block { reason, .. } = &again else {
+                    unreachable!()
+                };
+                let reason = reason.clone();
+                self.record(
+                    task,
+                    &def,
+                    &preview,
+                    &again,
+                    approval.clone(),
+                    None,
+                    AuditOutcome::Blocked,
+                    started,
+                    None,
+                );
+                task.lock().note(
+                    ActivityKind::Blocked,
+                    format!("Blocked: {} — {reason}", preview.summary),
+                );
+                self.publish(task);
+                return Ok(CallToolResult::error(format!(
+                    "Blocked by policy: {reason}."
+                )));
+            }
+        }
         if second_look
             && let Some(why) = self
                 .changed_since_asked(task, &def, &provider, &args, &preview)
@@ -325,9 +355,11 @@ impl Runtime {
             }
         }
 
-        if def.side_effect != SideEffect::None && !self.audit_healthy() {
+        // Fail closed (AU-1): nothing an agent asks runs while the log can't
+        // record it, reads included (AuditLog.tla).
+        if !self.audit_healthy() {
             return Ok(CallToolResult::error(
-                "Not done: the audit log is unavailable, so the OS is refusing changes until it recovers.",
+                "Not done: the audit log can't take records right now, so the OS is refusing what agents ask until it can.",
             ));
         }
 
@@ -403,7 +435,7 @@ impl Runtime {
                         let app = def.name.as_str().split('.').next().unwrap_or_default();
                         (app.to_owned(), detail)
                     });
-                self.record_with(
+                let on_record = self.record_with(
                     task,
                     &def,
                     &preview,
@@ -415,6 +447,14 @@ impl Runtime {
                     sent,
                     provided,
                 );
+                // What a read found reaches the agent only once it's on the
+                // record (AU-1); its record waits for the log (AuditLog.tla).
+                // A change happened, so its result goes back either way.
+                if !on_record && def.side_effect == SideEffect::None {
+                    return Ok(CallToolResult::error(
+                        "Not done: the audit log couldn't record this read, so what it found isn't given; the OS is refusing what agents ask until the log can take records.",
+                    ));
+                }
                 // Away from the task's lock: it may ask the system its offset.
                 let day = recorded.as_ref().map(|_| local_day());
                 // A write that landed after the preview carries its label on
@@ -766,10 +806,10 @@ impl Runtime {
         outcome: AuditOutcome,
         started: Instant,
         model: Option<Value>,
-    ) {
+    ) -> bool {
         self.record_with(
             task, def, preview, verdict, approval, snapshot, outcome, started, model, None,
-        );
+        )
     }
 
     /// [`record`](Self::record), with what the app gave for the record
@@ -787,7 +827,7 @@ impl Runtime {
         started: Instant,
         model: Option<Value>,
         provided: Option<(String, Value)>,
-    ) {
+    ) -> bool {
         let mut event: AuditEvent =
             self.task_event(task, EventKind::Action, preview.summary.clone());
         // How long the OS took, from the call to its outcome, for the
@@ -814,7 +854,7 @@ impl Runtime {
         event.approval = approval;
         event.snapshot = snapshot;
         event.outcome = Some(outcome);
-        self.audit(event);
+        self.audit(event)
     }
 
     fn report_progress(&self, task: &Task, args: Value) -> Result<CallToolResult, RpcError> {
@@ -977,4 +1017,34 @@ fn local_day() -> String {
         }
     };
     glass_replay::local_day(Timestamp::now().unix_seconds(), offset)
+}
+
+/// How `policy` decides a call that `preview` describes: its tier, the
+/// labels of the files it names, and an item of the shared space held to
+/// its label like a file (ADR 0034 §5).
+fn judge(
+    policy: &glass_policy::EffectivePolicy,
+    def: &ActionDef,
+    preview: &Preview,
+    home: &std::path::Path,
+) -> Verdict {
+    let label_of = |path: &std::path::Path| labels::label_of(policy, home, path);
+    let paths = preview
+        .reads
+        .iter()
+        .chain(&preview.writes)
+        .map(PathBuf::as_path);
+    let verdict = decide(policy, &def.name, def.default_tier, paths, &label_of);
+    match (verdict, preview.label) {
+        (verdict @ Verdict::Block { .. }, _) | (verdict, None) => verdict,
+        (_, Some(label)) if !policy.may_open(label) => Verdict::Block {
+            reason: format!(
+                "{} is labeled {label}; this agent may only open data up to {}",
+                preview.targets.first().map_or("It", String::as_str),
+                policy.max_label()
+            ),
+            rule: format!("data label {label}"),
+        },
+        (verdict, _) => verdict,
+    }
 }

@@ -251,3 +251,12 @@ slice's plan:
 - Every change to the people sends the whole list to every device: about
   2 MB for 10,000 people. With SCIM's steady trickle of changes, releases
   need coalescing (one every few minutes at most), then deltas.
+
+## Amended by ADR 0053
+- Publish takes `previewed`, the draft's digest the preview showed, and
+  refuses (409) a draft that changed since; promote takes the `version` IT
+  saw run on the ring before; rollback answers `discarded_draft` when it
+  threw unpublished edits away (`specs/tla/PolicyConsole.tla`).
+- An open app's call that waited for an answer or for the person's turn is
+  decided again by its session's policy once it has the turn; an agent's
+  task keeps the policy it started with (`specs/tla/PolicyApply.tla`).

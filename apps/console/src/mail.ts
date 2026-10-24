@@ -130,10 +130,10 @@ export async function mailPage(root: HTMLElement): Promise<void> {
               {
                 class: "button primary",
                 "data-test": "publish",
-                disabled: !page.changed,
+                disabled: !page.changed || !impact,
                 onclick: () =>
                   act(async () => {
-                    const r = await api<{ version: number }>("POST", "/api/policy/publish", { note: impact?.changes.find((c) => c.includes("mail")) ?? "Everyone: mail service" });
+                    const r = await api<{ version: number }>("POST", "/api/policy/publish", { note: impact?.changes.find((c) => c.includes("mail")) ?? "Everyone: mail service", previewed: impact?.draft });
                     impact = null;
                     return `Published v${r.version} to the pilot ring. Pilot devices apply it in about a second.`;
                   }),

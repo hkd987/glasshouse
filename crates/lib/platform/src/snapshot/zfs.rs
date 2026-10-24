@@ -181,8 +181,14 @@ impl Snapshotter for ZfsSnapshotter {
         for (name, created) in ours(&out) {
             let snap = name.split_once('@').map_or("", |(_, s)| s);
             if created < cutoff && !kept.contains(snap) {
-                cmd::run("zfs", &["destroy", name])?;
-                gone += 1;
+                // One that can't go (held, busy) doesn't keep the rest, day
+                // after day (ADR 0053).
+                match cmd::run("zfs", &["destroy", name]) {
+                    Ok(_) => gone += 1,
+                    Err(e) => {
+                        tracing::warn!(snapshot = name, error = %e, "couldn't remove an old snapshot");
+                    }
+                }
             }
         }
         Ok(gone)

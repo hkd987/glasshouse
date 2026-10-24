@@ -274,3 +274,33 @@ async fn adr0031_zero_minutes_is_never() {
             .sleep_due(Instant::now() + Duration::from_secs(24 * 3600))
     );
 }
+
+/// The sign-in screen tells glassd who signed in until it hears (ADR 0053,
+/// Boot.tla): told twice, it's one sign-in on the record; told after the
+/// session ended (a try that landed late), it's none.
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0031_a_sign_in_told_again_is_one_and_one_told_late_is_none() {
+    let h = harness_with("");
+    signed_in(&h, std::os::unix::process::parent_id());
+    signed_in(&h, std::os::unix::process::parent_id());
+    let sign_ins = glass_audit::read(&h.audit_path(), |r| {
+        r.event.kind == EventKind::SeatChanged && r.event.detail["signed_in"] == true
+    })
+    .unwrap();
+    assert_eq!(sign_ins.len(), 1, "told twice, signed in once");
+    h.rt.seat_end(&root(&h)).unwrap();
+
+    // A session whose `su` has ended.
+    let mut ended = std::process::Command::new("true").spawn().unwrap();
+    let pid = ended.id();
+    ended.wait().unwrap();
+    let late = h.rt.seat_begin(
+        &root(&h),
+        SeatBegin {
+            user: h.me.name.clone(),
+            session_pid: pid,
+        },
+    );
+    assert!(late.is_err(), "{late:?}");
+    assert_eq!(h.rt.seat_user(), None);
+}

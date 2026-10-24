@@ -196,6 +196,39 @@ mod tests {
         assert_eq!(records[3].event.detail["dropped_bytes"], 17);
     }
 
+    // AuditLog.tla, AU2_VerifyNeverCallsAGoodLogCorrupt and
+    // AU2_TheReportReadsAGoodLog: a write under way, or one a full disk or
+    // a crash cut short, ends the file in part of a line. Every reader took
+    // it for corruption: `glassctl verify` failed, and glassd reported no
+    // blocked actions to the console.
+    #[test]
+    fn au2_a_record_still_being_written_is_not_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        write_three(&path);
+        for unfinished in [&br#"{"hash":"9a"#[..], &[b'x'; 70_000][..]] {
+            let records = verify(&path).unwrap().records;
+            let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(unfinished).unwrap();
+            drop(file);
+
+            let report = verify(&path).unwrap();
+            assert_eq!(report.records, records);
+            assert_eq!(report.unfinished, unfinished.len() as u64);
+            let all = read(&path, |_| true).unwrap();
+            assert_eq!(all.len() as u64, records);
+            assert_eq!(read_since(&path, 0, |_| true).unwrap(), all);
+            // Opening it for writing cuts it off, as before.
+            AuditLog::open(&path, Durability::Buffered).unwrap();
+            let report = verify(&path).unwrap();
+            assert_eq!(report.unfinished, 0);
+            assert_eq!(
+                read(&path, |_| true).unwrap().last().unwrap().event.kind,
+                EventKind::LogRecovered
+            );
+        }
+    }
+
     #[test]
     fn read_filters_by_task() {
         let dir = tempfile::tempdir().unwrap();

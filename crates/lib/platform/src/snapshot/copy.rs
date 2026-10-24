@@ -110,9 +110,13 @@ impl Snapshotter for CopySnapshotter {
             };
             let dir = entry.path();
             if !keep.contains(&id) && taken(&dir).is_some_and(|t| t < before) {
-                fs::remove_dir_all(&dir)
-                    .map_err(|e| PlatformError::io(format!("removing {}", dir.display()), e))?;
-                gone += 1;
+                // One that can't go doesn't keep the rest (ADR 0053).
+                match fs::remove_dir_all(&dir) {
+                    Ok(()) => gone += 1,
+                    Err(e) => {
+                        tracing::warn!(snapshot = %dir.display(), error = %e, "couldn't remove an old snapshot");
+                    }
+                }
             }
         }
         Ok(gone)
@@ -193,6 +197,31 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(left, BTreeSet::from([held.to_string(), new.to_string()]));
+    }
+
+    /// AU-20 as a computer ages: one old snapshot that can't be removed
+    /// doesn't keep the others (ADR 0053).
+    #[test]
+    fn au20_a_snapshot_that_cant_go_doesnt_keep_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let snaps = CopySnapshotter::new(dir.path().join("snaps"));
+        let (stuck, old) = (SnapshotId::new(), SnapshotId::new());
+        snaps.snapshot(old, std::slice::from_ref(&home)).unwrap();
+        // Something in the store under a snapshot's name that won't go as
+        // one: a file, not a folder.
+        fs::write(dir.path().join("snaps").join(stuck.to_string()), "").unwrap();
+        let long_ago = SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 3600);
+        for id in [stuck, old] {
+            fs::File::open(dir.path().join("snaps").join(id.to_string()))
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+        let month_ago = SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 3600);
+        assert_eq!(snaps.prune(month_ago, &BTreeSet::new()).unwrap(), 1);
+        assert!(!dir.path().join("snaps").join(old.to_string()).exists());
     }
 
     #[test]

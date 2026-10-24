@@ -116,11 +116,14 @@ function render(view: View, act: Act): HTMLElement {
         {
           class: "button primary",
           "data-test": "publish",
-          disabled: !p.draft_changed,
+          // What goes out is what IT previewed (AD-3).
+          disabled: !p.draft_changed || !view.impact,
+          title: view.impact ? undefined : "Preview the impact first",
           onclick: () =>
             act(async () => {
               const r = await api<{ version: number }>("POST", "/api/policy/publish", {
                 note: view.impact?.changes[0] ?? `${g.display}: policy changed`,
+                previewed: view.impact?.draft,
               });
               return `Published v${r.version} to the pilot ring. Pilot devices apply it in about a second.`;
             }),
@@ -276,7 +279,7 @@ function render(view: View, act: Act): HTMLElement {
         {
           class: "button",
           disabled: p.rings.pilot === p.rings.early,
-          onclick: () => act(async () => `Early ring now runs v${(await api<{ version: number }>("POST", "/api/policy/promote", { ring: "early" })).version}.`),
+          onclick: () => act(async () => `Early ring now runs v${(await api<{ version: number }>("POST", "/api/policy/promote", { ring: "early", version: p.rings.pilot })).version}.`),
         },
         "Promote to early",
       ),
@@ -285,7 +288,7 @@ function render(view: View, act: Act): HTMLElement {
         {
           class: "button",
           disabled: p.rings.early === p.rings.broad,
-          onclick: () => act(async () => `Every device now runs v${(await api<{ version: number }>("POST", "/api/policy/promote", { ring: "broad" })).version}.`),
+          onclick: () => act(async () => `Every device now runs v${(await api<{ version: number }>("POST", "/api/policy/promote", { ring: "broad", version: p.rings.early })).version}.`),
         },
         "Promote to broad",
       ),
@@ -313,8 +316,9 @@ function render(view: View, act: Act): HTMLElement {
                       class: "button small",
                       onclick: () =>
                         act(async () => {
-                          const r = await api<{ version: number }>("POST", "/api/policy/rollback", { to: v.version });
-                          return `Rolled back to v${v.version}'s rules as v${r.version}, on every device.`;
+                          const r = await api<{ version: number; discarded_draft: boolean }>("POST", "/api/policy/rollback", { to: v.version });
+                          const draft = r.discarded_draft ? " The draft's changes that weren't published were discarded." : "";
+                          return `Rolled back to v${v.version}'s rules as v${r.version}, on every device.${draft}`;
                         }),
                     },
                     `Roll back to v${v.version}`,

@@ -183,6 +183,10 @@ pub struct PowerResult {
 pub struct AuditVerifyResult {
     pub records: u64,
     pub last_hash: String,
+    /// Bytes after the last whole record: one being written, or one a
+    /// crash or a full disk cut short. Not corruption (AU-2, ADR 0053).
+    #[serde(default)]
+    pub unfinished: u64,
 }
 
 /// What subscribers are told. The shell redraws a tile per `TaskUpdated`.

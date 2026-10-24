@@ -787,14 +787,19 @@ pub enum ChatFailure {
     Link(LinkError),
     /// Something on this computer.
     Local(String),
+    /// The console may have taken a post whose answer never came: it shows
+    /// in the conversation if it did. Sending it again may post it twice
+    /// (ADR 0052).
+    MaybePosted(String),
 }
 
 impl std::fmt::Display for ChatFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotSetUp(m) | Self::Local(m) | Self::Link(LinkError::Refused(m)) => {
-                f.write_str(m)
-            }
+            Self::NotSetUp(m)
+            | Self::Local(m)
+            | Self::MaybePosted(m)
+            | Self::Link(LinkError::Refused(m)) => f.write_str(m),
             Self::Link(LinkError::Unreachable(m)) => write!(
                 f,
                 "your organization's server can't be reached ({m}). Nothing was queued; try again when it's back"

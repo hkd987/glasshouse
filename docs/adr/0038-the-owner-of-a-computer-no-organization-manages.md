@@ -81,3 +81,7 @@ and ADR 0031.
 - Not decided here: a second owner, or handing ownership over. Setup
   records one. The AI models answer is recorded but still not applied
   (slice 2: the owner's key, kept root only, for the model gateway).
+
+## Amended by ADR 0053
+glassd learns the owner when someone signs in, if it knew of none: at
+first boot it starts before setup makes them (`specs/tla/Boot.tla`).

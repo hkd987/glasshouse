@@ -313,14 +313,15 @@ pub fn fill(
     state
         .save_draft(&doc)
         .map_err(|e| anyhow::anyhow!("fixture policy: {e:?}"))?;
+    let previewed = state.draft_digest();
     let version = state
-        .publish(dir, "AP and Legal get their agents", "pat")
+        .publish(dir, "AP and Legal get their agents", "pat", &previewed)
         .map_err(|e| anyhow::anyhow!("fixture policy: {e:?}"))?;
     state
-        .promote(Ring::Early)
+        .promote(Ring::Early, version)
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     state
-        .promote(Ring::Broad)
+        .promote(Ring::Broad, version)
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
     for item in catalog(items) {

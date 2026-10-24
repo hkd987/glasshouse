@@ -2,7 +2,7 @@
 //! with what the broad ring runs, in words IT reads, and how many people
 //! and agents it reaches ("this change affects 214 users and 3 agents").
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use glass_policy::document::{
     AgentPolicy, GroupPolicy, Managed, PolicyDocument, Support, SupportRole,
@@ -58,6 +58,11 @@ pub struct Impact {
     /// `Policy::lint` on the draft: irreversible actions below Ask and the
     /// like.
     pub warnings: Vec<String>,
+    /// The draft this preview shows ([`State::draft_digest`]): publish
+    /// names it (AD-3, ADR 0053).
+    ///
+    /// [`State::draft_digest`]: crate::state::State::draft_digest
+    pub draft: String,
 }
 
 fn tier(t: Tier) -> &'static str {
@@ -269,10 +274,28 @@ fn agent_lines(
 }
 
 /// The agents `user` may run under `doc`, by any of their groups.
-fn agents_for(doc: &PolicyDocument, directory: &dyn Directory, user: &str) -> Vec<String> {
+/// The agents any of `people` may run under `doc`, by any of their groups:
+/// each group's members read once, not once a person (a preview of a big
+/// group's change took 6 s at 10,000 people, under the console's lock;
+/// ADR 0053).
+fn agents_reaching(
+    doc: &PolicyDocument,
+    directory: &dyn Directory,
+    people: &[&str],
+) -> BTreeSet<String> {
+    if people.is_empty() {
+        return BTreeSet::new();
+    }
+    let people: HashSet<&str> = people.iter().copied().collect();
     doc.groups
         .iter()
-        .filter(|g| g.name == EVERYONE || directory.members(&g.name).contains(&user))
+        .filter(|g| {
+            g.name == EVERYONE
+                || directory
+                    .members(&g.name)
+                    .iter()
+                    .any(|m| people.contains(m))
+        })
         .flat_map(|g| g.agents.iter().map(ToString::to_string))
         .collect()
 }
@@ -439,10 +462,8 @@ pub fn preview(
         };
         let profile_only = rules(old) == rules(draft);
         if !profile_only {
-            for member in members {
-                for doc in [old, draft] {
-                    agents.extend(agents_for(doc, directory, member));
-                }
+            for doc in [old, draft] {
+                agents.extend(agents_reaching(doc, directory, &members));
             }
         }
     }
@@ -491,6 +512,7 @@ pub fn preview(
         org_wide,
         changes,
         warnings,
+        draft: String::new(),
     }
 }
 
@@ -647,6 +669,78 @@ mod tests {
             "{:?}",
             impact.changes
         );
+    }
+
+    /// An org of `people`, in groups of 500, all of them in "staff", whose
+    /// rules a draft changes: what a preview must reach (AD-3).
+    fn big_org(people: usize) -> (LocalDirectory, PolicyDocument, PolicyDocument) {
+        use crate::directory::{Group, User};
+        let users: Vec<User> = (0..people)
+            .map(|i| User {
+                name: format!("p{i}"),
+                display: String::new(),
+                email: format!("p{i}@acme.example"),
+                title: String::new(),
+                department: String::new(),
+            })
+            .collect();
+        let mut groups: Vec<Group> = (0..people / 500)
+            .map(|g| Group {
+                name: format!("team-{g}"),
+                display: String::new(),
+                source: String::new(),
+                members: (g * 500..(g + 1) * 500).map(|i| format!("p{i}")).collect(),
+            })
+            .collect();
+        groups.push(Group {
+            name: "staff".into(),
+            display: "Staff".into(),
+            source: String::new(),
+            members: users.iter().map(|u| u.name.clone()).collect(),
+        });
+        let teams: String = (0..people / 500)
+            .map(|g| format!("\n[[group]]\nname = \"team-{g}\"\nagents = [\"invoice-demo\"]\n"))
+            .collect();
+        let base = doc(&format!(
+            "{}{teams}\n[[group]]\nname = \"staff\"\nagents = [\"it-agent\"]\n",
+            glass_policy::DEFAULT_POLICY
+        ));
+        let draft = doc(&format!(
+            "{}{teams}\n[[group]]\nname = \"staff\"\nagents = [\"it-agent\"]\ntiers = {{ \"mail.send\" = \"never\" }}\n",
+            glass_policy::DEFAULT_POLICY
+        ));
+        (LocalDirectory { users, groups }, base, draft)
+    }
+
+    #[test]
+    fn ad3_a_change_to_a_big_group_reaches_its_people_and_every_agent_they_run() {
+        let (dir, base, draft) = big_org(2_000);
+        let impact = preview(Some((1, &base)), &draft, &dir, &Titles::first_party());
+        assert_eq!(impact.users, 2_000);
+        assert!(
+            impact.agent_ids.contains(&"invoice-demo".to_owned())
+                && impact.agent_ids.contains(&"it-agent".to_owned()),
+            "{:?}",
+            impact.agent_ids
+        );
+    }
+
+    /// How long a preview takes for a big org. Run by hand:
+    /// `cargo test -p glass-console speed_preview -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "the speed check: run by hand"]
+    #[allow(clippy::print_stdout)]
+    fn speed_preview_of_a_change_to_everyone_in_a_big_org() {
+        for people in [2_000, 10_000] {
+            let (dir, base, draft) = big_org(people);
+            let started = std::time::Instant::now();
+            let impact = preview(Some((1, &base)), &draft, &dir, &Titles::first_party());
+            println!(
+                "{people} people: {:?} ({} reached)",
+                started.elapsed(),
+                impact.users
+            );
+        }
     }
 
     #[test]

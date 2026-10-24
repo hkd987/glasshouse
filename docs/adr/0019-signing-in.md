@@ -113,3 +113,10 @@ environment, `setlogin`, PAM session modules, lastlog.
   Locking from the menu or Ctrl Super Q shows the lock screen, a wrong
   password is refused, shortcuts do nothing while locked, and `demo`'s
   password brings the desktop back as it was.
+
+## Amended by ADR 0053
+- First-run setup writes down what it's making (`setup.making.toml`)
+  before it makes anything; the sign-in screen's next start finishes an
+  interrupted setup or undoes it, and `setup.toml` is written whole.
+- The sign-in screen tells glassd who signed in until glassd hears, every
+  2 s, and stops when the session ends (`specs/tla/Boot.tla`).

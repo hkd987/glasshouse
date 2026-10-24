@@ -8,6 +8,7 @@ mod common;
 mod agent_folders;
 mod apps;
 mod artifacts;
+mod audit;
 mod catalog;
 mod chat;
 mod continuation;

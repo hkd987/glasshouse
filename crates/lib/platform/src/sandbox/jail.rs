@@ -38,7 +38,10 @@ pub struct JailConfig {
     /// Host directories mounted read-only at the same path in every jail.
     /// Enough of the base system for dynamically linked programs to run.
     pub base_mounts: Vec<PathBuf>,
-    /// Where per-jail `.conf`, `.fstab` and `.spec.json` files live.
+    /// Where per-jail `.conf`, `.fstab` and `.spec.json` files live, beside
+    /// the jails' roots: on a disk that keeps them across a restart of the
+    /// computer, so [`Sandbox::cleanup_stale`] finds every sandbox a power
+    /// cut left (ADR 0053). Not `/var/run`, which the boot empties.
     pub state_dir: PathBuf,
     /// devfs ruleset for `/dev`. 4 is the stock `devfsrules_jail`.
     pub devfs_ruleset: u32,
@@ -62,7 +65,7 @@ impl Default for JailConfig {
             .into_iter()
             .map(PathBuf::from)
             .collect(),
-            state_dir: PathBuf::from("/var/run/glasshouse/jails"),
+            state_dir: PathBuf::from("/var/db/glasshouse/sandboxes"),
             devfs_ruleset: 4,
             limits: ResourceLimits::default(),
         }
@@ -187,6 +190,25 @@ impl JailSandbox {
         Ok(())
     }
 
+    /// Roots in the state folder with no spec beside them, other than
+    /// `done`'s: made before their spec was written first, or their spec
+    /// lost with /var/run (before ADR 0053). One whose spec is there but
+    /// unreadable stays for an operator, as `cleanup_stale` leaves it.
+    fn orphans(&self, entries: &[fs::DirEntry], done: &[String]) -> Vec<(String, PathBuf)> {
+        entries
+            .iter()
+            .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+            .filter_map(|entry| {
+                let name = entry.file_name().to_str()?.to_owned();
+                let orphan = name.starts_with(JAIL_PREFIX)
+                    && check_name(&name).is_ok()
+                    && !done.contains(&name)
+                    && !self.file(&name, "spec.json").exists();
+                orphan.then(|| (name, entry.path()))
+            })
+            .collect()
+    }
+
     fn jail_exists(name: &str) -> bool {
         cmd::run("jls", &["-j", name, "jid"]).is_ok()
     }
@@ -230,6 +252,14 @@ impl Sandbox for JailSandbox {
         fs::create_dir_all(&self.config.state_dir)
             .map_err(|e| PlatformError::io("creating jail state dir", e))?;
         let fstab = self.render_fstab(spec)?;
+        let write = |ext: &str, text: &str| {
+            let path = self.file(&spec.name, ext);
+            fs::write(&path, text)
+                .map_err(|e| PlatformError::io(format!("writing {}", path.display()), e))
+        };
+        // The spec first, before anything it names exists: whenever glassd
+        // stops, cleanup_stale finds everything made (ADR 0053).
+        write("spec.json", &serde_json_string(spec)?)?;
 
         create_layout(spec)?;
         for base in &self.config.base_mounts {
@@ -245,14 +275,6 @@ impl Sandbox for JailSandbox {
         fs::create_dir_all(spec.root.join("dev"))
             .map_err(|e| PlatformError::io("creating dev", e))?;
         self.write_identity(spec)?;
-
-        let spec_json = serde_json_string(spec)?;
-        let write = |ext: &str, text: &str| {
-            let path = self.file(&spec.name, ext);
-            fs::write(&path, text)
-                .map_err(|e| PlatformError::io(format!("writing {}", path.display()), e))
-        };
-        write("spec.json", &spec_json)?;
         write("fstab", &fstab)?;
         write("conf", &self.render_conf(spec))?;
 
@@ -342,7 +364,8 @@ impl Sandbox for JailSandbox {
         let Ok(entries) = fs::read_dir(&self.config.state_dir) else {
             return Ok(cleaned);
         };
-        for entry in entries.flatten() {
+        let entries: Vec<fs::DirEntry> = entries.flatten().collect();
+        for entry in &entries {
             let path = entry.path();
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
@@ -365,6 +388,17 @@ impl Sandbox for JailSandbox {
             };
             self.destroy(&spec)?;
             cleaned.push(spec.name);
+        }
+        for (name, root) in self.orphans(&entries, &cleaned) {
+            self.destroy(&SandboxSpec {
+                name: name.clone(),
+                root,
+                mounts: Vec::new(),
+                user: String::new(),
+                uid: 0,
+                gid: 0,
+            })?;
+            cleaned.push(name);
         }
         Ok(cleaned)
     }
@@ -428,6 +462,38 @@ mod tests {
     }
 
     #[test]
+    fn pa2_a_root_left_without_its_spec_is_found_at_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let jails = JailSandbox::new(JailConfig {
+            state_dir: dir.path().to_owned(),
+            ..JailConfig::default()
+        });
+        for d in [
+            "glass-0193ab12",
+            "glass-0193ab13",
+            "glass-0193ab14",
+            "other",
+        ] {
+            fs::create_dir(dir.path().join(d)).unwrap();
+        }
+        // One with its spec, one with a spec nobody can read: not orphans.
+        fs::write(dir.path().join("glass-0193ab13.spec.json"), "{}").unwrap();
+        fs::write(dir.path().join("glass-0193ab14.spec.json"), "not json").unwrap();
+        fs::write(dir.path().join("glass-0193ab15"), "a file").unwrap();
+        let entries: Vec<fs::DirEntry> = fs::read_dir(dir.path()).unwrap().flatten().collect();
+        let found: Vec<String> = jails
+            .orphans(&entries, &[])
+            .into_iter()
+            .map(|(name, root)| {
+                assert_eq!(root, dir.path().join(&name));
+                name
+            })
+            .collect();
+        assert_eq!(found, ["glass-0193ab12"]);
+        assert!(jails.orphans(&entries, &found).is_empty());
+    }
+
+    #[test]
     fn fstab_mounts_base_read_only_then_grants() {
         let jail = JailSandbox::new(JailConfig {
             base_mounts: vec!["/bin".into()],
@@ -452,7 +518,7 @@ mod tests {
             "children.max = 0;",
             "allow.raw_sockets = 0;",
             "devfs_ruleset = 4;",
-            "mount.fstab = \"/var/run/glasshouse/jails/glass-0193ab12.fstab\";",
+            "mount.fstab = \"/var/db/glasshouse/sandboxes/glass-0193ab12.fstab\";",
         ] {
             assert!(conf.contains(needle), "missing {needle:?} in\n{conf}");
         }

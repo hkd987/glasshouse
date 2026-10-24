@@ -176,10 +176,6 @@ pub fn full_name_problem(full_name: &str) -> Option<&'static str> {
     }
 }
 
-/// Creates a person's account (first-run setup, UX-2): a login shell, a
-/// home of their own (its own ZFS dataset when `/home` is one, so undo can
-/// restore it from snapshots, PA-5), and their password, which `pw` reads
-/// from its standard input and never sees on a command line. Root only.
 /// Ends every process of `login`'s that isn't in a jail, when their
 /// session has ended: one left running could read the keyboard or the
 /// screen it opened, and so the next person's password. Agents run in
@@ -210,6 +206,12 @@ pub fn end_processes(login: &str) -> crate::Result<()> {
     }
 }
 
+/// Creates a person's account (first-run setup, UX-2): a login shell, a
+/// home of their own (its own ZFS dataset when `/home` is one, so undo can
+/// restore it from snapshots, PA-5), and their password, which `pw` reads
+/// from its standard input and never sees on a command line. Root only.
+/// Its steps are separate commands: a power cut between them is what
+/// [`finish_person`] and [`undo_person`] are for.
 pub fn create_person(login: &str, full_name: &str, password: &str) -> crate::Result<()> {
     use crate::{PlatformError, cmd};
 
@@ -230,14 +232,7 @@ pub fn create_person(login: &str, full_name: &str, password: &str) -> crate::Res
         ));
     }
     let home = format!("/home/{login}");
-    // /home's own dataset, when it has one: the person's home goes under it.
-    let dataset = cmd::run("zfs", &["list", "-H", "-o", "name,mountpoint", "/home"])
-        .ok()
-        .and_then(|out| {
-            let mut fields = out.lines().next()?.split('\t');
-            let (name, mountpoint) = (fields.next()?, fields.next()?);
-            (mountpoint == "/home").then(|| format!("{name}/{login}"))
-        });
+    let dataset = home_dataset(login);
     if let Some(dataset) = &dataset {
         cmd::run("zfs", &["create", dataset])?;
     }
@@ -273,6 +268,66 @@ pub fn create_person(login: &str, full_name: &str, password: &str) -> crate::Res
         return Err(e);
     }
     cmd::run("chown", &[&format!("{login}:{login}"), &home]).map(drop)
+}
+
+/// The dataset a person's home is, or would be: under /home's own
+/// dataset, when it has one.
+fn home_dataset(login: &str) -> Option<String> {
+    crate::cmd::run("zfs", &["list", "-H", "-o", "name,mountpoint", "/home"])
+        .ok()
+        .and_then(|out| {
+            let mut fields = out.lines().next()?.split('\t');
+            let (name, mountpoint) = (fields.next()?, fields.next()?);
+            (mountpoint == "/home").then(|| format!("{name}/{login}"))
+        })
+}
+
+/// Finishes the account first-run setup made for `login` when a power cut
+/// came after `pw useradd` (ADR 0053): its home made theirs. Root only.
+pub fn finish_person(login: &str) -> crate::Result<()> {
+    use crate::{PlatformError, cmd};
+
+    if !cfg!(target_os = "freebsd") {
+        return Err(PlatformError::Unsupported("finishing accounts".into()));
+    }
+    if !valid_login(login) || by_name(login).is_none() {
+        return Err(PlatformError::Unsafe(format!(
+            "{login:?} is not an account here"
+        )));
+    }
+    let home = format!("/home/{login}");
+    cmd::run("chown", &[&format!("{login}:{login}"), &home]).map(drop)
+}
+
+/// Takes back the home first-run setup made for `login` when a power cut
+/// came before its account was (ADR 0053), so setup can make it again: the
+/// dataset, if it was made at `since` or later. One that was there before
+/// stays. Root only.
+pub fn undo_person(login: &str, since: std::time::SystemTime) -> crate::Result<()> {
+    use crate::{PlatformError, cmd};
+
+    if !cfg!(target_os = "freebsd") {
+        return Err(PlatformError::Unsupported("taking accounts back".into()));
+    }
+    if !valid_login(login) || by_name(login).is_some() {
+        return Err(PlatformError::Unsafe(format!(
+            "{login:?} isn't a name setup left unfinished"
+        )));
+    }
+    let Some(dataset) = home_dataset(login) else {
+        return Ok(());
+    };
+    let Ok(created) = cmd::run("zfs", &["get", "-Hp", "-o", "value", "creation", &dataset]) else {
+        return Ok(()); // no such dataset: nothing was made
+    };
+    let created: u64 = created.trim().parse().unwrap_or(0);
+    let since = since
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(u64::MAX, |d| d.as_secs());
+    if created >= since {
+        cmd::run("zfs", &["destroy", &dataset])?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

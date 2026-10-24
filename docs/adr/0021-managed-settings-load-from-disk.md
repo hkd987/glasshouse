@@ -91,3 +91,12 @@ of startup).
   is not trusted (it must validate again before use).
 - Boot timings, before and after, are in docs/dev/performance.md ("Boot"),
   measured with `tools/boot/timeline.py`.
+
+## Amended by ADR 0053
+- Its promises hold in `specs/tla/Boot.tla`: only a policy that validated
+  is enforced, the last good one only ever holds one that was, and glassd
+  refuses to start only with no good copy.
+- Jails' state lives beside their roots in `/var/db/glasshouse/sandboxes`,
+  not in `/var/run`, which the boot empties, so the start-up cleanup finds
+  what a power cut left; it also removes roots without a spec, never one
+  that still has anything mounted under it.

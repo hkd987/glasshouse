@@ -176,6 +176,11 @@ async fn setup_and_wait(
         return drive_attended(rt, task, socket, server, stop).await;
     }
 
+    // A stop that came while the task was being prepared: nothing more is
+    // made, and the agent never starts (AW-11, specs/tla/Containment.tla).
+    if task.ended() {
+        return Ok(Exit::Stopped);
+    }
     let sandbox = Arc::clone(&rt.sandbox);
     let spec = task.sandbox.clone();
     tokio::task::spawn_blocking(move || sandbox.create(&spec))
@@ -208,6 +213,11 @@ async fn setup_and_wait(
         args: task.entry.args.clone(),
         env: agent_env(rt, task),
     };
+    // The look before the agent starts: a stop by now keeps it from
+    // starting. One landing after is seen by the wait below, which kills it.
+    if task.ended() {
+        return Ok(Exit::Stopped);
+    }
     let mut command = tokio::process::Command::from(rt.sandbox.command(&task.sandbox, &process));
     command
         .stdin(Stdio::null())
@@ -225,15 +235,18 @@ async fn setup_and_wait(
             state.caption = "Getting started".into();
         }
         // Users read this line, so it names no backend (BR-1); the audit
-        // record carries the backend for security teams.
-        state.note(
-            ActivityKind::State,
-            if rt.sandbox.is_security_boundary() {
-                "Agent running in its own sealed sandbox"
-            } else {
-                "Agent running WITHOUT containment (development mode)"
-            },
-        );
+        // record carries the backend for security teams. A task stopped
+        // just as its agent started doesn't say it runs.
+        if state.tile.is_live() {
+            state.note(
+                ActivityKind::State,
+                if rt.sandbox.is_security_boundary() {
+                    "Agent running in its own sealed sandbox"
+                } else {
+                    "Agent running WITHOUT containment (development mode)"
+                },
+            );
+        }
     }
     rt.publish(task);
 

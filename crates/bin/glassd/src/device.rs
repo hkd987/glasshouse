@@ -36,6 +36,32 @@ fn owner_of(setup: Option<&str>, people: &[glass_platform::users::Person]) -> Op
     recorded.or_else(|| people.first().map(|p| p.name.clone()))
 }
 
+/// Learns the owner of a computer nobody manages when someone signs in or
+/// out, while glassd knows of none: first-run setup makes the owner after
+/// glassd has started, and their first session is the owner's like any
+/// other (ADR 0038, specs/tla/Boot.tla). An owner, once known, stays.
+pub(crate) fn learn_owner(
+    settings: SettingsHandle,
+    mut seats: tokio::sync::watch::Receiver<Option<String>>,
+    read: impl Fn() -> Option<String> + Send + Sync + 'static,
+) {
+    let read = Arc::new(read);
+    tokio::spawn(async move {
+        while seats.changed().await.is_ok() {
+            if settings.owner().is_some() {
+                continue;
+            }
+            let read = Arc::clone(&read);
+            if let Ok(owner) = tokio::task::spawn_blocking(move || read()).await
+                && owner.is_some()
+            {
+                tracing::info!(owner = ?owner, "the computer's owner, from setup");
+                settings.set_owner(owner);
+            }
+        }
+    });
+}
+
 /// What glassd last applied.
 #[derive(Debug, Default)]
 struct Applied {
@@ -253,6 +279,38 @@ mod tests {
             Some("demo")
         );
         assert_eq!(owner_of(None, &[]), None);
+    }
+
+    /// Boot.tla's "ownerAtStart": glassd starts before first-run setup
+    /// makes the owner, so it knew of none for their whole first session,
+    /// and Settings treated the computer as IT's.
+    #[tokio::test]
+    async fn adr0038_the_owner_setup_made_is_known_once_they_sign_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = SettingsHandle::new(dir.path().join("settings"));
+        let (seat, seats) = tokio::sync::watch::channel(None);
+        let made = Arc::new(Mutex::new(None::<String>));
+        learn_owner(settings.clone(), seats, {
+            let made = Arc::clone(&made);
+            move || made.lock().unwrap().clone()
+        });
+        assert_eq!(settings.owner(), None, "glassd started before setup");
+        // Setup made dana and signed her in.
+        *made.lock().unwrap() = Some("dana".into());
+        seat.send_replace(Some("dana".into()));
+        for _ in 0..200 {
+            if settings.owner().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(settings.owner().as_deref(), Some("dana"));
+        // An owner, once known, stays.
+        *made.lock().unwrap() = Some("sam".into());
+        seat.send_replace(None);
+        seat.send_replace(Some("sam".into()));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(settings.owner().as_deref(), Some("dana"));
     }
 
     fn computer(remix: bool) -> Vec<Resolved> {

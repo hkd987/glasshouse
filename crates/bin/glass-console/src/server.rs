@@ -272,17 +272,23 @@ struct SignIn {
     user: String,
 }
 
+/// A publish names the preview it shows (`draft` from the preview).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Note {
+struct Publish {
     #[serde(default)]
     note: String,
+    #[serde(default)]
+    previewed: Option<String>,
 }
 
+/// A promote names the version IT saw the ring before run.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Promote {
     ring: Ring,
+    #[serde(default)]
+    version: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1227,20 +1233,30 @@ impl Console {
                 let base = state
                     .in_force(Ring::Broad)
                     .and_then(|v| toml::from_str(&v.text).ok().map(|d| (v.version, d)));
-                let impact = impact::preview(
+                let mut impact = impact::preview(
                     base.as_ref().map(|(v, d)| (*v, d)),
                     &draft,
                     directory,
                     &self.titles,
                 );
+                impact.draft = state.draft_digest();
                 ok(serde_json::to_value(impact).unwrap_or_default())
             }
             ("POST", ["policy", "publish"]) => {
-                let note: Note = match body(request) {
+                let publish: Publish = match body(request) {
                     Ok(b) => b,
                     Err(r) => return r,
                 };
-                let result = self.state().publish(directory, &note.note, &user);
+                // AD-3: what goes out is what IT previewed.
+                let Some(previewed) = publish.previewed else {
+                    return error(
+                        400,
+                        "Preview the draft first: publishing names the preview it shows.",
+                    );
+                };
+                let result = self
+                    .state()
+                    .publish(directory, &publish.note, &user, &previewed);
                 match result {
                     Ok(version) => {
                         tracing::info!(version, by = %user, "policy published to the pilot ring");
@@ -1255,7 +1271,10 @@ impl Console {
                     Ok(b) => b,
                     Err(r) => return r,
                 };
-                let result = self.state().promote(promote.ring);
+                let Some(seen) = promote.version else {
+                    return error(400, "Name the version you saw the ring before run.");
+                };
+                let result = self.state().promote(promote.ring, seen);
                 match result {
                     Ok(version) => {
                         self.released();
@@ -1271,9 +1290,9 @@ impl Console {
                 };
                 let result = self.state().rollback(directory, rollback.to, &user);
                 match result {
-                    Ok(version) => {
+                    Ok((version, discarded)) => {
                         self.released();
-                        ok(json!({ "version": version }))
+                        ok(json!({ "version": version, "discarded_draft": discarded }))
                     }
                     Err(r) => refused(r),
                 }
@@ -2001,6 +2020,18 @@ mod tests {
             self.call_as(&self.cookie, method, path, body).await
         }
 
+        /// An admin previews the draft and publishes what the preview
+        /// showed, as the policy page does.
+        async fn publish(&self, note: &str) -> (u16, Value) {
+            let (_, impact) = self.call("POST", "/api/policy/preview", json!({})).await;
+            self.call(
+                "POST",
+                "/api/policy/publish",
+                json!({ "note": note, "previewed": impact["draft"] }),
+            )
+            .await
+        }
+
         /// A call by whoever has `session`.
         async fn call_as(
             &self,
@@ -2479,11 +2510,12 @@ mod tests {
         for (path, body) in [
             ("/api/credits/terms", json!({ "accept": true })),
             ("/api/policy/edit", json!({ "edit": "credits", "on": true })),
-            ("/api/policy/publish", json!({})),
         ] {
             let (status, answer) = t.call("POST", path, body).await;
             assert_eq!(status, 200, "{path}: {answer}");
         }
+        let (status, answer) = t.publish("").await;
+        assert_eq!(status, 200, "{answer}");
         keys
     }
 
@@ -2812,7 +2844,7 @@ mod tests {
         // Not in force until published.
         let (_, page) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
         assert_eq!(installs(&page), false);
-        let (status, _) = t.call("POST", "/api/policy/publish", json!({})).await;
+        let (status, _) = t.publish("").await;
         assert_eq!(status, 200);
         let (_, page) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
         assert_eq!(installs(&page), true);
@@ -2842,7 +2874,7 @@ mod tests {
                 .contains("Remote help: IT Help Desk taken out"),
             "{impact}"
         );
-        t.call("POST", "/api/policy/publish", json!({})).await;
+        t.publish("").await;
         let (status, _) = t.call_as(&jordan, "GET", "/api/session", Value::Null).await;
         assert_eq!(status, 401);
         let (status, _) = t.call_as(&jordan, "GET", "/api/support", Value::Null).await;
@@ -2897,7 +2929,7 @@ mod tests {
                 .contains("Desktop Support may reach kiosk computers with nobody there"),
             "{impact}"
         );
-        t.call("POST", "/api/policy/publish", json!({})).await;
+        t.publish("").await;
         let (_, page) = t.call_as(&alex, "GET", "/api/support", Value::Null).await;
         assert_eq!(unattended(&page), true);
         let (_, fleet) = t.call("GET", "/api/fleet", Value::Null).await;
@@ -3032,7 +3064,7 @@ mod tests {
         assert_eq!(lock["set"], json!({ "value": 5, "locked": true }));
         assert!(lock["pilot"].is_null());
 
-        let (status, _) = t.call("POST", "/api/policy/publish", json!({})).await;
+        let (status, _) = t.publish("").await;
         assert_eq!(status, 200);
         t.sync("d", None, 0).await;
         t.call("POST", "/api/fleet/d/ring", json!({ "ring": "pilot" }))
@@ -3117,13 +3149,7 @@ mod tests {
         assert_eq!(impact["users"], 2, "{impact}");
         assert_eq!(impact["groups"], json!(["AP Operations"]));
 
-        let (status, published) = t
-            .call(
-                "POST",
-                "/api/policy/publish",
-                json!({ "note": "AP sends never" }),
-            )
-            .await;
+        let (status, published) = t.publish("AP sends never").await;
         assert_eq!(status, 200, "{published}");
         let v2 = published["version"].as_u64().unwrap();
         assert_eq!(v2, v1 + 1);
@@ -3148,7 +3174,11 @@ mod tests {
 
         for ring in ["early", "broad"] {
             let (status, _) = t
-                .call("POST", "/api/policy/promote", json!({ "ring": ring }))
+                .call(
+                    "POST",
+                    "/api/policy/promote",
+                    json!({ "ring": ring, "version": v2 }),
+                )
                 .await;
             assert_eq!(status, 200);
         }
@@ -3176,6 +3206,91 @@ mod tests {
         let (_, page) = t.call("GET", "/api/policy?group=ap-ops", Value::Null).await;
         assert_eq!(page["group"]["display"], "AP Operations");
         assert_eq!(page["live"]["rollbacks_7d"], 1);
+    }
+
+    /// PolicyConsole.tla: two admins on one draft. What goes out is what
+    /// the publishing admin previewed, a ring is promoted to the version IT
+    /// saw run, and a rollback says when it threw away edits not yet
+    /// published (AD-2, AD-3, DV-12, ADR 0053).
+    #[tokio::test]
+    async fn ad3_what_goes_out_is_what_it_previewed_and_saw_run() {
+        let t = console().await;
+        let edit = |class: &str, tier: &str| json!({ "edit": "tier", "group": "ap-ops", "class": class, "tier": tier });
+        let v1 = t.console.state().latest_version();
+        // One admin edits and previews; another edits before the publish.
+        t.call("POST", "/api/policy/edit", edit("send", "never"))
+            .await;
+        let (_, seen) = t.call("POST", "/api/policy/preview", json!({})).await;
+        assert_eq!(seen["draft"].as_str().map(str::len), Some(64), "{seen}");
+        t.call("POST", "/api/policy/edit", edit("read", "ask"))
+            .await;
+        let (status, refused) = t
+            .call(
+                "POST",
+                "/api/policy/publish",
+                json!({ "note": "AP sends never", "previewed": seen["draft"] }),
+            )
+            .await;
+        assert_eq!(status, 409, "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("The draft changed since you previewed it"),
+            "{refused}"
+        );
+        let (status, _) = t
+            .call("POST", "/api/policy/publish", json!({ "note": "x" }))
+            .await;
+        assert_eq!(status, 400, "a publish names its preview");
+        assert_eq!(t.console.state().latest_version(), v1, "nothing signed");
+        // Previewed again, it goes out.
+        let (status, published) = t.publish("AP sends never, reads ask").await;
+        assert_eq!(status, 200, "{published}");
+        let v2 = published["version"].as_u64().unwrap();
+
+        // One admin sees v2 run on the pilot ring; another publishes v3.
+        t.call("POST", "/api/policy/edit", edit("read", "auto"))
+            .await;
+        let (_, v3) = t.publish("Reads back to auto").await;
+        let v3 = v3["version"].as_u64().unwrap();
+        let (status, refused) = t
+            .call(
+                "POST",
+                "/api/policy/promote",
+                json!({ "ring": "early", "version": v2 }),
+            )
+            .await;
+        assert_eq!(status, 409, "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("runs v{v3} now, not the v{v2} you saw")),
+            "{refused}"
+        );
+        assert_ne!(t.console.state().in_force(Ring::Early).unwrap().version, v3);
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/policy/promote",
+                json!({ "ring": "early", "version": v3 }),
+            )
+            .await;
+        assert_eq!(status, 200);
+
+        // A rollback while the draft holds an edit nobody published.
+        t.call("POST", "/api/policy/edit", edit("send", "ask"))
+            .await;
+        let (status, back) = t
+            .call("POST", "/api/policy/rollback", json!({ "to": v1 }))
+            .await;
+        assert_eq!(status, 200, "{back}");
+        assert_eq!(back["discarded_draft"], true, "{back}");
+        let (_, back) = t
+            .call("POST", "/api/policy/rollback", json!({ "to": v2 }))
+            .await;
+        assert_eq!(back["discarded_draft"], false, "{back}");
     }
 
     #[tokio::test]
@@ -3215,7 +3330,7 @@ mod tests {
             .await;
         assert_eq!(status, 400);
 
-        let (status, published) = t.call("POST", "/api/policy/publish", json!({})).await;
+        let (status, published) = t.publish("").await;
         assert_eq!(status, 200);
         let v = published["version"].as_u64().unwrap();
         // A pilot device gets it.
@@ -3270,7 +3385,7 @@ mod tests {
             json!({ "edit": "tier", "group": "everyone", "class": "export", "tier": "never" }),
         )
         .await;
-        let (status, _) = t.call("POST", "/api/policy/publish", json!({})).await;
+        let (status, _) = t.publish("").await;
         assert_eq!(status, 200);
         let (answer, took) = waiting.await.unwrap();
         assert_eq!(answer.policy.unwrap().version, v1 + 1);
@@ -3592,7 +3707,7 @@ mod tests {
             json!({ "edit": "tier", "group": "everyone", "class": "export", "tier": "never" }),
         )
         .await;
-        let (status, _) = t.call("POST", "/api/policy/publish", json!({})).await;
+        let (status, _) = t.publish("").await;
         assert_eq!(status, 200);
     }
 

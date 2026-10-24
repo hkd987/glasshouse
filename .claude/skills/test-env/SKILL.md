@@ -29,6 +29,9 @@ make vm-status            # "running: pid …, ssh … up" or not running
   `os/freebsd/scripts/vm.sh run '...'`.
 - As the demo user: `os/freebsd/scripts/vm.sh run "su demo -c 'glassctl tasks'"`
   (plain `su`, not `su -l`, keeps output clean; HOME is still set).
+- A power cut (nothing shut down or written first), for crash recovery:
+  `os/freebsd/scripts/vm.sh power-cut`, then `vm.sh wait`. Not `vm.sh
+  reset`, which deletes the VM's disk.
 - Full suite: `make e2e-vm` (~2 min). Run it after any change to the runtime,
   broker, actions, sandbox, undo or audit.
 - Logs: `/var/log/glassd.log`; per task `/var/db/glasshouse/tasks/<id>/agent.log`.

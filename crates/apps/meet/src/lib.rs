@@ -681,7 +681,7 @@ impl MeetProvider {
             Err(ChatFailure::Link(LinkError::Unreachable(_))) => {
                 return Ok(not_added_yet(&meeting.id, &title));
             }
-            Err(ChatFailure::Local(why)) if why.contains("may have been posted") => {
+            Err(ChatFailure::MaybePosted(_)) => {
                 return Ok(not_added_yet(&meeting.id, &title));
             }
             Err(e) => return Err(failed(DOING, e)),

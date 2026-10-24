@@ -450,7 +450,9 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             }
             tracing::info!(?limits, "agent resource limits");
             let mut jail = JailConfig {
-                state_dir: run_dir.join("jails"),
+                // Beside the sandboxes' roots, kept across a restart of
+                // the computer: the boot empties the run folder (ADR 0053).
+                state_dir: config.state_dir.join("sandboxes"),
                 limits,
                 ..JailConfig::default()
             };
@@ -703,6 +705,14 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // What IT sets for the computer that glassd applies itself: the time
     // zone, and USB drives for whoever is signed in (ADR 0031).
     device::watch(&org.settings, &runtime, config.studio.source.clone());
+    // First-run setup makes the owner of a computer nobody manages after
+    // glassd has started: learnt as they sign in (ADR 0038).
+    if config.managed.is_none() {
+        let state_dir = config.state_dir.clone();
+        device::learn_owner(org.settings.clone(), runtime.watch_seat(), move || {
+            device::owner(&state_dir)
+        });
+    }
     // The owner of a computer nobody manages connects their AI models in
     // Settings (ADR 0039).
     if config.managed.is_none() {

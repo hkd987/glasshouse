@@ -90,6 +90,12 @@ Send as you go, not all at the end.
 - Sleep (PM-5), as root: `service glassd suspend`, tasks, `service glassd resume`
 - Containment: `run containment-probe`, then `grep -E '^(PASS|FAIL)'` in the
   task's `agent.log`, then `jls` (nothing left behind)
+- A power cut with a task running (PA-2): `jls` and `ls
+  /var/db/glasshouse/sandboxes`, `vm.sh power-cut`, `vm.sh wait`, the same
+  again (empty), and glassd.log's "removed a sandbox left behind"
+- Signing in while glassd is down (ADR 0031): `service glassd stop`,
+  `desk.sh signin`, `service glassd start`, then the greeter's "telling it
+  again" and "glassd heard" lines in `/var/log/glass-greeter.log`
 - Audit: `glassctl audit <task>`, `glassctl verify`
 - Tailoring (TL): `glassctl tailor invoice-demo --set flag_over=1000
   --block mail.send`, then `plan`/`run` to show the layer applied, `--undo`

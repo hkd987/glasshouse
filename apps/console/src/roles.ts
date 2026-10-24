@@ -208,11 +208,12 @@ export async function rolesPage(root: HTMLElement): Promise<void> {
               {
                 class: "button primary",
                 "data-test": "publish",
-                disabled: !page.changed,
+                disabled: !page.changed || !impact,
                 onclick: () =>
                   act(async () => {
                     const r = await api<{ version: number }>("POST", "/api/policy/publish", {
                       note: impact?.changes.find((c) => c.startsWith("Remote help")) ?? "Remote help roles",
+                      previewed: impact?.draft,
                     });
                     impact = null;
                     return `Published v${r.version} to the pilot ring. Support staff's access follows it now.`;
