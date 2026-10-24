@@ -852,9 +852,9 @@ pub fn undo(
     audit: &mut dyn FnMut(AuditEvent),
 ) -> Result<PatchTrial, String> {
     let running = envs.running()?;
-    let (mut record, was) = match store.trial() {
+    let (mut record, ended, was) = match store.trial() {
         Some(r) if r.trial.state == TrialState::Probation && r.trial.env == running => {
-            (r, "on probation")
+            (r, TrialState::Cancelled, "on probation")
         }
         _ => {
             let trial = store
@@ -873,7 +873,8 @@ pub fn undo(
                     modules: Vec::new(),
                     signer: String::new(),
                 },
-                "kept",
+                TrialState::Undone,
+                "after it was kept",
             )
         }
     };
@@ -887,11 +888,7 @@ pub fn undo(
     if !envs.permanent(&from)? {
         envs.activate(&from)?;
     }
-    record.trial.state = if was == "kept" {
-        TrialState::Undone
-    } else {
-        TrialState::Cancelled
-    };
+    record.trial.state = ended;
     record.trial.ended_at = Some(Timestamp::now());
     record.trial.note = Some(format!("taken out {was}"));
     store.end(&record)?;
