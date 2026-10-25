@@ -55,7 +55,8 @@ glass_kpatch() { cargo run -q --manifest-path "$repo/Cargo.toml" -p glass-kpatch
 pub=$(glass_kpatch public --key "$kpatch/dev-key")
 in_vm "cp $conf $conf.before-patch-test &&
 	printf '\n[hardware]\nkeys = [\"%s\"]\nprobation_minutes = 5\n' '$pub' >>$conf &&
-	service glassd restart >/dev/null"
+	service glassd restart >/dev/null &&
+	for i in \$(jot 60); do glassctl status >/dev/null 2>&1 && break; sleep 1; done"
 untrust() {
 	in_vm "if [ -f $conf.before-patch-test ]; then mv $conf.before-patch-test $conf &&
 		service glassd restart >/dev/null; fi" || true
