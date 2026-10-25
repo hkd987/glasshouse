@@ -26,6 +26,10 @@ const PLAN_TOKENS: u32 = 4_000;
 const WRITE_TOKENS: u32 = 12_000;
 /// Builds before giving up.
 const TRIES: usize = 3;
+/// Times the write step may ask to read more first, and how much each
+/// adds: the plan names its reads before the searches say where to look.
+const MORE_READS: usize = 2;
+const MORE_CONTEXT: usize = 30_000;
 /// The most of a file read whole, in lines.
 const MAX_FILE_LINES: u32 = 8_000;
 /// The most of the source given to the model at once.
@@ -143,6 +147,37 @@ async fn read_file(agent: &Agent, path: &str) -> anyhow::Result<Result<String, S
             return Ok(Ok(text));
         }
     }
+}
+
+/// Reads each of `reads` (at most four: 400 lines of a file under `sys/`,
+/// from a line) into `context`, numbered, until it holds `limit`.
+async fn read_source(
+    agent: &Agent,
+    reads: &Value,
+    context: &mut String,
+    limit: usize,
+) -> anyhow::Result<()> {
+    for read in reads.as_array().into_iter().flatten().take(4) {
+        let path = read["path"]
+            .as_str()
+            .unwrap_or("")
+            .trim_start_matches("sys/");
+        agent
+            .progress(&format!("Reading sys/{path}"), None, None)
+            .await?;
+        let args = json!({ "path": path, "from": read["from"].as_u64().unwrap_or(1).max(1), "lines": 400 });
+        if let Ok(text) = call(agent, "hardware_source_read", args).await? {
+            let from = text["from"].as_u64().unwrap_or(1);
+            *context += &format!("sys/{path}, from line {from}:\n");
+            for (i, line) in text["text"].as_str().unwrap_or("").lines().enumerate() {
+                *context += &format!("{:>5}\t{line}\n", from + i as u64);
+            }
+        }
+        if context.len() > limit {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// One file's edits applied to its text: each `old` found exactly once.
@@ -343,39 +378,33 @@ async fn run() -> anyhow::Result<()> {
             }
         }
     }
-    for read in plan["read"].as_array().into_iter().flatten().take(4) {
-        let path = read["path"]
-            .as_str()
-            .unwrap_or("")
-            .trim_start_matches("sys/");
-        agent
-            .progress(&format!("Reading sys/{path}"), None, None)
-            .await?;
-        let args = json!({ "path": path, "from": read["from"].as_u64().unwrap_or(1).max(1), "lines": 400 });
-        if let Ok(text) = call(&agent, "hardware_source_read", args).await? {
-            let from = text["from"].as_u64().unwrap_or(1);
-            context += &format!("sys/{path}, from line {from}:\n");
-            for (i, line) in text["text"].as_str().unwrap_or("").lines().enumerate() {
-                context += &format!("{:>5}\t{line}\n", from + i as u64);
-            }
-        }
-        if context.len() > MAX_CONTEXT {
-            break;
-        }
-    }
-    let context: String = context.chars().take(MAX_CONTEXT).collect();
+    read_source(&agent, &plan["read"], &mut context, MAX_CONTEXT).await?;
+    let mut context: String = context.chars().take(MAX_CONTEXT).collect();
 
-    // Write it, then build it until it builds.
+    // Write it, reading more first if it asks, then build it until it
+    // builds.
     agent.progress("Writing the patch", None, None).await?;
-    let mut written = ask(
-        &agent,
-        "write",
+    let write = |context: &str| {
         format!(
             "The person says: {request}\n\nThe hardware report:\n{report}\nYour plan: {plan}\n\nThe source you read (line numbers before a tab aren't part of it):\n{context}"
-        ),
-        WRITE_TOKENS,
-    )
-    .await?;
+        )
+    };
+    let mut written = ask(&agent, "write", write(&context), WRITE_TOKENS).await?;
+    for _ in 0..MORE_READS {
+        let Some(more) = written
+            .as_ref()
+            .filter(|w| w["edits"].is_null() && w["no_patch"].is_null())
+            .map(|w| w["read"].clone())
+            .filter(|r| r.as_array().is_some_and(|r| !r.is_empty()))
+        else {
+            break;
+        };
+        let mut added = String::new();
+        read_source(&agent, &more, &mut added, MORE_CONTEXT).await?;
+        context += &added.chars().take(MORE_CONTEXT).collect::<String>();
+        agent.progress("Writing the patch", None, None).await?;
+        written = ask(&agent, "write", write(&context), WRITE_TOKENS).await?;
+    }
     let mut tries = 0;
     let build = loop {
         let Some(patch) = written.take() else {

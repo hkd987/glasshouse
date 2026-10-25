@@ -55,6 +55,12 @@ file; `new` replaces it.
 - `summary`: one line a person understands: what works after it.
 - `modules`: each module the edited files are built into.
 
+The code you'd change isn't in what you were shown? Ask for it first:
+`{"read": [{"path": "sys/dev/sound/pci/hda/hdac.c", "from": 1680}]}`,
+400 lines from `from`, at most 4 reads, twice at most. The searches'
+`file:line` results say where to look. Never write an edit for code you
+haven't seen.
+
 **Fix** it when it doesn't build: you get the compiler's errors and your
 edits. Answer with the whole set of edits again, corrected. Read the
 error's file and line, and change only what the error is about.
