@@ -229,10 +229,49 @@ fn names_back(snaps: &[String], env: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Removes `name`, with the snapshot it was made from.
+/// Removes `name`, with the snapshot `bectl` made it from. An image's
+/// snapshot, which an update's delta was received onto (ADR 0061), stays:
+/// the image's next delta comes from it.
 pub fn destroy(name: &str) -> Result<()> {
     checked(name)?;
-    cmd::run("bectl", &["destroy", "-o", name]).map(|_| ())
+    let root = be_root()?;
+    let origin = cmd::run(
+        "zfs",
+        &[
+            "get",
+            "-H",
+            "-o",
+            "value",
+            "origin",
+            &format!("{root}/{name}"),
+        ],
+    )?;
+    let made_for_it = origin
+        .trim()
+        .split_once('@')
+        .is_none_or(|(_, snap)| bectl_snapshot(snap));
+    let args: &[&str] = if made_for_it {
+        &["destroy", "-o", name]
+    } else {
+        &["destroy", name]
+    };
+    cmd::run("bectl", args).map(|_| ())
+}
+
+/// One of `bectl create`'s own snapshots: `2026-10-25-10:32:27-0`.
+fn bectl_snapshot(snap: &str) -> bool {
+    let Some((at, n)) = snap.rsplit_once('-') else {
+        return false;
+    };
+    let digit = |b: u8| b.is_ascii_digit();
+    at.len() == 19
+        && at.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 | 10 => b == b'-',
+            13 | 16 => b == b':',
+            _ => digit(b),
+        })
+        && !n.is_empty()
+        && n.bytes().all(digit)
 }
 
 fn supported() -> Result<()> {
@@ -350,6 +389,24 @@ mod tests {
         let update = names(&["glass-image-of-default", "glass-image"]);
         assert!(names_back(&update, "glass-os-2026.11.1").is_empty());
         assert!(names_back(&update, "default").is_empty());
+    }
+
+    /// The dev VM's update test (2026-10-25): an update that didn't start
+    /// was removed with `bectl destroy -o`, and the snapshot it was
+    /// received onto, the running image's `@glass-image`, went with it.
+    #[test]
+    fn ep11_removing_an_update_keeps_the_image_snapshot_it_came_from() {
+        assert!(bectl_snapshot("2026-10-25-10:32:27-0"));
+        assert!(bectl_snapshot("2026-10-25-10:32:27-12"));
+        for kept in [
+            "glass-image",
+            "glass-image-of-default",
+            "2026-10-25-10:32:27",
+            "2026-10-25 10:32:27-0",
+            "2026-10-25-10:32:27-x",
+        ] {
+            assert!(!bectl_snapshot(kept), "{kept}");
+        }
     }
 
     #[test]

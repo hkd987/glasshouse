@@ -691,9 +691,18 @@ pub fn undo(
     audit: &mut dyn FnMut(AuditEvent),
 ) -> Result<OsUpdate, String> {
     let running = envs.running()?;
+    let kept = |u: &OsUpdate| u.state == TrialState::Kept && u.env == running;
+    // The record is the last update tried: one tried since, and rolled
+    // back, leaves the kept one in the history.
     let mut record = store
         .record()
-        .filter(|r| r.update.state == TrialState::Kept && r.update.env == running)
+        .filter(|r| kept(&r.update))
+        .or_else(|| {
+            store.history().into_iter().find(kept).map(|update| Record {
+                update,
+                carried: Vec::new(),
+            })
+        })
         .ok_or_else(|| format!("{running} isn't an OS update this computer installed"))?;
     let from = record.update.from_env.clone();
     if !envs.exists(&from)? {
@@ -1269,5 +1278,38 @@ mod tests {
         start(&mut s);
         assert_eq!(s.fake.s().running, "default");
         assert!(!s.fake.exists(&update.env).unwrap(), "removed once off it");
+    }
+
+    /// The dev VM's update test (2026-10-25): an update tried after the
+    /// kept one, which didn't start, left undo refusing the kept one, "isn't
+    /// an OS update this computer installed".
+    #[test]
+    fn adr0061_a_kept_update_is_taken_out_after_a_later_one_rolled_back() {
+        let mut s = setup();
+        publish(&s, 7, "2026.11.1", &[], |_| {});
+        let kept = apply_it(&mut s, false).unwrap();
+        start(&mut s);
+        assert_eq!(state(&s), TrialState::Kept);
+        publish(
+            &s,
+            8,
+            "2026.11.2",
+            &[("boot/loader.conf", "glass_panic_test_load=\"YES\"\n")],
+            |_| {},
+        );
+        s.fake.s().panics.push("glass_panic_test".into());
+        apply_it(&mut s, false).unwrap();
+        start(&mut s);
+        assert_eq!(state(&s), TrialState::RolledBack);
+        assert_eq!(s.fake.s().running, kept.env);
+
+        let out = undo(&s.fake, &s.store, &mut |_| {}).unwrap();
+        assert_eq!(
+            (out.state, out.version.as_str()),
+            (TrialState::Undone, "2026.11.1")
+        );
+        assert_eq!(s.fake.s().permanent, "default");
+        start(&mut s);
+        assert_eq!(s.fake.s().running, "default");
     }
 }

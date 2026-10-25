@@ -15,7 +15,8 @@
 # - undo: `glassctl update undo`: the next start is the version before, which removes the update.
 #
 # The VM trusts this run's development root key, follows the pilot channel and reads releases from
-# /var/db/glasshouse-updates for this run only: its glassd.toml is put back however the run ends.
+# /var/db/glasshouse-updates for this run only: its glassd.toml is put back as the run ends. The
+# releases are on a dataset of their own, outside the boot environments, as a share or USB drive is.
 # A whole image is the size of the VM's own (about 4 GB, more than the dev disk spares), so the VM
 # makes deltas: the changes since a snapshot of the image it runs, as the release pipeline would
 # since the image it shipped. Needs the current build deployed (`make freebsd vm-deploy`).
@@ -64,13 +65,20 @@ in_vm "test ! -e $conf.before-update-test" || {
 	log "an earlier run left the VM trusting its root: put $conf.before-update-test back over $conf"
 	exit 1
 }
-in_vm "cp $conf $conf.before-update-test && mkdir -p $source/pilot && chmod 700 $source &&
+pool=${root_ds%%/*}
+in_vm "cp $conf $conf.before-update-test &&
+	{ zfs destroy -r $pool/glass-update-source 2>/dev/null || true; } &&
+	zfs create -o mountpoint=$source $pool/glass-update-source &&
+	mkdir -p $source/pilot && chmod 700 $source &&
 	printf '\n[update]\nroots = [\"%s\"]\nchannel = \"pilot\"\nsource = \"%s\"\n' '$(pub root)' '$source' >>$conf &&
 	service glassd restart >/dev/null"
 untrust() {
-	in_vm "if [ -f $conf.before-update-test ]; then mv $conf.before-update-test $conf &&
-		service glassd restart >/dev/null; fi
-		rm -rf $source" || true
+	in_vm "zfs destroy -r $pool/glass-update-source
+		case \$(kenv -q vfs.root.mountfrom) in */default) ;; *) exit 3 ;; esac
+		if [ -f $conf.before-update-test ]; then mv $conf.before-update-test $conf &&
+		service glassd restart >/dev/null; fi" ||
+		log "FAIL the VM's glassd.toml isn't back: in its default boot environment, put" \
+			"$conf.before-update-test back over $conf"
 	rm -rf "$work"
 }
 trap untrust EXIT
