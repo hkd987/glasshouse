@@ -117,6 +117,20 @@ plan = [
 ]
 
 [[agent]]
+id = "hardware-agent"
+name = "Hardware agent"
+version = "0.1"
+description = "Writes a fix for a part of this computer that doesn't work (Wi-Fi after sleep, the touchpad, the camera) as a kernel patch, has it built, and asks you before the next restart tries it."
+mode = "actions"
+program = "/usr/local/libexec/glasshouse/glass-hardware-agent"
+plan = [
+  "Read this computer's hardware report",
+  "Read the kernel's source of the release it runs, at the build service",
+  "Write the smallest change and have it built, fixing it from the compiler's errors",
+  "Show you the change and ask you before the next restart tries it; it goes back by itself if it doesn't work",
+]
+
+[[agent]]
 id = "skill-evals"
 name = "Skill evals"
 version = "0.1"

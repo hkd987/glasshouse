@@ -1,0 +1,20 @@
+[package]
+name = "glass-hardware-agent"
+description = "The hardware agent (ADR 0057, slice 2): writes a kernel patch for a part that doesn't work, has it built, and proposes it to the person."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+glass-agent-sdk.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+glass-managed.workspace = true
+
+[lints]
+workspace = true

@@ -203,7 +203,10 @@ impl Runtime {
                     )
                 }));
             }
-            Verdict::Ask { rule } if !self.desk.has_task_grant(task.id, &def.name) => {
+            Verdict::Ask { rule }
+                if glass_policy::every_time(&def.name)
+                    || !self.desk.has_task_grant(task.id, &def.name) =>
+            {
                 match self
                     .ask(task, &def, &preview, rule, &verdict, started)
                     .await

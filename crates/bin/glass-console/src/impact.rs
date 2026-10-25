@@ -650,6 +650,7 @@ mod tests {
                 "containment-probe",
                 "desktop-agent",
                 "desktop-agent-plan",
+                "hardware-agent",
                 "invoice-demo",
                 "it-agent",
                 "skill-evals"

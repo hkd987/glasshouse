@@ -21,8 +21,8 @@ pub mod store;
 mod support;
 
 pub use engine::{
-    EVERYONE, EffectivePolicy, LoosenRefused, PEOPLE_ONLY, PERSONS_OWN, Policy, PolicyError,
-    RuleSource, TierDecision, people_only, persons_own,
+    EVERY_TIME, EVERYONE, EffectivePolicy, LoosenRefused, PEOPLE_ONLY, PERSONS_OWN, Policy,
+    PolicyError, RuleSource, TierDecision, every_time, people_only, persons_own,
 };
 pub use models::{ModelRefusal, ModelRules, Prefer, Route, RouteStep};
 pub use pattern::{ActionPattern, InvalidPattern, Specificity};

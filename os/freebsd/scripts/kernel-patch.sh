@@ -25,7 +25,8 @@ set -euo pipefail
 
 vm="$FREEBSD_SCRIPTS_DIR/vm.sh"
 out_dir=$BUILD_DIR/kpatch
-key=$out_dir/dev-key
+# KPATCH_KEY: another key to sign with, as glass-kbuild signs agents' patches with its own.
+key=${KPATCH_KEY:-$out_dir/dev-key}
 src_ds=zroot/kpatch/src
 src_snap=$src_ds@$FREEBSD_RELEASE
 kernel_ds=zroot/kpatch/kernel

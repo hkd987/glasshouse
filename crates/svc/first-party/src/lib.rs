@@ -15,6 +15,8 @@ use glass_app_chat::ChatProvider;
 pub use glass_app_chat::{ChatHandle, Notice as ChatNotice};
 use glass_app_docs::DocsProvider;
 use glass_app_files::FilesProvider;
+use glass_app_hardware::HardwareProvider;
+pub use glass_app_hardware::{BuildService, HardwareHandle, Patches};
 use glass_app_helpdesk::HelpdeskProvider;
 use glass_app_mail::MailProvider;
 pub use glass_app_mail::{
@@ -75,6 +77,10 @@ pub struct Setup {
     pub skills: PathBuf,
     /// Each person's routines (DA-4), root's: the runtime runs them.
     pub routines: Routines,
+    /// What agents read and do to fix the hardware with a kernel patch
+    /// (ADR 0057): the build service and the runtime's patches, once both
+    /// exist.
+    pub hardware: HardwareHandle,
 }
 
 impl Setup {
@@ -95,6 +101,7 @@ impl Setup {
             studio: Studio::offline(),
             skills: PathBuf::from("/nonexistent"),
             routines: Routines::offline(),
+            hardware: HardwareHandle::new("/nonexistent"),
         }
     }
 }
@@ -143,6 +150,7 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
         setup.restartable_services,
     )))?;
     registry.register(Arc::new(HelpdeskProvider::new(setup.helpdesk_outbox)))?;
+    registry.register(Arc::new(HardwareProvider::new(setup.hardware)))?;
     registry.register(Arc::new(
         CatalogProvider::new(setup.catalog).managed(setup.managed),
     ))?;

@@ -258,6 +258,15 @@ fn plan_patches(
     Ok((notes, rebuilds))
 }
 
+/// The version of an update being installed, if one is: no kernel patch
+/// is set up meanwhile (ADR 0061).
+pub fn open_update(store: &Store) -> Option<String> {
+    store
+        .record()
+        .filter(|r| r.update.state.open())
+        .map(|r| r.update.version)
+}
+
 /// Whether anything blocks an update now: one under way, or a kernel
 /// patch being tried.
 fn busy(store: &Store, hw: &hwpatch::Store) -> Result<(), String> {

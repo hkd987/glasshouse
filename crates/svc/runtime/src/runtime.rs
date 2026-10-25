@@ -1563,6 +1563,12 @@ impl Runtime {
         let bytes = std::fs::read(&request.bundle)
             .map_err(|e| RuntimeError::Invalid(format!("{}: {e}", request.bundle.display())))?;
         let store = self.hardware_checked();
+        // One OS update or one kernel patch at a time (ADR 0061).
+        if let Some(update) = crate::osupdate::open_update(&self.updates) {
+            return Err(RuntimeError::Invalid(format!(
+                "OS update {update} is being installed: restart to finish it first"
+            )));
+        }
         crate::hwpatch::apply(
             &crate::hwpatch::System,
             &store,
@@ -1574,6 +1580,34 @@ impl Runtime {
         )
         .map_err(RuntimeError::Invalid)?;
         Ok(crate::hwpatch::status(&crate::hwpatch::System, &store))
+    }
+
+    /// A kernel patch an agent built, set up to try at the next start
+    /// (`hardware.patch_propose`, ADR 0057): the hardware app calls this
+    /// once the person said yes, and the checks are root's, the same as
+    /// [`Self::hardware_patch_apply`]'s.
+    pub fn hardware_patch_propose(&self, bytes: &[u8]) -> Result<glass_api::PatchTrial> {
+        if bytes.len() as u64 > crate::hwpatch::MAX_BUNDLE_BYTES {
+            return Err(RuntimeError::Invalid(
+                "more than a patch bundle may be".into(),
+            ));
+        }
+        let store = self.hardware_checked();
+        if let Some(update) = crate::osupdate::open_update(&self.updates) {
+            return Err(RuntimeError::Invalid(format!(
+                "OS update {update} is being installed: restart to finish it first"
+            )));
+        }
+        crate::hwpatch::apply(
+            &crate::hwpatch::System,
+            &store,
+            &self.config.hardware,
+            bytes,
+            &mut |event| {
+                self.audit(event);
+            },
+        )
+        .map_err(RuntimeError::Invalid)
     }
 
     /// The kernel patch being tried and the ones tried before. Root only.

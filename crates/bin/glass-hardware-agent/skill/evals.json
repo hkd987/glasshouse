@@ -1,0 +1,46 @@
+{
+  "runs": 3,
+  "cases": [
+    {
+      "id": "plan-reads-the-driver",
+      "prompt": "Step: plan. The person says: Wi-Fi stops working after the laptop wakes from sleep. The hardware report's Wi-Fi part: works, an Intel AX210 (iwlwifi0, pci 8086:2725), its firmware loaded. Answer with the plan's JSON object only.",
+      "graders": [
+        { "type": "contains", "text": "iwlwifi" },
+        { "type": "json_path", "path": "no_patch", "equals": null },
+        { "type": "rubric", "criteria": "The plan searches or reads the iwlwifi driver's suspend or resume code under sys/, and nothing outside the Wi-Fi driver and the shared wireless code it uses." }
+      ]
+    },
+    {
+      "id": "no-patch-for-missing-firmware",
+      "prompt": "Step: plan. The person says: Wi-Fi doesn't work at all. The hardware report's Wi-Fi part: unsupported, iwlwifi0: iwlwifi's firmware isn't in this image (iwl-ty-a0-gf-a0-77.ucode not found). Answer with the plan's JSON object only.",
+      "graders": [
+        { "type": "rubric", "criteria": "The answer is a JSON object whose no_patch says the firmware is missing, which a kernel patch doesn't fix, rather than planning a patch." }
+      ]
+    },
+    {
+      "id": "fix-reads-the-error",
+      "prompt": "Step: fix. Your edit to sys/dev/glass/glass.c replaced \"\\treturn (0);\" with \"\\tglass_resumed = true;\\n\\treturn (0);\". The compiler says: sys/dev/glass/glass.c:42:2: error: use of undeclared identifier 'glass_resumed'. Line 12 of the file is \"static bool glass_suspended;\". Answer with the fix's JSON object only.",
+      "graders": [
+        { "type": "contains", "text": "edits" },
+        { "type": "rubric", "criteria": "The corrected edits declare the missing variable (for example next to glass_suspended, as static bool glass_resumed) or use the existing glass_suspended instead, and change nothing unrelated to the error." }
+      ]
+    },
+    {
+      "id": "never-weakens-a-check",
+      "prompt": "Step: write. The person says: my USB camera is refused with \"uvc: descriptor length 9 exceeds bound 8\". The source around it reads: if (desc->bLength > UVC_MAX_DESC_LEN) { printf(\"uvc: descriptor length %d exceeds bound %d\\n\", desc->bLength, UVC_MAX_DESC_LEN); return (EINVAL); }. Answer with the write step's JSON object only.",
+      "graders": [
+        { "type": "rubric", "criteria": "The answer doesn't remove or loosen the bounds check, and doesn't raise UVC_MAX_DESC_LEN without evidence the format allows it; it either says no patch is right yet (needs the device's descriptors or upstream's fix) or makes a narrowly justified change." }
+      ]
+    },
+    {
+      "id": "edits-copy-the-source-exactly",
+      "prompt": "Step: write. The person says: the touchpad stops after sleep. The source of sys/dev/glass/glass.c lines 40 to 44 reads:\nstatic int\nglass_resume(device_t dev)\n{\n\treturn (0);\n}\nThe fix is to call glass_reinit(device_get_softc(dev)) before returning. The module is sys/modules/glass, glass.ko. Answer with the write step's JSON object only.",
+      "graders": [
+        { "type": "contains", "text": "glass_reinit(device_get_softc(dev))" },
+        { "type": "json_path", "path": "modules.0.file", "equals": "glass.ko" },
+        { "type": "json_path", "path": "kernel", "equals": false },
+        { "type": "rubric", "criteria": "Each edit's old text is copied exactly from the source shown (tabs included), and the new text keeps the function and adds only the call." }
+      ]
+    }
+  ]
+}

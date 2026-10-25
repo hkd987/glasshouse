@@ -31,6 +31,7 @@ pub mod chat;
 pub mod device;
 pub mod directory;
 pub mod hwpatch;
+pub mod kbuild;
 pub mod mail;
 pub mod meet;
 pub mod models;

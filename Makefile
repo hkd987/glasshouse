@@ -12,7 +12,7 @@ SHELL := /bin/bash
 REPO_ROOT := $(CURDIR)
 FREEBSD_TARGET := x86_64-unknown-freebsd
 # Binaries shipped in the OS image (see os/freebsd/dist.manifest).
-SHIPPED := glassd glassctl glass-mcp glass-demo-agent glass-it-agent glass-desktop-agent glass-claude-runner glass-skill-evals glass-probe glass-app-bridge
+SHIPPED := glassd glassctl glass-mcp glass-demo-agent glass-it-agent glass-hardware-agent glass-desktop-agent glass-claude-runner glass-skill-evals glass-probe glass-app-bridge
 # Run in the bundler's jail, which holds nothing but its own folder: statically linked, built
 # apart so the flag doesn't rebuild everything else (ADR 0049).
 STATIC_SHIPPED := glass-app-try

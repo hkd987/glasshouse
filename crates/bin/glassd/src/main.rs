@@ -12,6 +12,7 @@
 mod browser;
 mod config;
 mod device;
+mod hardware;
 mod managed;
 mod meetings;
 mod org_apps;
@@ -210,6 +211,9 @@ pub(crate) struct OrgData {
     pub(crate) org_apps: org_apps::OrgAppStore,
     /// People's routines (DA-4), root only in the state directory.
     pub(crate) routines: glass_first_party::Routines,
+    /// What agents read and do to fix the hardware (ADR 0057): built
+    /// kernel patches, root only in the state directory.
+    pub(crate) hardware: glass_first_party::HardwareHandle,
 }
 
 impl OrgData {
@@ -240,6 +244,7 @@ impl OrgData {
                 tryout: Some(config.studio.tryout.clone()),
             }),
             routines: glass_first_party::Routines::new(state_dir.join("routines")),
+            hardware: glass_first_party::HardwareHandle::new(state_dir.join("hardware/builds")),
         }
     }
 }
@@ -389,6 +394,7 @@ fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<R
         studio: org.studio.clone(),
         skills: config.state_dir.join("skills"),
         routines: org.routines.clone(),
+        hardware: org.hardware.clone(),
     })?)
 }
 
@@ -744,6 +750,15 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     org.settings
         .set_wifi(Arc::new(wifi::SystemRadio::new(&config.wifi)));
     let _ = tokio::task::spawn_blocking(wifi::set_up_station).await;
+    // What agents reach to fix the hardware (ADR 0057): the runtime's
+    // kernel patches, and the build service if this computer has one.
+    org.hardware
+        .set_patches(Arc::new(hardware::RuntimePatches(Arc::downgrade(&runtime))));
+    match hardware::service(&config.hardware) {
+        Ok(Some(service)) => org.hardware.set_service(service),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("the kernel patch build service: {e}"),
+    }
     // The screen's backlight (ADR 0060), at the brightness it last had.
     let backlight = match config.display.backlight.clone() {
         Some(path) => Some(glass_platform::backlight::Backlight::stand_in(path)),

@@ -39,6 +39,8 @@ pub(crate) struct Http {
     proxy: Option<Proxy>,
     pub(crate) idle: Duration,
     pub(crate) total: Duration,
+    /// The most of a reply read.
+    pub(crate) max_reply: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +107,16 @@ impl Http {
             proxy,
             idle: IDLE_TIMEOUT,
             total: CALL_TIMEOUT,
+            max_reply: MAX_REPLY,
         }
+    }
+
+    /// Reads replies of up to `bytes`: a built kernel patch carries its
+    /// kernel (ADR 0057).
+    #[must_use]
+    pub fn with_max_reply(mut self, bytes: usize) -> Self {
+        self.max_reply = bytes;
+        self
     }
 
     /// Waits longer than a provider's own call does, for requests that
@@ -169,7 +180,7 @@ impl Http {
             .and_then(|()| stream.write_all(body))
             .and_then(|()| stream.flush())
             .map_err(|e| outage("sending", &e))?;
-        read_reply(&mut *stream, deadline)
+        read_reply(&mut *stream, deadline, self.max_reply)
     }
 
     /// A connection to `target`, through the proxy and TLS as needed.
@@ -281,20 +292,24 @@ struct Head {
     retry_after: Option<Duration>,
 }
 
-fn read_reply(stream: &mut dyn Stream, deadline: Instant) -> Result<Reply, ProviderError> {
+fn read_reply(
+    stream: &mut dyn Stream,
+    deadline: Instant,
+    max: usize,
+) -> Result<Reply, ProviderError> {
     let mut buf: Vec<u8> = Vec::with_capacity(16 * 1024);
     let mut chunk = [0u8; 16 * 1024];
     let mut parsed: Option<Head> = None;
     let mut closed = false;
     loop {
         if parsed.is_none() {
-            parsed = head(&buf)?;
+            parsed = head(&buf, max)?;
         }
         if let Some(head) = &parsed {
             let body = &buf[head.at..];
             let done = match head.framing {
                 Framing::Length(n) if body.len() >= n => Some(body[..n].to_vec()),
-                Framing::Chunked => dechunk(body)?,
+                Framing::Chunked => dechunk(body, max)?,
                 Framing::Close if closed => Some(body.to_vec()),
                 _ => None,
             };
@@ -318,7 +333,7 @@ fn read_reply(stream: &mut dyn Stream, deadline: Instant) -> Result<Reply, Provi
                 "timed out reading the reply".into(),
             ));
         }
-        if buf.len() > MAX_REPLY {
+        if buf.len() > max {
             return Err(ProviderError::Unavailable("the reply is too large".into()));
         }
         match stream.read(&mut chunk) {
@@ -339,7 +354,7 @@ fn read_reply(stream: &mut dyn Stream, deadline: Instant) -> Result<Reply, Provi
 }
 
 /// The reply's head, once it's all there.
-fn head(buf: &[u8]) -> Result<Option<Head>, ProviderError> {
+fn head(buf: &[u8], max: usize) -> Result<Option<Head>, ProviderError> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut response = httparse::Response::new(&mut headers);
     let at = match response.parse(buf) {
@@ -365,7 +380,7 @@ fn head(buf: &[u8]) -> Result<Option<Head>, ProviderError> {
         let n: usize = length
             .parse()
             .map_err(|_| ProviderError::Unavailable("bad Content-Length".into()))?;
-        if n > MAX_REPLY {
+        if n > max {
             return Err(ProviderError::Unavailable("the reply is too large".into()));
         }
         Framing::Length(n)
@@ -385,7 +400,7 @@ fn head(buf: &[u8]) -> Result<Option<Head>, ProviderError> {
 }
 
 /// The body of a chunked reply, once its last chunk has arrived.
-fn dechunk(data: &[u8]) -> Result<Option<Vec<u8>>, ProviderError> {
+fn dechunk(data: &[u8], max: usize) -> Result<Option<Vec<u8>>, ProviderError> {
     let bad = || ProviderError::Unavailable("bad chunked encoding".into());
     let mut out = Vec::new();
     let mut at = 0;
@@ -397,7 +412,7 @@ fn dechunk(data: &[u8]) -> Result<Option<Vec<u8>>, ProviderError> {
                     return Ok(Some(out));
                 }
                 let size = usize::try_from(size).map_err(|_| bad())?;
-                if size > MAX_REPLY || out.len() + size > MAX_REPLY {
+                if size > max || out.len() + size > max {
                     return Err(ProviderError::Unavailable("the reply is too large".into()));
                 }
                 if data.len() < at + size + 2 {
@@ -574,7 +589,11 @@ mod tests {
     fn replies_are_framed_by_length_chunks_or_close() {
         let reply = |raw: &'static [u8]| {
             let mut stream = std::io::Cursor::new(raw.to_vec());
-            read_reply(&mut stream, Instant::now() + Duration::from_secs(5))
+            read_reply(
+                &mut stream,
+                Instant::now() + Duration::from_secs(5),
+                MAX_REPLY,
+            )
         };
         let r = reply(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello, and more").unwrap();
         assert_eq!((r.status, r.body.as_str()), (200, "hello"));

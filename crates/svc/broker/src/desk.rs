@@ -135,9 +135,12 @@ impl ApprovalDesk {
             }
             ApprovalAnswer::Deny => (Outcome::Denied, ApprovalState::Denied),
         };
+        // What the person says yes to every time is never granted for the
+        // rest of the task (ADR 0057).
         if let ApprovalAnswer::Approve {
             scope: ApprovalScope::Task,
         } = answer
+            && !glass_policy::every_time(&pending.view.action)
         {
             state
                 .task_grants
@@ -318,6 +321,27 @@ mod tests {
             }
         );
         assert_eq!(rx.await.unwrap(), Outcome::Approved(ApprovalScope::Once));
+        assert!(!desk.has_task_grant(task, &v.action));
+    }
+
+    /// A kernel patch is a yes every time (ADR 0057): "for the rest of the
+    /// task" approves this one only.
+    #[tokio::test]
+    async fn adr0057_a_kernel_patch_is_never_granted_for_the_task() {
+        let desk = ApprovalDesk::new();
+        let task = TaskId::new();
+        let mut v = view(task);
+        v.action = "hardware.patch_propose".parse().unwrap();
+        let rx = desk.open(v.clone(), 1001);
+        desk.answer(
+            v.id,
+            ApprovalAnswer::Approve {
+                scope: ApprovalScope::Task,
+            },
+            1001,
+        )
+        .unwrap();
+        assert_eq!(rx.await.unwrap(), Outcome::Approved(ApprovalScope::Task));
         assert!(!desk.has_task_grant(task, &v.action));
     }
 

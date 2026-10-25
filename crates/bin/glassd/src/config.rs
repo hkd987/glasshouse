@@ -102,6 +102,20 @@ pub struct HardwareConfig {
     /// computer that sleeps: any kernel patch can break waking.
     #[serde(default = "default_resumes")]
     pub probation_resumes: u64,
+    /// The build service agents' patches are built by (slice 2), and the
+    /// file with its token, root's, mode 600. Unset: agents build none.
+    #[serde(default)]
+    pub build_service: Option<String>,
+    #[serde(default = "default_build_token")]
+    pub build_token: PathBuf,
+    /// Plain HTTP to this machine, for development (a tunnel to the
+    /// host's service).
+    #[serde(default)]
+    pub build_allow_insecure_http: bool,
+}
+
+fn default_build_token() -> PathBuf {
+    "/usr/local/etc/glasshouse/kbuild-token".into()
 }
 
 impl Default for HardwareConfig {
@@ -111,6 +125,9 @@ impl Default for HardwareConfig {
             community: false,
             probation_minutes: default_probation(),
             probation_resumes: default_resumes(),
+            build_service: None,
+            build_token: default_build_token(),
+            build_allow_insecure_http: false,
         }
     }
 }

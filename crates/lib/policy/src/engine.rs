@@ -419,6 +419,16 @@ const PERSONS_OWN_WHY: &str = "only the person does it, in their own app: connec
      starting their routines or keeping new ones, in Routines (ADR 0047); no agent ever does, and \
      those apps' own [[app]] tiers say what the person does there";
 
+/// What an agent does only with the person's yes, each time: at least Ask
+/// whatever the rules say, and never under an approval for the rest of the
+/// task. Kernel code runs outside every sandbox (ADR 0057, PA-3).
+pub const EVERY_TIME: &[&str] = &["hardware.patch_propose"];
+
+/// Whether `action` asks the person every time ([`EVERY_TIME`]).
+pub fn every_time(action: &ActionName) -> bool {
+    EVERY_TIME.contains(&action.as_str())
+}
+
 fn is_persons_own(name: &str) -> bool {
     PERSONS_OWN.contains(&name)
 }
@@ -464,6 +474,9 @@ pub enum RuleSource {
     /// The person's own, with a secret only they have (ADR 0037): never an
     /// agent.
     PersonsOwn,
+    /// The person says yes every time (ADR 0057): rules can't lower it
+    /// below Ask.
+    EveryTime,
 }
 
 impl fmt::Display for RuleSource {
@@ -479,6 +492,7 @@ impl fmt::Display for RuleSource {
             RuleSource::PersonsOwn => {
                 f.write_str("only the person does this, in their own app, never an agent")
             }
+            RuleSource::EveryTime => f.write_str("the person says yes every time"),
         }
     }
 }
@@ -641,6 +655,12 @@ impl EffectivePolicy {
                     },
                 };
             }
+        }
+        if !self.app && every_time(action) && decision.tier < Tier::Ask {
+            decision = TierDecision {
+                tier: Tier::Ask,
+                source: RuleSource::EveryTime,
+            };
         }
         decision
     }
@@ -947,6 +967,46 @@ mod tests {
         // `*` names no app, and "meeting.*" isn't meetings.
         with_default("[[agent]]\nid = \"anything\"\nallowed_actions = [\"*\", \"meeting.*\"]\n")
             .unwrap();
+    }
+
+    #[test]
+    fn adr0057_a_kernel_patch_is_proposed_with_the_persons_yes_every_time() {
+        let everything = "[[agent]]\nid = \"anything\"\nallowed_actions = [\"*\"]\n\
+                          [agent.tiers]\n\"hardware.*\" = \"auto\"\n\
+                          [[group]]\nname = \"all\"\nmembers = [\"dana\"]\nagents = [\"anything\"]\n\
+                          [group.tiers]\n\"*\" = \"auto\"\n";
+        let policy = with_default(everything).unwrap();
+        let agent = policy
+            .effective("dana", &"anything".parse().unwrap())
+            .unwrap();
+        let propose = agent.tier_for(&name("hardware.patch_propose"), Tier::Auto);
+        assert_eq!(
+            (propose.tier, propose.source),
+            (Tier::Ask, RuleSource::EveryTime)
+        );
+        // Building one, or reading the report, stays as the rules say.
+        assert_eq!(
+            agent
+                .tier_for(&name("hardware.patch_build"), Tier::Auto)
+                .tier,
+            Tier::Auto
+        );
+        // Never stays never.
+        let never = with_default(
+            "[[agent]]\nid = \"anything\"\nallowed_actions = [\"*\"]\n\
+             [agent.tiers]\n\"hardware.patch_propose\" = \"never\"\n\
+             [[group]]\nname = \"all\"\nmembers = [\"dana\"]\nagents = [\"anything\"]\n",
+        )
+        .unwrap();
+        let agent = never
+            .effective("dana", &"anything".parse().unwrap())
+            .unwrap();
+        assert_eq!(
+            agent
+                .tier_for(&name("hardware.patch_propose"), Tier::Ask)
+                .tier,
+            Tier::Never
+        );
     }
 
     #[test]

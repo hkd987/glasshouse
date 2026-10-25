@@ -210,7 +210,7 @@ services = ["cron", "ntpd", "openvpn", "cupsd"]
 # directory fills `it-admins` (SCIM, AD-1).
 [[group]]
 name = "everyone"
-agents = ["desktop-agent", "desktop-agent-plan", "it-agent", "invoice-demo", "containment-probe", "claude-code", "skill-evals"]
+agents = ["desktop-agent", "desktop-agent-plan", "it-agent", "hardware-agent", "invoice-demo", "containment-probe", "claude-code", "skill-evals"]
 apps = ["browser", "mail", "calendar", "chat", "artifacts", "docs", "meet", "store", "settings", "routines", "activity-monitor", "terminal"]
 
 [[group]]
@@ -300,6 +300,14 @@ max_label = "internal"
 [[agent]]
 id = "it-agent"
 allowed_actions = ["system.*", "helpdesk.ticket.create"]
+
+# Writes a kernel patch for a part that doesn't work (ADR 0057, slice 2):
+# the report and the kernel's source to read, its patch built by the
+# build service, and the person's yes every time it proposes one
+# (hardware.patch_propose is Ask whatever a rule says). Nothing else.
+[[agent]]
+id = "hardware-agent"
+allowed_actions = ["hardware.*", "model.complete"]
 
 # Scripted demo agent used to show delegation, approvals and undo end to end
 # before model-backed agents land.

@@ -27,7 +27,7 @@ bin="${CARGO_TARGET_DIR:-$repo/target}/debug"
 
 if [ -z "${GLASS_DEV_SKIP_BUILD:-}" ]; then
 	cargo build --manifest-path "$repo/Cargo.toml" -p glassd -p glassctl -p glass-demo-agent -p glass-probe \
-		-p glass-mcp -p glass-app-bridge -p glass-skill-evals -p glass-it-agent -p glass-desktop-agent \
+		-p glass-mcp -p glass-app-bridge -p glass-skill-evals -p glass-it-agent -p glass-hardware-agent -p glass-desktop-agent \
 		-p glass-claude-runner -p glass-app-try
 	cargo build --manifest-path "$repo/Cargo.toml" -p glass-e2e --bin glass-fake-wpa
 fi
@@ -113,6 +113,13 @@ name = "IT agent"
 description = "Fixes this computer: network and VPN, storage and slowdowns, from IT's approved list. Opens a help desk ticket with diagnostics when it can't."
 program = "$bin/glass-it-agent"
 plan = ["Check the parts of this computer your problem points to", "Apply a fix from IT's approved list", "Ask you before restarting anything or opening a help desk ticket"]
+
+[[agent]]
+id = "hardware-agent"
+name = "Hardware agent"
+description = "Writes a fix for a part of this computer that doesn't work as a kernel patch, has it built, and asks you before the next restart tries it."
+program = "$bin/glass-hardware-agent"
+plan = ["Read this computer's hardware report", "Write the smallest change and have it built", "Ask you before the next restart tries it"]
 
 [[agent]]
 id = "skill-evals"

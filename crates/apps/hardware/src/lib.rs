@@ -1,0 +1,977 @@
+//! The `hardware` app's actions (ADR 0057, slice 2): what an agent reads and
+//! does to fix this computer's hardware with a kernel patch.
+//!
+//! - `hardware.report`: what this OS makes of each part (DK-12).
+//! - `hardware.source_search` and `hardware.source_read`: the base
+//!   system's kernel source of the release this computer runs, held by the
+//!   build service, never on the computer.
+//! - `hardware.patch_build`: a patch the agent wrote, built by the build
+//!   service into a bundle it signs as a community patch, or answered with
+//!   the compiler's errors. Nothing on the computer changes. The bundle is
+//!   kept here, root's; the agent gets its id.
+//! - `hardware.patch_propose`: a built patch set up to try at the next
+//!   restart, as `glassctl hardware patch apply` does. The person says yes
+//!   every time: policy can't lower it below Ask, and no approval covers
+//!   the rest of the task (`glass_policy::EVERY_TIME`). The person reads
+//!   the diff in the review. Then it's tried, on probation and kept, or
+//!   goes back by itself, like any kernel patch.
+//!
+//! glassd gives the handle the build service's client and the runtime's
+//! kernel patches once both exist ([`HardwareHandle::set_service`],
+//! [`HardwareHandle::set_patches`]).
+
+use std::path::PathBuf;
+use std::sync::{Arc, PoisonError, RwLock};
+
+use glass_actions::{
+    ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, TaskContext,
+};
+use glass_api::{AskLabels, ChangeKind, PatchTrial};
+use glass_managed::kbuild::{
+    BuildModule, BuildRequest, BuildResult, SourceFound, SourceRead, SourceSearch, SourceText,
+};
+use glass_types::{ActionName, SideEffect, Tier};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+pub const REPORT: &str = "hardware.report";
+pub const SOURCE_SEARCH: &str = "hardware.source_search";
+pub const SOURCE_READ: &str = "hardware.source_read";
+pub const PATCH_BUILD: &str = "hardware.patch_build";
+pub const PATCH_PROPOSE: &str = "hardware.patch_propose";
+
+/// The kernel patch build service (ADR 0057): glassd's client for it.
+pub trait BuildService: Send + Sync {
+    fn search(&self, request: &SourceSearch) -> Result<SourceFound, String>;
+    fn read(&self, request: &SourceRead) -> Result<SourceText, String>;
+    fn build(&self, request: &BuildRequest) -> Result<BuildResult, String>;
+}
+
+/// The runtime's kernel patches, as root sets them up.
+pub trait Patches: Send + Sync {
+    /// The release this computer runs: what patches are built for.
+    fn release(&self) -> Result<String, String>;
+    /// Sets up `bundle` to try at the next start (`hwpatch::apply`).
+    fn apply(&self, bundle: &[u8]) -> Result<PatchTrial, String>;
+}
+
+/// What this computer's hardware report is, for tests to replace.
+pub type ReportFn = Arc<dyn Fn() -> Result<glass_platform::hardware::Report, String> + Send + Sync>;
+
+struct Inner {
+    /// Where built bundles wait, root's.
+    builds: PathBuf,
+    service: RwLock<Option<Arc<dyn BuildService>>>,
+    patches: RwLock<Option<Arc<dyn Patches>>>,
+    report: ReportFn,
+}
+
+/// The hardware app's state on this computer.
+#[derive(Clone)]
+pub struct HardwareHandle(Arc<Inner>);
+
+impl std::fmt::Debug for HardwareHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HardwareHandle")
+            .field("builds", &self.0.builds)
+            .finish_non_exhaustive()
+    }
+}
+
+impl HardwareHandle {
+    /// Built bundles kept in `builds`, which glassd owns.
+    pub fn new(builds: impl Into<PathBuf>) -> Self {
+        Self::with_report(
+            builds,
+            Arc::new(|| glass_platform::hardware::report().map_err(|e| e.to_string())),
+        )
+    }
+
+    pub fn with_report(builds: impl Into<PathBuf>, report: ReportFn) -> Self {
+        Self(Arc::new(Inner {
+            builds: builds.into(),
+            service: RwLock::new(None),
+            patches: RwLock::new(None),
+            report,
+        }))
+    }
+
+    pub fn set_service(&self, service: Arc<dyn BuildService>) {
+        *self
+            .0
+            .service
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(service);
+    }
+
+    pub fn set_patches(&self, patches: Arc<dyn Patches>) {
+        *self
+            .0
+            .patches
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(patches);
+    }
+
+    fn service(&self) -> Result<Arc<dyn BuildService>, ActionError> {
+        self.0
+            .service
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| {
+                ActionError::Failed("this computer has no kernel patch build service".into())
+            })
+    }
+
+    fn patches(&self) -> Result<Arc<dyn Patches>, ActionError> {
+        self.0
+            .patches
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| ActionError::Failed("this computer takes no kernel patches".into()))
+    }
+
+    fn release(&self) -> Result<String, ActionError> {
+        self.patches()?.release().map_err(ActionError::Failed)
+    }
+
+    /// A built bundle, by the id `hardware.patch_build` gave.
+    fn bundle(
+        &self,
+        build: &str,
+    ) -> Result<(Vec<u8>, glass_managed::hwpatch::Bundle), ActionError> {
+        if build.len() != 16 || !build.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ActionError::InvalidInput(format!(
+                "{build:?} isn't a build's id"
+            )));
+        }
+        let path = self.0.builds.join(format!("{build}.bundle.json"));
+        let bytes = std::fs::read(&path)
+            .map_err(|_| ActionError::NotFound(format!("build {build}: build the patch first")))?;
+        let bundle = serde_json::from_slice(&bytes)
+            .map_err(|e| ActionError::Failed(format!("build {build}: {e}")))?;
+        Ok((bytes, bundle))
+    }
+
+    fn keep(&self, bundle: &glass_managed::hwpatch::Bundle) -> Result<String, ActionError> {
+        let bytes = serde_json::to_vec(bundle).map_err(|e| ActionError::Failed(e.to_string()))?;
+        let id = glass_managed::sha256_hex(&bytes)[..16].to_owned();
+        std::fs::create_dir_all(&self.0.builds)
+            .map_err(|e| ActionError::io(self.0.builds.display(), e))?;
+        let path = self.0.builds.join(format!("{id}.bundle.json"));
+        write_private(&path, &bytes).map_err(|e| ActionError::io(path.display(), e))?;
+        Ok(id)
+    }
+}
+
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoInput {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchInput {
+    pattern: String,
+    #[serde(default)]
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadInput {
+    path: String,
+    #[serde(default)]
+    from: Option<u32>,
+    #[serde(default)]
+    lines: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildInput {
+    id: String,
+    summary: String,
+    diff: String,
+    #[serde(default)]
+    modules: Vec<BuildModule>,
+    #[serde(default)]
+    kernel: bool,
+    #[serde(default)]
+    targets: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProposeInput {
+    build: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct HardwareProvider {
+    handle: HardwareHandle,
+}
+
+impl HardwareProvider {
+    pub fn new(handle: HardwareHandle) -> Self {
+        Self { handle }
+    }
+}
+
+/// A diff's files and the lines it adds and removes, for the review.
+fn diff_stats(diff: &str) -> (Vec<String>, usize, usize) {
+    let files = diff
+        .lines()
+        .filter_map(|l| l.strip_prefix("+++ b/"))
+        .map(|f| f.split_whitespace().next().unwrap_or("").to_owned())
+        .collect();
+    let added = diff
+        .lines()
+        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+        .count();
+    let removed = diff
+        .lines()
+        .filter(|l| l.starts_with('-') && !l.starts_with("---"))
+        .count();
+    (files, added, removed)
+}
+
+impl ActionProvider for HardwareProvider {
+    fn actions(&self) -> Vec<ActionDef> {
+        let def = |name: &str, title: &str, description: &str, side_effect, tier, schema: Value| {
+            ActionDef {
+                name: name.parse().expect("static name"),
+                title: title.into(),
+                description: description.into(),
+                input_schema: schema,
+                side_effect,
+                default_tier: tier,
+                ask: AskLabels::default(),
+            }
+        };
+        vec![
+            def(
+                REPORT,
+                "Read the hardware report",
+                "Each part of this computer (graphics, Wi-Fi, Ethernet, Bluetooth, camera, sound, \
+                 touchpad, sleep, battery, TPM), its devices and drivers, and whether this OS \
+                 drives it. Reads only.",
+                SideEffect::None,
+                Tier::Auto,
+                json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+            ),
+            def(
+                SOURCE_SEARCH,
+                "Search the kernel's source",
+                "Lines matching an extended regular expression in the kernel source of the \
+                 release this computer runs, under sys/<path> (dev/iwlwifi, or empty for all). \
+                 At most 200 matches. The build service holds the source.",
+                SideEffect::Disclose,
+                Tier::Auto,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string" },
+                        "path": { "type": "string" }
+                    },
+                    "required": ["pattern"],
+                    "additionalProperties": false
+                }),
+            ),
+            def(
+                SOURCE_READ,
+                "Read the kernel's source",
+                "Lines of a file in the kernel source of the release this computer runs, from \
+                 sys/: at most 400 at a time, from line `from`.",
+                SideEffect::Disclose,
+                Tier::Auto,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "from": { "type": "integer", "minimum": 1 },
+                        "lines": { "type": "integer", "minimum": 1, "maximum": 400 }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }),
+            ),
+            def(
+                PATCH_BUILD,
+                "Build a kernel patch",
+                "Builds a patch (a unified diff of files under sys/, a/ and b/ prefixes) for the \
+                 release this computer runs: the modules it names (their folders under \
+                 sys/modules), and the kernel if it changes code built into it. Answers with the \
+                 compiler's errors, or a build id to propose. Nothing on this computer changes.",
+                SideEffect::Disclose,
+                Tier::Auto,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "lowercase letters, digits and -" },
+                        "summary": { "type": "string", "description": "what it fixes, for a person" },
+                        "diff": { "type": "string" },
+                        "modules": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "dir": { "type": "string" },
+                                    "file": { "type": "string" },
+                                    "load_at_boot": { "type": "boolean" }
+                                },
+                                "required": ["dir", "file"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "kernel": { "type": "boolean" },
+                        "targets": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["id", "summary", "diff"],
+                    "additionalProperties": false
+                }),
+            ),
+            ActionDef {
+                ask: AskLabels::new("Read the patch", "Try at restart"),
+                ..def(
+                    PATCH_PROPOSE,
+                    "Propose a kernel patch",
+                    "Sets up a built patch to try at the next restart, with the person's yes, \
+                     every time. It runs in the kernel, outside every sandbox; if the computer \
+                     doesn't start or crashes before its probation ends, it goes back by itself.",
+                    SideEffect::Irreversible,
+                    Tier::Ask,
+                    json!({
+                        "type": "object",
+                        "properties": { "build": { "type": "string" } },
+                        "required": ["build"],
+                        "additionalProperties": false
+                    }),
+                )
+            },
+        ]
+    }
+
+    fn returns(&self, action: &ActionName) -> Option<Value> {
+        Some(match action.as_str() {
+            REPORT => json!({
+                "type": "object",
+                "properties": {
+                    "maker": { "type": "string" },
+                    "model": { "type": "string" },
+                    "processor": { "type": "string" },
+                    "memory_mb": { "type": "integer" },
+                    "parts": { "type": "array", "items": { "type": "object" } },
+                    "complete": { "type": "boolean" }
+                },
+                "required": ["maker", "model", "parts", "complete"]
+            }),
+            SOURCE_SEARCH => json!({
+                "type": "object",
+                "properties": {
+                    "matches": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file": { "type": "string" },
+                                "line": { "type": "integer" },
+                                "text": { "type": "string" }
+                            },
+                            "required": ["file", "line", "text"]
+                        }
+                    },
+                    "truncated": { "type": "boolean" }
+                },
+                "required": ["matches", "truncated"]
+            }),
+            SOURCE_READ => json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "from": { "type": "integer" },
+                    "text": { "type": "string" },
+                    "total_lines": { "type": "integer" }
+                },
+                "required": ["path", "from", "text", "total_lines"]
+            }),
+            PATCH_BUILD => json!({
+                "type": "object",
+                "properties": {
+                    "ok": { "type": "boolean" },
+                    "log": { "type": "string", "description": "the compiler's errors, or what was built" },
+                    "build": { "type": ["string", "null"], "description": "what hardware.patch_propose takes" }
+                },
+                "required": ["ok", "log", "build"]
+            }),
+            PATCH_PROPOSE => json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "state": { "type": "string" },
+                    "env": { "type": "string" }
+                },
+                "required": ["id", "state", "env"]
+            }),
+            _ => return None,
+        })
+    }
+
+    fn preview(
+        &self,
+        _ctx: &TaskContext,
+        action: &ActionName,
+        input: &Value,
+    ) -> Result<Preview, ActionError> {
+        match action.as_str() {
+            REPORT => {
+                let _: NoInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: "Read this computer's hardware report".into(),
+                    targets: vec!["Hardware report".into()],
+                    ..Preview::default()
+                })
+            }
+            SOURCE_SEARCH => {
+                let input: SearchInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: format!("Search the kernel's source for {:?}", input.pattern),
+                    targets: vec![format!("sys/{}", input.path)],
+                    ..Preview::default()
+                })
+            }
+            SOURCE_READ => {
+                let input: ReadInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: format!("Read sys/{}", input.path),
+                    targets: vec![format!("sys/{}", input.path)],
+                    ..Preview::default()
+                })
+            }
+            PATCH_BUILD => {
+                let input: BuildInput = glass_actions::parse_input(input)?;
+                let (files, added, removed) = diff_stats(&input.diff);
+                Ok(Preview {
+                    summary: format!(
+                        "Build kernel patch {}: {} (+{added} −{removed})",
+                        input.id, input.summary
+                    ),
+                    targets: files,
+                    ..Preview::default()
+                })
+            }
+            PATCH_PROPOSE => {
+                let input: ProposeInput = glass_actions::parse_input(input)?;
+                let (_, bundle) = self.handle.bundle(&input.build)?;
+                let manifest: glass_managed::hwpatch::Manifest =
+                    serde_json::from_str(&bundle.signed.payload)
+                        .map_err(|e| ActionError::Failed(e.to_string()))?;
+                let (files, added, removed) = diff_stats(&bundle.patch);
+                let mut items = vec![
+                    format!("What it fixes: {}", manifest.summary),
+                    "Nobody reviewed it: an agent wrote it. It runs in the kernel, outside \
+                     every sandbox."
+                        .into(),
+                    format!(
+                        "It changes {} (+{added} −{removed}); the diff is below",
+                        files.join(", ")
+                    ),
+                    format!(
+                        "It replaces {}",
+                        manifest
+                            .modules
+                            .iter()
+                            .map(|m| m.file.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    "The next restart tries it once. If the computer doesn't start, or \
+                     crashes or hangs before a day of use, it goes back by itself."
+                        .into(),
+                ];
+                let mut texts = vec![String::new(); items.len()];
+                texts[2] = bundle.patch.clone();
+                items.truncate(texts.len());
+                Ok(Preview {
+                    summary: format!("Try kernel patch {} at the next restart", manifest.id),
+                    targets: vec![format!("Kernel patch {}", manifest.id)],
+                    items,
+                    texts,
+                    ..Preview::default()
+                })
+            }
+            other => Err(ActionError::InvalidInput(format!(
+                "hardware has no action {other}"
+            ))),
+        }
+    }
+
+    fn invoke(
+        &self,
+        ctx: &TaskContext,
+        action: &ActionName,
+        input: &Value,
+    ) -> Result<ActionOutput, ActionError> {
+        let output = |text: String, data: Value| ActionOutput {
+            text,
+            data,
+            changes: Vec::new(),
+        };
+        match action.as_str() {
+            REPORT => {
+                let _: NoInput = glass_actions::parse_input(input)?;
+                let report = (self.handle.0.report)().map_err(ActionError::Failed)?;
+                let blockers = report.blockers().count();
+                Ok(output(
+                    format!(
+                        "{} {}: {} parts, {blockers} this OS can't drive",
+                        report.maker,
+                        report.model,
+                        report.parts.len()
+                    ),
+                    serde_json::to_value(&report).unwrap_or_default(),
+                ))
+            }
+            SOURCE_SEARCH => {
+                let input: SearchInput = glass_actions::parse_input(input)?;
+                if input.pattern.is_empty() || input.pattern.len() > 200 {
+                    return Err(ActionError::InvalidInput(
+                        "a pattern of 1 to 200 characters".into(),
+                    ));
+                }
+                if !glass_managed::kbuild::valid_path(&input.path) {
+                    return Err(ActionError::InvalidInput(format!(
+                        "{:?} isn't a path under sys/",
+                        input.path
+                    )));
+                }
+                let found = self
+                    .handle
+                    .service()?
+                    .search(&SourceSearch {
+                        release: self.handle.release()?,
+                        pattern: input.pattern.clone(),
+                        path: input.path,
+                    })
+                    .map_err(ActionError::Failed)?;
+                Ok(output(
+                    format!(
+                        "{} matches for {:?}{}",
+                        found.matches.len(),
+                        input.pattern,
+                        if found.truncated { ", and more" } else { "" }
+                    ),
+                    serde_json::to_value(&found).unwrap_or_default(),
+                ))
+            }
+            SOURCE_READ => {
+                let input: ReadInput = glass_actions::parse_input(input)?;
+                if !glass_managed::kbuild::valid_path(&input.path) || input.path.is_empty() {
+                    return Err(ActionError::InvalidInput(format!(
+                        "{:?} isn't a file under sys/",
+                        input.path
+                    )));
+                }
+                let text = self
+                    .handle
+                    .service()?
+                    .read(&SourceRead {
+                        release: self.handle.release()?,
+                        path: input.path,
+                        from: input.from.unwrap_or(1).max(1),
+                        lines: input
+                            .lines
+                            .unwrap_or(glass_managed::kbuild::MAX_LINES)
+                            .clamp(1, glass_managed::kbuild::MAX_LINES),
+                    })
+                    .map_err(ActionError::Failed)?;
+                Ok(output(
+                    format!(
+                        "sys/{} from line {} of {}",
+                        text.path, text.from, text.total_lines
+                    ),
+                    serde_json::to_value(&text).unwrap_or_default(),
+                ))
+            }
+            PATCH_BUILD => {
+                let input: BuildInput = glass_actions::parse_input(input)?;
+                let request = BuildRequest {
+                    release: self.handle.release()?,
+                    id: input.id,
+                    summary: input.summary,
+                    diff: input.diff,
+                    modules: input.modules,
+                    kernel: input.kernel,
+                    targets: input.targets,
+                    origin: format!("agent:{}", ctx.principal.task),
+                };
+                request.check().map_err(ActionError::InvalidInput)?;
+                let built = self
+                    .handle
+                    .service()?
+                    .build(&request)
+                    .map_err(ActionError::Failed)?;
+                match built.bundle {
+                    Some(bundle) if built.ok => {
+                        let build = self.handle.keep(&bundle)?;
+                        Ok(output(
+                            format!("Built {}: propose it with build {build}", request.id),
+                            json!({ "ok": true, "log": built.log, "build": build }),
+                        ))
+                    }
+                    _ => Ok(output(
+                        format!(
+                            "{} didn't build; the compiler's errors are in log",
+                            request.id
+                        ),
+                        json!({ "ok": false, "log": built.log, "build": null }),
+                    )),
+                }
+            }
+            PATCH_PROPOSE => {
+                let input: ProposeInput = glass_actions::parse_input(input)?;
+                let (bytes, _) = self.handle.bundle(&input.build)?;
+                let trial = self
+                    .handle
+                    .patches()?
+                    .apply(&bytes)
+                    .map_err(ActionError::Failed)?;
+                Ok(ActionOutput {
+                    text: format!(
+                        "Kernel patch {} is set up: the next restart tries it, and it goes back \
+                         by itself if the computer doesn't start",
+                        trial.id
+                    ),
+                    data: json!({ "id": trial.id, "state": trial.state, "env": trial.env }),
+                    changes: vec![Change {
+                        kind: ChangeKind::Created,
+                        target: format!("Kernel patch {}, to try at the next restart", trial.id),
+                        reversible: false,
+                        paths: Vec::new(),
+                    }],
+                })
+            }
+            other => Err(ActionError::InvalidInput(format!(
+                "hardware has no action {other}"
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    use glass_api::TrialState;
+    use glass_managed::hwpatch::{Bundle, GLASSHOUSE, Manifest, Module, Review};
+    use glass_managed::kbuild::SourceMatch;
+    use glass_managed::{DocKind, OrgKey, base64, sha256_hex};
+    use glass_types::Timestamp;
+
+    use super::*;
+
+    /// The build service: it builds a diff that says `fixed`, and answers
+    /// anything else with a compiler error.
+    #[derive(Default)]
+    struct Service {
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl BuildService for Service {
+        fn search(&self, request: &SourceSearch) -> Result<SourceFound, String> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push(format!("search {}", request.release));
+            Ok(SourceFound {
+                matches: vec![SourceMatch {
+                    file: "sys/dev/glass/glass.c".into(),
+                    line: 3,
+                    text: "static int glass_suspend(device_t dev)".into(),
+                }],
+                truncated: false,
+            })
+        }
+        fn read(&self, request: &SourceRead) -> Result<SourceText, String> {
+            Ok(SourceText {
+                path: request.path.clone(),
+                from: request.from,
+                text: "int x;\n".into(),
+                total_lines: 1,
+            })
+        }
+        fn build(&self, request: &BuildRequest) -> Result<BuildResult, String> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push(format!("build {}", request.origin));
+            if !request.diff.contains("fixed") {
+                return Ok(BuildResult {
+                    ok: false,
+                    log: "glass.c:3:5: error: use of undeclared identifier 'fixd'".into(),
+                    bundle: None,
+                });
+            }
+            let module = b"\x7fELF glass.ko".to_vec();
+            let manifest = Manifest {
+                id: request.id.clone(),
+                summary: request.summary.clone(),
+                release: request.release.clone(),
+                origin: request.origin.clone(),
+                review: Review::Community,
+                targets: vec![],
+                modules: vec![Module {
+                    file: "glass.ko".into(),
+                    sha256: sha256_hex(&module),
+                    load_at_boot: false,
+                }],
+                patch_sha256: sha256_hex(request.diff.as_bytes()),
+                requirements: vec![],
+                includes: vec![],
+                resumes: 0,
+            };
+            Ok(BuildResult {
+                ok: true,
+                log: "built glass.ko".into(),
+                bundle: Some(Bundle {
+                    signed: OrgKey::from_seed([7; 32]).sign(
+                        DocKind::HardwarePatch,
+                        GLASSHOUSE,
+                        1,
+                        serde_json::to_string(&manifest).unwrap(),
+                    ),
+                    patch: request.diff.clone(),
+                    modules: BTreeMap::from([("glass.ko".into(), base64::encode(&module))]),
+                }),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct Kernel {
+        applied: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl Patches for Kernel {
+        fn release(&self) -> Result<String, String> {
+            Ok("15.1-RELEASE-p1".into())
+        }
+        fn apply(&self, bundle: &[u8]) -> Result<PatchTrial, String> {
+            self.applied.lock().unwrap().push(bundle.to_vec());
+            Ok(PatchTrial {
+                id: "glass-resume".into(),
+                revision: 1,
+                summary: String::new(),
+                review: "community".into(),
+                env: "glass-hw-glass-resume-r1".into(),
+                from_env: "default".into(),
+                state: TrialState::Staged,
+                modules: vec!["glass.ko".into()],
+                staged_at: Timestamp::now(),
+                ended_at: None,
+                note: None,
+                ran_minutes: 0,
+                probation_minutes: 0,
+                woke: 0,
+                probation_resumes: 0,
+            })
+        }
+    }
+
+    fn setup(dir: &Path) -> (HardwareProvider, Arc<Service>, Arc<Kernel>) {
+        let handle = HardwareHandle::with_report(
+            dir.join("builds"),
+            Arc::new(|| {
+                glass_platform::hardware::Sources::read_dir(Path::new("/nonexistent"))
+                    .map(|s| glass_platform::hardware::assess(&s))
+                    .map_err(|e| e.to_string())
+            }),
+        );
+        let service = Arc::new(Service::default());
+        let kernel = Arc::new(Kernel::default());
+        handle.set_service(service.clone());
+        handle.set_patches(kernel.clone());
+        (HardwareProvider::new(handle), service, kernel)
+    }
+
+    fn call(
+        provider: &HardwareProvider,
+        ctx: &TaskContext,
+        name: &str,
+        input: Value,
+    ) -> Result<ActionOutput, ActionError> {
+        let action: ActionName = name.parse().unwrap();
+        provider.preview(ctx, &action, &input)?;
+        let out = provider.invoke(ctx, &action, &input)?;
+        let shape = provider.returns(&action).unwrap();
+        glass_actions::shape::conforms(&out.data, &shape).unwrap_or_else(|e| panic!("{name}: {e}"));
+        Ok(out)
+    }
+
+    fn build_input(diff: &str) -> Value {
+        json!({
+            "id": "glass-resume",
+            "summary": "The glass device works again after sleep",
+            "diff": format!("--- a/sys/dev/glass/glass.c\n+++ b/sys/dev/glass/glass.c\n@@ -3 +3 @@\n-old\n+{diff}\n"),
+            "modules": [{ "dir": "glass", "file": "glass.ko" }]
+        })
+    }
+
+    #[test]
+    fn adr0057_an_agent_builds_a_patch_until_it_compiles_then_proposes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (provider, service, kernel) = setup(dir.path());
+        let ctx = glass_actions::testing::context(dir.path());
+
+        let found = call(
+            &provider,
+            &ctx,
+            SOURCE_SEARCH,
+            json!({ "pattern": "suspend", "path": "dev/glass" }),
+        )
+        .unwrap();
+        assert_eq!(found.data["matches"][0]["line"], 3);
+        call(
+            &provider,
+            &ctx,
+            SOURCE_READ,
+            json!({ "path": "dev/glass/glass.c" }),
+        )
+        .unwrap();
+
+        // The compiler's errors come back as a result the agent reads.
+        let failed = call(&provider, &ctx, PATCH_BUILD, build_input("fixd")).unwrap();
+        assert_eq!(failed.data["ok"], false);
+        assert!(
+            failed.data["log"]
+                .as_str()
+                .unwrap()
+                .contains("undeclared identifier")
+        );
+
+        let built = call(&provider, &ctx, PATCH_BUILD, build_input("fixed")).unwrap();
+        let build = built.data["build"].as_str().unwrap().to_owned();
+        assert_eq!(build.len(), 16);
+        let asked = service.asked.lock().unwrap().clone();
+        assert!(
+            asked.contains(&"search 15.1-RELEASE-p1".to_owned()),
+            "the release it runs"
+        );
+        assert!(
+            asked.contains(&format!("build agent:{}", ctx.principal.task)),
+            "signed as the agent's: {asked:?}"
+        );
+        assert!(
+            kernel.applied.lock().unwrap().is_empty(),
+            "building changes nothing here"
+        );
+
+        // The review shows what it fixes, that nobody reviewed it, and the
+        // diff itself.
+        let action: ActionName = PATCH_PROPOSE.parse().unwrap();
+        let preview = provider
+            .preview(&ctx, &action, &json!({ "build": build }))
+            .unwrap();
+        assert!(
+            preview
+                .items
+                .iter()
+                .any(|i| i.contains("Nobody reviewed it"))
+        );
+        assert!(preview.texts.iter().any(|t| t.contains("+fixed")));
+        let proposed = call(&provider, &ctx, PATCH_PROPOSE, json!({ "build": build })).unwrap();
+        assert_eq!(proposed.data["state"], "staged");
+        let applied = kernel.applied.lock().unwrap();
+        let bytes = std::fs::read(
+            dir.path()
+                .join("builds")
+                .join(format!("{build}.bundle.json")),
+        )
+        .unwrap();
+        assert_eq!(applied[0], bytes, "what's set up is what was built");
+    }
+
+    #[test]
+    fn adr0057_what_an_agent_names_stays_in_the_kernel_s_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let (provider, _, _) = setup(dir.path());
+        let ctx = glass_actions::testing::context(dir.path());
+        assert!(
+            call(
+                &provider,
+                &ctx,
+                SOURCE_READ,
+                json!({ "path": "../../etc/master.passwd" })
+            )
+            .is_err()
+        );
+        assert!(
+            call(
+                &provider,
+                &ctx,
+                SOURCE_SEARCH,
+                json!({ "pattern": "x", "path": "/etc" })
+            )
+            .is_err()
+        );
+        let outside = json!({
+            "id": "glass-resume",
+            "summary": "x",
+            "diff": "--- a/etc/rc.conf\n+++ b/etc/rc.conf\n@@ -1 +1 @@\n-a\n+b\n",
+            "modules": [{ "dir": "glass", "file": "glass.ko" }]
+        });
+        assert!(call(&provider, &ctx, PATCH_BUILD, outside).is_err());
+        // A build id is ours, never a path.
+        assert!(
+            call(
+                &provider,
+                &ctx,
+                PATCH_PROPOSE,
+                json!({ "build": "../../../etc/x" })
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            call(
+                &provider,
+                &ctx,
+                PATCH_PROPOSE,
+                json!({ "build": "0123456789abcdef" })
+            ),
+            Err(ActionError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn dk12_the_report_is_this_computer_s() {
+        let dir = tempfile::tempdir().unwrap();
+        let (provider, _, _) = setup(dir.path());
+        let ctx = glass_actions::testing::context(dir.path());
+        // The stand-in reads a capture that isn't there.
+        assert!(call(&provider, &ctx, REPORT, json!({})).is_err());
+        for def in provider.actions() {
+            assert!(provider.returns(&def.name).is_some(), "{}", def.name);
+        }
+        let propose = provider
+            .actions()
+            .into_iter()
+            .find(|d| d.name.as_str() == PATCH_PROPOSE)
+            .unwrap();
+        assert_eq!(propose.default_tier, Tier::Ask);
+    }
+}

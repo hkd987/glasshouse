@@ -972,6 +972,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-app-hardware"
+version = "0.1.0"
+dependencies = [
+ "glass-actions",
+ "glass-api",
+ "glass-managed",
+ "glass-platform",
+ "glass-types",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "glass-app-helpdesk"
 version = "0.1.0"
 dependencies = [
@@ -1258,6 +1273,7 @@ dependencies = [
  "glass-app-chat",
  "glass-app-docs",
  "glass-app-files",
+ "glass-app-hardware",
  "glass-app-helpdesk",
  "glass-app-mail",
  "glass-app-meet",
@@ -1309,6 +1325,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-hardware-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glass-agent-sdk",
+ "glass-managed",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "glass-http"
 version = "0.1.0"
 dependencies = [
@@ -1325,6 +1352,22 @@ dependencies = [
  "glass-agent-sdk",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "glass-kbuild"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "glass-crypto",
+ "glass-managed",
+ "glass-platform",
+ "hex",
+ "httparse",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

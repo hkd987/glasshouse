@@ -21,6 +21,7 @@ pub mod billing;
 mod console;
 mod credits;
 mod http;
+mod kbuild;
 pub mod mail;
 mod openrouter;
 mod sigv4;
@@ -36,6 +37,7 @@ pub use anthropic::AnthropicProvider;
 pub use bedrock::{AwsCredentials, BedrockProvider};
 pub use console::ConsoleClient;
 pub use credits::{CreditsLink, CreditsProvider};
+pub use kbuild::BuildClient;
 pub use mail::ImapLink;
 pub use openrouter::{
     AUTO as OPENROUTER_AUTO, Account as OpenRouterAccount, KeyUsage, MadeKey, OpenRouterKeys,

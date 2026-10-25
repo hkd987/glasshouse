@@ -1,0 +1,25 @@
+[package]
+name = "glass-kbuild"
+description = "The kernel patch build service (ADR 0057, slice 2): the kernel's source searched and read, and agents' patches built and signed as community patches. Runs where patches are built, never on a device."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+glass-crypto.workspace = true
+glass-managed.workspace = true
+glass-platform.workspace = true
+hex.workspace = true
+httparse.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
