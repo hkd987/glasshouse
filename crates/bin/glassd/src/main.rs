@@ -18,6 +18,7 @@ mod meetings;
 mod org_apps;
 mod org_patches;
 mod personal;
+mod updates;
 mod wifi;
 
 use std::io::Write;
@@ -222,6 +223,9 @@ pub(crate) struct OrgData {
     /// Kernel patches IT reviewed (ADR 0057, slice 3): fetched from the
     /// console on the person's yes, checked against the signed catalog.
     pub(crate) org_patches: org_patches::OrgPatchStore,
+    /// OS releases from the org's console (ADR 0061), connected once
+    /// managed sync has the computer's key; its ring is its channel.
+    pub(crate) updates: Arc<updates::ConsoleUpdates>,
 }
 
 impl OrgData {
@@ -254,8 +258,35 @@ impl OrgData {
             routines: glass_first_party::Routines::new(state_dir.join("routines")),
             hardware: glass_first_party::HardwareHandle::new(state_dir.join("hardware/builds")),
             org_patches: org_patches::OrgPatchStore::default(),
+            updates: updates::ConsoleUpdates::new(),
         }
     }
+}
+
+/// Where OS releases come from (ADR 0061): a folder, an update server, or
+/// the org's console.
+fn update_source(
+    config: &Config,
+    org: &OrgData,
+) -> anyhow::Result<Option<Arc<dyn glass_runtime::osupdate::Source>>> {
+    use config::UpdateSource;
+    Ok(match config.update.source(config.managed.is_some()) {
+        None => None,
+        Some(UpdateSource::Folder(dir)) => {
+            Some(Arc::new(glass_runtime::osupdate::Folder::new(&dir)))
+        }
+        Some(UpdateSource::Https(url)) => {
+            let allow = config
+                .managed
+                .as_ref()
+                .is_some_and(|m| m.allow_insecure_http);
+            Some(Arc::new(
+                updates::Https::new(&url, allow)
+                    .map_err(|e| anyhow::anyhow!("update.source: {e}"))?,
+            ))
+        }
+        Some(UpdateSource::Console) => Some(Arc::clone(&org.updates) as _),
+    })
 }
 
 /// Reads and checks the config and policy, from local disk only.
@@ -568,7 +599,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             update: glass_runtime::osupdate::OsUpdates {
                 roots: config.update.roots.clone(),
                 channel: config.update.channel.clone(),
-                source: config.update.source.clone(),
+                source: update_source(&config, &org)?,
             },
         },
         policy: loaded.policy.clone(),

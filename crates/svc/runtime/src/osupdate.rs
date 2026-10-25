@@ -23,8 +23,15 @@
 //!
 //! The record lives on glassd's own dataset, outside the environments, as
 //! the kernel patches' does (ADR 0057).
+//!
+//! Releases come from a [`Source`]: a folder ([`Folder`]: a share, a USB
+//! drive), Glasshouse's update server over HTTPS, or the org's console,
+//! which serves each computer its ring's channel. Whatever brings them,
+//! what's taken is what the keys signed: an image is downloaded into
+//! glassd's state, hashed as it arrives, and a download that stopped goes
+//! on from where it was.
 
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use glass_api::{OsUpdate, PatchTrial, TrialState, UpdateAvailable, UpdateStatus};
@@ -39,20 +46,123 @@ use crate::hwpatch::{self, Envs, HardwarePatches};
 
 /// The largest image this computer takes.
 pub const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+/// What an update leaves free on the disk, beyond its image downloaded and
+/// received.
+const ROOM_TO_SPARE: u64 = 1024 * 1024 * 1024;
 /// What an image says it is.
 pub const OS_RELEASE: &str = "usr/local/share/glasshouse/os-release.json";
+
+/// The most of `keys.json` or a `release.json` read.
+const MAX_SIGNED_BYTES: u64 = 1024 * 1024;
 
 /// Which updates this computer takes (glassd.toml `[update]`).
 #[derive(Debug, Clone, Default)]
 pub struct OsUpdates {
     /// The root keys the image trusts. With none, it takes no update.
     pub roots: Vec<PublicKey>,
-    /// `pilot`, `early` or `broad`.
+    /// `pilot`, `early` or `broad`, unless the source says which (the
+    /// org's console: the computer's ring).
     pub channel: String,
-    /// A folder holding `keys.json` and `<channel>/release.json` with its
-    /// image beside it: a share, a USB drive, or where the updates the
-    /// console brings are put.
-    pub source: Option<PathBuf>,
+    /// Where releases come from.
+    pub source: Option<std::sync::Arc<dyn Source>>,
+}
+
+impl OsUpdates {
+    /// The channel this computer follows now.
+    pub fn channel(&self) -> String {
+        self.source
+            .as_ref()
+            .and_then(|s| s.channel())
+            .unwrap_or_else(|| self.channel.clone())
+    }
+}
+
+/// Where releases come from: the root's key list, and each channel's
+/// `release.json` with its image and kernel patch rebuilds beside it.
+/// Nothing a source brings is trusted for coming from it.
+pub trait Source: Send + Sync + std::fmt::Debug {
+    /// Where, for people: a folder, an address, "the org's console".
+    fn describe(&self) -> String;
+    /// The channel it serves this computer, when it decides: the org's
+    /// console, by the computer's ring.
+    fn channel(&self) -> Option<String> {
+        None
+    }
+    /// The root's key list, `keys.json`: at most `max` bytes.
+    fn keys(&self, max: u64) -> Result<Vec<u8>, String>;
+    /// `name`, a file of `channel`'s release, from byte `offset` on, onto
+    /// `to`: at most `max` bytes, the number written. What it wrote before
+    /// an error stays written.
+    fn file(
+        &self,
+        channel: &str,
+        name: &str,
+        offset: u64,
+        to: &mut dyn std::io::Write,
+        max: u64,
+    ) -> Result<u64, String>;
+}
+
+/// A small file of `channel`'s release, whole.
+fn small(source: &dyn Source, channel: &str, name: &str, max: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    source.file(channel, name, 0, &mut bytes, max)?;
+    Ok(bytes)
+}
+
+/// Releases in a folder: `keys.json`, and `<channel>/release.json` with
+/// its image beside it (a share, a USB drive).
+#[derive(Debug, Clone)]
+pub struct Folder(PathBuf);
+
+impl Folder {
+    pub fn new(dir: &Path) -> Self {
+        Self(dir.to_owned())
+    }
+
+    fn read(
+        path: &Path,
+        offset: u64,
+        to: &mut dyn std::io::Write,
+        max: u64,
+    ) -> Result<u64, String> {
+        use std::io::Seek as _;
+        let shown = |e: std::io::Error| format!("{}: {e}", path.display());
+        let mut file = std::fs::File::open(path).map_err(shown)?;
+        file.seek(std::io::SeekFrom::Start(offset)).map_err(shown)?;
+        // One byte past the most, to tell a file that's too long.
+        let copied = std::io::copy(&mut file.take(max.saturating_add(1)), to).map_err(shown)?;
+        if copied > max {
+            return Err(format!("{} is longer than {max} bytes", path.display()));
+        }
+        Ok(copied)
+    }
+}
+
+impl Source for Folder {
+    fn describe(&self) -> String {
+        self.0.display().to_string()
+    }
+
+    fn keys(&self, max: u64) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        Self::read(&self.0.join("keys.json"), 0, &mut bytes, max)?;
+        Ok(bytes)
+    }
+
+    fn file(
+        &self,
+        channel: &str,
+        name: &str,
+        offset: u64,
+        to: &mut dyn std::io::Write,
+        max: u64,
+    ) -> Result<u64, String> {
+        if !osupdate::valid_file(channel) || !osupdate::valid_file(name) {
+            return Err(format!("{channel}/{name} isn't a release's file"));
+        }
+        Self::read(&self.0.join(channel).join(name), offset, to, max)
+    }
 }
 
 /// What an image says it is (`/usr/local/share/glasshouse/os-release.json`).
@@ -123,7 +233,8 @@ impl Store {
         self.keep(record)
     }
 
-    fn taken(&self) -> Option<u64> {
+    /// The last release number taken.
+    pub fn taken(&self) -> Option<u64> {
         self.read::<Taken>("taken.json").map(|t| t.number)
     }
 
@@ -149,25 +260,30 @@ fn event(update: &OsUpdate, summary: String, outcome: Option<Outcome>) -> AuditE
     event
 }
 
+/// Where releases come from, and the channel they're read on.
+type Channel<'a> = (&'a dyn Source, String);
+
 /// The newest release on the channel, verified against the key list the
 /// computer holds, or a newer one in the source, which it then keeps.
-fn newest(store: &Store, config: &OsUpdates) -> Result<(Verified, PathBuf), String> {
+fn newest<'a>(store: &Store, config: &'a OsUpdates) -> Result<(Verified, Channel<'a>), String> {
     if config.roots.is_empty() {
         return Err("this computer takes no OS updates: it trusts no root key".into());
     }
     let source = config
         .source
-        .as_ref()
+        .as_deref()
         .ok_or("this computer has no update source")?;
-    let read = |path: PathBuf| -> Result<Signed, String> {
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+    let channel = config.channel();
+    let parse = |what: &str, bytes: Vec<u8>| -> Result<Signed, String> {
+        serde_json::from_slice(&bytes).map_err(|e| format!("{what}: {e}"))
     };
     // The key list: a newer one replaces the one in force, revoking keys
     // whatever happens to the release.
     let have = store.keys();
-    let offered = read(source.join("keys.json")).ok();
+    let offered = source
+        .keys(MAX_SIGNED_BYTES)
+        .and_then(|bytes| parse("keys.json", bytes))
+        .ok();
     let mut keys: Option<KeyList> = have
         .as_ref()
         .and_then(|signed| osupdate::open_keys(signed, &config.roots, None).ok());
@@ -179,10 +295,12 @@ fn newest(store: &Store, config: &OsUpdates) -> Result<(Verified, PathBuf), Stri
         keys = Some(newer);
     }
     let keys = keys.ok_or("no key list from the root yet")?;
-    let channel = source.join(&config.channel);
-    let release = read(channel.join("release.json"))?;
-    let verified = osupdate::verify_release(&keys, &release, &config.channel, store.taken())?;
-    Ok((verified, channel))
+    let release = parse(
+        "release.json",
+        small(source, &channel, "release.json", MAX_SIGNED_BYTES)?,
+    )?;
+    let verified = osupdate::verify_release(&keys, &release, &channel, store.taken())?;
+    Ok((verified, (source, channel)))
 }
 
 /// A kept kernel patch's rebuild for the new image: its record there, and
@@ -192,13 +310,17 @@ type Rebuild = (PatchTrial, Opened);
 /// What the update does with each kernel patch the computer keeps, or why
 /// it can't be taken: the patch's fix would be gone after it (Check,
 /// `CarriesFix`).
+///
+/// A check (`fetch` false) says a rebuild comes with the update without
+/// downloading it: it's read and checked when the update is installed.
 fn plan_patches(
     hw: &hwpatch::Store,
     patches: &HardwarePatches,
     verified: &Verified,
-    channel: &Path,
+    (source, channel): &Channel<'_>,
     running: &str,
     drop_patches: bool,
+    fetch: bool,
 ) -> Result<(Vec<String>, Vec<Rebuild>), String> {
     let mut notes = Vec::new();
     let mut rebuilds = Vec::new();
@@ -210,8 +332,19 @@ fn plan_patches(
                 kept.id, release.version
             ));
         } else if let Some(rebuild) = release.patches.iter().find(|p| p.id == kept.id) {
-            let path = channel.join(&rebuild.bundle);
-            let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if !fetch {
+                notes.push(format!(
+                    "{}: a rebuild for {} comes with it",
+                    kept.id, release.base
+                ));
+                continue;
+            }
+            let bytes = small(
+                *source,
+                channel,
+                &rebuild.bundle,
+                glass_managed::hwreview::MAX_BUNDLE_REPLY as u64,
+            )?;
             let bundle: Bundle = serde_json::from_slice(&bytes)
                 .map_err(|e| format!("{}: not a patch bundle: {e}", rebuild.bundle))?;
             let opened = bundle
@@ -303,7 +436,7 @@ pub fn check(
         Ok((verified, channel)) => {
             let running = envs.running().unwrap_or_default();
             let (notes, blocked) =
-                match plan_patches(hw, patches, &verified, &channel, &running, false) {
+                match plan_patches(hw, patches, &verified, &channel, &running, false, false) {
                     Ok((notes, _)) => (notes, busy(store, hw).err()),
                     Err(why) => (Vec::new(), Some(why)),
                 };
@@ -319,6 +452,30 @@ pub fn check(
         Err(why) => out.checked = Some(why),
     }
     out
+}
+
+/// Downloads the newest release's image ahead of installing it, when it's
+/// newer than the last taken and nothing blocks it: the install then reads
+/// it from glassd's state. What it says is the check's.
+pub fn fetch(
+    envs: &dyn Envs,
+    store: &Store,
+    hw: &hwpatch::Store,
+    config: &OsUpdates,
+    patches: &HardwarePatches,
+) -> UpdateStatus {
+    let mut checked = check(envs, store, hw, config, patches);
+    if checked
+        .available
+        .as_ref()
+        .is_some_and(|a| a.blocked.is_none())
+        && let Ok((verified, channel)) = newest(store, config)
+        && let Err(why) = download(store, &channel, &verified)
+    {
+        checked.checked = Some(why);
+    }
+    let _ = store.write("checked.json", &checked);
+    checked
 }
 
 /// Installs the newest release in a boot environment of its own, which the
@@ -362,13 +519,37 @@ pub fn apply(
                 ));
             }
         }
-        let (notes, rebuilds) =
-            plan_patches(hw, patches, &verified, &channel, &running, drop_patches)?;
+        let (notes, rebuilds) = plan_patches(
+            hw,
+            patches,
+            &verified,
+            &channel,
+            &running,
+            drop_patches,
+            true,
+        )?;
         Ok((verified, channel, running, env, notes, rebuilds))
     });
     let (verified, channel, running, env, notes, rebuilds) = match checked {
         Ok(checked) => checked,
         Err(why) => return Err(refuse(why, audit)),
+    };
+    // The image, before anything is staged: a download that stops changes
+    // nothing but what it downloaded, which the next try goes on from.
+    let copy = match download(store, &channel, &verified) {
+        Ok(copy) => copy,
+        Err(why) => {
+            let mut event = AuditEvent::new(
+                EventKind::OsUpdate,
+                format!(
+                    "OS update {} not downloaded: {why}",
+                    verified.release.version
+                ),
+            );
+            event.outcome = Some(Outcome::Failed { error: why.clone() });
+            audit(event);
+            return Err(why);
+        }
     };
     // 2. BeginStage.
     let mut record = Record {
@@ -403,7 +584,6 @@ pub fn apply(
             // Left by an update that didn't stay.
             envs.destroy(&env)?;
         }
-        let copy = copy_in(store, &channel, &verified)?;
         let imported = match &verified.image.delta_from {
             Some(_) => envs.import_onto(&env, &copy, &record.update.from_env),
             None => envs.import(&env, &copy),
@@ -453,10 +633,15 @@ pub fn apply(
     Ok(record.update)
 }
 
-/// The image copied beside glassd's state, hashed as it goes, and checked
-/// against the OS key's digest: what's imported is what was checked, even
-/// if the source changes meanwhile.
-fn copy_in(store: &Store, channel: &Path, verified: &Verified) -> Result<PathBuf, String> {
+/// The image downloaded beside glassd's state, hashed as it arrives, and
+/// checked against the OS key's digest: what's imported is what was
+/// checked, even if the source changes meanwhile. A download that stopped
+/// goes on from where it was, its file named by the digest it's for.
+fn download(
+    store: &Store,
+    (source, channel): &Channel<'_>,
+    verified: &Verified,
+) -> Result<PathBuf, String> {
     use sha2::Digest as _;
     let image = &verified.image;
     if image.bytes > MAX_IMAGE_BYTES {
@@ -465,45 +650,114 @@ fn copy_in(store: &Store, channel: &Path, verified: &Verified) -> Result<PathBuf
             image.bytes
         ));
     }
-    let from = channel.join(&image.file);
+    if image.sha256.len() != 64 || !image.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("the image's digest isn't a SHA-256".into());
+    }
     let dir = store.dir.join("incoming");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let to = dir.join(&image.file);
-    let mut input = std::fs::File::open(&from).map_err(|e| format!("{}: {e}", from.display()))?;
-    let mut output = std::fs::File::create(&to).map_err(|e| format!("{}: {e}", to.display()))?;
+    // Downloads for other images are moot.
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&image.sha256)
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let to = dir.join(format!("{}{}", image.sha256, osupdate::IMAGE_SUFFIX));
+    // What arrived before, hashed again.
     let mut hasher = sha2::Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
-    let mut total: u64 = 0;
-    let copied = (|| {
+    let mut have: u64 = 0;
+    if let Ok(mut partial) = std::fs::File::open(&to) {
+        let mut buf = vec![0u8; 1 << 20];
         loop {
-            let n = input.read(&mut buf).map_err(|e| e.to_string())?;
+            let n = partial.read(&mut buf).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
             }
-            total += n as u64;
-            if total > image.bytes {
-                return Err("the image is longer than its signed size".to_owned());
-            }
             hasher.update(&buf[..n]);
-            output.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            have += n as u64;
         }
-        output.sync_all().map_err(|e| e.to_string())?;
-        if total != image.bytes {
-            return Err(format!(
-                "the image is {total} bytes, and its signed size is {}",
-                image.bytes
-            ));
-        }
-        if hex::encode(hasher.finalize()) != image.sha256 {
-            return Err("the image doesn't match the digest the OS key signed".into());
-        }
-        Ok(())
-    })();
-    if let Err(why) = copied {
+    }
+    if have > image.bytes {
         let _ = std::fs::remove_file(&to);
-        return Err(why);
+        return Err(
+            "the downloaded image was longer than its signed size; download it again".into(),
+        );
+    }
+    // Room for the rest of it, for receiving it as a boot environment, and
+    // to spare: an update never fills the disk.
+    let needed = (image.bytes - have) + image.bytes + ROOM_TO_SPARE;
+    if let Ok(usage) = glass_platform::system::filesystem_usage(&dir)
+        && usage.available_kb.saturating_mul(1024) < needed
+    {
+        return Err(format!(
+            "not enough room for it: the update needs {} MB free and the disk has {} MB",
+            needed.div_ceil(1024 * 1024),
+            usage.available_kb / 1024
+        ));
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&to)
+        .map_err(|e| format!("{}: {e}", to.display()))?;
+    let mut sink = Hashing {
+        file,
+        hasher: &mut hasher,
+        written: 0,
+    };
+    let fetched = if have < image.bytes {
+        source.file(channel, &image.file, have, &mut sink, image.bytes - have)
+    } else {
+        Ok(0)
+    };
+    let written = sink.written;
+    sink.file.sync_all().map_err(|e| e.to_string())?;
+    drop(sink);
+    let total = have + written;
+    if let Err(why) = fetched {
+        return Err(format!(
+            "the download stopped at {} of {} MB ({why}); apply again to go on",
+            total / (1024 * 1024),
+            image.bytes.div_ceil(1024 * 1024)
+        ));
+    }
+    if total != image.bytes {
+        return Err(format!(
+            "the download stopped at {total} of {} bytes; apply again to go on",
+            image.bytes
+        ));
+    }
+    if hex::encode(hasher.finalize()) != image.sha256 {
+        let _ = std::fs::remove_file(&to);
+        return Err("the image doesn't match the digest the OS key signed".into());
     }
     Ok(to)
+}
+
+/// A file that hashes what's written to it, and counts it.
+struct Hashing<'a> {
+    file: std::fs::File,
+    hasher: &'a mut sha2::Sha256,
+    written: u64,
+}
+
+impl std::io::Write for Hashing<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use sha2::Digest as _;
+        let n = self.file.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
 }
 
 /// As glassd starts: on the update, the image is the release's, and it's
@@ -738,14 +992,20 @@ fn running_version(envs: &dyn Envs) -> Option<String> {
 
 pub fn status(envs: &dyn Envs, store: &Store, config: &OsUpdates) -> UpdateStatus {
     let version = running_version(envs);
+    let taken = store.taken().unwrap_or(0);
+    // What the last check in the background found, while it's still news.
+    let last = store
+        .read::<UpdateStatus>("checked.json")
+        .and_then(|c| c.available)
+        .filter(|a| a.number > taken);
     UpdateStatus {
         running: envs.running().unwrap_or_default(),
         version,
-        channel: config.channel.clone(),
-        taken: store.taken().unwrap_or(0),
+        channel: config.channel(),
+        taken,
         update: store.record().map(|r| r.update),
         history: store.history(),
-        available: None,
+        available: last,
         checked: None,
     }
 }
@@ -797,7 +1057,7 @@ mod tests {
         OsUpdates {
             roots: vec![key(ROOT).public()],
             channel: "pilot".into(),
-            source: Some(s.source.path().to_owned()),
+            source: Some(std::sync::Arc::new(Folder::new(s.source.path()))),
         }
     }
 
@@ -1030,7 +1290,7 @@ mod tests {
         std::fs::write(&image, bytes).unwrap();
         let refused = apply_it(&mut s, false).unwrap_err();
         assert!(refused.contains("doesn't match the digest"), "{refused}");
-        assert_eq!(state(&s), TrialState::RolledBack);
+        assert!(s.store.record().is_none(), "nothing was staged");
         assert!(!s.fake.exists("glass-os-2026.11.1").unwrap());
         assert_eq!(s.store.taken(), None, "a failed install takes no number");
 
@@ -1106,6 +1366,176 @@ mod tests {
         )
         .unwrap();
         file
+    }
+
+    /// A [`Folder`] that stops after `stop` bytes of an image, as a
+    /// download does when the network goes, and keeps what it was asked.
+    #[derive(Debug)]
+    struct Flaky {
+        folder: Folder,
+        stop: std::sync::Mutex<Option<u64>>,
+        channel: Option<String>,
+        asked: std::sync::Mutex<Vec<(String, u64)>>,
+    }
+
+    impl Source for Flaky {
+        fn describe(&self) -> String {
+            "a flaky network".into()
+        }
+        fn channel(&self) -> Option<String> {
+            self.channel.clone()
+        }
+        fn keys(&self, max: u64) -> Result<Vec<u8>, String> {
+            self.folder.keys(max)
+        }
+        fn file(
+            &self,
+            channel: &str,
+            name: &str,
+            offset: u64,
+            to: &mut dyn std::io::Write,
+            max: u64,
+        ) -> Result<u64, String> {
+            self.asked.lock().unwrap().push((name.to_owned(), offset));
+            let stop = if name.ends_with(osupdate::IMAGE_SUFFIX) {
+                self.stop.lock().unwrap().take()
+            } else {
+                None
+            };
+            match stop {
+                Some(stop) => {
+                    let mut all = Vec::new();
+                    self.folder.file(channel, name, offset, &mut all, max)?;
+                    to.write_all(&all[..stop as usize]).unwrap();
+                    Err("the connection was reset".into())
+                }
+                _ => self.folder.file(channel, name, offset, to, max),
+            }
+        }
+    }
+
+    fn flaky(s: &Setup, stop: Option<u64>, channel: Option<&str>) -> std::sync::Arc<Flaky> {
+        std::sync::Arc::new(Flaky {
+            folder: Folder::new(s.source.path()),
+            stop: std::sync::Mutex::new(stop),
+            channel: channel.map(str::to_owned),
+            asked: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// An image comes over the network: a download that stops stages
+    /// nothing, and the next try goes on from where it stopped.
+    #[test]
+    fn bs4_a_download_that_stopped_goes_on_from_where_it_was() {
+        let mut s = setup();
+        publish(
+            &s,
+            7,
+            "2026.11.1",
+            &[("etc/motd", &"x".repeat(5000))],
+            |_| {},
+        );
+        let source = flaky(&s, Some(1200), None);
+        let mut config = config(&s);
+        config.source = Some(source.clone());
+        let audit = &mut s.audit;
+        let mut run = || {
+            apply(
+                &s.fake,
+                &s.store,
+                &s.hw,
+                &config,
+                &patches(),
+                false,
+                &mut |e| audit.push(e),
+            )
+        };
+        let stopped = run().unwrap_err();
+        assert!(stopped.contains("apply again to go on"), "{stopped}");
+        assert!(s.store.record().is_none(), "nothing staged");
+        assert_eq!(s.store.taken(), None);
+
+        let update = run().unwrap();
+        assert_eq!(update.state, TrialState::Staged);
+        let images: Vec<u64> = source
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name.ends_with(".zfs"))
+            .map(|(_, offset)| *offset)
+            .collect();
+        assert_eq!(images, [0, 1200], "the second download went on from 1200");
+        assert!(
+            s.audit.iter().any(|e| e.summary.contains("not downloaded")),
+            "the stop is on the record"
+        );
+    }
+
+    /// A check reads the release, never a kernel patch's rebuild: those
+    /// come when the update is installed. A source may decide the channel:
+    /// the org's console, by the computer's ring.
+    #[test]
+    fn adr0061_a_check_downloads_no_rebuild_and_follows_the_source_s_channel() {
+        let s = setup();
+        let kept = PatchTrial {
+            id: "lkpi-wlan-suspend".into(),
+            revision: 1,
+            summary: "Wi-Fi works again after sleep".into(),
+            review: "reviewed".into(),
+            env: "default".into(),
+            from_env: "default".into(),
+            state: TrialState::Kept,
+            modules: vec!["if_iwlwifi.ko".into()],
+            staged_at: Timestamp::now(),
+            ended_at: None,
+            note: None,
+            ran_minutes: 0,
+            probation_minutes: 0,
+            woke: 0,
+            probation_resumes: 0,
+        };
+        s.hw.carry("default", &[kept]).unwrap();
+        let file = rebuild(&s, "lkpi-wlan-suspend", "15.1-RELEASE");
+        publish(&s, 7, "2026.11.1", &[], |r| {
+            r.patches = vec![PatchRebuild {
+                id: "lkpi-wlan-suspend".into(),
+                bundle: file,
+            }];
+        });
+        let source = flaky(&s, None, Some("pilot"));
+        let config = OsUpdates {
+            channel: "broad".into(),
+            source: Some(source.clone()),
+            ..config(&s)
+        };
+        let checked = check(&s.fake, &s.store, &s.hw, &config, &patches());
+        assert_eq!(checked.channel, "pilot");
+        let available = checked.available.unwrap();
+        assert_eq!(available.blocked, None);
+        assert!(
+            available.patches[0].contains("comes with it"),
+            "{available:?}"
+        );
+        let asked: Vec<String> = source
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        assert_eq!(asked, ["release.json"]);
+
+        // Fetched ahead: the image is downloaded, nothing is staged.
+        let fetched = fetch(&s.fake, &s.store, &s.hw, &config, &patches());
+        assert_eq!(fetched.checked, None);
+        assert!(s.store.record().is_none());
+        assert!(
+            std::fs::read_dir(s.store.dir.join("incoming"))
+                .unwrap()
+                .count()
+                == 1
+        );
     }
 
     /// OsUpdate.tla's "patchesIgnored": a computer that keeps a kernel

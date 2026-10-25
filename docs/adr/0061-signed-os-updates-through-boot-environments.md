@@ -46,9 +46,9 @@ all done."
    - `<channel>/release.json`, with its image beside it;
    - and any kernel patches rebuilt for it.
 
-   The update source (`[update] source`) is that folder, on a share or a
-   USB drive. Updates the console brings will be put in one too. Fetching
-   over HTTPS, with images downloaded as they're read, is next.
+   The update source (`[update] source`) is laid out as that folder,
+   wherever it is: a folder on a share or a USB drive, Glasshouse's update
+   server over HTTPS, or the org's console (section 9).
 3. **An image is a ZFS stream** of a boot environment's `@glass-image`
    snapshot. There are two kinds:
    - **A whole image**, received with `bectl import`.
@@ -67,10 +67,12 @@ all done."
 4. **Installing, step by step** (`glass_runtime::osupdate::apply`; the
    model is `specs/tla/OsUpdate.tla`):
    1. the checks above;
-   2. the record says "staging";
-   3. the image is copied in beside glassd's state, hashed as it goes and
-      checked against the digest, so what's received is what was checked
-      even if the source changes;
+   2. the image is downloaded beside glassd's state, hashed as it arrives
+      and checked against the digest, so what's received is what was
+      checked even if the source changes. A download that stops (the
+      network goes) changes nothing else, and the next try goes on from
+      where it stopped;
+   3. the record says "staging";
    4. it's received into `glass-os-<version>`;
    5. the kept kernel patches' rebuilds are written into it;
    6. the release's number is kept as the last taken;
@@ -107,6 +109,35 @@ all done."
    development keys are in `build/osupdate`. The pipeline's live in
    hardware security modules (EP-11, EP-13, ADR 0026's slice 4).
 
+9. **Delivery** (added 2026-10-25). Wherever releases come from, the
+   computer checks every signature and the image's digest itself: nothing
+   is trusted for where it came from.
+   - **Sources** (`glass_runtime::osupdate::Source`): `[update] source`
+     is a folder (an absolute path), an `https://` address, or `console`.
+     A managed computer uses its console when it names none.
+   - **HTTPS** (`glass_gateway_providers::UpdateClient`): the one HTTP
+     client streams a reply's body to disk, binary, never all in memory.
+     It asks for the rest of a download that stopped with a `Range`
+     header, and passes over what it has when a server ignores ranges.
+     Plain HTTP only to this machine, on the development host.
+   - **The console** (`glass-console --updates <folder>`) serves that
+     folder to its computers, each its ring's channel: the ring IT sets on
+     the Devices page is the channel it updates on. A computer reads a file
+     8 MB at a time (`/device/v1/os/file`), each request signed by its key.
+     The console signs nothing. It can keep the folder a mirror of the
+     update server (`--updates-from`, each hour). A channel's
+     `release.json` is written only once its image and rebuilds are whole
+     there, so a computer never hears of a release whose files aren't.
+   - **Automatic checks.** A sync's answer carries the number of the
+     newest release on the computer's ring (`os_release`). Newer than the
+     last it took, glassd checks for it and downloads its image in the
+     background, once a release, and again half an hour after a download
+     that stopped. The update status says it's ready, so Settings does.
+     A check names the kernel patch rebuilds that come with a release but
+     doesn't download them: installing it does.
+   - IT's Devices page shows each computer's OS version and what each
+     ring is offered, and how the mirror's last round went.
+
 ## How it's tested
 - **The model** has five Old switches, each a version that would be
   wrong, and each fails:
@@ -138,6 +169,26 @@ all done."
 
   An image with no init panicked ("no init"), restarted by itself, and
   the loader started the version before.
+- **Delivery, in the VM** (2026-10-25), `UPDATE_VIA=https` and
+  `UPDATE_VIA=console`:
+  - over HTTPS from this host (`tools/dev/serve-https.py`, the development
+    certificate trusted for the run only), an update installs, starts
+    once, is kept and undone;
+  - from a development console, the VM enrolled and in its pilot ring:
+    30 seconds after the release appeared in the console's folder, the VM
+    heard of it in its sync and downloaded it by itself, with nobody
+    checking, then the same install, keep and undo.
+
+  The first HTTPS run stalled at a start: the QEMU process had been
+  paused when the host's disk filled, and every start after hung until a
+  fresh QEMU. The test now power-cuts a start that doesn't answer and
+  waits for the VM before putting it back.
+- **Unit tests**: a download that stops stages nothing and the next try
+  goes on from where it stopped; a check downloads no rebuild; streamed
+  replies by length, chunks and the connection's end, ranges honoured or
+  ignored; the console serving each ring its release in parts, refusing
+  other names and other computers; the mirror writing a release only once
+  its image is whole.
 
 ## Consequences
 - The release pipeline makes each image from a `@glass-image` snapshot,
@@ -149,7 +200,11 @@ all done."
 - An update's environment is a whole image: two versions and the first
   take about 12 GB on a laptop.
 - **Not built yet:**
-  - fetching over HTTPS;
-  - the console's update server and channels per group;
-  - telling the person and choosing when to restart;
-  - automatic checks.
+  - telling the person and choosing when to restart: an update is ready,
+    and installing it is root's (`glassctl update apply`) or, on a
+    computer no org manages, its owner's in Settings;
+  - IT holding a release back from a ring, or pausing one: today a ring
+    gets what the console's folder has for its channel.
+- A whole image is gigabytes over the network: deltas keep most updates to
+  megabytes, and the console's mirror means each image crosses the
+  internet once per org.

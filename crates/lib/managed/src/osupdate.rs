@@ -22,6 +22,25 @@ use serde::{Deserialize, Serialize};
 use crate::hwpatch::GLASSHOUSE;
 use crate::{DocKind, PublicKey, Signed};
 
+/// A computer reads a file of its ring's release from its org's console.
+pub const FILE_PATH: &str = "/device/v1/os/file";
+/// The most of a file the console sends at once: an image comes in parts.
+pub const MAX_PART: u64 = 8 * 1024 * 1024;
+
+/// A file of the release on the computer's channel, from its console: the
+/// channel is its ring, which the console knows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileRequest {
+    pub device: String,
+    /// `keys.json`, or a file beside the channel's release: its
+    /// `release.json`, its image, a kernel patch's rebuild.
+    pub name: String,
+    /// From this byte on.
+    #[serde(default)]
+    pub offset: u64,
+}
+
 /// The image a release installs: a ZFS stream of a whole boot environment's
 /// [`IMAGE_SNAPSHOT`], or of the changes to it since another image's.
 pub const IMAGE_SUFFIX: &str = ".zfs";

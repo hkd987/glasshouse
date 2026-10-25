@@ -155,17 +155,45 @@ fn default_probation() -> u64 {
 }
 
 /// `[update]`: the root keys the image trusts for OS updates, the channel
-/// the computer follows, and the folder releases are found in (ADR 0061).
-/// With no root keys it takes no update.
+/// the computer follows, and where releases come from (ADR 0061). With no
+/// root keys it takes no update.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateConfig {
     #[serde(default)]
     pub roots: Vec<glass_managed::PublicKey>,
+    /// The channel, unless the source is the org's console, which follows
+    /// the computer's ring.
     #[serde(default = "default_channel")]
     pub channel: String,
+    /// A folder (a share, a USB drive), Glasshouse's update server or a
+    /// mirror of it (`https://...`), or `console`, the org's: what a
+    /// managed computer uses when this is unset.
     #[serde(default)]
-    pub source: Option<PathBuf>,
+    pub source: Option<String>,
+}
+
+/// Where a computer's OS releases come from (ADR 0061).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateSource {
+    Folder(PathBuf),
+    Https(String),
+    Console,
+}
+
+impl UpdateConfig {
+    /// Where releases come from, if anywhere: on a managed computer, its
+    /// console unless `source` names another.
+    pub fn source(&self, managed: bool) -> Option<UpdateSource> {
+        match self.source.as_deref() {
+            None | Some("") => managed.then_some(UpdateSource::Console),
+            Some("console") => Some(UpdateSource::Console),
+            Some(url) if url.starts_with("https://") || url.starts_with("http://") => {
+                Some(UpdateSource::Https(url.to_owned()))
+            }
+            Some(path) => Some(UpdateSource::Folder(PathBuf::from(path))),
+        }
+    }
 }
 
 impl Default for UpdateConfig {
@@ -572,6 +600,28 @@ impl Config {
                 self.update.channel
             );
         }
+        match self.update.source(self.managed.is_some()) {
+            Some(UpdateSource::Console) if self.managed.is_none() => {
+                bail!("update.source = \"console\": this computer isn't managed by a console");
+            }
+            Some(UpdateSource::Https(url)) if url.starts_with("http://") => {
+                let loopback =
+                    url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost");
+                if !loopback || !self.managed.as_ref().is_some_and(|m| m.allow_insecure_http) {
+                    bail!(
+                        "update.source {url:?}: an update server is HTTPS (plain HTTP only to \
+                         this machine, with managed.allow_insecure_http, for development)"
+                    );
+                }
+            }
+            Some(UpdateSource::Folder(path)) if !path.is_absolute() => {
+                bail!(
+                    "update.source {:?}: a folder is an absolute path",
+                    path.display()
+                );
+            }
+            _ => {}
+        }
         if let Some(managed) = &self.managed {
             if managed.org_keys.is_empty() {
                 bail!("managed.org_keys: a managed device needs its org's public key");
@@ -668,6 +718,46 @@ mod tests {
             let config: Config =
                 toml::from_str(&format!("model_secrets = \"{inside}\"\n")).unwrap();
             assert!(config.validate().is_err(), "{inside}");
+        }
+    }
+
+    /// ADR 0061: a folder, an update server over HTTPS, or the org's
+    /// console, which a managed computer uses unless it names another.
+    #[test]
+    fn bs4_where_os_updates_come_from() {
+        const MANAGED: &str = "[managed]\nurl = \"https://console.example\"\norg = \"acme\"\n\
+            org_keys = [\"ed25519:0000000000000000000000000000000000000000000000000000000000000000\"]\n\
+            token_file = \"/usr/local/etc/glasshouse/enrollment.token\"\n";
+        let parse = |text: &str| -> Config { toml::from_str(text).unwrap() };
+        let unmanaged = parse("");
+        assert_eq!(unmanaged.update.source(false), None);
+        let managed = parse(MANAGED);
+        managed.validate().unwrap();
+        assert_eq!(managed.update.source(true), Some(UpdateSource::Console));
+
+        let folder = parse("[update]\nsource = \"/media/updates\"\n");
+        folder.validate().unwrap();
+        assert_eq!(
+            folder.update.source(false),
+            Some(UpdateSource::Folder("/media/updates".into()))
+        );
+        let https = parse("[update]\nsource = \"https://updates.example/glasshouse\"\n");
+        https.validate().unwrap();
+        assert_eq!(
+            https.update.source(false),
+            Some(UpdateSource::Https(
+                "https://updates.example/glasshouse".into()
+            ))
+        );
+        for refused in [
+            // No console to take them from.
+            "[update]\nsource = \"console\"\n",
+            // Plain HTTP, or a folder that isn't a whole path.
+            "[update]\nsource = \"http://updates.example/\"\n",
+            "[update]\nsource = \"http://127.0.0.1:8080/\"\n",
+            "[update]\nsource = \"updates\"\n",
+        ] {
+            assert!(parse(refused).validate().is_err(), "{refused}");
         }
     }
 

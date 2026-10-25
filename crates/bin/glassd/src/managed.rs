@@ -76,6 +76,27 @@ pub struct Managed {
     /// A release was refused, or couldn't be kept: the loop waits before
     /// it syncs again.
     backoff: bool,
+    /// OS releases the console told this computer of (ADR 0061), checked
+    /// for and downloaded in the background.
+    os_fetch: Arc<OsFetch>,
+}
+
+/// How long before a release whose download stopped is tried again.
+const OS_RETRY: Duration = Duration::from_secs(30 * 60);
+
+/// The background check and download of an OS release.
+#[derive(Debug, Default)]
+struct OsFetch {
+    /// The release being fetched, or the last tried and when.
+    state: std::sync::Mutex<OsFetchState>,
+}
+
+#[derive(Debug, Default)]
+struct OsFetchState {
+    running: bool,
+    /// The release downloaded, ready to install.
+    done: Option<u64>,
+    tried: Option<(u64, Instant)>,
 }
 
 /// Why a release didn't go in force (ADR 0051).
@@ -140,6 +161,7 @@ impl Managed {
             skip: HashMap::new(),
             kept_policy: None,
             backoff: false,
+            os_fetch: Arc::default(),
         };
         match this.load(DocKind::Catalog) {
             Some(signed) => {
@@ -277,6 +299,12 @@ impl Managed {
         match console(&token).map(ConsoleClient::for_model_calls) {
             Ok(models) => self.org.credits.connect(Arc::new(models), &self.device),
             Err(e) => tracing::error!("managed: model credits: {e}"),
+        }
+        // OS releases (ADR 0061) come from it too, on a client of their
+        // own: an image's parts mustn't hold up the sync.
+        match console(&token).map(ConsoleClient::for_updates) {
+            Ok(updates) => self.org.updates.connect(Arc::new(updates), &self.device),
+            Err(e) => tracing::error!("managed: OS updates: {e}"),
         }
         // Meetings (CF-21) go to the same console, on a client of their
         // own: a join mustn't wait behind chat's long poll.
@@ -424,6 +452,11 @@ impl Managed {
             self.last_error = None;
         }
         let mut changed = false;
+        // Its ring is the channel its OS releases come on (ADR 0061).
+        self.org.updates.set_ring(response.ring);
+        if let Some(number) = response.os_release {
+            self.os_release(number);
+        }
         if let Some(credits) = response.credits {
             match self.apply_credits(&credits) {
                 Ok(()) => changed = true,
@@ -461,6 +494,57 @@ impl Managed {
         }
         self.runtime.set_policy_source(self.source());
         changed
+    }
+
+    /// The console says the ring's channel has OS release `number` (ADR
+    /// 0061). Newer than the last this computer took, glassd checks for it
+    /// and downloads its image in the background, once a release, and
+    /// again a while after a download that stopped. Installing it is
+    /// still root's, and what it installs is what the keys signed.
+    fn os_release(&self, number: u64) {
+        if number <= self.runtime.update_taken() {
+            return;
+        }
+        {
+            let mut state = self
+                .os_fetch
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let tried_lately = state
+                .tried
+                .is_some_and(|(n, at)| n == number && at.elapsed() < OS_RETRY);
+            if state.running || state.done == Some(number) || tried_lately {
+                return;
+            }
+            state.running = true;
+            state.tried = Some((number, Instant::now()));
+        }
+        let runtime = Arc::clone(&self.runtime);
+        let fetch = Arc::clone(&self.os_fetch);
+        std::thread::spawn(move || {
+            let status = runtime.update_fetch();
+            let ready = status
+                .available
+                .as_ref()
+                .is_some_and(|a| a.blocked.is_none())
+                && status.checked.is_none();
+            match (&status.available, &status.checked) {
+                (Some(a), None) => tracing::info!(
+                    version = %a.version,
+                    blocked = a.blocked.as_deref().unwrap_or("-"),
+                    "managed: OS update {} downloaded, ready to install",
+                    a.number
+                ),
+                (_, Some(why)) => tracing::warn!("managed: OS update {number}: {why}"),
+                (None, None) => {}
+            }
+            let mut state = fetch.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.running = false;
+            if ready {
+                state.done = Some(number);
+            }
+        });
     }
 
     /// The console couldn't be reached: nothing changes.
@@ -1116,6 +1200,7 @@ mod tests {
             directory: None,
             chat: None,
             credits: None,
+            os_release: None,
         }
     }
 
@@ -1416,6 +1501,7 @@ mod tests {
                 version,
                 api_key: api_key.map(str::to_owned),
             }),
+            os_release: None,
         };
         assert!(m.handle(response(None, 2)));
         assert!(!path.exists());

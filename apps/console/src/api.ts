@@ -282,6 +282,13 @@ export interface FleetPage {
   devices: DeviceRow[];
   made: MadeApp[];
   enroll: { url: string; org: string; org_key: string; admins: number };
+  /** OS updates the console serves (ADR 0061): each ring's release, and the update server it mirrors. */
+  updates: OsUpdates | null;
+}
+
+export interface OsUpdates {
+  rings: { ring: Ring; number: number | null; version: string | null; base: string | null; bytes: number | null; delta_from: string | null }[];
+  mirror: { from: string; at: string | null; error: string | null } | null;
 }
 
 /** The org's mail service (NV-3), as policy carries it. */

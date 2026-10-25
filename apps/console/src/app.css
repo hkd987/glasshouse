@@ -369,6 +369,16 @@ tbody tr:last-child td {
   text-align: left;
 }
 
+/* A ring's OS release (ADR 0061): its size on a line of its own, words whole. */
+.ring-update {
+  word-break: normal;
+}
+
+.ring-update .hint {
+  display: block;
+  margin-top: 2px;
+}
+
 .kv:last-child {
   border-bottom: none;
 }
@@ -508,6 +518,11 @@ select {
 .stats .stat {
   flex-direction: column;
   align-items: flex-start;
+}
+
+/* A wide table scrolls in its own card, never under the side column. */
+.table-scroll {
+  overflow-x: auto;
 }
 
 .list tr.link {

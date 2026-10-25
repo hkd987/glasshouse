@@ -3,7 +3,8 @@
 //! credits and individuals' own keys, ADR 0039), over HTTPS; Stripe, which
 //! takes payment for model credits ([`stripe`]); the
 //! org's admin console, for managed settings ([`ConsoleClient`], ADR
-//! 0023); and the person's mail servers, over IMAP and SMTP submission
+//! 0023); Glasshouse's update server, for OS releases ([`UpdateClient`],
+//! ADR 0061); and the person's mail servers, over IMAP and SMTP submission
 //! ([`ImapLink`], ADR 0037).
 //!
 //! This is the only crate with an HTTP and TLS stack: ureq on the base
@@ -27,6 +28,7 @@ mod openrouter;
 mod sigv4;
 pub mod stripe;
 mod tools;
+mod updates;
 
 use std::sync::Arc;
 
@@ -43,6 +45,7 @@ pub use openrouter::{
     AUTO as OPENROUTER_AUTO, Account as OpenRouterAccount, KeyUsage, MadeKey, OpenRouterKeys,
     OpenRouterProvider,
 };
+pub use updates::UpdateClient;
 
 /// A gateway with a provider for each policy entry this machine can use,
 /// and a note for each it can't. Notes never contain a credential. Model

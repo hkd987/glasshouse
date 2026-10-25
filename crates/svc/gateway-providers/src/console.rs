@@ -19,6 +19,7 @@ use glass_managed::chat::{
 use glass_managed::device::{DeviceKey, REGISTER_PATH};
 use glass_managed::meet::{Joined, MediaKeys, MeetLink, MeetRequest};
 use glass_managed::models::{COMPLETE_PATH, ModelAnswer, ModelCall};
+use glass_managed::osupdate;
 use glass_managed::{DeviceReport, SyncRequest, SyncResponse};
 
 use crate::http::{Http, Target};
@@ -147,6 +148,19 @@ impl ConsoleClient {
 
     /// Posts `body` to `path`, signed with this computer's key.
     fn send(&self, path: &str, body: &[u8]) -> Result<crate::http::Reply, ProviderError> {
+        let headers = self.signed(path, body)?;
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        self.http
+            .post(&format!("{}{path}", self.base), &headers, body)
+    }
+
+    /// The headers of a JSON `body` posted to `path`, signed with this
+    /// computer's key.
+    fn signed(
+        &self,
+        path: &str,
+        body: &[u8],
+    ) -> Result<Vec<(&'static str, String)>, ProviderError> {
         let key = self.key.as_ref().ok_or_else(|| {
             ProviderError::NotConfigured("this computer has no device key yet".into())
         })?;
@@ -158,9 +172,50 @@ impl ConsoleClient {
             key.sign("POST", path, now, body)
                 .map_err(ProviderError::NotConfigured)?,
         );
+        Ok(headers)
+    }
+
+    /// For OS updates (ADR 0061): downloads that may take a while.
+    #[must_use]
+    pub fn for_updates(mut self) -> Self {
+        self.http = self.http.for_downloads();
+        self
+    }
+
+    /// Part of a file of this computer's ring's OS release (ADR 0061), from
+    /// byte `request.offset` on, onto `to`: at most
+    /// [`osupdate::MAX_PART`] bytes come at once, fewer at the file's end.
+    pub fn os_part(
+        &self,
+        request: &osupdate::FileRequest,
+        to: &mut dyn std::io::Write,
+    ) -> Result<u64, String> {
+        let body = serde_json::to_vec(request).map_err(|e| e.to_string())?;
+        let headers = self
+            .signed(osupdate::FILE_PATH, &body)
+            .map_err(|e| e.to_string())?;
         let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        self.http
-            .post(&format!("{}{path}", self.base), &headers, body)
+        let got = self
+            .http
+            .download(
+                &crate::http::Ask {
+                    method: "POST",
+                    url: &format!("{}{}", self.base, osupdate::FILE_PATH),
+                    headers: &headers,
+                    body: &body,
+                },
+                0,
+                to,
+                osupdate::MAX_PART,
+            )
+            .map_err(|e| e.to_string())?;
+        match got.status {
+            200 => Ok(got.written),
+            status => {
+                Err(Self::reason(&got.body)
+                    .unwrap_or_else(|| format!("the console answered {status}")))
+            }
+        }
     }
 
     /// Posts `body` to `path`: the answer's text, or why not, with the

@@ -10,10 +10,11 @@
 # for 10.0.2.2 (the host, as the VM sees it) that the VM is told to trust.
 # Needs `make console-dev` running (its state in build/console).
 #
-# --undo takes out the settings, the token and what the console left on the
-# VM (its kept releases and the policy file it wrote), so the VM is back to
-# the shipped default policy. `make e2e-vm` refuses to run while it's
-# enrolled.
+# --undo takes out the settings, the token, the development CA it told the
+# VM to trust, and what the console left on the VM (its kept releases and
+# the policy file it wrote), so the VM is back to the shipped default
+# policy and trusts what it did before. `make e2e-vm` refuses to run while
+# it's enrolled.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -31,7 +32,7 @@ vm_running || die "VM is not running (vm.sh up && vm.sh wait)"
 
 if [[ ${1:-} == --undo ]]; then
 	vm_ssh "sed -i '' '/^$begin/,/^$end/d' $conf; rm -f $token; rm -rf /var/db/glasshouse/managed
-	rm -f /usr/local/etc/glasshouse/policy.toml; service glassd restart >/dev/null"
+	rm -f /usr/local/etc/glasshouse/policy.toml $ca; certctl rehash; service glassd restart >/dev/null"
 	log "the VM is no longer enrolled"
 	exit 0
 fi
@@ -42,20 +43,7 @@ field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.ar
 curl -fsS -o /dev/null "$(field url)/" || die "the console at $(field url) isn't answering (make console-dev)"
 
 # A development CA and the console's certificate, made once.
-if [[ ! -f $tls/console.pem ]]; then
-	mkdir -p "$tls"
-	(
-		cd "$tls"
-		umask 077
-		openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=Glasshouse development CA" \
-			-keyout ca.key -out ca.pem 2>/dev/null
-		openssl req -newkey rsa:2048 -nodes -subj "/CN=10.0.2.2" -keyout console.key -out console.csr 2>/dev/null
-		printf 'subjectAltName=IP:10.0.2.2,IP:127.0.0.1,DNS:localhost\nextendedKeyUsage=serverAuth\n' >ext.cnf
-		openssl x509 -req -in console.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 825 \
-			-extfile ext.cnf -out console.pem 2>/dev/null
-		rm -f console.csr
-	)
-fi
+dev_tls "$tls"
 
 # HTTPS in front of the console, unless it's there already.
 if ! curl -fsS --cacert "$tls/ca.pem" -o /dev/null "https://127.0.0.1:$port/" 2>/dev/null; then

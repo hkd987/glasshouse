@@ -125,64 +125,76 @@ function render(
           null,
           null,
           h(
-            "table",
-            { class: "list devices" },
+            "div",
+            { class: "table-scroll" },
             h(
-              "thead",
-              {},
+              "table",
+              { class: "list devices" },
               h(
-                "tr",
+                "thead",
                 {},
-                ...["Device", "People", "Ring", "Kind", "Policy", "Catalog"].map((x) => h("th", {}, x)),
-                ...["Agents", "Waiting", "Blocked 24h"].map((x) => h("th", { class: "num" }, x)),
-                h("th", {}, "Last seen"),
-                h("th", {}, ""),
-              ),
-            ),
-            h(
-              "tbody",
-              {},
-              ...page.devices.map((d) =>
                 h(
                   "tr",
-                  { "data-device": d.id },
-                  h("td", {}, h("span", { class: `dot ${d.online ? "green" : "grey"}` }), mono(d.name), d.last_error ? h("div", { class: "warning small" }, d.last_error) : null),
-                  h("td", {}, d.users.join(", ") || "–"),
+                  {},
+                  ...["Device", "People", "Ring", "Kind", "Policy", "Catalog"].map((x) => h("th", {}, x)),
+                  ...["Agents", "Waiting", "Blocked 24h"].map((x) => h("th", { class: "num" }, x)),
+                  h("th", {}, "Last seen"),
+                  h("th", {}, ""),
+                ),
+              ),
+              h(
+                "tbody",
+                {},
+                ...page.devices.map((d) =>
                   h(
-                    "td",
-                    {},
+                    "tr",
+                    { "data-device": d.id },
                     h(
-                      "select",
-                      {
-                        "aria-label": `Ring for ${d.name}`,
-                        onchange: (e: Event) => setRing(d.id, (e.target as HTMLSelectElement).value as Ring),
-                      },
-                      ...RINGS.map((r) => h("option", { value: r, selected: r === d.ring }, capital(r))),
+                      "td",
+                      {},
+                      h("span", { class: `dot ${d.online ? "green" : "grey"}` }),
+                      mono(d.name),
+                      // The OS it runs (ADR 0061), under its name.
+                      d.os_version ? h("div", { class: "hint small", "data-test": "os-version" }, d.os_version) : null,
+                      d.last_error ? h("div", { class: "warning small" }, d.last_error) : null,
                     ),
+                    h("td", {}, d.users.join(", ") || "–"),
+                    h(
+                      "td",
+                      {},
+                      h(
+                        "select",
+                        {
+                          "aria-label": `Ring for ${d.name}`,
+                          onchange: (e: Event) => setRing(d.id, (e.target as HTMLSelectElement).value as Ring),
+                        },
+                        ...RINGS.map((r) => h("option", { value: r, selected: r === d.ring }, capital(r))),
+                      ),
+                    ),
+                    h(
+                      "td",
+                      {},
+                      page.kinds.length
+                        ? h(
+                            "select",
+                            {
+                              "aria-label": `Kind of computer ${d.name} is`,
+                              name: "kind",
+                              onchange: (e: Event) => setKind(d.id, (e.target as HTMLSelectElement).value || null),
+                            },
+                            h("option", { value: "", selected: !d.kind }, "–"),
+                            ...page.kinds.map((k) => h("option", { value: k, selected: k === d.kind }, capital(k))),
+                          )
+                        : "–",
+                    ),
+                    h("td", {}, d.policy_version ? mono(`v${d.policy_version}`) : "–"),
+                    h("td", {}, d.catalog_version ? mono(`v${d.catalog_version}`) : "–"),
+                    h("td", { class: "num" }, String(d.agents)),
+                    h("td", { class: "num" }, d.waiting ? chip(String(d.waiting), "wait") : "0"),
+                    h("td", { class: "num" }, String(d.blocked_24h)),
+                    h("td", { class: "hint" }, ago(d.last_seen)),
+                    removal(d, removing),
                   ),
-                  h(
-                    "td",
-                    {},
-                    page.kinds.length
-                      ? h(
-                          "select",
-                          {
-                            "aria-label": `Kind of computer ${d.name} is`,
-                            name: "kind",
-                            onchange: (e: Event) => setKind(d.id, (e.target as HTMLSelectElement).value || null),
-                          },
-                          h("option", { value: "", selected: !d.kind }, "–"),
-                          ...page.kinds.map((k) => h("option", { value: k, selected: k === d.kind }, capital(k))),
-                        )
-                      : "–",
-                  ),
-                  h("td", {}, d.policy_version ? mono(`v${d.policy_version}`) : "–"),
-                  h("td", {}, d.catalog_version ? mono(`v${d.catalog_version}`) : "–"),
-                  h("td", { class: "num" }, String(d.agents)),
-                  h("td", { class: "num" }, d.waiting ? chip(String(d.waiting), "wait") : "0"),
-                  h("td", { class: "num" }, String(d.blocked_24h)),
-                  h("td", { class: "hint" }, ago(d.last_seen)),
-                  removal(d, removing),
                 ),
               ),
             ),
@@ -193,6 +205,7 @@ function render(
       h(
         "aside",
         { class: "side" },
+        osUpdates(page),
         card(
           "Enroll a device",
           "Zero-touch enrollment isn't built yet (AD-10). A device enrolls with these in its system settings and the org's enrollment token.",
@@ -202,6 +215,46 @@ function render(
         ),
       ),
     ),
+  );
+}
+
+/** The OS release each ring's computers are offered (ADR 0061): the ring a
+ * computer is in is the channel it updates on. Computers check every
+ * release's signatures themselves; the console only passes them on. */
+function osUpdates(page: FleetPage): HTMLElement {
+  const u = page.updates;
+  if (!u) return card("OS updates", "This console serves no OS updates: computers take them from where their settings say.");
+  const size = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`);
+  return h(
+    "section",
+    { class: "card", "data-test": "os-updates" },
+    h("h2", {}, "OS updates"),
+    h("p", { class: "card-sub" }, "A computer's ring is the channel it updates on. Each computer checks a release's signatures itself before taking it."),
+    ...u.rings.map((r) =>
+      h(
+        "div",
+        { class: "kv stack ring-update", "data-ring": r.ring },
+        h("span", {}, `${capital(r.ring)} ring`),
+        r.version && r.number !== null && r.bytes !== null
+          ? h(
+              "span",
+              {},
+              mono(r.version),
+              ` · release ${r.number}`,
+              h("span", { class: "hint" }, r.delta_from ? `${size(r.bytes)} of changes from ${r.delta_from}` : `${size(r.bytes)}, the whole image`),
+            )
+          : h("span", { class: "hint" }, "Nothing offered"),
+      ),
+    ),
+    u.mirror
+      ? h(
+          "p",
+          { class: u.mirror.error ? "warning small" : "hint" },
+          u.mirror.error
+            ? `Mirroring ${u.mirror.from} failed${u.mirror.at ? ` ${ago(u.mirror.at)}` : ""}: ${u.mirror.error}`
+            : `Mirrored from ${u.mirror.from}${u.mirror.at ? `, checked ${ago(u.mirror.at)}` : ""}.`,
+        )
+      : null,
   );
 }
 

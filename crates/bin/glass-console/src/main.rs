@@ -21,6 +21,7 @@ mod relay;
 mod server;
 mod state;
 mod studio;
+mod updates;
 mod views;
 
 use std::net::SocketAddr;
@@ -114,7 +115,19 @@ struct Args {
     /// The key it signs with (`ed25519:...`).
     #[arg(long)]
     kbuild_key: Option<String>,
+    /// OS updates for the org's computers (ADR 0061): a folder laid out as
+    /// Glasshouse's update server is, served to each computer on its
+    /// ring's channel.
+    #[arg(long)]
+    updates: Option<PathBuf>,
+    /// Glasshouse's update server, which `--updates` mirrors, checked each
+    /// hour (`https://...`; plain HTTP to this machine with `--dev`).
+    #[arg(long, requires = "updates")]
+    updates_from: Option<String>,
 }
+
+/// How often the update server is mirrored.
+const MIRROR_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// The development billing relay's token for every console. Not a secret.
 const DEV_BILLING_TOKEN: &str = "dev-billing-token-not-a-secret";
@@ -396,6 +409,23 @@ async fn run(args: Args) -> anyhow::Result<()> {
         }
         _ if args.dev => console.set_patch_builder(hardware::DevBuilder::new()),
         _ => tracing::warn!("kernel patches sent for review can't be built: no --kbuild"),
+    }
+    if let Some(dir) = &args.updates {
+        let updates = std::sync::Arc::new(updates::Updates::new(dir));
+        console.set_updates(std::sync::Arc::clone(&updates));
+        if let Some(from) = &args.updates_from {
+            let server = glass_gateway_providers::UpdateClient::new(from, args.dev)
+                .map_err(|e| anyhow::anyhow!("--updates-from: {e}"))?;
+            tracing::info!(from = %server.url(), "updates: mirroring the update server");
+            tokio::spawn(async move {
+                let server = std::sync::Arc::new(server);
+                loop {
+                    let (updates, server) = (updates.clone(), server.clone());
+                    let _ = tokio::task::spawn_blocking(move || updates.mirror(&server)).await;
+                    tokio::time::sleep(MIRROR_EVERY).await;
+                }
+            });
+        }
     }
     // Apps people share are checked and built here, confined, or refused.
     if args.bundler.is_file() && args.apps.join("sdk").is_dir() {

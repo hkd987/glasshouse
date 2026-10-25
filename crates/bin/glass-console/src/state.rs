@@ -1450,6 +1450,7 @@ impl State {
             directory,
             chat,
             credits: self.credits.for_device(request.credits),
+            os_release: None,
         }
     }
 
@@ -1598,6 +1599,11 @@ impl State {
     /// under the lock after a request's signature was, so a computer IT
     /// removed or forgot meanwhile gets nothing more, and no entry is made
     /// for it (ADR 0052, the DeviceEnrollment model).
+    /// The ring a computer is in: a new one is in the broad ring.
+    pub fn ring_of(&self, id: &str) -> Ring {
+        self.fleet.devices.get(id).map_or(Ring::Broad, |d| d.ring)
+    }
+
     pub fn still_signs(&self, id: &str, key: &str) -> Computer {
         match self.computer(id) {
             Computer::Key(found)

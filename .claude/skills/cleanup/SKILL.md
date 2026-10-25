@@ -41,6 +41,14 @@ the VM (status `io-error`), which looks like a hung VM.
    `build/cache` (the FreeBSD downloads, slow to fetch again) or
    `build/vm` (the dev VM: `make vm-reset` rebuilds it).
 
+## Before a big build
+
+A full `make test` or `make freebsd vm-deploy` after many changes grows
+the incremental caches by several GB (8 GB once, from 12 GB free to none,
+which paused the VM). With under about 12 GB free, build with
+`CARGO_INCREMENTAL=0` (slower to rebuild, nothing cached), and run
+`tools/cleanup.sh --apply` after.
+
 ## Never
 
 - Delete `build/vm`, `build/cache` or `build/freebsd` (the sysroot) to save

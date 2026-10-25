@@ -1508,6 +1508,26 @@ impl Runtime {
         ))
     }
 
+    /// Checks for a newer release and downloads its image ahead, in the
+    /// background: glassd, when its console says its ring has one (ADR
+    /// 0061). The update status says what it found; installing it is
+    /// still root's.
+    pub fn update_fetch(&self) -> glass_api::UpdateStatus {
+        let store = self.hardware_checked();
+        crate::osupdate::fetch(
+            &crate::hwpatch::System,
+            &self.updates,
+            &store,
+            &self.config.update,
+            &self.hardware_rules(),
+        )
+    }
+
+    /// The last release number this computer took (ADR 0061).
+    pub fn update_taken(&self) -> u64 {
+        self.updates.taken().unwrap_or(0)
+    }
+
     /// Installs the newest release in a boot environment of its own, which
     /// the next start uses once (ADR 0061). Root only.
     pub fn update_apply(

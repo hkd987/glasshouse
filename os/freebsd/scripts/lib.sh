@@ -52,6 +52,26 @@ VM_QMP=$VM_DIR/qmp.sock                                 # QEMU machine protocol,
 VM_EFIVARS=$VM_DIR/efivars.fd
 
 log() { printf '[%s] %s\n' "${0##*/}" "$*" >&2; }
+
+# dev_tls <dir> -- a development CA (ca.pem) and a server certificate for 10.0.2.2, the host as the
+# VM sees it (console.pem, console.key), made once in <dir>. Development only: the VM is told to
+# trust the CA only while a script that needs it runs.
+dev_tls() {
+	local tls=$1
+	[[ -f $tls/console.pem ]] && return
+	mkdir -p "$tls"
+	(
+		cd "$tls" || exit
+		umask 077
+		openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=Glasshouse development CA" \
+			-keyout ca.key -out ca.pem 2>/dev/null
+		openssl req -newkey rsa:2048 -nodes -subj "/CN=10.0.2.2" -keyout console.key -out console.csr 2>/dev/null
+		printf 'subjectAltName=IP:10.0.2.2,IP:127.0.0.1,DNS:localhost\nextendedKeyUsage=serverAuth\n' >ext.cnf
+		openssl x509 -req -in console.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 825 \
+			-extfile ext.cnf -out console.pem 2>/dev/null
+		rm -f console.csr
+	)
+}
 die() { log "error: $*"; exit 1; }
 need() {
 	local t

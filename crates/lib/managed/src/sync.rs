@@ -97,6 +97,11 @@ pub struct SyncResponse {
     /// reaches only a computer whose key signed the request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credits: Option<ModelCredits>,
+    /// The number of the newest OS release on the ring's channel, when the
+    /// console has one (ADR 0061): a computer that took an older one
+    /// checks for it. What it takes is still what the keys signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_release: Option<u64>,
 }
 
 /// The org's key for its model credits (ADR 0039), at a version; no key

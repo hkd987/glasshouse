@@ -26,6 +26,12 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// The longest a connection may sit silent. Without streaming, a reply
 /// says nothing until it's whole.
 const IDLE_TIMEOUT: Duration = CALL_TIMEOUT;
+/// A download may sit silent this long before it's an outage; it may take
+/// as long as it takes in all (ADR 0061: an image is gigabytes).
+const DOWNLOAD_IDLE: Duration = Duration::from_secs(60);
+const DOWNLOAD_TOTAL: Duration = Duration::from_secs(24 * 3600);
+/// The most of a reply's head read, and of a refusal's body.
+const MAX_HEAD: usize = 64 * 1024;
 /// How much longer a hop in front of a provider waits than the provider's
 /// own call (ADR 0039: a computer's call through its console), so the far
 /// end gives up first and the near end hears why.
@@ -57,6 +63,25 @@ pub(crate) struct Reply {
     /// How long the server asked us to wait before trying again
     /// (`retry-after`, in seconds), when it said.
     pub retry_after: Option<Duration>,
+}
+
+/// A request [`Http::download`] sends.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Ask<'a> {
+    pub method: &'a str,
+    pub url: &'a str,
+    pub headers: &'a [(&'a str, &'a str)],
+    pub body: &'a [u8],
+}
+
+/// What [`Http::download`] got.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Downloaded {
+    pub status: u16,
+    /// A 2xx body's bytes written.
+    pub written: u64,
+    /// Another status's body, as text, for its reason.
+    pub body: String,
 }
 
 /// Where a request goes.
@@ -119,6 +144,15 @@ impl Http {
         self
     }
 
+    /// For downloads (ADR 0061): a minute of silence is an outage, and the
+    /// whole may take as long as it takes.
+    #[must_use]
+    pub fn for_downloads(mut self) -> Self {
+        self.idle = DOWNLOAD_IDLE;
+        self.total = DOWNLOAD_TOTAL;
+        self
+    }
+
     /// Waits longer than a provider's own call does, for requests that
     /// another server forwards to one.
     #[must_use]
@@ -152,6 +186,114 @@ impl Http {
         if !matches!(method, "GET" | "POST" | "PATCH" | "DELETE") {
             return Err(ProviderError::Rejected(format!("no method {method:?}")));
         }
+        let deadline = Instant::now() + self.total;
+        let mut stream = self.request(method, url, headers, body)?;
+        read_reply(&mut *stream, deadline, self.max_reply)
+    }
+
+    /// Sends a request, as [`Http::send`] does, and streams a 2xx reply's
+    /// body onto `to`, never all in memory, and binary: an OS image (ADR
+    /// 0061). With `from` above 0 it asks for the body from that byte on
+    /// (`Range`): a 206 answers from there, and a 200, from a server that
+    /// ignores ranges, has its first `from` bytes passed over. At most
+    /// `max` bytes are written; what was written before an error stays.
+    pub fn download(
+        &self,
+        ask: &Ask<'_>,
+        from: u64,
+        to: &mut dyn Write,
+        max: u64,
+    ) -> Result<Downloaded, ProviderError> {
+        let range = format!("bytes={from}-");
+        let mut all: Vec<(&str, &str)> = ask.headers.to_vec();
+        if from > 0 {
+            all.push(("Range", &range));
+        }
+        let deadline = Instant::now() + self.total;
+        let mut stream = self.request(ask.method, ask.url, &all, ask.body)?;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 16 * 1024];
+        let head = loop {
+            if let Some(head) = head(&buf, usize::MAX)? {
+                break head;
+            }
+            if buf.len() > MAX_HEAD {
+                return Err(ProviderError::Unavailable(
+                    "the reply head is too long".into(),
+                ));
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(ProviderError::Unavailable(
+                        "the connection closed before the reply was complete".into(),
+                    ));
+                }
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) => return Err(outage("reading the reply", &e)),
+            }
+        };
+        let left = match head.framing {
+            Framing::Length(n) => Left::Length(n as u64),
+            Framing::Chunked => Left::ChunkSize,
+            Framing::Close => Left::Close,
+        };
+        let mut reply = Body {
+            stream: &mut *stream,
+            pending: buf.split_off(head.at),
+            at: 0,
+            left,
+            deadline,
+        };
+        if !(200..300).contains(&head.status) {
+            let mut text = Vec::new();
+            let _ = (&mut reply).take(MAX_HEAD as u64).read_to_end(&mut text);
+            return Ok(Downloaded {
+                status: head.status,
+                written: 0,
+                body: String::from_utf8_lossy(&text).into_owned(),
+            });
+        }
+        let skip = if head.status == 206 { 0 } else { from };
+        let skipped = std::io::copy(&mut (&mut reply).take(skip), &mut std::io::sink())
+            .map_err(|e| broken("downloading", &e))?;
+        if skipped < skip {
+            return Err(ProviderError::Unavailable(
+                "the reply ended before where the download stopped".into(),
+            ));
+        }
+        let mut written: u64 = 0;
+        let mut part = vec![0u8; 256 * 1024];
+        loop {
+            let n = reply
+                .read(&mut part)
+                .map_err(|e| broken("downloading", &e))?;
+            if n == 0 {
+                break;
+            }
+            if written + n as u64 > max {
+                return Err(ProviderError::Unavailable(format!(
+                    "the download is longer than the {max} bytes expected"
+                )));
+            }
+            to.write_all(&part[..n])
+                .map_err(|e| ProviderError::Unavailable(format!("writing the download: {e}")))?;
+            written += n as u64;
+        }
+        Ok(Downloaded {
+            status: head.status,
+            written,
+            body: String::new(),
+        })
+    }
+
+    /// A connection with `method` sent on it, its headers and body.
+    fn request(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<Box<dyn Stream>, ProviderError> {
         let target = Target::parse(url).ok_or_else(|| {
             ProviderError::NotConfigured(format!("{url:?} is not an http(s) URL"))
         })?;
@@ -160,7 +302,6 @@ impl Http {
                 "model endpoints must use HTTPS".into(),
             ));
         }
-        let deadline = Instant::now() + self.total;
         let mut head = format!(
             "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Glasshouse model gateway\r\nContent-Length: {}\r\nConnection: close\r\n",
             target.path,
@@ -180,7 +321,7 @@ impl Http {
             .and_then(|()| stream.write_all(body))
             .and_then(|()| stream.flush())
             .map_err(|e| outage("sending", &e))?;
-        read_reply(&mut *stream, deadline, self.max_reply)
+        Ok(stream)
     }
 
     /// A connection to `target`, through the proxy and TLS as needed.
@@ -216,6 +357,17 @@ fn outage(doing: &str, e: &std::io::Error) -> ProviderError {
             ProviderError::Unavailable(format!("timed out {doing}"))
         }
         kind => ProviderError::Unavailable(format!("network error {doing}: {kind}")),
+    }
+}
+
+/// A download broken off: an outage, in the stream's own words where it
+/// has them (a bad chunk, an early end).
+fn broken(doing: &str, e: &std::io::Error) -> ProviderError {
+    match e.kind() {
+        std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof => {
+            ProviderError::Unavailable(format!("{doing}: {e}"))
+        }
+        _ => outage(doing, e),
     }
 }
 
@@ -349,6 +501,152 @@ fn read_reply(
                 closed = true;
             }
             Err(e) => return Err(outage("reading the reply", &e)),
+        }
+    }
+}
+
+/// What's left of a body being streamed.
+#[derive(Debug, Clone, Copy)]
+enum Left {
+    Length(u64),
+    /// A chunk's size line is next.
+    ChunkSize,
+    /// This much of a chunk, then its CRLF.
+    Chunk(u64),
+    Close,
+    Done,
+}
+
+/// A reply's body, read as it arrives: by its length, its chunks, or the
+/// connection's end.
+struct Body<'a> {
+    stream: &'a mut dyn Stream,
+    /// Bytes read and not yet given out, from `at`.
+    pending: Vec<u8>,
+    at: usize,
+    left: Left,
+    deadline: Instant,
+}
+
+impl Body<'_> {
+    fn waiting(&self) -> &[u8] {
+        &self.pending[self.at..]
+    }
+
+    /// More from the connection; false at its end.
+    fn fill(&mut self) -> std::io::Result<bool> {
+        if Instant::now() > self.deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out",
+            ));
+        }
+        self.pending.drain(..self.at);
+        self.at = 0;
+        let mut chunk = [0u8; 64 * 1024];
+        match self.stream.read(&mut chunk) {
+            Ok(0) => Ok(false),
+            Ok(n) => {
+                self.pending.extend_from_slice(&chunk[..n]);
+                Ok(true)
+            }
+            // A server that closes without TLS close_notify ends a body
+            // framed by the connection.
+            Err(_) if matches!(self.left, Left::Close) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn early_end() -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the connection closed before the reply was complete",
+        )
+    }
+
+    fn bad_chunk() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "bad chunked encoding")
+    }
+
+    /// Up to `left` waiting bytes into `out`.
+    fn give(&mut self, out: &mut [u8], left: u64) -> usize {
+        let n = out
+            .len()
+            .min(self.waiting().len())
+            .min(usize::try_from(left).unwrap_or(usize::MAX));
+        out[..n].copy_from_slice(&self.pending[self.at..self.at + n]);
+        self.at += n;
+        n
+    }
+}
+
+impl Read for Body<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            match self.left {
+                Left::Done | Left::Length(0) => {
+                    self.left = Left::Done;
+                    return Ok(0);
+                }
+                Left::Length(left) => {
+                    if self.waiting().is_empty() && !self.fill()? {
+                        return Err(Self::early_end());
+                    }
+                    let n = self.give(out, left);
+                    self.left = Left::Length(left - n as u64);
+                    return Ok(n);
+                }
+                Left::ChunkSize => match httparse::parse_chunk_size(self.waiting()) {
+                    Ok(httparse::Status::Complete((used, size))) => {
+                        self.at += used;
+                        self.left = if size == 0 {
+                            Left::Done
+                        } else {
+                            Left::Chunk(size)
+                        };
+                    }
+                    Ok(httparse::Status::Partial) => {
+                        if self.waiting().len() > 1024 {
+                            return Err(Self::bad_chunk());
+                        }
+                        if !self.fill()? {
+                            return Err(Self::early_end());
+                        }
+                    }
+                    Err(_) => return Err(Self::bad_chunk()),
+                },
+                Left::Chunk(0) => {
+                    if self.waiting().len() < 2 {
+                        if !self.fill()? {
+                            return Err(Self::early_end());
+                        }
+                        continue;
+                    }
+                    if &self.waiting()[..2] != b"\r\n" {
+                        return Err(Self::bad_chunk());
+                    }
+                    self.at += 2;
+                    self.left = Left::ChunkSize;
+                }
+                Left::Chunk(left) => {
+                    if self.waiting().is_empty() && !self.fill()? {
+                        return Err(Self::early_end());
+                    }
+                    let n = self.give(out, left);
+                    self.left = Left::Chunk(left - n as u64);
+                    return Ok(n);
+                }
+                Left::Close => {
+                    if self.waiting().is_empty() && !self.fill()? {
+                        self.left = Left::Done;
+                        return Ok(0);
+                    }
+                    return Ok(self.give(out, u64::MAX));
+                }
+            }
         }
     }
 }
@@ -675,6 +973,44 @@ pub(crate) mod fake {
     pub struct Request {
         pub head: String,
         pub body: String,
+    }
+
+    /// Serves one request per reply, each reply's bytes exactly as given
+    /// (a head and any body, binary), then closes; returns the base URL
+    /// and the requests it got.
+    pub fn serve_raw(replies: Vec<Vec<u8>>) -> (String, mpsc::Receiver<Request>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            for reply in replies {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    head.push_str(&line);
+                }
+                let mut received = vec![0; length];
+                reader.read_exact(&mut received).unwrap();
+                let mut stream = stream;
+                let _ = stream.write_all(&reply);
+                tx.send(Request {
+                    head,
+                    body: String::from_utf8_lossy(&received).into_owned(),
+                })
+                .unwrap();
+            }
+        });
+        (url, rx)
     }
 
     /// Serves one request; returns the base URL and the request it got.

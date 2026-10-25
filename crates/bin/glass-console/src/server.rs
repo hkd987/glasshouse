@@ -108,6 +108,8 @@ pub struct Console {
     /// Kernel patches an agent is reviewing for IT now (ADR 0057): one
     /// review of each at a time.
     reviewing: Mutex<std::collections::BTreeSet<String>>,
+    /// OS updates the console serves its computers (ADR 0061).
+    updates: std::sync::OnceLock<Arc<crate::updates::Updates>>,
 }
 
 /// Where the org's credits that agents' reviews of kernel patches spend
@@ -380,6 +382,7 @@ impl Console {
             granting: tokio::sync::Mutex::new(()),
             model_calls: tokio::sync::Semaphore::new(MAX_MODEL_CALLS),
             reviewing: Mutex::default(),
+            updates: std::sync::OnceLock::new(),
         })
     }
 
@@ -1156,6 +1159,25 @@ impl Console {
         let _ = self.patch_builder.set(builder);
     }
 
+    /// Serves `updates` to the org's computers (ADR 0061).
+    pub fn set_updates(&self, updates: Arc<crate::updates::Updates>) {
+        let _ = self.updates.set(updates);
+    }
+
+    /// Adds the number of the release on the computer's ring's channel to
+    /// what a sync answers (ADR 0061).
+    fn with_os_release(
+        &self,
+        mut answer: glass_managed::SyncResponse,
+    ) -> glass_managed::SyncResponse {
+        answer.os_release = self
+            .updates
+            .get()
+            .and_then(|u| u.offered(answer.ring))
+            .map(|o| o.number);
+        answer
+    }
+
     /// Builds the patches sent for review, one at a time, until the console
     /// stops: those a restart interrupted first.
     pub async fn build_patches(self: Arc<Self>) {
@@ -1652,7 +1674,12 @@ impl Console {
                 Ok(()) => ok(json!({})),
                 Err(r) => refused(r),
             },
-            ("GET", ["fleet"]) => ok(views::fleet(&self.state(), directory, &self.url)),
+            ("GET", ["fleet"]) => {
+                let mut page = views::fleet(&self.state(), directory, &self.url);
+                // What each ring is offered (ADR 0061).
+                page["updates"] = self.updates.get().map_or(Value::Null, |u| u.view());
+                ok(page)
+            }
             ("POST", ["fleet", device, "ring"]) => {
                 let set: SetRing = match body(request) {
                     Ok(b) => b,
@@ -1766,6 +1793,7 @@ impl Console {
                     || first.credits.is_some()
                     || wait.is_zero()
                 {
+                    let first = self.with_os_release(first);
                     return ok(serde_json::to_value(first).unwrap_or_default());
                 }
                 // Long poll: answer as soon as something is released, to a
@@ -1778,6 +1806,7 @@ impl Console {
                     }
                     state.sync(&sync)
                 };
+                let answer = self.with_os_release(answer);
                 ok(serde_json::to_value(answer).unwrap_or_default())
             }
             "report" => {
@@ -1925,6 +1954,32 @@ impl Console {
                 }
             }
             "apps/submit" => self.apps_submit(request).await,
+            "os/file" => {
+                let ask: glass_managed::osupdate::FileRequest = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                let Some(updates) = self.updates.get() else {
+                    return error(404, "This console serves no OS updates.");
+                };
+                // The computer's ring is its channel, as IT sets it.
+                let ring = {
+                    let state = self.state();
+                    if let Some(gone) = signer_gone(state.still_signs(&device, &key)) {
+                        return gone;
+                    }
+                    state.ring_of(&device)
+                };
+                let updates = Arc::clone(updates);
+                let read =
+                    tokio::task::spawn_blocking(move || updates.part(ring, &ask.name, ask.offset))
+                        .await;
+                match read {
+                    Ok(Ok(part)) => Response::new(200, "application/octet-stream", part),
+                    Ok(Err(r)) => refused(r),
+                    Err(e) => error(500, &e.to_string()),
+                }
+            }
             "hardware/submit" => self.patch_submit(&device, request),
             "hardware/bundle" => {
                 let fetch: glass_managed::hwreview::PatchFetch = match body(request) {
@@ -4791,6 +4846,123 @@ mod tests {
         let (text, partial) = crate::hardware::review_message(&shared, "1", "patch-x");
         assert!(!partial);
         assert!(text.contains("(they didn't say)") && text.contains("didn't build"));
+    }
+
+    /// ADR 0061: the console serves OS updates from its folder, each
+    /// computer its ring's channel, in parts, to computers whose keys sign
+    /// the request; a sync says the number of the release on the ring, and
+    /// IT's fleet page says what each ring is offered. The console signs
+    /// nothing: computers check what it serves.
+    #[tokio::test]
+    async fn bs4_the_console_serves_each_ring_its_os_release_in_parts() {
+        use glass_managed::osupdate::{FILE_PATH, ImageDigest, MAX_PART, Release};
+
+        let t = console().await;
+        let folder = tempfile::tempdir().unwrap();
+        let signer = glass_managed::OrgKey::from_seed([9; 32]);
+        let image: Vec<u8> = (0..MAX_PART as usize + 100)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        std::fs::create_dir_all(folder.path().join("pilot")).unwrap();
+        std::fs::write(folder.path().join("pilot/glasshouse-2026.11.1.zfs"), &image).unwrap();
+        std::fs::write(
+            folder.path().join("keys.json"),
+            b"{\"the\": \"root's list\"}",
+        )
+        .unwrap();
+        let digest = ImageDigest {
+            file: "glasshouse-2026.11.1.zfs".into(),
+            sha256: glass_managed::sha256_hex(&image),
+            bytes: image.len() as u64,
+            version: "2026.11.1".into(),
+            delta_from: None,
+        };
+        let release = Release {
+            channel: "pilot".into(),
+            version: "2026.11.1".into(),
+            base: "15.1-RELEASE-p2".into(),
+            image: signer.sign(
+                DocKind::OsImage,
+                glass_managed::hwpatch::GLASSHOUSE,
+                7,
+                serde_json::to_string(&digest).unwrap(),
+            ),
+            fixes: vec![],
+            patches: vec![],
+            notes: String::new(),
+        };
+        let signed = signer.sign(
+            DocKind::OsRelease,
+            glass_managed::hwpatch::GLASSHOUSE,
+            7,
+            serde_json::to_string(&release).unwrap(),
+        );
+        std::fs::write(
+            folder.path().join("pilot/release.json"),
+            serde_json::to_vec(&signed).unwrap(),
+        )
+        .unwrap();
+        let part = |device: &str, name: &str, offset: u64| {
+            t.device(
+                FILE_PATH,
+                json!({ "device": device, "name": name, "offset": offset }),
+            )
+        };
+
+        // A console with no updates serves none, and syncs say none.
+        t.sync("lab-1", None, 0).await;
+        t.sync("lab-2", None, 0).await;
+        assert_eq!(part("lab-1", "keys.json", 0).await.status, 404);
+        t.console
+            .set_updates(Arc::new(crate::updates::Updates::new(folder.path())));
+        assert_eq!(
+            t.sync("lab-1", None, 0).await.os_release,
+            None,
+            "broad: none"
+        );
+
+        // In the pilot ring, it hears of release 7 and reads it, in parts.
+        let (status, _) = t
+            .call("POST", "/api/fleet/lab-1/ring", json!({ "ring": "pilot" }))
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(t.sync("lab-1", None, 0).await.os_release, Some(7));
+        let keys = part("lab-1", "keys.json", 0).await;
+        assert_eq!(keys.body, b"{\"the\": \"root's list\"}");
+        let r = part("lab-1", "release.json", 0).await;
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, serde_json::to_vec(&signed).unwrap());
+        let first = part("lab-1", "glasshouse-2026.11.1.zfs", 0).await;
+        assert_eq!(first.body.len() as u64, MAX_PART);
+        let rest = part("lab-1", "glasshouse-2026.11.1.zfs", MAX_PART).await;
+        assert_eq!([first.body, rest.body].concat(), image);
+
+        // Its ring decides: another computer's ring has no release.
+        assert_eq!(part("lab-2", "release.json", 0).await.status, 404);
+        // Nothing outside the folder, nor another channel's by path.
+        assert_eq!(part("lab-1", "../keys.json", 0).await.status, 400);
+        assert_eq!(part("lab-1", "broad/release.json", 0).await.status, 400);
+        // Only a computer whose key signs it: another computer can't ask
+        // as this one.
+        let as_other = json!({ "device": "lab-2", "name": "release.json", "offset": 0 })
+            .to_string()
+            .into_bytes();
+        let now = glass_types::Timestamp::now().unix_seconds();
+        let headers = lock(&t.devices)["lab-1"]
+            .sign("POST", FILE_PATH, now, &as_other)
+            .unwrap();
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let mut other = request("POST", FILE_PATH, &Value::Null, &headers);
+        other.body = as_other;
+        assert_eq!(t.console.handle(&other).await.status, 403);
+
+        // IT reads what each ring is offered.
+        let (_, fleet) = t.call("GET", "/api/fleet", Value::Null).await;
+        let rings = &fleet["updates"]["rings"];
+        assert_eq!(rings[0]["ring"], "pilot");
+        assert_eq!(rings[0]["number"], 7);
+        assert_eq!(rings[0]["version"], "2026.11.1");
+        assert_eq!(rings[2]["number"], Value::Null);
     }
 
     /// The catalog page with hundreds of items shows each as its own page
