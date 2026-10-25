@@ -85,7 +85,9 @@ cmd_up() {
 	local devices=()
 	[[ -n ${VM_DEVICES:-} ]] && read -ra devices <<<"$VM_DEVICES"
 	rm -f "$VM_MONITOR" "$VM_QMP"
-	qemu-system-x86_64 \
+	# -nodefaults: every device is named below. q35's own empty DVD drive (cd0) timed out its
+	# commands for minutes at some starts, emulated without KVM.
+	qemu-system-x86_64 -nodefaults \
 		-name glasshouse-dev -machine q35 -accel "$VM_ACCEL" -cpu "$VM_CPU_MODEL" \
 		-smp "$VM_CPUS" -m "$VM_MEM" \
 		-drive "if=virtio,file=$VM_DISK,format=qcow2,discard=unmap" \
