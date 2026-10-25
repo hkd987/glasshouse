@@ -44,6 +44,7 @@ stop() {
 
 down() {
 	stop
+	rm -f "$dev/kbuild-token"
 	vm_running || return 0
 	vm_ssh "rm -f $etc/kbuild-token
 for f in $files; do
@@ -70,19 +71,28 @@ up() {
 	[[ -f $key ]] || "$bin/glass-kpatch" keygen --out "$key" >/dev/null
 	local public
 	public=$("$bin/glass-kpatch" public --key "$key")
+	# A new token each run, as `down` removes it.
+	rm -f "$dev/kbuild-token"
 	"$bin/glass-kbuild" token --out "$dev/kbuild-token"
 
 	# Set first: anything after this point is undone.
 	trap 'down' ERR
-	nohup "$bin/glass-kbuild" serve --token-file "$dev/kbuild-token" --release "$FREEBSD_RELEASE" \
-		--repo "$repo" --key "$key" >"$dev/kbuild.log" 2>&1 &
+	# Each in a session of its own, outliving the shell that started it.
+	setsid "$bin/glass-kbuild" serve --token-file "$dev/kbuild-token" --release "$FREEBSD_RELEASE" \
+		--repo "$repo" --key "$key" </dev/null >"$dev/kbuild.log" 2>&1 &
 	echo $! >"$dev/kbuild.pid"
-	nohup python3 "$repo/tools/dev/model-relay.py" 8787 >"$dev/relay.log" 2>&1 &
+	setsid python3 "$repo/tools/dev/model-relay.py" 8787 </dev/null >"$dev/relay.log" 2>&1 &
 	echo $! >"$dev/relay.pid"
-	nohup ssh "${SSH_OPTS[@]}" -o ControlMaster=no -o ControlPath=none -o ExitOnForwardFailure=yes \
+	# A connection of its own, not the shared one (ssh takes an option's first value, so these
+	# come before SSH_OPTS): `vm.sh ssh-close`, which deploys run, would take the tunnel with it.
+	setsid ssh -o ControlMaster=no -o ControlPath=none -o ExitOnForwardFailure=yes "${SSH_OPTS[@]}" \
 		-p "$VM_SSH_PORT" -N -R 7500:127.0.0.1:7500 -R 8787:127.0.0.1:8787 root@127.0.0.1 \
-		>"$dev/tunnel.log" 2>&1 &
+		</dev/null >"$dev/tunnel.log" 2>&1 &
 	echo $! >"$dev/tunnel.pid"
+	sleep 3
+	for name in kbuild relay tunnel; do
+		kill -0 "$(cat "$dev/$name.pid")" 2>/dev/null || die "the $name didn't start: $(cat "$dev/$name.log")"
+	done
 
 	# The real-model policy, its anthropic provider the relay.
 	"$bin/glass-e2e" real-model-policy anthropic "$model" |
