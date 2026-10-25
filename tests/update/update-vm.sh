@@ -57,6 +57,13 @@ publish_keys() {
 }
 
 root_ds=$(in_vm 'zpool get -H -o value bootfs zroot' | sed 's|/[^/]*$||')
+# glassd.toml is in the boot environment, with the build deployed into it.
+[[ $(in_vm 'kenv -q vfs.root.mountfrom') == */default ]] ||
+	{ log "the VM isn't running its default boot environment"; exit 1; }
+in_vm "test ! -e $conf.before-update-test" || {
+	log "an earlier run left the VM trusting its root: put $conf.before-update-test back over $conf"
+	exit 1
+}
 in_vm "cp $conf $conf.before-update-test && mkdir -p $source/pilot && chmod 700 $source &&
 	printf '\n[update]\nroots = [\"%s\"]\nchannel = \"pilot\"\nsource = \"%s\"\n' '$(pub root)' '$source' >>$conf &&
 	service glassd restart >/dev/null"
