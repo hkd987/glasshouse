@@ -356,6 +356,26 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
   - The runtime checks it as it checks any patch, and it's tried, on
     probation and kept, or goes back.
   - `catalog.search` never turns a kernel patch up for an agent.
+- **Run end to end in the dev VM** (2026-10-25), the VM enrolled with
+  `make console-dev` and taking only reviewed patches, the agent on a real
+  model through the org's credits (`glass-console --dev-anthropic`, which
+  sends credit calls to Anthropic with the host's key in development):
+  - The agent wrote the codec's name into `hdacc.c` and asked to send it
+    to IT. Before that, the computer refused the first build, a module
+    for a driver this kernel has built in, on this route too
+    (`hwpatch::fits_here`), and the agent built it into the kernel.
+  - The console's build service built it again: 4 minutes. It had refused
+    every real build until then, "isn't the patch it was asked to build":
+    `glass-kbuild` put the summary before the diff in the bundle.
+  - IT read who asked and what they said (the agent hadn't sent that
+    either), the target, the console's build and its log, the diff, and
+    approved it for everyone.
+  - The VM's catalog took it, and the Store's Hardware category offered
+    it. The person installed it after the confirm, restarted, and the
+    kernel named the codec, a reviewed patch on probation. IT's page
+    counted it "Being tried".
+  - The agent had told the person their patch was "set up: restart to try
+    it" when it had gone to IT; it says where it went now.
 
 ## Consequences
 - **Community patches are a deliberate exception to containment** (PA-3):

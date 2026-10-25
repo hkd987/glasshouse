@@ -18,10 +18,13 @@
 #
 # The VM takes community patches, unless --reviewed-only says it takes only reviewed ones: then
 # an agent's patch goes to IT for review, on a VM enrolled with a console
-# (os/freebsd/scripts/enroll-dev.sh). Enrolled, though, the VM takes the console's policy instead
-# of this one, and its model calls go through the console's credits: `make console-dev`'s answer
-# them itself and reach no model, so the agent can't write a patch there without a credits file
-# (`glass-console --credits`). Then, as demo:
+# (os/freebsd/scripts/enroll-dev.sh). Enrolled, the VM takes the console's policy instead of this
+# one, and its model calls go through the console's credits: start the console with
+# `--dev-anthropic claude-sonnet-5-5` (the key from GLASS_ANTHROPIC_API_KEY, on this host) and
+# `--kbuild http://127.0.0.1:7500 --kbuild-token build/real-hardware/kbuild-token --kbuild-key
+# <build/kpatch/agent-key's public half>`, then, in it, add credits, accept the terms, turn credits
+# on, let hardware-agent ask models, publish and promote (ADR 0057's run of 2026-10-25). Then, as
+# demo:
 #   glassctl run hardware-agent "The sound stops working after the computer wakes from sleep"
 # The VM has no sound card unless it's started with one:
 #   VM_DEVICES="-audiodev none,id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0" vm.sh up
