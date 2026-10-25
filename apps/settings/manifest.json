@@ -2,7 +2,7 @@
   "id": "settings",
   "name": "Settings",
   "version": "0.1.0",
-  "description": "How this computer is set up for you: Wi-Fi, the screen, the clock, the lock screen and the browser. What IT locked shows as set by IT.",
+  "description": "How this computer is set up for you: Wi-Fi, the screen, the clock, the lock screen, the browser, and this computer's updates. What IT locked shows as set by IT.",
   "actions": [
     "settings.list",
     "settings.set",
@@ -13,7 +13,11 @@
     "settings.wifi_join",
     "settings.wifi_forget",
     "settings.brightness",
-    "settings.brightness_set"
+    "settings.brightness_set",
+    "settings.computer",
+    "settings.computer_check",
+    "settings.update_install",
+    "settings.patch_remove"
   ],
   "permissions": [
     "offline"

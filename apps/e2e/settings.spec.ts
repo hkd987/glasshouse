@@ -135,7 +135,8 @@ test("adr0060 the person sets the screen's brightness in Settings, as the keys d
   await slider.fill("35");
   await expect(row.locator("[data-test=brightness-percent]")).toHaveText("35%");
   await expect.poll(async () => (await control<{ percent: number }>("display.brightness", {})).percent).toBe(35);
-  await row.scrollIntoViewIfNeeded();
+  // The page redraws once glassd answers, which may be mid-scroll.
+  await expect(async () => await row.scrollIntoViewIfNeeded({ timeout: 1000 })).toPass();
   await page.screenshot({ path: join(SHOTS, "settings-brightness.png") });
 
   // A brightness key, as the desktop sends it; never off, whatever is asked.
@@ -144,6 +145,24 @@ test("adr0060 the person sets the screen's brightness in Settings, as the keys d
   // On the record from Settings.
   expect(audit().some((r) => r.event.kind === "action" && r.event.action === "settings.brightness_set")).toBe(true);
   await control("display.brightness", { percent: 100 });
+});
+
+test("adr0061 this computer's version, its updates and its kernel patches are in Settings, the owner's to check", async ({ page }) => {
+  await page.goto(appUrl("settings"));
+  await expect(page.locator("html[data-ready=true]")).toHaveCount(1);
+  // The suite's computer trusts no update key: the owner checks and is told so.
+  const version = page.locator("[data-setting=version]");
+  await expect(version).toBeVisible();
+  await version.locator("[data-test=update-check]").click();
+  await expect(version.locator("[data-test=update-help]")).toContainText("takes no OS updates");
+  expect(audit().some((r) => r.event.kind === "action" && r.event.action === "settings.computer_check")).toBe(true);
+  // Patches nobody here reviewed: off until the owner (or IT) turns them on.
+  const community = page.locator('[data-setting="hardware.community_patches"]');
+  await expect(community.locator("input[type=checkbox]")).not.toBeChecked();
+  await community.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(SHOTS, "settings-this-computer.png") });
+  // No kernel patch here to take out.
+  await expect(page.locator("[data-test=patch-remove]")).toHaveCount(0);
 });
 
 test("cf12 the person joins Wi-Fi in Settings, inside the rules the computer's owner sets", async ({ page }) => {

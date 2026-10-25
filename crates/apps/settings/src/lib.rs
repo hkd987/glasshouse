@@ -9,6 +9,7 @@
 //! directory, by uid, never in their home, so nothing they or their agents
 //! can write decides what IT locked.
 
+pub mod computer;
 pub mod wifi;
 
 use std::collections::BTreeMap;
@@ -53,6 +54,30 @@ pub const BRIGHTNESS: &str = "settings.brightness";
 /// Sets the screen's brightness, never so dim it's off
 /// (`glass_platform::backlight::LEAST`).
 pub const BRIGHTNESS_SET: &str = "settings.brightness_set";
+/// `text` as a sentence: a capital first, a full stop last.
+fn sentence(text: &str) -> String {
+    let mut chars = text.trim().chars();
+    let mut out: String = chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default();
+    if !out.ends_with(['.', '!', '?']) {
+        out.push('.');
+    }
+    out
+}
+
+/// This computer as Settings shows it: its version, OS updates and kernel
+/// patches (ADR 0057, 0061).
+pub const COMPUTER: &str = "settings.computer";
+/// And the newest release on its channel, checked.
+pub const COMPUTER_CHECK: &str = "settings.computer_check";
+/// Installs the newest release: the computer's owner, on a computer nobody
+/// manages. The person's own.
+pub const UPDATE_INSTALL: &str = "settings.update_install";
+/// Takes a kernel patch back before its restart, or out: anyone at the
+/// screen, back to the computer as it was. The person's own.
+pub const PATCH_REMOVE: &str = "settings.patch_remove";
 /// Where the screen's brightness is kept for the next start.
 const BRIGHTNESS_FILE: &str = "brightness";
 
@@ -176,6 +201,8 @@ struct Inner {
     wifi: RwLock<Option<Arc<dyn wifi::Radio>>>,
     /// The screen's backlight, if it's dimmed from here (ADR 0060).
     backlight: RwLock<Option<Backlight>>,
+    /// The runtime's OS updates and kernel patches (ADR 0057, 0061).
+    system: RwLock<Option<Arc<dyn computer::Computer>>>,
     /// Held from a change's check through its write: the desktop's
     /// `settings.set` and the Settings app's can come at once, and each
     /// rewrites the whole file (ADR 0052).
@@ -228,6 +255,7 @@ impl SettingsHandle {
             model_keys: RwLock::new(None),
             wifi: RwLock::new(None),
             backlight: RwLock::new(None),
+            system: RwLock::new(None),
             writing: Mutex::new(()),
         }))
     }
@@ -260,6 +288,41 @@ impl SettingsHandle {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The runtime's OS updates and kernel patches (glassd's).
+    pub fn set_computer(&self, system: Arc<dyn computer::Computer>) {
+        *self
+            .0
+            .system
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(system);
+    }
+
+    fn system(&self) -> Result<Arc<dyn computer::Computer>, ActionError> {
+        self.0
+            .system
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| {
+                ActionError::Failed("This computer's updates aren't set up here.".into())
+            })
+    }
+
+    /// This computer as `user` sees it in Settings; checked for updates
+    /// when `check`.
+    fn computer_view(&self, user: &str, check: bool) -> Result<Value, ActionError> {
+        let system = self.system()?;
+        let owner = self.owner().as_deref() == Some(user);
+        let updates = if check && owner {
+            system.check()
+        } else {
+            system.updates()
+        }
+        .map_err(ActionError::Failed)?;
+        let patches = system.patches().map_err(ActionError::Failed)?;
+        Ok(computer::view(&updates, &patches, owner))
     }
 
     /// The screen's backlight (glassd's, ADR 0060), set to the brightness
@@ -1099,6 +1162,52 @@ impl ActionProvider for SettingsProvider {
                 ask: AskLabels::default(),
             },
             ActionDef {
+                name: COMPUTER.parse().expect("static name"),
+                title: "See this computer's version and updates".into(),
+                description: "The version this computer runs, its OS update, and the kernel \
+                              patches it tries or keeps. The person's, in Settings."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                side_effect: SideEffect::None,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: COMPUTER_CHECK.parse().expect("static name"),
+                title: "Check for OS updates".into(),
+                description: "The newest release on this computer's channel, checked. The \
+                              computer's owner, in Settings."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                side_effect: SideEffect::None,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: UPDATE_INSTALL.parse().expect("static name"),
+                title: "Install an OS update".into(),
+                description: "Installs the newest release; the next restart uses it, and goes \
+                              back if it doesn't start. The computer's owner, in Settings; never \
+                              an agent."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: PATCH_REMOVE.parse().expect("static name"),
+                title: "Take a kernel patch out".into(),
+                description: "Takes back the kernel patch waiting for a restart, or takes out \
+                              the one the computer runs: the next restart is as before it. The \
+                              person's, in Settings; never an agent."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
                 name: BRIGHTNESS.parse().expect("static name"),
                 title: "See the screen's brightness".into(),
                 description: "How bright the screen is, in percent, and whether it's dimmed \
@@ -1207,6 +1316,21 @@ impl ActionProvider for SettingsProvider {
                 "required": ["connected", "setup_choice", "managed", "editable", "services", "agents"],
                 "additionalProperties": false
             }),
+            COMPUTER | COMPUTER_CHECK | UPDATE_INSTALL | PATCH_REMOVE => json!({
+                "type": "object",
+                "properties": {
+                    "version": { "type": ["string", "null"], "description": "the version this computer runs" },
+                    "channel": { "type": "string" },
+                    "owner": { "type": "boolean", "description": "the person may install updates" },
+                    "update": { "type": ["object", "null"], "description": "the update being installed" },
+                    "last_update": { "type": ["object", "null"] },
+                    "available": { "type": ["object", "null"], "description": "a newer release, from a check" },
+                    "checked": { "type": ["string", "null"], "description": "why a check found none" },
+                    "patch": { "type": ["object", "null"], "description": "the kernel patch being tried" },
+                    "kept": { "type": "array", "items": { "type": "object" } }
+                },
+                "required": ["version", "channel", "owner", "kept"]
+            }),
             BRIGHTNESS | BRIGHTNESS_SET => json!({
                 "type": "object",
                 "properties": {
@@ -1307,6 +1431,20 @@ impl ActionProvider for SettingsProvider {
                         None => "Disconnect AI models".into(),
                     },
                     targets: vec!["Settings: AI models".into()],
+                    ..Preview::default()
+                })
+            }
+            COMPUTER | COMPUTER_CHECK | UPDATE_INSTALL | PATCH_REMOVE => {
+                let _: NoInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: match action.as_str() {
+                        COMPUTER => "See this computer's version and updates",
+                        COMPUTER_CHECK => "Check for OS updates",
+                        UPDATE_INSTALL => "Install the OS update",
+                        _ => "Take the kernel patch out",
+                    }
+                    .into(),
+                    targets: vec!["Settings: This computer".into()],
                     ..Preview::default()
                 })
             }
@@ -1471,6 +1609,71 @@ impl ActionProvider for SettingsProvider {
                 Ok(ActionOutput {
                     text,
                     data: self.handle.models_view(&who.name),
+                    changes: Vec::new(),
+                })
+            }
+            COMPUTER | COMPUTER_CHECK | UPDATE_INSTALL | PATCH_REMOVE => {
+                // The person's own, in Settings: policy makes these Never for
+                // every agent, and anything but Settings is refused here too.
+                if ctx.principal.agent.as_str() != APP {
+                    return Err(ActionError::Failed(
+                        "This computer's updates and kernel patches are the person's, in \
+                         Settings; never an agent's."
+                            .into(),
+                    ));
+                }
+                let _: NoInput = glass_actions::parse_input(input)?;
+                let system = self.handle.system()?;
+                let text = match action.as_str() {
+                    UPDATE_INSTALL => {
+                        if self.handle.owner().as_deref() != Some(who.name.as_str()) {
+                            return Err(ActionError::Failed(
+                                "Only the computer's owner installs its updates; on a computer \
+                                 an organization manages, IT does."
+                                    .into(),
+                            ));
+                        }
+                        let update = system.install().map_err(ActionError::Failed)?;
+                        format!("{} is installed: restart to use it.", update.version)
+                    }
+                    PATCH_REMOVE => {
+                        let patches = system.patches().map_err(ActionError::Failed)?;
+                        let waiting = patches
+                            .trial
+                            .as_ref()
+                            .is_some_and(|t| t.state == glass_api::TrialState::Staged);
+                        if waiting {
+                            system.cancel_patch().map_err(ActionError::Failed)?;
+                            "The kernel patch is taken back: it won't be tried.".into()
+                        } else {
+                            system.undo_patch().map_err(ActionError::Failed)?;
+                            "The kernel patch is taken out: the next restart is as before it."
+                                .into()
+                        }
+                    }
+                    _ => String::new(),
+                };
+                let view = self
+                    .handle
+                    .computer_view(&who.name, action.as_str() == COMPUTER_CHECK)?;
+                let text = if text.is_empty() {
+                    match (
+                        view["available"]["version"].as_str(),
+                        view["checked"].as_str(),
+                        view["version"].as_str(),
+                    ) {
+                        (Some(newer), _, _) => format!("{newer} is available."),
+                        // A check that found nothing says why.
+                        (None, Some(why), _) => sentence(why),
+                        (None, None, Some(version)) => format!("This computer runs {version}."),
+                        (None, None, None) => "This computer's version isn't known.".into(),
+                    }
+                } else {
+                    text
+                };
+                Ok(ActionOutput {
+                    text,
+                    data: view,
                     changes: Vec::new(),
                 })
             }
@@ -2273,6 +2476,160 @@ members = ["dana"]
         assert_eq!(next.brightness().unwrap().percent, Some(35));
     }
 
+    /// A computer with an update to take and a patch being tried.
+    struct Machine(Mutex<(glass_api::UpdateStatus, glass_api::PatchStatus)>);
+
+    fn machine() -> Arc<Machine> {
+        let trial = glass_api::PatchTrial {
+            id: "iwlwifi-resume".into(),
+            revision: 1,
+            summary: "Wi-Fi works again after sleep".into(),
+            review: "community".into(),
+            env: "default-patch-1".into(),
+            from_env: "default".into(),
+            state: glass_api::TrialState::Staged,
+            modules: vec!["if_iwlwifi.ko".into()],
+            staged_at: glass_types::Timestamp::now(),
+            ended_at: None,
+            note: None,
+            ran_minutes: 0,
+            probation_minutes: 1440,
+            woke: 0,
+            probation_resumes: 2,
+        };
+        Arc::new(Machine(Mutex::new((
+            glass_api::UpdateStatus {
+                running: "default".into(),
+                version: Some("2026.10.1".into()),
+                channel: "stable".into(),
+                taken: 7,
+                update: None,
+                history: Vec::new(),
+                available: None,
+                checked: None,
+            },
+            glass_api::PatchStatus {
+                running: "default".into(),
+                trial: Some(trial),
+                history: Vec::new(),
+                kept: Vec::new(),
+            },
+        ))))
+    }
+
+    impl computer::Computer for Machine {
+        fn updates(&self) -> Result<glass_api::UpdateStatus, String> {
+            Ok(self.0.lock().unwrap().0.clone())
+        }
+        fn check(&self) -> Result<glass_api::UpdateStatus, String> {
+            let mut state = self.0.lock().unwrap();
+            state.0.available = Some(glass_api::UpdateAvailable {
+                number: 8,
+                version: "2026.11.1".into(),
+                base: "15.1".into(),
+                notes: String::new(),
+                patches: Vec::new(),
+                blocked: None,
+            });
+            Ok(state.0.clone())
+        }
+        fn install(&self) -> Result<glass_api::OsUpdate, String> {
+            let mut state = self.0.lock().unwrap();
+            let update = glass_api::OsUpdate {
+                number: 8,
+                version: "2026.11.1".into(),
+                channel: "stable".into(),
+                base: "15.1".into(),
+                env: "update-8".into(),
+                from_env: "default".into(),
+                state: glass_api::TrialState::Staged,
+                staged_at: glass_types::Timestamp::now(),
+                ended_at: None,
+                note: None,
+                patches: Vec::new(),
+            };
+            state.0.update = Some(update.clone());
+            Ok(update)
+        }
+        fn patches(&self) -> Result<glass_api::PatchStatus, String> {
+            Ok(self.0.lock().unwrap().1.clone())
+        }
+        fn cancel_patch(&self) -> Result<glass_api::PatchStatus, String> {
+            let mut state = self.0.lock().unwrap();
+            let trial = state.1.trial.as_mut().ok_or("no patch")?;
+            if trial.state != glass_api::TrialState::Staged {
+                return Err("it's been tried".into());
+            }
+            trial.state = glass_api::TrialState::Cancelled;
+            Ok(state.1.clone())
+        }
+        fn undo_patch(&self) -> Result<glass_api::PatchStatus, String> {
+            let mut state = self.0.lock().unwrap();
+            let trial = state.1.trial.as_mut().ok_or("no patch")?;
+            trial.state = glass_api::TrialState::Undone;
+            Ok(state.1.clone())
+        }
+    }
+
+    #[test]
+    fn adr0061_the_owner_installs_updates_and_anyone_at_the_screen_takes_a_patch_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SettingsHandle::new(dir.path());
+        handle.set_policy(&policy(""));
+        let provider = SettingsProvider::new(handle.clone());
+        let call = |ctx: &TaskContext, name: &str| {
+            provider.invoke(ctx, &name.parse().unwrap(), &json!({}))
+        };
+        let dana = ctx("dana", 1001, APP);
+        let sam = ctx("sam", 1002, APP);
+
+        // Not set up here (the dev host's glassd): said, not a crash.
+        let none = call(&dana, COMPUTER).unwrap_err().to_string();
+        assert!(none.contains("aren't set up here"), "{none}");
+        let system = machine();
+        handle.set_computer(system.clone());
+
+        // Managed (no owner): everyone sees the version and the patch, and
+        // nobody here checks or installs: IT does.
+        let seen = call(&sam, COMPUTER).unwrap();
+        assert_eq!(seen.data["version"], "2026.10.1");
+        assert_eq!(seen.data["owner"], false);
+        assert_eq!(seen.data["patch"]["label"], "Restart to try it");
+        assert!(call(&dana, COMPUTER_CHECK).unwrap().data["available"].is_null());
+        let it = call(&dana, UPDATE_INSTALL).unwrap_err().to_string();
+        assert!(it.contains("IT does"), "{it}");
+        assert!(system.0.lock().unwrap().0.update.is_none());
+
+        // Dana owns it: she checks, and installs; Sam still can't.
+        handle.set_owner(Some("dana".into()));
+        let checked = call(&dana, COMPUTER_CHECK).unwrap();
+        assert_eq!(checked.text, "2026.11.1 is available.");
+        assert_eq!(checked.data["owner"], true);
+        assert!(call(&sam, UPDATE_INSTALL).is_err());
+        let installed = call(&dana, UPDATE_INSTALL).unwrap();
+        assert_eq!(installed.text, "2026.11.1 is installed: restart to use it.");
+        assert_eq!(installed.data["update"]["state"], "staged");
+
+        // Anyone at the screen takes back a patch not yet tried, and takes
+        // out one on probation: both only go back.
+        let back = call(&sam, PATCH_REMOVE).unwrap();
+        assert!(back.text.contains("taken back"), "{}", back.text);
+        assert!(back.data["patch"].is_null(), "no longer open");
+        system.0.lock().unwrap().1.trial.as_mut().unwrap().state = glass_api::TrialState::Probation;
+        let out = call(&sam, PATCH_REMOVE).unwrap();
+        assert!(out.text.contains("taken out"), "{}", out.text);
+
+        // Never an agent, whatever policy said: the app refuses too.
+        let agent = ctx("dana", 1001, "desktop-agent");
+        for name in [COMPUTER, COMPUTER_CHECK, UPDATE_INSTALL, PATCH_REMOVE] {
+            let refused = call(&agent, name).unwrap_err().to_string();
+            assert!(refused.contains("never an agent's"), "{name}: {refused}");
+        }
+        for name in [UPDATE_INSTALL, PATCH_REMOVE] {
+            assert!(glass_policy::persons_own(&name.parse().unwrap()), "{name}");
+        }
+    }
+
     #[test]
     fn ga1_what_each_action_returns_is_what_it_declares() {
         let dir = tempfile::tempdir().unwrap();
@@ -2340,6 +2697,17 @@ members = ["dana"]
             .unwrap();
         assert_eq!(run(BRIGHTNESS_SET, json!({ "percent": 40 }))["percent"], 40);
         assert_eq!(run(BRIGHTNESS, json!({}))["percent"], 40);
+
+        // This computer: its version, an update checked and installed, and
+        // a patch taken back.
+        handle.set_computer(machine());
+        run(COMPUTER, json!({}));
+        assert_eq!(
+            run(COMPUTER_CHECK, json!({}))["available"]["version"],
+            "2026.11.1"
+        );
+        run(UPDATE_INSTALL, json!({}));
+        run(PATCH_REMOVE, json!({}));
 
         for def in provider.actions() {
             assert!(provider.returns(&def.name).is_some(), "{}", def.name);

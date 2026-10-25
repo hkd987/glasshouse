@@ -405,6 +405,11 @@ pub const PERSONS_OWN: &[&str] = &[
     "settings.models_connect",
     // A Wi-Fi network's password (CF-12, ADR 0059).
     "settings.wifi_join",
+    // An OS update and a kernel patch change what the whole computer runs
+    // (ADR 0057, ADR 0061): installing one, or taking a patch out, is the
+    // person's at the screen; IT's on a managed computer.
+    "settings.update_install",
+    "settings.patch_remove",
     // Starting a routine runs a task with the scope it was saved with,
     // which the agent asking may not have; and what the person did twice
     // is theirs to keep (ADR 0047).
@@ -416,8 +421,9 @@ pub const PERSONS_OWN: &[&str] = &[
 
 const PERSONS_OWN_WHY: &str = "only the person does it, in their own app: connecting their mail \
      or their AI models with their password or key, in Mail or Settings (ADR 0037, ADR 0039), and \
-     starting their routines or keeping new ones, in Routines (ADR 0047); no agent ever does, and \
-     those apps' own [[app]] tiers say what the person does there";
+     starting their routines or keeping new ones, in Routines (ADR 0047), and installing this \
+     computer's OS updates or taking out its kernel patches, in Settings (ADR 0061); no agent \
+     ever does, and those apps' own [[app]] tiers say what the person does there";
 
 /// What an agent does only with the person's yes, each time: at least Ask
 /// whatever the rules say, and never under an approval for the rest of the

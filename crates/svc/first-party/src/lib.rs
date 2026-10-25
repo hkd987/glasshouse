@@ -28,6 +28,7 @@ use glass_app_people::PeopleProvider;
 pub use glass_app_routines::Routines;
 use glass_app_routines::RoutinesProvider;
 use glass_app_settings::SettingsProvider;
+pub use glass_app_settings::computer::Computer;
 pub use glass_app_settings::wifi as settings_wifi;
 pub use glass_app_settings::{ModelAgent, ModelKeys, SettingsHandle};
 use glass_app_skills::SkillsProvider;

@@ -70,8 +70,40 @@ interface Brightness {
   percent: number | null;
 }
 
+/** A patch or update's state, as glassd names them. */
+type Trial = "staging" | "staged" | "probation" | "kept" | "failed" | "rolled_back" | "cancelled" | "undone";
+
+/** This computer (ADR 0057, ADR 0061): its version, OS updates and kernel patches. */
+interface Computer {
+  version: string | null;
+  channel: string;
+  /** The person is the owner of a computer nobody manages: they install updates. */
+  owner: boolean;
+  /** The update being installed. */
+  update: { version: string; state: Trial; patches: string[] } | null;
+  last_update: { version: string; state: Trial; note: string | null } | null;
+  /** From a check. */
+  available: { version: string; notes?: string; patches?: string[]; blocked?: string } | null;
+  checked: string | null;
+  /** The kernel patch being tried. */
+  patch: {
+    id: string;
+    summary: string;
+    review: string;
+    state: Trial;
+    label: string;
+    ran_minutes: number;
+    probation_minutes: number;
+    woke: number;
+    probation_resumes: number;
+  } | null;
+  kept: { id: string; revision: number; summary: string; review: string }[];
+}
+
 /** Display & sleep's section, where brightness goes first. */
 const DISPLAY = "Display & sleep";
+/** This computer's section, where its version and patches go first. */
+const COMPUTER = "This computer";
 
 const bridge = new Bridge({ app: "settings" });
 const state = {
@@ -79,6 +111,7 @@ const state = {
   models: null as Models | null,
   wifi: null as Wifi | null,
   brightness: null as Brightness | null,
+  computer: null as Computer | null,
   /** The network whose password is being typed, and the password. */
   joining: null as { network: string; password: string } | null,
   /** What the owner is connecting: the key is typed here and sent once. */
@@ -103,7 +136,7 @@ async function load(): Promise<void> {
   } catch (error) {
     state.notice = { text: error instanceof Offline ? "Settings haven't been loaded on this computer yet." : String(error), tone: "bad" };
   }
-  await Promise.all([loadWifi(), loadBrightness()]);
+  await Promise.all([loadWifi(), loadBrightness(), loadComputer()]);
   // AI models (ADR 0039) on their own: a system without them still shows
   // every setting, just not this section.
   try {
@@ -222,6 +255,105 @@ function brightness(b: Brightness): HTMLElement {
       shown,
     ),
   );
+}
+
+async function loadComputer(): Promise<void> {
+  try {
+    const read = await bridge.read<Computer>("settings.computer", {});
+    // A check's answer stays on the page until the next check.
+    const checked = state.computer && { available: state.computer.available, checked: state.computer.checked };
+    state.computer = read.result.ok ? { ...read.result.data, ...(checked ?? {}) } : null;
+  } catch {
+    state.computer = null;
+  }
+}
+
+/** Checks for an update, installs it, or takes a kernel patch out: each on the record. */
+async function computerAction(action: "settings.computer_check" | "settings.update_install" | "settings.patch_remove"): Promise<void> {
+  state.busy = "computer";
+  state.notice = null;
+  render();
+  try {
+    const result = await bridge.call<Computer>(action, {});
+    if (result.ok) state.computer = result.data;
+    state.notice = { text: result.text, tone: result.ok ? "ok" : "bad" };
+  } catch (error) {
+    state.notice = { text: error instanceof BridgeError ? error.message : String(error), tone: "bad" };
+  }
+  state.busy = null;
+  render();
+}
+
+/** glassd's reasons start lowercase, for logs; here they're sentences. */
+function sentence(text: string): string {
+  const t = text.trim();
+  return t.charAt(0).toUpperCase() + t.slice(1) + (/[.!?]$/.test(t) ? "" : ".");
+}
+
+function hours(minutes: number): string {
+  return minutes >= 120 ? `${Math.floor(minutes / 60)} hours` : `${minutes} minutes`;
+}
+
+function review(r: string): string {
+  return r === "reviewed" ? "Reviewed and signed" : "Nobody here reviewed it";
+}
+
+/** The version, its update and its kernel patches: rows at the top of This computer. */
+function computer(c: Computer): HTMLElement[] {
+  const busy = state.busy === "computer" || state.offline;
+  const rows: HTMLElement[] = [];
+  // The version, and the update: checked and installed by the owner;
+  // on a managed computer IT does.
+  let updateHelp: string;
+  let updateControl: HTMLElement | null = null;
+  if (c.update) {
+    updateHelp = c.update.state === "staged" ? `${c.update.version} is installed. Restart to use it: if it doesn't start, the computer goes back by itself.` : `${c.update.version} is being installed.`;
+  } else if (c.available) {
+    updateHelp = c.available.blocked ? `${c.available.version} is available, but ${c.available.blocked}` : `${c.available.version} is available.${c.available.notes ? ` ${c.available.notes}` : ""}`;
+    if (c.owner && !c.available.blocked) updateControl = h("button", { class: "button", disabled: busy, "data-test": "update-install", onclick: () => computerAction("settings.update_install") }, "Install");
+  } else {
+    updateHelp = c.checked ? sentence(c.checked) : (c.last_update?.state === "rolled_back" ? `${c.last_update.version} didn't start, so the computer went back.` : "Updates come signed, and a restart goes back if one doesn't start.");
+  }
+  if (!c.update && !updateControl) {
+    updateControl = c.owner ? h("button", { class: "link", disabled: busy, "data-test": "update-check", onclick: () => computerAction("settings.computer_check") }, "Check for updates") : h("span", { class: "muted" }, "Your organization or this computer's owner updates it");
+  }
+  rows.push(
+    h(
+      "div",
+      { class: "setting", "data-setting": "version" },
+      h("div", {}, h("div", { class: "title" }, c.version ? `Version ${c.version}` : "Version"), h("div", { class: "help", "data-test": "update-help" }, updateHelp)),
+      updateControl,
+    ),
+  );
+  // The kernel patch being tried: anyone at the screen takes it back or out.
+  if (c.patch) {
+    const p = c.patch;
+    const served = p.state === "probation" ? ` · ${hours(p.ran_minutes)} of ${hours(p.probation_minutes)}${p.probation_resumes ? `, ${p.woke} of ${p.probation_resumes} wakes` : ""}` : "";
+    rows.push(
+      h(
+        "div",
+        { class: "setting", "data-setting": "patch" },
+        h("div", {}, h("div", { class: "title" }, p.summary), h("div", { class: "help", "data-test": "patch-state" }, `${p.label}${served}`), h("div", { class: "who" }, `Kernel patch ${p.id} · ${review(p.review)}`)),
+        p.state === "staged" || p.state === "probation"
+          ? h("button", { class: "link", disabled: busy, "data-test": "patch-remove", onclick: () => computerAction("settings.patch_remove") }, p.state === "staged" ? "Don't try it" : "Take it out")
+          : null,
+      ),
+    );
+  }
+  for (const k of c.kept) {
+    rows.push(
+      h(
+        "div",
+        { class: "setting", "data-setting": `kept-${k.id}` },
+        h("div", {}, h("div", { class: "title" }, k.summary), h("div", { class: "help" }, "Kept: this computer runs on it"), h("div", { class: "who" }, `Kernel patch ${k.id} · ${review(k.review)}`)),
+        // The last one kept is the one a take-out undoes.
+        !c.patch && k === c.kept[c.kept.length - 1]
+          ? h("button", { class: "link", disabled: busy, "data-test": "patch-remove", onclick: () => computerAction("settings.patch_remove") }, "Take it out")
+          : null,
+      ),
+    );
+  }
+  return rows;
 }
 
 /** Signal as four bars: -50 dBm and better is all four. */
@@ -621,6 +753,7 @@ function render(): void {
             "div",
             { class: "rows" },
             section === DISPLAY && state.brightness?.present ? brightness(state.brightness) : null,
+            ...(section === COMPUTER && state.computer ? computer(state.computer) : []),
             ...state.settings.filter((s) => s.section === section).map(row),
           ),
         ),
@@ -639,5 +772,5 @@ setInterval(() => {
   if (state.busy || state.joining || document.hidden) return;
   // The slider being dragged isn't redrawn under the pointer.
   if (document.activeElement?.getAttribute("name") === "brightness") return;
-  void Promise.all([loadWifi(), loadBrightness()]).then(render);
+  void Promise.all([loadWifi(), loadBrightness(), loadComputer()]).then(render);
 }, 8000);

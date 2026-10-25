@@ -15,6 +15,9 @@ use serde::Serialize;
 use crate::EVERYONE;
 use crate::document::{Managed, PolicyDocument, SettingValue};
 
+/// Whether this computer takes kernel patches nobody in the organization
+/// reviewed: agents' and the community's (ADR 0057).
+pub const COMMUNITY_PATCHES: &str = "hardware.community_patches";
 /// The organization's Wi-Fi networks, by name (CF-12).
 pub const WIFI_NETWORKS: &str = "wifi.networks";
 /// Wi-Fi networks the computer never joins.
@@ -173,6 +176,17 @@ pub fn table() -> &'static [SettingDef] {
                 "Off: USB drives and card readers don't connect, and any plugged in is turned off.",
                 Scope::Seat,
                 true,
+            ),
+            // ADR 0057: glassd's kernel patches read it live, so turning
+            // it off fails a community patch on probation at the next
+            // minute of use.
+            toggle(
+                COMMUNITY_PATCHES,
+                "This computer",
+                "Patches nobody here reviewed",
+                "Lets this computer try kernel patches an agent or the community wrote, which nobody in your organization reviewed. Each is tried once, with the person's yes, and goes back by itself if the computer doesn't start or crashes.",
+                Scope::Device,
+                false,
             ),
             // CF-12, ADR 0059: glassd keeps the organization's networks
             // in wpa_supplicant, their passwords from wifi-secrets.toml,

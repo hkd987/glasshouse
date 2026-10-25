@@ -754,6 +754,10 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // kernel patches, and the build service if this computer has one.
     org.hardware
         .set_patches(Arc::new(hardware::RuntimePatches(Arc::downgrade(&runtime))));
+    org.settings
+        .set_computer(Arc::new(hardware::RuntimeComputer(Arc::downgrade(
+            &runtime,
+        ))));
     match hardware::service(&config.hardware) {
         Ok(Some(service)) => org.hardware.set_service(service),
         Ok(None) => {}

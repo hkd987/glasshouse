@@ -1383,7 +1383,7 @@ impl Runtime {
         crate::hwpatch::resumed(
             &crate::hwpatch::System,
             &store,
-            &self.config.hardware,
+            &self.hardware_rules(),
             &mut |event| {
                 self.audit(event);
             },
@@ -1464,6 +1464,20 @@ impl Runtime {
             .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
 
+    /// Which kernel patches this computer takes now: glassd.toml's keys,
+    /// and community patches if the config or the computer's setting says
+    /// so (IT's, or on a computer nobody manages its owner's, ADR 0057).
+    /// Read at every check, so turning the setting off fails a community
+    /// patch on probation.
+    pub(crate) fn hardware_rules(&self) -> crate::hwpatch::HardwarePatches {
+        let mut rules = self.config.hardware.clone();
+        rules.community |= self.device_settings.computer(None).iter().any(|r| {
+            r.id == glass_policy::settings::COMMUNITY_PATCHES
+                && r.value == glass_policy::document::SettingValue::Bool(true)
+        });
+        rules
+    }
+
     fn updates_admin(&self, caller: &Caller) -> Result<()> {
         if caller.is_admin() {
             Ok(())
@@ -1484,7 +1498,7 @@ impl Runtime {
             &self.updates,
             &store,
             &self.config.update,
-            &self.config.hardware,
+            &self.hardware_rules(),
         ))
     }
 
@@ -1502,7 +1516,7 @@ impl Runtime {
             &self.updates,
             &store,
             &self.config.update,
-            &self.config.hardware,
+            &self.hardware_rules(),
             request.drop_patches,
             &mut |event| {
                 self.audit(event);
@@ -1572,7 +1586,7 @@ impl Runtime {
         crate::hwpatch::apply(
             &crate::hwpatch::System,
             &store,
-            &self.config.hardware,
+            &self.hardware_rules(),
             &bytes,
             &mut |event| {
                 self.audit(event);
@@ -1601,7 +1615,7 @@ impl Runtime {
         crate::hwpatch::apply(
             &crate::hwpatch::System,
             &store,
-            &self.config.hardware,
+            &self.hardware_rules(),
             bytes,
             &mut |event| {
                 self.audit(event);
@@ -1677,7 +1691,7 @@ impl Runtime {
             crate::hwpatch::at_start(
                 &crate::hwpatch::System,
                 &store,
-                &self.config.hardware,
+                &self.hardware_rules(),
                 &mut |event| {
                     self.audit(event);
                 },
@@ -1705,7 +1719,7 @@ impl Runtime {
         crate::hwpatch::tick(
             &crate::hwpatch::System,
             &store,
-            &self.config.hardware,
+            &self.hardware_rules(),
             minutes,
             &mut |event| {
                 self.audit(event);

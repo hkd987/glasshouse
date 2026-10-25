@@ -69,6 +69,60 @@ fn token(path: &Path) -> Result<String, String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// This computer's OS updates and kernel patches, as Settings shows them
+/// (ADR 0061): the settings app decides who may do what (the owner installs
+/// updates; anyone at the screen takes a patch out), and asks the runtime
+/// as root, as `glassctl` run by root does.
+pub struct RuntimeComputer(pub Weak<Runtime>);
+
+impl RuntimeComputer {
+    fn runtime(&self) -> Result<Arc<Runtime>, String> {
+        self.0.upgrade().ok_or_else(|| "glassd is stopping".into())
+    }
+}
+
+fn root() -> glass_runtime::Caller {
+    glass_runtime::Caller {
+        name: "root".into(),
+        uid: 0,
+        gid: 0,
+        home: "/root".into(),
+    }
+}
+
+impl glass_first_party::Computer for RuntimeComputer {
+    fn updates(&self) -> Result<glass_api::UpdateStatus, String> {
+        self.runtime()?
+            .update_status(&root())
+            .map_err(|e| e.to_string())
+    }
+    fn check(&self) -> Result<glass_api::UpdateStatus, String> {
+        self.runtime()?
+            .update_check(&root())
+            .map_err(|e| e.to_string())
+    }
+    fn install(&self) -> Result<glass_api::OsUpdate, String> {
+        self.runtime()?
+            .update_apply(&root(), glass_api::UpdateApply::default())
+            .map_err(|e| e.to_string())
+    }
+    fn patches(&self) -> Result<glass_api::PatchStatus, String> {
+        self.runtime()?
+            .hardware_patch_status(&root())
+            .map_err(|e| e.to_string())
+    }
+    fn cancel_patch(&self) -> Result<glass_api::PatchStatus, String> {
+        self.runtime()?
+            .hardware_patch_cancel(&root())
+            .map_err(|e| e.to_string())
+    }
+    fn undo_patch(&self) -> Result<glass_api::PatchStatus, String> {
+        self.runtime()?
+            .hardware_patch_undo(&root())
+            .map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
