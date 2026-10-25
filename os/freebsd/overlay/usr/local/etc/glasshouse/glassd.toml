@@ -42,13 +42,16 @@ max_processes = 256
 [snapshots]
 backend = "zfs"
 
-# Kernel patches (ADR 0057): the keys one of which must have signed a patch
-# this computer takes, whether it takes community patches nobody here
-# reviewed, and the minutes of use a patch is on probation for (until then a
-# crash goes back to the boot environment before). With no keys, it takes
-# none; this image names none yet.
+# Kernel patches (ADR 0057): reviewers' keys, whose word on a patch's review
+# this computer takes; keys that sign only patches nobody reviewed (the
+# build service's, for agents' patches); whether it takes those (on a
+# managed computer IT's setting hardware.community_patches decides too); and
+# the minutes of use a patch is on probation for (until then a crash goes
+# back to the boot environment before). With no keys, it takes none; this
+# image names none yet.
 # [hardware]
 # keys = ["ed25519:<the patch service's key>"]
+# community_keys = ["ed25519:<the build service's key>"]
 # community = false
 # probation_minutes = 480
 

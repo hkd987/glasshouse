@@ -105,7 +105,9 @@ What the build does:
 - signs the bundle with `build/kpatch/dev-key`.
 
 A computer takes bundles signed by a key its `glassd.toml` names under
-`[hardware] keys`. The image names none.
+`[hardware] keys` (reviewers': a patch they signed is reviewed if it says
+so) or `community_keys` (the build service's: it signs agents' patches,
+which are never reviewed, whatever they say). The image names none.
 
 When the computer starts on the patch, glassd checks it and puts it on
 probation, or says it failed. On probation, a clean restart comes back to

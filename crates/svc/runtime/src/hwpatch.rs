@@ -49,9 +49,14 @@ pub const MAX_BUNDLE_BYTES: u64 = 128 * 1024 * 1024;
 /// Which patches this computer takes (glassd.toml `[hardware]`).
 #[derive(Debug, Clone, Default)]
 pub struct HardwarePatches {
-    /// Keys one of which must have signed a patch. With none, it takes no
-    /// patch.
+    /// Reviewers' keys: a patch one of them signed is what it says it is,
+    /// reviewed or not (ours; on a managed computer, IT's too).
     pub keys: Vec<PublicKey>,
+    /// Keys that sign only patches nobody reviewed: the build service's,
+    /// which signs agents' patches for integrity alone (ADR 0057). A patch
+    /// one of them signed that says it was reviewed is refused. With no
+    /// key of either kind, the computer takes no patch.
+    pub community_keys: Vec<PublicKey>,
     /// Whether it takes patches nobody here reviewed. On a managed computer,
     /// only if IT allows it (ADR 0057).
     pub community: bool,
@@ -455,7 +460,7 @@ fn admit(
     config: &HardwarePatches,
     bytes: &[u8],
 ) -> Result<(Opened, String), (String, String)> {
-    if config.keys.is_empty() {
+    if config.keys.is_empty() && config.community_keys.is_empty() {
         return Err((
             String::new(),
             "this computer takes no kernel patches: it trusts no key to sign them".into(),
@@ -470,10 +475,24 @@ fn admit(
         .and_then(|m| m["id"].as_str().map(str::to_owned))
         .unwrap_or_default();
     let refuse = |why: String| (claimed.clone(), why);
+    let keys: Vec<PublicKey> = config
+        .keys
+        .iter()
+        .chain(&config.community_keys)
+        .cloned()
+        .collect();
     let opened = bundle
-        .open(GLASSHOUSE, &config.keys, store.kept_revision(&claimed))
+        .open(GLASSHOUSE, &keys, store.kept_revision(&claimed))
         .map_err(|e| refuse(format!("refused: {e}")))?;
     let manifest = &opened.manifest;
+    // Reviewed is a reviewer's word, never the patch's own.
+    if manifest.review == Review::Reviewed && !reviewer(config, &opened.signer) {
+        return Err(refuse(format!(
+            "refused: {} says it was reviewed, but the key that signed it signs only patches \
+             nobody reviewed",
+            manifest.id
+        )));
+    }
     if manifest.review == Review::Community && !config.community {
         return Err(refuse(format!(
             "refused: {} is a community patch nobody here reviewed, and this computer takes \
@@ -955,10 +974,20 @@ fn check(envs: &dyn Envs, record: &Record) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `signer` is a reviewer's key, whose word on a patch's review
+/// this computer takes.
+fn reviewer(config: &HardwarePatches, signer: &str) -> bool {
+    config.keys.iter().any(|k| k.id() == signer)
+}
+
 /// The keys and the community setting in force now still take the patch:
 /// IT may have turned either off since it was set up.
 fn trusted(config: &HardwarePatches, record: &Record) -> Result<(), String> {
-    if !config.keys.iter().any(|k| k.id() == record.signer) {
+    let community_key = config
+        .community_keys
+        .iter()
+        .any(|k| k.id() == record.signer);
+    if !reviewer(config, &record.signer) && !(community_key && record.trial.review == "community") {
         return Err("this computer no longer trusts the key that signed it".into());
     }
     if record.trial.review == "community" && !config.community {
@@ -1112,6 +1141,7 @@ mod tests {
     fn config() -> HardwarePatches {
         HardwarePatches {
             keys: vec![key().public()],
+            community_keys: Vec::new(),
             community: false,
             probation_minutes: 0,
             probation_resumes: 0,
@@ -1936,5 +1966,73 @@ mod tests {
         // Patches to different modules stack freely.
         let module = bundle("sd-fix", "sdhci.ko", false, Review::Reviewed);
         assert!(apply(&fake, &store, &config(), &module, &mut push).is_ok());
+    }
+
+    /// Signs `bytes`' manifest again, with `by`.
+    fn signed_by(bytes: &[u8], by: &OrgKey) -> Vec<u8> {
+        let mut bundle: Bundle = serde_json::from_slice(bytes).unwrap();
+        bundle.signed = by.sign(
+            DocKind::HardwarePatch,
+            GLASSHOUSE,
+            bundle.signed.version,
+            bundle.signed.payload.clone(),
+        );
+        serde_json::to_vec(&bundle).unwrap()
+    }
+
+    /// The build service signs agents' patches for integrity alone: its key
+    /// never makes a patch reviewed, whatever the patch says (ADR 0057).
+    #[test]
+    fn adr0057_a_community_key_signs_only_patches_nobody_reviewed() {
+        let service = OrgKey::from_seed([9; 32]);
+        let rules = HardwarePatches {
+            community_keys: vec![service.public()],
+            community: true,
+            ..config()
+        };
+        let mut push = |_| {};
+
+        // It says it was reviewed: refused, here and with community off.
+        let (fake, store, _) = setup();
+        let claims = signed_by(
+            &bundle("agent-wifi", "if_iwlwifi.ko", false, Review::Reviewed),
+            &service,
+        );
+        let refused = apply(&fake, &store, &rules, &claims, &mut push).unwrap_err();
+        assert!(
+            refused.contains("signs only patches nobody reviewed"),
+            "{refused}"
+        );
+        let closed = HardwarePatches {
+            community: false,
+            ..rules.clone()
+        };
+        assert!(apply(&fake, &store, &closed, &claims, &mut push).is_err());
+
+        // It says nobody did: taken where community patches are, and
+        // still trusted at the next start (kept at once: no probation).
+        let honest = signed_by(
+            &bundle("agent-wifi", "if_iwlwifi.ko", false, Review::Community),
+            &service,
+        );
+        let refused = apply(&fake, &store, &closed, &honest, &mut push).unwrap_err();
+        assert!(refused.contains("community patch"), "{refused}");
+        let trial = apply(&fake, &store, &rules, &honest, &mut push).unwrap();
+        assert_eq!(trial.review, "community");
+        fake.restart();
+        at_start(&fake, &store, &rules, &mut push);
+        assert_eq!(state(&store), TrialState::Kept);
+
+        // Only a community key alone: a computer that trusts nothing else.
+        let only = HardwarePatches {
+            keys: Vec::new(),
+            ..rules.clone()
+        };
+        let (fake, store, _) = setup();
+        assert!(apply(&fake, &store, &only, &honest, &mut push).is_ok());
+        let ours = bundle("lkpi-wlan-suspend", "kernel", false, Review::Reviewed);
+        let (fake2, store2, _) = setup();
+        assert!(apply(&fake2, &store2, &only, &ours, &mut push).is_err());
+        drop((fake, store));
     }
 }

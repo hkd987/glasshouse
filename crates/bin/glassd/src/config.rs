@@ -90,8 +90,13 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HardwareConfig {
+    /// Reviewers' keys: they say whether a patch was reviewed.
     #[serde(default)]
     pub keys: Vec<glass_managed::PublicKey>,
+    /// Keys that sign only patches nobody reviewed, such as the build
+    /// service's (ADR 0057).
+    #[serde(default)]
+    pub community_keys: Vec<glass_managed::PublicKey>,
     #[serde(default)]
     pub community: bool,
     /// Minutes of use on a patch before it's kept: until then a crash goes
@@ -122,6 +127,7 @@ impl Default for HardwareConfig {
     fn default() -> Self {
         Self {
             keys: Vec::new(),
+            community_keys: Vec::new(),
             community: false,
             probation_minutes: default_probation(),
             probation_resumes: default_resumes(),

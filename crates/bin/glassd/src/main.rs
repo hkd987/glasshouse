@@ -542,6 +542,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             org_apps: Arc::new(org.org_apps.clone()),
             hardware: glass_runtime::hwpatch::HardwarePatches {
                 keys: config.hardware.keys.clone(),
+                community_keys: config.hardware.community_keys.clone(),
                 community: config.hardware.community,
                 probation_minutes: config.hardware.probation_minutes,
                 probation_resumes: config.hardware.probation_resumes,
