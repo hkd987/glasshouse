@@ -274,9 +274,11 @@ pub fn sleeps() -> bool {
 /// the computer, in seconds; Intel's (ichwd) waits it twice over.
 pub const WATCHDOG_SECS: u32 = 60;
 /// How long it waits once `watchdogd` has gone, as the computer shuts
-/// down: a shutdown that hangs restarts too, and one that finishes powers
-/// the watchdog off with the rest.
-pub const WATCHDOG_SHUTDOWN_SECS: u32 = 120;
+/// down: a shutdown that hangs restarts too, about two minutes on (Intel
+/// waits twice over), sooner than most people hold the power button. One
+/// that finishes turns the watchdog off with the rest (ichwd halts it as it
+/// shuts down); the rest takes seconds.
+pub const WATCHDOG_SHUTDOWN_SECS: u32 = 60;
 
 /// Arms the hardware watchdog with the base system's `watchdogd`, or
 /// disarms it (ADR 0057): while armed, a computer that hangs restarts by
@@ -295,23 +297,35 @@ pub fn watchdog(on: bool) -> Result<bool> {
     let running = cmd::run("service", &["watchdogd", "onestatus"]).is_ok();
     match (on, running) {
         (true, false) => {
-            cmd::run(
-                "watchdogd",
-                &[
-                    "-t",
-                    &WATCHDOG_SECS.to_string(),
-                    "-x",
-                    &WATCHDOG_SHUTDOWN_SECS.to_string(),
-                ],
-            )?;
+            cmd::run("watchdogd", &["-t", &WATCHDOG_SECS.to_string()])?;
         }
-        // It leaves the shutdown's timeout as it exits: then off.
+        // 15.1's turns it off as it exits; off whatever another leaves.
         (false, true) => {
             cmd::run("service", &["watchdogd", "onestop"])?;
             cmd::run("watchdog", &["-t", "0"])?;
         }
         _ => {}
     }
+    Ok(true)
+}
+
+/// Keeps the watchdog [`watchdog`] armed through the shutdown (ADR 0057):
+/// as the computer stops every process, `watchdogd` turns the watchdog off
+/// as it exits (15.1's ignores `-x`, the timeout to leave it with). So it
+/// stops first, and the watchdog is left with [`WATCHDOG_SHUTDOWN_SECS`]
+/// of its own (`watchdog -t`, which sets it and exits). Only as the
+/// computer shuts down: nothing pats it after. Nothing when it isn't
+/// armed, or the computer's own rc.conf runs `watchdogd`.
+pub fn watchdog_through_shutdown() -> Result<bool> {
+    if !std::path::Path::new("/dev/fido").exists()
+        || cmd::run("sysrc", &["-n", "watchdogd_enable"])
+            .is_ok_and(|v| v.trim().eq_ignore_ascii_case("yes"))
+        || cmd::run("service", &["watchdogd", "onestatus"]).is_err()
+    {
+        return Ok(false);
+    }
+    cmd::run("service", &["watchdogd", "onestop"])?;
+    cmd::run("watchdog", &["-t", &WATCHDOG_SHUTDOWN_SECS.to_string()])?;
     Ok(true)
 }
 

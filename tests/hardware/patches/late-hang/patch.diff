@@ -1,4 +1,4 @@
-A module that loads and hangs every processor three minutes later, on
+A module that loads and hangs every processor when the test asks, on
 purpose: the kernel patch that passes the check at the start and hangs once
 the computer is in use, for tests/hardware/patch-vm.sh (ADR 0057). Never
 shipped.
@@ -7,12 +7,15 @@ diff --git b/sys/dev/glass_late_hang/glass_late_hang.c b/sys/dev/glass_late_hang
 new file mode 100644
 --- /dev/null
 +++ b/sys/dev/glass_late_hang/glass_late_hang.c
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,80 @@
 +/*
-+ * A module that loads, then hangs the computer a while later, on purpose:
-+ * every processor stops with its interrupts off, as one stuck in a driver
-+ * would, so nothing runs, watchdogd included, and only the hardware
-+ * watchdog restarts it (ADR 0057, tests/hardware/patch-vm.sh). Never
++ * A module that loads, then hangs the computer when the test asks
++ * (`sysctl debug.glass_late_hang=<seconds>`), on purpose: every processor
++ * stops with its interrupts off, as one stuck in a driver would, so nothing
++ * runs, watchdogd included, and only the hardware watchdog restarts it
++ * (ADR 0057, tests/hardware/patch-vm.sh). The test asks once the computer
++ * is in use: a timer from the load could go off while a slow emulated start
++ * still probes its devices, before anything arms the watchdog. Never
 + * shipped.
 + */
 +#include <sys/param.h>
@@ -20,13 +23,12 @@ new file mode 100644
 +#include <sys/kernel.h>
 +#include <sys/module.h>
 +#include <sys/smp.h>
++#include <sys/sysctl.h>
 +#include <sys/systm.h>
 +#include <sys/taskqueue.h>
 +#include <machine/cpu.h>
 +
 +static struct timeout_task glass_late_hang_task;
-+static int glass_late_hang_secs = 180;
-+TUNABLE_INT("debug.glass_late_hang_secs", &glass_late_hang_secs);
 +
 +static void
 +glass_late_hang_spin(void *arg __unused)
@@ -43,16 +45,33 @@ new file mode 100644
 +}
 +
 +static int
++glass_late_hang_sysctl(SYSCTL_HANDLER_ARGS)
++{
++	int secs = 0, error;
++
++	error = sysctl_handle_int(oidp, &secs, 0, req);
++	if (error != 0 || req->newptr == NULL)
++		return (error);
++	if (secs < 1)
++		return (EINVAL);
++	taskqueue_enqueue_timeout(taskqueue_thread, &glass_late_hang_task,
++	    secs * hz);
++	printf("glass_late_hang: hangs in %d seconds, on purpose (ADR 0057)\n",
++	    secs);
++	return (0);
++}
++SYSCTL_PROC(_debug, OID_AUTO, glass_late_hang,
++    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_MPSAFE, NULL, 0,
++    glass_late_hang_sysctl, "I",
++    "Hang every processor in this many seconds, on purpose (ADR 0057)");
++
++static int
 +glass_late_hang_modevent(module_t mod __unused, int type, void *arg __unused)
 +{
 +	switch (type) {
 +	case MOD_LOAD:
 +		TIMEOUT_TASK_INIT(taskqueue_thread, &glass_late_hang_task, 0,
 +		    glass_late_hang_fire, NULL);
-+		taskqueue_enqueue_timeout(taskqueue_thread, &glass_late_hang_task,
-+		    glass_late_hang_secs * hz);
-+		printf("glass_late_hang: hangs in %d seconds, on purpose (ADR 0057)\n",
-+		    glass_late_hang_secs);
 +		return (0);
 +	case MOD_UNLOAD:
 +		taskqueue_drain_timeout(taskqueue_thread, &glass_late_hang_task);

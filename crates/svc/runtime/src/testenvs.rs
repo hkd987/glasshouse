@@ -29,6 +29,8 @@ pub(crate) struct FakeState {
     pub(crate) mounts: BTreeMap<String, PathBuf>,
     /// The hardware watchdog is armed.
     pub(crate) watchdog: bool,
+    /// It's armed on its own, for the shutdown, not by `watchdogd`.
+    pub(crate) shutdown_watchdog: bool,
     /// The last start came from the watchdog's restart.
     pub(crate) restarted: bool,
 }
@@ -61,6 +63,13 @@ impl Fake {
         self.state.lock().unwrap()
     }
 
+    /// The shutdown stops every process, `watchdogd` with them, which turns
+    /// the watchdog off as it exits unless it was armed on its own.
+    pub(crate) fn processes_stopped(&self) {
+        let mut s = self.s();
+        s.watchdog = std::mem::take(&mut s.shutdown_watchdog);
+    }
+
     /// A restart: the loader's choice, then the modules loaded at start;
     /// one that panics restarts the computer at once.
     pub(crate) fn restart(&self) {
@@ -71,6 +80,7 @@ impl Fake {
             s.loaded.clear();
             s.restarted = false;
             s.watchdog = false;
+            s.shutdown_watchdog = false;
             drop(s);
             let conf = std::fs::read_to_string(self.env_dir(&env).join("boot/loader.conf"))
                 .unwrap_or_default();
@@ -206,6 +216,11 @@ impl Envs for Fake {
     }
     fn watchdog(&self, on: bool) -> Result<(), String> {
         self.s().watchdog = on;
+        Ok(())
+    }
+    fn watchdog_through_shutdown(&self) -> Result<(), String> {
+        let mut s = self.s();
+        s.shutdown_watchdog = s.watchdog;
         Ok(())
     }
     fn watchdog_restarted(&self) -> bool {

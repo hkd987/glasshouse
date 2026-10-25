@@ -124,11 +124,22 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
   until the patch is kept, and again while a kept one is taken out. A
   patch that hangs the computer once it's in use restarts it within about
   two minutes, nobody at the power button, on the environment before.
-  - It stays armed through a shutdown (`watchdogd -x 120`): a patch can
-    hang that too, and a clean shutdown has already set the next start to
-    the patch. The start after the watchdog's restart says so in the
-    kernel's messages ("resuming after hardware watchdog timeout"), and
-    glassd fails the patch then.
+  - It stays armed through a shutdown: a patch can hang that too, and a
+    clean shutdown has already set the next start to the patch.
+    `watchdogd` stops with every other process and turns the watchdog off
+    as it exits (15.1's ignores `-x`, the timeout to leave it with), so as
+    the computer shuts down glassd stops it first and leaves the watchdog
+    a minute of its own (`watchdog -t 60`; Intel's restarts after two). The
+    start after the watchdog's restart says so in the kernel's messages
+    ("resuming after hardware watchdog timeout"), and glassd fails the
+    patch then.
+  - A person who holds the power button sooner, as the shutdown hangs,
+    starts the patch again, as the shutdown had set: nothing tells that
+    from a shutdown that finished (the power-off clears the kernel's
+    messages, and nothing of the person's runs after the kernel takes
+    over). Each shutdown hangs again, and the patch can be kept after its
+    probation, as a patch that hangs only now and then can. The person
+    takes it out in Settings.
   - It can't help a computer that hangs as it wakes: the timer doesn't run
     asleep. That one needs the power button, and the start after it is
     the environment before.

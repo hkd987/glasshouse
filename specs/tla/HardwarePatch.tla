@@ -35,7 +35,8 @@
 (*    computer runs a patch not yet kept, from glassd's start check until  *)
 (*    it's kept: a hang restarts the computer, on the environment before.  *)
 (*    It doesn't run while asleep, and may not be armed again as the      *)
-(*    computer wakes. Through a shutdown it stays armed (`watchdogd -x`),  *)
+(*    computer wakes. Through a shutdown it stays armed (glassd sets it    *)
+(*    with `watchdog -t`, as `watchdogd` turns it off when it's stopped),  *)
 (*    and the start after a reset it made fails the patch: the kernel      *)
 (*    says so (ichwd: "resuming after hardware watchdog timeout"). Hang,   *)
 (*    WatchdogReset; the person's PowerOff.                                *)
@@ -311,8 +312,8 @@ Shutdown ==
     /\ Awake /\ started /\ ~closing /\ step = "idle"
     /\ restarts < MaxRestarts
     /\ closing' = TRUE
-    \* Armed through the rest of the shutdown (`watchdogd -x`): a patch
-    \* can hang it too.
+    \* Armed through the rest of the shutdown (`watchdog -t`, set by
+    \* glassd as `watchdogd` stops): a patch can hang it too.
     /\ watchdog' = (watchdog /\ "watchdogOffAtShutdown" \notin Old)
     /\ UNCHANGED <<asleep, woke, hung, sleeps, fired, wdOnTrial>>
     /\ IF running = "t" /\ Seen = "probation" /\ Probing THEN once' = TRUE

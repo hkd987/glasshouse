@@ -1,10 +1,11 @@
 # A test fixture, never shipped: a module the loader loads at every start,
-# which passes glassd's check and hangs every processor three minutes later
-# (ADR 0057). On probation, the hardware watchdog must restart the computer
-# on the boot environment before, nobody at the power button.
+# which passes glassd's check and hangs every processor when the test asks
+# (`sysctl debug.glass_late_hang=<seconds>`, ADR 0057). On probation, the
+# hardware watchdog must restart the computer on the boot environment
+# before, nobody at the power button.
 id = "late-hang"
 revision = 1
-summary = "A module that hangs the computer three minutes after it loads (a test)"
+summary = "A module that hangs the computer when asked (a test)"
 release = "15.1-RELEASE"
 origin = "glasshouse"
 review = "reviewed"

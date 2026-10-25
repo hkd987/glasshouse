@@ -18,9 +18,11 @@
 #   probation: the VM restarts by itself on the environment before, and the patch rolled back.
 # - hang: a module that never finishes loading (hang-test): after a power cut the VM starts on
 #   the environment before, and the patch rolled back.
-# - late-hang: a module that hangs every processor three minutes after it loads (late-hang), on
-#   probation: the hardware watchdog (QEMU's ICH9 TCO, ichwd) restarts the VM by itself, nobody
-#   at the power button, on the environment before.
+# - late-hang: a module that hangs every processor when asked (late-hang), asked once the VM is on
+#   probation with the watchdog armed: the hardware watchdog (QEMU's ICH9 TCO, ichwd) restarts
+#   the VM by itself, nobody at the power button, on the environment before. (A timer from the
+#   module's load went off once while an emulated start still waited on its USB controller,
+#   before glassd ran: a hang that early is the power cut of `hang`.)
 # - shutdown-hang: a module that hangs the shutdown (shutdown-hang), whose next start the clean
 #   shutdown already set to it: the watchdog, armed through the shutdown, restarts the VM onto
 #   it, and glassd fails it from what the kernel says of that start.
@@ -74,6 +76,12 @@ trap untrust EXIT
 # and panics, aren't.
 console_at() { stat -c %s "$repo/build/vm/console.log"; }
 console_since() { tail -c +$(($1 + 1)) "$repo/build/vm/console.log"; }
+# The kernel said $1 in the start before this one: its message buffer outlives a restart (the
+# watchdog's, a power cut) and has what the splash keeps off the serial console.
+start_before_said() {
+	in_vm dmesg | awk '/---<<BOOT>>---/ { n++ } { line[NR] = $0; start[NR] = n }
+		END { for (i = 1; i <= NR; i++) if (start[i] == n - 1) print line[i] }' | grep -aqF "$1"
+}
 
 # Until the VM is back and glassd answers.
 back() {
@@ -274,19 +282,18 @@ hang() {
 }
 
 late_hang() {
-	log "late-hang: a module that hangs every processor three minutes after it loads, on probation"
-	local env since
+	log "late-hang: a module that hangs every processor when asked, on probation"
+	local env
 	env=$(apply "$kpatch/late-hang.bundle.json") || return
-	since=$(console_at)
 	restart
 	settled
 	[[ $(status 'd["trial"]["state"]') == probation ]] ||
 		fail "late-hang: not on probation before it hung: $(status 'd["trial"]')"
 	watchdog_is yes "late-hang: on probation"
-	log "late-hang: on probation; waiting for it to hang, and the watchdog to restart the VM"
+	in_vm 'sysctl debug.glass_late_hang=10' >/dev/null || fail "late-hang: its sysctl isn't there"
+	log "late-hang: on probation; it hangs in 10 s, and the watchdog restarts the VM"
 	until_state rolled_back 900 || return
-	console_since "$since" | grep -aq "glass_late_hang: hanging every processor now" ||
-		fail "late-hang: it never hung"
+	start_before_said "glass_late_hang: hanging every processor now" || fail "late-hang: it never hung"
 	[[ $(status 'd["running"]') == default ]] || fail "late-hang: not back on default"
 	gone "$env"
 	log "late-hang: $(status 'd["trial"]["note"]')"
@@ -294,20 +301,20 @@ late_hang() {
 
 shutdown_hang() {
 	log "shutdown-hang: a module that hangs the shutdown, its next start already set to it"
-	local env since
+	local env
 	env=$(apply "$kpatch/shutdown-hang.bundle.json") || return
 	restart
 	settled
 	[[ $(status 'd["trial"]["state"]') == probation ]] ||
 		fail "shutdown-hang: not on probation: $(status 'd["trial"]')"
-	since=$(console_at)
+	watchdog_is yes "shutdown-hang: on probation"
 	log "shutdown-hang: a clean restart, which it hangs; the watchdog restarts the VM"
 	in_vm 'shutdown -r now' >/dev/null 2>&1 || true
 	"$vm" ssh-close
 	sleep 30
 	"$vm" wait 900 >/dev/null || { fail "shutdown-hang: the VM never came back"; return; }
 	for _ in $(seq 60); do in_vm 'glassctl status' >/dev/null 2>&1 && break; sleep 2; done
-	console_since "$since" | grep -aq "glass_shutdown_hang: hanging the shutdown" ||
+	start_before_said "glass_shutdown_hang: hanging the shutdown" ||
 		fail "shutdown-hang: the shutdown never hung"
 	[[ $(status 'd["running"]') == "$env" ]] || fail "shutdown-hang: the shutdown had set the next start to $env"
 	in_vm 'dmesg | grep -a "resuming after hardware watchdog timeout"' >/dev/null ||

@@ -107,6 +107,9 @@ pub trait Envs: Send + Sync {
     /// Arms the hardware watchdog (`watchdogd`), or disarms it: a hang then
     /// restarts the computer. Nothing on a computer without one.
     fn watchdog(&self, on: bool) -> Result<(), String>;
+    /// As the computer shuts down, keeps an armed watchdog armed after
+    /// `watchdogd` stops with every other process, which turns it off.
+    fn watchdog_through_shutdown(&self) -> Result<(), String>;
     /// This start came from the watchdog's restart: the computer hung.
     fn watchdog_restarted(&self) -> bool;
 }
@@ -171,6 +174,11 @@ impl Envs for System {
     }
     fn watchdog(&self, on: bool) -> Result<(), String> {
         glass_platform::hardware::watchdog(on)
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+    fn watchdog_through_shutdown(&self) -> Result<(), String> {
+        glass_platform::hardware::watchdog_through_shutdown()
             .map(drop)
             .map_err(|e| e.to_string())
     }
@@ -766,6 +774,12 @@ pub fn at_start(
 /// a patch on probation is started again by the next start, once. A crash
 /// never gets here, so the next start after one is the environment before.
 pub fn at_shutdown(envs: &dyn Envs, store: &Store) -> Result<(), String> {
+    // The watchdog stays armed through the shutdown: a patch can hang that
+    // too (HardwarePatch.tla's "watchdogOffAtShutdown"). `watchdogd`, which
+    // stops with every process, would turn it off.
+    if let Err(why) = envs.watchdog_through_shutdown() {
+        tracing::warn!("keeping the watchdog through the shutdown: {why}");
+    }
     let Some(record) = store.trial() else {
         return Ok(());
     };
@@ -776,8 +790,6 @@ pub fn at_shutdown(envs: &dyn Envs, store: &Store) -> Result<(), String> {
     {
         envs.activate_once(env)?;
     }
-    // The watchdog stays armed through the shutdown (`watchdogd -x`): a
-    // patch can hang that too.
     Ok(())
 }
 
@@ -1829,6 +1841,7 @@ mod tests {
         at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
         assert!(fake.s().watchdog, "on probation");
         at_shutdown(&fake, &store).unwrap();
+        fake.processes_stopped();
         assert!(fake.s().watchdog, "armed through the shutdown");
         fake.restart();
         at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
@@ -1881,7 +1894,10 @@ mod tests {
         fake.restart();
         at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
         at_shutdown(&fake, &store).unwrap();
-        // The shutdown hangs; the watchdog restarts it, on the patch.
+        fake.processes_stopped();
+        // The shutdown hangs; the watchdog, still armed, restarts it, on
+        // the patch.
+        assert!(fake.s().watchdog, "armed as the shutdown hangs");
         fake.restart();
         fake.s().restarted = true;
         assert_eq!(fake.s().running, trial.env);
