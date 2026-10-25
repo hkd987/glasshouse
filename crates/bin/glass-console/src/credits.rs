@@ -287,6 +287,72 @@ impl ModelForwarder for DevModels {
     }
 }
 
+/// For `--dev --dev-anthropic <model>`: computers' calls on the org's
+/// credits go to a real model, Anthropic's, with the key this machine has
+/// (`GLASS_ANTHROPIC_API_KEY`), never OpenRouter, so a managed dev VM's
+/// agents can think (`tools/dev/real-hardware.sh`). Charges the in-memory
+/// key at the model's tokens, as [`DevModels`] does. Never shipped.
+pub struct AnthropicDevModels {
+    keys: Arc<MemoryKeys>,
+    model: String,
+    provider: glass_gateway_providers::AnthropicProvider,
+}
+
+impl AnthropicDevModels {
+    pub fn new(keys: Arc<MemoryKeys>, model: &str, key: Secret) -> Self {
+        Self::with(
+            keys,
+            model,
+            glass_gateway_providers::AnthropicProvider::new(None, key),
+        )
+    }
+
+    fn with(
+        keys: Arc<MemoryKeys>,
+        model: &str,
+        provider: glass_gateway_providers::AnthropicProvider,
+    ) -> Self {
+        Self {
+            keys,
+            model: model.to_owned(),
+            provider,
+        }
+    }
+}
+
+/// Never the key.
+impl std::fmt::Debug for AnthropicDevModels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicDevModels")
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ModelForwarder for AnthropicDevModels {
+    fn complete(
+        &self,
+        key: &str,
+        request: &ProviderRequest<'_>,
+    ) -> Result<ProviderReply, ProviderError> {
+        let reply = self.provider.complete(&ProviderRequest {
+            model: &self.model,
+            system: request.system,
+            messages: request.messages,
+            max_tokens: request.max_tokens,
+            tools: request.tools,
+        })?;
+        let tokens = reply.input_tokens * 3 + reply.output_tokens * 15;
+        let cost = (tokens as f64 / 1_000_000.0 * 1e6).round() / 1e6;
+        self.keys.charge_key(key, cost)?;
+        Ok(ProviderReply {
+            cost_usd: Some(cost),
+            served_by: Some(format!("development/anthropic/{}", self.model)),
+            ..reply
+        })
+    }
+}
+
 /// What one computer spent on the org's credits.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeviceUsage {
@@ -790,6 +856,78 @@ impl Credits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A computer's call on the org's credits reaches the model named, with
+    /// the key this machine has, and spends the org's credits.
+    #[test]
+    fn adr0039_dev_credits_can_reach_a_real_model() {
+        use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = format!("http://{}", server.local_addr().unwrap());
+        let seen = std::thread::spawn(move || {
+            let (stream, _) = server.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let (mut head, mut length) = (String::new(), 0);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = n.trim().parse().unwrap();
+                }
+                head += &line;
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let reply = r#"{"content":[{"type":"text","text":"a plan"}],"stop_reason":"end_turn","usage":{"input_tokens":1000,"output_tokens":100}}"#;
+            write!(
+                &stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+            (head, String::from_utf8(body).unwrap())
+        });
+        let keys = Arc::new(MemoryKeys::default());
+        let (_, org_key) = keys.create("acme", 1.0).unwrap();
+        let provider =
+            glass_gateway_providers::AnthropicProvider::relayed(&at, Secret::new("sk-host"))
+                .unwrap();
+        let models = AnthropicDevModels::with(keys.clone(), "claude-sonnet-5-5", provider);
+        let messages = [glass_gateway::Message::text(
+            glass_gateway::Role::User,
+            "plan it",
+        )];
+        let reply = models
+            .complete(
+                &org_key,
+                &ProviderRequest {
+                    model: "openrouter/auto",
+                    system: None,
+                    messages: &messages,
+                    max_tokens: 100,
+                    tools: &[],
+                },
+            )
+            .unwrap();
+        assert_eq!(reply.text, "a plan");
+        assert_eq!(
+            reply.cost_usd,
+            Some(0.0045),
+            "1000 in at $3, 100 out at $15 a million"
+        );
+        let (head, body) = seen.join().unwrap();
+        assert!(
+            head.contains("x-api-key: sk-host"),
+            "the host's key, not the org's"
+        );
+        assert!(body.contains("\"model\":\"claude-sonnet-5-5\""), "{body}");
+        assert_eq!(keys.usage(&format!("{:064x}", 1)).unwrap().usage, 0.0045);
+        // Debug never shows a key.
+        assert!(!format!("{models:?}").contains("sk-"));
+    }
 
     #[test]
     fn adr0039_admins_are_warned_when_credits_run_low_or_out() {

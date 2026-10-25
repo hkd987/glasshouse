@@ -98,6 +98,11 @@ struct Args {
     /// The development billing relay's public key, hex.
     #[arg(long, requires = "billing_relay")]
     billing_key: Option<String>,
+    /// Development: computers' calls on the org's credits go to this
+    /// Anthropic model (`claude-sonnet-5-5`), with the key in
+    /// `GLASS_ANTHROPIC_API_KEY`, instead of answering here. Never shipped.
+    #[arg(long, requires = "dev")]
+    dev_anthropic: Option<String>,
     /// The kernel patch build service (`glass-kbuild`) that builds the
     /// patches computers send for review (ADR 0057). With `--dev` and
     /// none, a stand-in builds them, which no computer trusts.
@@ -360,13 +365,21 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     }),
                     _ => std::sync::Arc::new(credits::DevPayments::new(webhook)),
                 };
-            console.set_credits(
-                keys.clone(),
-                token,
-                DEV_MARKUP,
-                Some(payments),
-                std::sync::Arc::new(credits::DevModels::new(keys)),
-            );
+            let models: std::sync::Arc<dyn credits::ModelForwarder> = match &args.dev_anthropic {
+                Some(model) => {
+                    let key = std::env::var("GLASS_ANTHROPIC_API_KEY")
+                        .ok()
+                        .filter(|k| !k.is_empty())
+                        .context("--dev-anthropic needs GLASS_ANTHROPIC_API_KEY")?;
+                    std::sync::Arc::new(credits::AnthropicDevModels::new(
+                        keys.clone(),
+                        model,
+                        glass_gateway::Secret::new(&key),
+                    ))
+                }
+                None => std::sync::Arc::new(credits::DevModels::new(keys.clone())),
+            };
+            console.set_credits(keys, token, DEV_MARKUP, Some(payments), models);
         }
         None => {}
     }
