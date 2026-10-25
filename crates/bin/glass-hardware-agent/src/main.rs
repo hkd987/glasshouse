@@ -474,12 +474,52 @@ async fn run() -> anyhow::Result<()> {
         .await?;
     };
 
-    // Propose it: the person reads it and says yes, or not.
-    let (build, patch) = build;
+    // Propose it: the person reads it and says yes, or not. A driver this
+    // computer's kernel has built in never loads from a module: built
+    // again as a kernel patch, the same edits.
+    let (mut build, mut patch) = build;
     agent
         .progress("Asking you to try it at the next restart", None, None)
         .await?;
-    match call(&agent, "hardware_patch_propose", json!({ "build": build })).await? {
+    let mut proposed = call(&agent, "hardware_patch_propose", json!({ "build": build })).await?;
+    if let Err(why) = &proposed
+        && why.contains("rebuilds the kernel")
+        && patch["kernel"] != true
+    {
+        agent
+            .progress(
+                "Building it into the kernel, which has the driver built in",
+                None,
+                None,
+            )
+            .await?;
+        patch["kernel"] = json!(true);
+        let diff = edits_to_diff(&agent, &patch["edits"]).await?;
+        let rebuilt = match diff {
+            Ok(diff) => {
+                let mut args = json!({
+                    "id": patch["id"],
+                    "summary": patch["summary"],
+                    "diff": diff,
+                    "modules": patch["modules"].as_array().cloned().unwrap_or_default(),
+                    "kernel": true,
+                });
+                if let Some(targets) = patch["targets"].as_array() {
+                    args["targets"] = json!(targets);
+                }
+                call(&agent, "hardware_patch_build", args).await?
+            }
+            Err(why) => Err(why),
+        };
+        if let Ok(built) = rebuilt.as_ref()
+            && built["ok"] == true
+        {
+            build = built["build"].as_str().unwrap_or("").to_owned();
+            proposed = call(&agent, "hardware_patch_propose", json!({ "build": build })).await?;
+        }
+    }
+    let patch = patch;
+    match proposed {
         Ok(set_up) => {
             agent
                 .answer(

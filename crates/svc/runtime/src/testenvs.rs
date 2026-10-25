@@ -26,6 +26,8 @@ pub(crate) struct FakeState {
     /// Modules that don't link against this kernel.
     pub(crate) broken: Vec<String>,
     pub(crate) loaded: Vec<String>,
+    /// Drivers the kernel has built in: `kldload -n` says they're loaded.
+    pub(crate) built_in: Vec<String>,
     pub(crate) mounts: BTreeMap<String, PathBuf>,
     /// The hardware watchdog is armed.
     pub(crate) watchdog: bool,
@@ -211,8 +213,13 @@ impl Envs for Fake {
         if s.broken.iter().any(|m| m == name) {
             return Err("kldload: an error occurred while loading module".into());
         }
-        s.loaded.push(name.into());
+        if !s.built_in.iter().any(|m| m == name) {
+            s.loaded.push(name.into());
+        }
         Ok(())
+    }
+    fn built_in(&self, name: &str) -> bool {
+        self.s().built_in.iter().any(|m| m == name)
     }
     fn watchdog(&self, on: bool) -> Result<(), String> {
         self.s().watchdog = on;

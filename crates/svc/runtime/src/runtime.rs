@@ -1606,6 +1606,23 @@ impl Runtime {
     /// (`hardware.patch_propose`, ADR 0057): the hardware app calls this
     /// once the person said yes, and the checks are root's, the same as
     /// [`Self::hardware_patch_apply`]'s.
+    /// Whether [`Self::hardware_patch_propose`] would set `bytes` up, before
+    /// the person is asked.
+    pub fn hardware_patch_check(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.len() as u64 > crate::hwpatch::MAX_BUNDLE_BYTES {
+            return Err(RuntimeError::Invalid(
+                "more than a patch bundle may be".into(),
+            ));
+        }
+        crate::hwpatch::would_take(
+            &crate::hwpatch::System,
+            &self.hardware_checked(),
+            &self.hardware_rules(),
+            bytes,
+        )
+        .map_err(RuntimeError::Invalid)
+    }
+
     pub fn hardware_patch_propose(&self, bytes: &[u8]) -> Result<glass_api::PatchTrial> {
         if bytes.len() as u64 > crate::hwpatch::MAX_BUNDLE_BYTES {
             return Err(RuntimeError::Invalid(

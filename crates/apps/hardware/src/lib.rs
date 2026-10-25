@@ -61,6 +61,8 @@ pub trait Patches: Send + Sync {
     fn release(&self) -> Result<String, String>;
     /// Sets up `bundle` to try at the next start (`hwpatch::apply`).
     fn apply(&self, bundle: &[u8]) -> Result<PatchTrial, String>;
+    /// Whether [`Self::apply`] would take `bundle`, changing nothing.
+    fn check(&self, bundle: &[u8]) -> Result<(), String>;
     /// Whether this computer tries patches nobody reviewed.
     fn takes_community(&self) -> bool;
 }
@@ -553,7 +555,14 @@ impl ActionProvider for HardwareProvider {
             }
             PATCH_PROPOSE => {
                 let input: ProposeInput = glass_actions::parse_input(input)?;
-                let (_, bundle) = self.handle.bundle(&input.build)?;
+                let (bytes, bundle) = self.handle.bundle(&input.build)?;
+                // Nobody is asked about a patch this computer would refuse.
+                if !matches!(self.handle.route()?, Route::Review(_)) {
+                    self.handle
+                        .patches()?
+                        .check(&bytes)
+                        .map_err(ActionError::InvalidInput)?;
+                }
                 let manifest: glass_managed::hwpatch::Manifest =
                     serde_json::from_str(&bundle.signed.payload)
                         .map_err(|e| ActionError::Failed(e.to_string()))?;
@@ -881,6 +890,8 @@ mod tests {
         applied: Mutex<Vec<Vec<u8>>>,
         /// It takes only patches IT reviewed.
         reviewed_only: Mutex<bool>,
+        /// Why it would refuse what it's given, if it would.
+        refuse: Mutex<Option<String>>,
     }
 
     impl Patches for Kernel {
@@ -889,6 +900,9 @@ mod tests {
         }
         fn takes_community(&self) -> bool {
             !*self.reviewed_only.lock().unwrap()
+        }
+        fn check(&self, _bundle: &[u8]) -> Result<(), String> {
+            self.refuse.lock().unwrap().clone().map_or(Ok(()), Err)
         }
         fn apply(&self, bundle: &[u8]) -> Result<PatchTrial, String> {
             self.applied.lock().unwrap().push(bundle.to_vec());
@@ -1000,9 +1014,18 @@ mod tests {
             "building changes nothing here"
         );
 
+        // A patch this computer would refuse is refused before anyone is
+        // asked (the dev VM's snd_hda.ko for a kernel with it built in).
+        let action: ActionName = PATCH_PROPOSE.parse().unwrap();
+        *kernel.refuse.lock().unwrap() = Some("the kernel has snd_hda built in".into());
+        let refused = provider
+            .preview(&ctx, &action, &json!({ "build": build }))
+            .unwrap_err();
+        assert!(refused.to_string().contains("built in"), "{refused}");
+        *kernel.refuse.lock().unwrap() = None;
+
         // The review shows what it fixes, that nobody reviewed it, and the
         // diff itself.
-        let action: ActionName = PATCH_PROPOSE.parse().unwrap();
         let preview = provider
             .preview(&ctx, &action, &json!({ "build": build }))
             .unwrap();

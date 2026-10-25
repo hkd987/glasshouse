@@ -249,6 +249,28 @@ pub fn module_loaded(name: &str) -> bool {
         && cmd::run("kldstat", &["-q", "-n", name]).is_ok()
 }
 
+/// Whether the running kernel has driver `name` built in: one of its own
+/// modules (`kldstat -v -i 1`) is called that, as `pci/snd_hda` is in
+/// GENERIC. A module file of that name never loads beside it (`kldload -n`
+/// says it's loaded and does nothing), so a patch to it rebuilds the kernel.
+pub fn built_in(name: &str) -> bool {
+    cfg!(target_os = "freebsd")
+        && module_name(name)
+        && cmd::run("kldstat", &["-v", "-i", "1"]).is_ok_and(|text| kernel_has(&text, name))
+}
+
+fn kernel_has(kldstat: &str, name: &str) -> bool {
+    kldstat
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next()?.parse::<u32>().ok()?;
+            let module = fields.next()?;
+            fields.next().is_none().then_some(module)
+        })
+        .any(|module| module.rsplit('/').next() == Some(name))
+}
+
 /// Loads kernel module `name` with what it depends on, unless it's loaded:
 /// proof it links against this kernel.
 pub fn load_module(name: &str) -> Result<()> {
@@ -1086,6 +1108,28 @@ mod tests {
 
     fn part_of(report: &Report, kind: Kind) -> &Part {
         report.parts.iter().find(|p| p.kind == kind).unwrap()
+    }
+
+    /// The dev VM (2026-10-25): the hardware agent built snd_hda.ko for a
+    /// kernel with snd_hda in it, and the start check took `kldload -n`'s
+    /// "already loaded" for the patch's module.
+    #[test]
+    fn adr0057_a_driver_built_into_the_kernel_is_seen() {
+        let kldstat = "Id Refs Address                Size Name\n \
+             1   53 0xffffffff80200000  2351bd0 kernel (/boot/kernel/kernel)\n\
+             \tContains modules:\n\
+             \t\t Id Name\n\
+             \t\t401 cubic\n\
+             \t\t256 pci/snd_hda\n\
+             \t\t257 hdac/snd_hda\n";
+        assert!(kernel_has(kldstat, "snd_hda"));
+        assert!(kernel_has(kldstat, "cubic"));
+        assert!(!kernel_has(kldstat, "if_iwlwifi"));
+        assert!(
+            !kernel_has(kldstat, "kernel"),
+            "the file's own line isn't a module"
+        );
+        assert!(!kernel_has(kldstat, "hda"));
     }
 
     #[test]

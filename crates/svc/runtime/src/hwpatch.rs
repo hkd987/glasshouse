@@ -100,6 +100,9 @@ pub trait Envs: Send + Sync {
     fn root(&self) -> PathBuf;
     fn module_loaded(&self, name: &str) -> bool;
     fn load_module(&self, name: &str) -> Result<(), String>;
+    /// The running kernel has driver `name` built in, so a module of that
+    /// name never loads beside it.
+    fn built_in(&self, name: &str) -> bool;
     /// The kernel's last messages about `name` or loading modules: why a
     /// module didn't load. The trial's environment, its logs with it, may
     /// be removed, so a failed check keeps them.
@@ -187,6 +190,9 @@ impl Envs for System {
     }
     fn load_module(&self, name: &str) -> Result<(), String> {
         glass_platform::hardware::load_module(name).map_err(|e| e.to_string())
+    }
+    fn built_in(&self, name: &str) -> bool {
+        glass_platform::hardware::built_in(name)
     }
     fn kernel_messages(&self, name: &str) -> String {
         glass_platform::hardware::kernel_messages(name, 5).join("; ")
@@ -515,6 +521,24 @@ fn admit(
             manifest.id
         )));
     }
+    // A module the kernel has built in never loads: the patch must bring
+    // the kernel rebuilt with it.
+    if !manifest
+        .modules
+        .iter()
+        .any(|m| m.file == glass_managed::hwpatch::KERNEL)
+        && let Some(file) = manifest
+            .modules
+            .iter()
+            .map(|m| m.file.as_str())
+            .find(|f| envs.built_in(f.strip_suffix(".ko").unwrap_or(f)))
+    {
+        return Err(refuse(format!(
+            "refused: this computer's kernel has {} built in, so the patch's {file} would never \
+             run: a patch to it rebuilds the kernel",
+            file.strip_suffix(".ko").unwrap_or(file)
+        )));
+    }
     let release = envs.kernel_release().map_err(&refuse)?;
     if !glass_platform::hardware::release_takes(&release, &manifest.release) {
         return Err(refuse(format!(
@@ -569,6 +593,19 @@ fn admit(
         )));
     }
     Ok((opened, from))
+}
+
+/// Whether [`apply`] would take `bytes`, changing nothing: what the
+/// person is asked about is a patch this computer can set up.
+pub fn would_take(
+    envs: &dyn Envs,
+    store: &Store,
+    config: &HardwarePatches,
+    bytes: &[u8],
+) -> Result<(), String> {
+    admit(envs, store, config, bytes)
+        .map(drop)
+        .map_err(|(_, why)| why)
 }
 
 /// The modules into the new environment's `/boot/kernel`, and those the
@@ -972,15 +1009,21 @@ fn check(envs: &dyn Envs, record: &Record) -> Result<(), String> {
             messages if messages.is_empty() => why,
             messages => format!("{why} (the kernel: {messages})"),
         };
-        if module.load_at_boot {
-            if !envs.module_loaded(name) {
-                return Err(said(format!(
-                    "{name} wasn't loaded as the computer started"
-                )));
-            }
-        } else {
+        if !module.load_at_boot {
             envs.load_module(name)
                 .map_err(|e| said(format!("{name} doesn't load: {e}")))?;
+        }
+        // Its own file, not a driver of that name the kernel has built in,
+        // which `kldload -n` takes for it.
+        if !envs.module_loaded(name) {
+            return Err(said(if envs.built_in(name) {
+                format!(
+                    "the kernel has {name} built in, so the patch's {} never ran",
+                    module.file
+                )
+            } else {
+                format!("{name} wasn't loaded as the computer started")
+            }));
         }
     }
     Ok(())
@@ -1820,6 +1863,40 @@ mod tests {
         let plain = bundle("other", "if_iwlwifi.ko", false, Review::Reviewed);
         let trial = apply(&fake, &store, &awake, &plain, &mut |e| audit.push(e)).unwrap();
         assert_eq!(trial.probation_resumes, 0);
+    }
+
+    /// The dev VM (2026-10-25): an agent's snd_hda.ko, for a kernel with
+    /// snd_hda built in, would have passed the start check (`kldload -n`
+    /// says it's loaded) and been kept without ever running. It's refused
+    /// before it's set up, and the start check fails one that got there.
+    #[test]
+    fn adr0057_a_module_the_kernel_has_built_in_is_refused() {
+        let (fake, store, mut audit) = setup();
+        let bytes = bundle(
+            "lkpi-wlan-suspend",
+            "if_iwlwifi.ko",
+            false,
+            Review::Reviewed,
+        );
+        fake.s().built_in.push("if_iwlwifi".into());
+        let why = would_take(&fake, &store, &waking(), &bytes).unwrap_err();
+        assert!(
+            why.contains("built in") && why.contains("rebuilds the kernel"),
+            "{why}"
+        );
+        assert!(apply(&fake, &store, &waking(), &bytes, &mut |e| audit.push(e)).is_err());
+        assert_eq!(fake.s().envs.len(), 1, "nothing set up");
+
+        // Set up while the kernel didn't have it, started on one that does.
+        fake.s().built_in.clear();
+        would_take(&fake, &store, &waking(), &bytes).unwrap();
+        apply(&fake, &store, &waking(), &bytes, &mut |e| audit.push(e)).unwrap();
+        fake.s().built_in.push("if_iwlwifi".into());
+        fake.restart();
+        at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
+        let ended = store.trial().unwrap().trial;
+        assert_eq!(ended.state, TrialState::Failed);
+        assert!(ended.note.unwrap().contains("never ran"));
     }
 
     /// HardwarePatch.tla's "noWatchdog": a patch that hangs the computer in

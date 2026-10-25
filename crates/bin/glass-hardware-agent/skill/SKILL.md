@@ -53,7 +53,9 @@ file; `new` replaces it.
 
 - `id`: lowercase letters, digits and `-`, saying what it fixes.
 - `summary`: one line a person understands: what works after it.
-- `modules`: each module the edited files are built into.
+- `modules`: each module the edited files are built into. If the
+  computer's kernel has that driver built in, the program builds it into
+  the kernel instead (`kernel`), as it must.
 
 The code you'd change isn't in what you were shown? Ask for it first:
 `{"read": [{"path": "sys/dev/sound/pci/hda/hdac.c", "from": 1680}]}`,
