@@ -17,8 +17,11 @@
 //! On probation the patch's environment isn't the permanent one: a crash, a
 //! panic or a power cut starts the one before. [`at_shutdown`], as the
 //! computer shuts down cleanly, sets the next start to the patch's, once
-//! (Shutdown); [`tick`] counts the minutes of use and, once the probation
-//! is served, makes it permanent (Promote, Confirm). A patch the computer's
+//! (Shutdown); [`tick`] counts the minutes of use and [`resumed`] the wakes
+//! from sleep and, once the probation is served, makes it permanent
+//! (Promote, Confirm). While the computer runs a patch not yet kept, the
+//! hardware watchdog is armed (`watchdogd`): a hang restarts it, on the
+//! environment before (Hang, WatchdogReset). A patch the computer's
 //! keys or community setting no longer allow fails instead
 //! (FailOnProbation). [`undo`] takes a patch out (TakeBack, UndoActivate,
 //! UndoEnd).
@@ -37,6 +40,9 @@ use glass_managed::hwpatch::{Bundle, GLASSHOUSE, Opened, Review};
 use glass_types::Timestamp;
 use serde::{Deserialize, Serialize};
 
+/// Why a patch failed when the watchdog restarted the computer on it.
+const HUNG: &str = "the computer hung on it, and the hardware watchdog restarted it";
+
 /// The largest bundle this computer reads.
 pub const MAX_BUNDLE_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -52,6 +58,12 @@ pub struct HardwarePatches {
     /// Minutes of use on a patch before it's kept. With none, a patch that
     /// passes its check at the first start is kept at once.
     pub probation_minutes: u64,
+    /// Times the computer wakes from sleep on a patch before it's kept, as
+    /// well; a patch may ask for more.
+    pub probation_resumes: u64,
+    /// Whether this computer sleeps (S3): a computer that doesn't counts
+    /// no wakes, and refuses a patch that asks for them.
+    pub sleeps: bool,
 }
 
 /// The base system's boot environments and modules, as [`apply`] and
@@ -81,6 +93,11 @@ pub trait Envs: Send + Sync {
     /// module didn't load. The trial's environment, its logs with it, may
     /// be removed, so a failed check keeps them.
     fn kernel_messages(&self, name: &str) -> String;
+    /// Arms the hardware watchdog (`watchdogd`), or disarms it: a hang then
+    /// restarts the computer. Nothing on a computer without one.
+    fn watchdog(&self, on: bool) -> Result<(), String>;
+    /// This start came from the watchdog's restart: the computer hung.
+    fn watchdog_restarted(&self) -> bool;
 }
 
 /// The computer's own, through `bectl` and `kld*` (glass_platform).
@@ -128,6 +145,14 @@ impl Envs for System {
     }
     fn module_loaded(&self, name: &str) -> bool {
         glass_platform::hardware::module_loaded(name)
+    }
+    fn watchdog(&self, on: bool) -> Result<(), String> {
+        glass_platform::hardware::watchdog(on)
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+    fn watchdog_restarted(&self) -> bool {
+        glass_platform::hardware::watchdog_restarted()
     }
     fn load_module(&self, name: &str) -> Result<(), String> {
         glass_platform::hardware::load_module(name).map_err(|e| e.to_string())
@@ -313,6 +338,12 @@ pub fn apply(
             note: None,
             ran_minutes: 0,
             probation_minutes: config.probation_minutes,
+            woke: 0,
+            probation_resumes: if config.sleeps {
+                config.probation_resumes.max(u64::from(manifest.resumes))
+            } else {
+                0
+            },
         },
         modules: manifest
             .modules
@@ -403,6 +434,13 @@ fn admit(
         return Err(refuse(format!(
             "refused: {} is a community patch nobody here reviewed, and this computer takes \
              only reviewed ones",
+            manifest.id
+        )));
+    }
+    if manifest.resumes > 0 && !config.sleeps {
+        return Err(refuse(format!(
+            "refused: {} must come through waking from sleep before it's kept, and this \
+             computer doesn't sleep",
             manifest.id
         )));
     }
@@ -525,7 +563,7 @@ pub fn at_start(
             // The loader cleared the start-once as it started this one.
             disarm(envs, &env);
             match check(envs, &record).and_then(|()| trusted(config, &record)) {
-                Ok(()) if record.trial.probation_minutes == 0 => keep(envs, store, record, audit),
+                Ok(()) if record.trial.served() => keep(envs, store, record, audit),
                 Ok(()) => {
                     record.trial.state = TrialState::Probation;
                     if store.keep(&record).is_ok() {
@@ -533,8 +571,9 @@ pub fn at_start(
                             &record.trial,
                             format!(
                                 "Kernel patch {} passed its check and is on probation: kept \
-                                 after {} minutes of use; a crash before then goes back to {from}",
-                                record.trial.id, record.trial.probation_minutes
+                                 after {}; a crash or a hang before then goes back to {from}",
+                                record.trial.id,
+                                probation_words(&record.trial)
                             ),
                             Some(Outcome::Completed),
                             None,
@@ -553,9 +592,12 @@ pub fn at_start(
             // Started again by a clean restart, or glassd's own: a crash
             // from here goes back.
             disarm(envs, &env);
-            if let Err(why) = trusted(config, &record) {
+            if envs.watchdog_restarted() {
+                // It hung, a shutdown say, which had set this start to it.
+                fail(envs, store, record, HUNG.into(), audit);
+            } else if let Err(why) = trusted(config, &record) {
                 fail(envs, store, record, why, audit);
-            } else if record.trial.ran_minutes >= record.trial.probation_minutes {
+            } else if record.trial.served() {
                 keep(envs, store, record, audit);
             }
         }
@@ -585,9 +627,13 @@ pub fn at_start(
                             "the computer didn't start on it, and came back on the boot \
                              environment before"
                         }
+                        TrialState::Probation if envs.watchdog_restarted() => {
+                            "the computer hung on it, before its probation ended, and the \
+                             hardware watchdog restarted it on the boot environment before"
+                        }
                         TrialState::Probation => {
                             "the computer stopped while on it, before its probation ended (a \
-                             crash, a panic or a power cut), and came back on the boot \
+                             crash, a panic, a hang or a power cut), and came back on the boot \
                              environment before"
                         }
                         _ => "setting it up didn't finish",
@@ -638,6 +684,14 @@ pub fn at_start(
         // Started from another environment by hand, or kept: nothing to do.
         _ => {}
     }
+    // Running a patch not yet kept: the watchdog, until it's kept.
+    if let Some(record) = store.trial()
+        && record.trial.env == running
+        && record.trial.state != TrialState::Kept
+        && let Err(why) = envs.watchdog(true)
+    {
+        tracing::warn!("arming the watchdog: {why}");
+    }
 }
 
 /// As the computer shuts down cleanly (rc.d, `glassctl system shutdown`):
@@ -654,6 +708,8 @@ pub fn at_shutdown(envs: &dyn Envs, store: &Store) -> Result<(), String> {
     {
         envs.activate_once(env)?;
     }
+    // The watchdog stays armed through the shutdown (`watchdogd -x`): a
+    // patch can hang that too.
     Ok(())
 }
 
@@ -679,10 +735,52 @@ pub fn tick(
         return;
     }
     record.trial.ran_minutes = record.trial.ran_minutes.saturating_add(minutes);
-    if record.trial.ran_minutes >= record.trial.probation_minutes {
+    if record.trial.served() {
         keep(envs, store, record, audit);
     } else {
         let _ = store.keep(&record);
+    }
+}
+
+/// The computer woke from sleep (rc.resume, `glassctl system resume`): one
+/// more wake for a patch on probation, which keeps it once its probation
+/// is served, if this computer still takes it. A patch that breaks waking
+/// never gets here: the computer hangs, and the person's power button
+/// starts the environment before.
+pub fn resumed(
+    envs: &dyn Envs,
+    store: &Store,
+    config: &HardwarePatches,
+    audit: &mut dyn FnMut(AuditEvent),
+) {
+    let Some(mut record) = store.trial() else {
+        return;
+    };
+    if record.trial.state != TrialState::Probation
+        || envs.running().ok().as_deref() != Some(record.trial.env.as_str())
+    {
+        return;
+    }
+    if let Err(why) = trusted(config, &record) {
+        fail(envs, store, record, why, audit);
+        return;
+    }
+    record.trial.woke = record.trial.woke.saturating_add(1);
+    if record.trial.served() {
+        keep(envs, store, record, audit);
+    } else {
+        let _ = store.keep(&record);
+    }
+}
+
+/// What a probation asks, in words: "480 minutes of use and 2 wakes from
+/// sleep".
+fn probation_words(trial: &PatchTrial) -> String {
+    let minutes = format!("{} minutes of use", trial.probation_minutes);
+    match trial.probation_resumes {
+        0 => minutes,
+        1 => format!("{minutes} and a wake from sleep"),
+        n => format!("{minutes} and {n} wakes from sleep"),
     }
 }
 
@@ -702,8 +800,8 @@ fn keep(envs: &dyn Envs, store: &Store, mut record: Record, audit: &mut dyn FnMu
         audit(event(
             &record.trial,
             format!(
-                "Kernel patch {} kept: the computer started on it, it passed its check{}; {env} \
-                 is the boot environment from now on",
+                "Kernel patch {} kept: the computer started on it, it passed its check{}{}; \
+                 {env} is the boot environment from now on",
                 record.trial.id,
                 if record.trial.probation_minutes > 0 {
                     format!(
@@ -712,12 +810,19 @@ fn keep(envs: &dyn Envs, store: &Store, mut record: Record, audit: &mut dyn FnMu
                     )
                 } else {
                     String::new()
+                },
+                match record.trial.woke {
+                    0 => String::new(),
+                    1 => ", waking from sleep once".into(),
+                    n => format!(", waking from sleep {n} times"),
                 }
             ),
             Some(Outcome::Completed),
             None,
         ));
     }
+    // Kept: the watchdog goes.
+    let _ = envs.watchdog(false);
 }
 
 /// The patch failed: the record says why, and the next start is the
@@ -888,6 +993,8 @@ pub fn undo(
     if !envs.permanent(&from)? {
         envs.activate(&from)?;
     }
+    // Taken out, but what runs until the next start: the watchdog again.
+    let _ = envs.watchdog(true);
     record.trial.state = ended;
     record.trial.ended_at = Some(Timestamp::now());
     record.trial.note = Some(format!("taken out {was}"));
@@ -967,6 +1074,10 @@ mod tests {
         broken: Vec<String>,
         loaded: Vec<String>,
         mounts: BTreeMap<String, PathBuf>,
+        /// The hardware watchdog is armed.
+        watchdog: bool,
+        /// The last start came from the watchdog's restart.
+        restarted: bool,
     }
 
     impl Fake {
@@ -1005,6 +1116,8 @@ mod tests {
                 let env = s.once.take().unwrap_or_else(|| s.permanent.clone());
                 s.running = env.clone();
                 s.loaded.clear();
+                s.restarted = false;
+                s.watchdog = false;
                 drop(s);
                 let conf = std::fs::read_to_string(self.env_dir(&env).join("boot/loader.conf"))
                     .unwrap_or_default();
@@ -1101,6 +1214,13 @@ mod tests {
             s.loaded.push(name.into());
             Ok(())
         }
+        fn watchdog(&self, on: bool) -> Result<(), String> {
+            self.s().watchdog = on;
+            Ok(())
+        }
+        fn watchdog_restarted(&self) -> bool {
+            self.s().restarted
+        }
         fn kernel_messages(&self, name: &str) -> String {
             if self.s().broken.iter().any(|m| m == name) {
                 "link_elf_obj: symbol lkpi_80211_pm_driver undefined".into()
@@ -1120,6 +1240,8 @@ mod tests {
             keys: vec![key().public()],
             community: false,
             probation_minutes: 0,
+            probation_resumes: 0,
+            sleeps: true,
         }
     }
 
@@ -1145,9 +1267,22 @@ mod tests {
         review: Review,
         includes: &[&str],
     ) -> Vec<u8> {
+        bundle_edited(id, revision, file, load_at_boot, review, includes, |_| {})
+    }
+
+    /// [`bundle_on`], its manifest edited first.
+    fn bundle_edited(
+        id: &str,
+        revision: u64,
+        file: &str,
+        load_at_boot: bool,
+        review: Review,
+        includes: &[&str],
+        edit: impl FnOnce(&mut Manifest),
+    ) -> Vec<u8> {
         let module = format!("\x7fELF {file} patched").into_bytes();
         let patch = "--- a/sys/x.c\n+++ b/sys/x.c\n".to_owned();
-        let manifest = Manifest {
+        let mut manifest = Manifest {
             id: id.into(),
             summary: "Wi-Fi works again after sleep".into(),
             release: "15.1-RELEASE".into(),
@@ -1162,7 +1297,9 @@ mod tests {
             patch_sha256: sha256_hex(patch.as_bytes()),
             requirements: vec![],
             includes: includes.iter().map(|i| (*i).to_owned()).collect(),
+            resumes: 0,
         };
+        edit(&mut manifest);
         serde_json::to_vec(&Bundle {
             signed: key().sign(
                 DocKind::HardwarePatch,
@@ -1663,6 +1800,193 @@ mod tests {
         assert_eq!(fake.s().running, "default");
         at_start(&fake, &store, &probation(), &mut |e| audit.push(e));
         assert!(!fake.exists(&trial.env).unwrap());
+    }
+
+    /// Kept after an hour of use and a wake from sleep.
+    fn waking() -> HardwarePatches {
+        HardwarePatches {
+            probation_resumes: 1,
+            ..probation()
+        }
+    }
+
+    /// HardwarePatch.tla's "minutesOnly": a patch kept on minutes of use
+    /// alone, by a person who didn't close the lid that day, even if it
+    /// breaks waking.
+    #[test]
+    fn adr0057_a_patch_is_kept_only_once_the_computer_has_woken_on_it() {
+        let (fake, store, mut audit) = setup();
+        let bytes = bundle(
+            "lkpi-wlan-suspend",
+            "if_iwlwifi.ko",
+            false,
+            Review::Reviewed,
+        );
+        let trial = apply(&fake, &store, &waking(), &bytes, &mut |e| audit.push(e)).unwrap();
+        assert_eq!(trial.probation_resumes, 1);
+        fake.restart();
+        at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
+        assert!(
+            audit
+                .last()
+                .unwrap()
+                .summary
+                .contains("kept after 60 minutes of use and a wake from sleep"),
+            "{:?}",
+            audit.last()
+        );
+        tick(&fake, &store, &waking(), 60, &mut |e| audit.push(e));
+        assert_eq!(state(&store), TrialState::Probation, "no wake yet");
+        assert_eq!(fake.s().permanent, "default");
+
+        resumed(&fake, &store, &waking(), &mut |e| audit.push(e));
+        assert_eq!(state(&store), TrialState::Kept);
+        assert_eq!(fake.s().permanent, trial.env);
+        assert!(
+            audit
+                .last()
+                .unwrap()
+                .summary
+                .contains("ran 60 minutes on it without a crash, waking from sleep once"),
+            "{:?}",
+            audit.last()
+        );
+    }
+
+    /// A patch that hangs the computer as it wakes: the person holds the
+    /// power button, and the next start is the environment before.
+    #[test]
+    fn adr0057_a_patch_that_breaks_waking_goes_back() {
+        let (fake, store, mut audit) = setup();
+        let bytes = bundle(
+            "lkpi-wlan-suspend",
+            "if_iwlwifi.ko",
+            false,
+            Review::Reviewed,
+        );
+        let trial = apply(&fake, &store, &waking(), &bytes, &mut |e| audit.push(e)).unwrap();
+        fake.restart();
+        at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
+        tick(&fake, &store, &waking(), 90, &mut |e| audit.push(e));
+        // Asleep, then hung waking: no resume, no shutdown, off.
+        fake.restart();
+        assert_eq!(fake.s().running, "default");
+        at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
+        assert_eq!(state(&store), TrialState::RolledBack);
+        assert!(!fake.exists(&trial.env).unwrap());
+    }
+
+    /// A patch that asks for wakes, on a computer that doesn't sleep, could
+    /// never be kept.
+    #[test]
+    fn adr0057_a_patch_for_waking_is_refused_where_the_computer_doesnt_sleep() {
+        let (fake, store, mut audit) = setup();
+        let bytes = bundle_edited(
+            "lkpi-wlan-suspend",
+            1,
+            "if_iwlwifi.ko",
+            false,
+            Review::Reviewed,
+            &[],
+            |m| m.resumes = 2,
+        );
+        let awake = HardwarePatches {
+            sleeps: false,
+            ..waking()
+        };
+        let refused = apply(&fake, &store, &awake, &bytes, &mut |e| audit.push(e)).unwrap_err();
+        assert!(refused.contains("this computer doesn't sleep"), "{refused}");
+        // Where it sleeps, it asks for its own two wakes, more than the
+        // computer's one; a computer that doesn't sleep counts none.
+        let trial = apply(&fake, &store, &waking(), &bytes, &mut |e| audit.push(e)).unwrap();
+        assert_eq!(trial.probation_resumes, 2);
+        cancel(&fake, &store, &mut |e| audit.push(e)).unwrap();
+        let plain = bundle("other", "if_iwlwifi.ko", false, Review::Reviewed);
+        let trial = apply(&fake, &store, &awake, &plain, &mut |e| audit.push(e)).unwrap();
+        assert_eq!(trial.probation_resumes, 0);
+    }
+
+    /// HardwarePatch.tla's "noWatchdog": a patch that hangs the computer in
+    /// use leaves it hung until someone holds the power button. The
+    /// watchdog is armed from the start on a patch until it's kept, again
+    /// while a kept one is taken out, and never through a shutdown.
+    #[test]
+    fn adr0057_the_watchdog_is_armed_while_a_patch_is_not_yet_kept() {
+        let (fake, store, mut audit) = setup();
+        let bytes = bundle(
+            "lkpi-wlan-suspend",
+            "if_iwlwifi.ko",
+            false,
+            Review::Reviewed,
+        );
+        apply(&fake, &store, &waking(), &bytes, &mut |e| audit.push(e)).unwrap();
+        assert!(!fake.s().watchdog, "not on the environment before");
+        fake.restart();
+        at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
+        assert!(fake.s().watchdog, "on probation");
+        at_shutdown(&fake, &store).unwrap();
+        assert!(fake.s().watchdog, "armed through the shutdown");
+        fake.restart();
+        at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
+        assert!(fake.s().watchdog, "armed again");
+        tick(&fake, &store, &waking(), 60, &mut |e| audit.push(e));
+        resumed(&fake, &store, &waking(), &mut |e| audit.push(e));
+        assert_eq!(state(&store), TrialState::Kept);
+        assert!(!fake.s().watchdog, "kept");
+
+        undo(&fake, &store, &mut |e| audit.push(e)).unwrap();
+        assert!(fake.s().watchdog, "taken out, still running");
+    }
+
+    /// The watchdog restarts a computer the patch hung in use: the next
+    /// start is the environment before, and the record says why.
+    #[test]
+    fn adr0057_a_patch_that_hangs_goes_back_by_itself() {
+        let (fake, store, mut audit) = setup();
+        let bytes = bundle(
+            "lkpi-wlan-suspend",
+            "if_iwlwifi.ko",
+            false,
+            Review::Reviewed,
+        );
+        apply(&fake, &store, &waking(), &bytes, &mut |e| audit.push(e)).unwrap();
+        fake.restart();
+        at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
+        // Hung, then the watchdog's restart.
+        fake.restart();
+        fake.s().restarted = true;
+        at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
+        let ended = store.trial().unwrap().trial;
+        assert_eq!(ended.state, TrialState::RolledBack);
+        assert!(ended.note.unwrap().contains("hardware watchdog"));
+    }
+
+    /// HardwarePatch.tla's "resetUnheard": a patch that hangs every
+    /// shutdown has its next start already set to it; the watchdog's restart
+    /// is what tells.
+    #[test]
+    fn adr0057_a_patch_that_hangs_the_shutdown_fails() {
+        let (fake, store, mut audit) = setup();
+        let bytes = bundle(
+            "lkpi-wlan-suspend",
+            "if_iwlwifi.ko",
+            false,
+            Review::Reviewed,
+        );
+        let trial = apply(&fake, &store, &waking(), &bytes, &mut |e| audit.push(e)).unwrap();
+        fake.restart();
+        at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
+        at_shutdown(&fake, &store).unwrap();
+        // The shutdown hangs; the watchdog restarts it, on the patch.
+        fake.restart();
+        fake.s().restarted = true;
+        assert_eq!(fake.s().running, trial.env);
+        at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
+        let ended = store.trial().unwrap().trial;
+        assert_eq!(ended.state, TrialState::Failed);
+        assert!(ended.note.unwrap().contains("hardware watchdog"));
+        fake.restart();
+        assert_eq!(fake.s().running, "default");
     }
 
     /// HardwarePatchStack.tla's "stackBlind": a second patch that rebuilt

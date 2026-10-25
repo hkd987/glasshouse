@@ -1,0 +1,76 @@
+A module that hangs the computer as it shuts down, on purpose: the kernel
+patch whose next start a clean shutdown already set to it, for
+tests/hardware/patch-vm.sh (ADR 0057). Never shipped.
+
+diff --git b/sys/dev/glass_shutdown_hang/glass_shutdown_hang.c b/sys/dev/glass_shutdown_hang/glass_shutdown_hang.c
+new file mode 100644
+--- /dev/null
++++ b/sys/dev/glass_shutdown_hang/glass_shutdown_hang.c
+@@ -0,0 +1,57 @@
++/*
++ * A module that hangs the computer as it shuts down, on purpose: the
++ * kernel patch whose next start a clean shutdown has already set to it.
++ * Every processor stops with its interrupts off; the hardware watchdog,
++ * left armed through the shutdown (watchdogd -x), restarts it, and the
++ * start after says so (ADR 0057, tests/hardware/patch-vm.sh). Never
++ * shipped.
++ */
++#include <sys/param.h>
++#include <sys/errno.h>
++#include <sys/eventhandler.h>
++#include <sys/kernel.h>
++#include <sys/module.h>
++#include <sys/smp.h>
++#include <sys/systm.h>
++#include <machine/cpu.h>
++
++static eventhandler_tag glass_shutdown_hang_tag;
++
++static void
++glass_shutdown_hang_spin(void *arg __unused)
++{
++	for (;;)
++		cpu_spinwait();
++}
++
++static void
++glass_shutdown_hang_now(void *arg __unused, int howto __unused)
++{
++	printf("glass_shutdown_hang: hanging the shutdown, on purpose (ADR 0057)\n");
++	smp_rendezvous(NULL, glass_shutdown_hang_spin, NULL, NULL);
++}
++
++static int
++glass_shutdown_hang_modevent(module_t mod __unused, int type, void *arg __unused)
++{
++	switch (type) {
++	case MOD_LOAD:
++		glass_shutdown_hang_tag = EVENTHANDLER_REGISTER(shutdown_pre_sync,
++		    glass_shutdown_hang_now, NULL, SHUTDOWN_PRI_FIRST);
++		printf("glass_shutdown_hang: hangs the next shutdown, on purpose (ADR 0057)\n");
++		return (0);
++	case MOD_UNLOAD:
++		EVENTHANDLER_DEREGISTER(shutdown_pre_sync, glass_shutdown_hang_tag);
++		return (0);
++	default:
++		return (EOPNOTSUPP);
++	}
++}
++
++static moduledata_t glass_shutdown_hang_mod = {
++	"glass_shutdown_hang",
++	glass_shutdown_hang_modevent,
++	NULL
++};
++DECLARE_MODULE(glass_shutdown_hang, glass_shutdown_hang_mod, SI_SUB_DRIVERS, SI_ORDER_ANY);
++MODULE_VERSION(glass_shutdown_hang, 1);
+diff --git b/sys/modules/glass_shutdown_hang/Makefile b/sys/modules/glass_shutdown_hang/Makefile
+new file mode 100644
+--- /dev/null
++++ b/sys/modules/glass_shutdown_hang/Makefile
+@@ -0,0 +1,5 @@
++.PATH: ${SYSDIR}/dev/glass_shutdown_hang
++
++KMOD=	glass_shutdown_hang
++SRCS=	glass_shutdown_hang.c
++.include <bsd.kmod.mk>

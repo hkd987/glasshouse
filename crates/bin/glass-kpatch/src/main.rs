@@ -77,6 +77,10 @@ struct PatchFile {
     /// names that one here.
     #[serde(default)]
     includes: Vec<String>,
+    /// Times a computer must wake from sleep on it before keeping it: for
+    /// a patch to sleep or a driver's resume (ADR 0057).
+    #[serde(default)]
+    resumes: u32,
     /// The patch changes code the kernel is built with: the kernel is
     /// rebuilt with the image's configuration and carried too.
     #[serde(default)]
@@ -170,6 +174,7 @@ fn bundle(dir: &Path, modules_dir: &Path, key: &OrgKey) -> anyhow::Result<Bundle
         patch_sha256: sha256_hex(patch.as_bytes()),
         requirements: file.requirements,
         includes: file.includes,
+        resumes: file.resumes,
     };
     if !glass_managed::hwpatch::valid_id(&manifest.id) {
         bail!("{:?} isn't a patch id", manifest.id);

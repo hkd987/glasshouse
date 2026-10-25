@@ -251,6 +251,70 @@ pub fn load_module(name: &str) -> Result<()> {
     cmd::run("kldload", &["-n", name]).map(|_| ())
 }
 
+/// Whether this computer sleeps: its firmware offers S3, which the base
+/// system's suspend uses (ADR 0056).
+pub fn sleeps() -> bool {
+    cmd::run("sysctl", &["-n", "hw.acpi.supported_sleep_state"])
+        .is_ok_and(|states| states.split_whitespace().any(|s| s == "S3"))
+}
+
+/// How long the hardware watchdog waits for `watchdogd` before it restarts
+/// the computer, in seconds; Intel's (ichwd) waits it twice over.
+pub const WATCHDOG_SECS: u32 = 60;
+/// How long it waits once `watchdogd` has gone, as the computer shuts
+/// down: a shutdown that hangs restarts too, and one that finishes powers
+/// the watchdog off with the rest.
+pub const WATCHDOG_SHUTDOWN_SECS: u32 = 120;
+
+/// Arms the hardware watchdog with the base system's `watchdogd`, or
+/// disarms it (ADR 0057): while armed, a computer that hangs restarts by
+/// itself, through a shutdown too. Whether the computer has one
+/// (`/dev/fido`). A `watchdogd` the computer's own rc.conf runs is left as
+/// it is.
+pub fn watchdog(on: bool) -> Result<bool> {
+    if !std::path::Path::new("/dev/fido").exists() {
+        return Ok(false);
+    }
+    let enabled = cmd::run("sysrc", &["-n", "watchdogd_enable"])
+        .is_ok_and(|v| v.trim().eq_ignore_ascii_case("yes"));
+    if enabled {
+        return Ok(true);
+    }
+    let running = cmd::run("service", &["watchdogd", "onestatus"]).is_ok();
+    match (on, running) {
+        (true, false) => {
+            cmd::run(
+                "watchdogd",
+                &[
+                    "-t",
+                    &WATCHDOG_SECS.to_string(),
+                    "-x",
+                    &WATCHDOG_SHUTDOWN_SECS.to_string(),
+                ],
+            )?;
+        }
+        // It leaves the shutdown's timeout as it exits: then off.
+        (false, true) => {
+            cmd::run("service", &["watchdogd", "onestop"])?;
+            cmd::run("watchdog", &["-t", "0"])?;
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
+/// Whether this start came from a hardware watchdog's restart: the
+/// computer hung (ichwd says so as it attaches). Only this start's
+/// messages: the kernel's buffer can keep the last one's.
+pub fn watchdog_restarted() -> bool {
+    cmd::run("dmesg", &[]).is_ok_and(|text| restarted_by_watchdog(&text))
+}
+
+fn restarted_by_watchdog(dmesg: &str) -> bool {
+    let this_start = dmesg.rsplit("---<<BOOT>>---").next().unwrap_or(dmesg);
+    this_start.contains("resuming after hardware watchdog timeout")
+}
+
 /// The kernel's last `count` messages naming `name`, or about loading
 /// modules (`link_elf`, `KLD`): why a module didn't load.
 pub fn kernel_messages(name: &str, count: usize) -> Vec<String> {
@@ -1205,6 +1269,17 @@ ugen0.2: <Realtek Laptop Camera> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr
             camera_driver: true,
             brightness_levels: String::new(),
         }
+    }
+
+    #[test]
+    fn adr0057_a_watchdog_restart_is_this_start_s_alone() {
+        let ichwd = "ichwd0: <Intel ICH9 watchdog timer> on isa0\n\
+                     ichwd0: resuming after hardware watchdog timeout\n";
+        assert!(restarted_by_watchdog(ichwd));
+        // The last start's, kept in the kernel's buffer, then this one's.
+        let kept = format!("{ichwd}---<<BOOT>>---\nichwd0: <Intel ICH9 watchdog timer> on isa0\n");
+        assert!(!restarted_by_watchdog(&kept));
+        assert!(!restarted_by_watchdog(""));
     }
 
     #[test]

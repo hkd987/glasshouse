@@ -538,6 +538,8 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
                 keys: config.hardware.keys.clone(),
                 community: config.hardware.community,
                 probation_minutes: config.hardware.probation_minutes,
+                probation_resumes: config.hardware.probation_resumes,
+                sleeps: glass_platform::hardware::sleeps(),
             },
         },
         policy: loaded.policy.clone(),

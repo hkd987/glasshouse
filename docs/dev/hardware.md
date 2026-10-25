@@ -38,6 +38,9 @@ Not yet tried on a laptop: these steps follow how the dev VM is set up.
 4. **What only a person can check,** each against its requirement:
    - Wi-Fi joins WPA2 and WPA3 networks from Settings' Wi-Fi pane (CF-12),
      and WPA2-Enterprise by hand until Settings signs in to them (CF-10);
+   - the chipset's watchdog: `ichwd0` attaches (`dmesg | grep ichwd`) and
+     `/dev/fido` exists, or a kernel patch that hangs this model needs the
+     power button (ADR 0057);
    - the brightness keys and Settings' slider dim the screen, one step a
      press and not two (the firmware and the keyboard may both send one),
      and the level comes back after a restart (ADR 0060);

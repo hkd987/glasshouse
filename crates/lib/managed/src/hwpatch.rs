@@ -44,6 +44,15 @@ pub struct Manifest {
     /// rewrote must name it (`specs/tla/HardwarePatchStack.tla`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub includes: Vec<String>,
+    /// Times the computer must wake from sleep on it before it's kept, on
+    /// top of what the computer itself asks: for a patch to sleep, or to a
+    /// driver's resume. Refused on a computer that doesn't sleep.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub resumes: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// A module the patch rebuilt, or the kernel itself, replacing the base
@@ -232,6 +241,7 @@ mod tests {
             patch_sha256: sha256_hex(patch.as_bytes()),
             requirements: vec!["PM-5".into()],
             includes: vec![],
+            resumes: 0,
         };
         let payload = serde_json::to_string(&manifest).unwrap();
         Bundle {

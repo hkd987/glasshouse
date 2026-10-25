@@ -1374,6 +1374,16 @@ impl Runtime {
         }
         let resumed = self.resume_after_sleep();
         self.woke();
+        // One more wake for a kernel patch on probation (ADR 0057).
+        let store = self.hardware_checked();
+        crate::hwpatch::resumed(
+            &crate::hwpatch::System,
+            &store,
+            &self.config.hardware,
+            &mut |event| {
+                self.audit(event);
+            },
+        );
         Ok(resumed)
     }
 

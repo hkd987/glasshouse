@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Usage: tests/hardware/patch-vm.sh [good] [panic] [late] [hang] [refuse]
+# Usage: tests/hardware/patch-vm.sh [good] [panic] [late] [hang] [late-hang] [shutdown-hang] [refuse]
 # Kernel patches end to end in the dev VM (ADR 0057, specs/tla/HardwarePatch.tla). With no
 # arguments, all of them:
 #
 # - good: the Wi-Fi fix (os/freebsd/patches/lkpi-wlan-suspend) is set up in a boot environment of
 #   its own; the VM restarts onto it; glassd checks it (the kernel and modules are the ones signed,
-#   and load) and puts it on probation. A clean restart on probation comes back to it; after its
-#   minutes of use it's kept, and the fix's sysctl shows the patched kernel runs. A second kernel
+#   and load) and puts it on probation, the hardware watchdog armed. A clean restart on probation
+#   comes back to it; the VM sleeps and wakes twice (the fix asks for two wakes); after its minutes
+#   of use it's kept, the watchdog disarmed, and the fix's sysctl shows the patched kernel runs. A second kernel
 #   patch not built on top of it is refused (HardwarePatchStack.tla). Then it's taken out
 #   (`glassctl hardware patch undo`): the next start is the VM's own environment, which removes the
 #   patch's.
@@ -16,6 +17,12 @@
 #   probation: the VM restarts by itself on the environment before, and the patch rolled back.
 # - hang: a module that never finishes loading (hang-test): after a power cut the VM starts on
 #   the environment before, and the patch rolled back.
+# - late-hang: a module that hangs every processor three minutes after it loads (late-hang), on
+#   probation: the hardware watchdog (QEMU's ICH9 TCO, ichwd) restarts the VM by itself, nobody
+#   at the power button, on the environment before.
+# - shutdown-hang: a module that hangs the shutdown (shutdown-hang), whose next start the clean
+#   shutdown already set to it: the watchdog, armed through the shutdown, restarts the VM onto
+#   it, and glassd fails it from what the kernel says of that start.
 # - refuse: bundles changed after signing, signed by a key the VM doesn't trust, a community
 #   patch, and one built for another release are refused, set nothing up, and are on the audit
 #   record.
@@ -85,6 +92,13 @@ settled() {
 	done
 }
 
+# The hardware watchdog is armed ($1 = yes) or not (no).
+watchdog_is() {
+	local now=no
+	in_vm 'service watchdogd onestatus' >/dev/null 2>&1 && now=yes
+	[[ $now == "$1" ]] || fail "$2: watchdogd running: $now, should be $1"
+}
+
 # Until the trial is in state $1, for at most $2 seconds, through restarts the VM makes itself.
 until_state() {
 	local want=$1 deadline=$((SECONDS + $2)) got=
@@ -141,11 +155,25 @@ good() {
 	[[ $(status 'd["trial"]["state"]') == probation ]] ||
 		fail "good: not on probation: $(status 'd["trial"]')"
 	in_vm 'bectl list -H' | grep -q "^$env	N	" || fail "good: $env shouldn't be permanent yet"
+	watchdog_is yes "good: on probation"
 	log "good: a clean restart on probation comes back to it"
 	restart
 	[[ $(status 'd["running"]') == "$env" ]] || fail "good: a clean restart left $env"
+	watchdog_is yes "good: on probation, restarted"
+	log "good: the VM sleeps and wakes, twice"
+	local wakes
+	for wakes in 1 2; do
+		"$vm" sleep-wake 5 >&2 || { fail "good: the VM didn't sleep and wake"; return; }
+		for _ in $(seq 30); do
+			[[ $(status 'd["trial"].get("woke", 0)') -ge $wakes || $(status 'd["trial"]["state"]') == kept ]] && break
+			sleep 2
+		done
+		[[ $(status 'd["trial"].get("woke", 0)') -ge $wakes || $(status 'd["trial"]["state"]') == kept ]] ||
+			fail "good: wake $wakes wasn't counted: $(status 'd["trial"]')"
+	done
 	until_state kept 600 || return
 	in_vm 'bectl list -H' | grep -q "^$env	NR	" || fail "good: $env isn't the one every start uses"
+	watchdog_is no "good: kept"
 	# The VM has no Intel card, so nothing loads the driver by itself: it loads against the kernel
 	# running only if that is the patched one (it needs the fix's lkpi_80211_pm_driver).
 	in_vm 'kldload -n if_iwlwifi && kldstat -q -n if_iwlwifi' ||
@@ -239,6 +267,56 @@ hang() {
 	gone "$env"
 }
 
+late_hang() {
+	log "late-hang: a module that hangs every processor three minutes after it loads, on probation"
+	local env since
+	env=$(apply "$kpatch/late-hang.bundle.json") || return
+	since=$(console_at)
+	restart
+	settled
+	[[ $(status 'd["trial"]["state"]') == probation ]] ||
+		fail "late-hang: not on probation before it hung: $(status 'd["trial"]')"
+	watchdog_is yes "late-hang: on probation"
+	log "late-hang: on probation; waiting for it to hang, and the watchdog to restart the VM"
+	until_state rolled_back 900 || return
+	console_since "$since" | grep -aq "glass_late_hang: hanging every processor now" ||
+		fail "late-hang: it never hung"
+	[[ $(status 'd["running"]') == default ]] || fail "late-hang: not back on default"
+	gone "$env"
+	log "late-hang: $(status 'd["trial"]["note"]')"
+}
+
+shutdown_hang() {
+	log "shutdown-hang: a module that hangs the shutdown, its next start already set to it"
+	local env since
+	env=$(apply "$kpatch/shutdown-hang.bundle.json") || return
+	restart
+	settled
+	[[ $(status 'd["trial"]["state"]') == probation ]] ||
+		fail "shutdown-hang: not on probation: $(status 'd["trial"]')"
+	since=$(console_at)
+	log "shutdown-hang: a clean restart, which it hangs; the watchdog restarts the VM"
+	in_vm 'shutdown -r now' >/dev/null 2>&1 || true
+	"$vm" ssh-close
+	sleep 30
+	"$vm" wait 900 >/dev/null || { fail "shutdown-hang: the VM never came back"; return; }
+	for _ in $(seq 60); do in_vm 'glassctl status' >/dev/null 2>&1 && break; sleep 2; done
+	console_since "$since" | grep -aq "glass_shutdown_hang: hanging the shutdown" ||
+		fail "shutdown-hang: the shutdown never hung"
+	[[ $(status 'd["running"]') == "$env" ]] || fail "shutdown-hang: the shutdown had set the next start to $env"
+	in_vm 'dmesg | grep -a "resuming after hardware watchdog timeout"' >/dev/null ||
+		fail "shutdown-hang: the kernel doesn't say the watchdog restarted it"
+	[[ $(status 'd["trial"]["state"]') == failed ]] ||
+		fail "shutdown-hang: not failed after the watchdog's restart: $(status 'd["trial"]')"
+	log "shutdown-hang: $(status 'd["trial"]["note"]')"
+	# Its shutdown hangs again: a power cut back to the environment before.
+	"$vm" power-cut >&2
+	back
+	settled
+	[[ $(status 'd["running"]') == default ]] || fail "shutdown-hang: not back on default"
+	gone "$env"
+}
+
 refuse() {
 	log "refuse: what the VM doesn't take"
 	local good=$kpatch/panic-test.bundle.json src=$repo/tests/hardware/patches/panic-test
@@ -275,9 +353,9 @@ PY
 }
 
 wanted=("$@")
-((${#wanted[@]})) || wanted=(refuse good panic late hang)
+((${#wanted[@]})) || wanted=(refuse good panic late hang late-hang shutdown-hang)
 for scenario in "${wanted[@]}"; do
-	"$scenario"
+	"${scenario//-/_}"
 	in_vm 'glassctl verify' || fail "$scenario: the audit log doesn't verify"
 done
 in_vm 'glassctl hardware patch status'

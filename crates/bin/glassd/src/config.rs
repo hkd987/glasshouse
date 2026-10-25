@@ -95,6 +95,10 @@ pub struct HardwareConfig {
     /// back to the boot environment before. A working day by default.
     #[serde(default = "default_probation")]
     pub probation_minutes: u64,
+    /// Wakes from sleep on a patch before it's kept, as well, on a
+    /// computer that sleeps: any kernel patch can break waking.
+    #[serde(default = "default_resumes")]
+    pub probation_resumes: u64,
 }
 
 impl Default for HardwareConfig {
@@ -103,8 +107,13 @@ impl Default for HardwareConfig {
             keys: Vec::new(),
             community: false,
             probation_minutes: default_probation(),
+            probation_resumes: default_resumes(),
         }
     }
+}
+
+fn default_resumes() -> u64 {
+    1
 }
 
 fn default_probation() -> u64 {

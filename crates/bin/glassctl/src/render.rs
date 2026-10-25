@@ -667,8 +667,12 @@ pub fn patch_status(status: &glass_api::PatchStatus) -> String {
     match &status.trial {
         Some(t) if t.state.open() => {
             let probation = if t.state == TrialState::Probation {
+                let wakes = match t.probation_resumes {
+                    0 => String::new(),
+                    n => format!(", {} of {n} wakes from sleep", t.woke.min(n)),
+                };
                 format!(
-                    " · {} of {} minutes of use",
+                    " · {} of {} minutes of use{wakes}",
                     t.ran_minutes, t.probation_minutes
                 )
             } else {

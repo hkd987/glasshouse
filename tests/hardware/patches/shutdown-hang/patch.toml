@@ -1,0 +1,16 @@
+# A test fixture, never shipped: a module the loader loads at every start,
+# which hangs the computer as it shuts down (ADR 0057). The shutdown sets the
+# next start to the patch, once; the hardware watchdog's restart must fail it.
+id = "shutdown-hang"
+revision = 1
+summary = "A module that hangs the computer as it shuts down (a test)"
+release = "15.1-RELEASE"
+origin = "glasshouse"
+review = "reviewed"
+targets = []
+requirements = []
+
+[[module]]
+dir = "glass_shutdown_hang"
+file = "glass_shutdown_hang.ko"
+load_at_boot = true

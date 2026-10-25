@@ -102,7 +102,12 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
 - **On probation, then kept.** A patch that passes is on probation: the
   computer runs on it, but its environment isn't the permanent one until
   the computer has been in use on it for a working day
-  (`probation_minutes`, 480 by default; minutes asleep don't count). Until
+  (`probation_minutes`, 480 by default; minutes asleep don't count) and,
+  on a computer that sleeps, has woken from sleep on it
+  (`probation_resumes`, 1 by default; a patch for sleep asks for more in
+  its manifest, `resumes`, and is refused where the computer doesn't
+  sleep). Any kernel patch can break waking, and a person who didn't close
+  the lid that day would otherwise keep one that does. Until
   then the next start is set to it only as the computer shuts down
   cleanly: rc.d's shutdown tells glassd (`glassctl system shutdown`). A
   crash, a panic or a power cut never gets there, so the start after one is
@@ -112,9 +117,21 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
 
   A patch that panics as the computer starts costs one restart: the image
   turns off the kernel debugger on panic, and the start-once is spent. A
-  start that hangs is the same once the computer is turned off and on; the
-  chipset's watchdog (`watchdogd`) on the certified models would do that
-  without the person.
+  start that hangs is the same once the computer is turned off and on.
+- **The hardware watchdog** (Intel's chipset timer, `ichwd`, loaded at
+  every start) is armed by glassd with the base system's `watchdogd`
+  while the computer runs a patch not yet kept: from glassd's start check
+  until the patch is kept, and again while a kept one is taken out. A
+  patch that hangs the computer once it's in use restarts it within about
+  two minutes, nobody at the power button, on the environment before.
+  - It stays armed through a shutdown (`watchdogd -x 120`): a patch can
+    hang that too, and a clean shutdown has already set the next start to
+    the patch. The start after the watchdog's restart says so in the
+    kernel's messages ("resuming after hardware watchdog timeout"), and
+    glassd fails the patch then.
+  - It can't help a computer that hangs as it wakes: the timer doesn't run
+    asleep. That one needs the power button, and the start after it is
+    the environment before.
 - **On top of each other.** A patch that rewrites a file a kept patch
   rewrote (any two kernel patches) must have been built on top of it
   (`includes` in its manifest), or it's refused: kept anyway, it would undo
@@ -200,13 +217,23 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
   - tampered, untrusted, community and wrong-release bundles were refused,
     each on the audit record;
   - the audit log verified after each.
-- **Not yet like the release:**
-  - The patched kernel is built without CTF (`MK_CTF=no`, for speed), so
-    DTrace has no type information on it. The release's kernel has it,
-    which is the 1.5 MB difference in size. The build service should
-    build with CTF.
-  - Probation counts minutes awake, not sleeps. A patch for sleep should
-    count resumes too, once sleep works on the certified models (PM-5).
+- **Not yet like the release** (both done since, below):
+  - The patched kernel was built without CTF (`MK_CTF=no`, for speed), so
+    DTrace had no type information on it.
+  - Probation counted minutes awake, not wakes from sleep.
+
+## Wakes, the watchdog and CTF (2026-10-25)
+- **`HardwarePatch.tla` gained sleep, hangs and the watchdog:** a patch
+  that hangs once in use, and one that hangs the computer as it wakes.
+  Its Old switches fail as each earlier version would:
+  - `minutesOnly`: a patch that hangs every wake is kept after two ticks of
+    use with no sleep;
+  - `noWatchdog`: a patch that hangs leaves the computer hung;
+  - `watchdogOffAtShutdown`: a patch that hangs the shutdown does too;
+  - `resetUnheard`: one that hangs every shutdown, its next start already
+    set to it, stays on probation and is kept.
+- **The base kernel is built with CTF** now, as the release's is
+  (GENERIC's `WITH_CTF`): `zroot/kpatch/kernel@15.1-RELEASE-ctf`.
 
 ## Consequences
 - **Community patches are a deliberate exception to containment** (PA-3):

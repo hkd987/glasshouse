@@ -90,10 +90,23 @@ pub struct PatchTrial {
     pub ran_minutes: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub probation_minutes: u64,
+    /// Times the computer woke from sleep on it, and the wakes its
+    /// probation asks: a patch that breaks waking is never kept.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub woke: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub probation_resumes: u64,
 }
 
 fn is_zero(n: &u64) -> bool {
     *n == 0
+}
+
+impl PatchTrial {
+    /// Its probation is served: the minutes of use, and the wakes.
+    pub fn served(&self) -> bool {
+        self.ran_minutes >= self.probation_minutes && self.woke >= self.probation_resumes
+    }
 }
 
 /// [`crate::methods::HARDWARE_PATCH_STATUS`].

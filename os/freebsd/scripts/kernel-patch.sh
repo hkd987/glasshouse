@@ -11,8 +11,9 @@
 #
 # The source is the pinned release's src.txz (fetch.sh src), unpacked once into a dataset of its
 # own in the VM, zroot/kpatch/src@<release>. A patch that rebuilds the kernel starts instead from
-# zroot/kpatch/kernel@<release>: that source with its GENERIC kernel built, once per release (about
-# two hours in the emulated dev VM), so that each patch rebuilds only the files it changes and
+# zroot/kpatch/kernel@<release>-ctf: that source with its GENERIC kernel built as the release
+# builds it, CTF for DTrace included, once per release (about two hours in the emulated dev VM),
+# so that each patch rebuilds only the files it changes and
 # those that include them. Each build clones one of them at the same path (what a build records,
 # the paths in its dependency lists, stays true for the next), applies the patch's sys/ part,
 # builds, copies what it built back to build/kpatch/<id>/ and removes the clone. The bundle is
@@ -28,7 +29,9 @@ key=$out_dir/dev-key
 src_ds=zroot/kpatch/src
 src_snap=$src_ds@$FREEBSD_RELEASE
 kernel_ds=zroot/kpatch/kernel
-kernel_snap=$kernel_ds@$FREEBSD_RELEASE
+# -ctf: built with CTF, as GENERIC asks (makeoptions WITH_CTF); an earlier base built without it
+# is replaced, since a kernel links only from objects that all carry it.
+kernel_snap=$kernel_ds@$FREEBSD_RELEASE-ctf
 build_root=/var/cache/glasshouse-build
 # Where every build runs, one at a time.
 at=$build_root/work
@@ -62,13 +65,13 @@ ensure_source() {
 # What went wrong, from the last build's log.
 build_errors() { "$vm" ssh "grep -E 'error|Error' $at/build.log | head -20; tail -5 $at/build.log" || true; }
 
-# GENERIC, as the release builds it, without its modules (a patch names those it rebuilds), in
-# the tree at $at. `config` again each time: a patch can add files to the kernel (sys/conf/files);
+# GENERIC, as the release builds it (CTF for DTrace included), without its modules (a patch names
+# those it rebuilds), in the tree at $at. `config` again each time: a patch can add files to the kernel (sys/conf/files);
 # it leaves what didn't change as it was, so make rebuilds only what did.
 build_kernel() {
 	"$vm" ssh "cd $at/sys/amd64/conf && config -d $at/kobj GENERIC >/dev/null &&
 		make -s -j4 -C $at/kobj -m /usr/share/mk -m $at/sys/conf SRCTOP=$at S=$at/sys \
-			NO_MODULES=yes MK_CTF=no >$at/build.log 2>&1" || {
+			NO_MODULES=yes >$at/build.log 2>&1" || {
 		build_errors
 		return 1
 	}

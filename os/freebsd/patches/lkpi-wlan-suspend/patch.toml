@@ -10,6 +10,9 @@ review = "reviewed"
 # pilot's ThinkPad T14 Gen 2 (ADR 0057).
 targets = ["pci:8086:2723", "pci:8086:a0f0", "pci:8086:2725", "pci:8086:51f0", "model:LENOVO ThinkPad T14 Gen 2i"]
 requirements = ["PM-5", "CF-12"]
+# It's for waking from sleep: kept only once the computer has woken on it
+# twice, on top of a working day of use.
+resumes = 2
 
 # The 802.11 layer the drivers share is built into 15.1's kernel (GENERIC
 # has `wlan` and COMPAT_LINUXKPI), so the kernel is rebuilt with it; then
