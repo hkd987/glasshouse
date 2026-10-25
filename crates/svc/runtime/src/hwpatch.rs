@@ -30,6 +30,7 @@
 //! boot environments, so the environment the computer starts from reads
 //! what the one before it wrote (post-install.sh).
 
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -37,7 +38,7 @@ use glass_api::{PatchStatus, PatchTrial, TrialState};
 use glass_audit::{AuditEvent, EventKind, Outcome};
 use glass_managed::PublicKey;
 use glass_managed::hwpatch::{Bundle, GLASSHOUSE, Opened, Review};
-use glass_types::Timestamp;
+use glass_types::{FileDigest, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// Why a patch failed when the watchdog restarted the computer on it.
@@ -284,6 +285,28 @@ impl Store {
         write_whole(&self.dir.join("history.json"), &text, 0o600)
     }
 
+    /// The files kernel patches wrote over the image in `env`, by path
+    /// from its root, for the start's check of the system (ADR 0064).
+    pub(crate) fn patched(&self, env: &str) -> BTreeMap<String, FileDigest> {
+        std::fs::read(self.dir.join("files").join(format!("{env}.json")))
+            .ok()
+            .and_then(|text| serde_json::from_slice(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn set_patched(
+        &self,
+        env: &str,
+        files: &BTreeMap<String, FileDigest>,
+    ) -> Result<(), String> {
+        let text = serde_json::to_vec_pretty(files).map_err(|e| e.to_string())?;
+        write_whole(
+            &self.dir.join("files").join(format!("{env}.json")),
+            &text,
+            0o600,
+        )
+    }
+
     /// The revision of patch `id` this computer last kept.
     fn kept_revision(&self, id: &str) -> Option<u64> {
         self.history()
@@ -432,8 +455,10 @@ pub fn apply(
     ));
     // 2 to 4. The start-once is last: until it's set, nothing starts the new
     // environment.
+    // The new environment has what its own was patched with, then this.
     let set_up = envs
         .create(&env)
+        .and_then(|()| store.set_patched(&env, &store.patched(&record.trial.from_env)))
         .and_then(|()| write_modules(envs, store, &env, &opened))
         .and_then(|()| envs.activate_once(&env));
     if let Err(why) = set_up {
@@ -639,9 +664,22 @@ pub(crate) fn write_modules(
     envs.mount(env, &at)?;
     let written = (|| {
         let kernel = at.join("boot/kernel");
+        let mut patched = store.patched(env);
         for (module, bytes) in &opened.modules {
-            write_whole(&kernel.join(&module.file), bytes, 0o555)?;
+            let path = kernel.join(&module.file);
+            // The image's files are read-only (ADR 0064): not to root
+            // either, until the flag is off.
+            if path.exists() {
+                let _ =
+                    glass_platform::integrity::set_immutable(std::slice::from_ref(&path), false);
+            }
+            write_whole(&path, bytes, 0o555)?;
+            patched.insert(
+                format!("boot/kernel/{}", module.file),
+                FileDigest::file(glass_managed::sha256_hex(bytes), bytes.len() as u64),
+            );
         }
+        store.set_patched(env, &patched)?;
         let loads: Vec<String> = opened
             .modules
             .iter()

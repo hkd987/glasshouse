@@ -43,6 +43,7 @@ pub mod skills;
 pub mod store;
 pub mod studio;
 pub mod sync;
+pub mod system;
 
 pub use catalog::{
     CatalogItem, CatalogRelease, Declared, InstallMode, ItemKind, Match, Provenance, Scope,

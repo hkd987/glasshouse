@@ -216,6 +216,68 @@ pub struct SystemStatus {
     pub policy: String,
     pub tasks_running: usize,
     pub approvals_pending: usize,
+    /// glassd's check of the system's files at its start (ADR 0064).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_files: Option<SystemCheck>,
+}
+
+/// glassd's check, at every start, of the system's files against the list
+/// the OS key signed (ADR 0064, EP-1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCheck {
+    pub state: SystemCheckState,
+    /// The image the list is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Files checked.
+    #[serde(default)]
+    pub files: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<glass_types::Timestamp>,
+    #[serde(default)]
+    pub took_ms: u64,
+    /// Not checked: why. Changed: what, in a sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// What differs from the list: the first few, `/usr/bin/yes (changed)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub differences: Vec<String>,
+    /// How many differ.
+    #[serde(default)]
+    pub different: u64,
+    /// Files glassd made read-only again, having found them writable.
+    #[serde(default)]
+    pub sealed: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCheckState {
+    /// Nothing to check against (a development build), or nothing to
+    /// check it with: agents run.
+    Unchecked,
+    /// Under way: agents start once it's done.
+    Checking,
+    /// The system is the image's, as the OS key signed it.
+    Verified,
+    /// Something differs, or the list doesn't verify: no agent starts.
+    Changed,
+}
+
+impl SystemCheck {
+    pub fn unchecked(why: impl Into<String>) -> Self {
+        Self {
+            state: SystemCheckState::Unchecked,
+            version: None,
+            files: 0,
+            checked_at: None,
+            took_ms: 0,
+            note: Some(why.into()),
+            differences: Vec::new(),
+            different: 0,
+            sealed: 0,
+        }
+    }
 }
 
 /// How many tasks a suspend paused, or a resume let continue.

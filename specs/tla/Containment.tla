@@ -21,6 +21,12 @@
 (*    (JailRemove: `jail -r` kills every process in it and unmounts,       *)
 (*    RemoveRoot, RemoveSpec), `cleanup_stale` (Cleanup: at glassd's      *)
 (*    start, every spec on disk destroyed before any task starts).         *)
+(*  - runtime.rs `begin_system_check`, `check_system` and system.rs       *)
+(*    `may_start` (ADR 0064, EP-1): at each glassd start the system's      *)
+(*    files are checked against the list the OS key signed (CheckSystem);  *)
+(*    no task starts while that runs, nor after it found them changed.    *)
+(*    The files can be changed, or put right, at any time (Tamper,        *)
+(*    PutRight): a change after the check is the next start's to find.    *)
 (*  - The computer: glassd can die (Crash), be stopped (ShutdownBegin,    *)
 (*    ShutdownExit) or the computer restart under it (Reboot: jails,       *)
 (*    mounts and processes are gone, `/var/run` is emptied by cleanvar,    *)
@@ -41,6 +47,8 @@
 (*  "specInRun"   the specs lived in /var/run, which the boot empties.    *)
 (*  "openClosing" a start could land while glassd shut down, after its    *)
 (*                stops, and run on after it exited.                       *)
+(*  "noSystemCheck" before ADR 0064: a task started whatever the system's *)
+(*                files were (EP1_NoAgentStartsOnAChangedSystem fails).    *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -77,11 +85,17 @@ VARIABLES
     crashes, reboots, shutdowns,
     stoppedEarly, \* ghost: each task's stop came before its supervisor's look
     lateSpawn,  \* ghost: an agent started after a stop its supervisor could see
-    cleanExit   \* ghost: glassd's last exit was a clean stop that waited
+    cleanExit,  \* ghost: glassd's last exit was a clean stop that waited
+    sys,        \* this run's check of the system: "checking", "verified", "changed"
+    tampered,   \* the system's files differ from the list the OS key signed
+    startedUnverified \* ghost: a task started before or against the check
 
 vars == <<up, cleaned, closing, run, tile, era, req, seen, sup, jail, proc,
           root, spec, waited, crashes, reboots, shutdowns, stoppedEarly,
-          stoppedEarly, lateSpawn, cleanExit>>
+          stoppedEarly, lateSpawn, cleanExit, sys, tampered, startedUnverified>>
+
+\* The start check's variables, which most steps leave alone.
+system == <<sys, tampered, startedUnverified>>
 
 Live == {t \in Tasks : tile[t] = "live"}
 
@@ -98,6 +112,8 @@ TypeOK ==
     /\ waited \subseteq Tasks
     /\ stoppedEarly \in [Tasks -> BOOLEAN]
     /\ lateSpawn \in BOOLEAN /\ cleanExit \in BOOLEAN
+    /\ sys \in {"checking", "verified", "changed"}
+    /\ tampered \in BOOLEAN /\ startedUnverified \in BOOLEAN
 
 Init ==
     /\ up = TRUE /\ cleaned = FALSE /\ closing = FALSE /\ run = 1
@@ -112,6 +128,7 @@ Init ==
     /\ crashes = 0 /\ reboots = 0 /\ shutdowns = 0
     /\ stoppedEarly = [t \in Tasks |-> FALSE]
     /\ lateSpawn = FALSE /\ cleanExit = FALSE
+    /\ sys = "checking" /\ tampered \in BOOLEAN /\ startedUnverified = FALSE
 
 disk == <<jail, proc, root, spec>>
 counts == <<crashes, reboots, shutdowns>>
@@ -128,7 +145,7 @@ Cleanup ==
     /\ root' = [t \in Tasks |-> root[t] /\ ~spec[t]]
     /\ spec' = [t \in Tasks |-> FALSE]
     /\ UNCHANGED <<up, closing, run, tile, era, req, seen, sup, waited, counts,
-                   stoppedEarly, lateSpawn, cleanExit>>
+                   stoppedEarly, lateSpawn, cleanExit, system>>
 
 (* Starting a task: policy and scope first (`prepare`), then the person's *)
 (* live tasks counted against the limit, then the task inserted and its   *)
@@ -138,16 +155,21 @@ Admit(t) ==
     /\ tile' = [tile EXCEPT ![t] = "live"]
     /\ era' = [era EXCEPT ![t] = run]
     /\ sup' = [sup EXCEPT ![t] = "prepare"]
+    /\ startedUnverified' = (startedUnverified \/ sys # "verified")
+
+\* What `may_start` lets through: a system this run's check verified.
+SystemLetsStart == sys = "verified" \/ "noSystemCheck" \in Old
 
 Start(t) ==
     /\ "countApart" \notin Old
     /\ up /\ cleaned /\ req[t] = "idle"
     /\ req' = [req EXCEPT ![t] = "done"]
     /\ IF Cardinality(Live) < MaxLive /\ (closing => "openClosing" \in Old)
+          /\ SystemLetsStart
        THEN Admit(t)
-       ELSE UNCHANGED <<tile, era, sup>>
+       ELSE UNCHANGED <<tile, era, sup, startedUnverified>>
     /\ UNCHANGED <<up, cleaned, closing, run, seen, disk, waited, counts,
-                   stoppedEarly, lateSpawn, cleanExit>>
+                   stoppedEarly, lateSpawn, cleanExit, sys, tampered>>
 
 StartCount(t) ==
     /\ "countApart" \in Old
@@ -155,16 +177,17 @@ StartCount(t) ==
     /\ req' = [req EXCEPT ![t] = "counted"]
     /\ seen' = [seen EXCEPT ![t] = Cardinality(Live)]
     /\ UNCHANGED <<up, cleaned, closing, run, tile, era, sup, disk, waited,
-                   counts, stoppedEarly, lateSpawn, cleanExit>>
+                   counts, stoppedEarly, lateSpawn, cleanExit, system>>
 
 StartInsert(t) ==
     /\ up /\ req[t] = "counted"
     /\ req' = [req EXCEPT ![t] = "done"]
     /\ IF seen[t] < MaxLive /\ (closing => "openClosing" \in Old)
+          /\ SystemLetsStart
        THEN Admit(t)
-       ELSE UNCHANGED <<tile, era, sup>>
+       ELSE UNCHANGED <<tile, era, sup, startedUnverified>>
     /\ UNCHANGED <<up, cleaned, closing, run, seen, disk, waited, counts,
-                   stoppedEarly, lateSpawn, cleanExit>>
+                   stoppedEarly, lateSpawn, cleanExit, sys, tampered>>
 
 \* Stop (end_task): the tile and the gate say Ended at once; the supervisor
 \* hears it at its next look.
@@ -173,14 +196,14 @@ Stop(t) ==
     /\ tile' = [tile EXCEPT ![t] = "ended"]
     /\ stoppedEarly' = [stoppedEarly EXCEPT ![t] = sup[t] \in BeforeLook]
     /\ UNCHANGED <<up, cleaned, closing, run, era, req, seen, sup, disk,
-                   waited, counts, lateSpawn, cleanExit>>
+                   waited, counts, lateSpawn, cleanExit, system>>
 
 -----------------------------------------------------------------------------
 (* The supervisor, one step at a time. Teardown runs whatever happened.   *)
 
 Step(t, from, to) == sup[t] = from /\ sup' = [sup EXCEPT ![t] = to]
 Others == <<up, cleaned, closing, run, era, req, seen, waited, counts,
-            stoppedEarly, cleanExit>>
+            stoppedEarly, cleanExit, system>>
 
 \* App state and the opening snapshot are ready; a stop by now is seen
 \* before anything is made.
@@ -276,7 +299,7 @@ Crash ==
     /\ up /\ crashes < MaxCrashes
     /\ Forget /\ crashes' = crashes + 1 /\ cleanExit' = FALSE
     /\ UNCHANGED <<run, era, seen, disk, reboots, shutdowns, stoppedEarly,
-                   lateSpawn>>
+                   lateSpawn, system>>
 
 \* The power goes, or the kernel panics: jails, mounts and processes are
 \* gone with it, and the boot empties /var/run.
@@ -287,7 +310,7 @@ Reboot ==
     /\ proc' = [t \in Tasks |-> FALSE]
     /\ spec' = IF "specInRun" \in Old THEN [t \in Tasks |-> FALSE] ELSE spec
     /\ UNCHANGED <<run, era, seen, root, crashes, shutdowns, stoppedEarly,
-                   lateSpawn>>
+                   lateSpawn, system>>
 
 \* `shutdown`: stops the live tasks, then waits for the supervisors there
 \* are (a start after its stops isn't stopped).
@@ -297,25 +320,50 @@ ShutdownBegin ==
     /\ tile' = [t \in Tasks |-> IF tile[t] = "live" THEN "ended" ELSE tile[t]]
     /\ waited' = {t \in Tasks : sup[t] \notin {"none", "done"}}
     /\ UNCHANGED <<up, cleaned, run, era, req, seen, sup, disk, counts,
-                   stoppedEarly, lateSpawn, cleanExit>>
+                   stoppedEarly, lateSpawn, cleanExit, system>>
 
 \* Every supervisor it waited for has torn its sandbox down.
 ShutdownExit ==
     /\ up /\ closing /\ \A t \in waited : sup[t] = "done"
     /\ Forget /\ shutdowns' = shutdowns + 1 /\ cleanExit' = TRUE
     /\ UNCHANGED <<run, era, seen, disk, crashes, reboots, stoppedEarly,
-                   lateSpawn>>
+                   lateSpawn, system>>
 
+\* begin_system_check: no task starts until the check is done.
 GlassdStarts ==
     /\ ~up /\ run < MaxRuns
     /\ up' = TRUE /\ run' = run + 1 /\ cleanExit' = FALSE
+    /\ sys' = "checking"
     /\ UNCHANGED <<cleaned, closing, tile, era, req, seen, sup, disk, waited,
-                   counts, stoppedEarly, lateSpawn>>
+                   counts, stoppedEarly, lateSpawn, tampered, startedUnverified>>
+
+\* check_system: the files against the list, as they are now.
+CheckSystem ==
+    /\ up /\ sys = "checking"
+    /\ sys' = IF tampered THEN "changed" ELSE "verified"
+    /\ UNCHANGED <<up, cleaned, closing, run, tile, era, req, seen, sup, disk,
+                   waited, counts, stoppedEarly, lateSpawn, cleanExit, tampered,
+                   startedUnverified>>
+
+\* Root changes a system file (the flag taken off first), or IT puts the
+\* system right (an update taken out, the computer installed again).
+Tamper ==
+    /\ ~tampered /\ tampered' = TRUE
+    /\ UNCHANGED <<up, cleaned, closing, run, tile, era, req, seen, sup, disk,
+                   waited, counts, stoppedEarly, lateSpawn, cleanExit, sys,
+                   startedUnverified>>
+
+PutRight ==
+    /\ tampered /\ tampered' = FALSE
+    /\ UNCHANGED <<up, cleaned, closing, run, tile, era, req, seen, sup, disk,
+                   waited, counts, stoppedEarly, lateSpawn, cleanExit, sys,
+                   startedUnverified>>
 
 -----------------------------------------------------------------------------
 
 Next ==
     \/ Cleanup \/ Crash \/ Reboot \/ ShutdownBegin \/ ShutdownExit \/ GlassdStarts
+    \/ CheckSystem \/ Tamper \/ PutRight
     \/ \E t \in Tasks :
         \/ Start(t) \/ StartCount(t) \/ StartInsert(t) \/ Stop(t)
         \/ Prepare(t) \/ WriteSpec(t) \/ MakeRoot(t) \/ JailCreate(t)
@@ -349,6 +397,10 @@ PA2_NothingOfAnEarlierRunOnceStarted ==
 \* AW-11: a stop the supervisor could see before the agent starts keeps it
 \* from starting.
 AW11_AStoppedTaskNeverStartsItsAgent == ~lateSpawn
+
+\* EP-1 (ADR 0064): no task starts in a run of glassd before its check of
+\* the system's files, nor after the check found them changed.
+EP1_NoAgentStartsOnAChangedSystem == ~startedUnverified
 
 \* PA-2: glassd stopped cleanly leaves no agent running and no jail, once
 \* the teardowns it waited for are done.

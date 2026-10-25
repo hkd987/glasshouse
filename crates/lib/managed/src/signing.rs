@@ -49,6 +49,8 @@ pub enum DocKind {
     OsRelease,
     /// An OS image's digest, signed by the OS key.
     OsImage,
+    /// The list of an image's system files, signed by the OS key (ADR 0064).
+    OsManifest,
 }
 
 impl DocKind {
@@ -62,6 +64,7 @@ impl DocKind {
             Self::OsKeys => "os_keys",
             Self::OsRelease => "os_release",
             Self::OsImage => "os_image",
+            Self::OsManifest => "os_manifest",
         }
     }
 }

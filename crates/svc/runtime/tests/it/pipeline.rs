@@ -662,6 +662,47 @@ async fn pa2_no_task_starts_once_shutting_down() {
     );
 }
 
+/// ADR 0064 (EP-1): no agent starts while glassd checks the system's
+/// files at its start, nor on a system that differs from its image; a
+/// development build, with nothing to check against, runs agents. Each
+/// check is on the audit record.
+#[tokio::test]
+async fn ep1_no_agent_starts_on_a_system_that_differs_or_while_it_is_checked() {
+    let h = harness();
+    let root = tempfile::tempdir().unwrap();
+    h.rt.begin_system_check();
+    let refused = h.rt.start(&h.me, h.request(&[], &["Reports"]));
+    assert!(
+        matches!(&refused, Err(RuntimeError::Conflict(m)) if m.contains("checking its system files")),
+        "{refused:?}"
+    );
+    // An image built for release with no signed list: changed.
+    let check = h.rt.check_system(root.path(), true);
+    assert_eq!(check.state, glass_api::SystemCheckState::Changed);
+    let refused = h.rt.start(&h.me, h.request(&[], &["Reports"]));
+    assert!(
+        matches!(&refused, Err(RuntimeError::Conflict(m)) if m.contains("has changed since it was signed")),
+        "{refused:?}"
+    );
+    assert_eq!(
+        h.rt.status().system_files.map(|c| c.state),
+        Some(glass_api::SystemCheckState::Changed)
+    );
+    // A development build: unchecked, and agents run.
+    let check = h.rt.check_system(root.path(), false);
+    assert_eq!(check.state, glass_api::SystemCheckState::Unchecked);
+    h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap();
+    let checks: Vec<String> = glass_audit::read(&h.audit_path(), |r| {
+        r.event.kind == EventKind::SystemChecked
+    })
+    .unwrap()
+    .into_iter()
+    .map(|r| r.event.summary)
+    .collect();
+    assert_eq!(checks.len(), 2, "{checks:?}");
+    assert!(checks[0].contains("No agent starts"), "{checks:?}");
+}
+
 #[tokio::test]
 async fn other_users_cannot_see_drive_or_answer_a_task() {
     let h = harness();

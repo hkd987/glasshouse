@@ -130,6 +130,10 @@ pub enum EventKind {
     /// An OS update installed in a boot environment of its own, kept,
     /// rolled back, refused or taken out (ADR 0061).
     OsUpdate,
+    /// glassd checked the system's files against the list the OS key
+    /// signed, as it started: unchanged, changed, or not checked and why
+    /// (ADR 0064, EP-1).
+    SystemChecked,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

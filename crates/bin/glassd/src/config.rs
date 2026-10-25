@@ -171,6 +171,11 @@ pub struct UpdateConfig {
     /// managed computer uses when this is unset.
     #[serde(default)]
     pub source: Option<String>,
+    /// An image built for release: with no signed list of its system files,
+    /// or one that doesn't verify, no agent starts (ADR 0064). A
+    /// development build, without one, runs agents unchecked.
+    #[serde(default)]
+    pub require_signed_system: bool,
 }
 
 /// Where a computer's OS releases come from (ADR 0061).
@@ -202,6 +207,7 @@ impl Default for UpdateConfig {
             roots: Vec::new(),
             channel: default_channel(),
             source: None,
+            require_signed_system: false,
         }
     }
 }

@@ -5,6 +5,7 @@
 //! on what a task, an agent, a tier or a label is.
 
 mod action;
+mod digest;
 mod ids;
 mod label;
 mod principal;
@@ -12,6 +13,7 @@ mod tier;
 mod timestamp;
 
 pub use action::{ActionName, InvalidActionName, SideEffect};
+pub use digest::FileDigest;
 pub use ids::{
     AgentId, ApprovalId, InvalidAgentId, InvalidId, PERSONAL_PREFIX, SnapshotId, TaskId,
 };

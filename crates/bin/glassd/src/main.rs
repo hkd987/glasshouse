@@ -764,12 +764,30 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // without it (ADR 0057). Off the start path: the check loads modules.
     // Then its minutes of use, counted while the computer is awake, keep it
     // once they reach its probation.
+    //
+    // Then the system's files against the list the OS key signed for the
+    // image (ADR 0064): no agent starts until that's done, nor on a system
+    // that differs.
+    runtime.begin_system_check();
     {
         let runtime = Arc::clone(&runtime);
         let every = patch_tick(config.hardware.probation_minutes);
+        let required = config.update.require_signed_system;
         tokio::spawn(async move {
             let at_start = Arc::clone(&runtime);
-            let _ = tokio::task::spawn_blocking(move || at_start.hardware_at_start()).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                at_start.hardware_at_start();
+                let check = at_start.check_system(std::path::Path::new("/"), required);
+                tracing::info!(
+                    state = ?check.state,
+                    files = check.files,
+                    took_ms = check.took_ms,
+                    sealed = check.sealed,
+                    note = check.note.as_deref().unwrap_or("-"),
+                    "system files checked"
+                );
+            })
+            .await;
             let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
             // Asleep, it isn't in use: one tick on waking, not the ones missed.
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

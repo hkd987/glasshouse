@@ -269,6 +269,12 @@ enum SystemCommand {
     /// The machine is shutting down cleanly: a kernel patch on probation
     /// is started again by the next start (ADR 0057).
     Shutdown,
+    /// The list of the system's files under a root, by digest, for the
+    /// release side to sign with the OS key (ADR 0064). Reads files only.
+    Manifest {
+        #[arg(long, default_value = "/")]
+        root: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -457,6 +463,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    if let Command::System(SystemCommand::Manifest { root }) = &cli.command {
+        let version = std::fs::read(root.join("usr/local/share/glasshouse/os-release.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|v| v["version"].as_str().map(str::to_owned))
+            .context("the image's os-release.json names no version")?;
+        let files = glass_platform::integrity::system_files(root)?;
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "version": version, "files": files }))?
+        );
+        return Ok(());
+    }
     let client = Client::connect(&cli.socket)
         .await
         .with_context(|| "is glassd running? (service glassd status)".to_string())?;
@@ -470,13 +489,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let status: SystemStatus = ctl.call(methods::SYSTEM_STATUS, Value::Null).await?;
             ctl.show(&status, |s| {
                 format!(
-                    "glassd {}\n  sandbox   {}{}\n  policy    {}\n  running   {} agents\n  waiting   {} approvals\n",
+                    "glassd {}\n  sandbox   {}{}\n  policy    {}\n  running   {} agents\n  waiting   {} approvals\n{}",
                     s.version,
                     s.sandbox,
                     if s.contained { String::new() } else { style::red("  (NOT A SECURITY BOUNDARY)") },
                     s.policy,
                     s.tasks_running,
-                    s.approvals_pending
+                    s.approvals_pending,
+                    s.system_files.as_ref().map(render::system_check).unwrap_or_default()
                 )
             })
         }
@@ -818,7 +838,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let (method, verb) = match cmd {
                 SystemCommand::Suspend => (methods::SYSTEM_SUSPEND, "Paused"),
                 SystemCommand::Resume => (methods::SYSTEM_RESUME, "Resumed"),
-                SystemCommand::Shutdown => unreachable!("handled above"),
+                SystemCommand::Shutdown | SystemCommand::Manifest { .. } => {
+                    unreachable!("handled above")
+                }
             };
             let result: PowerResult = ctl.call(method, Value::Null).await?;
             ctl.show(&result, |r| {

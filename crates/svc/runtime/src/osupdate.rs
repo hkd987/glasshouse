@@ -239,7 +239,7 @@ impl Store {
     }
 
     /// The key list in force: the newest one a root signed.
-    fn keys(&self) -> Option<Signed> {
+    pub(crate) fn keys(&self) -> Option<Signed> {
         self.read("keys.json")
     }
 
@@ -662,6 +662,8 @@ pub fn apply(
         };
         let _ = std::fs::remove_file(&copy);
         imported?;
+        // A new image: patched by nothing but the rebuilds it carries.
+        hw.set_patched(&env, &std::collections::BTreeMap::new())?;
         for (_, opened) in &rebuilds {
             hwpatch::write_modules(envs, hw, &env, opened)?;
         }

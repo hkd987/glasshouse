@@ -36,7 +36,8 @@ rm -f "$tarball"
 vm_ssh 'sh -eus' <<'EOF'
 tarball=/var/tmp/glasshouse-dist.tar
 state=/var/db/glasshouse-deploy.files
-tar -xpf "$tarball" -C /
+# A system file made read-only (ADR 0064's system immutable flag) is replaced all the same.
+tar -xpf "$tarball" -C / --clear-nochange-fflags
 sent=$(mktemp)
 tar -tf "$tarball" | sed 's|^\./|/|' >"$sent"
 new=$(mktemp)
@@ -47,6 +48,7 @@ if [ -f "$state" ]; then
 fi
 while IFS= read -r f; do
 	echo "deploy: removing stale $f"
+	chflags noschg "$f" 2>/dev/null || true
 	rm -f "$f"
 done <"$stale"
 mv "$new" "$state"

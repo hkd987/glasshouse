@@ -109,6 +109,9 @@ pub struct Runtime {
     updates: crate::osupdate::Store,
     /// glassd's start check of a kernel patch has run (ADR 0057).
     hardware_started: AtomicBool,
+    /// The check of the system's files at glassd's start (ADR 0064): no
+    /// agent starts while it runs, nor on a system that differs.
+    system_check: RwLock<glass_api::SystemCheck>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -173,6 +176,9 @@ impl Runtime {
             hardware: Mutex::new(crate::hwpatch::Store::new(&parts.config.state_dir)),
             updates: crate::osupdate::Store::new(&parts.config.state_dir),
             hardware_started: AtomicBool::new(false),
+            system_check: RwLock::new(glass_api::SystemCheck::unchecked(
+                "glassd hasn't checked the system yet",
+            )),
             config: parts.config,
             settings: RwLock::new(Arc::new(Settings {
                 policy: Arc::new(parts.policy),
@@ -609,7 +615,91 @@ impl Runtime {
                 .filter(|t| !t.is_app() && t.lock().tile.is_live())
                 .count(),
             approvals_pending: self.desk.pending(None).len(),
+            system_files: Some(self.system_check()),
         }
+    }
+
+    /// The last check of the system's files (ADR 0064).
+    pub fn system_check(&self) -> glass_api::SystemCheck {
+        self.system_check
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// glassd's start: no agent starts until [`Self::check_system`] says.
+    pub fn begin_system_check(&self) {
+        let mut check = self
+            .system_check
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        *check = glass_api::SystemCheck::unchecked("checking");
+        check.state = glass_api::SystemCheckState::Checking;
+    }
+
+    /// Checks the system's files under `root` against the list the OS key
+    /// signed for the image, with the modules kernel patches wrote over it,
+    /// makes them read-only again where they weren't, and says so on the
+    /// audit record (ADR 0064, EP-1). `required`: an image built for
+    /// release, which runs no agent without a list that verifies.
+    pub fn check_system(&self, root: &std::path::Path, required: bool) -> glass_api::SystemCheck {
+        use crate::hwpatch::Envs as _;
+        use glass_api::SystemCheckState;
+        let patched = crate::hwpatch::System
+            .running()
+            .map(|env| self.hardware_checked().patched(&env))
+            .unwrap_or_default();
+        let (mut check, unsealed) = crate::system::check(&crate::system::Inputs {
+            root,
+            roots: &self.config.update.roots,
+            held_keys: self.updates.keys(),
+            required,
+            patched,
+        });
+        if !unsealed.is_empty() {
+            match glass_platform::integrity::set_immutable(&unsealed, true) {
+                Ok(()) => check.sealed = unsealed.len() as u64,
+                Err(e) => tracing::warn!("making the system's files read-only again: {e}"),
+            }
+        }
+        let summary = match check.state {
+            SystemCheckState::Verified => format!(
+                "The system is the image's: {} files as the OS key signed them for {}{}",
+                check.files,
+                check.version.as_deref().unwrap_or("this image"),
+                if check.sealed > 0 {
+                    format!(", {} made read-only", check.sealed)
+                } else {
+                    String::new()
+                }
+            ),
+            SystemCheckState::Changed => format!(
+                "The system has changed since it was signed: {}. No agent starts",
+                check.note.as_deref().unwrap_or("its files differ")
+            ),
+            SystemCheckState::Unchecked | SystemCheckState::Checking => format!(
+                "The system's files weren't checked: {}",
+                check
+                    .note
+                    .as_deref()
+                    .unwrap_or("nothing to check them against")
+            ),
+        };
+        let mut event = AuditEvent::new(EventKind::SystemChecked, summary);
+        event.detail = serde_json::json!({
+            "state": check.state,
+            "files": check.files,
+            "took_ms": check.took_ms,
+            "differences": check.differences,
+            "different": check.different,
+            "sealed": check.sealed,
+        });
+        self.audit(event);
+        *self
+            .system_check
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = check.clone();
+        check
     }
 
     /// The agents running now, for whom, and whether each waits on a
@@ -848,6 +938,9 @@ impl Runtime {
         request: TaskRequest,
         origin: Origin,
     ) -> Result<TaskView> {
+        // Not on a system that differs from its image, nor while that's
+        // checked (ADR 0064).
+        crate::system::may_start(&self.system_check()).map_err(RuntimeError::Conflict)?;
         // A routine runs with the scope it was saved with, nothing more.
         let request = match origin {
             Origin::Routine(_) => request,

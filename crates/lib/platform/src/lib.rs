@@ -12,6 +12,8 @@
 //! - [`users`] and [`xattr`]: account lookup and data labels stored with files.
 //! - [`system`]: network, storage, load and services, for the IT self-service
 //!   agent (AE-4).
+//! - [`integrity`]: the system's files by digest, and the flag that keeps
+//!   them read-only (ADR 0064).
 //! - [`net`]: who owns the other end of a loopback connection, for the app
 //!   bridge (ADR 0027).
 //! - [`framebuffer`] and [`input`]: the console framebuffer and the evdev
@@ -37,6 +39,7 @@ pub mod fs;
 pub mod hardware;
 #[allow(unsafe_code)]
 pub mod input;
+pub mod integrity;
 #[cfg(target_os = "freebsd")]
 mod ioctl;
 pub mod net;

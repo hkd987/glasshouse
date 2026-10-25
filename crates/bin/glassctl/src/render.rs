@@ -822,6 +822,46 @@ fn plural(n: u32, noun: &str) -> String {
     }
 }
 
+/// `glassctl status`'s line on the check of the system's files at glassd's
+/// start (ADR 0064).
+pub fn system_check(c: &glass_api::SystemCheck) -> String {
+    use glass_api::SystemCheckState;
+    let note = c.note.as_deref().unwrap_or_default();
+    match c.state {
+        SystemCheckState::Verified => {
+            let mut line = format!(
+                "  system    {} {} ({} files, checked in {:.1} s",
+                green("verified"),
+                c.version.as_deref().unwrap_or_default(),
+                c.files,
+                c.took_ms as f64 / 1000.0
+            );
+            if c.sealed > 0 {
+                line.push_str(&format!(", {} made read-only", c.sealed));
+            }
+            line.push_str(")\n");
+            line
+        }
+        SystemCheckState::Changed => {
+            let mut text = format!("  system    {}: {note}\n", red("CHANGED"));
+            for d in &c.differences {
+                text.push_str(&format!("              {d}\n"));
+            }
+            if c.different > c.differences.len() as u64 {
+                text.push_str(&format!(
+                    "              and {} more\n",
+                    c.different - c.differences.len() as u64
+                ));
+            }
+            text
+        }
+        SystemCheckState::Checking => format!("  system    {}\n", dim("checking…")),
+        SystemCheckState::Unchecked => {
+            format!("  system    {}\n", dim(&format!("not checked: {note}")))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use glass_api::{AgentMode, ApprovalState, AskLabels};

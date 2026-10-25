@@ -8,6 +8,8 @@
 //! - `release` signs an image's digest with the OS key and the release with
 //!   its channel's key, and puts both beside the image in a channel's
 //!   folder: what `glassctl update` reads.
+//! - `manifest` signs the list of an image's system files with the OS key
+//!   (ADR 0064): what `glassctl system manifest` wrote where the image is.
 //!
 //! The keys made here are development keys. The release pipeline's live in
 //! hardware security modules, used in a recorded ceremony (EP-11).
@@ -21,6 +23,7 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use glass_managed::hwpatch::GLASSHOUSE;
 use glass_managed::osupdate::{ImageDigest, KeyList, ListedKey, PatchRebuild, Release};
+use glass_managed::system::SystemManifest;
 use glass_managed::{DocKind, OrgKey, PublicKey};
 
 #[derive(Debug, Parser)]
@@ -101,6 +104,19 @@ enum Command {
         patches: Vec<String>,
         #[arg(long, default_value = "")]
         notes: String,
+    },
+    /// Sign the list of an image's system files (`glassctl system
+    /// manifest`'s) with the OS key, for the image's
+    /// `/usr/local/share/glasshouse/system.json` (ADR 0064).
+    Manifest {
+        list: PathBuf,
+        #[arg(long)]
+        os_key: PathBuf,
+        /// Goes up with every list: the release number.
+        #[arg(long)]
+        number: u64,
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -212,6 +228,31 @@ fn main() -> anyhow::Result<()> {
             println!(
                 "{}: {version} (release {number}) on {channel}, {bytes} bytes",
                 out.display()
+            );
+        }
+        Command::Manifest {
+            list,
+            os_key,
+            number,
+            out,
+        } => {
+            let text =
+                std::fs::read_to_string(&list).with_context(|| list.display().to_string())?;
+            let manifest: SystemManifest = serde_json::from_str(&text)
+                .with_context(|| format!("{}: not a list of system files", list.display()))?;
+            let signed = read_key(&os_key)?.sign(
+                DocKind::OsManifest,
+                GLASSHOUSE,
+                number,
+                serde_json::to_string(&manifest)?,
+            );
+            std::fs::write(&out, serde_json::to_vec(&signed)?)
+                .with_context(|| out.display().to_string())?;
+            println!(
+                "{}: {} files of {} (list {number})",
+                out.display(),
+                manifest.files.len(),
+                manifest.version
             );
         }
     }
