@@ -126,6 +126,19 @@ all done."
   - an image whose init is missing rolls back by itself;
   - undo.
 
+  It passed on 2026-10-25, after it found three bugs the stand-in boot
+  environments couldn't:
+  - a delta's environment couldn't be promoted, so it was never kept (the
+    clashing `@glass-image`, above);
+  - removing an update that didn't start (`bectl destroy -o`) destroyed
+    the running image's `@glass-image` with it, which the next delta
+    comes from: only snapshots `bectl` made go with an environment now;
+  - after an update rolled back, undo no longer found the kept one it
+    should take out: it looks in the history now.
+
+  An image with no init panicked ("no init"), restarted by itself, and
+  the loader started the version before.
+
 ## Consequences
 - The release pipeline makes each image from a `@glass-image` snapshot,
   writes its os-release.json, and keeps the previous release's snapshot
