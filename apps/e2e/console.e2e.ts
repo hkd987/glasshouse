@@ -365,6 +365,25 @@ test("dv11 ga2 an item IT approves reaches catalog.search on the device", async 
   await close();
 });
 
+test("adr0057 IT reads an agent's kernel patch: who asked, its build here, the diff, the computers that run it", async ({ browser }) => {
+  // The fixture's: an agent wrote it for a person on NW-LT-0001.
+  const { page, close } = await session(browser);
+  await open(page, "#/catalog/iwlwifi-resume", "catalog");
+  await expect(page.locator("h1")).toHaveText("Wi-Fi works again after sleep");
+  await expect(page.locator("[data-test=asked-by]")).toContainText("written by an agent for");
+  await expect(page.locator("[data-test=kernel]")).toContainText("outside every sandbox");
+  await expect(page.locator("[data-test=asked]")).toContainText("every time the laptop wakes up");
+  await expect(page.locator("[data-test=build]")).toContainText("Built here");
+  await expect(page.locator("details.file")).toHaveCount(2);
+  await expect(page.locator("[data-test=computers]")).toContainText("Kept");
+  // Never pushed: no "required" to choose.
+  await expect(page.locator("select[data-test=mode] option[value=required]")).toHaveCount(0);
+  await shot(page, "catalog-kernel-patch-review");
+  await page.locator("[data-test=changes]").scrollIntoViewIfNeeded();
+  await shot(page, "catalog-kernel-patch-diff");
+  await close();
+});
+
 test("dv11 the Store shows what IT made available and installs it", async ({ browser }) => {
   const page = await browser.newPage();
   // Approved for everyone, available, by the test before.

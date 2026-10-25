@@ -303,7 +303,7 @@ function patchReview(hw: Hardware): HTMLElement[] {
       ),
       "build",
     ),
-    changed(patchFiles(hw.diff)),
+    changed(patchFiles(hw.diff), true),
     tagged(
       card(
         "On the org's computers",
@@ -433,16 +433,16 @@ function checks(shared: Shared): HTMLElement {
 }
 
 /** What changed from the base the console holds, file by file. */
-function changed(changes: FileChange[]): HTMLElement {
+/** What changed, file by file: from what a shared app remixes, or a kernel patch from the release's source, every file open. */
+function changed(changes: FileChange[], patch = false): HTMLElement {
   const added = changes.reduce((n, c) => n + c.added, 0);
   const removed = changes.reduce((n, c) => n + c.removed, 0);
+  const against = patch ? "against the release's own source" : "compared with the console's own copy of what it remixes";
   return tagged(
     card(
       "What changed",
-      changes.length
-        ? `${plural(changes.length, "file")}, +${added} −${removed}, compared with the console's own copy of what it remixes.`
-        : "Nothing: it's the same as what it remixes.",
-      ...changes.map((c) => fileDiff(c, changes.length === 1)),
+      changes.length ? `${plural(changes.length, "file")}, +${added} −${removed}, ${against}.` : "Nothing: it's the same as what it remixes.",
+      ...changes.map((c) => fileDiff(c, patch || changes.length === 1)),
     ),
     "changes",
   );

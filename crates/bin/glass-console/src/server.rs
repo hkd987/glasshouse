@@ -4438,7 +4438,11 @@ mod tests {
             started.elapsed()
         );
         assert_eq!(fleet["totals"]["devices"], 500);
-        assert_eq!(catalog["items"].as_array().unwrap().len(), 50);
+        assert_eq!(
+            catalog["items"].as_array().unwrap().len(),
+            51,
+            "50 items and a kernel patch waiting for review"
+        );
         assert!(catalog["counts"]["waiting"].as_u64().unwrap() >= 1);
         assert_eq!(
             policy["group"]["users"], 216,

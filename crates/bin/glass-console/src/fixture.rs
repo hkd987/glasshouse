@@ -379,12 +379,88 @@ pub fn fill(
                     blocked_24h: blocked,
                     last_error: None,
                     made_here: Vec::new(),
-                    patches: Vec::new(),
+                    // Wi-Fi after sleep: kept on a few computers, being
+                    // tried on one (ADR 0057).
+                    patches: match n {
+                        1..=3 => vec![patch_report("kept")],
+                        4 => vec![patch_report("probation")],
+                        _ => Vec::new(),
+                    },
                     reported_at: now,
                 }),
             },
         );
     }
     state.fleet_dirty = true;
-    state.save_fleet()
+    state.save_fleet()?;
+    // A kernel patch an agent wrote on one of them, waiting for IT's review
+    // (ADR 0057, slice 3), built by the development stand-in.
+    if devices > 0 {
+        let submission = glass_managed::hwreview::PatchSubmission {
+            request: glass_managed::kbuild::BuildRequest {
+                release: "15.1-RELEASE".into(),
+                id: "iwlwifi-resume".into(),
+                summary: "Wi-Fi works again after sleep".into(),
+                diff: PATCH.into(),
+                modules: vec![glass_managed::kbuild::BuildModule {
+                    dir: "iwlwifi".into(),
+                    file: "if_iwlwifi.ko".into(),
+                    load_at_boot: false,
+                }],
+                kernel: false,
+                targets: vec!["pci:8086:2725".into()],
+                origin: "agent:019a2f4c".into(),
+            },
+            person: "u0001".into(),
+            asked: "My Wi-Fi stops working every time the laptop wakes up from sleep.".into(),
+            computer: "LENOVO 20W0".into(),
+        };
+        let submitted = state
+            .take_patch(&submission, "NW-LT-0001", dir)
+            .map_err(|e| anyhow::anyhow!("fixture patch: {e:?}"))?;
+        let builder = crate::hardware::DevBuilder::new();
+        let id = submitted.id.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
+        use crate::hardware::PatchBuilder as _;
+        state
+            .patch_built(
+                &id,
+                &submitted.version,
+                builder.build(&submission.request),
+                &builder.key(),
+            )
+            .map_err(|e| anyhow::anyhow!("fixture patch: {e:?}"))?;
+    }
+    Ok(())
 }
+
+fn patch_report(state: &str) -> glass_managed::PatchReport {
+    glass_managed::PatchReport {
+        id: "iwlwifi-resume".into(),
+        revision: 1,
+        state: state.into(),
+    }
+}
+
+/// What the fixture's agent wrote: re-initialize the firmware on resume.
+const PATCH: &str = "--- a/sys/contrib/dev/iwlwifi/mvm/ops.c
++++ b/sys/contrib/dev/iwlwifi/mvm/ops.c
+@@ -2041,6 +2041,10 @@ static int iwl_mvm_resume(struct iwl_op_mode *op_mode)
+ \tstruct iwl_mvm *mvm = IWL_OP_MODE_GET_MVM(op_mode);
+ \tint ret;
+ 
++\t/* The firmware lost its state over S3: load it again. */
++\tif (test_bit(IWL_MVM_STATUS_IN_D3, &mvm->status))
++\t\tiwl_mvm_restart_fw(mvm);
++
+ \tret = iwl_mvm_resume_d3(mvm);
+ \treturn ret;
+ }
+--- a/sys/compat/linuxkpi/common/src/linux_80211.c
++++ b/sys/compat/linuxkpi/common/src/linux_80211.c
+@@ -5120,7 +5120,7 @@ linuxkpi_ieee80211_resume(struct ieee80211com *ic)
+ \tstruct lkpi_hw *lhw = ic->ic_softc;
+-\tlkpi_ieee80211_restart_hw(lhw, false);
++\tlkpi_ieee80211_restart_hw(lhw, true);
+ \treturn (0);
+ }
+";
