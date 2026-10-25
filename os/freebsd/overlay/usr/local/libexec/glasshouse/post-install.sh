@@ -116,10 +116,9 @@ case " $(getconf kld_list) " in
 esac
 # The screen's brightness (ADR 0060): the firmware's levels, and its
 # brightness keys, through acpi_video. Intel's hardware watchdog (ichwd),
-# armed while a kernel patch is on trial (ADR 0057). uinput: Bluetooth
-# keyboards' and mice's input (ADR 0062). Each takes nothing on a computer
-# without one.
-for module in acpi_video ichwd uinput; do
+# armed while a kernel patch is on trial (ADR 0057). Each takes nothing on
+# a computer without one.
+for module in acpi_video ichwd; do
 	case " $(getconf kld_list) " in
 	*" $module "*) ;;
 	*) list=$(getconf kld_list) && setconf /etc/rc.conf kld_list="${list:+$list }$module" ;;
@@ -179,8 +178,8 @@ fi
 # Bluetooth (CF-13, ADR 0062): devd starts the stack as a controller attaches;
 # hcsecd answers a device's pairing with the PIN Settings gave and keeps its
 # link key, and bthidd connects paired keyboards and mice, their input through
-# evdev (-u, with uinput above) as the desktop reads it.
-setconf /etc/rc.conf hcsecd_enable=YES bthidd_enable=YES bthidd_flags=-u
+# evdev as the desktop reads it (its rc script's -u; uinput is in the kernel).
+setconf /etc/rc.conf hcsecd_enable=YES bthidd_enable=YES
 [ -e /etc/bluetooth/bthidd.conf ] || install -o root -g wheel -m 0600 /dev/null /etc/bluetooth/bthidd.conf
 # USB cameras (ADR 0058): devd starts webcamd as one attaches
 # (devd/glasshouse-camera.conf). The person at the screen opens it as they

@@ -56,8 +56,9 @@ pilot's checklist. CF-13. The owner: "All the above let's get them all done."
    - `settings.bluetooth_remove`, `settings.bluetooth_power`.
 
    The Settings app also refuses any caller but itself.
-7. **The image** enables hcsecd and bthidd (`bthidd_flags=-u`), loads
-   uinput, and creates `bthidd.conf` empty.
+7. **The image** enables hcsecd and bthidd and creates `bthidd.conf`
+   empty. bthidd's rc script passes `-u`, and uinput is in the kernel. In
+   the VM both run with no controller, waiting for one.
 8. **A stand-in.** `[bluetooth] stand_in` names a JSON file that stands in
    for a controller. The dev host has a keyboard, a mouse, a phone and
    headphones nearby, and the apps' browser suite pairs the keyboard
