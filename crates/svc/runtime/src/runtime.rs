@@ -1623,6 +1623,12 @@ impl Runtime {
         .map_err(RuntimeError::Invalid)
     }
 
+    /// Whether `bytes` could run on this computer at all: what it sends for
+    /// IT to review must.
+    pub fn hardware_patch_fits(&self, bytes: &[u8]) -> Result<()> {
+        crate::hwpatch::fits(&crate::hwpatch::System, bytes).map_err(RuntimeError::Invalid)
+    }
+
     pub fn hardware_patch_propose(&self, bytes: &[u8]) -> Result<glass_api::PatchTrial> {
         if bytes.len() as u64 > crate::hwpatch::MAX_BUNDLE_BYTES {
             return Err(RuntimeError::Invalid(

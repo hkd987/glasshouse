@@ -521,31 +521,7 @@ fn admit(
             manifest.id
         )));
     }
-    // A module the kernel has built in never loads: the patch must bring
-    // the kernel rebuilt with it.
-    if !manifest
-        .modules
-        .iter()
-        .any(|m| m.file == glass_managed::hwpatch::KERNEL)
-        && let Some(file) = manifest
-            .modules
-            .iter()
-            .map(|m| m.file.as_str())
-            .find(|f| envs.built_in(f.strip_suffix(".ko").unwrap_or(f)))
-    {
-        return Err(refuse(format!(
-            "refused: this computer's kernel has {} built in, so the patch's {file} would never \
-             run: a patch to it rebuilds the kernel",
-            file.strip_suffix(".ko").unwrap_or(file)
-        )));
-    }
-    let release = envs.kernel_release().map_err(&refuse)?;
-    if !glass_platform::hardware::release_takes(&release, &manifest.release) {
-        return Err(refuse(format!(
-            "refused: built for {}, and this computer runs {release}",
-            manifest.release
-        )));
-    }
+    fits_here(envs, manifest).map_err(&refuse)?;
     if let Some(open) = store.trial().filter(|r| r.trial.state.open()) {
         return Err(refuse(format!(
             "patch {} is {}: one patch is tried at a time",
@@ -593,6 +569,48 @@ fn admit(
         )));
     }
     Ok((opened, from))
+}
+
+/// Whether a patch could run on this computer at all, whoever reviews it:
+/// built for the release it runs, and bringing the kernel for a driver
+/// the kernel has built in, which a module of its own never replaces.
+fn fits_here(envs: &dyn Envs, manifest: &glass_managed::hwpatch::Manifest) -> Result<(), String> {
+    if !manifest
+        .modules
+        .iter()
+        .any(|m| m.file == glass_managed::hwpatch::KERNEL)
+        && let Some(file) = manifest
+            .modules
+            .iter()
+            .map(|m| m.file.as_str())
+            .find(|f| envs.built_in(f.strip_suffix(".ko").unwrap_or(f)))
+    {
+        return Err(format!(
+            "refused: this computer's kernel has {} built in, so the patch's {file} would never \
+             run: a patch to it rebuilds the kernel",
+            file.strip_suffix(".ko").unwrap_or(file)
+        ));
+    }
+    let release = envs.kernel_release()?;
+    if !glass_platform::hardware::release_takes(&release, &manifest.release) {
+        return Err(format!(
+            "refused: built for {}, and this computer runs {release}",
+            manifest.release
+        ));
+    }
+    Ok(())
+}
+
+/// [`fits_here`] for a bundle not checked further: one this computer sends
+/// for IT to review rather than sets up, so IT never reviews a patch it
+/// couldn't run.
+pub fn fits(envs: &dyn Envs, bytes: &[u8]) -> Result<(), String> {
+    let bundle: Bundle =
+        serde_json::from_slice(bytes).map_err(|e| format!("not a patch bundle: {e}"))?;
+    let manifest: glass_managed::hwpatch::Manifest =
+        serde_json::from_str(&bundle.signed.payload)
+            .map_err(|e| format!("not a patch bundle: {e}"))?;
+    fits_here(envs, &manifest)
 }
 
 /// Whether [`apply`] would take `bytes`, changing nothing: what the
@@ -1891,7 +1909,9 @@ mod tests {
         assert!(
             why.contains("built in") && why.contains("rebuilds the kernel"),
             "{why}"
-        );
+        ); // And never sent to IT to review.
+        assert!(fits(&fake, &bytes).unwrap_err().contains("built in"));
+
         assert!(apply(&fake, &store, &waking(), &bytes, &mut |e| audit.push(e)).is_err());
         assert_eq!(fake.s().envs.len(), 1, "nothing set up");
 

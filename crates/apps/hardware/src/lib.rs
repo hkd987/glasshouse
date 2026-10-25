@@ -63,6 +63,9 @@ pub trait Patches: Send + Sync {
     fn apply(&self, bundle: &[u8]) -> Result<PatchTrial, String>;
     /// Whether [`Self::apply`] would take `bundle`, changing nothing.
     fn check(&self, bundle: &[u8]) -> Result<(), String>;
+    /// Whether `bundle` could run here at all (its release, a driver the
+    /// kernel has built in): what goes to IT for review must.
+    fn fits(&self, bundle: &[u8]) -> Result<(), String>;
     /// Whether this computer tries patches nobody reviewed.
     fn takes_community(&self) -> bool;
 }
@@ -556,13 +559,15 @@ impl ActionProvider for HardwareProvider {
             PATCH_PROPOSE => {
                 let input: ProposeInput = glass_actions::parse_input(input)?;
                 let (bytes, bundle) = self.handle.bundle(&input.build)?;
-                // Nobody is asked about a patch this computer would refuse.
-                if !matches!(self.handle.route()?, Route::Review(_)) {
-                    self.handle
-                        .patches()?
-                        .check(&bytes)
-                        .map_err(ActionError::InvalidInput)?;
+                // Nobody is asked about a patch this computer would refuse,
+                // nor IT about one it couldn't run.
+                let patches = self.handle.patches()?;
+                if matches!(self.handle.route()?, Route::Review(_)) {
+                    patches.fits(&bytes)
+                } else {
+                    patches.check(&bytes)
                 }
+                .map_err(ActionError::InvalidInput)?;
                 let manifest: glass_managed::hwpatch::Manifest =
                     serde_json::from_str(&bundle.signed.payload)
                         .map_err(|e| ActionError::Failed(e.to_string()))?;
@@ -904,6 +909,9 @@ mod tests {
         fn check(&self, _bundle: &[u8]) -> Result<(), String> {
             self.refuse.lock().unwrap().clone().map_or(Ok(()), Err)
         }
+        fn fits(&self, _bundle: &[u8]) -> Result<(), String> {
+            self.refuse.lock().unwrap().clone().map_or(Ok(()), Err)
+        }
         fn apply(&self, bundle: &[u8]) -> Result<PatchTrial, String> {
             self.applied.lock().unwrap().push(bundle.to_vec());
             Ok(PatchTrial {
@@ -1094,6 +1102,11 @@ mod tests {
         // Managed: the review says where it goes, and it goes there.
         let console = Arc::new(Console::default());
         provider.handle.set_review(console.clone());
+        // Never one that couldn't run here, a driver the kernel has built in.
+        *kernel.refuse.lock().unwrap() = Some("the kernel has snd_hda built in".into());
+        let refused = provider.preview(&ctx, &action, &input).unwrap_err();
+        assert!(refused.to_string().contains("built in"), "{refused}");
+        *kernel.refuse.lock().unwrap() = None;
         let preview = provider.preview(&ctx, &action, &input).unwrap();
         assert!(
             preview.summary.contains("to IT for review"),

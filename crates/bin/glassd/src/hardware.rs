@@ -40,6 +40,13 @@ impl Patches for RuntimePatches {
             .hardware_patch_check(bundle)
             .map_err(|e| e.to_string())
     }
+
+    fn fits(&self, bundle: &[u8]) -> Result<(), String> {
+        let runtime = self.0.upgrade().ok_or("glassd is stopping")?;
+        runtime
+            .hardware_patch_fits(bundle)
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// The build service, as `[hardware] build_service` names it.
