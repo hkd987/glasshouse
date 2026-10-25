@@ -29,6 +29,7 @@ if [ -z "${GLASS_DEV_SKIP_BUILD:-}" ]; then
 	cargo build --manifest-path "$repo/Cargo.toml" -p glassd -p glassctl -p glass-demo-agent -p glass-probe \
 		-p glass-mcp -p glass-app-bridge -p glass-skill-evals -p glass-it-agent -p glass-desktop-agent \
 		-p glass-claude-runner -p glass-app-try
+	cargo build --manifest-path "$repo/Cargo.toml" -p glass-e2e --bin glass-fake-wpa
 fi
 
 mkdir -p "$dev/home" "$dev/state" "$run"
@@ -64,6 +65,13 @@ agent_dirs = ["$bin"]
 
 [snapshots]
 backend = "copy"
+
+# Wi-Fi (CF-12): a stand-in wpa_supplicant with networks in the air
+# (glass-fake-wpa), and the organization's passwords, root's file on a
+# computer, the developer's here.
+[wifi]
+control_dir = "$run/wpa"
+secrets = "$dev/wifi-secrets.toml"
 
 # Remixing and making apps (ADR 0032): the apps workspace's esbuild, its
 # source in the layout images have, and what tries each version (ADR 0049).
@@ -163,6 +171,10 @@ usd_per_mtok_out = 15.0
 MODELS
 	fi
 } >"$dev/policy.toml"
+
+# The stand-in wpa_supplicant, gone when glassd (this process, after exec) is.
+"$bin/glass-fake-wpa" "$run/wpa" &
+(umask 077 && printf '[networks."Northwind Staff"]\npassword = "staff-password-not-real"\n' >"$dev/wifi-secrets.toml")
 
 echo "glassd (host-insecure) — in another shell:"
 echo "  export GLASS_CONTROL_SOCKET=$run/control.sock"

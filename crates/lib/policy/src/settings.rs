@@ -15,6 +15,12 @@ use serde::Serialize;
 use crate::EVERYONE;
 use crate::document::{Managed, PolicyDocument, SettingValue};
 
+/// The organization's Wi-Fi networks, by name (CF-12).
+pub const WIFI_NETWORKS: &str = "wifi.networks";
+/// Wi-Fi networks the computer never joins.
+pub const WIFI_BLOCKED: &str = "wifi.blocked";
+/// Only the organization's Wi-Fi networks may be joined.
+pub const WIFI_ONLY_ORGANIZATION: &str = "wifi.only_organization";
 /// The folders the desktop agent reads when asked without naming any
 /// (ADR 0048).
 pub const AGENT_FOLDERS: &str = "agents.folders";
@@ -56,6 +62,8 @@ pub enum Kind {
     /// Folders in the person's home, such as `Documents` or
     /// `Projects/Northwind`.
     Folders,
+    /// Wi-Fi networks by name, such as `Northwind Staff` (CF-12).
+    Networks,
 }
 
 /// One setting a computer has.
@@ -165,6 +173,36 @@ pub fn table() -> &'static [SettingDef] {
                 "Off: USB drives and card readers don't connect, and any plugged in is turned off.",
                 Scope::Seat,
                 true,
+            ),
+            // CF-12, ADR 0059: glassd keeps the organization's networks
+            // in wpa_supplicant, their passwords from wifi-secrets.toml,
+            // never in policy or Settings; Settings joins only what these
+            // allow.
+            SettingDef {
+                id: WIFI_NETWORKS,
+                section: "Wi-Fi",
+                title: "Your organization's networks",
+                help: "Joined by themselves, ahead of any network a person joined. Their passwords are set on the computer, never shown.",
+                kind: Kind::Networks,
+                scope: Scope::Device,
+                default: SettingValue::List(Vec::new()),
+            },
+            SettingDef {
+                id: WIFI_BLOCKED,
+                section: "Wi-Fi",
+                title: "Blocked networks",
+                help: "Networks this computer never joins; one it's on is left at once.",
+                kind: Kind::Networks,
+                scope: Scope::Device,
+                default: SettingValue::List(Vec::new()),
+            },
+            toggle(
+                WIFI_ONLY_ORGANIZATION,
+                "Wi-Fi",
+                "Only your organization's networks",
+                "People can't join other networks, such as a café's or their home's.",
+                Scope::Device,
+                false,
             ),
             toggle(
                 "notifications.do_not_disturb",
@@ -367,6 +405,7 @@ pub fn describe(def: &SettingDef, value: &SettingValue) -> String {
         (_, SettingValue::Text(t)) => t.clone(),
         (Kind::Apps, SettingValue::List(l)) if l.len() > 3 => format!("{} apps", l.len()),
         (Kind::Folders, SettingValue::List(l)) if l.len() > 3 => format!("{} folders", l.len()),
+        (Kind::Networks, SettingValue::List(l)) if l.len() > 3 => format!("{} networks", l.len()),
         (_, SettingValue::List(l)) if l.is_empty() => "none".into(),
         (_, SettingValue::List(l)) if l.len() <= 3 => l.join(", "),
         (_, SettingValue::List(l)) => format!("{} sites", l.len()),
@@ -447,6 +486,20 @@ pub fn check(def: &SettingDef, value: &SettingValue) -> Result<(), String> {
                 None => Ok(()),
             }
         }
+        (Kind::Networks, SettingValue::List(names)) => {
+            if names.len() > 64 {
+                return Err("at most 64 networks".into());
+            }
+            match names
+                .iter()
+                .find(|n| n.is_empty() || n.len() > 32 || n.chars().any(char::is_control))
+            {
+                Some(n) => Err(format!(
+                    "{n:?} isn't a Wi-Fi network's name: 1 to 32 characters"
+                )),
+                None => Ok(()),
+            }
+        }
         (Kind::TimeZone, SettingValue::Text(zone)) => {
             if zone.is_empty() || time_zone_ok(zone) {
                 Ok(())
@@ -463,6 +516,7 @@ pub fn check(def: &SettingDef, value: &SettingValue) -> Result<(), String> {
         (Kind::TimeZone, _) => Err("a time zone's name".into()),
         (Kind::Apps, _) => Err("a list of apps".into()),
         (Kind::Folders, _) => Err("a list of folders".into()),
+        (Kind::Networks, _) => Err("a list of Wi-Fi networks".into()),
     }
 }
 

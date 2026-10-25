@@ -31,5 +31,11 @@ path = "src/main.rs"
 name = "glass-fake-claude"
 path = "src/bin/fake_claude.rs"
 
+# wpa_supplicant's control socket with networks in the air and no radio,
+# for the development host and the apps' tests (CF-12, ADR 0059).
+[[bin]]
+name = "glass-fake-wpa"
+path = "src/bin/fake_wpa.rs"
+
 [lints]
 workspace = true

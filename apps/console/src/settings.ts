@@ -114,6 +114,7 @@ export async function settingsPage(root: HTMLElement, group: string): Promise<vo
       case "sites":
       case "apps":
       case "folders":
+      case "networks":
         return h(
           "textarea",
           {
@@ -125,12 +126,15 @@ export async function settingsPage(root: HTMLElement, group: string): Promise<vo
                 ? "One per line, by id: my-mail, notes"
                 : row.kind.type === "folders"
                   ? "One per line, in the person's home: Documents, Projects/Northwind"
-                  : "One per line: games.example, *.social.example",
+                  : row.kind.type === "networks"
+                    ? "One per line: Northwind Staff"
+                    : "One per line: games.example, *.social.example",
             disabled,
             oninput: (e: Event) =>
               set(
                 (e.target as HTMLTextAreaElement).value
-                  .split(/[\n,]+/)
+                  // A network's name may have a comma in it.
+                  .split(row.kind.type === "networks" ? /\n+/ : /[\n,]+/)
                   .map((s) => s.trim())
                   .filter(Boolean),
               ),

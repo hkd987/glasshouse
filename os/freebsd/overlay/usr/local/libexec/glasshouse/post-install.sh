@@ -148,6 +148,19 @@ for setting in debug.debugger_on_panic=0 kern.panic_reboot_wait_time=5; do
 	sysctl -q "$setting" >/dev/null
 	loader_tunable "${setting%%=*}" "${setting#*=}"
 done
+# Wi-Fi (CF-12, ADR 0059): the radio's station interface (wlan0, which glassd
+# gives the radio it finds) runs wpa_supplicant with the control socket glassd
+# drives, and DHCP follows the link. Joined networks are saved here, root's.
+setconf /etc/rc.conf ifconfig_wlan0="WPA DHCP"
+if ! grep -q '^ctrl_interface=' /etc/wpa_supplicant.conf 2>/dev/null; then
+	(
+		umask 077
+		touch /etc/wpa_supplicant.conf
+		printf 'ctrl_interface=/var/run/wpa_supplicant\nctrl_interface_group=wheel\nupdate_config=1\n' |
+			cat - /etc/wpa_supplicant.conf >/etc/wpa_supplicant.conf.new
+		mv /etc/wpa_supplicant.conf.new /etc/wpa_supplicant.conf
+	)
+fi
 # The drivers the image adds in /boot/modules (ADR 0058: graphics and its
 # firmware) load by module name, which the linker finds through this index, as
 # a package install would have written it.

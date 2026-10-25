@@ -68,6 +68,8 @@ struct Applied {
     zone: String,
     usb_storage: Option<bool>,
     remix: Option<bool>,
+    /// The Wi-Fi rules wpa_supplicant's networks were made to match.
+    wifi: Option<glass_first_party::settings_wifi::Rules>,
 }
 
 /// Runs `apply` with the computer's settings for whoever is signed in at
@@ -115,16 +117,35 @@ pub(crate) fn follow(
 pub(crate) fn watch(settings: &SettingsHandle, runtime: &Arc<Runtime>, source: PathBuf) {
     let applied = Mutex::new(Applied::default());
     let weak = Arc::downgrade(runtime);
+    let handle = settings.clone();
     follow(settings, runtime, move |computer, seat| {
         let mut applied = applied.lock().unwrap_or_else(|p| p.into_inner());
-        apply(
-            computer,
-            seat,
-            weak.upgrade().as_deref(),
-            &source,
-            &mut applied,
-        );
+        let runtime = weak.upgrade();
+        apply(computer, seat, runtime.as_deref(), &source, &mut applied);
+        wifi(&handle, runtime.as_deref(), &mut applied);
     });
+}
+
+/// The organization's Wi-Fi networks in wpa_supplicant, blocked ones gone,
+/// the person's own off where only the organization's may be joined
+/// (CF-12): whenever the rules change, each change on the audit record.
+fn wifi(settings: &SettingsHandle, runtime: Option<&Runtime>, applied: &mut Applied) {
+    let rules = settings.wifi_rules();
+    if applied.wifi.as_ref() == Some(&rules) {
+        return;
+    }
+    match settings.wifi_reconcile() {
+        Ok(did) => {
+            for change in did {
+                tracing::info!("Wi-Fi: {change}");
+                if let Some(runtime) = runtime {
+                    runtime.append_audit(setting_event("wifi", change.into(), None, Ok(())));
+                }
+            }
+            applied.wifi = Some(rules);
+        }
+        Err(e) => tracing::warn!("Wi-Fi: {e}"),
+    }
 }
 
 /// TL-6: with remixing off, our apps' source leaves the computer. Removed

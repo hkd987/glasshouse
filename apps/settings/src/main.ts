@@ -16,7 +16,7 @@ interface Setting {
   section: string;
   title: string;
   help: string;
-  kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" } | { type: "time_zone" } | { type: "apps" } | { type: "folders" };
+  kind: { type: "toggle" } | { type: "number"; min: number; max: number; unit: string } | { type: "url" } | { type: "sites" } | { type: "time_zone" } | { type: "apps" } | { type: "folders" } | { type: "networks" };
   scope: "person" | "device" | "seat";
   default: Value;
   value: Value;
@@ -40,10 +40,37 @@ interface Models {
   agents: { id: string; name: string; on: boolean; always: boolean }[];
 }
 
+/** Wi-Fi as glassd drives it (CF-12, ADR 0059). */
+interface Network {
+  name: string;
+  /** dBm, when nearby. */
+  signal?: number;
+  security?: "open" | "personal" | "enterprise";
+  joined: boolean;
+  known: boolean;
+  /** Joining it failed, as a wrong password does. */
+  failed: boolean;
+  organization: boolean;
+  /** Why it can't be joined here. */
+  blocked?: string;
+}
+
+interface Wifi {
+  present: boolean;
+  state: string;
+  joined: string | null;
+  address: string | null;
+  only_organization: boolean;
+  networks: Network[];
+}
+
 const bridge = new Bridge({ app: "settings" });
 const state = {
   settings: [] as Setting[],
   models: null as Models | null,
+  wifi: null as Wifi | null,
+  /** The network whose password is being typed, and the password. */
+  joining: null as { network: string; password: string } | null,
   /** What the owner is connecting: the key is typed here and sent once. */
   connecting: { service: "openrouter", key: "" },
   /** The names of the apps settings list, by id, as this computer offers them. */
@@ -66,6 +93,7 @@ async function load(): Promise<void> {
   } catch (error) {
     state.notice = { text: error instanceof Offline ? "Settings haven't been loaded on this computer yet." : String(error), tone: "bad" };
   }
+  await loadWifi();
   // AI models (ADR 0039) on their own: a system without them still shows
   // every setting, just not this section.
   try {
@@ -93,6 +121,140 @@ async function change(setting: Setting, value: Value | undefined): Promise<void>
   }
   state.busy = null;
   await load();
+}
+
+/** The networks around and the one in use; nothing shown on a system without it. */
+async function loadWifi(): Promise<void> {
+  try {
+    const read = await bridge.read<Wifi>("settings.wifi", {});
+    state.wifi = read.result.ok ? read.result.data : null;
+  } catch {
+    state.wifi = null;
+  }
+}
+
+async function joinWifi(network: string, password: string | null): Promise<void> {
+  state.busy = "wifi";
+  state.notice = null;
+  render();
+  try {
+    const result = await bridge.call("settings.wifi_join", password ? { network, password } : { network });
+    state.notice = { text: result.text, tone: result.ok ? "ok" : "bad" };
+    if (result.ok) state.joining = null;
+  } catch (error) {
+    state.notice = { text: error instanceof BridgeError ? error.message : String(error), tone: "bad" };
+  }
+  state.busy = null;
+  await load();
+}
+
+async function forgetWifi(network: string): Promise<void> {
+  state.busy = "wifi";
+  state.notice = null;
+  render();
+  try {
+    const result = await bridge.call("settings.wifi_forget", { network });
+    state.notice = { text: result.text, tone: result.ok ? "ok" : "bad" };
+  } catch (error) {
+    state.notice = { text: error instanceof BridgeError ? error.message : String(error), tone: "bad" };
+  }
+  state.busy = null;
+  await load();
+}
+
+/** Signal as four bars: -50 dBm and better is all four. */
+function bars(dbm: number | undefined): string {
+  if (dbm === undefined) return "";
+  const n = dbm >= -50 ? 4 : dbm >= -60 ? 3 : dbm >= -70 ? 2 : 1;
+  return "▂▄▆█".slice(0, n).padEnd(4, "·");
+}
+
+function network(w: Wifi, n: Network): HTMLElement {
+  const busy = state.busy === "wifi" || state.offline;
+  const typing = state.joining?.network === n.name;
+  const notes = [
+    n.joined ? (w.address ? `Connected · ${w.address}` : "Connecting…") : null,
+    !n.joined && n.failed ? "Couldn't join: the password may be wrong" : null,
+    n.organization ? "Your organization's network" : null,
+    !n.joined && n.known && !n.organization ? "Joins by itself" : null,
+    n.signal === undefined ? "Not in range" : null,
+  ].filter(Boolean);
+  let control: HTMLElement | null;
+  if (n.blocked) {
+    control = h("span", { class: "muted" }, "Can't join");
+  } else if (typing) {
+    control = h(
+      "span",
+      { class: "control" },
+      h("input", {
+        class: "text",
+        type: "password",
+        name: "password",
+        autocomplete: "off",
+        "aria-label": `Password for ${n.name}`,
+        placeholder: "Password",
+        disabled: busy,
+        oninput: (e: Event) => state.joining && (state.joining.password = (e.target as HTMLInputElement).value),
+        onkeydown: (e: Event) => {
+          if ((e as KeyboardEvent).key === "Enter" && state.joining) void joinWifi(n.name, state.joining.password);
+        },
+      }),
+      h("button", { class: "button", disabled: busy, "data-test": "wifi-join", onclick: () => state.joining && joinWifi(n.name, state.joining.password) }, "Join"),
+      h("button", { class: "link", disabled: busy, onclick: () => ((state.joining = null), render()) }, "Cancel"),
+    );
+  } else {
+    control = h(
+      "span",
+      { class: "control" },
+      !n.joined && n.signal !== undefined
+        ? h(
+            "button",
+            {
+              class: "button",
+              disabled: busy,
+              "data-test": "wifi-join",
+              onclick: () => {
+                // A password the first time, unless it's open or the computer knows it.
+                if (n.security === "personal" && !n.organization && (!n.known || n.failed)) {
+                  state.joining = { network: n.name, password: "" };
+                  render();
+                } else void joinWifi(n.name, null);
+              },
+            },
+            "Join",
+          )
+        : null,
+      n.known && !n.organization ? h("button", { class: "link", disabled: busy, "data-test": "wifi-forget", onclick: () => forgetWifi(n.name) }, "Forget") : null,
+    );
+  }
+  return h(
+    "div",
+    { class: "setting", "data-network": n.name },
+    h(
+      "div",
+      {},
+      h("div", { class: "title" }, h("span", { class: "bars", "aria-hidden": "true" }, bars(n.signal)), " ", n.name, n.security && n.security !== "open" ? " 🔒" : ""),
+      notes.length ? h("div", { class: "help" }, notes.join(" · ")) : null,
+      n.blocked ? h("div", { class: "who it" }, n.blocked) : null,
+    ),
+    control,
+  );
+}
+
+/** Wi-Fi: the network in use and the ones around, inside IT's rules. */
+function wifi(w: Wifi): HTMLElement {
+  const rows: (HTMLElement | null)[] = w.present
+    ? [
+        w.only_organization ? h("div", { class: "setting" }, h("div", { class: "who it" }, "🔒 Your organization allows only its own networks on this computer")) : null,
+        ...(w.networks.length ? w.networks.map((n) => network(w, n)) : [h("div", { class: "setting" }, h("div", { class: "help" }, "Looking for networks…"))]),
+      ]
+    : [h("div", { class: "setting" }, h("div", { class: "help" }, "This computer has no Wi-Fi."))];
+  return h(
+    "section",
+    { class: "group", "data-section": "wifi" },
+    h("h2", {}, "Wi-Fi"),
+    h("div", { class: "rows" }, ...rows),
+  );
 }
 
 /** An app's name as this computer offers it; its id for one it no longer has. */
@@ -187,9 +349,10 @@ function control(setting: Setting): HTMLElement {
       }),
     );
   }
-  if (setting.kind.type === "sites" || setting.kind.type === "folders") {
+  if (setting.kind.type === "sites" || setting.kind.type === "folders" || setting.kind.type === "networks") {
     const list = Array.isArray(setting.value) ? setting.value : [];
     const folders = setting.kind.type === "folders";
+    const networks = setting.kind.type === "networks";
     return h(
       "span",
       { class: "control" },
@@ -201,13 +364,14 @@ function control(setting: Setting): HTMLElement {
           name: setting.id,
           "aria-label": setting.title,
           rows: 2,
-          placeholder: folders ? "One per line, in your home: Documents" : "One per line: games.example",
+          placeholder: networks ? "One per line: Free Airport WiFi" : folders ? "One per line, in your home: Documents" : "One per line: games.example",
           disabled: busy,
           onchange: (e: Event) =>
             change(
               setting,
               (e.target as HTMLTextAreaElement).value
-                .split(/[\n,]+/)
+                // A network's name may have a comma in it.
+                .split(networks ? /\n+/ : /[\n,]+/)
                 .map((site) => site.trim())
                 .filter(Boolean),
             ),
@@ -385,6 +549,7 @@ function render(): void {
       { class: "page" },
       state.notice && h("div", { class: `banner ${state.notice.tone === "ok" ? "done" : "refused"}`, role: "status" }, state.notice.text),
       state.offline && h("div", { class: "banner offline" }, "Offline: these are the settings as they were last loaded."),
+      state.wifi ? wifi(state.wifi) : null,
       ...sections.map((section) =>
         h("section", { class: "group" }, h("h2", {}, section), h("div", { class: "rows" }, ...state.settings.filter((s) => s.section === section).map(row))),
       ),
@@ -396,3 +561,9 @@ function render(): void {
 }
 
 void load();
+// The networks around change as the person moves: looked at again every
+// few seconds while Settings is open, unless they're typing a password.
+setInterval(() => {
+  if (state.busy || state.joining || document.hidden) return;
+  void loadWifi().then(render);
+}, 8000);

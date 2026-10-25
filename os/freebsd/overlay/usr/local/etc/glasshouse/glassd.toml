@@ -52,6 +52,14 @@ backend = "zfs"
 # community = false
 # probation_minutes = 480
 
+# Wi-Fi (CF-12, ADR 0059): the organization's networks are named in policy
+# (wifi.networks); their passwords are in this root-only file (mode 600),
+# which IT or its tooling writes, never in policy or Settings:
+#   [networks."Northwind Staff"]
+#   password = "..."
+# [wifi]
+# secrets = "/usr/local/etc/glasshouse/wifi-secrets.toml"
+
 # The agent catalog (AD-5): what IT has published to this machine. What each
 # agent may do is set by policy, not here.
 

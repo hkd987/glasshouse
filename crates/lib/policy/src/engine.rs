@@ -403,6 +403,8 @@ pub fn people_only(action: &ActionName) -> bool {
 pub const PERSONS_OWN: &[&str] = &[
     "mail.connect",
     "settings.models_connect",
+    // A Wi-Fi network's password (CF-12, ADR 0059).
+    "settings.wifi_join",
     // Starting a routine runs a task with the scope it was saved with,
     // which the agent asking may not have; and what the person did twice
     // is theirs to keep (ADR 0047).

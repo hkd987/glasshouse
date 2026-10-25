@@ -2,13 +2,16 @@
   "id": "settings",
   "name": "Settings",
   "version": "0.1.0",
-  "description": "How this computer is set up for you: the clock, the lock screen and the browser. What IT locked shows as set by IT.",
+  "description": "How this computer is set up for you: Wi-Fi, the clock, the lock screen and the browser. What IT locked shows as set by IT.",
   "actions": [
     "settings.list",
     "settings.set",
     "settings.models",
     "settings.models_connect",
-    "settings.models_agents"
+    "settings.models_agents",
+    "settings.wifi",
+    "settings.wifi_join",
+    "settings.wifi_forget"
   ],
   "permissions": [
     "offline"

@@ -1052,6 +1052,7 @@ version = "0.1.0"
 dependencies = [
  "glass-actions",
  "glass-api",
+ "glass-platform",
  "glass-policy",
  "glass-types",
  "serde",

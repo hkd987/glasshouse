@@ -16,6 +16,7 @@ mod managed;
 mod meetings;
 mod org_apps;
 mod personal;
+mod wifi;
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -730,8 +731,15 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         });
     }
 
+    // The computer's Wi-Fi for Settings (CF-12, ADR 0059): its radio given
+    // its station interface, then the organization's networks kept as the
+    // rules say, by device::watch below.
+    org.settings
+        .set_wifi(Arc::new(wifi::SystemRadio::new(&config.wifi)));
+    let _ = tokio::task::spawn_blocking(wifi::set_up_station).await;
+
     // What IT sets for the computer that glassd applies itself: the time
-    // zone, and USB drives for whoever is signed in (ADR 0031).
+    // zone, USB drives for whoever is signed in (ADR 0031), and Wi-Fi.
     device::watch(&org.settings, &runtime, config.studio.source.clone());
     // First-run setup makes the owner of a computer nobody manages after
     // glassd has started: learnt as they sign in (ADR 0038).

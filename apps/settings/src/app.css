@@ -122,3 +122,9 @@
   top: 0;
   z-index: 1;
 }
+
+.bars {
+  font-family: var(--mono, monospace);
+  letter-spacing: -1px;
+  color: var(--accent, #2c4fc4);
+}

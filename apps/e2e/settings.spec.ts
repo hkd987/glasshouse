@@ -24,6 +24,9 @@ test.afterEach(async () => {
   await control("settings.set", { id: HOME_PAGE });
 });
 
+/** A network's row in Settings' Wi-Fi section. */
+const wifiRow = (page: import("@playwright/test").Page, name: string) => page.locator(`[data-section=wifi] [data-network="${name}"]`);
+
 const USB = "devices.usb_storage";
 const HOME_PAGE = "browser.home_page";
 const value = async (id: string) => (await control<SettingsView>("settings.get", {})).settings.find((s) => s.id === id)?.value;
@@ -119,4 +122,74 @@ test("adr0039 the owner connects their own AI models in Settings, and the key st
   await expect(row.locator("[data-test=connect]")).toBeVisible();
   expect(existsSync(file)).toBe(false);
   expect(model()).toBe("No model (scripted agent)");
+});
+
+test("cf12 the person joins Wi-Fi in Settings, inside the rules the computer's owner sets", async ({ page }) => {
+  // The suite's Wi-Fi is glass-fake-wpa: wpa_supplicant's control socket
+  // with networks in the air (tools/dev/host-run.sh).
+  await page.goto(appUrl("settings"));
+  await expect(page.locator("html[data-ready=true]")).toHaveCount(1);
+  const section = page.locator("[data-section=wifi]");
+  await expect(section.locator("[data-network]")).toHaveCount(5);
+  await expect(wifiRow(page, "Northwind Corp")).toContainText("needs a sign-in");
+  await expect(wifiRow(page, "Northwind Corp").locator("[data-test=wifi-join]")).toHaveCount(0);
+
+  // An open network joins at once.
+  await wifiRow(page, "Café Guest").locator("[data-test=wifi-join]").click();
+  await expect(page.locator(".banner")).toHaveText("Joining Café Guest.");
+  await expect(wifiRow(page, "Café Guest")).toContainText("Connected · 192.168.4.20");
+
+  // One with a password asks for it: a wrong one doesn't connect, the right one does.
+  const home = wifiRow(page, "Home 6E");
+  await home.locator("[data-test=wifi-join]").click();
+  await home.locator("input[name=password]").fill("not the password");
+  await home.locator("[data-test=wifi-join]").click();
+  await expect(page.locator(".banner")).toHaveText("Joining Home 6E.");
+  await expect(home).toContainText("Couldn't join: the password may be wrong");
+  await home.locator("[data-test=wifi-join]").click();
+  await home.locator("input[name=password]").fill("correct horse battery");
+  await home.locator("[data-test=wifi-join]").click();
+  await expect(home).toContainText("Connected · 192.168.4.20");
+  await section.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(SHOTS, "settings-wifi.png") });
+
+  // The owner blocks a network and names the computer's own: the blocked one
+  // can't be joined, the computer's joins by itself, its password from the
+  // system's file, and can't be forgotten here.
+  const blocked = page.locator('[data-setting="wifi.blocked"] textarea');
+  await blocked.fill("Free Airport WiFi");
+  await blocked.blur();
+  await expect(wifiRow(page, "Free Airport WiFi")).toContainText("Free Airport WiFi is blocked on this computer.");
+  await expect(wifiRow(page, "Free Airport WiFi").locator("[data-test=wifi-join]")).toHaveCount(0);
+  const ours = page.locator('[data-setting="wifi.networks"] textarea');
+  await ours.fill("Northwind Staff");
+  await ours.blur();
+  await expect(wifiRow(page, "Northwind Staff")).toContainText("Your organization's network");
+  await expect(wifiRow(page, "Northwind Staff").locator("[data-test=wifi-forget]")).toHaveCount(0);
+
+  // Forgetting Home 6E: the computer falls back on its own network by itself.
+  await home.locator("[data-test=wifi-forget]").click();
+  await expect(page.locator(".banner")).toHaveText("Forgot Home 6E.");
+  await expect(wifiRow(page, "Northwind Staff")).toContainText("Connected · 192.168.4.20");
+  await section.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(SHOTS, "settings-wifi-rules.png") });
+
+  // On the record; never the password, in the record or a log.
+  expect(audit().some((r) => r.event.kind === "action" && r.event.action === "settings.wifi_join")).toBe(true);
+  expect(JSON.stringify(audit())).not.toContain("correct horse");
+  expect(JSON.stringify(audit())).not.toContain("staff-password");
+  for (const log of ["glassd.log", "bridge.log"]) {
+    const path = join(DEV, log);
+    if (existsSync(path)) expect(readFileSync(path, "utf8")).not.toContain("correct horse");
+  }
+
+  // Back as it was.
+  await blocked.fill("");
+  await blocked.blur();
+  await ours.fill("");
+  await ours.blur();
+  await expect(wifiRow(page, "Northwind Staff")).not.toContainText("Your organization's network");
+  for (const name of ["Café Guest"]) {
+    if (await wifiRow(page, name).locator("[data-test=wifi-forget]").count()) await wifiRow(page, name).locator("[data-test=wifi-forget]").click();
+  }
 });

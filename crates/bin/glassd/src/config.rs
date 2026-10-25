@@ -70,6 +70,10 @@ pub struct Config {
     /// Which kernel patches this computer takes (ADR 0057).
     #[serde(default)]
     pub hardware: HardwareConfig,
+    /// Where wpa_supplicant listens, and the organization's Wi-Fi
+    /// passwords (CF-12, ADR 0059).
+    #[serde(default)]
+    pub wifi: WifiConfig,
     #[serde(default, rename = "agent")]
     pub agents: Vec<CatalogEntry>,
 }
@@ -102,6 +106,42 @@ impl Default for HardwareConfig {
 
 fn default_probation() -> u64 {
     8 * 60
+}
+
+/// `[wifi]`: the radio's wpa_supplicant control socket, and the
+/// organization's Wi-Fi passwords: root-owned, mode 600, or glassd refuses
+/// them, as it does model secrets. Not shipped; IT or its tooling writes it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WifiConfig {
+    #[serde(default = "default_wifi_control")]
+    pub control_dir: PathBuf,
+    #[serde(default = "default_wifi_interface")]
+    pub interface: String,
+    #[serde(default = "default_wifi_secrets")]
+    pub secrets: PathBuf,
+}
+
+impl Default for WifiConfig {
+    fn default() -> Self {
+        Self {
+            control_dir: default_wifi_control(),
+            interface: default_wifi_interface(),
+            secrets: default_wifi_secrets(),
+        }
+    }
+}
+
+fn default_wifi_control() -> PathBuf {
+    glass_platform::wifi::CONTROL_DIR.into()
+}
+
+fn default_wifi_interface() -> String {
+    glass_platform::wifi::INTERFACE.into()
+}
+
+fn default_wifi_secrets() -> PathBuf {
+    "/usr/local/etc/glasshouse/wifi-secrets.toml".into()
 }
 
 /// `[studio]`: what remixing and making apps needs (ADR 0032). glassd

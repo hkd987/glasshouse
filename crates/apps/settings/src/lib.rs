@@ -9,6 +9,8 @@
 //! directory, by uid, never in their home, so nothing they or their agents
 //! can write decides what IT locked.
 
+pub mod wifi;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -37,6 +39,14 @@ pub const MODELS_CONNECT: &str = "settings.models_connect";
 pub const MODELS_AGENTS: &str = "settings.models_agents";
 /// The Settings app: the one place the computer's own settings change.
 pub const APP: &str = "settings";
+/// Wi-Fi as Settings shows it (CF-12): the networks nearby and known, the
+/// one in use, inside IT's rules. The person's own, in Settings: never an
+/// agent's (where the computer is, from the networks around it, is theirs).
+pub const WIFI: &str = "settings.wifi";
+/// Joins a Wi-Fi network, with its password the first time.
+pub const WIFI_JOIN: &str = "settings.wifi_join";
+/// Forgets a Wi-Fi network the person joined.
+pub const WIFI_FORGET: &str = "settings.wifi_forget";
 
 /// The services an owner can connect: id, name, and how a key starts.
 pub const MODEL_SERVICES: [(&str, &str, &str); 2] = [
@@ -119,7 +129,7 @@ fn effective_shape() -> Value {
                 "type": "object",
                 "description": "what it holds; a number's min, max and unit",
                 "properties": {
-                    "type": { "enum": ["toggle", "number", "url", "sites", "time_zone", "apps", "folders"] },
+                    "type": { "enum": ["toggle", "number", "url", "sites", "time_zone", "apps", "folders", "networks"] },
                     "min": { "type": "integer" },
                     "max": { "type": "integer" },
                     "unit": { "type": "string" }
@@ -154,6 +164,8 @@ struct Inner {
     owner: RwLock<Option<String>>,
     /// Where the owner's AI models key goes (ADR 0039).
     model_keys: RwLock<Option<Arc<dyn ModelKeys>>>,
+    /// The computer's Wi-Fi, as glassd drives it (CF-12).
+    wifi: RwLock<Option<Arc<dyn wifi::Radio>>>,
     /// Held from a change's check through its write: the desktop's
     /// `settings.set` and the Settings app's can come at once, and each
     /// rewrites the whole file (ADR 0052).
@@ -204,6 +216,7 @@ impl SettingsHandle {
             app_names: RwLock::new(None),
             owner: RwLock::new(None),
             model_keys: RwLock::new(None),
+            wifi: RwLock::new(None),
             writing: Mutex::new(()),
         }))
     }
@@ -223,6 +236,49 @@ impl SettingsHandle {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The computer's Wi-Fi radio (glassd's, CF-12).
+    pub fn set_wifi(&self, radio: Arc<dyn wifi::Radio>) {
+        *self.0.wifi.write().unwrap_or_else(PoisonError::into_inner) = Some(radio);
+    }
+
+    fn wifi(&self) -> Option<Arc<dyn wifi::Radio>> {
+        self.0
+            .wifi
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// What IT, or the computer's owner, decided about Wi-Fi.
+    pub fn wifi_rules(&self) -> wifi::Rules {
+        let mut rules = wifi::Rules::default();
+        for r in self.computer(None) {
+            match (r.id, r.value) {
+                (settings::WIFI_NETWORKS, SettingValue::List(l)) => rules.organization = l,
+                (settings::WIFI_BLOCKED, SettingValue::List(l)) => rules.blocked = l,
+                (settings::WIFI_ONLY_ORGANIZATION, SettingValue::Bool(b)) => {
+                    rules.only_organization = b;
+                }
+                _ => {}
+            }
+        }
+        rules
+    }
+
+    /// Makes the radio's networks what the rules say: as glassd starts and
+    /// whenever they change. What it changed, in words.
+    pub fn wifi_reconcile(&self) -> Result<Vec<String>, String> {
+        match self.wifi() {
+            Some(radio) => wifi::reconcile(radio.as_ref(), &self.wifi_rules()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn wifi_view(&self) -> Result<wifi::View, ActionError> {
+        let radio = self.wifi().ok_or_else(no_wifi)?;
+        wifi::view(radio.as_ref(), &self.wifi_rules()).map_err(ActionError::Failed)
     }
 
     /// What Settings shows about AI models for `user` (ADR 0039).
@@ -777,6 +833,10 @@ impl PrivateMode for fs::OpenOptions {
     }
 }
 
+fn no_wifi() -> ActionError {
+    ActionError::Failed("This computer has no Wi-Fi.".into())
+}
+
 #[derive(Debug, Clone)]
 pub struct SettingsProvider {
     handle: SettingsHandle,
@@ -791,6 +851,20 @@ impl SettingsProvider {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NoInput {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JoinInput {
+    network: String,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForgetInput {
+    network: String,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -900,6 +974,53 @@ impl ActionProvider for SettingsProvider {
                 default_tier: Tier::Never,
                 ask: AskLabels::default(),
             },
+            ActionDef {
+                name: WIFI.parse().expect("static name"),
+                title: "See Wi-Fi networks".into(),
+                description: "The Wi-Fi networks nearby and known, the one in use, and which \
+                              the computer may join. The person's own, in Settings: never an \
+                              agent."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                side_effect: SideEffect::None,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: WIFI_JOIN.parse().expect("static name"),
+                title: "Join a Wi-Fi network".into(),
+                description: "Joins a network, with its password the first time. The person's \
+                              own, in Settings: never an agent."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "network": { "type": "string" },
+                        "password": { "type": "string" }
+                    },
+                    "required": ["network"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: WIFI_FORGET.parse().expect("static name"),
+                title: "Forget a Wi-Fi network".into(),
+                description: "Forgets a network the person joined. The person's own, in \
+                              Settings: never an agent."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "network": { "type": "string" } },
+                    "required": ["network"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
         ]
     }
 
@@ -982,6 +1103,36 @@ impl ActionProvider for SettingsProvider {
                 "required": ["connected", "setup_choice", "managed", "editable", "services", "agents"],
                 "additionalProperties": false
             }),
+            WIFI | WIFI_JOIN | WIFI_FORGET => json!({
+                "type": "object",
+                "properties": {
+                    "present": { "type": "boolean", "description": "the computer has Wi-Fi" },
+                    "state": { "type": "string", "description": "the radio's state: COMPLETED once joined, SCANNING, ASSOCIATING, DISCONNECTED" },
+                    "joined": { "type": ["string", "null"], "description": "the network in use" },
+                    "address": { "type": ["string", "null"], "description": "the address it gave" },
+                    "only_organization": { "type": "boolean", "description": "only the organization's networks may be joined" },
+                    "networks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "signal": { "type": "integer", "description": "dBm, when nearby: -30 next to it, -80 barely there" },
+                                "security": { "enum": ["open", "personal", "enterprise"] },
+                                "joined": { "type": "boolean" },
+                                "known": { "type": "boolean", "description": "the computer joins it by itself" },
+                                "failed": { "type": "boolean", "description": "joining it failed, as a wrong password does" },
+                                "organization": { "type": "boolean" },
+                                "blocked": { "type": "string", "description": "why it can't be joined here" }
+                            },
+                            "required": ["name", "joined", "known", "failed", "organization"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["present", "state", "joined", "address", "only_organization", "networks"],
+                "additionalProperties": false
+            }),
             _ => return None,
         })
     }
@@ -1043,6 +1194,31 @@ impl ActionProvider for SettingsProvider {
                         None => "Disconnect AI models".into(),
                     },
                     targets: vec!["Settings: AI models".into()],
+                    ..Preview::default()
+                })
+            }
+            WIFI => {
+                let _: NoInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: "See Wi-Fi networks".into(),
+                    targets: vec!["Settings: Wi-Fi".into()],
+                    ..Preview::default()
+                })
+            }
+            WIFI_JOIN => {
+                // Never the password: the summary and targets are audited.
+                let input: JoinInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: format!("Join the Wi-Fi network {}", input.network),
+                    targets: vec![format!("Wi-Fi: {}", input.network)],
+                    ..Preview::default()
+                })
+            }
+            WIFI_FORGET => {
+                let input: ForgetInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: format!("Forget the Wi-Fi network {}", input.network),
+                    targets: vec![format!("Wi-Fi: {}", input.network)],
                     ..Preview::default()
                 })
             }
@@ -1166,6 +1342,59 @@ impl ActionProvider for SettingsProvider {
                 Ok(ActionOutput {
                     text,
                     data: self.handle.models_view(&who.name),
+                    changes: Vec::new(),
+                })
+            }
+            WIFI | WIFI_JOIN | WIFI_FORGET => {
+                // The person's own, in Settings: policy makes these Never for
+                // every agent, and anything but Settings is refused here too.
+                if ctx.principal.agent.as_str() != APP {
+                    return Err(ActionError::Failed(
+                        "Wi-Fi is the person's own, in Settings; never an agent's.".into(),
+                    ));
+                }
+                let radio = self.handle.wifi().ok_or_else(no_wifi)?;
+                let rules = self.handle.wifi_rules();
+                let text = match action.as_str() {
+                    WIFI_JOIN => {
+                        let input: JoinInput = glass_actions::parse_input(input)?;
+                        wifi::join(
+                            radio.as_ref(),
+                            &rules,
+                            &input.network,
+                            input.password.as_deref().filter(|p| !p.is_empty()),
+                        )
+                        .map_err(ActionError::Failed)?;
+                        format!("Joining {}.", input.network)
+                    }
+                    WIFI_FORGET => {
+                        let input: ForgetInput = glass_actions::parse_input(input)?;
+                        wifi::forget(radio.as_ref(), &rules, &input.network)
+                            .map_err(ActionError::Failed)?;
+                        format!("Forgot {}.", input.network)
+                    }
+                    _ => {
+                        let _: NoInput = glass_actions::parse_input(input)?;
+                        String::new()
+                    }
+                };
+                let view = self.handle.wifi_view()?;
+                let text = if text.is_empty() {
+                    match &view.joined {
+                        Some(n) => {
+                            format!("On {n}; {} networks nearby or known.", view.networks.len())
+                        }
+                        None if view.present => {
+                            format!("Not on a network; {} nearby or known.", view.networks.len())
+                        }
+                        None => "This computer has no Wi-Fi.".into(),
+                    }
+                } else {
+                    text
+                };
+                Ok(ActionOutput {
+                    text,
+                    data: serde_json::to_value(&view).unwrap_or_default(),
                     changes: Vec::new(),
                 })
             }

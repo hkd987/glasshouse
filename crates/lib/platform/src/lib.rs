@@ -43,6 +43,7 @@ pub mod snapshot;
 pub mod system;
 #[allow(unsafe_code)]
 pub mod users;
+pub mod wifi;
 #[allow(unsafe_code)]
 pub mod xattr;
 
