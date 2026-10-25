@@ -764,6 +764,19 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     org.settings
         .set_wifi(Arc::new(wifi::SystemRadio::new(&config.wifi)));
     let _ = tokio::task::spawn_blocking(wifi::set_up_station).await;
+    // Bluetooth for Settings (CF-13, ADR 0062): the computer's controller,
+    // or the file standing in for it; down where the rules say it's off,
+    // by device::watch below and every half minute.
+    let bluetooth = match config.bluetooth.stand_in.clone() {
+        Some(path) => Some(glass_platform::bluetooth::Controller::stand_in(path)),
+        None => tokio::task::spawn_blocking(glass_platform::bluetooth::Controller::find)
+            .await
+            .ok()
+            .flatten(),
+    };
+    if let Some(controller) = bluetooth {
+        org.settings.set_bluetooth(controller);
+    }
     // What agents reach to fix the hardware (ADR 0057): the runtime's
     // kernel patches, and the build service if this computer has one.
     org.hardware
@@ -800,6 +813,9 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // What IT sets for the computer that glassd applies itself: the time
     // zone, USB drives for whoever is signed in (ADR 0031), and Wi-Fi.
     device::watch(&org.settings, &runtime, config.studio.source.clone());
+    if config.bluetooth.stand_in.is_none() {
+        device::watch_bluetooth(&org.settings, &runtime);
+    }
     // First-run setup makes the owner of a computer nobody manages after
     // glassd has started: learnt as they sign in (ADR 0038).
     if config.managed.is_none() {

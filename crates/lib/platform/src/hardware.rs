@@ -57,7 +57,7 @@ pub struct Part {
     /// What the status means on this computer.
     pub note: String,
     /// What the OS doesn't do with it yet, whatever the computer: a
-    /// requirement not built, as a phrase ("the Bluetooth pane in Settings").
+    /// requirement not built, as a phrase ("802.1X on wired networks").
     pub gap: Option<String>,
 }
 
@@ -563,7 +563,7 @@ fn bluetooth(usb: Option<&[UsbDevice]>, devices: &[Device], intel_firmware: bool
     };
     with_gap(
         part(Kind::Bluetooth, status, found, note),
-        "the Bluetooth pane in Settings (CF-13)",
+        "headsets and Bluetooth LE, which this OS version lacks (CF-13)",
     )
 }
 

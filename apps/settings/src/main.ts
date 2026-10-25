@@ -100,10 +100,37 @@ interface Computer {
   kept: { id: string; revision: number; summary: string; review: string }[];
 }
 
+/** A Bluetooth device, paired or found nearby (CF-13). */
+interface BtDevice {
+  address: string;
+  name: string;
+  kind: string;
+  /** "Keyboard", "Mouse", "Phone"... */
+  label: string;
+  paired: boolean;
+  connected: boolean;
+  /** Why it can't be paired here. */
+  blocked?: string;
+}
+
+/** Bluetooth as glassd drives it (CF-13, ADR 0062). */
+interface Bluetooth {
+  present: boolean;
+  on: boolean;
+  /** IT (or the owner) lets it be on. */
+  allowed: boolean;
+  input_only: boolean;
+  devices: BtDevice[];
+  /** After pairing: what the person types on the device. */
+  pin?: string;
+}
+
 /** Display & sleep's section, where brightness goes first. */
 const DISPLAY = "Display & sleep";
 /** This computer's section, where its version and patches go first. */
 const COMPUTER = "This computer";
+/** Bluetooth's section: the devices first, then IT's rules. */
+const BLUETOOTH = "Bluetooth";
 
 const bridge = new Bridge({ app: "settings" });
 const state = {
@@ -112,6 +139,9 @@ const state = {
   wifi: null as Wifi | null,
   brightness: null as Brightness | null,
   computer: null as Computer | null,
+  bluetooth: null as Bluetooth | null,
+  /** The device being paired, and the PIN to type on it. */
+  pairing: null as { address: string; pin: string } | null,
   /** The network whose password is being typed, and the password. */
   joining: null as { network: string; password: string } | null,
   /** What the owner is connecting: the key is typed here and sent once. */
@@ -136,7 +166,7 @@ async function load(): Promise<void> {
   } catch (error) {
     state.notice = { text: error instanceof Offline ? "Settings haven't been loaded on this computer yet." : String(error), tone: "bad" };
   }
-  await Promise.all([loadWifi(), loadBrightness(), loadComputer()]);
+  await Promise.all([loadWifi(), loadBrightness(), loadComputer(), loadBluetooth()]);
   // AI models (ADR 0039) on their own: a system without them still shows
   // every setting, just not this section.
   try {
@@ -353,6 +383,97 @@ function computer(c: Computer): HTMLElement[] {
       ),
     );
   }
+  return rows;
+}
+
+async function loadBluetooth(): Promise<void> {
+  try {
+    const read = await bridge.read<Bluetooth>("settings.bluetooth", {});
+    state.bluetooth = read.result.ok ? read.result.data : null;
+  } catch {
+    state.bluetooth = null;
+  }
+  // Paired: the PIN is done with.
+  if (state.pairing && state.bluetooth?.devices.some((d) => d.address === state.pairing?.address && d.connected)) state.pairing = null;
+}
+
+/** Looks for devices, pairs one, removes one, or turns Bluetooth on or off: each on the record. */
+async function bluetoothAction(action: string, input: Record<string, unknown>): Promise<void> {
+  state.busy = action === "settings.bluetooth_scan" ? "bluetooth-scan" : "bluetooth";
+  state.notice = null;
+  render();
+  try {
+    const result = await bridge.call<Bluetooth>(action, input);
+    if (result.ok) {
+      state.bluetooth = result.data;
+      if (result.data.pin && typeof input.address === "string") state.pairing = { address: input.address, pin: result.data.pin };
+    }
+    state.notice = { text: result.text, tone: result.ok ? "ok" : "bad" };
+  } catch (error) {
+    state.notice = { text: error instanceof BridgeError ? error.message : String(error), tone: "bad" };
+  }
+  state.busy = null;
+  render();
+}
+
+/** The paired devices, the PIN being typed, and what a search found: rows at the top of Bluetooth. */
+function bluetooth(b: Bluetooth): HTMLElement[] {
+  const busy = state.busy !== null && state.busy.startsWith("bluetooth");
+  if (!b.present) return [h("div", { class: "setting", "data-setting": "bluetooth-devices" }, h("div", { class: "help" }, "This computer has no Bluetooth."))];
+  const power = b.allowed
+    ? h("input", {
+        type: "checkbox",
+        name: "bluetooth-on",
+        "aria-label": "Bluetooth on",
+        checked: b.on,
+        disabled: busy || state.offline,
+        onchange: (e: Event) => bluetoothAction("settings.bluetooth_power", { on: (e.target as HTMLInputElement).checked }),
+      })
+    : h("span", { class: "muted" }, "Turned off on this computer");
+  const rows: HTMLElement[] = [
+    h(
+      "div",
+      { class: "setting", "data-setting": "bluetooth-on" },
+      h("div", {}, h("div", { class: "title" }, "Bluetooth"), h("div", { class: "help" }, b.on ? "Keyboards, mice and other devices connect." : "Nothing connects over Bluetooth.")),
+      h("span", { class: "control" }, power),
+    ),
+  ];
+  if (!b.on) return rows;
+  for (const d of b.devices) {
+    // Until the next look shows it connected: the person types it then.
+    const typing = state.pairing?.address === d.address;
+    let control: HTMLElement | null;
+    if (d.paired) {
+      control = h("button", { class: "link", disabled: busy, "data-test": "bt-remove", onclick: () => bluetoothAction("settings.bluetooth_remove", { address: d.address }) }, "Remove");
+    } else if (d.blocked) {
+      control = h("span", { class: "muted" }, "Can't pair");
+    } else {
+      control = h("button", { class: "button", disabled: busy, "data-test": "bt-pair", onclick: () => bluetoothAction("settings.bluetooth_pair", { address: d.address }) }, "Pair");
+    }
+    const notes = [d.label, d.paired ? (d.connected ? "Connected" : "Paired, not connected") : null, d.blocked ?? null].filter(Boolean);
+    rows.push(
+      h(
+        "div",
+        { class: "setting", "data-device": d.address },
+        h(
+          "div",
+          {},
+          h("div", { class: "title" }, d.name),
+          h("div", { class: "help" }, notes.join(" · ")),
+          typing && state.pairing ? h("div", { class: "who", "data-test": "bt-pin" }, `Type ${state.pairing.pin} on it, then press Enter.`) : null,
+        ),
+        control,
+      ),
+    );
+  }
+  rows.push(
+    h(
+      "div",
+      { class: "setting" },
+      h("div", { class: "help" }, b.input_only ? "This computer pairs only keyboards, mice and other input devices." : "Put the device in pairing mode, then look for it."),
+      h("button", { class: "button", disabled: busy || state.offline, "data-test": "bt-scan", onclick: () => bluetoothAction("settings.bluetooth_scan", {}) }, state.busy === "bluetooth-scan" ? "Looking…" : "Look for devices"),
+    ),
+  );
   return rows;
 }
 
@@ -754,6 +875,7 @@ function render(): void {
             { class: "rows" },
             section === DISPLAY && state.brightness?.present ? brightness(state.brightness) : null,
             ...(section === COMPUTER && state.computer ? computer(state.computer) : []),
+            ...(section === BLUETOOTH && state.bluetooth ? bluetooth(state.bluetooth) : []),
             ...state.settings.filter((s) => s.section === section).map(row),
           ),
         ),
@@ -772,5 +894,5 @@ setInterval(() => {
   if (state.busy || state.joining || document.hidden) return;
   // The slider being dragged isn't redrawn under the pointer.
   if (document.activeElement?.getAttribute("name") === "brightness") return;
-  void Promise.all([loadWifi(), loadBrightness(), loadComputer()]).then(render);
+  void Promise.all([loadWifi(), loadBrightness(), loadComputer(), loadBluetooth()]).then(render);
 }, 8000);

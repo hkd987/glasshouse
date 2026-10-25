@@ -77,6 +77,9 @@ pub struct Config {
     /// The screen's backlight (ADR 0060).
     #[serde(default)]
     pub display: DisplayConfig,
+    /// Bluetooth (CF-13, ADR 0062).
+    #[serde(default)]
+    pub bluetooth: BluetoothConfig,
     /// The OS updates this computer takes (ADR 0061).
     #[serde(default)]
     pub update: UpdateConfig,
@@ -182,6 +185,16 @@ fn default_channel() -> String {
 pub struct DisplayConfig {
     #[serde(default)]
     pub backlight: Option<PathBuf>,
+}
+
+/// `[bluetooth] stand_in`: a file standing in for the computer's Bluetooth,
+/// on a computer with none (development, the apps' tests). Unset: the
+/// computer's own controller, if it has one.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BluetoothConfig {
+    #[serde(default)]
+    pub stand_in: Option<PathBuf>,
 }
 
 /// `[wifi]`: the radio's wpa_supplicant control socket, and the

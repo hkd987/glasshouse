@@ -405,6 +405,8 @@ pub const PERSONS_OWN: &[&str] = &[
     "settings.models_connect",
     // A Wi-Fi network's password (CF-12, ADR 0059).
     "settings.wifi_join",
+    // A paired keyboard types into everything (CF-13, ADR 0062).
+    "settings.bluetooth_pair",
     // An OS update and a kernel patch change what the whole computer runs
     // (ADR 0057, ADR 0061): installing one, or taking a patch out, is the
     // person's at the screen; IT's on a managed computer.

@@ -9,6 +9,7 @@
 //! directory, by uid, never in their home, so nothing they or their agents
 //! can write decides what IT locked.
 
+pub mod bluetooth;
 pub mod computer;
 pub mod wifi;
 
@@ -67,6 +68,17 @@ fn sentence(text: &str) -> String {
     out
 }
 
+/// Bluetooth devices, paired and nearby (CF-13, ADR 0062). The person's,
+/// in Settings.
+pub const BLUETOOTH: &str = "settings.bluetooth";
+/// Looks for devices nearby: about ten seconds.
+pub const BLUETOOTH_SCAN: &str = "settings.bluetooth_scan";
+/// Pairs one the last search found. The person's own: a paired keyboard
+/// types.
+pub const BLUETOOTH_PAIR: &str = "settings.bluetooth_pair";
+pub const BLUETOOTH_REMOVE: &str = "settings.bluetooth_remove";
+/// Turns Bluetooth on or off, when IT lets it be on.
+pub const BLUETOOTH_POWER: &str = "settings.bluetooth_power";
 /// This computer as Settings shows it: its version, OS updates and kernel
 /// patches (ADR 0057, 0061).
 pub const COMPUTER: &str = "settings.computer";
@@ -203,6 +215,10 @@ struct Inner {
     backlight: RwLock<Option<Backlight>>,
     /// The runtime's OS updates and kernel patches (ADR 0057, 0061).
     system: RwLock<Option<Arc<dyn computer::Computer>>>,
+    /// The computer's Bluetooth controller (CF-13), and what the last
+    /// search for devices found.
+    bluetooth: RwLock<Option<bluetooth::Controller>>,
+    nearby: Mutex<Vec<bluetooth::Device>>,
     /// Held from a change's check through its write: the desktop's
     /// `settings.set` and the Settings app's can come at once, and each
     /// rewrites the whole file (ADR 0052).
@@ -256,6 +272,8 @@ impl SettingsHandle {
             wifi: RwLock::new(None),
             backlight: RwLock::new(None),
             system: RwLock::new(None),
+            bluetooth: RwLock::new(None),
+            nearby: Mutex::new(Vec::new()),
             writing: Mutex::new(()),
         }))
     }
@@ -383,6 +401,60 @@ impl SettingsHandle {
             present: true,
             percent: Some(now),
         })
+    }
+
+    /// The computer's Bluetooth controller (glassd's, CF-13).
+    pub fn set_bluetooth(&self, controller: bluetooth::Controller) {
+        *self
+            .0
+            .bluetooth
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(controller);
+    }
+
+    pub fn has_bluetooth(&self) -> bool {
+        self.bluetooth().is_some()
+    }
+
+    fn bluetooth(&self) -> Option<bluetooth::Controller> {
+        self.0
+            .bluetooth
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// What IT, or the computer's owner, decided about Bluetooth.
+    pub fn bluetooth_rules(&self) -> bluetooth::Rules {
+        let mut rules = bluetooth::Rules::default();
+        for r in self.computer(None) {
+            match (r.id, r.value) {
+                (settings::BLUETOOTH_ENABLED, SettingValue::Bool(b)) => rules.enabled = b,
+                (settings::BLUETOOTH_INPUT_ONLY, SettingValue::Bool(b)) => rules.input_only = b,
+                _ => {}
+            }
+        }
+        rules
+    }
+
+    /// Brings Bluetooth down when the rules say it's off: as glassd starts
+    /// and whenever they change. What it changed, in words.
+    pub fn bluetooth_reconcile(&self) -> Result<Vec<String>, String> {
+        match self.bluetooth() {
+            Some(controller) => bluetooth::reconcile(&controller, &self.bluetooth_rules()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn bluetooth_view(&self) -> Result<bluetooth::View, ActionError> {
+        let nearby = self
+            .0
+            .nearby
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        bluetooth::view(self.bluetooth().as_ref(), &self.bluetooth_rules(), &nearby)
+            .map_err(ActionError::Failed)
     }
 
     /// What IT, or the computer's owner, decided about Wi-Fi.
@@ -971,6 +1043,10 @@ fn no_wifi() -> ActionError {
     ActionError::Failed("This computer has no Wi-Fi.".into())
 }
 
+fn no_bluetooth() -> ActionError {
+    ActionError::Failed("This computer has no Bluetooth.".into())
+}
+
 #[derive(Debug, Clone)]
 pub struct SettingsProvider {
     handle: SettingsHandle,
@@ -998,6 +1074,18 @@ struct JoinInput {
 #[serde(deny_unknown_fields)]
 struct ForgetInput {
     network: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeviceInput {
+    address: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PowerInput {
+    on: bool,
 }
 
 #[derive(Deserialize)]
@@ -1162,6 +1250,77 @@ impl ActionProvider for SettingsProvider {
                 ask: AskLabels::default(),
             },
             ActionDef {
+                name: BLUETOOTH.parse().expect("static name"),
+                title: "See Bluetooth devices".into(),
+                description: "The Bluetooth devices paired, and those the last search found. \
+                              The person's own, in Settings: never an agent."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                side_effect: SideEffect::None,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: BLUETOOTH_SCAN.parse().expect("static name"),
+                title: "Look for Bluetooth devices".into(),
+                description: "Looks for devices nearby, for about ten seconds. The person's \
+                              own, in Settings: never an agent."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                side_effect: SideEffect::None,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: BLUETOOTH_PAIR.parse().expect("static name"),
+                title: "Pair a Bluetooth device".into(),
+                description: "Pairs a device the last search found; the person types the PIN \
+                              it gives on the device. The person's own, in Settings: never an \
+                              agent."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "address": { "type": "string" } },
+                    "required": ["address"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: BLUETOOTH_REMOVE.parse().expect("static name"),
+                title: "Remove a Bluetooth device".into(),
+                description: "Forgets a paired device. The person's own, in Settings: never an \
+                              agent."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "address": { "type": "string" } },
+                    "required": ["address"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: BLUETOOTH_POWER.parse().expect("static name"),
+                title: "Turn Bluetooth on or off".into(),
+                description: "Turns Bluetooth on or off, when IT lets it be on. The person's \
+                              own, in Settings: never an agent."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "on": { "type": "boolean" } },
+                    "required": ["on"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
                 name: COMPUTER.parse().expect("static name"),
                 title: "See this computer's version and updates".into(),
                 description: "The version this computer runs, its OS update, and the kernel \
@@ -1316,6 +1475,37 @@ impl ActionProvider for SettingsProvider {
                 "required": ["connected", "setup_choice", "managed", "editable", "services", "agents"],
                 "additionalProperties": false
             }),
+            BLUETOOTH | BLUETOOTH_SCAN | BLUETOOTH_PAIR | BLUETOOTH_REMOVE | BLUETOOTH_POWER => {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "present": { "type": "boolean", "description": "the computer has Bluetooth" },
+                        "on": { "type": "boolean", "description": "devices connect" },
+                        "allowed": { "type": "boolean", "description": "IT (or the owner) lets it be on" },
+                        "input_only": { "type": "boolean", "description": "only keyboards, mice and other input devices may be paired" },
+                        "pin": { "type": "string", "description": "after pairing: what the person types on the device" },
+                        "devices": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "address": { "type": "string" },
+                                    "name": { "type": "string" },
+                                    "kind": { "enum": ["keyboard", "mouse", "keyboard_and_mouse", "game_controller", "input", "audio", "phone", "computer", "other"] },
+                                    "label": { "type": "string" },
+                                    "paired": { "type": "boolean" },
+                                    "connected": { "type": "boolean" },
+                                    "blocked": { "type": "string", "description": "why it can't be paired here" }
+                                },
+                                "required": ["address", "name", "kind", "label", "paired", "connected"],
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["present", "on", "allowed", "input_only", "devices"],
+                    "additionalProperties": false
+                })
+            }
             COMPUTER | COMPUTER_CHECK | UPDATE_INSTALL | PATCH_REMOVE => json!({
                 "type": "object",
                 "properties": {
@@ -1461,6 +1651,43 @@ impl ActionProvider for SettingsProvider {
                 Ok(Preview {
                     summary: format!("Set the screen's brightness to {}%", input.percent),
                     targets: vec!["Settings: Display & sleep".into()],
+                    ..Preview::default()
+                })
+            }
+            BLUETOOTH | BLUETOOTH_SCAN => {
+                let _: NoInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: if action.as_str() == BLUETOOTH {
+                        "See Bluetooth devices"
+                    } else {
+                        "Look for Bluetooth devices"
+                    }
+                    .into(),
+                    targets: vec!["Settings: Bluetooth".into()],
+                    ..Preview::default()
+                })
+            }
+            BLUETOOTH_PAIR | BLUETOOTH_REMOVE => {
+                let input: DeviceInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: format!(
+                        "{} the Bluetooth device {}",
+                        if action.as_str() == BLUETOOTH_PAIR {
+                            "Pair"
+                        } else {
+                            "Remove"
+                        },
+                        input.address
+                    ),
+                    targets: vec![format!("Bluetooth: {}", input.address)],
+                    ..Preview::default()
+                })
+            }
+            BLUETOOTH_POWER => {
+                let input: PowerInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: format!("Turn Bluetooth {}", if input.on { "on" } else { "off" }),
+                    targets: vec!["Settings: Bluetooth".into()],
                     ..Preview::default()
                 })
             }
@@ -1695,6 +1922,97 @@ impl ActionProvider for SettingsProvider {
                         None => "This screen's brightness isn't set from here.".into(),
                     },
                     data: serde_json::to_value(brightness).unwrap_or_default(),
+                    changes: Vec::new(),
+                })
+            }
+            BLUETOOTH | BLUETOOTH_SCAN | BLUETOOTH_PAIR | BLUETOOTH_REMOVE | BLUETOOTH_POWER => {
+                // The person's own, in Settings: policy makes these Never for
+                // every agent, and anything but Settings is refused here too.
+                if ctx.principal.agent.as_str() != APP {
+                    return Err(ActionError::Failed(
+                        "Bluetooth is the person's own, in Settings; never an agent's.".into(),
+                    ));
+                }
+                let controller = self.handle.bluetooth().ok_or_else(no_bluetooth)?;
+                let rules = self.handle.bluetooth_rules();
+                let mut pin = None;
+                let text = match action.as_str() {
+                    BLUETOOTH_SCAN => {
+                        let _: NoInput = glass_actions::parse_input(input)?;
+                        if !controller
+                            .on()
+                            .map_err(|e| ActionError::Failed(e.to_string()))?
+                        {
+                            return Err(ActionError::Failed("Turn Bluetooth on first.".into()));
+                        }
+                        let found = controller
+                            .inquiry()
+                            .map_err(|e| ActionError::Failed(e.to_string()))?;
+                        let n = found.len();
+                        *self
+                            .handle
+                            .0
+                            .nearby
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner) = found;
+                        match n {
+                            0 => "Found nothing nearby: is the device in pairing mode?".into(),
+                            1 => "Found 1 device nearby.".into(),
+                            n => format!("Found {n} devices nearby."),
+                        }
+                    }
+                    BLUETOOTH_PAIR => {
+                        let input: DeviceInput = glass_actions::parse_input(input)?;
+                        let nearby = self
+                            .handle
+                            .0
+                            .nearby
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .clone();
+                        let code = bluetooth::pair(&controller, &rules, &nearby, &input.address)
+                            .map_err(ActionError::Failed)?;
+                        // The PIN only in the data Settings shows, never in
+                        // a line that may be kept.
+                        pin = Some(code);
+                        "Type the PIN Settings shows on the device, then press Enter.".into()
+                    }
+                    BLUETOOTH_REMOVE => {
+                        let input: DeviceInput = glass_actions::parse_input(input)?;
+                        controller
+                            .remove(&input.address.to_ascii_lowercase())
+                            .map_err(|e| ActionError::Failed(e.to_string()))?;
+                        "Removed it: it won't connect again until it's paired.".into()
+                    }
+                    BLUETOOTH_POWER => {
+                        let input: PowerInput = glass_actions::parse_input(input)?;
+                        bluetooth::power(&controller, &rules, input.on)
+                            .map_err(ActionError::Failed)?;
+                        format!("Bluetooth is {}.", if input.on { "on" } else { "off" })
+                    }
+                    _ => {
+                        let _: NoInput = glass_actions::parse_input(input)?;
+                        String::new()
+                    }
+                };
+                let view = self.handle.bluetooth_view()?;
+                let text = if text.is_empty() {
+                    let paired = view.devices.iter().filter(|d| d.paired).count();
+                    match (view.present, view.on) {
+                        (false, _) => "This computer has no Bluetooth.".into(),
+                        (true, false) => format!("Bluetooth is off; {paired} devices paired."),
+                        (true, true) => format!("Bluetooth is on; {paired} devices paired."),
+                    }
+                } else {
+                    text
+                };
+                let mut data = serde_json::to_value(&view).unwrap_or_default();
+                if let (Some(pin), Some(map)) = (pin, data.as_object_mut()) {
+                    map.insert("pin".into(), json!(pin));
+                }
+                Ok(ActionOutput {
+                    text,
+                    data,
                     changes: Vec::new(),
                 })
             }
@@ -2708,6 +3026,27 @@ members = ["dana"]
         );
         run(UPDATE_INSTALL, json!({}));
         run(PATCH_REMOVE, json!({}));
+
+        // Bluetooth (CF-13): a keyboard found, paired, removed; off and on.
+        let bt = dir.path().join("bluetooth.json");
+        std::fs::write(
+            &bt,
+            json!({ "nearby": [{ "address": "00:1f:20:3a:4b:5c", "name": "Keyboard K380", "class": 0x002540 }] })
+                .to_string(),
+        )
+        .unwrap();
+        handle.set_bluetooth(bluetooth::Controller::stand_in(&bt));
+        assert_eq!(run(BLUETOOTH, json!({}))["present"], true);
+        assert_eq!(
+            run(BLUETOOTH_SCAN, json!({}))["devices"][0]["label"],
+            "Keyboard"
+        );
+        let paired = run(BLUETOOTH_PAIR, json!({ "address": "00:1f:20:3a:4b:5c" }));
+        assert_eq!(paired["pin"].as_str().unwrap().len(), 6);
+        assert_eq!(paired["devices"][0]["paired"], true);
+        run(BLUETOOTH_REMOVE, json!({ "address": "00:1f:20:3a:4b:5c" }));
+        assert_eq!(run(BLUETOOTH_POWER, json!({ "on": false }))["on"], false);
+        run(BLUETOOTH_POWER, json!({ "on": true }));
 
         for def in provider.actions() {
             assert!(provider.returns(&def.name).is_some(), "{}", def.name);

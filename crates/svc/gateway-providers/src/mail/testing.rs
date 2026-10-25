@@ -118,6 +118,17 @@ impl Mox {
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
+        // Its control socket, which `set_password` talks to, comes up
+        // after the ports do: waited for too, or a test races it.
+        let ctl = mox.dir.path().join("mox/ctl");
+        while !ctl.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "mox has no control socket at {}",
+                ctl.display()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
         Some(mox)
     }
 
@@ -228,7 +239,7 @@ impl Mox {
             .args(["setaccountpassword", "mox"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("mox setaccountpassword runs");
         child
@@ -237,9 +248,11 @@ impl Mox {
             .expect("its stdin")
             .write_all(format!("{password}\n").as_bytes())
             .expect("the password reaches it");
+        let out = child.wait_with_output().expect("it ends");
         assert!(
-            child.wait().expect("it ends").success(),
-            "mox refused the password"
+            out.status.success(),
+            "mox refused the password: {}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 

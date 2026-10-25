@@ -123,6 +123,48 @@ pub(crate) fn watch(settings: &SettingsHandle, runtime: &Arc<Runtime>, source: P
         let runtime = weak.upgrade();
         apply(computer, seat, runtime.as_deref(), &source, &mut applied);
         wifi(&handle, runtime.as_deref(), &mut applied);
+        bluetooth(&handle, runtime.as_deref());
+    });
+}
+
+/// Bluetooth down where the rules say it's off (CF-13): whenever they
+/// change, and every half minute, for a controller plugged in since or a
+/// stack the base system started again as one attached.
+fn bluetooth(settings: &SettingsHandle, runtime: Option<&Runtime>) {
+    match settings.bluetooth_reconcile() {
+        Ok(did) => {
+            for change in did {
+                tracing::info!("Bluetooth: {change}");
+                if let Some(runtime) = runtime {
+                    runtime.append_audit(setting_event("bluetooth", change.into(), None, Ok(())));
+                }
+            }
+        }
+        Err(e) => tracing::warn!("Bluetooth: {e}"),
+    }
+}
+
+/// Keeps Bluetooth as the rules say between their changes: finds a
+/// controller plugged in since glassd started, and brings the stack down
+/// again where it's off.
+pub(crate) fn watch_bluetooth(settings: &SettingsHandle, runtime: &Arc<Runtime>) {
+    let settings = settings.clone();
+    let weak = Arc::downgrade(runtime);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let settings = settings.clone();
+            let weak = weak.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if !settings.has_bluetooth()
+                    && let Some(found) = glass_platform::bluetooth::Controller::find()
+                {
+                    settings.set_bluetooth(found);
+                }
+                bluetooth(&settings, weak.upgrade().as_deref());
+            })
+            .await;
+        }
     });
 }
 

@@ -143,4 +143,7 @@ From the image's contents and the base system's source (ADR 0056, 0058):
 - **Sound:** HD Audio works; laptops that route their microphone through
   Intel's audio DSP have no driver for it.
 - **Bluetooth:** Intel's controllers' firmware (`iwmbt`) is in the image,
-  loaded by `iwmbtfw` as the controller attaches.
+  loaded by `iwmbtfw` as the controller attaches. Settings pairs keyboards
+  and mice with a PIN typed on them (ADR 0062): on each pilot laptop, pair
+  a Bluetooth keyboard and mouse, type and point with them, restart, and
+  check they reconnect. Headsets and Bluetooth LE aren't in the base system.

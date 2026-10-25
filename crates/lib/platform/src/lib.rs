@@ -28,6 +28,7 @@
 #[allow(unsafe_code)]
 pub mod auth;
 pub mod backlight;
+pub mod bluetooth;
 pub mod bootenv;
 mod cmd;
 #[allow(unsafe_code)]

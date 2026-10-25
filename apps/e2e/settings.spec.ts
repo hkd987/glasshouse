@@ -165,6 +165,36 @@ test("adr0061 this computer's version, its updates and its kernel patches are in
   await expect(page.locator("[data-test=patch-remove]")).toHaveCount(0);
 });
 
+test("cf13 the person pairs a keyboard in Settings, inside the rules the computer's owner sets", async ({ page }) => {
+  // The suite's Bluetooth is a stand-in with a keyboard, a mouse, a phone
+  // and headphones nearby (tools/dev/host-run.sh).
+  await page.goto(appUrl("settings"));
+  await expect(page.locator("html[data-ready=true]")).toHaveCount(1);
+  await expect(page.locator("input[name=bluetooth-on]")).toBeChecked();
+  await page.locator("[data-test=bt-scan]").click();
+  const keyboard = page.locator('[data-device="00:1f:20:3a:4b:5c"]');
+  await expect(keyboard).toContainText("Keyboard K380");
+  // Headphones need the base system's work first.
+  await expect(page.locator('[data-device="00:1b:66:01:02:03"]')).toContainText("Can't pair");
+
+  await keyboard.locator("[data-test=bt-pair]").click();
+  await expect(keyboard.locator("[data-test=bt-pin]")).toContainText(/Type \d{6} on it/);
+  await expect(keyboard).toContainText("Connected");
+  await keyboard.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(SHOTS, "settings-bluetooth.png") });
+  expect(audit().some((r) => r.event.kind === "action" && r.event.action === "settings.bluetooth_pair")).toBe(true);
+  await keyboard.locator("[data-test=bt-remove]").click();
+  await expect(keyboard.locator("[data-test=bt-pair]")).toBeVisible();
+
+  // The owner allows only input devices: the phone can't be paired.
+  await control("settings.set", { id: "bluetooth.input_only", value: true });
+  await page.reload();
+  await expect(page.locator("html[data-ready=true]")).toHaveCount(1);
+  await page.locator("[data-test=bt-scan]").click();
+  await expect(page.locator('[data-device="00:80:37:29:19:a4"]')).toContainText("only keyboards, mice");
+  await control("settings.set", { id: "bluetooth.input_only" });
+});
+
 test("cf12 the person joins Wi-Fi in Settings, inside the rules the computer's owner sets", async ({ page }) => {
   // The suite's Wi-Fi is glass-fake-wpa: wpa_supplicant's control socket
   // with networks in the air (tools/dev/host-run.sh).

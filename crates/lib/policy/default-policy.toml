@@ -86,6 +86,13 @@ approval_timeout_secs = 900
 "settings.wifi" = "never"
 "settings.wifi_join" = "never"
 "settings.wifi_forget" = "never"
+# Bluetooth (CF-13, ADR 0062): the person's, in Settings. A paired keyboard
+# types into everything, so pairing is never an agent's.
+"settings.bluetooth" = "never"
+"settings.bluetooth_scan" = "never"
+"settings.bluetooth_pair" = "never"
+"settings.bluetooth_remove" = "never"
+"settings.bluetooth_power" = "never"
 # The screen's brightness (ADR 0060): the person's, from Settings and the
 # brightness keys. IT may let an agent dim it; never below 5%.
 "settings.brightness" = "never"
@@ -278,10 +285,11 @@ tiers = { "catalog.patch_install" = "auto" }
 
 # The computer's owner connects their own AI models in Settings, and chooses
 # which agents use them (ADR 0039); the person at it joins Wi-Fi (CF-12),
+# pairs Bluetooth devices (CF-13),
 # installs OS updates and takes kernel patches out (ADR 0061).
 [[app]]
 id = "settings"
-tiers = { "settings.models_connect" = "auto", "settings.models_agents" = "auto", "settings.wifi" = "auto", "settings.wifi_join" = "auto", "settings.wifi_forget" = "auto", "settings.brightness" = "auto", "settings.brightness_set" = "auto", "settings.computer" = "auto", "settings.computer_check" = "auto", "settings.update_install" = "auto", "settings.patch_remove" = "auto" }
+tiers = { "settings.models_connect" = "auto", "settings.models_agents" = "auto", "settings.wifi" = "auto", "settings.wifi_join" = "auto", "settings.wifi_forget" = "auto", "settings.bluetooth" = "auto", "settings.bluetooth_scan" = "auto", "settings.bluetooth_pair" = "auto", "settings.bluetooth_remove" = "auto", "settings.bluetooth_power" = "auto", "settings.brightness" = "auto", "settings.brightness_set" = "auto", "settings.computer" = "auto", "settings.computer_check" = "auto", "settings.update_install" = "auto", "settings.patch_remove" = "auto" }
 
 # In Routines the person sees what runs for them, starts it, pauses it,
 # changes when it runs, goes back to an earlier version, and keeps what they

@@ -24,6 +24,10 @@ pub const WIFI_NETWORKS: &str = "wifi.networks";
 pub const WIFI_BLOCKED: &str = "wifi.blocked";
 /// Only the organization's Wi-Fi networks may be joined.
 pub const WIFI_ONLY_ORGANIZATION: &str = "wifi.only_organization";
+/// Whether the computer's Bluetooth may be on (CF-13).
+pub const BLUETOOTH_ENABLED: &str = "bluetooth.enabled";
+/// Only keyboards, mice and other input devices may be paired.
+pub const BLUETOOTH_INPUT_ONLY: &str = "bluetooth.input_only";
 /// The folders the desktop agent reads when asked without naming any
 /// (ADR 0048).
 pub const AGENT_FOLDERS: &str = "agents.folders";
@@ -215,6 +219,24 @@ pub fn table() -> &'static [SettingDef] {
                 "Wi-Fi",
                 "Only your organization's networks",
                 "People can't join other networks, such as a café's or their home's.",
+                Scope::Device,
+                false,
+            ),
+            // CF-13, ADR 0062: glassd brings the stack down when it's off,
+            // and Settings pairs only what these allow.
+            toggle(
+                BLUETOOTH_ENABLED,
+                "Bluetooth",
+                "Bluetooth",
+                "Off: nothing connects over Bluetooth, and nothing can be paired. Paired devices are kept for when it's on again.",
+                Scope::Device,
+                true,
+            ),
+            toggle(
+                BLUETOOTH_INPUT_ONLY,
+                "Bluetooth",
+                "Only keyboards and mice",
+                "People can pair keyboards, mice and other input devices, and nothing else.",
                 Scope::Device,
                 false,
             ),

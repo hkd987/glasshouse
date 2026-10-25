@@ -77,6 +77,11 @@ secrets = "$dev/wifi-secrets.toml"
 [display]
 backlight = "$dev/backlight"
 
+# Bluetooth (CF-13, ADR 0062): a file stands in for a controller, with a
+# keyboard, a mouse, a phone and headphones nearby.
+[bluetooth]
+stand_in = "$dev/bluetooth.json"
+
 # Remixing and making apps (ADR 0032): the apps workspace's esbuild, its
 # source in the layout images have, and what tries each version (ADR 0049).
 [studio]
@@ -186,6 +191,14 @@ MODELS
 # The stand-in wpa_supplicant, gone when glassd (this process, after exec) is.
 "$bin/glass-fake-wpa" "$run/wpa" &
 (umask 077 && printf '[networks."Northwind Staff"]\npassword = "staff-password-not-real"\n' >"$dev/wifi-secrets.toml")
+cat >"$dev/bluetooth.json" <<'BT'
+{"on": true, "nearby": [
+  {"address": "00:1f:20:3a:4b:5c", "name": "Keyboard K380", "class": 9536},
+  {"address": "00:1f:20:3a:4b:5d", "name": "MX Anywhere 3", "class": 9600},
+  {"address": "00:80:37:29:19:a4", "name": "Dana's phone", "class": 5374468},
+  {"address": "00:1b:66:01:02:03", "name": "WH-1000XM4", "class": 2360324}
+]}
+BT
 
 echo "glassd (host-insecure) — in another shell:"
 echo "  export GLASS_CONTROL_SOCKET=$run/control.sock"
