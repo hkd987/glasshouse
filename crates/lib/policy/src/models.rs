@@ -318,9 +318,10 @@ pub(crate) fn validate(doc: &crate::document::PolicyDocument, errors: &mut Vec<S
         }
         if let Some(endpoint) = &p.endpoint
             && !endpoint.starts_with("https://")
+            && !loopback_http(endpoint)
         {
             errors.push(format!(
-                "models.provider {:?}: endpoint must be an https:// URL",
+                "models.provider {:?}: endpoint must be an https:// URL (or http:// to this computer, a development relay)",
                 p.id
             ));
         }
@@ -415,6 +416,24 @@ pub(crate) fn validate(doc: &crate::document::PolicyDocument, errors: &mut Vec<S
             ));
         }
     }
+}
+
+/// `http://` to this computer: a development relay
+/// (`tools/dev/model-relay.py`), which the gateway uses only where
+/// glassd.toml says `model_relay = true`, and refuses elsewhere.
+fn loopback_http(endpoint: &str) -> bool {
+    let Some(rest) = endpoint.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 #[cfg(test)]
@@ -750,6 +769,28 @@ mod tests {
         assert!(rules.route(Label::Public, None).is_err());
         assert_eq!(rules.unlabeled(), Label::Internal);
         assert!(!rules.log_prompts());
+    }
+
+    /// A development relay on this computer is a policy's to name
+    /// (`tools/dev/real-hardware.sh`); anywhere else, plain HTTP isn't.
+    #[test]
+    fn mp4_an_endpoint_is_https_or_a_relay_on_this_computer() {
+        for relay in [
+            "http://127.0.0.1:8787",
+            "http://localhost:8787/",
+            "http://[::1]:8787",
+        ] {
+            assert!(loopback_http(relay), "{relay}");
+        }
+        for other in [
+            "http://api.anthropic.com",
+            "http://127.0.0.1.example.com",
+            "http://10.0.2.2:8787",
+            "ftp://127.0.0.1",
+            "https://127.0.0.1",
+        ] {
+            assert!(!loopback_http(other), "{other}");
+        }
     }
 
     #[test]

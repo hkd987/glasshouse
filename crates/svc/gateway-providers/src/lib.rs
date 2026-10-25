@@ -72,6 +72,15 @@ pub fn connect_with(
         match entry.kind {
             ProviderKind::Scripted => gateway.add(&entry.id, Arc::new(ScriptedProvider::echo())),
             ProviderKind::Anthropic => match secrets.get(&entry.id, "api_key") {
+                Some(_)
+                    if !relay
+                        && entry.endpoint.as_deref().is_some_and(|e| e.starts_with("http://")) =>
+                {
+                    notes.push(format!(
+                        "model provider {}: its endpoint is a development relay, which this computer doesn't use (glassd.toml model_relay)",
+                        entry.id
+                    ));
+                }
                 Some(key) => gateway.add(
                     &entry.id,
                     Arc::new(
