@@ -35,7 +35,17 @@ Not yet tried on a laptop: these steps follow how the dev VM is set up.
 3. **The report.** `glassctl hardware` as root, and `glassctl --json
    hardware > <model>.json` for the record. Anything marked ✗ keeps the
    model off the list until fixed; ~ works with the limit it names.
-4. **What only a person can check,** each against its requirement:
+4. **The bring-up kit.** At the laptop, as root,
+   `/usr/local/libexec/glasshouse/bringup.sh --ssid <network>` goes
+   through the list below part by part, asking the person what only a
+   person can tell (a sound heard, the screen dimmer, a wake that came
+   back whole). It tries Intel's graphics driver if they say so, and
+   sleeps and wakes three times (`--cycles N`). It writes `report.md`,
+   `results.tsv`, `glassctl hardware`'s report and a `capture.sh` capture
+   to `/var/db/glasshouse-bringup/<model>-<date>`; copy that folder off
+   with the record. `--auto` asks nothing, as in the VM, where what QEMU
+   lacks shows as missing.
+5. **What only a person can check,** each against its requirement:
    - Wi-Fi joins WPA2 and WPA3 networks from Settings' Wi-Fi pane (CF-12),
      and WPA2-Enterprise by hand until Settings signs in to them (CF-10);
    - the chipset's watchdog: `ichwd0` attaches (`dmesg | grep ichwd`) and
@@ -51,7 +61,7 @@ Not yet tried on a laptop: these steps follow how the dev VM is set up.
      resumed (PM-1, PM-5), timed;
    - a dock and an external screen (DK-11, CF-32);
    - battery life against Windows on the same model (PM-6).
-5. **Sleep cycles (PM-4).** 1,000 cycles need something to wake the
+6. **Sleep cycles (PM-4).** 1,000 cycles need something to wake the
    laptop each time: the base system can't set a wake alarm, so use Wake
    on LAN from another machine (`ifconfig <port> wol_magic`, where the
    model wakes from S3 by its network port), or a USB key presser.

@@ -19,6 +19,9 @@ static_bindir=${CARGO_TARGET_DIR:-$REPO_ROOT/target}/static/x86_64-unknown-freeb
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 cp -a "$FREEBSD_OS_DIR/overlay/." "$DIST_DIR/"
+# What the bring-up kit (bringup.sh) saves for `glassctl hardware --from`, the same script that runs
+# on a stock release's stick (docs/dev/hardware.md).
+install -m 0755 "$REPO_ROOT/tests/hardware/capture.sh" "$DIST_DIR/usr/local/libexec/glasshouse/capture.sh"
 find "$DIST_DIR" -name .gitkeep -delete
 
 missing=() shipped=() shell_shipped=() n=0 lineno=0
