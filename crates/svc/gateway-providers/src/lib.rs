@@ -53,6 +53,19 @@ pub fn connect(
     secrets: &Secrets,
     credits: Option<&Arc<CreditsLink>>,
 ) -> (Gateway, Vec<String>) {
+    connect_with(providers, secrets, credits, false)
+}
+
+/// [`connect`], and with `relay`, Anthropic's API through a relay on this
+/// machine where policy names one (`http://127.0.0.1:...`): development,
+/// on a computer that can't reach the API itself. glassd.toml says so,
+/// never policy alone.
+pub fn connect_with(
+    providers: &[ProviderEntry],
+    secrets: &Secrets,
+    credits: Option<&Arc<CreditsLink>>,
+    relay: bool,
+) -> (Gateway, Vec<String>) {
     let mut gateway = Gateway::new();
     let mut notes = Vec::new();
     for entry in providers {
@@ -62,7 +75,14 @@ pub fn connect(
                 Some(key) => gateway.add(
                     &entry.id,
                     Arc::new(
-                        AnthropicProvider::new(entry.endpoint.as_deref(), key.clone())
+                        entry
+                            .endpoint
+                            .as_deref()
+                            .filter(|_| relay)
+                            .and_then(|e| AnthropicProvider::relayed(e, key.clone()))
+                            .unwrap_or_else(|| {
+                                AnthropicProvider::new(entry.endpoint.as_deref(), key.clone())
+                            })
                             .checking_history(entry.check_history),
                     ),
                 ),

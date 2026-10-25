@@ -57,6 +57,11 @@ pub struct Config {
     /// every directory mounted into a jail.
     #[serde(default = "default_model_secrets")]
     pub model_secrets: PathBuf,
+    /// Development: Anthropic's API through a relay on this machine, where
+    /// policy names one (`http://127.0.0.1:...`, `tools/dev/model-relay.py`),
+    /// for a computer that can't reach the API itself. Never shipped.
+    #[serde(default)]
+    pub model_relay: bool,
     #[serde(default)]
     pub sandbox: SandboxConfig,
     #[serde(default)]

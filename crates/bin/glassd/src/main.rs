@@ -141,8 +141,12 @@ fn gateway(config: &Config, policy: &Policy, org: &OrgData) -> Models {
         }
     }
     let credits = config.managed.is_some().then_some(&org.credits);
-    let (gateway, more) =
-        glass_gateway_providers::connect(&policy.document().models.providers, &secrets, credits);
+    let (gateway, more) = glass_gateway_providers::connect_with(
+        &policy.document().models.providers,
+        &secrets,
+        credits,
+        config.model_relay,
+    );
     notes.extend(more);
     for note in &notes {
         tracing::warn!("models: {note}");

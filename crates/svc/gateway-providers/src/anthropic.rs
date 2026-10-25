@@ -84,6 +84,15 @@ impl AnthropicProvider {
         Self::with_http(Http::new(), endpoint, key)
     }
 
+    /// Through a relay on this machine, over plain HTTP: development, where
+    /// a computer can't reach the API itself (`tools/dev/model-relay.py`).
+    /// `None` unless `endpoint` is `http://` to a loopback address.
+    pub fn relayed(endpoint: &str, key: Secret) -> Option<Self> {
+        let target = crate::http::Target::parse(&format!("{}/", endpoint.trim_end_matches('/')))?;
+        (!target.tls && crate::console::is_loopback(&target.host))
+            .then(|| Self::with_http(Http::loopback(), Some(endpoint), key))
+    }
+
     fn with_http(http: Http, endpoint: Option<&str>, key: Secret) -> Self {
         let endpoint = endpoint
             .unwrap_or(DEFAULT_ENDPOINT)
@@ -544,5 +553,9 @@ mod tests {
         assert!(err.fails_over(), "{err}");
         let provider = AnthropicProvider::new(Some("http://127.0.0.1:9"), Secret::new("k"));
         assert!(provider.complete(&request(&messages)).is_err());
+        // A relay is plain HTTP to this machine only.
+        assert!(AnthropicProvider::relayed("http://127.0.0.1:8787", Secret::new("k")).is_some());
+        assert!(AnthropicProvider::relayed("http://api.example.com", Secret::new("k")).is_none());
+        assert!(AnthropicProvider::relayed("https://127.0.0.1:8787", Secret::new("k")).is_none());
     }
 }

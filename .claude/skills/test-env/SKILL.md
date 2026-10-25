@@ -47,6 +47,12 @@ make vm-status            # "running: pid …, ssh … up" or not running
   openrouter.ai fails (the session proxy re-signs HTTPS and the VM doesn't
   trust it; never change that): use `--host`, which runs them on the dev
   host (nothing contained) where this machine's trust applies.
+- Agents in the VM's own jails on Anthropic, from a cloud session:
+  `tools/dev/model-relay.py 8787 &` on the host (the key from
+  `GLASS_ANTHROPIC_API_KEY`, put in there, never in the VM), forwarded with
+  `ssh -R 8787:127.0.0.1:8787`; the VM's glassd.toml `model_relay = true`
+  and policy's anthropic provider `endpoint = "http://127.0.0.1:8787"`, its
+  secrets file a placeholder key. Put glassd.toml and policy back after.
 - The agents on a real model on the VM's own desktop (screenshots of an
   agent using the OS): `tools/dev/real-desktop.sh up [model]` (default
   `claude-haiku-5-5`, about a tenth of a cent a task) runs a dev-host glassd
