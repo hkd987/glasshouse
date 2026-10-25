@@ -296,6 +296,25 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
   service's included. `[hardware] keys` are now reviewers' keys.
   `community_keys` sign only patches nobody reviewed: a patch one of them
   signed that says it was reviewed is refused.
+- **On a real model in the dev VM** (2026-10-25, Sonnet through
+  `tools/dev/real-hardware.sh`; the VM given an emulated HD Audio card):
+  - Asked about sound after sleep, it declined twice. First it had read
+    only the first 400 lines of `hdac.c`: the plan names its reads before
+    the searches say where the code is, so the write step may now ask to
+    read more. Then, having read the resume paths, it found the sequence
+    sound and said it wouldn't change it without a log of a failed
+    resume: the right answer on a VM whose sound works.
+  - Asked to name QEMU's codec, it wrote a one-line edit to `hdacc.c`,
+    built as `snd_hda.ko`. This kernel has `snd_hda` built in, so that
+    module would never load, and the start check would have taken
+    `kldload -n`'s "already loaded" for it and kept a patch that never
+    ran. Now such a patch is refused before the person is asked, the
+    start check wants the module's own file loaded, and the agent builds
+    the same edit into the kernel (4½ minutes). Approved and restarted,
+    the kernel named the codec ("QEMU HDA Duplex"), on probation.
+  - The relay needed two fixes: policy now takes `http://` to this
+    computer's loopback as an endpoint (the gateway uses it only with
+    `model_relay`), and the tunnel is an ssh connection of its own.
 
 ## Slice 3, as built (2026-10-25)
 - **IT's setting.** `hardware.community_patches` (a device setting, off by
