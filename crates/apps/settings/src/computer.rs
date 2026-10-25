@@ -8,7 +8,10 @@
 //!   (or back, before its restart): that only ever goes back to the
 //!   computer as it was.
 //! - **The computer's owner**, on a computer nobody manages (ADR 0038),
-//!   checks for and installs OS updates. On a managed computer IT does.
+//!   checks for and installs OS updates. On a managed computer the update
+//!   IT's ring gets installs by itself.
+//! - **Anyone at the screen** chooses when the computer restarts into an
+//!   update installed: now, or tonight.
 //! - **No agent**, ever: policy makes these Never, and the actions that
 //!   change anything are the person's own (`PERSONS_OWN`).
 
@@ -22,6 +25,9 @@ pub trait Computer: Send + Sync {
     /// And the newest release on the computer's channel.
     fn check(&self) -> Result<UpdateStatus, String>;
     fn install(&self) -> Result<OsUpdate, String>;
+    /// Restarts into the update installed now, sets it for tonight, or
+    /// takes tonight back.
+    fn restart(&self, when: glass_api::RestartWhen) -> Result<UpdateStatus, String>;
     fn patches(&self) -> Result<PatchStatus, String>;
     /// Takes back the patch set up but not yet tried.
     fn cancel_patch(&self) -> Result<PatchStatus, String>;
@@ -54,6 +60,7 @@ pub fn view(updates: &UpdateStatus, patches: &PatchStatus, owner: bool) -> Value
             "blocked": a.blocked,
         })),
         "checked": updates.checked,
+        "restart_at": updates.restart_at,
         "patch": patches.trial.as_ref().filter(|t| open(t.state)).map(|t| json!({
             "id": t.id,
             "summary": t.summary,

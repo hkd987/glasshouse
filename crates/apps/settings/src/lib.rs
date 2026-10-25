@@ -90,6 +90,9 @@ pub const UPDATE_INSTALL: &str = "settings.update_install";
 /// Takes a kernel patch back before its restart, or out: anyone at the
 /// screen, back to the computer as it was. The person's own.
 pub const PATCH_REMOVE: &str = "settings.patch_remove";
+/// Restarts into the OS update installed, now or tonight, or not tonight
+/// after all: anyone at the screen. The person's own.
+pub const UPDATE_RESTART: &str = "settings.update_restart";
 /// Where the screen's brightness is kept for the next start.
 const BRIGHTNESS_FILE: &str = "brightness";
 
@@ -1064,6 +1067,12 @@ struct NoInput {}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RestartInput {
+    when: glass_api::RestartWhen,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JoinInput {
     network: String,
     #[serde(default)]
@@ -1355,6 +1364,23 @@ impl ActionProvider for SettingsProvider {
                 ask: AskLabels::default(),
             },
             ActionDef {
+                name: UPDATE_RESTART.parse().expect("static name"),
+                title: "Restart into the OS update".into(),
+                description: "Restarts the computer into the OS update installed, now or at 3 \
+                              in the morning, or takes tonight back. Anyone at the screen, in \
+                              Settings; never an agent."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "when": { "enum": ["now", "tonight", "cancel"] } },
+                    "required": ["when"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
                 name: PATCH_REMOVE.parse().expect("static name"),
                 title: "Take a kernel patch out".into(),
                 description: "Takes back the kernel patch waiting for a restart, or takes out \
@@ -1506,9 +1532,10 @@ impl ActionProvider for SettingsProvider {
                     "additionalProperties": false
                 })
             }
-            COMPUTER | COMPUTER_CHECK | UPDATE_INSTALL | PATCH_REMOVE => json!({
+            COMPUTER | COMPUTER_CHECK | UPDATE_INSTALL | UPDATE_RESTART | PATCH_REMOVE => json!({
                 "type": "object",
                 "properties": {
+                    "restart_at": { "type": ["string", "null"], "description": "when the computer restarts into the update installed" },
                     "version": { "type": ["string", "null"], "description": "the version this computer runs" },
                     "channel": { "type": "string" },
                     "owner": { "type": "boolean", "description": "the person may install updates" },
@@ -1621,6 +1648,19 @@ impl ActionProvider for SettingsProvider {
                         None => "Disconnect AI models".into(),
                     },
                     targets: vec!["Settings: AI models".into()],
+                    ..Preview::default()
+                })
+            }
+            UPDATE_RESTART => {
+                let input: RestartInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: match input.when {
+                        glass_api::RestartWhen::Now => "Restart into the OS update now",
+                        glass_api::RestartWhen::Tonight => "Restart into the OS update tonight",
+                        glass_api::RestartWhen::Cancel => "Don't restart tonight",
+                    }
+                    .into(),
+                    targets: vec!["Settings: This computer".into()],
                     ..Preview::default()
                 })
             }
@@ -1839,7 +1879,7 @@ impl ActionProvider for SettingsProvider {
                     changes: Vec::new(),
                 })
             }
-            COMPUTER | COMPUTER_CHECK | UPDATE_INSTALL | PATCH_REMOVE => {
+            COMPUTER | COMPUTER_CHECK | UPDATE_INSTALL | UPDATE_RESTART | PATCH_REMOVE => {
                 // The person's own, in Settings: policy makes these Never for
                 // every agent, and anything but Settings is refused here too.
                 if ctx.principal.agent.as_str() != APP {
@@ -1849,9 +1889,27 @@ impl ActionProvider for SettingsProvider {
                             .into(),
                     ));
                 }
-                let _: NoInput = glass_actions::parse_input(input)?;
+                let restart = if action.as_str() == UPDATE_RESTART {
+                    Some(glass_actions::parse_input::<RestartInput>(input)?.when)
+                } else {
+                    let _: NoInput = glass_actions::parse_input(input)?;
+                    None
+                };
                 let system = self.handle.system()?;
                 let text = match action.as_str() {
+                    UPDATE_RESTART => {
+                        let when = restart.unwrap_or(glass_api::RestartWhen::Cancel);
+                        let status = system.restart(when).map_err(ActionError::Failed)?;
+                        match (when, status.restart_at) {
+                            (glass_api::RestartWhen::Now, _) => {
+                                "Restarting into the update…".into()
+                            }
+                            (glass_api::RestartWhen::Tonight, Some(at)) => {
+                                format!("The computer restarts into the update at {}.", at.clock())
+                            }
+                            _ => "It won't restart tonight: restart when you like.".into(),
+                        }
+                    }
                     UPDATE_INSTALL => {
                         if self.handle.owner().as_deref() != Some(who.name.as_str()) {
                             return Err(ActionError::Failed(
@@ -2825,6 +2883,7 @@ members = ["dana"]
                 history: Vec::new(),
                 available: None,
                 checked: None,
+                restart_at: None,
             },
             glass_api::PatchStatus {
                 running: "default".into(),
@@ -2868,6 +2927,17 @@ members = ["dana"]
             };
             state.0.update = Some(update.clone());
             Ok(update)
+        }
+        fn restart(&self, when: glass_api::RestartWhen) -> Result<glass_api::UpdateStatus, String> {
+            let mut state = self.0.lock().unwrap();
+            if state.0.update.is_none() {
+                return Err("no update is installed and waiting for a restart".into());
+            }
+            state.0.restart_at = match when {
+                glass_api::RestartWhen::Cancel => None,
+                _ => glass_types::Timestamp::from_unix_seconds(1_793_000_000),
+            };
+            Ok(state.0.clone())
         }
         fn patches(&self) -> Result<glass_api::PatchStatus, String> {
             Ok(self.0.lock().unwrap().1.clone())
@@ -2928,6 +2998,29 @@ members = ["dana"]
         assert_eq!(installed.text, "2026.11.1 is installed: restart to use it.");
         assert_eq!(installed.data["update"]["state"], "staged");
 
+        // Anyone at the screen chooses when it restarts into it: tonight,
+        // then not tonight after all.
+        let restart = |ctx: &TaskContext, when: &str| {
+            provider.invoke(
+                ctx,
+                &UPDATE_RESTART.parse().unwrap(),
+                &json!({ "when": when }),
+            )
+        };
+        let tonight = restart(&sam, "tonight").unwrap();
+        assert!(
+            tonight
+                .text
+                .starts_with("The computer restarts into the update at"),
+            "{}",
+            tonight.text
+        );
+        assert!(tonight.data["restart_at"].is_string());
+        let kept = restart(&sam, "cancel").unwrap();
+        assert!(kept.text.contains("won't restart tonight"), "{}", kept.text);
+        assert!(kept.data["restart_at"].is_null());
+        assert!(restart(&sam, "whenever").is_err(), "now, tonight or cancel");
+
         // Anyone at the screen takes back a patch not yet tried, and takes
         // out one on probation: both only go back.
         let back = call(&sam, PATCH_REMOVE).unwrap();
@@ -2939,11 +3032,20 @@ members = ["dana"]
 
         // Never an agent, whatever policy said: the app refuses too.
         let agent = ctx("dana", 1001, "desktop-agent");
+        let refused = provider
+            .invoke(
+                &agent,
+                &UPDATE_RESTART.parse().unwrap(),
+                &json!({ "when": "now" }),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("never an agent's"), "{refused}");
         for name in [COMPUTER, COMPUTER_CHECK, UPDATE_INSTALL, PATCH_REMOVE] {
             let refused = call(&agent, name).unwrap_err().to_string();
             assert!(refused.contains("never an agent's"), "{name}: {refused}");
         }
-        for name in [UPDATE_INSTALL, PATCH_REMOVE] {
+        for name in [UPDATE_INSTALL, UPDATE_RESTART, PATCH_REMOVE] {
             assert!(glass_policy::persons_own(&name.parse().unwrap()), "{name}");
         }
     }
@@ -3025,6 +3127,7 @@ members = ["dana"]
             "2026.11.1"
         );
         run(UPDATE_INSTALL, json!({}));
+        run(UPDATE_RESTART, json!({ "when": "tonight" }));
         run(PATCH_REMOVE, json!({}));
 
         // Bluetooth (CF-13): a keyboard found, paired, removed; off and on.

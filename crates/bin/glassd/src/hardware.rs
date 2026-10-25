@@ -127,6 +127,11 @@ impl glass_first_party::Computer for RuntimeComputer {
             .update_apply(&root(), glass_api::UpdateApply::default())
             .map_err(|e| e.to_string())
     }
+    fn restart(&self, when: glass_api::RestartWhen) -> Result<glass_api::UpdateStatus, String> {
+        self.runtime()?
+            .update_restart(&root(), glass_api::UpdateRestart { when })
+            .map_err(|e| e.to_string())
+    }
     fn patches(&self) -> Result<glass_api::PatchStatus, String> {
         self.runtime()?
             .hardware_patch_status(&root())

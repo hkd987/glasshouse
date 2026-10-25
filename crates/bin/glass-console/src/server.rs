@@ -14,6 +14,7 @@
 //! GET  /api/fleet                     the fleet page
 //! POST /api/fleet/<device>/ring       move a device to another ring
 //! POST /api/fleet/<device>/kind       say what kind of computer it is
+//! POST /api/updates/hold              hold OS updates back from a ring, or not
 //! GET  /api/settings?group=<g>        device settings for a group (UX-1)
 //! GET  /api/roles                     remote help's roles (CF-81)
 //! GET  /api/support                   support staff's page (CF-80)
@@ -344,6 +345,12 @@ struct Approve {
 #[serde(deny_unknown_fields)]
 struct SetRing {
     ring: Ring,
+}
+
+#[derive(Deserialize)]
+struct HoldUpdates {
+    ring: Ring,
+    hold: bool,
 }
 
 #[derive(Deserialize)]
@@ -1165,14 +1172,16 @@ impl Console {
     }
 
     /// Adds the number of the release on the computer's ring's channel to
-    /// what a sync answers (ADR 0061).
+    /// what a sync answers (ADR 0061): none while IT holds the ring back.
     fn with_os_release(
         &self,
         mut answer: glass_managed::SyncResponse,
     ) -> glass_managed::SyncResponse {
+        let held = self.state().os_held(answer.ring);
         answer.os_release = self
             .updates
             .get()
+            .filter(|_| !held)
             .and_then(|u| u.offered(answer.ring))
             .map(|o| o.number);
         answer
@@ -1676,8 +1685,9 @@ impl Console {
             },
             ("GET", ["fleet"]) => {
                 let mut page = views::fleet(&self.state(), directory, &self.url);
-                // What each ring is offered (ADR 0061).
-                page["updates"] = self.updates.get().map_or(Value::Null, |u| u.view());
+                // What each ring is offered (ADR 0061), and IT's holds.
+                let holds = self.state().fleet.os_holds.clone();
+                page["updates"] = self.updates.get().map_or(Value::Null, |u| u.view(&holds));
                 ok(page)
             }
             ("POST", ["fleet", device, "ring"]) => {
@@ -1693,6 +1703,30 @@ impl Console {
                     }
                     Err(r) => refused(r),
                 }
+            }
+            // IT holds OS updates back from a ring, or lets them go to it
+            // again (ADR 0061).
+            ("POST", ["updates", "hold"]) => {
+                let set: HoldUpdates = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                {
+                    let mut state = self.state();
+                    state.hold_os_updates(set.ring, set.hold.then_some(user.as_str()));
+                    if let Err(e) = state.save_fleet() {
+                        return error(500, &format!("{e:#}"));
+                    }
+                }
+                let ring = set.ring.as_str();
+                if set.hold {
+                    tracing::info!(ring, by = %user, "OS updates held back from a ring");
+                } else {
+                    tracing::info!(ring, by = %user, "OS updates go to a ring again");
+                }
+                // Computers waiting on a sync hear of the release again.
+                self.released();
+                ok(json!({}))
             }
             ("POST", ["fleet", device, "revoke"]) => {
                 let mut state = self.state();
@@ -1962,13 +1996,22 @@ impl Console {
                 let Some(updates) = self.updates.get() else {
                     return error(404, "This console serves no OS updates.");
                 };
-                // The computer's ring is its channel, as IT sets it.
+                // The computer's ring is its channel, as IT sets it. The
+                // root's key list goes out whatever IT holds back: it
+                // carries revocations.
                 let ring = {
                     let state = self.state();
                     if let Some(gone) = signer_gone(state.still_signs(&device, &key)) {
                         return gone;
                     }
-                    state.ring_of(&device)
+                    let ring = state.ring_of(&device);
+                    if ask.name != "keys.json" && state.os_held(ring) {
+                        return refused(crate::state::Refused::Rule(format!(
+                            "IT holds OS updates back from the {} ring for now.",
+                            ring.as_str()
+                        )));
+                    }
+                    ring
                 };
                 let updates = Arc::clone(updates);
                 let read =
@@ -3181,6 +3224,11 @@ mod tests {
             ("GET", "/api/fleet", Value::Null),
             ("POST", "/api/fleet/d/ring", json!({ "ring": "pilot" })),
             ("POST", "/api/fleet/d/kind", json!({ "kind": "kiosk" })),
+            (
+                "POST",
+                "/api/updates/hold",
+                json!({ "ring": "broad", "hold": true }),
+            ),
             ("GET", "/api/mail", Value::Null),
             ("GET", "/api/roles", Value::Null),
             ("GET", "/api/settings", Value::Null),
@@ -3191,6 +3239,7 @@ mod tests {
         }
         assert_eq!(t.console.state().policy, before, "nothing changed");
         assert_eq!(t.console.state().fleet.devices["d"].ring, Ring::Broad);
+        assert!(!t.console.state().os_held(Ring::Broad));
     }
 
     #[tokio::test]
@@ -4962,7 +5011,43 @@ mod tests {
         assert_eq!(rings[0]["ring"], "pilot");
         assert_eq!(rings[0]["number"], 7);
         assert_eq!(rings[0]["version"], "2026.11.1");
+        assert_eq!(rings[0]["held"], Value::Null);
         assert_eq!(rings[2]["number"], Value::Null);
+
+        // IT holds the pilot ring back: its computers hear of no release
+        // and download none, but still get the root's key list, which
+        // carries revocations.
+        let hold = |hold: bool| {
+            t.call(
+                "POST",
+                "/api/updates/hold",
+                json!({ "ring": "pilot", "hold": hold }),
+            )
+        };
+        assert_eq!(hold(true).await.0, 200);
+        assert_eq!(t.sync("lab-1", None, 0).await.os_release, None);
+        assert_eq!(
+            part("lab-1", "glasshouse-2026.11.1.zfs", MAX_PART)
+                .await
+                .status,
+            409,
+            "a download under way stops"
+        );
+        assert_eq!(part("lab-1", "release.json", 0).await.status, 409);
+        assert_eq!(part("lab-1", "keys.json", 0).await.status, 200);
+        let (_, fleet) = t.call("GET", "/api/fleet", Value::Null).await;
+        assert_eq!(fleet["updates"]["rings"][0]["held"]["by"], "pat");
+        assert_eq!(fleet["updates"]["rings"][1]["held"], Value::Null);
+        // Kept with the fleet, so a console restart keeps holding.
+        let saved = std::fs::read_to_string(t._dir.path().join("fleet.json")).unwrap();
+        assert!(saved.contains("\"os_holds\""), "{saved}");
+
+        // Let go, the ring hears of release 7 again.
+        assert_eq!(hold(false).await.0, 200);
+        assert_eq!(t.sync("lab-1", None, 0).await.os_release, Some(7));
+        assert_eq!(part("lab-1", "release.json", 0).await.status, 200);
+        let (_, fleet) = t.call("GET", "/api/fleet", Value::Null).await;
+        assert_eq!(fleet["updates"]["rings"][0]["held"], Value::Null);
     }
 
     /// The catalog page with hundreds of items shows each as its own page

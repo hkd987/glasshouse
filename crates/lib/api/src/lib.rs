@@ -46,7 +46,9 @@ pub use task::{
     TaskView, TileState, UndoReport, UndoRequest,
 };
 pub use text::{DisplaySafe, STAND_IN, display_char, display_line, invisible};
-pub use update::{OsUpdate, UpdateApply, UpdateAvailable, UpdateStatus};
+pub use update::{
+    OsUpdate, RestartWhen, UpdateApply, UpdateAvailable, UpdateRestart, UpdateStatus,
+};
 
 /// Where `glassd` listens unless configured otherwise.
 pub const DEFAULT_CONTROL_SOCKET: &str = "/var/run/glasshouse/control.sock";
@@ -169,6 +171,10 @@ pub mod methods {
     pub const SYSTEM_UPDATE_STATUS: &str = "system.update.status";
     /// `()` → [`crate::OsUpdate`]: takes back an update not yet started.
     pub const SYSTEM_UPDATE_CANCEL: &str = "system.update.cancel";
+    /// [`crate::UpdateRestart`] → [`crate::UpdateStatus`]: restarts into
+    /// the update installed, now or tonight, or not tonight after all.
+    /// Root only.
+    pub const SYSTEM_UPDATE_RESTART: &str = "system.update.restart";
     /// `()` → [`crate::OsUpdate`]: back to the version before, from the
     /// next start.
     pub const SYSTEM_UPDATE_UNDO: &str = "system.update.undo";

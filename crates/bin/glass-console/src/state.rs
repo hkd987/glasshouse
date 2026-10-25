@@ -240,6 +240,17 @@ pub struct FleetState {
     /// removed, while a computer set up again, with a new key, enrolls.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub removed_keys: BTreeSet<String>,
+    /// The rings IT holds OS updates back from (ADR 0061).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub os_holds: BTreeMap<Ring, OsHold>,
+}
+
+/// IT holding OS updates back from a ring (ADR 0061): while it holds, the
+/// ring's computers hear of no release and download none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OsHold {
+    pub since: Timestamp,
+    pub by: String,
 }
 
 /// Why a computer's key wasn't registered.
@@ -1656,6 +1667,28 @@ impl State {
         let device = self.device(&report.device.clone());
         device.last_seen = Timestamp::now();
         device.report = Some(report);
+    }
+
+    /// IT holds OS updates back from `ring` (`by` names who), or, with
+    /// `None`, lets them go to it again.
+    pub fn hold_os_updates(&mut self, ring: Ring, by: Option<&str>) {
+        match by {
+            Some(by) => {
+                self.fleet.os_holds.entry(ring).or_insert_with(|| OsHold {
+                    since: Timestamp::now(),
+                    by: by.to_owned(),
+                });
+            }
+            None => {
+                self.fleet.os_holds.remove(&ring);
+            }
+        }
+        self.fleet_dirty = true;
+    }
+
+    /// Whether IT holds OS updates back from `ring`.
+    pub fn os_held(&self, ring: Ring) -> bool {
+        self.fleet.os_holds.contains_key(&ring)
     }
 
     pub fn set_ring(&mut self, id: &str, ring: Ring) -> Result<(), Refused> {

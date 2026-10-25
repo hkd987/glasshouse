@@ -539,6 +539,20 @@ impl Managed {
                 (_, Some(why)) => tracing::warn!("managed: OS update {number}: {why}"),
                 (None, None) => {}
             }
+            // On a managed computer the update installs by itself, IT
+            // having chosen what each ring gets: the person chooses when to
+            // restart into it, in Settings.
+            if ready {
+                match runtime
+                    .update_apply(&crate::hardware::root(), glass_api::UpdateApply::default())
+                {
+                    Ok(update) => tracing::info!(
+                        version = %update.version,
+                        "managed: OS update installed, waiting for a restart"
+                    ),
+                    Err(e) => tracing::warn!("managed: OS update {number} not installed: {e}"),
+                }
+            }
             let mut state = fetch.state.lock().unwrap_or_else(|e| e.into_inner());
             state.running = false;
             if ready {

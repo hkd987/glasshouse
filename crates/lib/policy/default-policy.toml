@@ -103,6 +103,7 @@ approval_timeout_secs = 900
 "settings.computer" = "never"
 "settings.computer_check" = "never"
 "settings.update_install" = "never"
+"settings.update_restart" = "never"
 "settings.patch_remove" = "never"
 # Chat (CF-91, ADR 0030): reading the person's conversations is quiet;
 # posting and making a channel leave the machine and can't be taken back,
@@ -289,7 +290,7 @@ tiers = { "catalog.patch_install" = "auto" }
 # installs OS updates and takes kernel patches out (ADR 0061).
 [[app]]
 id = "settings"
-tiers = { "settings.models_connect" = "auto", "settings.models_agents" = "auto", "settings.wifi" = "auto", "settings.wifi_join" = "auto", "settings.wifi_forget" = "auto", "settings.bluetooth" = "auto", "settings.bluetooth_scan" = "auto", "settings.bluetooth_pair" = "auto", "settings.bluetooth_remove" = "auto", "settings.bluetooth_power" = "auto", "settings.brightness" = "auto", "settings.brightness_set" = "auto", "settings.computer" = "auto", "settings.computer_check" = "auto", "settings.update_install" = "auto", "settings.patch_remove" = "auto" }
+tiers = { "settings.models_connect" = "auto", "settings.models_agents" = "auto", "settings.wifi" = "auto", "settings.wifi_join" = "auto", "settings.wifi_forget" = "auto", "settings.bluetooth" = "auto", "settings.bluetooth_scan" = "auto", "settings.bluetooth_pair" = "auto", "settings.bluetooth_remove" = "auto", "settings.bluetooth_power" = "auto", "settings.brightness" = "auto", "settings.brightness_set" = "auto", "settings.computer" = "auto", "settings.computer_check" = "auto", "settings.update_install" = "auto", "settings.update_restart" = "auto", "settings.patch_remove" = "auto" }
 
 # In Routines the person sees what runs for them, starts it, pauses it,
 # changes when it runs, goes back to an earlier version, and keeps what they

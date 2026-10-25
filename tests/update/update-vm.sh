@@ -21,7 +21,10 @@
 #   only);
 # - console: from a development admin console holding them in its --updates folder, the VM enrolled
 #   with it for this run (enroll-dev.sh, undone as the run ends) and put in its pilot ring. The VM
-#   hears of the release as it syncs and downloads it by itself; `good` checks that it did.
+#   hears of the release as it syncs, and downloads and installs it by itself; `good` checks that it
+#   did, then restarts into it as a person would (`glassctl update restart tonight`, then `now`).
+#   First, IT holds the pilot ring back as the release comes out, and the VM hears of nothing until
+#   IT resumes.
 # With https or console, the scenarios are good and undo.
 #
 # The VM trusts this run's development root key, follows the pilot channel and reads releases from
@@ -119,6 +122,9 @@ untrust() {
 	# The VM answers first, whatever stopped the run.
 	"$vm" wait 600 >/dev/null 2>&1 || { "$vm" power-cut >&2 && "$vm" wait 900 >/dev/null; } || true
 	if [[ $via == console ]]; then
+		# A run stopped while IT held the ring back leaves the dev console holding nothing.
+		curl -fsS -b "$work/jar" -H 'content-type: application/json' -d '{"ring": "pilot", "hold": false}' \
+			"$console_url/api/updates/hold" >/dev/null 2>&1 || true
 		"$repo/os/freebsd/scripts/enroll-dev.sh" --undo || log "FAIL enroll-dev.sh --undo"
 	fi
 	in_vm "zfs destroy -r $pool/glass-update-source
@@ -240,9 +246,22 @@ good() {
 	base_version=$(in_vm 'cat /usr/local/share/glasshouse/os-release.json' | field 'd["version"]')
 	local next="$base_version-u1" env
 	log "good: $base_version to $next"
-	make_release "$next"
 	if [[ $via == console ]]; then
-		# Nobody checks: the VM hears of the release as it syncs, and downloads it by itself.
+		# IT holds the pilot ring back as the release comes out: the VM hears of nothing.
+		it_hold true
+		make_release "$next"
+		sleep 60
+		[[ $(status '(d.get("available") or {}).get("version", "")') != "$next" ]] ||
+			fail "good: the VM heard of $next while IT held its ring back"
+		[[ $(status '(d.get("update") or {}).get("version", "")') != "$next" ]] ||
+			fail "good: the VM installed $next while IT held its ring back"
+		it_hold false
+	else
+		make_release "$next"
+	fi
+	if [[ $via == console ]]; then
+		# Nobody checks: once IT resumes, the VM hears of the release as it syncs, and downloads it
+		# by itself.
 		local heard=
 		for _ in $(seq 90); do
 			heard=$(status 'd.get("available", {}).get("version", "")')
@@ -250,16 +269,31 @@ good() {
 			sleep 2
 		done
 		[[ $heard == "$next" ]] || fail "good: the VM didn't hear of $next from the console"
-		in_vm 'grep "OS update" /var/log/glassd.log | tail -2' >&2 || true
+		# A managed computer installs it by itself; the person picks when to restart.
+		local state=
+		for _ in $(seq 90); do
+			state=$(status '(d.get("update") or {}).get("state", "")')
+			[[ $state == staged ]] && break
+			sleep 2
+		done
+		in_vm 'grep "OS update" /var/log/glassd.log | tail -3' >&2 || true
+		[[ $state == staged ]] || fail "good: the VM didn't install $next by itself"
+		in_vm 'glassctl update restart tonight' >&2
+		[[ -n $(status 'd.get("restart_at") or ""') ]] || fail "good: no restart set for tonight"
+		env=$(status 'd["update"]["env"]')
+		in_vm 'bectl list -H' | grep -q "^$env	T	" || fail "good: $env isn't set to start once"
+		in_vm 'glassctl update restart now' >/dev/null 2>&1 || true
+		back
+	else
+		in_vm 'glassctl update check' >&2
+		[[ $(in_vm 'glassctl --json update check' | field 'd["available"]["version"]') == "$next" ]] ||
+			fail "good: the check doesn't offer $next"
+		in_vm 'glassctl update apply' >&2
+		[[ $(status 'd["update"]["state"]') == staged ]] || fail "good: not staged"
+		env=$(status 'd["update"]["env"]')
+		in_vm 'bectl list -H' | grep -q "^$env	T	" || fail "good: $env isn't set to start once"
+		restart
 	fi
-	in_vm 'glassctl update check' >&2
-	[[ $(in_vm 'glassctl --json update check' | field 'd["available"]["version"]') == "$next" ]] ||
-		fail "good: the check doesn't offer $next"
-	in_vm 'glassctl update apply' >&2
-	[[ $(status 'd["update"]["state"]') == staged ]] || fail "good: not staged"
-	env=$(status 'd["update"]["env"]')
-	in_vm 'bectl list -H' | grep -q "^$env	T	" || fail "good: $env isn't set to start once"
-	restart
 	[[ $(status 'd["running"]') == "$env" ]] || fail "good: not running from $env"
 	[[ $(status 'd["update"]["state"]') == kept ]] || fail "good: not kept: $(status 'd["update"]')"
 	[[ $(status 'd["version"]') == "$next" ]] || fail "good: the image doesn't say $next"
@@ -319,6 +353,13 @@ bad() {
 	in_vm 'bectl list -H' | grep -q "^$env	" && fail "bad: $env is still there"
 	rm -f "$keys/pilot2"
 	log "bad: $(status 'd["update"]["note"]')"
+}
+
+# it_hold <true|false>: IT holds the pilot ring's OS updates back, or resumes them (ADR 0061 §11).
+it_hold() {
+	curl -fsS -b "$work/jar" -H 'content-type: application/json' -d "{\"ring\": \"pilot\", \"hold\": $1}" \
+		"$console_url/api/updates/hold" >/dev/null || fail "the console didn't take hold=$1"
+	log "IT $([[ $1 == true ]] && echo holds back || echo resumes) the pilot ring's OS updates"
 }
 
 undo() {

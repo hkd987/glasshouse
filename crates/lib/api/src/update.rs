@@ -15,6 +15,24 @@ pub struct UpdateApply {
     pub drop_patches: bool,
 }
 
+/// [`crate::methods::SYSTEM_UPDATE_RESTART`]: when the computer restarts
+/// into the update installed. Root only; in Settings, the person at the
+/// screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestartWhen {
+    Now,
+    /// At 3 in the morning, the computer's time.
+    Tonight,
+    /// Not tonight after all.
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRestart {
+    pub when: RestartWhen,
+}
+
 /// An OS update staged on this computer, or one before.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OsUpdate {
@@ -78,4 +96,8 @@ pub struct UpdateStatus {
     /// From a check: why there's nothing to say about one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checked: Option<String>,
+    /// When the computer restarts into the update installed, if someone
+    /// chose a time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_at: Option<Timestamp>,
 }

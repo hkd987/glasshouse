@@ -44,6 +44,9 @@ export default async function consoleSetup(): Promise<() => Promise<void>> {
   rmSync(LOGS, { recursive: true, force: true });
   rmSync(RUN, { recursive: true, force: true });
   mkdirSync(DEV, { recursive: true });
+  // OS updates the console serves (ADR 0061): none here, but IT can hold a ring back.
+  const updates = join(CONSOLE_STATE, "..", "os-updates");
+  mkdirSync(updates, { recursive: true });
   if (!existsSync(join(REPO, "apps/console/dist/app.js"))) {
     throw new Error("the console's web app isn't built: make apps-build");
   }
@@ -92,6 +95,8 @@ export default async function consoleSetup(): Promise<() => Promise<void>> {
         FIXTURE.join(","),
         "--admin",
         userInfo().username,
+        "--updates",
+        updates,
       ]),
     );
     await until("the console", () => existsSync(join(CONSOLE_STATE, "enrollment.json")));

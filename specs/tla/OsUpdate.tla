@@ -195,8 +195,8 @@ Stop ==
     /\ UNCHANGED <<env, patched, once, perm, record, offer, taken, patchKept,
                    ranUnsigned, lostFix, replayed>>
 
-\* The person restarts, when glassd says the update is ready, or at any
-\* other time.
+\* The person restarts, when glassd says the update is ready (now, or at
+\* the night they set), or at any other time.
 Restart ==
     /\ running # "off" /\ started /\ ~closing /\ step = "idle"
     /\ (record = "staged" \/ restarts < MaxRestarts)

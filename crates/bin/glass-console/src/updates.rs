@@ -22,7 +22,7 @@ use glass_managed::{Ring, Signed};
 use glass_types::Timestamp;
 use serde_json::{Value, json};
 
-use crate::state::Refused;
+use crate::state::{OsHold, Refused};
 
 /// The most of `keys.json` or a `release.json` read.
 const MAX_SIGNED: u64 = 1024 * 1024;
@@ -103,14 +103,16 @@ impl Updates {
         Ok(part)
     }
 
-    /// What IT reads: each ring's release, and the mirror.
-    pub fn view(&self) -> Value {
+    /// What IT reads: each ring's release, whether IT holds it back, and
+    /// the mirror.
+    pub fn view(&self, holds: &BTreeMap<Ring, OsHold>) -> Value {
         let rings: Vec<Value> = Ring::ALL
             .iter()
             .map(|&ring| {
                 let offered = self.offered(ring);
                 json!({
                     "ring": ring,
+                    "held": holds.get(&ring),
                     "number": offered.as_ref().map(|o| o.number),
                     "version": offered.as_ref().map(|o| &o.version),
                     "base": offered.as_ref().map(|o| &o.base),
@@ -411,10 +413,10 @@ mod tests {
 
         updates.mirror(&server);
         assert_eq!(
-            updates.view()["mirror"]["error"],
+            updates.view(&BTreeMap::new())["mirror"]["error"],
             Value::Null,
             "{}",
-            updates.view()
+            updates.view(&BTreeMap::new())
         );
         assert_eq!(updates.offered(Ring::Pilot).unwrap().number, 7);
         assert_eq!(updates.offered(Ring::Broad), None);
@@ -427,16 +429,16 @@ mod tests {
         publish(upstream.path(), 8, "2026.11.2", 60_000);
         cut.store(20_000, Ordering::SeqCst);
         updates.mirror(&server);
-        assert!(updates.view()["mirror"]["error"].is_string());
+        assert!(updates.view(&BTreeMap::new())["mirror"]["error"].is_string());
         assert_eq!(updates.offered(Ring::Pilot).unwrap().number, 7);
 
         // The next round goes on from where it stopped: 8, and 7's image gone.
         updates.mirror(&server);
         assert_eq!(
-            updates.view()["mirror"]["error"],
+            updates.view(&BTreeMap::new())["mirror"]["error"],
             Value::Null,
             "{}",
-            updates.view()
+            updates.view(&BTreeMap::new())
         );
         assert_eq!(updates.offered(Ring::Pilot).unwrap().number, 8);
         assert_eq!(

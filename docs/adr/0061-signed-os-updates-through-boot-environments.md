@@ -101,9 +101,9 @@ all done."
    `--drop-patches` takes the update anyway, on the record. No update goes
    while a kernel patch is being tried, nor a patch while an update is.
 7. **Root only:** `glassctl update` (status), `check`, `apply`, `cancel`,
-   `undo`. Each step and each refusal is on the audit record (`os_update`
-   events). Nothing asks the person yet. The console sending updates to
-   devices, and Settings telling the person, come with the update server.
+   `undo`, `restart`. Each step and each refusal is on the audit record
+   (`os_update` events). The console sending updates to devices is in
+   9, the person choosing when to restart in 10.
 8. **The release side:** `glass-release` makes keys, signs key lists, and
    signs a release of an image or of a digest made where the image is. The
    development keys are in `build/osupdate`. The pipeline's live in
@@ -137,6 +137,40 @@ all done."
      doesn't download them: installing it does.
    - IT's Devices page shows each computer's OS version and what each
      ring is offered, and how the mirror's last round went.
+
+10. **The person restarts into it** (added 2026-10-25).
+    - A managed computer installs a release once it has downloaded it, by
+      itself: IT chose what each ring gets. The image waits in its
+      environment, set to start once. Nothing restarts.
+    - The person chooses when. Settings → Computer says the update is
+      ready, with **Restart now**, and **Tonight** (3 in the morning, the
+      computer's time) or **Not tonight** once that's set.
+      `settings.update_restart` is the person's own, like the rest of
+      Settings' computer actions: never an agent's. `glassctl update
+      restart now|tonight|cancel` is root's.
+    - The time is kept with the update (`restart.json`) and counts only
+      while the update waits: taken, cancelled or undone, it goes too.
+      glassd looks each minute. When it's due, glassd writes the restart
+      on the audit record, then restarts (`shutdown -r now`).
+    - A restart missed by more than three hours, the computer off or
+      asleep at 3, moves to the next night: it never restarts under
+      someone at work. Any restart in the meantime starts the update
+      anyway.
+
+11. **IT holds a ring back** (added 2026-10-25). On the Devices page's OS
+    updates card each ring has **Hold** (`POST /api/updates/hold`, admins
+    only). While a ring is held:
+    - its syncs say no release, so its computers check for none;
+    - the console serves none of its channel's files, so a download under
+      way stops where it is, to go on from there once IT resumes;
+    - the root's key list still goes out: it carries revocations.
+
+    The hold is kept with the fleet and survives a console restart.
+    **Resume** lets the ring's computers hear of its release at their next
+    sync. A hold stops a release spreading. It doesn't take back one a
+    computer has installed and not yet started: recalling a release is a
+    newer release, signed, whose image is the one before it, so nothing
+    is ever downgraded by being told to.
 
 ## How it's tested
 - **The model** has five Old switches, each a version that would be
@@ -177,7 +211,9 @@ all done."
   - from a development console, the VM enrolled and in its pilot ring:
     30 seconds after the release appeared in the console's folder, the VM
     heard of it in its sync and downloaded it by itself, with nobody
-    checking, then the same install, keep and undo.
+    checking, then the same install, keep and undo. Since 10, it installs
+    it by itself too, and the test restarts as a person would: tonight,
+    then now.
 
   The first HTTPS run stalled at a start: the QEMU process had been
   paused when the host's disk filled, and every start after hung until a
@@ -200,11 +236,10 @@ all done."
 - An update's environment is a whole image: two versions and the first
   take about 12 GB on a laptop.
 - **Not built yet:**
-  - telling the person and choosing when to restart: an update is ready,
-    and installing it is root's (`glassctl update apply`) or, on a
-    computer no org manages, its owner's in Settings;
-  - IT holding a release back from a ring, or pausing one: today a ring
-    gets what the console's folder has for its channel.
+  - IT restarting a person's computer from the console, or setting a
+    deadline past which it restarts by itself;
+  - a hold taking back an update installed and not yet started; the person
+    hearing that IT holds their ring.
 - A whole image is gigabytes over the network: deltas keep most updates to
   megabytes, and the console's mirror means each image crosses the
   internet once per org.

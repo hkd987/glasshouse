@@ -904,6 +904,18 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         }
     });
 
+    // The restart into an OS update the person set for tonight (ADR
+    // 0061): due, glassd restarts the computer.
+    let restarting = Arc::clone(&runtime);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            if restarting.restart_if_due() {
+                return;
+            }
+        }
+    });
+
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let served = tokio::select! {

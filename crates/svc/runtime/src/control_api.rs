@@ -147,6 +147,10 @@ impl Handler for ControlApi {
             }
             methods::SYSTEM_UPDATE_STATUS => to_result(&blocking(|| rt.update_status(&caller))?),
             methods::SYSTEM_UPDATE_CANCEL => to_result(&blocking(|| rt.update_cancel(&caller))?),
+            methods::SYSTEM_UPDATE_RESTART => {
+                let request: glass_api::UpdateRestart = parse_params(params)?;
+                to_result(&blocking(|| rt.update_restart(&caller, request))?)
+            }
             methods::SYSTEM_UPDATE_UNDO => to_result(&blocking(|| rt.update_undo(&caller))?),
             methods::EVENTS_SUBSCRIBE => {
                 self.forward_events(caller, conn);

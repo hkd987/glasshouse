@@ -411,6 +411,7 @@ pub const PERSONS_OWN: &[&str] = &[
     // (ADR 0057, ADR 0061): installing one, or taking a patch out, is the
     // person's at the screen; IT's on a managed computer.
     "settings.update_install",
+    "settings.update_restart",
     "settings.patch_remove",
     "catalog.patch_install",
     // Starting a routine runs a task with the scope it was saved with,

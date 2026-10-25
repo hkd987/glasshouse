@@ -165,6 +165,58 @@ test("adr0061 this computer's version, its updates and its kernel patches are in
   await expect(page.locator("[data-test=patch-remove]")).toHaveCount(0);
 });
 
+// The person is in New York: tonight is 3 in the morning there.
+test.describe("in the person's time zone", () => {
+  test.use({ timezoneId: "America/New_York" });
+
+  test("adr0061 an update installed waits for the person, who restarts into it now or tonight", async ({ page }) => {
+    // The suite's computer takes no OS updates, so the bridge's answers stand
+    // in for one installed and waiting; what Settings asks for is checked as sent.
+    const asked: string[] = [];
+    let restartAt: string | null = null;
+    const computer = () => ({
+      version: "2026.10.1",
+      channel: "pilot",
+      owner: false,
+      update: { version: "2026.11.1", state: "staged", patches: [] },
+      last_update: null,
+      available: null,
+      checked: null,
+      restart_at: restartAt,
+      patch: null,
+      kept: [],
+    });
+    await page.route("**/_bridge/call", async (route) => {
+      const call = route.request().postDataJSON() as { action: string; input: { when?: string } };
+      if (call.action === "settings.update_restart") {
+        asked.push(call.input.when ?? "");
+        restartAt = call.input.when === "tonight" ? "2026-10-26T07:00:00Z" : null;
+        const text = call.input.when === "tonight" ? "The computer restarts into the update at 3:00." : "It won't restart tonight: restart when you like.";
+        await route.fulfill({ json: { ok: true, text, data: computer() } });
+      } else if (call.action === "settings.computer") {
+        await route.fulfill({ json: { ok: true, text: "", data: computer() } });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.goto(appUrl("settings"));
+    await expect(page.locator("html[data-ready=true]")).toHaveCount(1);
+    const version = page.locator("[data-setting=version]");
+    await expect(version.locator("[data-test=update-help]")).toContainText("2026.11.1 is installed. Restart to use it");
+    await expect(version.locator("[data-test=update-restart]")).toHaveText("Restart now");
+
+    await version.locator("[data-test=update-tonight]").click();
+    await expect(version.locator("[data-test=update-help]")).toContainText("The computer restarts into it at");
+    await expect(version.locator("[data-test=update-not-tonight]")).toBeVisible();
+    await version.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: join(SHOTS, "settings-update-tonight.png") });
+
+    await version.locator("[data-test=update-not-tonight]").click();
+    await expect(version.locator("[data-test=update-tonight]")).toBeVisible();
+    expect(asked).toEqual(["tonight", "cancel"]);
+  });
+});
+
 test("cf13 the person pairs a keyboard in Settings, inside the rules the computer's owner sets", async ({ page }) => {
   // The suite's Bluetooth is a stand-in with a keyboard, a mouse, a phone
   // and headphones nearby (tools/dev/host-run.sh).

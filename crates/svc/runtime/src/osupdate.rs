@@ -242,6 +242,78 @@ impl Store {
     fn keys(&self) -> Option<Signed> {
         self.read("keys.json")
     }
+
+    /// When the computer restarts into the update installed, if someone
+    /// chose a time and the update still waits for it.
+    fn restart_at(&self) -> Option<Timestamp> {
+        let staged = self
+            .record()
+            .is_some_and(|r| r.update.state == TrialState::Staged);
+        staged
+            .then(|| self.read::<Restart>("restart.json").map(|r| r.at))
+            .flatten()
+    }
+}
+
+/// When the person chose to restart into the update installed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Restart {
+    at: Timestamp,
+}
+
+/// The restart into an update, at the hour of the night it happens at, the
+/// computer's time: nobody's at work, and it's tonight for whoever chose it.
+const RESTART_HOUR: i64 = 3;
+
+/// The next 3 in the morning after `now`, `offset_secs` east of UTC.
+pub fn tonight(now: Timestamp, offset_secs: i32) -> Timestamp {
+    let local = now.unix_seconds() + i64::from(offset_secs);
+    let mut at = local.div_euclid(86_400) * 86_400 + RESTART_HOUR * 3600;
+    if at <= local {
+        at += 86_400;
+    }
+    Timestamp::from_unix_seconds(at - i64::from(offset_secs)).unwrap_or(now)
+}
+
+/// Sets when the computer restarts into the update installed, or, with
+/// `None`, takes that back. There must be one installed.
+pub fn schedule_restart(store: &Store, at: Option<Timestamp>) -> Result<(), String> {
+    let staged = store
+        .record()
+        .is_some_and(|r| r.update.state == TrialState::Staged);
+    match at {
+        Some(_) if !staged => Err("no update is installed and waiting for a restart".into()),
+        Some(at) => store.write("restart.json", &Restart { at }),
+        None => {
+            let _ = std::fs::remove_file(store.dir.join("restart.json"));
+            Ok(())
+        }
+    }
+}
+
+/// How late a restart someone chose still happens. A computer that was
+/// off or asleep at 3 doesn't restart under someone at work at 9: its
+/// restart moves to the next night.
+const RESTART_LATE_SECS: i64 = 3 * 3600;
+
+/// Whether the restart someone chose is due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartDue {
+    /// None is set, or its time hasn't come.
+    No,
+    /// Its time has come and the update still waits for it.
+    Now,
+    /// Its time went by while the computer was off or asleep.
+    Missed,
+}
+
+pub fn restart_due(store: &Store, now: Timestamp) -> RestartDue {
+    match store.restart_at() {
+        Some(at) if at > now => RestartDue::No,
+        Some(at) if now.unix_seconds() - at.unix_seconds() < RESTART_LATE_SECS => RestartDue::Now,
+        Some(_) => RestartDue::Missed,
+        None => RestartDue::No,
+    }
 }
 
 fn event(update: &OsUpdate, summary: String, outcome: Option<Outcome>) -> AuditEvent {
@@ -1007,6 +1079,7 @@ pub fn status(envs: &dyn Envs, store: &Store, config: &OsUpdates) -> UpdateStatu
         history: store.history(),
         available: last,
         checked: None,
+        restart_at: store.restart_at(),
     }
 }
 
@@ -1366,6 +1439,67 @@ mod tests {
         )
         .unwrap();
         file
+    }
+
+    fn at(text: &str) -> Timestamp {
+        serde_json::from_str(&format!("\"{text}\"")).unwrap()
+    }
+
+    /// The person chooses when the computer restarts into an update: a
+    /// time only while one is installed and waits, 3 in the morning the
+    /// computer's time, and never hours late.
+    #[test]
+    fn adr0061_the_person_restarts_into_an_update_now_or_tonight() {
+        // Tonight is the next 3 o'clock, local.
+        assert_eq!(
+            tonight(at("2026-10-25T22:15:00Z"), 7200),
+            at("2026-10-26T01:00:00Z")
+        );
+        assert_eq!(
+            tonight(at("2026-10-25T08:00:00Z"), -18000),
+            at("2026-10-26T08:00:00Z")
+        );
+        assert_eq!(
+            tonight(at("2026-10-25T07:59:00Z"), -18000),
+            at("2026-10-25T08:00:00Z")
+        );
+
+        let mut s = setup();
+        let soon = at("2026-10-26T01:00:00Z");
+        assert!(
+            schedule_restart(&s.store, Some(soon)).is_err(),
+            "nothing installed"
+        );
+        publish(&s, 7, "2026.11.1", &[], |_| {});
+        apply_it(&mut s, false).unwrap();
+        schedule_restart(&s.store, Some(soon)).unwrap();
+        assert_eq!(
+            status(&s.fake, &s.store, &config(&s)).restart_at,
+            Some(soon)
+        );
+        assert_eq!(
+            restart_due(&s.store, at("2026-10-26T00:59:00Z")),
+            RestartDue::No
+        );
+        assert_eq!(restart_due(&s.store, soon), RestartDue::Now);
+        assert_eq!(
+            restart_due(&s.store, at("2026-10-26T03:59:00Z")),
+            RestartDue::Now
+        );
+        // Asleep at 3, it doesn't restart under someone at work at 9.
+        assert_eq!(
+            restart_due(&s.store, at("2026-10-26T07:00:00Z")),
+            RestartDue::Missed
+        );
+        // Not tonight after all.
+        schedule_restart(&s.store, None).unwrap();
+        assert_eq!(restart_due(&s.store, soon), RestartDue::No);
+        // Set again, then the update is taken back: nothing to restart for.
+        schedule_restart(&s.store, Some(soon)).unwrap();
+        let audit = &mut s.audit;
+        cancel(&s.fake, &s.store, &mut |e| audit.push(e)).unwrap();
+        assert_eq!(restart_due(&s.store, soon), RestartDue::No);
+        assert_eq!(status(&s.fake, &s.store, &config(&s)).restart_at, None);
     }
 
     /// A [`Folder`] that stops after `stop` bytes of an image, as a

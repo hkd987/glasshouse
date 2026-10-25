@@ -203,6 +203,12 @@ enum UpdateCommand {
     Cancel,
     /// Goes back to the version before, from the next start.
     Undo,
+    /// Restarts into the update installed: `now`, `tonight` (3 in the
+    /// morning) or `cancel` (not tonight after all).
+    Restart {
+        #[arg(value_parser = ["now", "tonight", "cancel"])]
+        when: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -743,6 +749,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 None => ctl.call(methods::SYSTEM_UPDATE_STATUS, Value::Null).await?,
                 Some(UpdateCommand::Check) => {
                     ctl.call(methods::SYSTEM_UPDATE_CHECK, Value::Null).await?
+                }
+                Some(UpdateCommand::Restart { when }) => {
+                    let when = match when.as_str() {
+                        "now" => glass_api::RestartWhen::Now,
+                        "tonight" => glass_api::RestartWhen::Tonight,
+                        _ => glass_api::RestartWhen::Cancel,
+                    };
+                    ctl.call(
+                        methods::SYSTEM_UPDATE_RESTART,
+                        &glass_api::UpdateRestart { when },
+                    )
+                    .await?
                 }
                 Some(cmd) => {
                     let _: glass_api::OsUpdate = match cmd {

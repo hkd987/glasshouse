@@ -287,7 +287,16 @@ export interface FleetPage {
 }
 
 export interface OsUpdates {
-  rings: { ring: Ring; number: number | null; version: string | null; base: string | null; bytes: number | null; delta_from: string | null }[];
+  rings: {
+    ring: Ring;
+    number: number | null;
+    version: string | null;
+    base: string | null;
+    bytes: number | null;
+    delta_from: string | null;
+    /** IT holds updates back from the ring: who, and since when. */
+    held: { since: string; by: string } | null;
+  }[];
   mirror: { from: string; at: string | null; error: string | null } | null;
 }
 

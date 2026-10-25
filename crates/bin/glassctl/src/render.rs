@@ -758,6 +758,9 @@ pub fn update_status(status: &glass_api::UpdateStatus) -> String {
         for p in &u.patches {
             let _ = writeln!(out, "  Kernel patch {p}");
         }
+        if let Some(at) = status.restart_at {
+            let _ = writeln!(out, "  Restarts into it at {at}");
+        }
     }
     if let Some(a) = &status.available {
         let _ = writeln!(

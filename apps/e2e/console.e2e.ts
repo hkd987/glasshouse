@@ -627,6 +627,22 @@ test("ad4 the fleet shows the device on the new versions", async ({ browser }) =
   await close();
 });
 
+test("adr0061 IT holds OS updates back from a ring, then resumes them", async ({ browser }) => {
+  const { page, close } = await session(browser);
+  await open(page, "#/devices", "devices");
+  const pilot = page.locator('[data-test="os-updates"] [data-ring="pilot"]');
+  await pilot.locator('[data-test="hold-updates"]').click();
+  await expect(pilot).toContainText("Held");
+  await expect(pilot).toContainText("its computers hear of no release");
+  await expect(page.locator('[data-test="os-updates"] [data-ring="broad"]')).not.toContainText("Held");
+  await page.locator('[data-test="os-updates"]').scrollIntoViewIfNeeded();
+  await shot(page, "os-updates-held");
+  await pilot.locator('[data-test="resume-updates"]').click();
+  await expect(pilot.locator('[data-test="hold-updates"]')).toBeVisible();
+  await expect(pilot).not.toContainText("Held");
+  await close();
+});
+
 test("adr0030 IT removes a computer from the organization, then forgets it", async ({ browser }) => {
   const { page, close } = await session(browser);
   await open(page, "#/devices", "devices");

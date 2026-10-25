@@ -370,13 +370,18 @@ tbody tr:last-child td {
 }
 
 /* A ring's OS release (ADR 0061): its size on a line of its own, words whole. */
-.ring-update {
+.kv.stack.ring-update {
   word-break: normal;
 }
 
 .ring-update .hint {
   display: block;
   margin-top: 2px;
+}
+
+/* IT holding a ring's updates back: its chip beside the ring's name. */
+.ring-update .chip {
+  margin-left: 8px;
 }
 
 .kv:last-child {

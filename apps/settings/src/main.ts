@@ -85,6 +85,8 @@ interface Computer {
   /** From a check. */
   available: { version: string; notes?: string; patches?: string[]; blocked?: string } | null;
   checked: string | null;
+  /** When the computer restarts into the update installed, if someone chose. */
+  restart_at: string | null;
   /** The kernel patch being tried. */
   patch: {
     id: string;
@@ -298,13 +300,16 @@ async function loadComputer(): Promise<void> {
   }
 }
 
-/** Checks for an update, installs it, or takes a kernel patch out: each on the record. */
-async function computerAction(action: "settings.computer_check" | "settings.update_install" | "settings.patch_remove"): Promise<void> {
+/** Checks for an update, installs it, restarts into it, or takes a kernel patch out: each on the record. */
+async function computerAction(
+  action: "settings.computer_check" | "settings.update_install" | "settings.update_restart" | "settings.patch_remove",
+  input: Record<string, unknown> = {},
+): Promise<void> {
   state.busy = "computer";
   state.notice = null;
   render();
   try {
-    const result = await bridge.call<Computer>(action, {});
+    const result = await bridge.call<Computer>(action, input);
     if (result.ok) state.computer = result.data;
     state.notice = { text: result.text, tone: result.ok ? "ok" : "bad" };
   } catch (error) {
@@ -318,6 +323,11 @@ async function computerAction(action: "settings.computer_check" | "settings.upda
 function sentence(text: string): string {
   const t = text.trim();
   return t.charAt(0).toUpperCase() + t.slice(1) + (/[.!?]$/.test(t) ? "" : ".");
+}
+
+/** `3:00`, the computer's time, from an RFC 3339 time. */
+function clock(when: string): string {
+  return new Date(when).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
 function hours(minutes: number): string {
@@ -338,6 +348,18 @@ function computer(c: Computer): HTMLElement[] {
   let updateControl: HTMLElement | null = null;
   if (c.update) {
     updateHelp = c.update.state === "staged" ? `${c.update.version} is installed. Restart to use it: if it doesn't start, the computer goes back by itself.` : `${c.update.version} is being installed.`;
+    // Anyone at the screen chooses when: now, or tonight while nobody works.
+    if (c.update.state === "staged") {
+      if (c.restart_at) updateHelp = `${c.update.version} is installed. The computer restarts into it at ${clock(c.restart_at)}.`;
+      updateControl = h(
+        "div",
+        { class: "control" },
+        h("button", { class: "button", disabled: busy, "data-test": "update-restart", onclick: () => computerAction("settings.update_restart", { when: "now" }) }, "Restart now"),
+        c.restart_at
+          ? h("button", { class: "link", disabled: busy, "data-test": "update-not-tonight", onclick: () => computerAction("settings.update_restart", { when: "cancel" }) }, "Not tonight")
+          : h("button", { class: "link", disabled: busy, "data-test": "update-tonight", onclick: () => computerAction("settings.update_restart", { when: "tonight" }) }, "Tonight"),
+      );
+    }
   } else if (c.available) {
     updateHelp = c.available.blocked ? `${c.available.version} is available, but ${c.available.blocked}` : `${c.available.version} is available.${c.available.notes ? ` ${c.available.notes}` : ""}`;
     if (c.owner && !c.available.blocked) updateControl = h("button", { class: "button", disabled: busy, "data-test": "update-install", onclick: () => computerAction("settings.update_install") }, "Install");

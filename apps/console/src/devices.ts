@@ -16,7 +16,7 @@ export async function devicesPage(root: HTMLElement): Promise<void> {
   let last: FleetPage | null = null;
   const draw = (page: FleetPage) => {
     last = page;
-    show(root, render(page, message, setRing, setKind, { confirming, ask, remove, forget }));
+    show(root, render(page, message, setRing, setKind, { confirming, ask, remove, forget }, hold));
   };
   async function change(device: string, what: "ring" | "kind", value: string | null): Promise<void> {
     try {
@@ -42,6 +42,18 @@ export async function devicesPage(root: HTMLElement): Promise<void> {
         what === "revoke"
           ? `${name} was removed from the organization. It can't reach the console until it enrolls again.`
           : `${name} is forgotten. Set up again, it can enroll under the same name.`;
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    draw(await api<FleetPage>("GET", "/api/fleet"));
+  }
+  // IT holds OS updates back from a ring, or lets them go to it again (ADR 0061).
+  async function hold(ring: Ring, held: boolean): Promise<void> {
+    try {
+      await api("POST", "/api/updates/hold", { ring, hold: held });
+      message = held
+        ? `OS updates are held back from the ${ring} ring. Its computers hear of no release and download none until you resume.`
+        : `OS updates go to the ${ring} ring again.`;
     } catch (error) {
       message = (error as Error).message;
     }
@@ -89,6 +101,7 @@ function render(
   setRing: (device: string, ring: Ring) => Promise<void>,
   setKind: (device: string, kind: string | null) => Promise<void>,
   removing: Removing,
+  hold: (ring: Ring, held: boolean) => Promise<void>,
 ): HTMLElement {
   const t = page.totals;
   return h(
@@ -205,7 +218,7 @@ function render(
       h(
         "aside",
         { class: "side" },
-        osUpdates(page),
+        osUpdates(page, hold),
         card(
           "Enroll a device",
           "Zero-touch enrollment isn't built yet (AD-10). A device enrolls with these in its system settings and the org's enrollment token.",
@@ -221,7 +234,7 @@ function render(
 /** The OS release each ring's computers are offered (ADR 0061): the ring a
  * computer is in is the channel it updates on. Computers check every
  * release's signatures themselves; the console only passes them on. */
-function osUpdates(page: FleetPage): HTMLElement {
+function osUpdates(page: FleetPage, hold: (ring: Ring, held: boolean) => Promise<void>): HTMLElement {
   const u = page.updates;
   if (!u) return card("OS updates", "This console serves no OS updates: computers take them from where their settings say.");
   const size = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`);
@@ -234,7 +247,7 @@ function osUpdates(page: FleetPage): HTMLElement {
       h(
         "div",
         { class: "kv stack ring-update", "data-ring": r.ring },
-        h("span", {}, `${capital(r.ring)} ring`),
+        h("span", {}, `${capital(r.ring)} ring`, r.held ? chip("Held", "wait") : null),
         r.version && r.number !== null && r.bytes !== null
           ? h(
               "span",
@@ -244,6 +257,19 @@ function osUpdates(page: FleetPage): HTMLElement {
               h("span", { class: "hint" }, r.delta_from ? `${size(r.bytes)} of changes from ${r.delta_from}` : `${size(r.bytes)}, the whole image`),
             )
           : h("span", { class: "hint" }, "Nothing offered"),
+        r.held
+          ? h("span", { class: "hint" }, `Held back by ${r.held.by} ${ago(r.held.since)}: its computers hear of no release and download none.`)
+          : null,
+        h(
+          "button",
+          {
+            class: "button small",
+            "data-test": r.held ? "resume-updates" : "hold-updates",
+            title: r.held ? "Let this ring's computers take its release" : "Stop this ring's computers taking a release, downloads under way included",
+            onclick: () => void hold(r.ring, !r.held),
+          },
+          r.held ? "Resume" : "Hold",
+        ),
       ),
     ),
     u.mirror

@@ -444,6 +444,15 @@ pub fn process_age(pid: u32) -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
+/// Restarts the computer now, as the sign-in screen's Restart does: the
+/// base system's `shutdown -r`, which stops every service first.
+pub fn restart() -> Result<()> {
+    if !cfg!(target_os = "freebsd") {
+        return Err(PlatformError::Unsupported("restarting the computer".into()));
+    }
+    cmd::run("/sbin/shutdown", &["-r", "now"]).map(drop)
+}
+
 /// The computer's offset from UTC now, in seconds east, from the base
 /// system's `date` (which reads `/etc/localtime` afresh each time).
 pub fn utc_offset_secs() -> Option<i32> {

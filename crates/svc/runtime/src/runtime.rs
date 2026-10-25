@@ -1523,6 +1523,84 @@ impl Runtime {
         )
     }
 
+    /// Restarts into the update installed now, sets it for tonight, or
+    /// takes tonight back (ADR 0061). Root only: in Settings, the person at
+    /// the screen; never an agent. On the audit record.
+    pub fn update_restart(
+        &self,
+        caller: &Caller,
+        request: glass_api::UpdateRestart,
+    ) -> Result<glass_api::UpdateStatus> {
+        use glass_api::RestartWhen;
+        self.updates_admin(caller)?;
+        let summary = match request.when {
+            RestartWhen::Now => {
+                crate::osupdate::schedule_restart(&self.updates, Some(Timestamp::now()))
+                    .map_err(RuntimeError::Invalid)?;
+                "Restarting now into the OS update installed".to_owned()
+            }
+            RestartWhen::Tonight => {
+                let offset = glass_platform::system::utc_offset_secs().unwrap_or(0);
+                let at = crate::osupdate::tonight(Timestamp::now(), offset);
+                crate::osupdate::schedule_restart(&self.updates, Some(at))
+                    .map_err(RuntimeError::Invalid)?;
+                format!("The computer restarts into the OS update installed at {at}")
+            }
+            RestartWhen::Cancel => {
+                crate::osupdate::schedule_restart(&self.updates, None)
+                    .map_err(RuntimeError::Invalid)?;
+                "The restart into the OS update installed is taken back".to_owned()
+            }
+        };
+        self.audit(AuditEvent::new(EventKind::OsUpdate, summary));
+        if request.when == RestartWhen::Now {
+            self.restart_if_due();
+        }
+        self.update_status(caller)
+    }
+
+    /// Restarts the computer into the update installed when the restart
+    /// someone chose is due: glassd asks each minute (ADR 0061). One it
+    /// missed, off or asleep, moves to the next night.
+    pub fn restart_if_due(&self) -> bool {
+        use crate::osupdate::RestartDue;
+        let now = Timestamp::now();
+        match crate::osupdate::restart_due(&self.updates, now) {
+            RestartDue::No => return false,
+            RestartDue::Missed => {
+                let offset = glass_platform::system::utc_offset_secs().unwrap_or(0);
+                let at = crate::osupdate::tonight(now, offset);
+                let _ = crate::osupdate::schedule_restart(&self.updates, Some(at));
+                self.audit(AuditEvent::new(
+                    EventKind::OsUpdate,
+                    format!("The restart into the OS update installed was missed; now at {at}"),
+                ));
+                return false;
+            }
+            RestartDue::Now => {}
+        }
+        let _ = crate::osupdate::schedule_restart(&self.updates, None);
+        // On the record before the restart, which may not let glassd write.
+        self.audit(AuditEvent::new(
+            EventKind::OsUpdate,
+            "Restarting into the OS update installed",
+        ));
+        match glass_platform::system::restart() {
+            Ok(()) => true,
+            Err(e) => {
+                let mut event = AuditEvent::new(
+                    EventKind::OsUpdate,
+                    "The restart into the OS update installed failed",
+                );
+                event.outcome = Some(glass_audit::Outcome::Failed {
+                    error: e.to_string(),
+                });
+                self.audit(event);
+                false
+            }
+        }
+    }
+
     /// The last release number this computer took (ADR 0061).
     pub fn update_taken(&self) -> u64 {
         self.updates.taken().unwrap_or(0)
