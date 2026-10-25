@@ -105,21 +105,24 @@ refuse.
 
 ## Known before any laptop is tried
 
-From the image's contents and the base system's source (ADR 0056):
+From the image's contents and the base system's source (ADR 0056, 0058):
 
 - **Sleep:** this OS version (15.1) sleeps with S3 only; suspend to idle
   is in the base system's development branch. Laptops whose firmware
   offers only modern standby can't sleep at all.
-- **Wi-Fi:** the image carries firmware for Intel's older cards (`iwm`,
-  up to the 9000 series). Wi-Fi 6, 6E and 7 cards (AX200 to BE200, on
-  `iwlwifi`) and Realtek's `rtw88`/`rtw89` need firmware packages it
-  doesn't have.
-- **Cameras:** the image has no camera driver (`webcamd`), and the cameras
-  behind Intel's image processor (IPU6, most Intel laptops since 2021) have
-  none on this OS. USB (UVC) cameras would work with `webcamd`.
-- **Graphics:** no graphics driver (`drm-kmod`): one screen, at the
-  resolution the firmware set, with no brightness control.
+- **Wi-Fi:** the image carries firmware for Intel's cards: the older ones
+  (`iwm`, up to the 8265) and, since ADR 0058, Wi-Fi 6 and 6E on
+  `iwlwifi` (the 9000 series, AX200, AX201, AX210, AX211). Wi-Fi 7 (BE200)
+  and Realtek's `rtw88`/`rtw89` still need firmware it doesn't have.
+- **Cameras:** USB (UVC) cameras work through `webcamd`, which devd starts
+  as one attaches. The cameras behind Intel's image processor (IPU6, most
+  Intel laptops since 2021) have no driver on this OS.
+- **Graphics:** Intel's driver (`i915kms`) and its firmware are in the
+  image, off until the model is checked with it: set
+  `glasshouse_gpu_enable=YES` (`sysrc`) on the unit, restart, and check
+  the sign-in screen and desktop still draw, at the panel's resolution.
+  Without it: one screen, at the resolution the firmware set.
 - **Sound:** HD Audio works; laptops that route their microphone through
   Intel's audio DSP have no driver for it.
-- **Bluetooth:** Intel's controllers need firmware (`iwmbt`) the image
-  doesn't have; Settings has no Bluetooth pane (CF-13).
+- **Bluetooth:** Intel's controllers' firmware (`iwmbt`) is in the image,
+  loaded by `iwmbtfw` as the controller attaches.

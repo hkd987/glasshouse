@@ -1,0 +1,37 @@
+# The drivers and firmware the pilot's laptops need (ADR 0058), from FreeBSD's packages. Same format
+# as desktop.third-party: `<name>-<version> <path>...`, paths inside the package; stage-dist.sh copies
+# exactly these, with each package's license files.
+#
+# Firmware ships unmodified under its maker's redistribution terms and runs on the device it's for,
+# never on the computer's own processors (tools/legal/notices.py, IMAGE_FIRMWARE). The graphics
+# driver and the camera driver are GPL-2.0, unmodified, with their source on offer, as ADR 0027 ships
+# GPL-2.0 libraries (its owner question 1 covers them too).
+
+# Intel Wi-Fi 6 and 6E (iwlwifi): AX200 and AX201 (ThinkPad T14 Gen 2's and X1 Carbon Gen 9's CNVi
+# parts are AX201), AX210 and AX211 (the T14 Gen 2's AX210), and the 9000 series (Latitude 7490s
+# with a 9560). The 8265 and older run on iwm, whose firmware is in the base system. Each package's
+# loader.conf.d file sets the driver's options as its makers ship them.
+wifi-firmware-iwlwifi-kmod-22000-20260410 boot/firmware/iwlwifi-Qu-b0-hr-b0-77.ucode boot/firmware/iwlwifi-Qu-b0-jf-b0-77.ucode boot/firmware/iwlwifi-Qu-c0-hr-b0-77.ucode boot/firmware/iwlwifi-Qu-c0-jf-b0-77.ucode boot/firmware/iwlwifi-QuZ-a0-hr-b0-77.ucode boot/firmware/iwlwifi-QuZ-a0-jf-b0-77.ucode boot/firmware/iwlwifi-cc-a0-77.ucode boot/loader.conf.d/iwlwifi-22000.conf
+wifi-firmware-iwlwifi-kmod-ax210-20260410 boot/firmware/iwlwifi-ma-b0-gf-a0-89.ucode boot/firmware/iwlwifi-ma-b0-gf-a0.pnvm boot/firmware/iwlwifi-ma-b0-gf4-a0-89.ucode boot/firmware/iwlwifi-ma-b0-gf4-a0.pnvm boot/firmware/iwlwifi-ma-b0-hr-b0-89.ucode boot/firmware/iwlwifi-so-a0-gf-a0-77.ucode boot/firmware/iwlwifi-so-a0-gf-a0-89.ucode boot/firmware/iwlwifi-so-a0-gf-a0.pnvm boot/firmware/iwlwifi-so-a0-gf4-a0-77.ucode boot/firmware/iwlwifi-so-a0-gf4-a0-89.ucode boot/firmware/iwlwifi-so-a0-gf4-a0.pnvm boot/firmware/iwlwifi-so-a0-hr-b0-77.ucode boot/firmware/iwlwifi-so-a0-hr-b0-89.ucode boot/firmware/iwlwifi-so-a0-jf-b0-77.ucode boot/firmware/iwlwifi-ty-a0-gf-a0-77.ucode boot/firmware/iwlwifi-ty-a0-gf-a0-89.ucode boot/firmware/iwlwifi-ty-a0-gf-a0.pnvm boot/loader.conf.d/iwlwifi-ax210.conf
+wifi-firmware-iwlwifi-kmod-9000-20260410 boot/firmware/iwlwifi-9000-pu-b0-jf-b0-46.ucode boot/firmware/iwlwifi-9260-th-b0-jf-b0-46.ucode
+#license wifi-firmware-iwlwifi-kmod-22000 INTEL: Intel's firmware license (the port calls it "primary"); "whence" is linux-firmware's record of where each file comes from, not a license
+#license wifi-firmware-iwlwifi-kmod-ax210 INTEL: as above
+#license wifi-firmware-iwlwifi-kmod-9000 INTEL: as above
+
+# Intel Bluetooth (the same cards' Bluetooth half): firmware the base system's iwmbtfw loads as the
+# controller attaches (/etc/devd/iwmbtfw.conf names this folder).
+iwmbt-firmware-20251111 usr/local/share/iwmbt-firmware
+
+# USB cameras (UVC, every pilot model's): webcamd presents them as V4L2 devices, which the browser
+# engine uses for calls. Only the program: the package's own devd rules would attach it to every USB
+# device of no class too; ours (devd/glasshouse-camera.conf) start it for cameras only.
+webcamd-5.17.1.2_3 usr/local/sbin/webcamd usr/local/etc/rc.d/webcamd
+
+# Intel graphics (Iris Xe on the T14 Gen 2 and X1 Carbon Gen 9, UHD 620 on the Latitude 7490): the
+# DRM driver and its firmware (display, GuC and HuC). Off until a model is checked with it
+# (rc.d/glasshouse_gpu): the desktop draws on the firmware's framebuffer without it.
+drm-612-kmod-6.12.85.1501000_2 boot/modules/drm.ko boot/modules/ttm.ko boot/modules/dmabuf.ko boot/modules/i915kms.ko
+gpu-firmware-intel-kmod-tigerlake-20260519.1501000 boot/modules/i915_tgl_dmc_ver2_08_bin.ko boot/modules/i915_tgl_dmc_ver2_12_bin.ko boot/modules/i915_tgl_guc_35_2_0_bin.ko boot/modules/i915_tgl_guc_62_0_0_bin.ko boot/modules/i915_tgl_guc_69_0_3_bin.ko boot/modules/i915_tgl_guc_70_1_1_bin.ko boot/modules/i915_tgl_guc_70_bin.ko boot/modules/i915_tgl_huc_7_5_0_bin.ko boot/modules/i915_tgl_huc_7_9_3_bin.ko boot/modules/i915_tgl_huc_bin.ko
+gpu-firmware-intel-kmod-kabylake-20260519.1501000 boot/modules/i915_cml_guc_33_0_0_bin.ko boot/modules/i915_cml_guc_62_0_0_bin.ko boot/modules/i915_cml_guc_70_1_1_bin.ko boot/modules/i915_cml_huc_4_0_0_bin.ko boot/modules/i915_kbl_dmc_ver1_04_bin.ko boot/modules/i915_kbl_guc_33_0_0_bin.ko boot/modules/i915_kbl_guc_62_0_0_bin.ko boot/modules/i915_kbl_guc_70_1_1_bin.ko boot/modules/i915_kbl_huc_4_0_0_bin.ko boot/modules/i915_kbl_huc_ver02_00_1810_bin.ko
+#license gpu-firmware-intel-kmod-tigerlake INTEL: Intel's firmware license
+#license gpu-firmware-intel-kmod-kabylake INTEL: Intel's firmware license

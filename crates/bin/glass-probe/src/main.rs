@@ -184,6 +184,32 @@ fn processes() -> Result<String, String> {
     }
 }
 
+/// Hardware in the task's `/dev`: cameras (webcamd's V4L2 devices), the
+/// GPU, input, sound, USB, Bluetooth, disks, the firmware's tables and raw
+/// memory (ADR 0058). A jail's devfs ruleset shows none of them.
+fn hardware_devices() -> Result<String, String> {
+    const HARDWARE: [&str; 24] = [
+        "video", "dri", "drm", "cuse", "input", "snd", "dsp", "mixer", "usb", "ugen", "uhid",
+        "ubt", "bpf", "ada", "nvd", "nda", "da", "sd", "nvme", "acpi", "pci", "io", "mem", "kmem",
+    ];
+    let mut seen: Vec<String> = std::fs::read_dir("/dev")
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|name| {
+            HARDWARE.iter().any(|h| {
+                name.strip_prefix(h)
+                    .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit() || c == '.'))
+            })
+        })
+        .collect();
+    seen.sort();
+    if seen.is_empty() {
+        Err("sees no hardware in /dev".into())
+    } else {
+        Ok(format!("sees /dev/{}", seen.join(", /dev/")))
+    }
+}
+
 /// This machine's memory in bytes, from getconf(1) (FreeBSD names it
 /// PHYS_PAGES, glibc _PHYS_PAGES).
 fn physical_memory() -> Option<usize> {
@@ -390,6 +416,11 @@ async fn main() -> ExitCode {
                 Ok(s) => Err(format!("kill failed ({s})")),
                 Err(e) => Err(e.to_string()),
             },
+        ),
+        attempt(
+            "dev: see cameras, the GPU, input or disks",
+            Want::Denied,
+            hardware_devices(),
         ),
         attempt(
             "dev: open /dev/mem",

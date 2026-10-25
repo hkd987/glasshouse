@@ -148,6 +148,20 @@ for setting in debug.debugger_on_panic=0 kern.panic_reboot_wait_time=5; do
 	sysctl -q "$setting" >/dev/null
 	loader_tunable "${setting%%=*}" "${setting#*=}"
 done
+# The drivers the image adds in /boot/modules (ADR 0058: graphics and its
+# firmware) load by module name, which the linker finds through this index, as
+# a package install would have written it.
+[ -d /boot/modules ] && kldxref /boot/modules
+# USB cameras (ADR 0058): devd starts webcamd as one attaches
+# (devd/glasshouse-camera.conf). The person at the screen opens it as they
+# open the microphone (/dev/dsp): the device is anyone's on this computer, and
+# agents' jails show neither (devfs ruleset 4; the containment probe checks).
+setconf /etc/rc.conf webcamd_enable=YES webcamd_user=root webcamd_group=wheel \
+	devfs_system_ruleset=glasshouse
+if ! grep -q '^\[glasshouse=' /etc/devfs.rules 2>/dev/null; then
+	printf '\n[glasshouse=10]\nadd path '"'"'video*'"'"' mode 0666\n' >>/etc/devfs.rules
+fi
+service devfs restart >/dev/null 2>&1 || true
 # Console login: the full mark before the prompt, and a banner that names the
 # product, not the base system (%s).
 install -C -o root -g wheel -m 0644 "$branding/issue" /etc/issue

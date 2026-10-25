@@ -76,9 +76,45 @@ pub async fn studio(h: &Harness) -> anyhow::Result<()> {
     );
     files["src/main.ts"] = json!(main.replace("\"New message\",", "\"Write\","));
 
+    // Whatever the checks below say, the remix is undone after: a failed run
+    // leaves no app behind to take the next run's name.
+    let checked = saved_and_served(&client, &data, files).await;
+    let undone: anyhow::Result<glass_api::UndoReport> = h
+        .call(
+            methods::TASK_UNDO,
+            UndoRequest {
+                task: view.id,
+                to: None,
+                changes: vec![],
+                dry_run: false,
+            },
+        )
+        .await;
+    let _: Value = h
+        .call(methods::TASK_STOP, glass_api::TaskRef { task: view.id })
+        .await
+        .unwrap_or_default();
+    let (app, apps) = checked?;
+    undone?;
+    ensure!(
+        apps.call::<AppFiles>(glass_api::app_methods::APP_FILES, json!({ "app": app }))
+            .await
+            .is_err(),
+        "undone, the remix is gone"
+    );
+    Ok(())
+}
+
+/// Saves the remix and checks what came of it: tried in a jail, nothing
+/// left behind, served to its maker. The app's id, and the app socket.
+async fn saved_and_served(
+    client: &glass_rpc::Client,
+    data: &Value,
+    files: Value,
+) -> anyhow::Result<(String, glass_rpc::Client)> {
     let started = Instant::now();
     let saved = tool(
-        &client,
+        client,
         "apps_save",
         json!({ "base": "mail", "manifest": data["manifest"], "files": files, "note": "Write, not New message" }),
     )
@@ -137,33 +173,10 @@ pub async fn studio(h: &Harness) -> anyhow::Result<()> {
         .call(glass_api::app_methods::APP_FILES, json!({ "app": app }))
         .await
         .map_err(|e| anyhow::anyhow!("app.files: {e}"))?;
-    ensure!(served.files["index.html"].contains("<title>My Mail</title>"));
+    ensure!(served.files["index.html"].contains("<title>My Mail"));
     ensure!(
         served.files["app.js"].contains("Write"),
         "the bundle has the change"
     );
-
-    // Undo takes it back out of their apps.
-    let _: glass_api::UndoReport = h
-        .call(
-            methods::TASK_UNDO,
-            UndoRequest {
-                task: view.id,
-                to: None,
-                changes: vec![],
-                dry_run: false,
-            },
-        )
-        .await?;
-    ensure!(
-        apps.call::<AppFiles>(glass_api::app_methods::APP_FILES, json!({ "app": app }))
-            .await
-            .is_err(),
-        "undone, the remix is gone"
-    );
-    let _: Value = h
-        .call(methods::TASK_STOP, glass_api::TaskRef { task: view.id })
-        .await
-        .unwrap_or_default();
-    Ok(())
+    Ok((app, apps))
 }

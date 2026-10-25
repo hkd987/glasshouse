@@ -125,6 +125,11 @@ pub struct Sources {
     pub dmesg: String,
     /// Whether Intel's Bluetooth firmware is installed.
     pub intel_bt_firmware: bool,
+    /// Whether the image carries Intel's graphics driver (`i915kms.ko`),
+    /// which is off until a model is checked with it (ADR 0058).
+    pub intel_gpu_driver: bool,
+    /// Whether the image carries the USB camera driver (`webcamd`).
+    pub camera_driver: bool,
 }
 
 impl Sources {
@@ -153,6 +158,10 @@ impl Sources {
                 .unwrap_or_default(),
             dmesg: optional("dmesg").unwrap_or_default(),
             intel_bt_firmware: dir.join("iwmbt-firmware").exists(),
+            // A capture comes from the base system's own stick: what this
+            // image adds is judged as this image carries it.
+            intel_gpu_driver: true,
+            camera_driver: true,
         })
     }
 }
@@ -186,6 +195,8 @@ pub fn report() -> Result<Report> {
         dmesg: std::fs::read_to_string("/var/run/dmesg.boot").unwrap_or_default()
             + &read("dmesg", &[]),
         intel_bt_firmware: std::path::Path::new("/usr/local/share/iwmbt-firmware").is_dir(),
+        intel_gpu_driver: std::path::Path::new("/boot/modules/i915kms.ko").exists(),
+        camera_driver: std::path::Path::new("/usr/local/sbin/webcamd").exists(),
     };
     Ok(assess(&sources))
 }
@@ -272,11 +283,11 @@ pub fn assess(s: &Sources) -> Report {
         / 1024
         / 1024;
     let parts = vec![
-        graphics(&pci, s.graphics_driver),
+        graphics(&pci, s.graphics_driver, s.intel_gpu_driver),
         wifi(&pci, s),
         ethernet(&pci),
         bluetooth(usb.as_deref(), &devices, s.intel_bt_firmware),
-        camera(&pci, usb.as_deref(), &s.dev),
+        camera(&pci, usb.as_deref(), &s.dev, s.camera_driver),
         audio(&pci, &s.sndstat),
         pointer(&devices),
         sleep(&s.sleep),
@@ -308,21 +319,22 @@ fn with_gap(mut part: Part, gap: &str) -> Part {
     part
 }
 
-fn graphics(pci: &[PciDevice], driver: bool) -> Part {
-    let found: Vec<String> = pci
-        .iter()
-        .filter(|d| d.class >> 16 == 0x03)
-        .map(PciDevice::describe)
-        .collect();
+fn graphics(pci: &[PciDevice], driver: bool, intel_driver: bool) -> Part {
+    let gpus: Vec<&PciDevice> = pci.iter().filter(|d| d.class >> 16 == 0x03).collect();
+    let found: Vec<String> = gpus.iter().map(|d| d.describe()).collect();
     let gap = "more screens, docks and scaling; the desktop draws on one screen (CF-32)";
     if found.is_empty() {
         return part(Kind::Graphics, Status::Absent, found, "No graphics found");
     }
+    let intel = gpus.iter().any(|d| d.vendor_id == 0x8086);
     let note = if driver {
         "Its graphics driver is loaded"
+    } else if intel && intel_driver {
+        "Intel's graphics driver is in this image, off until this model is checked with it \
+         (glasshouse_gpu_enable): the screen the firmware set up, at a fixed resolution"
     } else {
-        "No graphics driver in this image: the screen the firmware set up, at a fixed \
-         resolution, with no brightness control"
+        "No driver for these graphics in this image: the screen the firmware set up, at a \
+         fixed resolution"
     };
     with_gap(part(Kind::Graphics, Status::Limited, found, note), gap)
 }
@@ -457,7 +469,7 @@ const INTEL_IMAGE_PROCESSORS: [u16; 9] = [
     0x9a19, 0x9a39, 0x4e19, 0x465d, 0x462e, 0xa75d, 0x7d19, 0x645d, 0xb05d,
 ];
 
-fn camera(pci: &[PciDevice], usb: Option<&[UsbDevice]>, dev: &[String]) -> Part {
+fn camera(pci: &[PciDevice], usb: Option<&[UsbDevice]>, dev: &[String], driver: bool) -> Part {
     let gap = "a camera driver in the image, for meetings in the browser (DK-11, CF-20)";
     let processors: Vec<String> = pci
         .iter()
@@ -507,6 +519,13 @@ fn camera(pci: &[PciDevice], usb: Option<&[UsbDevice]>, dev: &[String]) -> Part 
             Status::Works,
             found,
             "A USB camera, with its driver running",
+        )
+    } else if driver {
+        part(
+            Kind::Camera,
+            Status::Limited,
+            found,
+            "A USB camera (UVC): its driver (webcamd) is in this image but isn't running for it",
         )
     } else {
         with_gap(
@@ -1041,6 +1060,8 @@ ugen0.3: <Intel product 0x0033> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=O
                     .into(),
             ),
             graphics_driver: false,
+            intel_gpu_driver: false,
+            camera_driver: false,
             dev: vec![],
             dmesg: "iwlwifi0: <iwlwifi> mem 0x603d1cc000-0x603d1cffff at device 20.3 on pci0\n\
                     iwlwifi0: Direct firmware load for iwlwifi-so-a0-gf-a0-89.ucode failed with \
@@ -1158,6 +1179,8 @@ ugen0.2: <Realtek Laptop Camera> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr
             dev: vec!["tpm0".into(), "tpmrm0".into(), "video0".into()],
             dmesg: "iwm0: hw rev 0x320, fw ver 46.6b541b68.0, address f8:e4:e3:00:00:00\n".into(),
             intel_bt_firmware: false,
+            intel_gpu_driver: true,
+            camera_driver: true,
         }
     }
 
@@ -1206,6 +1229,38 @@ ugen0.2: <Realtek Laptop Camera> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr
                 .as_deref()
                 .unwrap()
                 .contains("CF-32")
+        );
+    }
+
+    /// ADR 0058: the image carries Intel's graphics driver, off until a model
+    /// is checked with it, and the USB camera driver, which devd starts as a
+    /// camera attaches.
+    #[test]
+    fn adr0058_the_image_s_drivers_are_named_when_they_aren_t_running() {
+        let mut s = laptop_ready();
+        s.graphics_driver = false;
+        s.dev.retain(|d| d != "video0");
+        let report = assess(&s);
+        let note = |kind| {
+            report
+                .parts
+                .iter()
+                .find(|p| p.kind == kind)
+                .map(|p| p.note.clone())
+                .unwrap()
+        };
+        assert!(note(Kind::Graphics).contains("off until this model is checked"));
+        assert_eq!(status(&report, Kind::Camera), Status::Limited);
+        assert!(note(Kind::Camera).contains("isn't running"));
+        s.camera_driver = false;
+        s.intel_gpu_driver = false;
+        let report = assess(&s);
+        assert_eq!(status(&report, Kind::Camera), Status::Unsupported);
+        assert!(
+            report
+                .parts
+                .iter()
+                .any(|p| p.kind == Kind::Graphics && p.note.contains("No driver for these"))
         );
     }
 

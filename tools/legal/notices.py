@@ -72,6 +72,9 @@ PORT_LICENSES = {
     "LGPL21+": "LGPL-2.1-or-later", "LGPL3": "LGPL-3.0-only", "LGPL3+": "LGPL-3.0-or-later",
     "Libpng": "Libpng", "MIT": "MIT", "MPL11": "MPL-1.1", "MPL20": "MPL-2.0", "OFL11": "OFL-1.1",
     "PD": "LicenseRef-public-domain", "ZLIB": "Zlib",
+    # Intel's firmware license (Wi-Fi, Bluetooth, graphics): redistribution of the unmodified
+    # binary, with the license, which the notices carry.
+    "INTEL": "LicenseRef-Intel-firmware",
 }
 # What an image may take from packages (ADR 0027). Permissive: deny.toml's list and these.
 IMAGE_PERMISSIVE = {
@@ -79,7 +82,11 @@ IMAGE_PERMISSIVE = {
     # CUPS 2.3 and later: Apache-2.0 with exceptions that only loosen it.
     "LicenseRef-CUPS",
 }
-# Unmodified, as separate shared libraries, with their source on offer (BR-3).
+# Firmware: binary code a device runs (Wi-Fi, Bluetooth, the GPU), never the computer's own
+# processors, shipped unmodified under its maker's redistribution terms (ADR 0058).
+IMAGE_FIRMWARE = {"LicenseRef-Intel-firmware"}
+# Unmodified, as separate shared libraries, programs or kernel modules, with their source on
+# offer (BR-3).
 IMAGE_WITH_OFFER = {
     "LGPL-2.0-only", "LGPL-2.0-or-later", "LGPL-2.1-only", "LGPL-2.1-or-later",
     "MPL-1.1", "MPL-2.0", "GPL-2.0-only", "GPL-2.0-or-later",
@@ -223,9 +230,10 @@ def third_party_offer(libraries: list[dict]) -> str:
         return ""
     out = [
         "",
-        "These third-party libraries ship unmodified, as separate shared",
-        "libraries. Their complete corresponding source is the distribution",
-        "files they were built from, available on the same terms:",
+        "These third-party libraries, programs and kernel modules ship",
+        "unmodified, as separate files. Their complete corresponding source",
+        "is the distribution files they were built from, available on the",
+        "same terms:",
         "",
     ]
     for lib in offered:
@@ -252,7 +260,7 @@ def image_license(ids: list[str], all_apply: bool, allowed: set[str]) -> tuple[s
     (all of them, or a choice of one): the SPDX expression it ships under,
     or None; and whether its source must be on offer."""
     spdx = [PORT_LICENSES.get(i, f"LicenseRef-port-{i}") for i in ids]
-    permissive = allowed | IMAGE_PERMISSIVE
+    permissive = allowed | IMAGE_PERMISSIVE | IMAGE_FIRMWARE
     if all_apply:
         if all(i in permissive or i in IMAGE_WITH_OFFER for i in spdx):
             return " AND ".join(spdx), any(i in IMAGE_WITH_OFFER for i in spdx)
@@ -299,8 +307,11 @@ def third_party(list_path: Path, licenses: Path | None) -> list[dict]:
             if name in corrected:
                 entry["license"], entry["all"] = " ".join(corrected[name]), True
                 entry["corrected"] = True
-            dist = re.search(r"^_LICENSE_DISTFILES=(.*)$", catalog, re.M)
-            entry["distfiles"] = dist.group(1).split() if dist else []
+            # One line for the package, or one per license (drm-kmod's).
+            entry["distfiles"] = sorted({
+                f for m in re.finditer(r"^_LICENSE_DISTFILES(?:_\S+)?\s*=(.*)$", catalog, re.M)
+                for f in m.group(1).split()
+            })
             entry["texts"] = [
                 (f.name, f.read_text(errors="replace").strip())
                 for f in sorted(folder.iterdir())

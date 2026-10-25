@@ -51,6 +51,10 @@ FreeBSD-powerd                  # CPU frequency scaling on battery
 FreeBSD-vt-data                 # console fonts and keymaps (vt; the syscons ones aren't used)
 FreeBSD-console-tools           # kbdcontrol, vidcontrol: load those keymaps and fonts
 FreeBSD-firmware-iwm            # Intel Wi-Fi firmware for laptops
+FreeBSD-libcuse                 # libcuse: webcamd presents USB cameras through it (ADR 0058)
+FreeBSD-bluetooth               # iwmbtfw (Intel Bluetooth firmware), hccontrol, bthidd (CF-13)
+FreeBSD-bluetooth-lib           # libbluetooth, libsdp (needed by FreeBSD-bluetooth)
+FreeBSD-ppp                     # (needed by FreeBSD-bluetooth)
 
 # --- Network
 FreeBSD-dhclient                # DHCP

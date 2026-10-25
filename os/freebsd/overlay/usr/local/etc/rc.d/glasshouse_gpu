@@ -1,0 +1,31 @@
+#!/bin/sh
+#
+# PROVIDE: glasshouse_gpu
+# REQUIRE: FILESYSTEMS
+# BEFORE:  glasshouse_greeter LOGIN
+# KEYWORD: nojail
+#
+# Intel's graphics driver (ADR 0058): the image carries it, and loads it on a computer with Intel
+# graphics once glasshouse_gpu_enable is set, which is per model, after the model is checked with
+# it (docs/dev/hardware.md). Without it the desktop draws on the screen the firmware set up.
+
+# shellcheck disable=SC1091,SC2034
+. /etc/rc.subr
+
+name="glasshouse_gpu"
+desc="Load the graphics driver for this computer's GPU"
+rcvar="glasshouse_gpu_enable"
+start_cmd="glasshouse_gpu_start"
+stop_cmd=":"
+
+glasshouse_gpu_start()
+{
+	# A display controller (class 0x03) of Intel's (vendor 0x8086).
+	if pciconf -l | grep -q 'class=0x03.* vendor=0x8086'; then
+		kldload -n i915kms || warn "the graphics driver didn't load"
+	fi
+}
+
+load_rc_config $name
+: "${glasshouse_gpu_enable:=NO}"
+run_rc_command "$1"
