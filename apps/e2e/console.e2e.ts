@@ -387,6 +387,9 @@ test("adr0057 IT reads an agent's kernel patch: who asked, its build here, the d
   // the shape asked for, and says no model read it. IT still decides.
   const ask = page.locator("button[data-test=agent-review]");
   await expect(ask).toHaveText("Review with agent");
+  // On a strong model IT chooses on the credits page, whatever the
+  // computers' agents run on.
+  await expect(page.locator(".agent-ask")).toContainText("Claude Opus 5.5 reads the patch");
   await expect(ask).toBeEnabled();
   await ask.click();
   const reading = page.locator("[data-test=agent-review-result]");

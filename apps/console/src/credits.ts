@@ -57,6 +57,14 @@ export async function creditsPage(root: HTMLElement, returned?: string): Promise
     });
   }
 
+  function setReviewModel(model: string): Promise<void> {
+    return act(async () => {
+      await api("POST", "/api/credits/review-model", { model });
+      const name = page.review_models.find((m) => m.id === model)?.name ?? model;
+      return `Kernel patch reviews run on ${name} now.`;
+    });
+  }
+
   function accept(): Promise<void> {
     return act(async () => {
       if (!accepting) throw new Error("Tick the box to accept the terms for your org.");
@@ -202,6 +210,23 @@ export async function creditsPage(root: HTMLElement, returned?: string): Promise
                       ),
                       h("button", { class: "button", "data-test": "save-alert", onclick: () => setAlert(alertBelow ?? page.alert_below_usd) }, "Save"),
                       page.alert_set ? h("button", { class: "button", onclick: () => setAlert(null) }, "Use the default") : null,
+                    ),
+                  ),
+                  card(
+                    "Kernel patch reviews",
+                    "The model that reads a kernel patch when you choose Review with agent in the Catalog, on these credits. Whatever the computers' agents run on, reviews run on a strong model.",
+                    h(
+                      "label",
+                      { class: "field" },
+                      "Model",
+                      h(
+                        "select",
+                        {
+                          "data-test": "review-model",
+                          onchange: (e: Event) => setReviewModel((e.target as HTMLSelectElement).value),
+                        },
+                        ...page.review_models.map((m) => h("option", { value: m.id, selected: m.id === page.review_model }, m.name)),
+                      ),
                     ),
                   ),
                   card(

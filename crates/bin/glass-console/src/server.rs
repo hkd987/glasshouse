@@ -573,8 +573,8 @@ impl Console {
     }
 
     /// `POST /api/catalog/<id>/agent-review {version}`, for the org's
-    /// admins (ADR 0057): the strongest model the org runs on its credits
-    /// reads the kernel patch on IT's screen, what the person asked and
+    /// admins (ADR 0057): the model IT chose for reviews, on the org's
+    /// credits, reads the kernel patch on IT's screen, what the person asked and
     /// the console's build of it, and says what it makes of it. That is
     /// kept beside the patch for IT to read; it decides nothing.
     async fn agent_review(&self, id: &str, request: &Request) -> Response {
@@ -615,14 +615,22 @@ impl Console {
                      review with an agent.",
                 );
             };
-            let Some(model) = state.review_model() else {
+            // What it reads goes to a model provider: on the terms the org
+            // accepted for its credits.
+            if state.credits.terms.is_none() {
                 return error(
                     409,
-                    "The org's published policy runs no model on its credits: add one to review \
-                     with an agent.",
+                    "Accept the model providers' terms on the Credits page to review with an \
+                     agent.",
                 );
-            };
-            (shared, key, model, state.credits.rate())
+            }
+            let (model, name) = state.credits.review_model();
+            (
+                shared,
+                key,
+                (model.to_owned(), name.to_owned()),
+                state.credits.rate(),
+            )
         };
         if !lock(&self.reviewing).insert(id.to_owned()) {
             return error(409, "An agent is reviewing it already.");
@@ -717,13 +725,13 @@ impl Console {
     /// Whether an agent can review kernel patch `id` here, on which model,
     /// or why not (ADR 0057).
     fn reviewer(&self, state: &State, id: &str) -> Value {
-        let model = state.review_model().map(|(_, name)| name);
+        let model = state.credits.review_model().1;
         let unavailable = if self.credits.get().is_none() {
             Some("Reviewing with an agent runs on model credits, which this console doesn't offer.")
         } else if state.credits.key().is_none() {
             Some("Buy model credits on the Credits page to review with an agent.")
-        } else if model.is_none() {
-            Some("The org's published policy runs no model on its credits.")
+        } else if state.credits.terms.is_none() {
+            Some("Accept the model providers' terms on the Credits page to review with an agent.")
         } else {
             None
         };
@@ -766,6 +774,26 @@ impl Console {
                     Ok(()) => {
                         tracing::info!(%user, below = state.credits.alert_below(), "credits: alert set");
                         ok(json!({ "alert_below_usd": state.credits.alert_below() }))
+                    }
+                    Err(e) => error(400, &e),
+                }
+            }
+            ("POST", "review-model") => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct ReviewModel {
+                    model: String,
+                }
+                let choice: ReviewModel = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                let mut state = self.state();
+                let dir = state.dir().to_owned();
+                match state.credits.set_review_model(&dir, &choice.model) {
+                    Ok(()) => {
+                        tracing::info!(%user, model = %choice.model, "credits: kernel patch reviews' model set");
+                        ok(json!({ "review_model": state.credits.review_model().0 }))
                     }
                     Err(e) => error(400, &e),
                 }
@@ -4640,8 +4668,11 @@ mod tests {
             (got["cost_usd"].as_f64().unwrap() - 0.01).abs() < 1e-9,
             "{got}"
         );
+        // On the model IT chose for reviews: a strong one by default,
+        // whatever its computers' agents run on.
         let (model, system, message) = lock(&reviewer.asked)[0].clone();
-        assert!(t.console.state().credit_models().contains(&model));
+        assert_eq!(model, "anthropic/claude-opus-5.5");
+        assert_eq!(view["hardware"]["reviewer"]["model"], "Claude Opus 5.5");
         assert_eq!(system, crate::hardware::REVIEW_SYSTEM);
         let fence = message
             .split_once('<')
@@ -4694,6 +4725,32 @@ mod tests {
                 .contains("read the diff yourself"),
             "{got}"
         );
+
+        // IT chooses another, from the strong ones only.
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/credits/review-model",
+                json!({ "model": "openrouter/auto" }),
+            )
+            .await;
+        assert_eq!(status, 400);
+        let (status, set) = t
+            .call(
+                "POST",
+                "/api/credits/review-model",
+                json!({ "model": "anthropic/claude-sonnet-5.5" }),
+            )
+            .await;
+        assert_eq!(status, 200, "{set}");
+        *lock(&reviewer.refuse) = false;
+        review("1").await;
+        assert_eq!(
+            lock(&reviewer.asked).last().unwrap().0,
+            "anthropic/claude-sonnet-5.5"
+        );
+        let (_, page) = t.call("GET", "/api/credits", Value::Null).await;
+        assert_eq!(page["review_model"], "anthropic/claude-sonnet-5.5");
 
         // A new version is reviewed afresh.
         submission["request"]["diff"] =

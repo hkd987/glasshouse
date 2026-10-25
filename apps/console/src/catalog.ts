@@ -339,7 +339,6 @@ function reviewWithAgent(item: Item, hw: Hardware, act: (work: () => Promise<str
       class: "button wide",
       "data-test": "agent-review",
       disabled: Boolean(why),
-      title: reviewer?.model ? `On ${reviewer.model}` : null,
       onclick: () => {
         button.disabled = true;
         button.textContent = "The agent is reading it…";
@@ -363,7 +362,8 @@ function reviewWithAgent(item: Item, hw: Hardware, act: (work: () => Promise<str
     h(
       "p",
       { class: "hint" },
-      why ?? `An agent reads the patch, what ${hw.person} asked and its build, on the org's model credits. It advises; it approves nothing.`,
+      why ??
+        `${reviewer?.model ?? "An agent"} reads the patch, what ${hw.person} asked and its build, on the org's model credits. It advises; it approves nothing.`,
     ),
   );
 }

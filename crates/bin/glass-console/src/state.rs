@@ -430,27 +430,8 @@ impl State {
     /// 0039), by the provider's id (`openrouter/auto`): the only ones the
     /// console forwards for its computers.
     pub fn credit_models(&self) -> std::collections::BTreeSet<String> {
-        self.credit_entries().into_iter().map(|m| m.model).collect()
-    }
-
-    /// The model a kernel patch's review with an agent runs on (ADR 0057):
-    /// the strongest the org's policies run on its credits, by its price,
-    /// as (the provider's id, its name).
-    pub fn review_model(&self) -> Option<(String, String)> {
-        self.credit_entries()
-            .into_iter()
-            .max_by(|a, b| {
-                let price =
-                    |m: &glass_policy::document::ModelEntry| m.usd_per_mtok_out.unwrap_or(0.0);
-                price(a).total_cmp(&price(b))
-            })
-            .map(|m| (m.model, m.name))
-    }
-
-    /// The models of the org's published policies on a credits provider.
-    fn credit_entries(&self) -> Vec<glass_policy::document::ModelEntry> {
         use glass_policy::document::ProviderKind;
-        let mut models = Vec::new();
+        let mut models = std::collections::BTreeSet::new();
         for ring in Ring::ALL {
             let Some(doc) = self
                 .in_force(ring)
@@ -468,8 +449,9 @@ impl State {
             models.extend(
                 doc.models
                     .models
-                    .into_iter()
-                    .filter(|m| credits.contains(&m.provider.as_str())),
+                    .iter()
+                    .filter(|m| credits.contains(&m.provider.as_str()))
+                    .map(|m| m.model.clone()),
             );
         }
         models

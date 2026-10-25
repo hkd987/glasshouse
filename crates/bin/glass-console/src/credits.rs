@@ -347,8 +347,15 @@ impl ModelForwarder for AnthropicDevModels {
         key: &str,
         request: &ProviderRequest<'_>,
     ) -> Result<ProviderReply, ProviderError> {
+        // OpenRouter's id for one of Anthropic's models, as Anthropic names
+        // it ("anthropic/claude-opus-5.5" is "claude-opus-5-5"): IT's choice
+        // for kernel patch reviews. Anything else runs on the one given.
+        let model = request
+            .model
+            .strip_prefix("anthropic/")
+            .map_or_else(|| self.model.clone(), |m| m.replace('.', "-"));
         let reply = self.provider.complete(&ProviderRequest {
-            model: &self.model,
+            model: &model,
             system: request.system,
             messages: request.messages,
             max_tokens: request.max_tokens,
@@ -359,7 +366,7 @@ impl ModelForwarder for AnthropicDevModels {
         self.keys.charge_key(key, cost)?;
         Ok(ProviderReply {
             cost_usd: Some(cost),
-            served_by: Some(format!("development/anthropic/{}", self.model)),
+            served_by: Some(format!("development/anthropic/{model}")),
             ..reply
         })
     }
@@ -619,7 +626,20 @@ pub struct Credits {
     /// admins; unset, [`Credits::alert_below`] picks one.
     #[serde(default)]
     pub alert_below_usd: Option<f64>,
+    /// The model IT's kernel patch reviews run on (ADR 0057), by
+    /// OpenRouter's id; unset, the first of [`REVIEW_MODELS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_model: Option<String>,
 }
+
+/// The models IT may have kernel patches reviewed on (ADR 0057), by
+/// OpenRouter's id, and their names: strong ones only, whatever its
+/// computers' agents run on. The first is the default.
+pub const REVIEW_MODELS: &[(&str, &str)] = &[
+    ("anthropic/claude-opus-5.5", "Claude Opus 5.5"),
+    ("anthropic/claude-fable-5.1", "Claude Fable 5.1"),
+    ("anthropic/claude-sonnet-5.5", "Claude Sonnet 5.5"),
+];
 
 impl std::fmt::Debug for Credits {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -699,6 +719,26 @@ impl Credits {
             ));
         }
         self.alert_below_usd = usd.map(|u| (u * 100.0).round() / 100.0);
+        self.save(dir).map_err(|e| format!("{e:#}"))
+    }
+
+    /// The model kernel patch reviews run on, as (OpenRouter's id, its
+    /// name): IT's choice, or the first of [`REVIEW_MODELS`].
+    pub fn review_model(&self) -> (&'static str, &'static str) {
+        self.review_model
+            .as_deref()
+            .and_then(|m| REVIEW_MODELS.iter().find(|(id, _)| *id == m))
+            .copied()
+            .unwrap_or(REVIEW_MODELS[0])
+    }
+
+    /// IT chooses the model kernel patch reviews run on: one of
+    /// [`REVIEW_MODELS`].
+    pub fn set_review_model(&mut self, dir: &Path, model: &str) -> Result<(), String> {
+        if !REVIEW_MODELS.iter().any(|(id, _)| *id == model) {
+            return Err(format!("{model} isn't a model reviews run on here."));
+        }
+        self.review_model = Some(model.to_owned());
         self.save(dir).map_err(|e| format!("{e:#}"))
     }
 
@@ -859,6 +899,11 @@ impl Credits {
             "remaining_usd": remaining,
             "grants": grants,
             "terms_accepted": self.terms.is_some(),
+            "review_model": self.review_model().0,
+            "review_models": REVIEW_MODELS
+                .iter()
+                .map(|(id, name)| json!({ "id": id, "name": name }))
+                .collect::<Vec<_>>(),
             "by_computer": computers,
             "problem": problem,
         })

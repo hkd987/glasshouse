@@ -380,8 +380,8 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
 ## Review with agent (2026-10-25)
 IT's review page has a "Review with agent" button. An agent reads the
 patch first and says what it makes of it, beside IT's own reading.
-- **What it reads.** The strongest model the org's published policy runs
-  on its credits, by its price, reads:
+- **What it reads.** The model IT chose for reviews on the credits page
+  reads, on the org's credits:
   - what the person said, and the make of their computer (not their
     name, nor which computer it was);
   - the patch's targets and what it rebuilds;
@@ -400,11 +400,17 @@ patch first and says what it makes of it, beside IT's own reading.
 - **What it isn't.** It approves nothing and changes nothing computers
   get. IT still approves or blocks, as before. The review is kept with
   the version it read, and a newer version starts without one.
+- **Which model.** IT picks one of a few strong models: Claude Opus 5.5
+  (the default), Claude Fable 5.1 or Claude Sonnet 5.5. That's whatever the
+  computers' agents run on. The default credits policy has only
+  OpenRouter's auto router, which picks a model for each request, and a
+  review shouldn't depend on its pick.
 - **What it costs.** It runs on the org's credits. The credits page counts
   it as "console: patch reviews", beside the computers. Only IT's admins
   can ask for one, one at a time per patch.
 - With `--dev`, the credits' stand-in answers a review in the same shape
-  and says no model read it. With `--dev-anthropic`, a real model reads it.
+  and says no model read it. With `--dev-anthropic`, the Anthropic model
+  IT chose reads it.
 - **Run on a real model** (2026-10-25, Claude Sonnet 5.5 through
   `--dev-anthropic`, a copy of the managed run's console):
   - The patch the agent wrote in the VM run above, the codec's name:
