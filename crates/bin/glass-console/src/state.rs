@@ -119,6 +119,9 @@ pub struct PatchShared {
     pub request: BuildRequest,
     pub build: PatchBuild,
     pub submitted_at: Timestamp,
+    /// What an agent made of this version, when IT asked one to review it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_review: Option<crate::hardware::AgentReview>,
 }
 
 /// The build service's build of a patch sent for review.
@@ -427,8 +430,27 @@ impl State {
     /// 0039), by the provider's id (`openrouter/auto`): the only ones the
     /// console forwards for its computers.
     pub fn credit_models(&self) -> std::collections::BTreeSet<String> {
+        self.credit_entries().into_iter().map(|m| m.model).collect()
+    }
+
+    /// The model a kernel patch's review with an agent runs on (ADR 0057):
+    /// the strongest the org's policies run on its credits, by its price,
+    /// as (the provider's id, its name).
+    pub fn review_model(&self) -> Option<(String, String)> {
+        self.credit_entries()
+            .into_iter()
+            .max_by(|a, b| {
+                let price =
+                    |m: &glass_policy::document::ModelEntry| m.usd_per_mtok_out.unwrap_or(0.0);
+                price(a).total_cmp(&price(b))
+            })
+            .map(|m| (m.model, m.name))
+    }
+
+    /// The models of the org's published policies on a credits provider.
+    fn credit_entries(&self) -> Vec<glass_policy::document::ModelEntry> {
         use glass_policy::document::ProviderKind;
-        let mut models = std::collections::BTreeSet::new();
+        let mut models = Vec::new();
         for ring in Ring::ALL {
             let Some(doc) = self
                 .in_force(ring)
@@ -446,9 +468,8 @@ impl State {
             models.extend(
                 doc.models
                     .models
-                    .iter()
-                    .filter(|m| credits.contains(&m.provider.as_str()))
-                    .map(|m| m.model.clone()),
+                    .into_iter()
+                    .filter(|m| credits.contains(&m.provider.as_str())),
             );
         }
         models
@@ -789,6 +810,7 @@ impl State {
             request: request.clone(),
             build: PatchBuild::Building,
             submitted_at: Timestamp::now(),
+            agent_review: None,
         };
         match self.catalog.items.iter_mut().find(|i| i.item.id == id) {
             Some(entry) => {
@@ -925,6 +947,50 @@ impl State {
             kernel: shared.request.kernel,
             reviewed_by: by.to_owned(),
         })
+    }
+
+    /// Version `version` of kernel patch `id`, for an agent to review: the
+    /// one on IT's screen, once its build is done.
+    pub fn patch_for_review(&self, id: &str, version: &str) -> Result<PatchShared, Refused> {
+        let entry = self.item(id)?;
+        let shared = entry
+            .hardware
+            .as_ref()
+            .ok_or_else(|| Refused::Rule(format!("{id} isn't a kernel patch")))?;
+        if entry.item.version != version {
+            return Err(Refused::Rule(format!(
+                "Version {} came in since: review that one.",
+                entry.item.version
+            )));
+        }
+        if shared.build == PatchBuild::Building {
+            return Err(Refused::Rule(
+                "It's still being built: the agent reads it with its build.".into(),
+            ));
+        }
+        Ok(shared.clone())
+    }
+
+    /// Keeps an agent's review of version `version` of `id`, unless a newer
+    /// version came in while it read.
+    pub fn keep_agent_review(
+        &mut self,
+        id: &str,
+        version: &str,
+        review: crate::hardware::AgentReview,
+    ) -> Result<(), Refused> {
+        let entry = self.item_mut(id)?;
+        if entry.item.version != version {
+            return Err(Refused::Rule(format!(
+                "Version {} came in while the agent read version {version}: review that one.",
+                entry.item.version
+            )));
+        }
+        let Some(shared) = entry.hardware.as_mut() else {
+            return Err(Refused::Rule(format!("{id} isn't a kernel patch")));
+        };
+        shared.agent_review = Some(review);
+        self.save_catalog().map_err(internal)
     }
 
     /// A reviewed patch's bundle, for a computer, only at the revision the

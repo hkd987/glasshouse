@@ -684,6 +684,37 @@ textarea.text {
   color: var(--attention-text);
 }
 
+/* Review with agent (ADR 0057): its button above IT's decision, and its
+   reading beside IT's own. */
+.agent-ask {
+  margin: 0 0 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.agent-ask .hint {
+  margin: 8px 0 0;
+}
+
+.agent-summary {
+  margin: 12px 0 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.agent-list h3 {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.agent-list ul {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 /* The build service's log: long paths wrap inside the card. */
 pre.log {
   margin: 12px 0 0;

@@ -158,6 +158,33 @@ export interface Hardware {
   bundle_sha256: string | null;
   /** Computers whose reports say they keep it, are trying it, or went back. */
   computers: { kept: number; trying: number; went_back: number };
+  /** What an agent made of this version, when IT asked one: advice only. */
+  agent_review: AgentReview | null;
+  /** Whether an agent can review it here, on which model, or why not. */
+  reviewer?: { model: string | null; unavailable: string | null; reviewing: boolean };
+}
+
+/** An agent's reading of a kernel patch (ADR 0057), beside IT's own. */
+export interface AgentReview {
+  /** Null when its answer wasn't a review: `text` is what it said. */
+  verdict: "looks_right" | "has_concerns" | "dont_approve" | null;
+  summary: string;
+  matches_request: string;
+  risks: string[];
+  checks: string[];
+  text?: string;
+  /** Its provider stopped it reviewing, and why ("cyber"; empty if unsaid). */
+  declined?: string;
+  /** It read only the start of a long diff. */
+  partial: boolean;
+  /** As the org's policy names the model. */
+  model: string;
+  served_by?: string;
+  /** Who asked for it, by name. */
+  by: string;
+  at: string;
+  /** What it cost the org's credits. */
+  cost_usd?: number;
 }
 
 /** An action, as IT reads it. */

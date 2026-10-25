@@ -12,11 +12,13 @@
 // So is a kernel patch an agent wrote on one of the org's computers (ADR
 // 0057, slice 3): what the person asked, the patch, the console's own build
 // of it, the diff, and the computers that run it. It's made available,
-// never required: the person at each computer says yes.
+// never required: the person at each computer says yes. "Review with
+// agent" has a model the org runs on its credits read it all first and say
+// what it makes of it: advice beside IT's own reading, never a decision.
 
 import { h, show } from "@glasshouse/sdk";
 
-import { type CatalogPage, type FileChange, type Hardware, type Item, type Mode, type Shared, type Titled, api } from "./api.ts";
+import { type AgentReview, type CatalogPage, type FileChange, type Hardware, type Item, type Mode, type Shared, type Titled, api } from "./api.ts";
 import { ago, capital, card, chip, mono, notice, plural } from "./ui.ts";
 
 const REVIEW: Record<Item["review"], [string, "ok" | "wait" | "bad"]> = {
@@ -220,6 +222,7 @@ function render(
           item.approved_version
             ? h("p", { class: "kept", "data-test": "kept-version" }, `Computers keep version ${item.approved_version} until you decide.`)
             : null,
+          hardware ? reviewWithAgent(item, hardware, act) : null,
           h("label", { class: "field" }, h("span", {}, "Approve for group"), groupPick),
           h("label", { class: "field" }, h("span", {}, "Install mode"), modePick),
           h("label", { class: "check-row inline" }, pin, h("span", {}, `Pin to v${item.version}`)),
@@ -270,10 +273,11 @@ const BUILD: Record<Hardware["build"]["state"], [string, "ok" | "wait" | "bad"]>
   failed: ["Didn't build", "bad"],
 };
 
-function patchReview(hw: Hardware): HTMLElement[] {
+function patchReview(hw: Hardware): (HTMLElement | null)[] {
   const build = hw.build;
   const parts = [...hw.modules, ...(hw.kernel ? ["the kernel"] : [])];
   return [
+    hw.agent_review ? agentReview(hw.agent_review) : null,
     tagged(
       card(
         "What they asked",
@@ -315,6 +319,78 @@ function patchReview(hw: Hardware): HTMLElement[] {
       "computers",
     ),
   ];
+}
+
+const VERDICT: Record<NonNullable<AgentReview["verdict"]>, [string, "ok" | "wait" | "bad"]> = {
+  looks_right: ["Looks right", "ok"],
+  has_concerns: ["Has concerns", "wait"],
+  dont_approve: ["Don't approve", "bad"],
+};
+
+/** The button that has an agent read the patch on screen, or why it can't. */
+function reviewWithAgent(item: Item, hw: Hardware, act: (work: () => Promise<string>) => Promise<void>): HTMLElement {
+  const reviewer = hw.reviewer;
+  const why = reviewer?.reviewing
+    ? "An agent is reading it now."
+    : (reviewer?.unavailable ?? (hw.build.state === "building" ? "It can read it once it's built." : null));
+  const button = h(
+    "button",
+    {
+      class: "button wide",
+      "data-test": "agent-review",
+      disabled: Boolean(why),
+      title: reviewer?.model ? `On ${reviewer.model}` : null,
+      onclick: () => {
+        button.disabled = true;
+        button.textContent = "The agent is reading it…";
+        return act(async () => {
+          // The version on screen: one sent since is refused.
+          const r = await api<AgentReview>("POST", `/api/catalog/${item.id}/agent-review`, { version: item.version });
+          return r.verdict
+            ? `The agent's review is in: ${VERDICT[r.verdict][0].toLowerCase()}. It's advice: the decision is yours.`
+            : r.declined !== undefined
+              ? "The model declined to review it: read why below."
+              : "The agent answered: read what it said below. The decision is yours.";
+        });
+      },
+    },
+    hw.agent_review ? "Review again with agent" : "Review with agent",
+  );
+  return h(
+    "div",
+    { class: "agent-ask" },
+    button,
+    h(
+      "p",
+      { class: "hint" },
+      why ?? `An agent reads the patch, what ${hw.person} asked and its build, on the org's model credits. It advises; it approves nothing.`,
+    ),
+  );
+}
+
+/** What the agent made of it, beside IT's own reading. */
+function agentReview(r: AgentReview): HTMLElement {
+  const cost = r.cost_usd === undefined ? "" : r.cost_usd < 0.01 ? ", for under $0.01" : `, for $${r.cost_usd.toFixed(2)}`;
+  const list = (title: string, items: string[]) =>
+    items.length ? h("div", { class: "agent-list" }, h("h3", {}, title), h("ul", {}, ...items.map((i) => h("li", {}, i)))) : null;
+  // The model that answered, without its provider's path.
+  const model = r.served_by?.split("/").pop() || r.model;
+  const declined = r.declined === undefined ? null : r.declined ? `Declined (${r.declined})` : "Declined";
+  return tagged(
+    card(
+      "The agent's review",
+      `${model} read it for ${r.by}, ${ago(r.at)}${cost}. Advice only: you decide.`,
+      r.verdict ? h("div", { class: "kv" }, h("span", {}, "Its reading"), chip(VERDICT[r.verdict][0], VERDICT[r.verdict][1])) : null,
+      declined ? h("div", { class: "kv" }, h("span", {}, "Its reading"), chip(declined, "bad")) : null,
+      r.partial ? notice("The diff was long: it read only its first 150 KB.", "bad") : null,
+      r.summary ? h("p", { class: "agent-summary" }, r.summary) : null,
+      r.matches_request ? h("p", { class: "agent-summary" }, h("strong", {}, "What they asked: "), r.matches_request) : null,
+      list("What could go wrong", r.risks),
+      list("Before you approve", r.checks),
+      r.text ? (declined ? h("p", { class: "agent-summary" }, r.text) : h("blockquote", { class: "maker-note" }, r.text)) : null,
+    ),
+    "agent-review-result",
+  );
 }
 
 /** A unified diff of several files, as the file-by-file view draws them. */

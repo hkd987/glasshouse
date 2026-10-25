@@ -365,7 +365,7 @@ test("dv11 ga2 an item IT approves reaches catalog.search on the device", async 
   await close();
 });
 
-test("adr0057 IT reads an agent's kernel patch: who asked, its build here, the diff, the computers that run it", async ({ browser }) => {
+test("adr0057 IT reads an agent's kernel patch: who asked, its build here, the diff, the computers that run it, an agent's review", async ({ browser }) => {
   // The fixture's: an agent wrote it for a person on NW-LT-0001.
   const { page, close } = await session(browser);
   await open(page, "#/catalog/iwlwifi-resume", "catalog");
@@ -381,6 +381,24 @@ test("adr0057 IT reads an agent's kernel patch: who asked, its build here, the d
   await shot(page, "catalog-kernel-patch-review");
   await page.locator("[data-test=changes]").scrollIntoViewIfNeeded();
   await shot(page, "catalog-kernel-patch-diff");
+
+  // Review with agent: a model on the org's credits (on since the adr0039
+  // tests above) reads it. The development stand-in answers a review in
+  // the shape asked for, and says no model read it. IT still decides.
+  const ask = page.locator("button[data-test=agent-review]");
+  await expect(ask).toHaveText("Review with agent");
+  await expect(ask).toBeEnabled();
+  await ask.click();
+  const reading = page.locator("[data-test=agent-review-result]");
+  await expect(reading).toContainText("Has concerns");
+  await expect(reading).toContainText("no model read this patch");
+  await expect(reading).toContainText("Before you approve");
+  await expect(reading).toContainText("Advice only: you decide.");
+  await expect(page.locator(".notice")).toContainText("the decision is yours");
+  await expect(page.locator("button[data-test=agent-review]")).toHaveText("Review again with agent");
+  await expect(page.locator(".crumbs")).toContainText("Waiting for review");
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await shot(page, "catalog-kernel-patch-agent-review");
   await close();
 });
 

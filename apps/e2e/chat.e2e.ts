@@ -136,7 +136,8 @@ test("cf91 a channel made in Chat with its people, who read it on their computer
   await page.keyboard.press("Enter");
   await expect(page.locator("[data-test=messages]")).toContainText("Kickoff at 3");
   await expect(page.locator(".sidebar .row.active")).toContainText("northwind-deal");
-  expect(priya("read", "#northwind-deal")).toContain("Kickoff at 3 in the big room");
+  // Her computer has it once its next sync brings it, not at once.
+  await expect.poll(() => priya("read", "#northwind-deal"), { timeout: 5000 }).toContain("Kickoff at 3 in the big room");
   // The console keeps the channel's name sealed (ADR 0030).
   expect(everything(CONSOLE_STATE)).not.toContain("northwind-deal");
   await page.screenshot({ path: join(CONSOLE_SHOTS, "chat-channel.png") });

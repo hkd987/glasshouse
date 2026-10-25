@@ -251,6 +251,18 @@ impl ModelForwarder for DevModels {
         let call = glass_gateway::scripted_call(request);
         let last = request.messages.last();
         let text = match (&call, last) {
+            // IT's "Review with agent" on a kernel patch (ADR 0057): a
+            // review in the shape asked for, that says no model read it.
+            _ if request.system == Some(crate::hardware::REVIEW_SYSTEM) => json!({
+                "verdict": "has_concerns",
+                "summary": "A development review: no model read this patch. The console runs \
+                            with --dev, and its credits answer from a script.",
+                "matches_request": "Not read: a real model says whether it does what the person \
+                                    asked.",
+                "risks": ["Nobody but you has read it yet."],
+                "checks": ["Try it on one computer before approving it for a group."],
+            })
+            .to_string(),
             (Some(call), _) => format!("Calling {} on model credits.", call.name),
             (None, Some(m)) if !m.tool_results.is_empty() => {
                 let results: Vec<String> = m
@@ -691,7 +703,7 @@ impl Credits {
     }
 
     /// The org's dollars rate: what it paid for each of OpenRouter's.
-    fn rate(&self) -> f64 {
+    pub fn rate(&self) -> f64 {
         if self.limit() > 0.0 {
             self.granted() / self.limit()
         } else {

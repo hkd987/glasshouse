@@ -425,7 +425,15 @@ fn hardware(
         "submitted_at": h.submitted_at,
         "bundle_sha256": item.patch.as_ref().map(|p| &p.bundle_sha256),
         "computers": { "kept": kept, "trying": trying, "went_back": went_back },
+        "agent_review": h.agent_review.as_ref().map(|r| agent_review(r, directory)),
     })
+}
+
+/// An agent's review of a kernel patch, with who asked for it by name.
+pub fn agent_review(review: &crate::hardware::AgentReview, directory: &dyn Directory) -> Value {
+    let mut view = json!(review);
+    view["by"] = json!(directory.display_name(&review.by));
+    view
 }
 
 /// A shared app's review (ADR 0032, R2; GA-8): who made it from what, the
