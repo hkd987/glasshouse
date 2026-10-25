@@ -31,14 +31,14 @@
 #   record.
 #
 # The audit log verifies after each. Needs the current build deployed (`make freebsd vm-deploy`)
-# and the bundles built (os/freebsd/scripts/kernel-patch.sh build <patch>). Run the VM with BIOS
-# firmware (`VM_FIRMWARE=bios vm.sh up`): emulated without KVM, the framebuffer console makes a
-# boot after a panic or a power cut take many minutes (vm.sh's waits give up), where the text
-# console takes seconds. What's tested is the same: the boot environments, the bootonce, the
-# watchdog.
+# and the bundles built (os/freebsd/scripts/kernel-patch.sh build <patch>). The VM's UEFI firmware
+# is the build with SMM, which the watchdog needs (lib.sh). Emulated, a start can wait minutes on
+# its USB controller and CD drive; vm.sh's waits allow for it.
 #
 # The VM trusts the bundles' development key (build/kpatch/dev-key), with a five-minute probation,
-# for this run only: its glassd.toml is put back however the run ends.
+# for this run only: its glassd.toml is put back as the run ends. That file is in the boot
+# environment: a run that ends on a patch's (the VM hung) leaves the key in the default one's,
+# and says so; the next run won't start until it's put back.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -60,13 +60,23 @@ status() { in_vm 'glassctl --json hardware patch status' | field "$1"; }
 glass_kpatch() { cargo run -q --manifest-path "$repo/Cargo.toml" -p glass-kpatch -- "$@"; }
 
 pub=$(glass_kpatch public --key "$kpatch/dev-key")
+# Patches' environments are made from the running one, with the build deployed into it.
+[[ $(in_vm 'kenv -q vfs.root.mountfrom') == */default ]] ||
+	{ log "the VM isn't running its default boot environment"; exit 1; }
+in_vm "test ! -e $conf.before-patch-test" || {
+	log "an earlier run left the VM trusting its key: put $conf.before-patch-test back over $conf"
+	exit 1
+}
 in_vm "cp $conf $conf.before-patch-test &&
 	printf '\n[hardware]\nkeys = [\"%s\"]\nprobation_minutes = 5\n' '$pub' >>$conf &&
 	service glassd restart >/dev/null &&
 	for i in \$(jot 60); do glassctl status >/dev/null 2>&1 && break; sleep 1; done"
 untrust() {
-	in_vm "if [ -f $conf.before-patch-test ]; then mv $conf.before-patch-test $conf &&
-		service glassd restart >/dev/null; fi" || true
+	in_vm "case \$(kenv -q vfs.root.mountfrom) in */default) ;; *) exit 3 ;; esac
+		if [ -f $conf.before-patch-test ]; then mv $conf.before-patch-test $conf &&
+		service glassd restart >/dev/null; fi" ||
+		log "FAIL the VM's glassd.toml isn't back: in its default boot environment, put" \
+			"$conf.before-patch-test back over $conf"
 	rm -rf "$work"
 }
 trap untrust EXIT

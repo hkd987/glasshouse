@@ -25,6 +25,10 @@ make vm-status            # "running: pid …, ssh … up" or not running
 ## Use it
 
 - Deploy after a code change: `make freebsd vm-deploy` (~12 s; `vm` profile).
+  It goes into the boot environment the VM runs, as does everything under
+  `/usr/local/etc` (glassd.toml included): after a kernel patch or OS
+  update test left the VM on another one (`bectl list`), get back on
+  `default` before deploying or editing config.
 - Run something as root: `make vm-run CMD="..."` or
   `os/freebsd/scripts/vm.sh run '...'`.
 - As the demo user: `os/freebsd/scripts/vm.sh run "su demo -c 'glassctl tasks'"`

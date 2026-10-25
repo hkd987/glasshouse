@@ -245,6 +245,36 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
     set to it, stays on probation and is kept.
 - **The base kernel is built with CTF** now, as the release's is
   (GENERIC's `WITH_CTF`): `zroot/kpatch/kernel@15.1-RELEASE-ctf`.
+- **In the VM** (`tests/hardware/patch-vm.sh`, 2026-10-25):
+  - the Wi-Fi fix, rebuilt on the CTF kernel, went on probation with the
+    watchdog armed, counted its two wakes and its minutes, and was kept,
+    the watchdog disarmed;
+  - a power cut on probation went back to the environment before;
+  - a module that panics as it loads, one that panics three minutes in,
+    and one that hangs the start (a power cut) each went back, and the
+    patch was removed;
+  - a module that hung every processor on probation: the watchdog
+    restarted the VM by itself, on the environment before ("the computer
+    hung on it, before its probation ended, and the hardware watchdog
+    restarted it");
+  - a module that hung the shutdown left the VM hung: the chipset's timer
+    was halted. 15.1's `watchdogd` ignores `-x` and turns the watchdog off
+    as the shutdown stops it, which is what the model's
+    `watchdogOffAtShutdown` switch says fails. With glassd leaving the
+    watchdog its own minute (above), it restarted the VM onto the patch,
+    and glassd failed it ("the computer hung on it, and the hardware
+    watchdog restarted it");
+  - the audit log verified after each.
+- **What emulation changes** (QEMU without KVM):
+  - Its firmware can't wake this OS from S3 (OVMF faults, SeaBIOS hangs),
+    so `vm.sh sleep-wake` runs the suspend and resume path without it
+    (`debug.acpi.suspend_bounce`).
+  - OVMF built without SMM can't take the TCO watchdog's interrupts, and
+    starts stall: the dev VM boots the build with SMM.
+  - A start can wait minutes on the emulated USB controller and CD drive.
+    A test module that hung three minutes after it loaded went off before
+    glassd ran, a hang no watchdog was armed for yet (the `hang` case: a
+    power cut). The test module now hangs when the test asks.
 
 ## Slice 2, as built (2026-10-25)
 - **The hardware app** gives agents five actions:
