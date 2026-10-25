@@ -11,8 +11,8 @@
 #   exec <binary> [args]     copy a host binary into the VM and run it (usable as a cargo runner)
 #   reset              stop and delete the overlay + seed (next `up` is a fresh first boot)
 #   power-cut          restart the VM at once, as if unplugged (nothing shut down or written first)
-#   sleep-wake [secs]  the guest sleeps (suspend to RAM, as a closed lid), then wakes after secs
-#                      (default 5), as an opened lid; waits until SSH answers again
+#   sleep-wake         the guest suspends and resumes, as a closed lid and an opened one: every
+#                      device's suspend and resume, without the firmware's sleep (see cmd_sleep_wake)
 #   clear-snapshots    destroy the tasks' `@glass-` snapshots test runs piled up (they slow every
 #                      snapshot, docs/dev/performance.md), with glassd stopped meanwhile
 #   console-log [-f]   print (or follow) the serial console log
@@ -153,25 +153,6 @@ cmd_wait() {
 # qmp_input <json events>: sends input events through QMP.
 qmp_input() {
 	qmp "{\"execute\": \"input-send-event\", \"arguments\": {\"events\": $1}}"
-}
-
-# qmp_status: what QEMU says the guest is doing: running, suspended, ...
-qmp_status() {
-	python3 - "$VM_QMP" <<'PY'
-import json, socket, sys
-s = socket.socket(socket.AF_UNIX)
-s.connect(sys.argv[1])
-f = s.makefile("rw")
-f.readline()
-for command in ({"execute": "qmp_capabilities"}, {"execute": "query-status"}):
-    f.write(json.dumps(command) + "\n")
-    f.flush()
-    while True:
-        reply = json.loads(f.readline())
-        if "return" in reply:
-            break
-print(reply["return"].get("status", ""))
-PY
 }
 
 # qmp <json command>: sends one command through QMP.
@@ -400,26 +381,22 @@ cmd_power_cut() {
 
 # The guest suspends to RAM, as a closed lid does (rc.suspend, then acpiconf), and wakes when
 # QEMU's firmware is told to (system_wakeup), as an opened lid does.
+# QEMU 8.2's firmware doesn't wake this OS from suspend to RAM: OVMF faults in its resume path,
+# and SeaBIOS leaves the guest hung (2026-10-25). So the kernel bounces
+# (debug.acpi.suspend_bounce): rc.suspend runs, every device suspends and resumes, rc.resume runs,
+# as a laptop's wake does, without the firmware's sleep.
 cmd_sleep_wake() {
-	local secs=${1:-5} state=
-	vm_ssh 'nohup acpiconf -s 3 >/dev/null 2>&1 </dev/null &' || true
-	vm_ssh_close
-	for _ in $(seq 120); do
-		state=$(qmp_status)
-		[[ $state == suspended ]] && break
-		sleep 1
-	done
-	[[ $state == suspended ]] || die "the guest didn't go to sleep (QEMU says ${state:-nothing})"
-	log "asleep; waking in ${secs}s"
-	sleep "$secs"
-	qmp '{"execute": "system_wakeup"}'
+	local before
+	before=$(vm_ssh 'grep -c "resumed at" /var/log/messages' || echo 0)
+	vm_ssh 'sysctl -q debug.acpi.suspend_bounce=1 && acpiconf -s 3' ||
+		die "the guest didn't suspend (acpiconf -s 3)"
 	local start=$SECONDS
-	until vm_ssh true 2>/dev/null; do
-		((SECONDS - start < 180)) || die "the guest didn't wake (QEMU says $(qmp_status)); see $VM_CONSOLE"
-		vm_ssh_close
-		sleep 3
+	until (($(vm_ssh 'grep -c "resumed at" /var/log/messages' || echo 0) > before)); do
+		((SECONDS - start < 120)) || die "the guest suspended and didn't resume; see $VM_CONSOLE"
+		sleep 2
 	done
-	log "awake after $((SECONDS - start))s"
+	vm_ssh 'sysctl -q debug.acpi.suspend_bounce=0' || true
+	log "suspended and resumed in $((SECONDS - start))s"
 }
 
 cmd_reset() {

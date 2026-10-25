@@ -6,7 +6,8 @@
 # - good: the Wi-Fi fix (os/freebsd/patches/lkpi-wlan-suspend) is set up in a boot environment of
 #   its own; the VM restarts onto it; glassd checks it (the kernel and modules are the ones signed,
 #   and load) and puts it on probation, the hardware watchdog armed. A clean restart on probation
-#   comes back to it; the VM sleeps and wakes twice (the fix asks for two wakes); after its minutes
+#   comes back to it; the VM suspends and resumes twice (the fix asks for two wakes; vm.sh
+#   sleep-wake says why QEMU's firmware can't sleep it for real); after its minutes
 #   of use it's kept, the watchdog disarmed, and the fix's sysctl shows the patched kernel runs. A second kernel
 #   patch not built on top of it is refused (HardwarePatchStack.tla). Then it's taken out
 #   (`glassctl hardware patch undo`): the next start is the VM's own environment, which removes the
@@ -161,10 +162,10 @@ good() {
 	restart
 	[[ $(status 'd["running"]') == "$env" ]] || fail "good: a clean restart left $env"
 	watchdog_is yes "good: on probation, restarted"
-	log "good: the VM sleeps and wakes, twice"
+	log "good: the VM suspends and resumes, twice"
 	local wakes
 	for wakes in 1 2; do
-		"$vm" sleep-wake 5 >&2 || { fail "good: the VM didn't sleep and wake"; return; }
+		"$vm" sleep-wake >&2 || { fail "good: the VM didn't suspend and resume"; return; }
 		for _ in $(seq 30); do
 			[[ $(status 'd["trial"].get("woke", 0)') -ge $wakes || $(status 'd["trial"]["state"]') == kept ]] && break
 			sleep 2
