@@ -481,7 +481,12 @@ async fn run() -> anyhow::Result<()> {
     agent
         .progress("Asking you to try it at the next restart", None, None)
         .await?;
-    let mut proposed = call(&agent, "hardware_patch_propose", json!({ "build": build })).await?;
+    let mut proposed = call(
+        &agent,
+        "hardware_patch_propose",
+        json!({ "build": build, "problem": request }),
+    )
+    .await?;
     if let Err(why) = &proposed
         && why.contains("rebuilds the kernel")
         && patch["kernel"] != true
@@ -515,11 +520,29 @@ async fn run() -> anyhow::Result<()> {
             && built["ok"] == true
         {
             build = built["build"].as_str().unwrap_or("").to_owned();
-            proposed = call(&agent, "hardware_patch_propose", json!({ "build": build })).await?;
+            proposed = call(
+                &agent,
+                "hardware_patch_propose",
+                json!({ "build": build, "problem": request }),
+            )
+            .await?;
         }
     }
     let patch = patch;
     match proposed {
+        // A computer that takes only patches IT reviewed sends it there.
+        Ok(sent) if sent["state"] == "sent_for_review" => {
+            agent
+                .answer(
+                    "Sent to IT for review",
+                    &format!(
+                        "Kernel patch {} went to IT for review: {}. Nothing changed on this computer. IT builds it again and reads it, and once they approve it, it's in the Store's Hardware category for you to install.",
+                        sent["id"].as_str().unwrap_or(""),
+                        patch["summary"].as_str().unwrap_or("")
+                    ),
+                )
+                .await?;
+        }
         Ok(set_up) => {
             agent
                 .answer(

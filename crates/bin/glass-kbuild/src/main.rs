@@ -206,11 +206,10 @@ impl Builder {
             );
         }
         std::fs::write(work.join("patch.toml"), file).map_err(|e| e.to_string())?;
-        std::fs::write(
-            work.join("patch.diff"),
-            format!("{}\n\n{}", request.summary, request.diff),
-        )
-        .map_err(|e| e.to_string())?;
+        // The diff as asked, nothing before it: the bundle carries this
+        // file, and IT's console checks it's the diff it sent (the summary
+        // is the manifest's).
+        std::fs::write(work.join("patch.diff"), &request.diff).map_err(|e| e.to_string())?;
         let bundle = work.join("bundle.json");
         let out = Process::new(self.repo.join("os/freebsd/scripts/kernel-patch.sh"))
             .arg("build")
