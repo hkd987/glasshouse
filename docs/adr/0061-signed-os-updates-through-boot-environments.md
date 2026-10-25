@@ -57,6 +57,13 @@ all done."
      origin=`). It is only taken when the computer runs exactly that
      version. A delta is a few megabytes where a whole image is about
      4 GB, and what it makes is the whole new image.
+   - **Kept, the new environment is promoted** (`bectl activate`), and
+     the image snapshot it was cloned from moves to it, beside its own
+     `@glass-image` from the stream. ZFS refuses two of one name, so the
+     one moving is renamed first, `@glass-image-of-<environment>`; an
+     environment promoted back (an update taken out) gets its name back
+     (`glass_platform::bootenv::activate`). The dev VM's first delta found
+     this: the promotion failed and the update was never kept.
 4. **Installing, step by step** (`glass_runtime::osupdate::apply`; the
    model is `specs/tla/OsUpdate.tla`):
    1. the checks above;

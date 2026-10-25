@@ -131,9 +131,102 @@ pub fn cancel_once() -> Result<()> {
 }
 
 /// Every start from now on is from `name`.
+///
+/// `bectl` promotes a clone as it does: the snapshots it was made from move
+/// to it, and ZFS refuses a name it already has. An OS update's environment
+/// has its own `@glass-image`, received with it, beside the one it was
+/// cloned from (ADR 0061), so the one moving is renamed first,
+/// `<snapshot>-of-<environment>`. An environment promoted back (an update
+/// taken out) gets its own name back.
 pub fn activate(name: &str) -> Result<()> {
     checked(name)?;
-    cmd::run("bectl", &["activate", name]).map(|_| ())
+    let root = be_root()?;
+    let fs = format!("{root}/{name}");
+    let renamed = make_way(&fs)?;
+    if let Err(e) = cmd::run("bectl", &["activate", name]) {
+        for (from, to) in renamed.iter().rev() {
+            let _ = cmd::run("zfs", &["rename", to, from]);
+        }
+        return Err(e);
+    }
+    for (from, to) in names_back(&snapshots(&fs)?, name) {
+        cmd::run(
+            "zfs",
+            &["rename", &format!("{fs}@{from}"), &format!("{fs}@{to}")],
+        )?;
+    }
+    Ok(())
+}
+
+/// Renames the snapshots promoting `fs` would move onto names it has: each
+/// `(old, new)`, in full.
+fn make_way(fs: &str) -> Result<Vec<(String, String)>> {
+    let origin = cmd::run("zfs", &["get", "-H", "-o", "value", "origin", fs])?;
+    let Some((origin_fs, origin_snap)) = origin.trim().split_once('@') else {
+        return Ok(Vec::new());
+    };
+    let env = origin_fs.rsplit('/').next().unwrap_or(origin_fs);
+    let mut renamed = Vec::new();
+    for snap in clashes(&snapshots(origin_fs)?, origin_snap, &snapshots(fs)?) {
+        let (from, to) = (
+            format!("{origin_fs}@{snap}"),
+            format!("{origin_fs}@{snap}-of-{env}"),
+        );
+        cmd::run("zfs", &["rename", &from, &to])?;
+        renamed.push((from, to));
+    }
+    Ok(renamed)
+}
+
+/// `fs`'s own snapshots, oldest first.
+fn snapshots(fs: &str) -> Result<Vec<String>> {
+    let text = cmd::run(
+        "zfs",
+        &[
+            "list",
+            "-H",
+            "-o",
+            "name",
+            "-s",
+            "createtxg",
+            "-t",
+            "snapshot",
+            "-d",
+            "1",
+            fs,
+        ],
+    )?;
+    Ok(text
+        .lines()
+        .filter_map(|l| l.trim().split_once('@').map(|(_, s)| s.to_owned()))
+        .collect())
+}
+
+/// The snapshots a promotion moves from the origin's (those up to the one
+/// the clone was made from, oldest first) whose names the clone has.
+fn clashes(origin: &[String], made_from: &str, clone: &[String]) -> Vec<String> {
+    let moving = origin
+        .iter()
+        .position(|s| s == made_from)
+        .map_or(&[][..], |at| &origin[..=at]);
+    moving
+        .iter()
+        .filter(|s| clone.contains(s))
+        .cloned()
+        .collect()
+}
+
+/// The snapshots renamed for `env` when another was promoted
+/// (`<snapshot>-of-<env>`), back to their names, where it has none by then.
+fn names_back(snaps: &[String], env: &str) -> Vec<(String, String)> {
+    let suffix = format!("-of-{env}");
+    snaps
+        .iter()
+        .filter_map(|s| {
+            let own = s.strip_suffix(&suffix)?;
+            (!snaps.iter().any(|t| t == own)).then(|| (s.clone(), own.to_owned()))
+        })
+        .collect()
 }
 
 /// Removes `name`, with the snapshot it was made from.
@@ -220,6 +313,43 @@ mod tests {
             once[1].mountpoint.as_deref(),
             Some(Path::new("/tmp/tmp.EwQe2EcHLt"))
         );
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// The dev VM's first delta update (2026-10-25): `bectl activate`
+    /// failed, "cannot promote ... conflicting snapshot 'glass-image' from
+    /// parent". The update's own `@glass-image` came with the stream.
+    #[test]
+    fn ep11_an_update_promoted_moves_its_origin_image_snapshot_aside() {
+        let default = names(&["2026-10-24-18:13:01-0", "glass-image"]);
+        let update = names(&["glass-image"]);
+        assert_eq!(clashes(&default, "glass-image", &update), ["glass-image"]);
+        // Snapshots after the one it was made from stay where they are.
+        let later = names(&["glass-image", "2026-10-25-09:24:33-0"]);
+        assert!(clashes(&later, "glass-image", &names(&["2026-10-25-09:24:33-0"])).is_empty());
+        // A kernel patch's environment has none of its own: nothing to move.
+        assert!(clashes(&default, "2026-10-24-18:13:01-0", &[]).is_empty());
+    }
+
+    /// Taken out, the version before is promoted back and its image
+    /// snapshot is `@glass-image` again, which the next delta comes from.
+    #[test]
+    fn ep11_the_version_before_gets_its_image_snapshot_name_back() {
+        let back = names(&["glass-image-of-default", "2026-10-25-10:00:00-0"]);
+        assert_eq!(
+            names_back(&back, "default"),
+            [(
+                "glass-image-of-default".to_owned(),
+                "glass-image".to_owned()
+            )]
+        );
+        // Not another environment's, and not where it has its own.
+        let update = names(&["glass-image-of-default", "glass-image"]);
+        assert!(names_back(&update, "glass-os-2026.11.1").is_empty());
+        assert!(names_back(&update, "default").is_empty());
     }
 
     #[test]
