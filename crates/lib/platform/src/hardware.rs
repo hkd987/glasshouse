@@ -45,7 +45,7 @@ pub struct Part {
     /// What the status means on this computer.
     pub note: String,
     /// What the OS doesn't do with it yet, whatever the computer: a
-    /// requirement not built, as a phrase ("the Wi-Fi pane in Settings").
+    /// requirement not built, as a phrase ("the Bluetooth pane in Settings").
     pub gap: Option<String>,
 }
 
@@ -130,6 +130,9 @@ pub struct Sources {
     pub intel_gpu_driver: bool,
     /// Whether the image carries the USB camera driver (`webcamd`).
     pub camera_driver: bool,
+    /// `sysctl -n hw.acpi.video.lcd0.levels`: the firmware's brightness
+    /// levels, if it has any (ADR 0060).
+    pub brightness_levels: String,
 }
 
 impl Sources {
@@ -162,6 +165,7 @@ impl Sources {
             // image adds is judged as this image carries it.
             intel_gpu_driver: true,
             camera_driver: true,
+            brightness_levels: optional("backlight").unwrap_or_default(),
         })
     }
 }
@@ -197,6 +201,7 @@ pub fn report() -> Result<Report> {
         intel_bt_firmware: std::path::Path::new("/usr/local/share/iwmbt-firmware").is_dir(),
         intel_gpu_driver: std::path::Path::new("/boot/modules/i915kms.ko").exists(),
         camera_driver: std::path::Path::new("/usr/local/sbin/webcamd").exists(),
+        brightness_levels: read("sysctl", &["-n", "hw.acpi.video.lcd0.levels"]),
     };
     Ok(assess(&sources))
 }
@@ -283,7 +288,7 @@ pub fn assess(s: &Sources) -> Report {
         / 1024
         / 1024;
     let parts = vec![
-        graphics(&pci, s.graphics_driver, s.intel_gpu_driver),
+        graphics(&pci, s),
         wifi(&pci, s),
         ethernet(&pci),
         bluetooth(usb.as_deref(), &devices, s.intel_bt_firmware),
@@ -319,7 +324,7 @@ fn with_gap(mut part: Part, gap: &str) -> Part {
     part
 }
 
-fn graphics(pci: &[PciDevice], driver: bool, intel_driver: bool) -> Part {
+fn graphics(pci: &[PciDevice], s: &Sources) -> Part {
     let gpus: Vec<&PciDevice> = pci.iter().filter(|d| d.class >> 16 == 0x03).collect();
     let found: Vec<String> = gpus.iter().map(|d| d.describe()).collect();
     let gap = "more screens, docks and scaling; the desktop draws on one screen (CF-32)";
@@ -327,21 +332,32 @@ fn graphics(pci: &[PciDevice], driver: bool, intel_driver: bool) -> Part {
         return part(Kind::Graphics, Status::Absent, found, "No graphics found");
     }
     let intel = gpus.iter().any(|d| d.vendor_id == 0x8086);
-    let note = if driver {
+    let note = if s.graphics_driver {
         "Its graphics driver is loaded"
-    } else if intel && intel_driver {
+    } else if intel && s.intel_gpu_driver {
         "Intel's graphics driver is in this image, off until this model is checked with it \
          (glasshouse_gpu_enable): the screen the firmware set up, at a fixed resolution"
     } else {
         "No driver for these graphics in this image: the screen the firmware set up, at a \
          fixed resolution"
     };
-    with_gap(part(Kind::Graphics, Status::Limited, found, note), gap)
+    // The screen's brightness (ADR 0060): the graphics driver's backlight,
+    // else the firmware's levels.
+    let brightness = if s.dev.iter().any(|d| d == "backlight") {
+        "brightness set from Settings and its keys (the graphics driver's backlight)"
+    } else if !s.brightness_levels.trim().is_empty() {
+        "brightness set from Settings and its keys (the firmware's levels)"
+    } else {
+        "brightness not set from here; the firmware's own keys may"
+    };
+    let note = format!("{note}; {brightness}");
+    with_gap(part(Kind::Graphics, Status::Limited, found, &note), gap)
 }
 
 fn wifi(pci: &[PciDevice], s: &Sources) -> Part {
     let radios: Vec<&str> = s.wlan.split_whitespace().collect();
-    let gap = "the Wi-Fi pane in Settings; a network is joined by hand (CF-12)";
+    let gap =
+        "networks with a sign-in of each person's own (802.1X); Settings joins the rest (CF-10)";
     let mut found = Vec::new();
     let (mut working, mut broken) = (false, Vec::new());
     for d in pci.iter().filter(|d| d.class >> 8 == 0x0280) {
@@ -1062,6 +1078,7 @@ ugen0.3: <Intel product 0x0033> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=O
             graphics_driver: false,
             intel_gpu_driver: false,
             camera_driver: false,
+            brightness_levels: String::new(),
             dev: vec![],
             dmesg: "iwlwifi0: <iwlwifi> mem 0x603d1cc000-0x603d1cffff at device 20.3 on pci0\n\
                     iwlwifi0: Direct firmware load for iwlwifi-so-a0-gf-a0-89.ucode failed with \
@@ -1176,11 +1193,17 @@ ugen0.2: <Realtek Laptop Camera> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr
             sleep: "S3 S4 S5\n".into(),
             battery: Some("Design capacity:\t55000 mWh\nLast full capacity:\t38500 mWh\n".into()),
             graphics_driver: true,
-            dev: vec!["tpm0".into(), "tpmrm0".into(), "video0".into()],
+            dev: vec![
+                "backlight".into(),
+                "tpm0".into(),
+                "tpmrm0".into(),
+                "video0".into(),
+            ],
             dmesg: "iwm0: hw rev 0x320, fw ver 46.6b541b68.0, address f8:e4:e3:00:00:00\n".into(),
             intel_bt_firmware: false,
             intel_gpu_driver: true,
             camera_driver: true,
+            brightness_levels: String::new(),
         }
     }
 
@@ -1214,7 +1237,15 @@ ugen0.2: <Realtek Laptop Camera> at usbus0, cfg=0 md=HOST spd=HIGH (480Mbps) pwr
                 .gap
                 .as_deref()
                 .unwrap()
-                .contains("CF-12")
+                .contains("CF-10")
+        );
+        // ADR 0060: the graphics driver's backlight sets the brightness.
+        assert!(
+            part_of(&report, Kind::Graphics)
+                .note
+                .contains("brightness set from Settings and its keys (the graphics driver's"),
+            "{}",
+            part_of(&report, Kind::Graphics).note
         );
         assert!(
             part_of(&report, Kind::Sleep)

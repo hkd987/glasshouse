@@ -304,3 +304,39 @@ async fn adr0031_a_sign_in_told_again_is_one_and_one_told_late_is_none() {
     assert!(late.is_err(), "{late:?}");
     assert_eq!(h.rt.seat_user(), None);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0060_the_person_at_the_screen_sets_its_brightness_and_never_off() {
+    let h = harness_with("");
+    let screen = h.home().join("screen-stand-in");
+    h.settings
+        .set_backlight(glass_platform::backlight::Backlight::stand_in(&screen))
+        .unwrap();
+    let desktop = Client::connect(h.serve_control()).await.unwrap();
+    let down = json!({ "step": "down" });
+    let before: Result<Value, _> = desktop.call(methods::DISPLAY_BRIGHTNESS, &down).await;
+    // Root sets it from anywhere; anyone else only once at the screen.
+    assert!(h.me.uid == 0 || before.is_err(), "{before:?}");
+    signed_in(&h, std::os::unix::process::parent_id());
+    let percent = |v: Value| v["percent"].as_u64().unwrap();
+    let now: Value = desktop
+        .call(methods::DISPLAY_BRIGHTNESS, json!({ "percent": 30 }))
+        .await
+        .unwrap();
+    assert_eq!(percent(now), 30);
+    let now: Value = desktop
+        .call(methods::DISPLAY_BRIGHTNESS, &down)
+        .await
+        .unwrap();
+    assert_eq!(percent(now), 20);
+    let now: Value = desktop
+        .call(methods::DISPLAY_BRIGHTNESS, json!({ "percent": 0 }))
+        .await
+        .unwrap();
+    assert_eq!(percent(now), 5, "never off");
+    let seen: Value = desktop
+        .call(methods::DISPLAY_BRIGHTNESS, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(seen, json!({ "present": true, "percent": 5 }));
+}

@@ -8,7 +8,8 @@
 //! Writes `boot.png`, `login.png`, `lock.png`, `desktop.png`, `desktop-banner.png`,
 //! `agents-menu.png`, `system-menu.png`, `about.png`, `force-quit.png`,
 //! `restart.png`, `launcher.png` and `switcher.png` (with a remix of Mail,
-//! TL-5), `command-bar.png` and the
+//! TL-5), `brightness.png` (a brightness key, ADR 0060), `command-bar.png`
+//! and the
 //! expanded view: `expanded.png` (the Expanded artboard), with its Changes
 //! tab, a roll back about to happen, a needs-you task's review and a
 //! finished task's receipt. The desktop shows the Desktop artboard's
@@ -23,7 +24,7 @@ use anyhow::{Context, bail};
 use glass_api::{Receipt, TaskDetail, TaskRef, TaskView, TileState, UndoReport, methods};
 use glass_shell::apps::AppWindow;
 use glass_shell::screens::expanded::{self, Expanded, Rollback, Tab};
-use glass_shell::screens::{boot, command_bar, desktop, launcher, login, switcher, system};
+use glass_shell::screens::{boot, command_bar, desktop, launcher, level, login, switcher, system};
 use glass_shell::{Element, Message, Size, Theme, fixtures, render};
 use glass_types::Timestamp;
 use time::OffsetDateTime;
@@ -284,6 +285,19 @@ fn main() -> anyhow::Result<()> {
             vec![window()],
             thumbnail,
             Some(switcher::overlay(&theme, &open, 1, &apps)),
+            (w, h),
+        ),
+    )?;
+
+    // A brightness key's level over a window (ADR 0060).
+    write(
+        "brightness.png",
+        desktop::view(
+            &theme,
+            &bare,
+            vec![window()],
+            thumbnail,
+            Some(level::overlay(60)),
             (w, h),
         ),
     )?;

@@ -5,6 +5,7 @@ pub mod command_bar;
 pub mod desktop;
 pub mod expanded;
 pub mod launcher;
+pub mod level;
 pub mod login;
 pub mod setup;
 pub mod switcher;

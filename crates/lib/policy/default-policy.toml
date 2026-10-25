@@ -83,6 +83,10 @@ approval_timeout_secs = 900
 "settings.wifi" = "never"
 "settings.wifi_join" = "never"
 "settings.wifi_forget" = "never"
+# The screen's brightness (ADR 0060): the person's, from Settings and the
+# brightness keys. IT may let an agent dim it; never below 5%.
+"settings.brightness" = "never"
+"settings.brightness_set" = "never"
 # Chat (CF-91, ADR 0030): reading the person's conversations is quiet;
 # posting and making a channel leave the machine and can't be taken back,
 # so they ask. What the person types in Chat itself is the [[app]] below.
@@ -260,7 +264,7 @@ tiers = { "meet.list" = "auto" }
 # which agents use them (ADR 0039); the person at it joins Wi-Fi (CF-12).
 [[app]]
 id = "settings"
-tiers = { "settings.models_connect" = "auto", "settings.models_agents" = "auto", "settings.wifi" = "auto", "settings.wifi_join" = "auto", "settings.wifi_forget" = "auto" }
+tiers = { "settings.models_connect" = "auto", "settings.models_agents" = "auto", "settings.wifi" = "auto", "settings.wifi_join" = "auto", "settings.wifi_forget" = "auto", "settings.brightness" = "auto", "settings.brightness_set" = "auto" }
 
 # In Routines the person sees what runs for them, starts it, pauses it,
 # changes when it runs, goes back to an earlier version, and keeps what they

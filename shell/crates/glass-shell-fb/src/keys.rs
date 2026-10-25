@@ -71,6 +71,9 @@ fn kind(code: u16) -> Option<Kind> {
         109 => named(Named::PageDown),
         111 => named(Named::Delete),
         125 | 126 => Some(Modifier(Modifiers::LOGO, Named::Super)),
+        // KEY_BRIGHTNESSDOWN and KEY_BRIGHTNESSUP (ADR 0060).
+        224 => named(Named::BrightnessDown),
+        225 => named(Named::BrightnessUp),
         _ => None,
     }
 }

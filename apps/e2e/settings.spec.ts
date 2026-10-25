@@ -124,6 +124,28 @@ test("adr0039 the owner connects their own AI models in Settings, and the key st
   expect(model()).toBe("No model (scripted agent)");
 });
 
+test("adr0060 the person sets the screen's brightness in Settings, as the keys do, never dark", async ({ page }) => {
+  // The suite's screen is a stand-in file (tools/dev/host-run.sh).
+  await control("display.brightness", { percent: 70 });
+  await page.goto(appUrl("settings"));
+  await expect(page.locator("html[data-ready=true]")).toHaveCount(1);
+  const row = page.locator("[data-setting=brightness]");
+  await expect(row.locator("[data-test=brightness-percent]")).toHaveText("70%");
+  const slider = row.locator("input[name=brightness]");
+  await slider.fill("35");
+  await expect(row.locator("[data-test=brightness-percent]")).toHaveText("35%");
+  await expect.poll(async () => (await control<{ percent: number }>("display.brightness", {})).percent).toBe(35);
+  await row.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(SHOTS, "settings-brightness.png") });
+
+  // A brightness key, as the desktop sends it; never off, whatever is asked.
+  expect((await control<{ percent: number }>("display.brightness", { step: "up" })).percent).toBe(40);
+  expect((await control<{ percent: number }>("display.brightness", { percent: 0 })).percent).toBe(5);
+  // On the record from Settings.
+  expect(audit().some((r) => r.event.kind === "action" && r.event.action === "settings.brightness_set")).toBe(true);
+  await control("display.brightness", { percent: 100 });
+});
+
 test("cf12 the person joins Wi-Fi in Settings, inside the rules the computer's owner sets", async ({ page }) => {
   // The suite's Wi-Fi is glass-fake-wpa: wpa_supplicant's control socket
   // with networks in the air (tools/dev/host-run.sh).

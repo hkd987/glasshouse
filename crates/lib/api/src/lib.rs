@@ -163,6 +163,10 @@ pub mod methods {
     /// the caller changes one of their own settings, as the Settings app's
     /// `settings.set` does, from their desktop. Audited.
     pub const SETTINGS_SET: &str = "settings.set";
+    /// [`crate::settings::BrightnessChange`] →
+    /// [`crate::settings::Brightness`]: the screen's brightness (ADR 0060),
+    /// from the desktop at the screen (its brightness keys) or root.
+    pub const DISPLAY_BRIGHTNESS: &str = "display.brightness";
     /// [`crate::SeatBegin`] → `()`. Root only: the sign-in screen says who
     /// is at the screen and which `su` runs their desktop (ADR 0031).
     pub const SEAT_BEGIN: &str = "seat.begin";

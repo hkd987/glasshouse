@@ -103,3 +103,29 @@ pub struct SettingChoice {
     #[serde(default)]
     pub value: Option<Value>,
 }
+
+/// `display.brightness` on the control socket (ADR 0060): one step, as the
+/// brightness keys go, or a percent; neither just says what it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrightnessChange {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<BrightnessStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrightnessStep {
+    Up,
+    Down,
+}
+
+/// The screen's brightness: `percent` is `None` on a screen not dimmed
+/// from here (a desktop's monitor, a VM).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Brightness {
+    pub present: bool,
+    pub percent: Option<u8>,
+}

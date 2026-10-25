@@ -73,6 +73,10 @@ backend = "copy"
 control_dir = "$run/wpa"
 secrets = "$dev/wifi-secrets.toml"
 
+# The screen's brightness (ADR 0060): a file stands in for a backlight.
+[display]
+backlight = "$dev/backlight"
+
 # Remixing and making apps (ADR 0032): the apps workspace's esbuild, its
 # source in the layout images have, and what tries each version (ADR 0049).
 [studio]

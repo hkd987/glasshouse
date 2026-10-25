@@ -51,6 +51,10 @@ impl Handler for ControlApi {
                 let choice: glass_api::settings::SettingChoice = parse_params(params)?;
                 to_result(&blocking(|| rt.choose_setting(&caller, choice))?)
             }
+            methods::DISPLAY_BRIGHTNESS => {
+                let change: glass_api::settings::BrightnessChange = parse_params(params)?;
+                to_result(&blocking(|| rt.brightness(&caller, &change))?)
+            }
             methods::TASK_PLAN => {
                 let request: TaskRequest = parse_params(params)?;
                 to_result(&blocking(|| rt.plan(&caller, &request))?)

@@ -108,6 +108,12 @@
   height: 20px;
 }
 
+/* Brightness (ADR 0060). */
+.level {
+  width: 160px;
+  accent-color: var(--accent);
+}
+
 .link {
   border: none;
   background: none;

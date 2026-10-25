@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use glass_actions::{ActionDef, ActionError, ActionOutput, ActionProvider, Preview, TaskContext};
 use glass_api::AskLabels;
-use glass_api::settings::{SettingFrom, SettingView};
+use glass_api::settings::{Brightness, BrightnessChange, BrightnessStep, SettingFrom, SettingView};
+use glass_platform::backlight::Backlight;
 use glass_policy::Policy;
 use glass_policy::document::SettingValue;
 use glass_policy::settings::{self, Scope, SettingDef};
@@ -47,6 +48,13 @@ pub const WIFI: &str = "settings.wifi";
 pub const WIFI_JOIN: &str = "settings.wifi_join";
 /// Forgets a Wi-Fi network the person joined.
 pub const WIFI_FORGET: &str = "settings.wifi_forget";
+/// The screen's brightness (ADR 0060).
+pub const BRIGHTNESS: &str = "settings.brightness";
+/// Sets the screen's brightness, never so dim it's off
+/// (`glass_platform::backlight::LEAST`).
+pub const BRIGHTNESS_SET: &str = "settings.brightness_set";
+/// Where the screen's brightness is kept for the next start.
+const BRIGHTNESS_FILE: &str = "brightness";
 
 /// The services an owner can connect: id, name, and how a key starts.
 pub const MODEL_SERVICES: [(&str, &str, &str); 2] = [
@@ -166,6 +174,8 @@ struct Inner {
     model_keys: RwLock<Option<Arc<dyn ModelKeys>>>,
     /// The computer's Wi-Fi, as glassd drives it (CF-12).
     wifi: RwLock<Option<Arc<dyn wifi::Radio>>>,
+    /// The screen's backlight, if it's dimmed from here (ADR 0060).
+    backlight: RwLock<Option<Backlight>>,
     /// Held from a change's check through its write: the desktop's
     /// `settings.set` and the Settings app's can come at once, and each
     /// rewrites the whole file (ADR 0052).
@@ -217,6 +227,7 @@ impl SettingsHandle {
             owner: RwLock::new(None),
             model_keys: RwLock::new(None),
             wifi: RwLock::new(None),
+            backlight: RwLock::new(None),
             writing: Mutex::new(()),
         }))
     }
@@ -249,6 +260,66 @@ impl SettingsHandle {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The screen's backlight (glassd's, ADR 0060), set to the brightness
+    /// it had when the computer last ran.
+    pub fn set_backlight(&self, backlight: Backlight) -> Result<(), String> {
+        let kept = fs::read_to_string(self.0.dir.join(BRIGHTNESS_FILE))
+            .ok()
+            .and_then(|t| t.trim().parse::<u8>().ok());
+        let restored = kept.map(|p| backlight.set(p).map_err(|e| e.to_string()));
+        *self
+            .0
+            .backlight
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(backlight);
+        restored.transpose().map(drop)
+    }
+
+    fn backlight(&self) -> Option<Backlight> {
+        self.0
+            .backlight
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The screen's brightness now.
+    pub fn brightness(&self) -> Result<Brightness, String> {
+        match self.backlight() {
+            Some(b) => Ok(Brightness {
+                present: true,
+                percent: Some(b.percent().map_err(|e| e.to_string())?),
+            }),
+            None => Ok(Brightness {
+                present: false,
+                percent: None,
+            }),
+        }
+    }
+
+    /// A step up or down, or a percent, kept for the next start; neither
+    /// says what it is.
+    pub fn change_brightness(&self, change: &BrightnessChange) -> Result<Brightness, String> {
+        let Some(backlight) = self.backlight() else {
+            return self.brightness();
+        };
+        let now = match (change.step, change.percent) {
+            (Some(step), _) => backlight.step(step == BrightnessStep::Up),
+            (None, Some(percent)) => backlight.set(percent),
+            (None, None) => return self.brightness(),
+        }
+        .map_err(|e| e.to_string())?;
+        // Kept as it goes: a computer that loses power keeps the last one.
+        let _ = write_private(
+            &self.0.dir.join(BRIGHTNESS_FILE),
+            format!("{now}\n").as_bytes(),
+        );
+        Ok(Brightness {
+            present: true,
+            percent: Some(now),
+        })
     }
 
     /// What IT, or the computer's owner, decided about Wi-Fi.
@@ -868,6 +939,12 @@ struct ForgetInput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct BrightnessInput {
+    percent: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConnectInput {
     service: Option<String>,
     #[serde(default)]
@@ -1021,6 +1098,33 @@ impl ActionProvider for SettingsProvider {
                 default_tier: Tier::Never,
                 ask: AskLabels::default(),
             },
+            ActionDef {
+                name: BRIGHTNESS.parse().expect("static name"),
+                title: "See the screen's brightness".into(),
+                description: "How bright the screen is, in percent, and whether it's dimmed \
+                              from here."
+                    .into(),
+                input_schema: json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                side_effect: SideEffect::None,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
+            ActionDef {
+                name: BRIGHTNESS_SET.parse().expect("static name"),
+                title: "Set the screen's brightness".into(),
+                description: "Sets the screen's brightness, in percent: never below 5, so the \
+                              screen never goes dark. The person's, in Settings."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "percent": { "type": "integer", "minimum": 0, "maximum": 100 } },
+                    "required": ["percent"],
+                    "additionalProperties": false
+                }),
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Never,
+                ask: AskLabels::default(),
+            },
         ]
     }
 
@@ -1101,6 +1205,15 @@ impl ActionProvider for SettingsProvider {
                     }
                 },
                 "required": ["connected", "setup_choice", "managed", "editable", "services", "agents"],
+                "additionalProperties": false
+            }),
+            BRIGHTNESS | BRIGHTNESS_SET => json!({
+                "type": "object",
+                "properties": {
+                    "present": { "type": "boolean", "description": "the screen is dimmed from here" },
+                    "percent": { "type": ["integer", "null"], "description": "how bright it is" }
+                },
+                "required": ["present", "percent"],
                 "additionalProperties": false
             }),
             WIFI | WIFI_JOIN | WIFI_FORGET => json!({
@@ -1194,6 +1307,22 @@ impl ActionProvider for SettingsProvider {
                         None => "Disconnect AI models".into(),
                     },
                     targets: vec!["Settings: AI models".into()],
+                    ..Preview::default()
+                })
+            }
+            BRIGHTNESS => {
+                let _: NoInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: "See the screen's brightness".into(),
+                    targets: vec!["Settings: Display & sleep".into()],
+                    ..Preview::default()
+                })
+            }
+            BRIGHTNESS_SET => {
+                let input: BrightnessInput = glass_actions::parse_input(input)?;
+                Ok(Preview {
+                    summary: format!("Set the screen's brightness to {}%", input.percent),
+                    targets: vec!["Settings: Display & sleep".into()],
                     ..Preview::default()
                 })
             }
@@ -1342,6 +1471,27 @@ impl ActionProvider for SettingsProvider {
                 Ok(ActionOutput {
                     text,
                     data: self.handle.models_view(&who.name),
+                    changes: Vec::new(),
+                })
+            }
+            BRIGHTNESS | BRIGHTNESS_SET => {
+                let brightness = if action.as_str() == BRIGHTNESS_SET {
+                    let input: BrightnessInput = glass_actions::parse_input(input)?;
+                    self.handle.change_brightness(&BrightnessChange {
+                        step: None,
+                        percent: Some(input.percent),
+                    })
+                } else {
+                    let _: NoInput = glass_actions::parse_input(input)?;
+                    self.handle.brightness()
+                }
+                .map_err(ActionError::Failed)?;
+                Ok(ActionOutput {
+                    text: match brightness.percent {
+                        Some(p) => format!("The screen is at {p}%."),
+                        None => "This screen's brightness isn't set from here.".into(),
+                    },
+                    data: serde_json::to_value(brightness).unwrap_or_default(),
                     changes: Vec::new(),
                 })
             }
@@ -2098,6 +2248,32 @@ members = ["dana"]
     }
 
     #[test]
+    fn adr0060_brightness_never_goes_dark_and_is_kept_for_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let screen = dir.path().join("screen");
+        let handle = SettingsHandle::new(dir.path().join("state"));
+        handle.set_backlight(Backlight::stand_in(&screen)).unwrap();
+        let change = |step, percent| {
+            handle
+                .change_brightness(&BrightnessChange { step, percent })
+                .unwrap()
+                .percent
+        };
+        assert_eq!(change(None, None), Some(100), "neither reads it");
+        assert_eq!(change(Some(BrightnessStep::Down), None), Some(90));
+        assert_eq!(change(None, Some(0)), Some(5), "never off");
+        assert_eq!(change(Some(BrightnessStep::Up), None), Some(10));
+        assert_eq!(change(None, Some(35)), Some(35));
+
+        // The firmware starts the screen at full; the next start puts it
+        // back where the person left it.
+        std::fs::write(&screen, "100").unwrap();
+        let next = SettingsHandle::new(dir.path().join("state"));
+        next.set_backlight(Backlight::stand_in(&screen)).unwrap();
+        assert_eq!(next.brightness().unwrap().percent, Some(35));
+    }
+
+    #[test]
     fn ga1_what_each_action_returns_is_what_it_declares() {
         let dir = tempfile::tempdir().unwrap();
         let handle = SettingsHandle::new(dir.path());
@@ -2156,6 +2332,14 @@ members = ["dana"]
         );
         run(MODELS_AGENTS, json!({ "agent": "it-agent", "on": false }));
         assert_eq!(run(MODELS, json!({}))["agents"][0]["on"], false);
+
+        // A screen not dimmed from here, then one that is.
+        assert_eq!(run(BRIGHTNESS, json!({}))["present"], false);
+        handle
+            .set_backlight(Backlight::stand_in(dir.path().join("screen")))
+            .unwrap();
+        assert_eq!(run(BRIGHTNESS_SET, json!({ "percent": 40 }))["percent"], 40);
+        assert_eq!(run(BRIGHTNESS, json!({}))["percent"], 40);
 
         for def in provider.actions() {
             assert!(provider.returns(&def.name).is_some(), "{}", def.name);

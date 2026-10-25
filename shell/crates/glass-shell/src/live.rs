@@ -22,6 +22,7 @@ use crate::screens::command_bar::{self, CommandBar, Hit};
 use crate::screens::desktop::{self, Desktop, Tiles};
 use crate::screens::expanded::{self, Expanded, Rollback, Tab};
 use crate::screens::launcher;
+use crate::screens::level;
 use crate::screens::login;
 use crate::screens::switcher;
 use crate::screens::system;
@@ -89,7 +90,12 @@ pub struct Live {
     /// The screen is blank for going unused (`display.blank_after_minutes`,
     /// ADR 0031): black until the next key or move, which only wakes it.
     blank: bool,
+    /// The brightness keys' level, shown until then (ADR 0060).
+    level: Option<(u8, Instant)>,
 }
+
+/// How long the brightness level stays on screen after a key.
+const LEVEL_FOR: Duration = Duration::from_millis(1500);
 
 /// The screen locks after this long without use unless IT or the person
 /// set otherwise (`lock.after_minutes`).
@@ -239,6 +245,11 @@ pub enum Effect {
     /// bar, for the desktop agent (AE-3). Its `TaskView` goes to
     /// [`Live::started`], a refusal to [`Live::start_failed`].
     Start(TaskRequest),
+    /// One step brighter or dimmer (`display.brightness`, ADR 0060); the
+    /// level it reaches goes to [`Live::brightness`].
+    Brightness {
+        up: bool,
+    },
 }
 
 /// The agent the command bar hands what's typed to (AE-3, ADR 0041).
@@ -297,6 +308,7 @@ impl Live {
             settings: SettingsView::default(),
             last_input: Instant::now(),
             blank: false,
+            level: None,
         };
         let waiting: Vec<TaskId> = live
             .tasks
@@ -605,20 +617,29 @@ impl Live {
     /// Takes away the banners whose time is up at `at`, unless the pointer
     /// is on them. True when any went, so the screen needs drawing.
     pub fn tick(&mut self, at: Instant) -> bool {
+        let level = self.level.take_if(|(_, until)| *until <= at).is_some();
         if self.held {
-            return false;
+            return level;
         }
         let before = self.banners.len();
         self.banners.retain(|b| b.until > at);
-        self.banners.len() != before
+        level || self.banners.len() != before
     }
 
-    /// When the next banner goes, for the shell to wake then.
+    /// When the next banner or the brightness level goes, for the shell to
+    /// wake then.
     pub fn next_change(&self) -> Option<Instant> {
+        let level = self.level.map(|(_, until)| until);
         if self.held {
-            return None;
+            return level;
         }
-        self.banners.iter().map(|b| b.until).min()
+        self.banners.iter().map(|b| b.until).chain(level).min()
+    }
+
+    /// The brightness a key reached (ADR 0060), shown for a moment from
+    /// `at`.
+    pub fn brightness(&mut self, percent: u8, at: Instant) {
+        self.level = Some((percent, at + LEVEL_FOR));
     }
 
     /// The tasks showing as banners.
@@ -732,9 +753,13 @@ impl Live {
     }
 
     fn react(&mut self, message: Message, at: Instant) -> Option<Effect> {
-        // Locked, the screen is the lock screen: nothing else answers.
+        // Locked, the screen is the lock screen: nothing else answers but
+        // the brightness keys (ADR 0060).
         if self.locked.is_some()
-            && !matches!(message, Message::PasswordChanged(_) | Message::SignIn)
+            && !matches!(
+                message,
+                Message::PasswordChanged(_) | Message::SignIn | Message::Brightness { .. }
+            )
         {
             return None;
         }
@@ -1042,6 +1067,7 @@ impl Live {
                 }
                 None
             }
+            Message::Brightness { up } => Some(Effect::Brightness { up }),
             Message::LockScreen => {
                 if !self.lockable {
                     return None;
@@ -1206,7 +1232,14 @@ impl Live {
     /// menu or the launcher, arrows, Home and End move and Enter chooses
     /// (UX-20).
     pub fn shortcut(&self, key: &Key, modifiers: Modifiers) -> Option<Message> {
-        // Locked, no shortcut does anything; the lock screen takes the keys.
+        // The brightness keys work everywhere, locked too (ADR 0060).
+        match key {
+            Key::Named(Named::BrightnessUp) => return Some(Message::Brightness { up: true }),
+            Key::Named(Named::BrightnessDown) => return Some(Message::Brightness { up: false }),
+            _ => {}
+        }
+        // Locked, no other shortcut does anything; the lock screen takes the
+        // keys.
         if self.locked.is_some() {
             return None;
         }
@@ -1391,7 +1424,11 @@ impl Live {
                 switch_user: false,
                 wallpaper: self.wallpaper,
             };
-            return login::view(theme, &screen, size);
+            let screen = login::view(theme, &screen, size);
+            return match self.level {
+                Some((percent, _)) => crate::layered(vec![screen, level::overlay(percent)]),
+                None => screen,
+            };
         }
         let expanded = self.expanded(now);
         // Nothing sits over the command bar or the expanded view; otherwise
@@ -1472,6 +1509,9 @@ impl Live {
         if let Some(chosen) = self.switching {
             overlays.push(switcher::overlay(theme, &self.windows, chosen, &self.apps));
         }
+        if let Some((percent, _)) = self.level {
+            overlays.push(level::overlay(percent));
+        }
         let overlay = match overlays.len() {
             0 | 1 => overlays.pop(),
             _ => Some(crate::layered(overlays)),
@@ -1499,6 +1539,29 @@ mod tests {
     use super::*;
     use crate::fixtures;
     use glass_api::TileState;
+
+    #[test]
+    fn adr0060_the_brightness_keys_work_locked_too_and_the_level_shows_a_moment() {
+        let mut live = Live::default().lockable();
+        let up = Key::Named(Named::BrightnessUp);
+        let down = Key::Named(Named::BrightnessDown);
+        assert_eq!(
+            live.shortcut(&down, Modifiers::empty()),
+            Some(Message::Brightness { up: false })
+        );
+        live.update(Message::LockScreen);
+        assert!(live.is_locked());
+        let pressed = live.shortcut(&up, Modifiers::empty()).unwrap();
+        assert_eq!(live.update(pressed), Some(Effect::Brightness { up: true }));
+
+        // glassd's answer shows, then goes by itself.
+        let at = Instant::now();
+        live.brightness(60, at);
+        assert_eq!(live.next_change(), Some(at + LEVEL_FOR));
+        assert!(!live.tick(at + Duration::from_millis(500)), "still showing");
+        assert!(live.tick(at + LEVEL_FOR), "gone");
+        assert_eq!(live.next_change(), None);
+    }
 
     /// A live desktop with the artboard's invoice agent among the tiles.
     fn with_invoices() -> (Live, TaskDetail) {

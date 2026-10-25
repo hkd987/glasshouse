@@ -79,6 +79,25 @@ impl Runtime {
         self.seat_user.borrow().clone()
     }
 
+    /// The screen's brightness (`display.brightness`, ADR 0060): one step
+    /// or a percent, from the desktop of whoever is at the screen (its
+    /// brightness keys) or root. Not on the audit record, as a key press
+    /// isn't; the Settings app's `settings.brightness_set` is.
+    pub fn brightness(
+        &self,
+        caller: &Caller,
+        change: &glass_api::settings::BrightnessChange,
+    ) -> Result<glass_api::settings::Brightness> {
+        if !caller.is_admin() && self.seat_user().as_deref() != Some(caller.name.as_str()) {
+            return Err(RuntimeError::PermissionDenied(
+                "only the person at the screen sets its brightness".into(),
+            ));
+        }
+        self.device_settings
+            .change_brightness(change)
+            .map_err(RuntimeError::Internal)
+    }
+
     /// Hears whenever someone signs in at the screen or out, so what
     /// follows them (the browser's settings, USB drives) can change.
     pub fn watch_seat(&self) -> tokio::sync::watch::Receiver<Option<String>> {

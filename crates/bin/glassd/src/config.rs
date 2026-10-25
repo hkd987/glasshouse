@@ -74,6 +74,9 @@ pub struct Config {
     /// passwords (CF-12, ADR 0059).
     #[serde(default)]
     pub wifi: WifiConfig,
+    /// The screen's backlight (ADR 0060).
+    #[serde(default)]
+    pub display: DisplayConfig,
     #[serde(default, rename = "agent")]
     pub agents: Vec<CatalogEntry>,
 }
@@ -106,6 +109,16 @@ impl Default for HardwareConfig {
 
 fn default_probation() -> u64 {
     8 * 60
+}
+
+/// `[display]`: `backlight`, a file holding a percent that stands in for
+/// the screen's backlight, on a computer with none to dim (development,
+/// the apps' tests). Unset: the computer's own, if it has one.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayConfig {
+    #[serde(default)]
+    pub backlight: Option<PathBuf>,
 }
 
 /// `[wifi]`: the radio's wpa_supplicant control socket, and the

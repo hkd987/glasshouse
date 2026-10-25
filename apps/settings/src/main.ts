@@ -64,11 +64,21 @@ interface Wifi {
   networks: Network[];
 }
 
+/** The screen's brightness (ADR 0060): none on a screen not dimmed from here. */
+interface Brightness {
+  present: boolean;
+  percent: number | null;
+}
+
+/** Display & sleep's section, where brightness goes first. */
+const DISPLAY = "Display & sleep";
+
 const bridge = new Bridge({ app: "settings" });
 const state = {
   settings: [] as Setting[],
   models: null as Models | null,
   wifi: null as Wifi | null,
+  brightness: null as Brightness | null,
   /** The network whose password is being typed, and the password. */
   joining: null as { network: string; password: string } | null,
   /** What the owner is connecting: the key is typed here and sent once. */
@@ -93,7 +103,7 @@ async function load(): Promise<void> {
   } catch (error) {
     state.notice = { text: error instanceof Offline ? "Settings haven't been loaded on this computer yet." : String(error), tone: "bad" };
   }
-  await loadWifi();
+  await Promise.all([loadWifi(), loadBrightness()]);
   // AI models (ADR 0039) on their own: a system without them still shows
   // every setting, just not this section.
   try {
@@ -160,6 +170,58 @@ async function forgetWifi(network: string): Promise<void> {
   }
   state.busy = null;
   await load();
+}
+
+async function loadBrightness(): Promise<void> {
+  try {
+    const read = await bridge.read<Brightness>("settings.brightness", {});
+    state.brightness = read.result.ok ? read.result.data : null;
+  } catch {
+    state.brightness = null;
+  }
+}
+
+/** Sets it as the slider lets go: each change is on the record, so not every step of a drag. */
+async function setBrightness(percent: number): Promise<void> {
+  state.busy = "brightness";
+  state.notice = null;
+  try {
+    const result = await bridge.call<Brightness>("settings.brightness_set", { percent });
+    if (result.ok) state.brightness = result.data;
+    else state.notice = { text: result.text, tone: "bad" };
+  } catch (error) {
+    state.notice = { text: error instanceof BridgeError ? error.message : String(error), tone: "bad" };
+  }
+  state.busy = null;
+  render();
+}
+
+function brightness(b: Brightness): HTMLElement {
+  const percent = b.percent ?? 100;
+  const shown = h("span", { class: "muted", "data-test": "brightness-percent" }, `${percent}%`);
+  return h(
+    "div",
+    { class: "setting", "data-setting": "brightness" },
+    h("div", {}, h("div", { class: "title" }, "Brightness"), h("div", { class: "help" }, "How bright the screen is. The brightness keys change it too. It never goes fully dark from here.")),
+    h(
+      "span",
+      { class: "control" },
+      h("input", {
+        type: "range",
+        class: "level",
+        name: "brightness",
+        "aria-label": "Brightness",
+        min: 5,
+        max: 100,
+        step: 5,
+        value: String(percent),
+        disabled: state.busy === "brightness" || state.offline,
+        oninput: (e: Event) => (shown.textContent = `${(e.target as HTMLInputElement).value}%`),
+        onchange: (e: Event) => setBrightness(Number((e.target as HTMLInputElement).value)),
+      }),
+      shown,
+    ),
+  );
 }
 
 /** Signal as four bars: -50 dBm and better is all four. */
@@ -551,7 +613,17 @@ function render(): void {
       state.offline && h("div", { class: "banner offline" }, "Offline: these are the settings as they were last loaded."),
       state.wifi ? wifi(state.wifi) : null,
       ...sections.map((section) =>
-        h("section", { class: "group" }, h("h2", {}, section), h("div", { class: "rows" }, ...state.settings.filter((s) => s.section === section).map(row))),
+        h(
+          "section",
+          { class: "group" },
+          h("h2", {}, section),
+          h(
+            "div",
+            { class: "rows" },
+            section === DISPLAY && state.brightness?.present ? brightness(state.brightness) : null,
+            ...state.settings.filter((s) => s.section === section).map(row),
+          ),
+        ),
       ),
       state.models ? models(state.models) : null,
     ),
@@ -565,5 +637,7 @@ void load();
 // few seconds while Settings is open, unless they're typing a password.
 setInterval(() => {
   if (state.busy || state.joining || document.hidden) return;
-  void loadWifi().then(render);
+  // The slider being dragged isn't redrawn under the pointer.
+  if (document.activeElement?.getAttribute("name") === "brightness") return;
+  void Promise.all([loadWifi(), loadBrightness()]).then(render);
 }, 8000);

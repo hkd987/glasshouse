@@ -114,6 +114,13 @@ case " $(getconf kld_list) " in
 *" tpm "*) ;;
 *) list=$(getconf kld_list) && setconf /etc/rc.conf kld_list="${list:+$list }tpm" ;;
 esac
+# The screen's brightness (ADR 0060): the firmware's levels, and its
+# brightness keys, through acpi_video; it takes nothing on a computer
+# whose firmware has none.
+case " $(getconf kld_list) " in
+*" acpi_video "*) ;;
+*) list=$(getconf kld_list) && setconf /etc/rc.conf kld_list="${list:+$list }acpi_video" ;;
+esac
 service glasshouse_identity start >/dev/null
 # Space ZFS frees goes back to the disk as it's freed: SSDs keep their write
 # speed, and a VM's sparse disk doesn't grow with every file rewritten (busy

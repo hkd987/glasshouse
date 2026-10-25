@@ -175,6 +175,16 @@ enum Command {
     /// Machine power events (root; run by the rc.d suspend/resume hooks).
     #[command(subcommand)]
     System(SystemCommand),
+    /// The screen (the person at it, or root).
+    #[command(subcommand)]
+    Display(DisplayCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum DisplayCommand {
+    /// The screen's brightness: `up`, `down`, a percent, or nothing to see
+    /// it (ADR 0060). Never below 5%.
+    Brightness { to: Option<String> },
 }
 
 #[derive(Debug, Subcommand)]
@@ -703,6 +713,35 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             until,
             timeout,
         } => wait(&ctl, &task, until, timeout).await,
+        Command::Display(DisplayCommand::Brightness { to }) => {
+            use glass_api::settings::{Brightness, BrightnessChange, BrightnessStep};
+            let change = match to.as_deref() {
+                None => BrightnessChange::default(),
+                Some("up") => BrightnessChange {
+                    step: Some(BrightnessStep::Up),
+                    percent: None,
+                },
+                Some("down") => BrightnessChange {
+                    step: Some(BrightnessStep::Down),
+                    percent: None,
+                },
+                Some(p) => BrightnessChange {
+                    step: None,
+                    percent: Some(
+                        p.trim_end_matches('%')
+                            .parse::<u8>()
+                            .ok()
+                            .filter(|p| *p <= 100)
+                            .ok_or_else(|| anyhow::anyhow!("{p}: up, down or a percent"))?,
+                    ),
+                },
+            };
+            let result: Brightness = ctl.call(methods::DISPLAY_BRIGHTNESS, &change).await?;
+            ctl.show(&result, |b| match b.percent {
+                Some(p) => format!("Brightness: {p}%\n"),
+                None => "This screen's brightness isn't set from here.\n".into(),
+            })
+        }
         Command::System(SystemCommand::Shutdown) => {
             let _: Value = ctl.call(methods::SYSTEM_SHUTDOWN, Value::Null).await?;
             Ok(())

@@ -1161,6 +1161,32 @@ impl Shell {
                 }
                 Vec::new()
             }
+            Effect::Brightness { up } => {
+                use glass_api::settings::{Brightness, BrightnessChange, BrightnessStep};
+                let change = BrightnessChange {
+                    step: Some(if up {
+                        BrightnessStep::Up
+                    } else {
+                        BrightnessStep::Down
+                    }),
+                    percent: None,
+                };
+                let result: Result<Brightness, _> =
+                    client.call(methods::DISPLAY_BRIGHTNESS, &change).await;
+                match result {
+                    Ok(Brightness {
+                        percent: Some(percent),
+                        ..
+                    }) => {
+                        self.live.brightness(percent, Instant::now());
+                        self.dirty = true;
+                    }
+                    // A screen not dimmed from here: the firmware may do it.
+                    Ok(_) => {}
+                    Err(e) => eprintln!("display.brightness: {e}"),
+                }
+                Vec::new()
+            }
             Effect::ListApps => {
                 let result: Result<Vec<glass_api::ProfileApp>, _> =
                     client.call(methods::APPS_LIST, ()).await;

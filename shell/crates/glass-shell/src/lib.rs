@@ -134,6 +134,10 @@ pub enum Message {
     /// Lock the screen until the person's password is given again (Ctrl
     /// Super Q, Super L, or the system menu); agents keep working.
     LockScreen,
+    /// A brightness key (ADR 0060): one step brighter or dimmer.
+    Brightness {
+        up: bool,
+    },
     /// Open or close the launcher (the dock's launcher icon, or Super tapped
     /// on its own).
     ToggleLauncher,

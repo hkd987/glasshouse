@@ -17,6 +17,9 @@ sysctl -n net.wlan.devices >"$dir/wlan" 2>/dev/null || :
 cat /dev/sndstat >"$dir/sndstat" 2>/dev/null || :
 sysctl -n hw.acpi.supported_sleep_state >"$dir/sleep" 2>/dev/null || :
 sysctl -n hw.dri.0.name >"$dir/dri" 2>/dev/null || :
+# The firmware's brightness levels (ADR 0060), once acpi_video is loaded.
+kldload -n acpi_video 2>/dev/null || :
+sysctl -n hw.acpi.video.lcd0.levels >"$dir/backlight" 2>/dev/null || :
 ls /dev >"$dir/dev"
 {
 	cat /var/run/dmesg.boot 2>/dev/null || :

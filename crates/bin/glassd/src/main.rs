@@ -737,6 +737,22 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     org.settings
         .set_wifi(Arc::new(wifi::SystemRadio::new(&config.wifi)));
     let _ = tokio::task::spawn_blocking(wifi::set_up_station).await;
+    // The screen's backlight (ADR 0060), at the brightness it last had.
+    let backlight = match config.display.backlight.clone() {
+        Some(path) => Some(glass_platform::backlight::Backlight::stand_in(path)),
+        None => tokio::task::spawn_blocking(glass_platform::backlight::Backlight::find)
+            .await
+            .ok()
+            .flatten(),
+    };
+    if let Some(backlight) = backlight {
+        tracing::info!("the screen's brightness: {}", backlight.name());
+        let settings = org.settings.clone();
+        let set = tokio::task::spawn_blocking(move || settings.set_backlight(backlight)).await;
+        if let Ok(Err(e)) = set {
+            tracing::warn!("setting the screen's brightness: {e}");
+        }
+    }
 
     // What IT sets for the computer that glassd applies itself: the time
     // zone, USB drives for whoever is signed in (ADR 0031), and Wi-Fi.

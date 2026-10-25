@@ -36,8 +36,11 @@ Not yet tried on a laptop: these steps follow how the dev VM is set up.
    hardware > <model>.json` for the record. Anything marked ✗ keeps the
    model off the list until fixed; ~ works with the limit it names.
 4. **What only a person can check,** each against its requirement:
-   - Wi-Fi joins WPA2 and WPA2-Enterprise networks, by hand until the
-     Wi-Fi pane exists (CF-10, CF-12);
+   - Wi-Fi joins WPA2 and WPA3 networks from Settings' Wi-Fi pane (CF-12),
+     and WPA2-Enterprise by hand until Settings signs in to them (CF-10);
+   - the brightness keys and Settings' slider dim the screen, one step a
+     press and not two (the firmware and the keyboard may both send one),
+     and the level comes back after a restart (ADR 0060);
    - the camera and the headset in a meeting in the browser (DK-11, CF-20);
    - sound from the speakers and the headphone jack, and the built-in
      microphone;

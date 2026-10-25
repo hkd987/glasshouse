@@ -266,6 +266,23 @@ pub const SPARK: Icon = Icon {
     )],
 };
 
+/// The screen's brightness (ADR 0060): a sun.
+pub const SUN: Icon = Icon {
+    view_box: (20.0, 20.0),
+    shapes: &[
+        Shape::Circle {
+            cx: 10.0,
+            cy: 10.0,
+            r: 3.6,
+            ink: Fill,
+        },
+        Shape::Path(
+            "M10 1.8v2.2M10 16v2.2M1.8 10h2.2M16 10h2.2M4.2 4.2l1.6 1.6M14.2 14.2l1.6 1.6M15.8 4.2l-1.6 1.6M5.8 14.2l-1.6 1.6",
+            StrokeRound(1.6),
+        ),
+    ],
+};
+
 pub const WIFI: Icon = Icon {
     view_box: (20.0, 20.0),
     shapes: &[
