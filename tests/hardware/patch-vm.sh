@@ -29,7 +29,11 @@
 #   record.
 #
 # The audit log verifies after each. Needs the current build deployed (`make freebsd vm-deploy`)
-# and the bundles built (os/freebsd/scripts/kernel-patch.sh build <patch>).
+# and the bundles built (os/freebsd/scripts/kernel-patch.sh build <patch>). Run the VM with BIOS
+# firmware (`VM_FIRMWARE=bios vm.sh up`): emulated without KVM, the framebuffer console makes a
+# boot after a panic or a power cut take many minutes (vm.sh's waits give up), where the text
+# console takes seconds. What's tested is the same: the boot environments, the bootonce, the
+# watchdog.
 #
 # The VM trusts the bundles' development key (build/kpatch/dev-key), with a five-minute probation,
 # for this run only: its glassd.toml is put back however the run ends.

@@ -31,6 +31,10 @@ VM_CPU_MODEL=${VM_CPU_MODEL:-max,la57=off,avx=off,avx2=off}
 VM_MEM=${VM_MEM:-4096}
 VM_DISK_SIZE=${VM_DISK_SIZE:-20G}
 VM_FIRMWARE=${VM_FIRMWARE:-uefi}                          # uefi (OVMF; a framebuffer, like laptops), or bios (text console)
+# The build with SMM where there is one: without it, the hardware watchdog's interrupts (ichwd,
+# ADR 0057) stall the next boot until the watchdog runs out, or for good.
+[[ -z ${OVMF_CODE:-} && -f /usr/share/OVMF/OVMF_CODE_4M.secboot.fd ]] &&
+	OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
 VM_SCREEN=${VM_SCREEN:-1280x800}                        # the display's size (ADR 0016); match loader.conf

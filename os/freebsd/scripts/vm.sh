@@ -71,6 +71,9 @@ cmd_up() {
 		cp "$OVMF_VARS" "$VM_EFIVARS"
 		firmware=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE"
 			-drive "if=pflash,format=raw,unit=1,file=$VM_EFIVARS")
+		# OVMF built with SMM handles the hardware watchdog's interrupts (ichwd, ADR 0057):
+		# its flash is SMM's alone.
+		[[ $OVMF_CODE == *secboot* ]] && firmware+=(-global "driver=cfi.pflash01,property=secure,value=on")
 	fi
 	# A second disk for the guest to write (the package-list image build), after the seed: vtbd2.
 	local extra=()
