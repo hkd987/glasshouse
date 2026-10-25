@@ -3,6 +3,7 @@
 - [architecture.md](architecture.md): processes, a task's life, containment, decisions, undo, audit, code map
 - [repo-layout.md](repo-layout.md): where things go, layering, crate conventions, how to add actions and agents
 - [prd-traceability.md](prd-traceability.md): every P0 requirement, its status and its test
+- [pilot-plan.md](pilot-plan.md): what stands between the build and a pilot, ranked, and what only the owner can provide
 - [adr/](adr/): architecture decision records
 - [design/](design/README.md): the mockups, rendered, and which API field drives each element
 - [dev/test-environment.md](dev/test-environment.md): set up a full test environment from a fresh checkout
