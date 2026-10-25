@@ -179,8 +179,13 @@ fi
 # hcsecd answers a device's pairing with the PIN Settings gave and keeps its
 # link key, and bthidd connects paired keyboards and mice, their input through
 # evdev as the desktop reads it (its rc script's -u; uinput is in the kernel).
-setconf /etc/rc.conf hcsecd_enable=YES bthidd_enable=YES
-[ -e /etc/bluetooth/bthidd.conf ] || install -o root -g wheel -m 0600 /dev/null /etc/bluetooth/bthidd.conf
+# glassd enables bthidd as the first one is paired: an empty bthidd.conf is a
+# syntax error to it.
+setconf /etc/rc.conf hcsecd_enable=YES
+if ! grep -qs '^device' /etc/bluetooth/bthidd.conf; then
+	rm -f /etc/bluetooth/bthidd.conf
+	sysrc -q -x bthidd_enable 2>/dev/null || true
+fi
 # USB cameras (ADR 0058): devd starts webcamd as one attaches
 # (devd/glasshouse-camera.conf). The person at the screen opens it as they
 # open the microphone (/dev/dsp): the device is anyone's on this computer, and

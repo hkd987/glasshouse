@@ -9,8 +9,9 @@
 //!   `/var/db/hcsecd.keys`.
 //! - `bthidd` connects keyboards, mice and other input devices, each with a
 //!   block in `/etc/bluetooth/bthidd.conf` that `bthidcontrol query` reads
-//!   from the device. With `-u` its input goes through evdev, as the
-//!   desktop reads it.
+//!   from the device. Its rc script's `-u` sends their input through evdev,
+//!   as the desktop reads it. It's enabled while one is paired: an empty
+//!   bthidd.conf is a syntax error to it.
 //!
 //! What glassd writes into those files is marked, so what IT or a person
 //! wrote by hand there is kept. Headsets and Bluetooth LE aren't in the base
@@ -522,7 +523,10 @@ impl Controller {
                     blocks.remove(&device.address);
                     blocks.push(&device.address, &bthidd_block(&query, device)?);
                     write(&path, &blocks.render())?;
-                    cmd::run("service", &["bthidd", "onerestart"])?;
+                    // bthidd runs while an input device is paired: an empty
+                    // bthidd.conf is a syntax error to it.
+                    cmd::run("sysrc", &["bthidd_enable=YES"])?;
+                    cmd::run("service", &["bthidd", "restart"])?;
                 }
                 Ok(())
             }
@@ -567,7 +571,10 @@ impl Controller {
                     write(keys, &kept)?;
                 }
                 cmd::run("service", &["hcsecd", "onerestart"])?;
-                if input {
+                if input && blocks.devices().next().is_none() {
+                    let _ = cmd::run("service", &["bthidd", "onestop"]);
+                    let _ = cmd::run("sysrc", &["-x", "bthidd_enable"]);
+                } else if input {
                     cmd::run("service", &["bthidd", "onerestart"])?;
                 }
                 Ok(())

@@ -56,9 +56,11 @@ pilot's checklist. CF-13. The owner: "All the above let's get them all done."
    - `settings.bluetooth_remove`, `settings.bluetooth_power`.
 
    The Settings app also refuses any caller but itself.
-7. **The image** enables hcsecd and bthidd and creates `bthidd.conf`
-   empty. bthidd's rc script passes `-u`, and uinput is in the kernel. In
-   the VM both run with no controller, waiting for one.
+7. **The image** enables hcsecd, which runs with no controller, waiting
+   for one. glassd enables bthidd as the first input device is paired, and
+   disables it as the last is removed: in the VM, bthidd refused an empty
+   `bthidd.conf` at boot ("syntax error in line 1"). Its rc script passes
+   `-u`, and uinput is in the kernel.
 8. **A stand-in.** `[bluetooth] stand_in` names a JSON file that stands in
    for a controller. The dev host has a keyboard, a mouse, a phone and
    headphones nearby, and the apps' browser suite pairs the keyboard
