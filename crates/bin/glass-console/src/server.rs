@@ -25,6 +25,8 @@
 //! POST /device/v1/blobs{,/get}         sealed blobs of the shared space (ADR 0033)
 //! POST /device/v1/apps/submit          share an app for review (ADR 0032)
 //! POST /device/v1/apps/bundle          an approved app's bundle, as signed
+//! POST /device/v1/hardware/submit      send a kernel patch for review (ADR 0057)
+//! POST /device/v1/hardware/bundle      a reviewed patch's bundle, as signed
 //! ```
 //!
 //! Admins are the directory's `it-admins`; support staff are the members of
@@ -87,6 +89,11 @@ pub struct Console {
     relay: std::sync::OnceLock<crate::relay::Relay>,
     /// What checks and builds the apps people share (ADR 0032).
     builder: std::sync::OnceLock<Arc<Builder>>,
+    /// What builds the kernel patches sent for review (ADR 0057).
+    patch_builder: std::sync::OnceLock<Arc<dyn crate::hardware::PatchBuilder>>,
+    /// Patches waiting for their build, one built at a time.
+    patch_queue: tokio::sync::mpsc::UnboundedSender<PatchJob>,
+    patch_jobs: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<PatchJob>>>,
     /// The built web app (`apps/console/dist`).
     web: PathBuf,
     /// The console's address, as devices reach it.
@@ -99,6 +106,13 @@ pub struct Console {
     /// Model calls being forwarded (ADR 0039).
     model_calls: tokio::sync::Semaphore,
 }
+
+/// A kernel patch's version to build.
+type PatchJob = (
+    glass_types::AgentId,
+    String,
+    glass_managed::kbuild::BuildRequest,
+);
 
 /// What model credits need on our side (ADR 0039).
 #[derive(Debug)]
@@ -329,6 +343,7 @@ impl Console {
     ) -> Arc<Self> {
         let (releases, _) = watch::channel(0);
         let (chat_changed, _) = watch::channel(0);
+        let (patch_queue, patch_jobs) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(Self {
             state: Mutex::new(state),
             directory,
@@ -340,6 +355,9 @@ impl Console {
             seen: Mutex::new(HashMap::new()),
             relay: std::sync::OnceLock::new(),
             builder: std::sync::OnceLock::new(),
+            patch_builder: std::sync::OnceLock::new(),
+            patch_queue,
+            patch_jobs: Mutex::new(Some(patch_jobs)),
             web,
             url,
             credits: std::sync::OnceLock::new(),
@@ -923,6 +941,42 @@ impl Console {
         )));
     }
 
+    /// Kernel patches sent for review are built by `builder` (ADR 0057).
+    /// Without one, the console refuses them.
+    pub fn set_patch_builder(&self, builder: Arc<dyn crate::hardware::PatchBuilder>) {
+        let _ = self.patch_builder.set(builder);
+    }
+
+    /// Builds the patches sent for review, one at a time, until the console
+    /// stops: those a restart interrupted first.
+    pub async fn build_patches(self: Arc<Self>) {
+        let Some(mut jobs) = lock(&self.patch_jobs).take() else {
+            return;
+        };
+        for job in self.state().patches_to_build() {
+            let _ = self.patch_queue.send(job);
+        }
+        while let Some((id, version, request)) = jobs.recv().await {
+            let Some(builder) = self.patch_builder.get().cloned() else {
+                continue;
+            };
+            let started = std::time::Instant::now();
+            let key = builder.key();
+            let result = tokio::task::spawn_blocking(move || builder.build(&request))
+                .await
+                .unwrap_or_else(|e| Err(format!("the build stopped: {e}")));
+            let ok = result.as_ref().is_ok_and(|r| r.ok);
+            if let Err(e) = self.state().patch_built(&id, &version, result, &key) {
+                tracing::warn!(%id, %version, "keeping a patch's build: {e:?}");
+            }
+            tracing::info!(
+                %id, %version, ok,
+                secs = started.elapsed().as_secs(),
+                "hardware: a patch sent for review was built"
+            );
+        }
+    }
+
     pub fn state(&self) -> std::sync::MutexGuard<'_, State> {
         lock(&self.state)
     }
@@ -946,6 +1000,7 @@ impl Console {
                 }
             }
         });
+        tokio::spawn(Arc::clone(&self).build_patches());
         // Meetings' sessions end with the call, even when everyone
         // dropped out without saying so (ADR 0052).
         let sweeper = Arc::clone(&self);
@@ -1650,6 +1705,17 @@ impl Console {
                 }
             }
             "apps/submit" => self.apps_submit(request).await,
+            "hardware/submit" => self.patch_submit(&device, request),
+            "hardware/bundle" => {
+                let fetch: glass_managed::hwreview::PatchFetch = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                match self.state().patch_bundle(&fetch) {
+                    Ok(bundle) => ok(serde_json::to_value(bundle).unwrap_or_default()),
+                    Err(r) => refused(r),
+                }
+            }
             "apps/bundle" => {
                 let wanted: glass_managed::studio::BundleRequest = match body(request) {
                     Ok(b) => b,
@@ -1785,6 +1851,42 @@ impl Console {
         );
         match result {
             Ok(submitted) => ok(serde_json::to_value(submitted).unwrap_or_default()),
+            Err(r) => refused(r),
+        }
+    }
+
+    // ---- kernel patches sent for review (ADR 0057, slice 3) -------------
+
+    /// A computer sends an agent's patch for IT's review: kept, and built
+    /// next.
+    fn patch_submit(&self, device: &str, request: &Request) -> Response {
+        let submission: glass_managed::hwreview::PatchSubmission = match body(request) {
+            Ok(b) => b,
+            Err(r) => return r,
+        };
+        if self.patch_builder.get().is_none() {
+            return refused(Refused::Rule(
+                "The organization's console can't build kernel patches yet.".into(),
+            ));
+        }
+        let result = self
+            .state()
+            .take_patch(&submission, device, self.directory.as_ref());
+        match result {
+            Ok(submitted) => {
+                tracing::info!(
+                    id = %submitted.id, version = %submitted.version, %device,
+                    "hardware: a patch was sent for review"
+                );
+                if let Ok(id) = submitted.id.parse() {
+                    let _ = self.patch_queue.send((
+                        id,
+                        submitted.version.clone(),
+                        submission.request.clone(),
+                    ));
+                }
+                ok(serde_json::to_value(submitted).unwrap_or_default())
+            }
             Err(r) => refused(r),
         }
     }
@@ -4053,6 +4155,148 @@ mod tests {
 
     /// The catalog page with hundreds of items shows each as its own page
     /// does, from IT's draft parsed once for the page, not once an item.
+    /// ADR 0057, slice 3: an agent's patch on a managed computer goes to
+    /// IT as source; the console builds it, IT reads it and approves it,
+    /// and what computers fetch is that build, signed as reviewed by the
+    /// org's key, never pushed.
+    #[tokio::test]
+    async fn adr0057_a_patch_sent_for_review_is_built_here_and_signed_by_the_org() {
+        use glass_managed::hwpatch::{Bundle, GLASSHOUSE, Review};
+        use glass_managed::hwreview::OrgPatch;
+
+        let t = console().await;
+        let submission = json!({
+            "request": {
+                "release": "15.1-RELEASE",
+                "id": "iwlwifi-resume",
+                "summary": "Wi-Fi works again after sleep",
+                "diff": "--- a/sys/dev/x.c\n+++ b/sys/dev/x.c\n@@ -1 +1 @@\n-a\n+b\n",
+                "modules": [{ "dir": "iwlwifi", "file": "if_iwlwifi.ko" }],
+                "targets": ["pci:8086:2725"],
+                "origin": "agent:9b1f"
+            },
+            "person": "dana",
+            "asked": "Wi-Fi stops after the laptop sleeps",
+            "computer": "LENOVO 20W0"
+        });
+        let submit = |body: Value| t.device("/device/v1/hardware/submit", body);
+        let fetch = |revision: u64| {
+            t.device(
+                "/device/v1/hardware/bundle",
+                json!({ "id": "iwlwifi-resume", "revision": revision }),
+            )
+        };
+
+        // No build service: refused, nothing kept.
+        assert_eq!(submit(submission.clone()).await.status, 409);
+        t.console
+            .set_patch_builder(crate::hardware::DevBuilder::new());
+
+        // Sent again while it's still building: refused.
+        assert_eq!(submit(submission.clone()).await.status, 200);
+        let again = submit(submission.clone()).await;
+        assert_eq!(again.status, 409);
+        assert!(String::from_utf8_lossy(&again.body).contains("still being built"));
+        tokio::spawn(Arc::clone(&t.console).build_patches());
+
+        // Waiting for IT, built here, nothing for computers yet.
+        let item = || t.call("GET", "/api/catalog/iwlwifi-resume", Value::Null);
+        for _ in 0..200 {
+            if item().await.1["hardware"]["build"]["state"] != "building" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (status, view) = item().await;
+        assert_eq!(status, 200, "{view}");
+        assert_eq!(view["kind"], "hardware_patch");
+        assert_eq!(view["review"], "waiting");
+        let h = &view["hardware"];
+        assert_eq!(h["build"]["state"], "built", "{h}");
+        assert_eq!(h["person"], "Dana Ruiz");
+        assert_eq!(h["computer"], "LENOVO 20W0");
+        assert!(h["diff"].as_str().unwrap().contains("+++ b/sys/dev/x.c"));
+        assert_eq!(fetch(1).await.status, 404);
+        assert!(t.sync("d", None, 0).await.catalog.is_none());
+
+        // Never pushed.
+        let approve = |mode: &str| {
+            t.call(
+                "POST",
+                "/api/catalog/iwlwifi-resume/approve",
+                json!({ "version": "1", "group": "ap-ops", "mode": mode, "pin": false }),
+            )
+        };
+        let (status, why) = approve("required").await;
+        assert_eq!(status, 409, "{why}");
+        assert!(why.to_string().contains("never pushed"), "{why}");
+
+        // Approved for AP Ops: the catalog names the reviewed bundle, which
+        // the org's key signed and says it was reviewed.
+        let (status, approved) = approve("available").await;
+        assert_eq!(status, 200, "{approved}");
+        let release: CatalogRelease = t
+            .sync("d", None, 0)
+            .await
+            .catalog
+            .unwrap()
+            .open(DocKind::Catalog, "acme", std::slice::from_ref(&t.key), None)
+            .unwrap();
+        let patch: OrgPatch = release.items[0].patch.clone().unwrap();
+        assert_eq!(
+            (patch.patch.as_str(), patch.revision, patch.targets.clone()),
+            ("iwlwifi-resume", 1, vec!["pci:8086:2725".to_owned()])
+        );
+        assert_eq!(release.items[0].groups["ap-ops"], InstallMode::Available);
+        let r = fetch(1).await;
+        assert_eq!(r.status, 200);
+        let bundle: Bundle = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(
+            glass_managed::hwreview::bundle_digest(&bundle),
+            patch.bundle_sha256
+        );
+        let opened = bundle
+            .open(GLASSHOUSE, std::slice::from_ref(&t.key), None)
+            .unwrap();
+        assert_eq!(opened.manifest.review, Review::Reviewed);
+        assert_eq!(opened.manifest.origin, "agent:9b1f");
+        // The build service's own key never made it reviewed.
+        let service = crate::hardware::DevBuilder::new();
+        assert!(
+            bundle
+                .open(
+                    GLASSHOUSE,
+                    &[crate::hardware::PatchBuilder::key(&*service)],
+                    None
+                )
+                .is_err()
+        );
+
+        // A patch that doesn't build can't be approved.
+        let mut broken = submission.clone();
+        broken["request"]["diff"] =
+            json!("--- a/sys/dev/x.c\n+++ b/sys/dev/x.c\n@@ -1 +1 @@\n-a\n+does not build\n");
+        assert_eq!(submit(broken).await.status, 200);
+        for _ in 0..200 {
+            if item().await.1["hardware"]["build"]["state"] != "building" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (_, view) = item().await;
+        assert_eq!(view["hardware"]["build"]["state"], "failed");
+        assert_eq!(view["approved_version"], "1", "computers keep the last one");
+        let (status, _) = t
+            .call(
+                "POST",
+                "/api/catalog/iwlwifi-resume/approve",
+                json!({ "version": "2", "group": "ap-ops", "mode": "available", "pin": false }),
+            )
+            .await;
+        assert_eq!(status, 409);
+        assert_eq!(fetch(1).await.status, 200);
+    }
+
     #[tokio::test]
     async fn ad5_a_catalog_of_hundreds_shows_each_item_as_its_page_does() {
         let t = console().await;
@@ -4078,12 +4322,14 @@ mod tests {
                     pinned: false,
                     provenance: Default::default(),
                     app: None,
+                    patch: None,
                 },
                 review: crate::state::Review::Waiting,
                 requested_by: "Legal Operations".into(),
                 checks: Vec::new(),
                 decided_by: None,
                 shared: None,
+                hardware: None,
                 approved: None,
             });
         }
@@ -4126,12 +4372,14 @@ mod tests {
                         pinned: false,
                         provenance: Default::default(),
                         app: None,
+                        patch: None,
                     },
                     review: crate::state::Review::Waiting,
                     requested_by: "Legal Operations".into(),
                     checks: Vec::new(),
                     decided_by: None,
                     shared: None,
+                    hardware: None,
                     approved: None,
                 })
                 .unwrap();

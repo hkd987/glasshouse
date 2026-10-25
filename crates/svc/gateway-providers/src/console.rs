@@ -70,6 +70,16 @@ impl ConsoleClient {
         self
     }
 
+    /// Reads answers as large as a reviewed kernel patch's bundle, which
+    /// may carry a whole kernel (ADR 0057).
+    #[must_use]
+    pub fn for_patches(mut self) -> Self {
+        self.http = self
+            .http
+            .with_max_reply(glass_managed::hwreview::MAX_BUNDLE_REPLY);
+        self
+    }
+
     /// Signs every request with `key`, the computer's own.
     #[must_use]
     pub fn signed_by(mut self, key: Arc<DeviceKey>) -> Self {
@@ -303,6 +313,34 @@ impl glass_managed::studio::ShareLink for ConsoleClient {
         Self::answer(
             &self
                 .request("/device/v1/apps/bundle", request)
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// Kernel patches sent for IT's review, and the reviewed ones' bundles
+/// (ADR 0057, slice 3), which glassd checks against the signed catalog.
+impl glass_managed::hwreview::PatchLink for ConsoleClient {
+    fn submit(
+        &self,
+        submission: &glass_managed::hwreview::PatchSubmission,
+    ) -> Result<glass_managed::hwreview::PatchSubmitted, String> {
+        Self::answer(
+            &self
+                .request(glass_managed::hwreview::SUBMIT_PATH, submission)
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    fn bundle(
+        &self,
+        fetch: &glass_managed::hwreview::PatchFetch,
+    ) -> Result<glass_managed::hwpatch::Bundle, String> {
+        Self::answer(
+            &self
+                .request(glass_managed::hwreview::BUNDLE_PATH, fetch)
                 .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())

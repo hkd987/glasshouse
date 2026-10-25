@@ -8,10 +8,15 @@
 // reviewed here: who made it from what, the console's own checks, what it
 // does beyond the app it remixes, what changed file by file, and whether a
 // person must review it (DV-4).
+//
+// So is a kernel patch an agent wrote on one of the org's computers (ADR
+// 0057, slice 3): what the person asked, the patch, the console's own build
+// of it, the diff, and the computers that run it. It's made available,
+// never required: the person at each computer says yes.
 
 import { h, show } from "@glasshouse/sdk";
 
-import { type CatalogPage, type FileChange, type Item, type Mode, type Shared, type Titled, api } from "./api.ts";
+import { type CatalogPage, type FileChange, type Hardware, type Item, type Mode, type Shared, type Titled, api } from "./api.ts";
 import { ago, capital, card, chip, mono, notice, plural } from "./ui.ts";
 
 const REVIEW: Record<Item["review"], [string, "ok" | "wait" | "bad"]> = {
@@ -117,10 +122,12 @@ function render(
     { "data-test": "group", "aria-label": "Approve for group" },
     ...groups.map((g) => h("option", { value: g.name, selected: g.name === requested }, `${g.display} (${plural(g.users, "user")})`)),
   );
+  const hardware = item.hardware ?? null;
   const modePick = h(
     "select",
     { "data-test": "mode", "aria-label": "Install mode" },
-    ...MODES.map(([m, label]) => h("option", { value: m }, label)),
+    // A kernel patch is never pushed.
+    ...MODES.filter(([m]) => !hardware || m !== "required").map(([m, label]) => h("option", { value: m }, label)),
   );
   const pin = h("input", { type: "checkbox", checked: item.pinned, "data-test": "pin" });
   const declares = item.declares;
@@ -136,7 +143,14 @@ function render(
         {},
         h("div", { class: "crumbs" }, h("a", { href: "#/catalog" }, "Catalog"), ` / ${REVIEW[item.review][0]}`),
         h("h1", {}, item.name),
-        shared
+        hardware
+          ? h(
+              "p",
+              { class: "sub", "data-test": "asked-by" },
+              `Kernel patch ${hardware.patch} · written by an agent for ${hardware.person} on ${hardware.computer || hardware.device} `,
+              mono(`v${item.version}`),
+            )
+          : shared
           ? madeBy(item, shared, base)
           : h(
               "p",
@@ -151,6 +165,14 @@ function render(
     ),
     message ? notice(message.text, message.tone) : null,
     shared?.needs_person ? needsPerson(shared.irreversible) : null,
+    hardware
+      ? h(
+          "div",
+          { class: "dv4", role: "note", "data-test": "kernel" },
+          h("strong", {}, "A person must review this: "),
+          "it runs in the kernel, outside every sandbox, on each computer that installs it. Approving it is that review: it goes out signed with the org's key as reviewed.",
+        )
+      : null,
     h(
       "div",
       { class: "columns" },
@@ -158,15 +180,19 @@ function render(
         "div",
         { class: "main" },
         ...(shared ? review(item, shared, base) : []),
-        card(
+        ...(hardware ? patchReview(hardware) : []),
+        hardware
+          ? null
+          : card(
           "What it can do",
           "Declared by the publisher and enforced by the OS. It can never go beyond this.",
           ...declares.actions.map((a) => h("div", { class: "kv" }, h("span", {}, a.title), h("span", {}, a.tier ? capital(a.tier) : "Policy decides"))),
           h("div", { class: "kv" }, h("span", {}, `Data up to ${capital(declares.max_label)}`), h("span", {}, "Routed by the org's model rules")),
           h("div", { class: "kv" }, h("span", {}, "Network access"), h("span", { class: "strong" }, network)),
         ),
-        // A shared app's checks are the console's own, above.
-        shared
+        // A shared app's checks are the console's own, above; a patch's
+        // are its build.
+        shared || hardware
           ? null
           : card(
               "Checks",
@@ -234,6 +260,79 @@ function render(
       ),
     ),
   );
+}
+
+// ---- a kernel patch's review (ADR 0057, slice 3) --------------------------
+
+const BUILD: Record<Hardware["build"]["state"], [string, "ok" | "wait" | "bad"]> = {
+  building: ["Building", "wait"],
+  built: ["Built here", "ok"],
+  failed: ["Didn't build", "bad"],
+};
+
+function patchReview(hw: Hardware): HTMLElement[] {
+  const build = hw.build;
+  const parts = [...hw.modules, ...(hw.kernel ? ["the kernel"] : [])];
+  return [
+    tagged(
+      card(
+        "What they asked",
+        `${hw.person} asked on ${hw.computer || "a computer"} (${hw.device}), ${ago(hw.submitted_at)}.`,
+        hw.asked ? h("blockquote", { class: "maker-note" }, hw.asked) : h("p", { class: "hint" }, "They didn't say."),
+      ),
+      "asked",
+    ),
+    tagged(
+      card(
+        "The patch",
+        "As the computer sent it: its source only, never what it built there.",
+        h("div", { class: "kv" }, h("span", {}, "For"), mono(hw.targets.join(", ") || "–")),
+        h("div", { class: "kv" }, h("span", {}, "Release"), mono(hw.release)),
+        h("div", { class: "kv" }, h("span", {}, "Replaces"), mono(parts.join(", "))),
+        h("div", { class: "kv" }, h("span", {}, "Written by"), mono(hw.origin)),
+        hw.bundle_sha256 ? h("div", { class: "kv" }, h("span", {}, "Reviewed bundle"), mono(hw.bundle_sha256.slice(0, 16))) : null,
+      ),
+      "patch",
+    ),
+    tagged(
+      card(
+        "The console's build",
+        build.state === "building" ? "The build service is building it." : "The build service built it again here, from the source above.",
+        h("div", { class: "kv" }, h("span", {}, "Build"), chip(BUILD[build.state][0], BUILD[build.state][1])),
+        "log" in build && build.log ? h("pre", { class: "log", "data-test": "build-log" }, build.log) : null,
+      ),
+      "build",
+    ),
+    changed(patchFiles(hw.diff)),
+    tagged(
+      card(
+        "On the org's computers",
+        "From their reports: kept after its probation, being tried, or gone back by itself.",
+        h("div", { class: "kv" }, h("span", {}, "Kept"), h("span", { class: "strong" }, String(hw.computers.kept))),
+        h("div", { class: "kv" }, h("span", {}, "Being tried"), h("span", {}, String(hw.computers.trying))),
+        h("div", { class: "kv" }, h("span", {}, "Went back"), h("span", { class: hw.computers.went_back ? "strong bad" : "" }, String(hw.computers.went_back))),
+      ),
+      "computers",
+    ),
+  ];
+}
+
+/** A unified diff of several files, as the file-by-file view draws them. */
+function patchFiles(diff: string): FileChange[] {
+  const files: FileChange[] = [];
+  for (const chunk of diff.split(/^(?=--- )/m)) {
+    const path = /^\+\+\+ b\/(\S+)/m.exec(chunk)?.[1];
+    if (!path) continue;
+    const lines = chunk.split("\n").filter((l) => !l.startsWith("--- ") && !l.startsWith("+++ "));
+    files.push({
+      path,
+      status: "changed",
+      added: lines.filter((l) => l.startsWith("+")).length,
+      removed: lines.filter((l) => l.startsWith("-")).length,
+      unified: lines.join("\n"),
+    });
+  }
+  return files;
 }
 
 // ---- a shared app's review (ADR 0032, R2; GA-8) ----------------------------

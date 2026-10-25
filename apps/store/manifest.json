@@ -2,8 +2,8 @@
   "id": "store",
   "name": "Store",
   "version": "0.1.0",
-  "description": "What your organization's catalog offers you: install what IT made available, see what it can do.",
-  "actions": ["catalog.list", "catalog.search", "catalog.install", "catalog.remove"],
+  "description": "What your organization's catalog offers you: install what IT made available, see what it can do, and the kernel patches IT reviewed for this computer.",
+  "actions": ["catalog.list", "catalog.search", "catalog.install", "catalog.remove", "catalog.patch_install"],
   "permissions": ["offline"],
   "labels": ["public", "internal"]
 }

@@ -133,6 +133,31 @@ export interface Item {
   shared?: Shared | null;
   /** What a shared app changes from its base, file by file: on the item's own page only. */
   changes?: FileChange[];
+  /** A kernel patch an agent wrote on one of the org's computers, for IT's review (ADR 0057). */
+  hardware?: Hardware | null;
+}
+
+/** A kernel patch sent for review (ADR 0057, slice 3): who asked on which computer, its source and its build here. */
+export interface Hardware {
+  person: string;
+  person_login: string;
+  device: string;
+  computer: string;
+  asked: string;
+  patch: string;
+  release: string;
+  targets: string[];
+  modules: string[];
+  kernel: boolean;
+  /** `agent:<task>`. */
+  origin: string;
+  diff: string;
+  build: { state: "building" } | { state: "built"; log: string; bytes: number } | { state: "failed"; log: string };
+  submitted_at: string;
+  /** Of the reviewed bundle, once approved. */
+  bundle_sha256: string | null;
+  /** Computers whose reports say they keep it, are trying it, or went back. */
+  computers: { kept: number; trying: number; went_back: number };
 }
 
 /** An action, as IT reads it. */

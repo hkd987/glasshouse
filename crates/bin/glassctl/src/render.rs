@@ -1098,6 +1098,7 @@ mod tests {
             model: "21AH00FGUS".into(),
             processor: "12th Gen Intel(R) Core(TM) i7-1265U".into(),
             memory_mb: 16069,
+            targets: Vec::new(),
             parts: vec![
                 part(
                     Kind::Wifi,

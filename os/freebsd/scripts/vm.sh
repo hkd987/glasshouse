@@ -465,4 +465,6 @@ console-log)
 	cat "$VM_CONSOLE"
 	;;
 *) sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2 && exit 2 ;;
-esac
+# `exit` on the same line: bash reads the dispatch whole before running it, never
+# what an edit made of the file while it ran (a long build in the VM survives one).
+esac; exit

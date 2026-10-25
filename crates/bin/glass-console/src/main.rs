@@ -14,6 +14,7 @@ mod credits;
 mod directory;
 mod edits;
 mod fixture;
+mod hardware;
 mod impact;
 mod meet;
 mod relay;
@@ -97,6 +98,17 @@ struct Args {
     /// The development billing relay's public key, hex.
     #[arg(long, requires = "billing_relay")]
     billing_key: Option<String>,
+    /// The kernel patch build service (`glass-kbuild`) that builds the
+    /// patches computers send for review (ADR 0057). With `--dev` and
+    /// none, a stand-in builds them, which no computer trusts.
+    #[arg(long, requires_all = ["kbuild_token", "kbuild_key"])]
+    kbuild: Option<String>,
+    /// The file with the console's token for it, mode 0600.
+    #[arg(long)]
+    kbuild_token: Option<PathBuf>,
+    /// The key it signs with (`ed25519:...`).
+    #[arg(long)]
+    kbuild_key: Option<String>,
 }
 
 /// The development billing relay's token for every console. Not a secret.
@@ -357,6 +369,20 @@ async fn run(args: Args) -> anyhow::Result<()> {
             );
         }
         None => {}
+    }
+    // Kernel patches sent for review are built by the build service.
+    match (&args.kbuild, &args.kbuild_token, &args.kbuild_key) {
+        (Some(url), Some(token), Some(key)) => {
+            let token = std::fs::read_to_string(token)
+                .with_context(|| format!("reading {}", token.display()))?;
+            let key: glass_managed::PublicKey = serde_json::from_value(serde_json::json!(key))
+                .context("--kbuild-key isn't a public key")?;
+            let client = glass_gateway_providers::BuildClient::new(url, token.trim(), args.dev)
+                .map_err(anyhow::Error::msg)?;
+            console.set_patch_builder(hardware::Service::new(client, key));
+        }
+        _ if args.dev => console.set_patch_builder(hardware::DevBuilder::new()),
+        _ => tracing::warn!("kernel patches sent for review can't be built: no --kbuild"),
     }
     // Apps people share are checked and built here, confined, or refused.
     if args.bundler.is_file() && args.apps.join("sdk").is_dir() {

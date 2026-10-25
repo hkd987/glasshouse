@@ -157,4 +157,6 @@ log)
 	vm_ssh "grep -v 'drawn in' $log | tail -n ${1:-20}"
 	;;
 *) die "usage: desk.sh ready|signin [password]|signout|restart|fresh <login>...|click x y|key k|keydown k|keyup k|scroll up/down|point x y|app '<command>'|wait <regex>|shot <png>|log [n]" ;;
-esac
+# `exit` on the same line: bash reads the dispatch whole before running it, never
+# what an edit made of the file while it ran (a long build in the VM survives one).
+esac; exit

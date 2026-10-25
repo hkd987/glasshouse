@@ -27,6 +27,9 @@ pub enum ItemKind {
     App,
     /// A recorded flow (AD-5).
     Flow,
+    /// A kernel patch IT reviewed (ADR 0057): offered to computers with
+    /// the hardware it's for, never pushed.
+    HardwarePatch,
 }
 
 impl ItemKind {
@@ -35,6 +38,7 @@ impl ItemKind {
             Self::Agent => "agent",
             Self::App => "app",
             Self::Flow => "recorded flow",
+            Self::HardwarePatch => "kernel patch",
         }
     }
 }
@@ -168,6 +172,10 @@ pub struct CatalogItem {
     /// install, by the bundle's digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<crate::studio::OrgApp>,
+    /// A kernel patch IT reviewed (ADR 0057): what computers fetch, by the
+    /// bundle's digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch: Option<crate::hwreview::OrgPatch>,
 }
 
 impl CatalogItem {
@@ -226,6 +234,20 @@ impl CatalogRelease {
             }
             if item.name.trim().is_empty() || item.name.chars().any(char::is_control) {
                 return Err(format!("{}: the name must be one line", item.id));
+            }
+            if (item.kind == ItemKind::HardwarePatch) != item.patch.is_some() {
+                return Err(format!(
+                    "{}: a kernel patch, and only one, names its reviewed bundle",
+                    item.id
+                ));
+            }
+            if item.kind == ItemKind::HardwarePatch
+                && item.groups.values().any(|m| *m == InstallMode::Required)
+            {
+                return Err(format!(
+                    "{}: a kernel patch is never pushed; the person at the computer says yes",
+                    item.id
+                ));
             }
             if item.id.is_personal() {
                 return Err(format!(
@@ -414,7 +436,12 @@ pub fn search<'a, S: AsRef<str>>(
     let need = words(need);
     let mut found: Vec<Match<'a>> = items
         .iter()
-        .filter(|item| kind.is_none_or(|k| item.kind == k))
+        // Kernel patches only when asked for: the Store's Hardware
+        // category, never a search for an app or an agent (ADR 0057).
+        .filter(|item| match kind {
+            Some(k) => item.kind == k,
+            None => item.kind != ItemKind::HardwarePatch,
+        })
         .filter_map(|item| {
             let mode = item.mode_for(groups)?;
             let actions = item.declares.actions.join(" ");
@@ -458,6 +485,7 @@ mod tests {
             pinned: false,
             provenance: Provenance::default(),
             app: None,
+            patch: None,
         }
     }
 

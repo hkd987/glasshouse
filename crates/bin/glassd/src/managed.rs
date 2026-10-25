@@ -296,6 +296,16 @@ impl Managed {
             }
             Err(e) => tracing::error!("managed: sharing apps: {e}"),
         }
+        // Kernel patches sent for IT's review, and the reviewed ones'
+        // bundles (ADR 0057, slice 3), on a client that reads them whole.
+        match console(&token).map(ConsoleClient::for_patches) {
+            Ok(patches) => {
+                let link: Arc<dyn glass_managed::hwreview::PatchLink> = Arc::new(patches);
+                self.org.hardware.set_review(Arc::clone(&link));
+                self.org.org_patches.connect(link);
+            }
+            Err(e) => tracing::error!("managed: kernel patches: {e}"),
+        }
         let mut retry = FIRST_RETRY;
         let mut reported: Option<Instant> = None;
         let mut registered = false;
@@ -822,6 +832,30 @@ impl Managed {
                     saved_at: record.saved_at,
                 })
                 .collect(),
+            patches: self
+                .runtime
+                .hardware_patch_status(&crate::hardware::root())
+                .map(|status| {
+                    status
+                        .trial
+                        .iter()
+                        .chain(
+                            status
+                                .kept
+                                .iter()
+                                .filter(|k| status.trial.as_ref().is_none_or(|t| t.id != k.id)),
+                        )
+                        .map(|t| glass_managed::PatchReport {
+                            id: t.id.clone(),
+                            revision: t.revision,
+                            state: serde_json::to_value(t.state)
+                                .ok()
+                                .and_then(|v| v.as_str().map(str::to_owned))
+                                .unwrap_or_default(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             reported_at: Timestamp::now(),
         }
     }
@@ -1063,6 +1097,7 @@ mod tests {
                 pinned: false,
                 provenance: Default::default(),
                 app: None,
+                patch: None,
             }],
         };
         key.sign(

@@ -410,6 +410,7 @@ pub const PERSONS_OWN: &[&str] = &[
     // person's at the screen; IT's on a managed computer.
     "settings.update_install",
     "settings.patch_remove",
+    "catalog.patch_install",
     // Starting a routine runs a task with the scope it was saved with,
     // which the agent asking may not have; and what the person did twice
     // is theirs to keep (ADR 0047).
@@ -422,7 +423,7 @@ pub const PERSONS_OWN: &[&str] = &[
 const PERSONS_OWN_WHY: &str = "only the person does it, in their own app: connecting their mail \
      or their AI models with their password or key, in Mail or Settings (ADR 0037, ADR 0039), and \
      starting their routines or keeping new ones, in Routines (ADR 0047), and installing this \
-     computer's OS updates or taking out its kernel patches, in Settings (ADR 0061); no agent \
+     computer's OS updates or kernel patches, in Settings and the Store (ADR 0061); no agent \
      ever does, and those apps' own [[app]] tiers say what the person does there";
 
 /// What an agent does only with the person's yes, each time: at least Ask

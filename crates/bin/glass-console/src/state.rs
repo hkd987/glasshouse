@@ -14,6 +14,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use glass_api::AppManifest;
 use glass_app_studio::diff::FileChange;
+use glass_managed::hwpatch::Bundle as PatchBundle;
+use glass_managed::hwreview::{
+    OrgPatch, PatchFetch, PatchSubmission, PatchSubmitted, bundle_digest,
+};
+use glass_managed::kbuild::BuildRequest;
 use glass_managed::studio::{
     Bundle, BundleRequest, OrgApp, ShareTo, SharedBase, Submission, Submitted,
 };
@@ -91,6 +96,38 @@ pub struct ConsoleItem {
     /// The version computers have while a newer one waits for review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved: Option<CatalogItem>,
+    /// A kernel patch an agent wrote on one of the org's computers, sent
+    /// for review (ADR 0057, slice 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware: Option<PatchShared>,
+}
+
+/// Patches waiting for their build at once, at most.
+const MAX_PATCH_BUILDS: usize = 16;
+
+/// A kernel patch sent for IT's review, and its build here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PatchShared {
+    /// The login of whoever asked for the fix.
+    pub person: String,
+    pub device: String,
+    /// The computer's make and model.
+    pub computer: String,
+    /// What they said was wrong.
+    pub asked: String,
+    /// The patch's source, as the computer sent it.
+    pub request: BuildRequest,
+    pub build: PatchBuild,
+    pub submitted_at: Timestamp,
+}
+
+/// The build service's build of a patch sent for review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PatchBuild {
+    Building,
+    Built { log: String, bytes: u64 },
+    Failed { log: String },
 }
 
 impl ConsoleItem {
@@ -659,12 +696,266 @@ impl State {
                 entry.item.version, entry.item.name
             )));
         }
+        if entry.hardware.is_some() {
+            let item = entry.item.clone();
+            let patch = self.sign_patch(&item, mode, by)?;
+            let entry = self.item_mut(id)?;
+            entry.item.patch = Some(patch);
+        }
+        let entry = self.item_mut(id)?;
         entry.review = Review::Approved;
         entry.approved = None;
         entry.item.groups.insert(group.to_owned(), mode);
         entry.item.pinned = pin;
         entry.decided_by = Some(by.to_owned());
         self.release_catalog()
+    }
+
+    // ---- kernel patches sent for review (ADR 0057, slice 3) -------------
+
+    /// Where a patch's version keeps its source, the build service's build
+    /// and, once IT approved it, the reviewed bundle.
+    fn patch_dir(&self, id: &AgentId, version: &str) -> PathBuf {
+        self.dir.join("patches").join(id.as_str()).join(version)
+    }
+
+    /// A computer sends an agent's patch for review: the next version of
+    /// the item it waits as, built next.
+    pub fn take_patch(
+        &mut self,
+        submission: &PatchSubmission,
+        device: &str,
+        directory: &dyn Directory,
+    ) -> Result<PatchSubmitted, Refused> {
+        submission.check().map_err(|e| Refused::Invalid(vec![e]))?;
+        let request = &submission.request;
+        let id: AgentId = request.id.parse().map_err(|_| {
+            Refused::Invalid(vec![format!("{} can't be a catalog item's id", request.id)])
+        })?;
+        let current = self.catalog.items.iter().find(|i| i.item.id == id);
+        if current.is_some_and(|i| i.hardware.is_none()) {
+            return Err(Refused::Rule(format!(
+                "{id} is already an app's or agent's id; the patch needs its own."
+            )));
+        }
+        // One build of a patch at a time, and a bounded queue: a computer
+        // can't keep the build service busy for everyone else.
+        let building = |i: &ConsoleItem| {
+            i.hardware
+                .as_ref()
+                .is_some_and(|h| h.build == PatchBuild::Building)
+        };
+        if current.is_some_and(building) {
+            return Err(Refused::Rule(format!(
+                "{id} is still being built here; send it again once it's built."
+            )));
+        }
+        if self.catalog.items.iter().filter(|i| building(i)).count() >= MAX_PATCH_BUILDS {
+            return Err(Refused::Rule(
+                "The console is building as many patches as it takes at once; send it again \
+                 later."
+                    .into(),
+            ));
+        }
+        let version = current
+            .map_or(1, |i| i.item.version.parse::<u32>().unwrap_or(0) + 1)
+            .to_string();
+        let dir = self.patch_dir(&id, &version);
+        std::fs::create_dir_all(&dir).map_err(internal)?;
+        write_json(&dir.join("request.json"), request).map_err(internal)?;
+        let person = directory.display_name(&submission.person);
+        let item = CatalogItem {
+            id: id.clone(),
+            kind: glass_managed::ItemKind::HardwarePatch,
+            name: request.summary.clone(),
+            version: version.clone(),
+            publisher: format!("An agent, for {person}"),
+            publisher_verified: false,
+            internal: true,
+            summary: request.summary.clone(),
+            keywords: request.targets.clone(),
+            declares: glass_managed::Declared::default(),
+            groups: BTreeMap::new(),
+            pinned: false,
+            provenance: Default::default(),
+            app: None,
+            patch: None,
+        };
+        let shared = PatchShared {
+            person: submission.person.clone(),
+            device: device.to_owned(),
+            computer: submission.computer.clone(),
+            asked: submission.asked.clone(),
+            request: request.clone(),
+            build: PatchBuild::Building,
+            submitted_at: Timestamp::now(),
+        };
+        match self.catalog.items.iter_mut().find(|i| i.item.id == id) {
+            Some(entry) => {
+                if entry.review == Review::Approved {
+                    entry.approved = Some(entry.item.clone());
+                }
+                let groups = entry.item.groups.clone();
+                entry.item = CatalogItem { groups, ..item };
+                entry.review = Review::Waiting;
+                entry.requested_by = person.clone();
+                entry.decided_by = None;
+                entry.hardware = Some(shared);
+            }
+            None => self.catalog.items.push(ConsoleItem {
+                item,
+                review: Review::Waiting,
+                requested_by: person.clone(),
+                checks: Vec::new(),
+                decided_by: None,
+                shared: None,
+                approved: None,
+                hardware: Some(shared),
+            }),
+        }
+        self.save_catalog().map_err(internal)?;
+        Ok(PatchSubmitted {
+            id: id.to_string(),
+            version,
+            text: format!(
+                "Sent \"{}\" to IT for review. Once they approve it, it's in the Store's \
+                 Hardware category for computers like this one.",
+                request.summary
+            ),
+        })
+    }
+
+    /// The patches waiting to be built: after a restart, those a build was
+    /// under way for.
+    pub fn patches_to_build(&self) -> Vec<(AgentId, String, BuildRequest)> {
+        self.catalog
+            .items
+            .iter()
+            .filter_map(|i| {
+                let h = i.hardware.as_ref()?;
+                (h.build == PatchBuild::Building)
+                    .then(|| (i.item.id.clone(), i.item.version.clone(), h.request.clone()))
+            })
+            .collect()
+    }
+
+    /// The build service's answer for version `version` of `id`: kept if
+    /// it's what was asked for, signed by `key`. A newer version sent since
+    /// makes it moot.
+    pub fn patch_built(
+        &mut self,
+        id: &AgentId,
+        version: &str,
+        result: Result<glass_managed::kbuild::BuildResult, String>,
+        key: &glass_managed::PublicKey,
+    ) -> Result<(), Refused> {
+        let dir = self.patch_dir(id, version);
+        let Some(entry) = self
+            .catalog
+            .items
+            .iter_mut()
+            .find(|i| i.item.id == *id && i.item.version == version)
+        else {
+            return Ok(());
+        };
+        let Some(shared) = entry.hardware.as_mut() else {
+            return Ok(());
+        };
+        shared.build = match result {
+            Err(why) => PatchBuild::Failed {
+                log: format!("The build service couldn't build it: {why}"),
+            },
+            Ok(built) => match built.bundle.filter(|_| built.ok) {
+                None => PatchBuild::Failed { log: built.log },
+                Some(bundle) => match crate::hardware::check_build(&shared.request, &bundle, key) {
+                    Err(why) => PatchBuild::Failed { log: why },
+                    Ok(()) => {
+                        write_json(&dir.join("built.json"), &bundle).map_err(internal)?;
+                        PatchBuild::Built {
+                            log: built.log,
+                            bytes: serde_json::to_vec(&bundle).map_or(0, |b| b.len() as u64),
+                        }
+                    }
+                },
+            },
+        };
+        self.save_catalog().map_err(internal)
+    }
+
+    /// IT approves a patch: its build, signed again with the org's key as
+    /// reviewed, is what computers fetch.
+    fn sign_patch(
+        &self,
+        item: &CatalogItem,
+        mode: InstallMode,
+        by: &str,
+    ) -> Result<OrgPatch, Refused> {
+        if mode == InstallMode::Required {
+            return Err(Refused::Rule(
+                "A kernel patch is never pushed: make it available, and the person at each \
+                 computer says yes."
+                    .into(),
+            ));
+        }
+        let entry = self.item(item.id.as_str())?;
+        let shared = entry
+            .hardware
+            .as_ref()
+            .ok_or_else(|| Refused::Rule(format!("{} isn't a kernel patch", item.id)))?;
+        if !matches!(shared.build, PatchBuild::Built { .. }) {
+            return Err(Refused::Rule(
+                "It hasn't been built: only a patch that built can be approved.".into(),
+            ));
+        }
+        let dir = self.patch_dir(&item.id, &item.version);
+        let built: PatchBundle = read_json(&dir.join("built.json"))
+            .map_err(internal)?
+            .ok_or_else(|| Refused::Rule("Its build is missing; send it again.".into()))?;
+        let revision = item.version.parse::<u64>().unwrap_or(1);
+        let reviewed = crate::hardware::reviewed(&built, &self.key, revision).map_err(internal)?;
+        write_json(&dir.join("reviewed.json"), &reviewed).map_err(internal)?;
+        let bytes = serde_json::to_vec(&reviewed).map_or(0, |b| b.len() as u64);
+        Ok(OrgPatch {
+            patch: shared.request.id.clone(),
+            release: shared.request.release.clone(),
+            targets: shared.request.targets.clone(),
+            revision,
+            bundle_sha256: bundle_digest(&reviewed),
+            bytes,
+            kernel: shared.request.kernel,
+            reviewed_by: by.to_owned(),
+        })
+    }
+
+    /// A reviewed patch's bundle, for a computer, only at the revision the
+    /// signed catalog gives computers.
+    pub fn patch_bundle(&self, fetch: &PatchFetch) -> Result<PatchBundle, Refused> {
+        let gone = || {
+            Refused::NotFound(format!(
+                "{} revision {} isn't in the catalog",
+                fetch.id, fetch.revision
+            ))
+        };
+        let live = self
+            .catalog
+            .items
+            .iter()
+            .find(|i| i.item.id.as_str() == fetch.id)
+            .and_then(ConsoleItem::live)
+            .filter(|live| {
+                live.patch
+                    .as_ref()
+                    .is_some_and(|p| p.revision == fetch.revision)
+            })
+            .ok_or_else(gone)?;
+        read_json(
+            &self
+                .patch_dir(&live.id, &live.version)
+                .join("reviewed.json"),
+        )
+        .ok()
+        .flatten()
+        .ok_or_else(gone)
     }
 
     /// IT blocks an item: it leaves the catalog devices get.
@@ -939,6 +1230,7 @@ impl State {
             pinned: false,
             provenance: Default::default(),
             app: Some(app),
+            patch: None,
         };
         match self.catalog.items.iter_mut().find(|i| i.item.id == plan.id) {
             Some(entry) => {
@@ -964,6 +1256,7 @@ impl State {
                 checks: Vec::new(),
                 decided_by: None,
                 shared: Some(shared),
+                hardware: None,
                 approved: None,
             }),
         }

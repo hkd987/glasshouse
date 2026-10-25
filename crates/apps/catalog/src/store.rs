@@ -7,6 +7,13 @@
 //!   joins, or leaves, the apps and agents they see. *Required* items are
 //!   theirs already; nothing else can be installed.
 //!
+//! - `catalog.patch_install`: a kernel patch IT reviewed and made
+//!   available, for this computer's hardware (ADR 0057, slice 3), fetched
+//!   from the console, checked against the signed catalog's digest and set
+//!   up to try at the next restart. The person's own: policy makes it Never
+//!   for every agent. It's the whole computer's, not the person's list, so
+//!   undo doesn't take it back; Settings takes it out.
+//!
 //! The choices are a file in the person's home (`INSTALLS`), written
 //! through their confined home as them, so undo restores it like any file
 //! a call changed. Installing only narrows what reaches a person: an
@@ -15,9 +22,10 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use glass_actions::{ActionError, ActionOutput, Change, Preview, TaskContext};
-use glass_api::ChangeKind;
+use glass_api::{ChangeKind, TrialState};
 use glass_managed::catalog::search;
 use glass_managed::{CatalogItem, InstallMode, ItemKind};
 use glass_platform::fs::ConfinedDir;
@@ -25,11 +33,14 @@ use glass_types::AgentId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{Applied, declares_text};
+use glass_managed::hwreview::OrgPatch;
+
+use crate::{Applied, CatalogHandle, OrgPatches, declares_text};
 
 pub const LIST: &str = "catalog.list";
 pub const INSTALL: &str = "catalog.install";
 pub const REMOVE: &str = "catalog.remove";
+pub const PATCH_INSTALL: &str = "catalog.patch_install";
 
 /// A person's choices from the catalog, under their home.
 pub const INSTALLS: &str = ".local/share/glasshouse/catalog/installed.json";
@@ -108,12 +119,40 @@ fn offered<'a>(
     Ok((item, mode))
 }
 
+/// A kernel patch the catalog makes available to this person, for this
+/// computer, and where it is here.
+fn patch_offered<'a>(
+    catalog: Option<&'a Applied>,
+    patches: Option<&Arc<dyn OrgPatches>>,
+    ctx: &TaskContext,
+    id: &AgentId,
+) -> Result<(&'a CatalogItem, &'a OrgPatch, Arc<dyn OrgPatches>), ActionError> {
+    let (item, mode) = offered(catalog, ctx, id)?;
+    let patch = item
+        .patch
+        .as_ref()
+        .filter(|_| item.kind == ItemKind::HardwarePatch)
+        .ok_or_else(|| ActionError::InvalidInput(format!("{} isn't a kernel patch", item.name)))?;
+    let patches = patches
+        .cloned()
+        .ok_or_else(|| ActionError::Failed("this computer takes no kernel patches".into()))?;
+    if mode != InstallMode::Available || !patches.fits(patch) {
+        return Err(ActionError::InvalidInput(format!(
+            "{} isn't for this computer's hardware",
+            item.name
+        )));
+    }
+    Ok((item, patch, patches))
+}
+
 pub(crate) fn preview(
-    catalog: Option<&Applied>,
+    handle: &CatalogHandle,
     ctx: &TaskContext,
     action: &str,
     input: &Value,
 ) -> Result<Preview, ActionError> {
+    let current = handle.current();
+    let catalog = current.as_deref();
     if action == LIST {
         let _: ListInput = glass_actions::parse_input(input)?;
         return Ok(Preview {
@@ -123,7 +162,28 @@ pub(crate) fn preview(
         });
     }
     let ItemRef { id } = glass_actions::parse_input(input)?;
+    if action == PATCH_INSTALL {
+        let (item, patch, _) = patch_offered(catalog, handle.patches().as_ref(), ctx, &id)?;
+        return Ok(Preview {
+            summary: format!("Install kernel patch {}: {}", patch.patch, item.summary),
+            targets: vec![format!("Kernel patch {}", patch.patch)],
+            items: vec![
+                format!("Reviewed by your organization ({})", patch.reviewed_by),
+                "It changes the kernel, which runs outside every sandbox".into(),
+                "The next restart tries it once; if the computer doesn't start, or crashes \
+                 before a day of use, it goes back by itself"
+                    .into(),
+            ],
+            ..Preview::default()
+        });
+    }
     let (item, mode) = offered(catalog, ctx, &id)?;
+    if item.kind == ItemKind::HardwarePatch {
+        return Err(ActionError::InvalidInput(format!(
+            "{} is a kernel patch: the Store installs it ({PATCH_INSTALL})",
+            item.name
+        )));
+    }
     if mode == InstallMode::Required {
         return Err(ActionError::InvalidInput(format!(
             "IT installs {} for you; there's nothing to {}",
@@ -162,17 +222,28 @@ pub(crate) fn preview(
 }
 
 pub(crate) fn invoke(
-    catalog: Option<&Applied>,
+    handle: &CatalogHandle,
     ctx: &TaskContext,
     action: &str,
     input: &Value,
 ) -> Result<ActionOutput, ActionError> {
+    let current = handle.current();
+    let catalog = current.as_deref();
     if action == LIST {
         let ListInput { kind } = glass_actions::parse_input(input)?;
-        return Ok(list(catalog, ctx, kind));
+        return Ok(list(catalog, handle.patches().as_ref(), ctx, kind));
     }
     let ItemRef { id } = glass_actions::parse_input(input)?;
+    if action == PATCH_INSTALL {
+        return install_patch(catalog, handle.patches().as_ref(), ctx, &id);
+    }
     let (item, mode) = offered(catalog, ctx, &id)?;
+    if item.kind == ItemKind::HardwarePatch {
+        return Err(ActionError::InvalidInput(format!(
+            "{} is a kernel patch: the Store installs it ({PATCH_INSTALL})",
+            item.name
+        )));
+    }
     if mode == InstallMode::Required {
         return Err(ActionError::InvalidInput(format!(
             "IT installs {} for you",
@@ -223,8 +294,48 @@ pub(crate) fn invoke(
     })
 }
 
-/// Everything the catalog offers this person, by name.
-fn list(catalog: Option<&Applied>, ctx: &TaskContext, kind: Option<ItemKind>) -> ActionOutput {
+/// Sets up a kernel patch from the catalog to try at the next restart.
+fn install_patch(
+    catalog: Option<&Applied>,
+    patches: Option<&Arc<dyn OrgPatches>>,
+    ctx: &TaskContext,
+    id: &AgentId,
+) -> Result<ActionOutput, ActionError> {
+    let (item, patch, patches) = patch_offered(catalog, patches, ctx, id)?;
+    if let Some(state) = patches.state(patch)
+        && (state.open() || state == TrialState::Kept)
+    {
+        return Err(ActionError::InvalidInput(format!(
+            "{} is on this computer already: {}",
+            item.name,
+            state.label()
+        )));
+    }
+    let trial = patches.install(id, patch).map_err(ActionError::Failed)?;
+    Ok(ActionOutput {
+        text: format!(
+            "Kernel patch {} is set up: restart to try it. If the computer doesn't start, or \
+             crashes before a day of use, it goes back by itself; Settings takes it out.",
+            trial.id
+        ),
+        data: json!({ "id": id, "installed": true, "state": trial.state }),
+        changes: vec![Change {
+            kind: ChangeKind::Created,
+            target: format!("Kernel patch {}, to try at the next restart", trial.id),
+            reversible: false,
+            paths: Vec::new(),
+        }],
+    })
+}
+
+/// Everything the catalog offers this person, by name: kernel patches
+/// only those for this computer.
+fn list(
+    catalog: Option<&Applied>,
+    patches: Option<&Arc<dyn OrgPatches>>,
+    ctx: &TaskContext,
+    kind: Option<ItemKind>,
+) -> ActionOutput {
     let Some(catalog) = catalog else {
         return ActionOutput {
             text: "No catalog from IT has reached this computer yet.".into(),
@@ -233,7 +344,25 @@ fn list(catalog: Option<&Applied>, ctx: &TaskContext, kind: Option<ItemKind>) ->
         };
     };
     let mine = installed(&ctx.home);
-    let found = search(&catalog.release.items, &ctx.groups, "", kind, usize::MAX);
+    let mut found = match kind {
+        Some(ItemKind::HardwarePatch) => Vec::new(),
+        _ => search(&catalog.release.items, &ctx.groups, "", kind, usize::MAX),
+    };
+    if let Some(patches) = patches
+        && kind.is_none_or(|k| k == ItemKind::HardwarePatch)
+    {
+        let all = search(
+            &catalog.release.items,
+            &ctx.groups,
+            "",
+            Some(ItemKind::HardwarePatch),
+            usize::MAX,
+        );
+        found.extend(all.into_iter().filter(|m| {
+            m.mode == InstallMode::Available
+                && m.item.patch.as_ref().is_some_and(|p| patches.fits(p))
+        }));
+    }
     let items: Vec<Value> = found
         .iter()
         .map(|m| {
@@ -247,7 +376,12 @@ fn list(catalog: Option<&Applied>, ctx: &TaskContext, kind: Option<ItemKind>) ->
                 "publisher_verified": item.publisher_verified,
                 "internal": item.internal,
                 "install": m.mode,
-                "installed": m.mode == InstallMode::Required || mine.contains(&item.id),
+                "installed": match (&item.patch, patches) {
+                    (Some(p), Some(patches)) => patches
+                        .state(p)
+                        .is_some_and(|s| s.open() || s == TrialState::Kept),
+                    _ => m.mode == InstallMode::Required || mine.contains(&item.id),
+                },
                 "summary": item.summary,
                 "declares": item.declares,
                 // An app someone at the org made (ADR 0032, R2): who, and
@@ -255,6 +389,16 @@ fn list(catalog: Option<&Applied>, ctx: &TaskContext, kind: Option<ItemKind>) ->
                 "app": item.app.as_ref().map(|a| json!({
                     "made_by": a.made_by,
                     "based_on": a.based_on,
+                })),
+                // A kernel patch IT reviewed (ADR 0057): what it's for, and
+                // where it is on this computer.
+                "patch": item.patch.as_ref().map(|p| json!({
+                    "patch": p.patch,
+                    "targets": p.targets,
+                    "kernel": p.kernel,
+                    "bytes": p.bytes,
+                    "reviewed_by": p.reviewed_by,
+                    "state": patches.and_then(|patches| patches.state(p)),
                 })),
             })
         })

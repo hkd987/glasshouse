@@ -3,15 +3,22 @@
 // available ones you may install, and each says what it may do (DV-3).
 // Installing changes only what you see; policy still decides what runs
 // (ADR 0023). Every call goes through the bridge and the audit log.
+//
+// Hardware: the kernel patches IT reviewed for this computer's parts (ADR
+// 0057). Installing one sets it up for the next restart, after a confirm in
+// plain words: it runs in the kernel, and it goes back by itself if the
+// computer doesn't start. Settings takes it out.
 
 import { Bridge, BridgeError, Offline, h, keepFilesOffline, ready, show } from "@glasshouse/sdk";
-import { type Item, KIND_NAMES, type Listing, canDo, emptyText, publisherLine, sections } from "./store.ts";
+import { type Item, KIND_NAMES, type Listing, canDo, emptyText, patchState, publisherLine, sections } from "./store.ts";
 
 const bridge = new Bridge({ app: "store" });
 const state = {
   listing: null as Listing | null,
   query: "",
   busy: null as string | null,
+  /** The kernel patch whose confirm is open. */
+  confirming: null as string | null,
   notice: null as { text: string; tone: "ok" | "bad" } | null,
   offline: false,
   user: "",
@@ -56,6 +63,25 @@ async function change(item: Item, action: "catalog.install" | "catalog.remove"):
   await load();
 }
 
+/** Sets a kernel patch up to try at the next restart, once the person confirmed. */
+async function installPatch(item: Item): Promise<void> {
+  state.busy = item.id;
+  state.confirming = null;
+  state.notice = null;
+  render();
+  try {
+    const result = await bridge.call("catalog.patch_install", { id: item.id });
+    state.notice = { text: result.text, tone: result.ok ? "ok" : "bad" };
+  } catch (error) {
+    state.notice = {
+      text: error instanceof Offline ? "That needs the system, and it isn't answering. Nothing changed." : error instanceof BridgeError ? error.message : String(error),
+      tone: "bad",
+    };
+  }
+  state.busy = null;
+  await load();
+}
+
 function done(item: Item, action: string): string {
   return `${action === "catalog.remove" ? "Removed" : "Installed"} ${item.name}.`;
 }
@@ -65,7 +91,7 @@ function done(item: Item, action: string): string {
 function render(): void {
   const listing = state.listing;
   const empty = emptyText(listing);
-  const { yours, available } = sections(listing?.items ?? [], state.query);
+  const { yours, available, hardware } = sections(listing?.items ?? [], state.query);
   show(
     root,
     titlebar(),
@@ -77,6 +103,7 @@ function render(): void {
       empty && h("p", { class: "empty" }, empty),
       !empty && section("Available to you", available, "Nothing else to install."),
       !empty && section("Yours", yours, "Nothing installed from the catalog yet."),
+      !empty && hardware.length ? hardwareSection(hardware) : null,
     ),
   );
 }
@@ -147,6 +174,60 @@ function card(item: Item): HTMLElement {
     h("p", { class: "summary" }, item.summary),
     h("p", { class: "publisher muted small" }, publisherLine(item, state.listing?.items ?? [])),
     h("p", { class: "can-do small" }, h("span", { class: "label" }, "Can do "), canDo(item.declares)),
+  );
+}
+
+/** Kernel patches IT reviewed for this computer's parts. */
+function hardwareSection(items: Item[]): HTMLElement {
+  return h(
+    "section",
+    { class: "section", "data-section": "hardware" },
+    h("h2", {}, "Hardware"),
+    h("p", { class: "none" }, "Fixes for this computer's parts, reviewed by your organization."),
+    h("div", { class: "grid" }, ...items.map(patchCard)),
+  );
+}
+
+function patchCard(item: Item): HTMLElement {
+  const patch = item.patch;
+  const busy = state.busy === item.id;
+  const where = patch ? patchState(patch) : null;
+  const confirming = state.confirming === item.id;
+  const button = item.installed
+    ? h("span", { class: "chip" }, where ?? "Installed")
+    : confirming
+      ? null
+      : h(
+          "button",
+          { class: "button primary", disabled: busy || state.offline, onclick: () => ((state.confirming = item.id), render()) },
+          busy ? "Setting up…" : "Install",
+        );
+  return h(
+    "article",
+    { class: "card", "data-id": item.id },
+    h(
+      "div",
+      { class: "card-head" },
+      h("div", { class: "icon hardware_patch", "aria-hidden": "true" }, "⚙"),
+      h("div", { class: "card-title" }, h("strong", {}, item.name), h("span", { class: "muted small" }, `${KIND_NAMES[item.kind]} · revision ${item.version}`)),
+      button,
+    ),
+    h("p", { class: "publisher muted small" }, patch ? `Reviewed by your organization (${patch.reviewed_by})` : item.publisher),
+    !item.installed && where ? h("p", { class: "small muted" }, where) : null,
+    confirming
+      ? h(
+          "div",
+          { class: "confirm", role: "alertdialog", "aria-label": `Install ${item.name}?` },
+          h("p", { class: "small" }, "It changes the kernel, the core of the system, which runs outside every sandbox. Your organization reviewed it."),
+          h("p", { class: "small" }, "The next restart tries it once. If the computer doesn't start, or crashes before a day of use, it goes back by itself. You can take it out in Settings."),
+          h(
+            "div",
+            { class: "confirm-buttons" },
+            h("button", { class: "button", onclick: () => ((state.confirming = null), render()) }, "Cancel"),
+            h("button", { class: "button primary", "data-test": "confirm-install", onclick: () => installPatch(item) }, "Install for the next restart"),
+          ),
+        )
+      : null,
   );
 }
 

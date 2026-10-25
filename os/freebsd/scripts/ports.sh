@@ -105,4 +105,6 @@ for name in sorted(want):
 	done
 	;;
 *) die "usage: ports.sh vm-install|sysroot|fetch <package>..." ;;
-esac
+# `exit` on the same line: bash reads the dispatch whole before running it, never
+# what an edit made of the file while it ran (a long build in the VM survives one).
+esac; exit

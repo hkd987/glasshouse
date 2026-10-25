@@ -39,6 +39,7 @@ fn item(id: &str, kind: ItemKind, groups: &[(&str, InstallMode)]) -> CatalogItem
         pinned: false,
         provenance: Default::default(),
         app: None,
+        patch: None,
     }
 }
 

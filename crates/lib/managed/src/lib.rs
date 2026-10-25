@@ -31,6 +31,7 @@ pub mod chat;
 pub mod device;
 pub mod directory;
 pub mod hwpatch;
+pub mod hwreview;
 pub mod kbuild;
 pub mod mail;
 pub mod meet;
@@ -51,8 +52,8 @@ pub use directory::{DirectoryHandle, DirectoryRelease, Person, Sender};
 pub use signing::{DocKind, OrgKey, PublicKey, Refusal, Signed};
 pub use store::ReleaseStore;
 pub use sync::{
-    ChatRelease, DeviceReport, MAX_WAIT_SECS, MadeApp, ModelCredits, PolicyRelease, Ring,
-    RunningAgent, SyncRequest, SyncResponse,
+    ChatRelease, DeviceReport, MAX_WAIT_SECS, MadeApp, ModelCredits, PatchReport, PolicyRelease,
+    Ring, RunningAgent, SyncRequest, SyncResponse,
 };
 
 /// SHA-256 of `bytes`, as lowercase hex.

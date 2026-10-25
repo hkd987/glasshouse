@@ -27,6 +27,12 @@ impl Patches for RuntimePatches {
             .hardware_patch_propose(bundle)
             .map_err(|e| e.to_string())
     }
+
+    fn takes_community(&self) -> bool {
+        self.0
+            .upgrade()
+            .is_some_and(|runtime| runtime.hardware_takes_community())
+    }
 }
 
 /// The build service, as `[hardware] build_service` names it.
@@ -81,7 +87,8 @@ impl RuntimeComputer {
     }
 }
 
-fn root() -> glass_runtime::Caller {
+/// Root, as glassd itself asks the runtime for what only root may.
+pub(crate) fn root() -> glass_runtime::Caller {
     glass_runtime::Caller {
         name: "root".into(),
         uid: 0,

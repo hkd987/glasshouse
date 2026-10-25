@@ -16,6 +16,7 @@ mod hardware;
 mod managed;
 mod meetings;
 mod org_apps;
+mod org_patches;
 mod personal;
 mod wifi;
 
@@ -214,6 +215,9 @@ pub(crate) struct OrgData {
     /// What agents read and do to fix the hardware (ADR 0057): built
     /// kernel patches, root only in the state directory.
     pub(crate) hardware: glass_first_party::HardwareHandle,
+    /// Kernel patches IT reviewed (ADR 0057, slice 3): fetched from the
+    /// console on the person's yes, checked against the signed catalog.
+    pub(crate) org_patches: org_patches::OrgPatchStore,
 }
 
 impl OrgData {
@@ -245,6 +249,7 @@ impl OrgData {
             }),
             routines: glass_first_party::Routines::new(state_dir.join("routines")),
             hardware: glass_first_party::HardwareHandle::new(state_dir.join("hardware/builds")),
+            org_patches: org_patches::OrgPatchStore::default(),
         }
     }
 }
@@ -541,7 +546,15 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             personal: Arc::new(org.studio.clone()),
             org_apps: Arc::new(org.org_apps.clone()),
             hardware: glass_runtime::hwpatch::HardwarePatches {
-                keys: config.hardware.keys.clone(),
+                // On a managed computer, IT reviews patches too: the org's
+                // key signs those it approved (ADR 0057, slice 3).
+                keys: config
+                    .hardware
+                    .keys
+                    .iter()
+                    .chain(config.managed.iter().flat_map(|m| &m.org_keys))
+                    .cloned()
+                    .collect(),
                 community_keys: config.hardware.community_keys.clone(),
                 community: config.hardware.community,
                 probation_minutes: config.hardware.probation_minutes,
@@ -759,6 +772,9 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         .set_computer(Arc::new(hardware::RuntimeComputer(Arc::downgrade(
             &runtime,
         ))));
+    // The Store's Hardware category: the patches IT reviewed (slice 3).
+    org.org_patches.set_runtime(Arc::downgrade(&runtime));
+    org.catalog.set_patches(Arc::new(org.org_patches.clone()));
     match hardware::service(&config.hardware) {
         Ok(Some(service)) => org.hardware.set_service(service),
         Ok(None) => {}

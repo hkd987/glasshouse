@@ -16,9 +16,16 @@
 //!   the diff in the review. Then it's tried, on probation and kept, or
 //!   goes back by itself, like any kernel patch.
 //!
-//! glassd gives the handle the build service's client and the runtime's
-//! kernel patches once both exist ([`HardwareHandle::set_service`],
-//! [`HardwareHandle::set_patches`]).
+//! On a managed computer that doesn't take patches nobody reviewed (IT's
+//! `hardware.community_patches`), `hardware.patch_propose` sends the
+//! patch's source to IT for review instead (slice 3): nothing changes on
+//! the computer, and once IT approves it, it's in the Store's Hardware
+//! category for computers like it.
+//!
+//! glassd gives the handle the build service's client, the runtime's
+//! kernel patches and, on a managed computer, the console's link once they
+//! exist ([`HardwareHandle::set_service`], [`HardwareHandle::set_patches`],
+//! [`HardwareHandle::set_review`]).
 
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -27,6 +34,7 @@ use glass_actions::{
     ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, TaskContext,
 };
 use glass_api::{AskLabels, ChangeKind, PatchTrial};
+use glass_managed::hwreview::{MAX_ASKED, PatchLink, PatchSubmission};
 use glass_managed::kbuild::{
     BuildModule, BuildRequest, BuildResult, SourceFound, SourceRead, SourceSearch, SourceText,
 };
@@ -53,6 +61,8 @@ pub trait Patches: Send + Sync {
     fn release(&self) -> Result<String, String>;
     /// Sets up `bundle` to try at the next start (`hwpatch::apply`).
     fn apply(&self, bundle: &[u8]) -> Result<PatchTrial, String>;
+    /// Whether this computer tries patches nobody reviewed.
+    fn takes_community(&self) -> bool;
 }
 
 /// What this computer's hardware report is, for tests to replace.
@@ -63,6 +73,8 @@ struct Inner {
     builds: PathBuf,
     service: RwLock<Option<Arc<dyn BuildService>>>,
     patches: RwLock<Option<Arc<dyn Patches>>>,
+    /// IT's review, on a managed computer.
+    review: RwLock<Option<Arc<dyn PatchLink>>>,
     report: ReportFn,
 }
 
@@ -92,8 +104,49 @@ impl HardwareHandle {
             builds: builds.into(),
             service: RwLock::new(None),
             patches: RwLock::new(None),
+            review: RwLock::new(None),
             report,
         }))
+    }
+
+    /// Patches this computer doesn't take go to IT for review through
+    /// `link` (a managed computer).
+    pub fn set_review(&self, link: Arc<dyn PatchLink>) {
+        *self
+            .0
+            .review
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(link);
+    }
+
+    /// Where an agent's patch goes: tried here, or sent to IT.
+    fn route(&self) -> Result<Route, ActionError> {
+        if self.patches()?.takes_community() {
+            return Ok(Route::Try);
+        }
+        match self
+            .0
+            .review
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        {
+            Some(link) => Ok(Route::Review(link)),
+            None => Err(ActionError::Failed(
+                "this computer takes only reviewed kernel patches, and an agent's patch is \
+                 nobody's reviewed one: its owner can allow them in Settings"
+                    .into(),
+            )),
+        }
+    }
+
+    /// What `build` was built from.
+    fn request(&self, build: &str) -> Result<BuildRequest, ActionError> {
+        let path = self.0.builds.join(format!("{build}.request.json"));
+        let bytes = std::fs::read(&path)
+            .map_err(|_| ActionError::NotFound(format!("build {build}: build the patch first")))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| ActionError::Failed(format!("build {build}: {e}")))
     }
 
     pub fn set_service(&self, service: Arc<dyn BuildService>) {
@@ -154,15 +207,31 @@ impl HardwareHandle {
         Ok((bytes, bundle))
     }
 
-    fn keep(&self, bundle: &glass_managed::hwpatch::Bundle) -> Result<String, ActionError> {
+    /// Keeps a built bundle and what it was built from, by an id for it.
+    fn keep(
+        &self,
+        bundle: &glass_managed::hwpatch::Bundle,
+        request: &BuildRequest,
+    ) -> Result<String, ActionError> {
         let bytes = serde_json::to_vec(bundle).map_err(|e| ActionError::Failed(e.to_string()))?;
         let id = glass_managed::sha256_hex(&bytes)[..16].to_owned();
         std::fs::create_dir_all(&self.0.builds)
             .map_err(|e| ActionError::io(self.0.builds.display(), e))?;
+        let source = serde_json::to_vec(request).map_err(|e| ActionError::Failed(e.to_string()))?;
+        let path = self.0.builds.join(format!("{id}.request.json"));
+        write_private(&path, &source).map_err(|e| ActionError::io(path.display(), e))?;
         let path = self.0.builds.join(format!("{id}.bundle.json"));
         write_private(&path, &bytes).map_err(|e| ActionError::io(path.display(), e))?;
         Ok(id)
     }
+}
+
+/// Where an agent's patch goes (slice 3).
+enum Route {
+    /// Tried here at the next restart.
+    Try,
+    /// Sent to IT for review.
+    Review(Arc<dyn PatchLink>),
 }
 
 fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -218,6 +287,10 @@ struct BuildInput {
 #[serde(deny_unknown_fields)]
 struct ProposeInput {
     build: String,
+    /// What the person said was wrong, in their words: IT reads it with a
+    /// patch sent for review.
+    #[serde(default)]
+    problem: String,
 }
 
 #[derive(Debug, Clone)]
@@ -345,18 +418,23 @@ impl ActionProvider for HardwareProvider {
                 }),
             ),
             ActionDef {
-                ask: AskLabels::new("Read the patch", "Try at restart"),
+                ask: AskLabels::new("Read the patch", "Go ahead"),
                 ..def(
                     PATCH_PROPOSE,
                     "Propose a kernel patch",
                     "Sets up a built patch to try at the next restart, with the person's yes, \
                      every time. It runs in the kernel, outside every sandbox; if the computer \
-                     doesn't start or crashes before its probation ends, it goes back by itself.",
+                     doesn't start or crashes before its probation ends, it goes back by itself. \
+                     On a computer that takes only patches IT reviewed, it goes to IT for \
+                     review instead: pass what the person said was wrong as problem.",
                     SideEffect::Irreversible,
                     Tier::Ask,
                     json!({
                         "type": "object",
-                        "properties": { "build": { "type": "string" } },
+                        "properties": {
+                            "build": { "type": "string" },
+                            "problem": { "type": "string", "description": "what the person said was wrong, in their words" }
+                        },
                         "required": ["build"],
                         "additionalProperties": false
                     }),
@@ -421,8 +499,8 @@ impl ActionProvider for HardwareProvider {
                 "type": "object",
                 "properties": {
                     "id": { "type": "string" },
-                    "state": { "type": "string" },
-                    "env": { "type": "string" }
+                    "state": { "type": "string", "description": "staged, or sent_for_review: IT reviews it first" },
+                    "env": { "type": ["string", "null"], "description": "the boot environment it's tried in" }
                 },
                 "required": ["id", "state", "env"]
             }),
@@ -498,15 +576,28 @@ impl ActionProvider for HardwareProvider {
                             .collect::<Vec<_>>()
                             .join(", ")
                     ),
+                ];
+                let review = matches!(self.handle.route()?, Route::Review(_));
+                items.push(if review {
+                    "This computer takes only patches IT reviewed, so nothing changes on it \
+                     now: IT gets the patch's source and what you said was wrong, builds it \
+                     and reads it. Once they approve it, it's in the Store's Hardware \
+                     category for computers like this one."
+                        .into()
+                } else {
                     "The next restart tries it once. If the computer doesn't start, or \
                      crashes or hangs before a day of use, it goes back by itself."
-                        .into(),
-                ];
+                        .into()
+                });
                 let mut texts = vec![String::new(); items.len()];
                 texts[2] = bundle.patch.clone();
                 items.truncate(texts.len());
                 Ok(Preview {
-                    summary: format!("Try kernel patch {} at the next restart", manifest.id),
+                    summary: if review {
+                        format!("Send kernel patch {} to IT for review", manifest.id)
+                    } else {
+                        format!("Try kernel patch {} at the next restart", manifest.id)
+                    },
                     targets: vec![format!("Kernel patch {}", manifest.id)],
                     items,
                     texts,
@@ -626,7 +717,7 @@ impl ActionProvider for HardwareProvider {
                     .map_err(ActionError::Failed)?;
                 match built.bundle {
                     Some(bundle) if built.ok => {
-                        let build = self.handle.keep(&bundle)?;
+                        let build = self.handle.keep(&bundle, &request)?;
                         Ok(output(
                             format!("Built {}: propose it with build {build}", request.id),
                             json!({ "ok": true, "log": built.log, "build": build }),
@@ -644,6 +735,29 @@ impl ActionProvider for HardwareProvider {
             PATCH_PROPOSE => {
                 let input: ProposeInput = glass_actions::parse_input(input)?;
                 let (bytes, _) = self.handle.bundle(&input.build)?;
+                if let Route::Review(link) = self.handle.route()? {
+                    // Its source, never the binary built here (slice 3).
+                    let computer = (self.handle.0.report)()
+                        .map(|r| format!("{} {}", r.maker, r.model).trim().to_owned())
+                        .unwrap_or_default();
+                    let submission = PatchSubmission {
+                        request: self.handle.request(&input.build)?,
+                        person: ctx.principal.on_behalf_of.name.clone(),
+                        asked: input.problem.chars().take(MAX_ASKED).collect(),
+                        computer,
+                    };
+                    submission.check().map_err(ActionError::InvalidInput)?;
+                    let sent = link.submit(&submission).map_err(ActionError::Failed)?;
+                    return Ok(ActionOutput {
+                        text: sent.text,
+                        data: json!({
+                            "id": submission.request.id,
+                            "state": "sent_for_review",
+                            "env": null,
+                        }),
+                        changes: Vec::new(),
+                    });
+                }
                 let trial = self
                     .handle
                     .patches()?
@@ -765,11 +879,16 @@ mod tests {
     #[derive(Default)]
     struct Kernel {
         applied: Mutex<Vec<Vec<u8>>>,
+        /// It takes only patches IT reviewed.
+        reviewed_only: Mutex<bool>,
     }
 
     impl Patches for Kernel {
         fn release(&self) -> Result<String, String> {
             Ok("15.1-RELEASE-p1".into())
+        }
+        fn takes_community(&self) -> bool {
+            !*self.reviewed_only.lock().unwrap()
         }
         fn apply(&self, bundle: &[u8]) -> Result<PatchTrial, String> {
             self.applied.lock().unwrap().push(bundle.to_vec());
@@ -904,6 +1023,78 @@ mod tests {
         )
         .unwrap();
         assert_eq!(applied[0], bytes, "what's set up is what was built");
+    }
+
+    /// IT's console, as a managed computer reaches it.
+    #[derive(Default)]
+    struct Console(Mutex<Vec<PatchSubmission>>);
+
+    impl PatchLink for Console {
+        fn submit(
+            &self,
+            submission: &PatchSubmission,
+        ) -> Result<glass_managed::hwreview::PatchSubmitted, String> {
+            self.0.lock().unwrap().push(submission.clone());
+            Ok(glass_managed::hwreview::PatchSubmitted {
+                id: submission.request.id.clone(),
+                version: "1".into(),
+                text: "Sent to IT for review.".into(),
+            })
+        }
+        fn bundle(
+            &self,
+            _: &glass_managed::hwreview::PatchFetch,
+        ) -> Result<glass_managed::hwpatch::Bundle, String> {
+            Err("not here".into())
+        }
+    }
+
+    /// Slice 3: on a computer that takes only reviewed patches, an agent's
+    /// patch goes to IT as source, with the person's yes; nothing changes
+    /// here. With nobody to review it, it's refused before anyone is asked.
+    #[test]
+    fn adr0057_a_patch_this_computer_does_not_take_goes_to_it_for_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let (provider, _, kernel) = setup(dir.path());
+        *kernel.reviewed_only.lock().unwrap() = true;
+        let mut ctx = glass_actions::testing::context(dir.path());
+        ctx.principal.on_behalf_of.name = "dana".into();
+        let built = call(&provider, &ctx, PATCH_BUILD, build_input("fixed")).unwrap();
+        let build = built.data["build"].as_str().unwrap().to_owned();
+        let action: ActionName = PATCH_PROPOSE.parse().unwrap();
+        let input = json!({ "build": build, "problem": "The touchpad stops after sleep" });
+
+        // Unmanaged, community patches off: no one to send it to.
+        let refused = provider.preview(&ctx, &action, &input).unwrap_err();
+        assert!(refused.to_string().contains("only reviewed"), "{refused}");
+
+        // Managed: the review says where it goes, and it goes there.
+        let console = Arc::new(Console::default());
+        provider.handle.set_review(console.clone());
+        let preview = provider.preview(&ctx, &action, &input).unwrap();
+        assert!(
+            preview.summary.contains("to IT for review"),
+            "{}",
+            preview.summary
+        );
+        assert!(
+            preview
+                .items
+                .iter()
+                .any(|i| i.contains("nothing changes on it"))
+        );
+        let sent = call(&provider, &ctx, PATCH_PROPOSE, input).unwrap();
+        assert_eq!(sent.data["state"], "sent_for_review");
+        assert!(sent.changes.is_empty());
+        assert!(
+            kernel.applied.lock().unwrap().is_empty(),
+            "nothing tried here"
+        );
+        let submitted = console.0.lock().unwrap();
+        assert_eq!(submitted[0].person, "dana");
+        assert_eq!(submitted[0].asked, "The touchpad stops after sleep");
+        assert!(submitted[0].request.diff.contains("+fixed"), "its source");
+        assert!(submitted[0].request.origin.starts_with("agent:"));
     }
 
     #[test]

@@ -98,6 +98,29 @@
   background: #0e8a8a;
 }
 
+.icon.hardware_patch {
+  background: #8a5a0e;
+}
+
+/* A kernel patch's confirm, in plain words, before it's set up. */
+.confirm {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--title-bar);
+}
+
+.confirm p {
+  margin: 0;
+}
+
+.confirm-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .summary {
   margin: 0;
   font-size: 13px;

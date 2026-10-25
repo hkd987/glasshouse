@@ -24,6 +24,18 @@ pub struct Report {
     /// False when USB devices and the battery couldn't be read (they need
     /// root): the parts that depend on them read as unknown.
     pub complete: bool,
+    /// What a kernel patch for this computer names (ADR 0057): each PCI
+    /// function, `pci:8086:2725`, and `model:<maker> <product>`.
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+impl Report {
+    /// Whether a patch for `targets` is for this computer: one of them is
+    /// a part of it.
+    pub fn fits(&self, targets: &[String]) -> bool {
+        targets.iter().any(|t| self.targets.contains(t))
+    }
 }
 
 impl Report {
@@ -363,13 +375,25 @@ pub fn assess(s: &Sources) -> Report {
         battery(s.battery.as_deref()),
         tpm(&devices, &s.dev),
     ];
+    let maker = kenv(&s.kenv, "smbios.system.maker");
+    let model = kenv(&s.kenv, "smbios.system.product");
+    let mut targets: Vec<String> = pci
+        .iter()
+        .map(|d| format!("pci:{:04x}:{:04x}", d.vendor_id, d.device_id))
+        .collect();
+    if !maker.is_empty() || !model.is_empty() {
+        targets.push(format!("model:{maker} {model}").trim_end().to_owned());
+    }
+    targets.sort();
+    targets.dedup();
     Report {
-        maker: kenv(&s.kenv, "smbios.system.maker"),
-        model: kenv(&s.kenv, "smbios.system.product"),
+        maker,
+        model,
         processor,
         memory_mb,
         parts,
         complete: s.usb.is_some() && s.battery.is_some(),
+        targets,
     }
 }
 
@@ -1159,6 +1183,14 @@ ugen0.3: <Intel product 0x0033> at usbus0, cfg=0 md=HOST spd=FULL (12Mbps) pwr=O
             (report.maker.as_str(), report.model.as_str()),
             ("LENOVO", "21AH00FGUS")
         );
+        // What a kernel patch for it names (ADR 0057).
+        assert!(
+            report.fits(&["pci:8086:51f0".into()]),
+            "{:?}",
+            report.targets
+        );
+        assert!(report.fits(&["model:LENOVO 21AH00FGUS".into()]));
+        assert!(!report.fits(&["pci:8086:2725".into()]));
         let blockers: Vec<Kind> = report.blockers().map(|p| p.kind).collect();
         assert_eq!(
             blockers,

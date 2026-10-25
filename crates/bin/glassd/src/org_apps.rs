@@ -244,6 +244,7 @@ mod tests {
                         made_by: "dana".into(),
                         based_on: Some("mail@0.1.0".into()),
                     }),
+                    patch: None,
                 }],
             },
         });

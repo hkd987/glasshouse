@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { type Item, canDo, emptyText, publisherLine, sections } from "../src/store.ts";
+import { type Item, canDo, emptyText, patchState, publisherLine, sections } from "../src/store.ts";
 
 const item = (id: string, extra: Partial<Item> = {}): Item => ({
   id,
@@ -67,4 +67,18 @@ test("dv13 the empty pages say why", () => {
   assert.match(emptyText({ catalog_version: null, managed: true, items: [] }) ?? "", /No catalog from IT/);
   assert.match(emptyText({ catalog_version: 3, managed: true, items: [] }) ?? "", /offers you nothing yet/);
   assert.equal(emptyText({ catalog_version: 3, managed: true, items: [item("x")] }), null);
+});
+
+test("adr0057 kernel patches for this computer are in Hardware, not with apps", () => {
+  const patch = { patch: "iwlwifi-resume", targets: ["pci:8086:2725"], kernel: false, bytes: 4096, reviewed_by: "pat", state: null };
+  const { yours, available, hardware } = sections([
+    item("vendor-disputes"),
+    item("iwlwifi-resume", { kind: "hardware_patch", name: "Wi-Fi works again after sleep", patch }),
+  ]);
+  assert.deepEqual(available.map((i) => i.id), ["vendor-disputes"]);
+  assert.deepEqual(yours, []);
+  assert.deepEqual(hardware.map((i) => i.id), ["iwlwifi-resume"]);
+  assert.equal(patchState(patch), null);
+  assert.equal(patchState({ ...patch, state: "staged" }), "Restart to try it");
+  assert.equal(patchState({ ...patch, state: "rolled_back" }), "It didn't work here and went back");
 });

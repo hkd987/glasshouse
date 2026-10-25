@@ -316,7 +316,34 @@ pub fn item(state: &State, directory: &dyn Directory, titles: &Titles, id: &str)
         .items
         .iter()
         .find(|i| i.item.id.as_str() == id)?;
-    Some(entry_view(entry, directory, titles, &doc))
+    Some(entry_view(
+        entry,
+        directory,
+        titles,
+        &doc,
+        &patch_counts(state),
+    ))
+}
+
+/// On how many computers each kernel patch is kept, being tried, or went
+/// back (ADR 0057): what their reports say, by patch id.
+fn patch_counts(state: &State) -> std::collections::BTreeMap<String, [u32; 3]> {
+    let mut counts = std::collections::BTreeMap::<String, [u32; 3]>::new();
+    for device in state.fleet.devices.values() {
+        if device.revoked.is_some() {
+            continue;
+        }
+        for p in device.report.iter().flat_map(|r| &r.patches) {
+            let slot = match p.state.as_str() {
+                "kept" => 0,
+                "staging" | "staged" | "probation" => 1,
+                "failed" | "rolled_back" => 2,
+                _ => continue,
+            };
+            counts.entry(p.id.clone()).or_default()[slot] += 1;
+        }
+    }
+    counts
 }
 
 /// One catalog item, with IT's draft (for the actions' titles) parsed once
@@ -326,6 +353,7 @@ fn entry_view(
     directory: &dyn Directory,
     titles: &Titles,
     doc: &PolicyDocument,
+    patches: &std::collections::BTreeMap<String, [u32; 3]>,
 ) -> Value {
     let i = &entry.item;
     let actions: Vec<Value> = i
@@ -367,6 +395,36 @@ fn entry_view(
         "public_store": i.public_store_check().err().map(|e| e.to_string()),
         "approved_version": entry.approved.as_ref().map(|a| &a.version),
         "shared": entry.shared.as_ref().map(|s| shared(s, directory, titles, doc, i)),
+        "hardware": entry.hardware.as_ref().map(|h| hardware(h, directory, i, patches)),
+    })
+}
+
+/// A kernel patch's review (ADR 0057, slice 3): who asked for it on which
+/// computer, its diff, its build, and the computers that run it.
+fn hardware(
+    h: &crate::state::PatchShared,
+    directory: &dyn Directory,
+    item: &CatalogItem,
+    patches: &std::collections::BTreeMap<String, [u32; 3]>,
+) -> Value {
+    let [kept, trying, went_back] = patches.get(&h.request.id).copied().unwrap_or_default();
+    json!({
+        "person": directory.display_name(&h.person),
+        "person_login": h.person,
+        "device": h.device,
+        "computer": h.computer,
+        "asked": h.asked,
+        "patch": h.request.id,
+        "release": h.request.release,
+        "targets": h.request.targets,
+        "modules": h.request.modules.iter().map(|m| &m.file).collect::<Vec<_>>(),
+        "kernel": h.request.kernel,
+        "origin": h.request.origin,
+        "diff": h.request.diff,
+        "build": h.build,
+        "submitted_at": h.submitted_at,
+        "bundle_sha256": item.patch.as_ref().map(|p| &p.bundle_sha256),
+        "computers": { "kept": kept, "trying": trying, "went_back": went_back },
     })
 }
 
@@ -420,6 +478,7 @@ fn shared(
 /// The catalog page (AD-5, DV-10, DV-11).
 pub fn catalog(state: &State, directory: &dyn Directory, titles: &Titles) -> Value {
     // The draft parsed once for the page, not once an item.
+    let patches = patch_counts(state);
     let items: Vec<Value> = state
         .draft()
         .map(|doc| {
@@ -427,7 +486,7 @@ pub fn catalog(state: &State, directory: &dyn Directory, titles: &Titles) -> Val
                 .catalog
                 .items
                 .iter()
-                .map(|entry| entry_view(entry, directory, titles, &doc))
+                .map(|entry| entry_view(entry, directory, titles, &doc, &patches))
                 .collect()
         })
         .unwrap_or_default();

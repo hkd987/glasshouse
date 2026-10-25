@@ -141,6 +141,7 @@ fn item(
         pinned: false,
         provenance: Provenance::default(),
         app: None,
+        patch: None,
     }
 }
 
@@ -174,6 +175,7 @@ fn catalog(count: usize) -> Vec<ConsoleItem> {
         ],
         decided_by: None,
         shared: None,
+        hardware: None,
         approved: None,
     }];
     let kinds = [ItemKind::App, ItemKind::Agent, ItemKind::Flow];
@@ -275,6 +277,7 @@ fn catalog(count: usize) -> Vec<ConsoleItem> {
             checks: vec!["Malware scan clean".into(), "No critical CVEs".into()],
             decided_by: (review != Review::Waiting).then(|| "pat".to_owned()),
             shared: None,
+            hardware: None,
             approved: None,
         });
     }
@@ -376,6 +379,7 @@ pub fn fill(
                     blocked_24h: blocked,
                     last_error: None,
                     made_here: Vec::new(),
+                    patches: Vec::new(),
                     reported_at: now,
                 }),
             },

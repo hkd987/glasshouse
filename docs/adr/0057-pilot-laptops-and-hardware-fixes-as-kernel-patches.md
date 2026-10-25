@@ -235,6 +235,68 @@ stick, and goes through `docs/dev/hardware.md`'s checklist.
 - **The base kernel is built with CTF** now, as the release's is
   (GENERIC's `WITH_CTF`): `zroot/kpatch/kernel@15.1-RELEASE-ctf`.
 
+## Slice 2, as built (2026-10-25)
+- **The hardware app** gives agents five actions:
+  - `hardware.report`, the computer's parts;
+  - `hardware.source_search` and `hardware.source_read`, the release's
+    kernel source, which the build service holds;
+  - `hardware.patch_build`, the bundle or the compiler's errors;
+  - `hardware.patch_propose`, at least Ask whatever a rule says, and never
+    under an approval for the rest of the task
+    (`glass_policy::EVERY_TIME`).
+- **`glass-kbuild` is the build service.** In development it builds through
+  `kernel-patch.sh` in the dev VM.
+- **`glass-hardware-agent` writes the patch.** A model plans, reads and
+  writes exact edits. The program turns them into a diff, builds it, and
+  fixes compiler errors (three tries). The `kernel-patch` skill teaches
+  it, with five evals.
+- **Only a reviewer's key makes a patch reviewed.** A patch said whether it
+  was reviewed, and any trusted key's signature counted, the build
+  service's included. `[hardware] keys` are now reviewers' keys.
+  `community_keys` sign only patches nobody reviewed: a patch one of them
+  signed that says it was reviewed is refused.
+
+## Slice 3, as built (2026-10-25)
+- **IT's setting.** `hardware.community_patches` (a device setting, off by
+  default) lets a computer take patches nobody reviewed. IT sets it on a
+  managed computer, the owner on their own.
+- **The person's view.** Settings' "This computer" shows:
+  - the version and its OS update;
+  - the patch being tried, with its probation in minutes and wakes;
+  - the patches kept.
+
+  Anyone at the screen takes a patch out (`settings.patch_remove`); only
+  the owner of an unmanaged computer installs updates. Both are the
+  person's own (`PERSONS_OWN`).
+- **IT's review queue.** On a managed computer that doesn't take patches
+  nobody reviewed, `hardware.patch_propose` sends the patch to IT instead
+  (`/device/v1/hardware/submit`). It sends the patch's source and what the
+  person said, never the binary built on the computer. The person's yes,
+  every time, covers that, and the review says so.
+  - The console has its build service build it again, one patch at a time
+    (`--kbuild`; a stand-in with `--dev`). It checks the build is the
+    patch it asked for, signed by the service as unreviewed.
+  - The catalog page shows the patch's review:
+    - who asked, on which computer, and what they said;
+    - the targets and what it replaces;
+    - the build and its log;
+    - the diff, file by file;
+    - from the computers' reports, how many kept it, are trying it, or
+      went back.
+  - Approving signs the console's build again with the org's key, as
+    reviewed. On a managed computer the org's keys are reviewers' keys.
+  - A patch is made available, never required.
+- **The Store's Hardware category.** A computer is offered a reviewed patch
+  only if one of its parts (`pci:<vendor>:<device>`, `model:<maker>
+  <product>`, from its hardware report) is one the patch is for, and only
+  if it runs the release the patch was built for.
+  - `catalog.patch_install` is the person's own, after a confirm in plain
+    words. glassd then fetches the bundle and keeps it only if its digest
+    is the one the signed catalog names.
+  - The runtime checks it as it checks any patch, and it's tried, on
+    probation and kept, or goes back.
+  - `catalog.search` never turns a kernel patch up for an agent.
+
 ## Consequences
 - **Community patches are a deliberate exception to containment** (PA-3):
   code a person chose to run in the kernel. It's never applied without their

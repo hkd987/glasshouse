@@ -64,6 +64,9 @@ approval_timeout_secs = 900
 "catalog.list" = "auto"
 "catalog.install" = "notify"
 "catalog.remove" = "notify"
+# A kernel patch IT reviewed (ADR 0057, slice 3): the person installs it in
+# the Store's Hardware category (its [[app]] below), never an agent.
+"catalog.patch_install" = "never"
 # Looking colleagues up in the org's directory (AD-1) reads only.
 "people.search" = "auto"
 # Device settings (UX-1): reading them, and the person changing one IT left
@@ -267,8 +270,15 @@ tiers = { "meet.list" = "auto", "meet.join" = "auto", "meet.keys" = "auto", "mee
 id = "calendar"
 tiers = { "meet.list" = "auto" }
 
+# In the Store's Hardware category the person installs a kernel patch IT
+# reviewed, for this computer (ADR 0057, slice 3): never an agent.
+[[app]]
+id = "store"
+tiers = { "catalog.patch_install" = "auto" }
+
 # The computer's owner connects their own AI models in Settings, and chooses
-# which agents use them (ADR 0039); the person at it joins Wi-Fi (CF-12).
+# which agents use them (ADR 0039); the person at it joins Wi-Fi (CF-12),
+# installs OS updates and takes kernel patches out (ADR 0061).
 [[app]]
 id = "settings"
 tiers = { "settings.models_connect" = "auto", "settings.models_agents" = "auto", "settings.wifi" = "auto", "settings.wifi_join" = "auto", "settings.wifi_forget" = "auto", "settings.brightness" = "auto", "settings.brightness_set" = "auto", "settings.computer" = "auto", "settings.computer_check" = "auto", "settings.update_install" = "auto", "settings.patch_remove" = "auto" }

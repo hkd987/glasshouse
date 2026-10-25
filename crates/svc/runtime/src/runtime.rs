@@ -1469,6 +1469,12 @@ impl Runtime {
     /// so (IT's, or on a computer nobody manages its owner's, ADR 0057).
     /// Read at every check, so turning the setting off fails a community
     /// patch on probation.
+    /// Whether this computer tries kernel patches nobody reviewed: its
+    /// config, or IT's (or the owner's) `hardware.community_patches`.
+    pub fn hardware_takes_community(&self) -> bool {
+        self.hardware_rules().community
+    }
+
     pub(crate) fn hardware_rules(&self) -> crate::hwpatch::HardwarePatches {
         let mut rules = self.config.hardware.clone();
         rules.community |= self.device_settings.computer(None).iter().any(|r| {

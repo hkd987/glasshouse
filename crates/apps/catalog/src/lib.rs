@@ -14,19 +14,23 @@
 //! action, is audited.
 //!
 //! The Store's actions, `catalog.list`, `catalog.install` and
-//! `catalog.remove`, are in [`store`].
+//! `catalog.remove`, are in [`store`]; so is its Hardware category's,
+//! `catalog.patch_install`: a kernel patch IT reviewed, for this computer's
+//! hardware, set up to try at the next restart (ADR 0057, slice 3). That
+//! one is the person's own: never an agent's.
 
 mod store;
 
-pub use store::{INSTALL, INSTALLS, LIST, REMOVE, installed, reaches};
+pub use store::{INSTALL, INSTALLS, LIST, PATCH_INSTALL, REMOVE, installed, reaches};
 
 use std::sync::{Arc, PoisonError, RwLock};
 
 use glass_actions::{ActionDef, ActionError, ActionOutput, ActionProvider, Preview, TaskContext};
-use glass_api::{AskLabels, display_line};
+use glass_api::{AskLabels, PatchTrial, TrialState, display_line};
 use glass_managed::catalog::search;
+use glass_managed::hwreview::OrgPatch;
 use glass_managed::{CatalogItem, CatalogRelease, InstallMode, ItemKind};
-use glass_types::{ActionName, SideEffect, Tier};
+use glass_types::{ActionName, AgentId, SideEffect, Tier};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -42,10 +46,33 @@ pub struct Applied {
     pub release: CatalogRelease,
 }
 
+/// The kernel patches IT reviewed, on this computer (ADR 0057, slice 3):
+/// glassd's.
+pub trait OrgPatches: Send + Sync {
+    /// Whether `patch` is for this computer: its hardware and its release.
+    fn fits(&self, patch: &OrgPatch) -> bool;
+    /// Where it is on this computer: being tried, kept, or gone back.
+    fn state(&self, patch: &OrgPatch) -> Option<TrialState>;
+    /// Fetches it from the console, checks it against the signed catalog's
+    /// digest, and sets it up to try at the next restart.
+    fn install(&self, item: &AgentId, patch: &OrgPatch) -> Result<PatchTrial, String>;
+}
+
 /// The device's catalog, shared between the sync that applies releases and
 /// the action that reads them. Each release is swapped in whole.
-#[derive(Debug, Clone, Default)]
-pub struct CatalogHandle(Arc<RwLock<Option<Arc<Applied>>>>);
+#[derive(Clone, Default)]
+pub struct CatalogHandle {
+    applied: Arc<RwLock<Option<Arc<Applied>>>>,
+    patches: Arc<RwLock<Option<Arc<dyn OrgPatches>>>>,
+}
+
+impl std::fmt::Debug for CatalogHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CatalogHandle")
+            .field("applied", &self.current().map(|a| a.version))
+            .finish_non_exhaustive()
+    }
+}
 
 impl CatalogHandle {
     pub fn new() -> Self {
@@ -54,14 +81,27 @@ impl CatalogHandle {
 
     /// The catalog in force, if one has arrived.
     pub fn current(&self) -> Option<Arc<Applied>> {
-        self.0
+        self.applied
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
     pub fn set(&self, applied: Applied) {
-        *self.0.write().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(applied));
+        *self.applied.write().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(applied));
+    }
+
+    /// The kernel patches IT reviewed reach this computer through
+    /// `patches` (glassd's, once the runtime exists).
+    pub fn set_patches(&self, patches: Arc<dyn OrgPatches>) {
+        *self.patches.write().unwrap_or_else(PoisonError::into_inner) = Some(patches);
+    }
+
+    pub(crate) fn patches(&self) -> Option<Arc<dyn OrgPatches>> {
+        self.patches
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -171,7 +211,7 @@ fn item_shape(more: &[(&str, Value)]) -> Value {
     let properties = serde_json::Map::from_iter(
         [
             ("id", json!({ "type": "string", "description": "the agent's or app's id on this computer" })),
-            ("kind", json!({ "enum": ["agent", "app", "flow"], "description": "flow: a recorded flow" })),
+            ("kind", json!({ "enum": ["agent", "app", "flow", "hardware_patch"], "description": "flow: a recorded flow; hardware_patch: a kernel patch IT reviewed, for this computer" })),
             ("name", json!({ "type": "string" })),
             ("version", json!({ "type": "string" })),
             ("publisher", json!({ "type": "string" })),
@@ -254,6 +294,15 @@ impl ActionProvider for CatalogProvider {
                 "Remove an item installed from the catalog",
                 "Remove an item this user installed from the org's catalog: it leaves the apps and agents they see.",
             ),
+            ActionDef {
+                side_effect: SideEffect::LocalReversible,
+                default_tier: Tier::Never,
+                ..item_def(
+                    PATCH_INSTALL,
+                    "Install a kernel patch from the Store",
+                    "Sets up a kernel patch IT reviewed, for this computer's hardware, to try at the next restart: the person's own, in the Store, never an agent's. It goes back by itself if the computer doesn't start, and the person takes it out in Settings.",
+                )
+            },
         ]
     }
 
@@ -285,6 +334,20 @@ impl ActionProvider for CatalogProvider {
                                 "required": ["made_by", "based_on"],
                                 "additionalProperties": false
                             })),
+                            ("patch", json!({
+                                "type": ["object", "null"],
+                                "description": "a kernel patch IT reviewed, for this computer; null for anything else",
+                                "properties": {
+                                    "patch": { "type": "string" },
+                                    "targets": { "type": "array", "items": { "type": "string" } },
+                                    "kernel": { "type": "boolean", "description": "it carries a whole kernel" },
+                                    "bytes": { "type": "integer" },
+                                    "reviewed_by": { "type": "string" },
+                                    "state": { "type": ["string", "null"], "description": "where it is on this computer: staged, probation, kept, failed, rolled_back, undone..." }
+                                },
+                                "required": ["patch", "targets", "kernel", "bytes", "reviewed_by", "state"],
+                                "additionalProperties": false
+                            })),
                         ])
                     },
                     "managed": managed
@@ -302,6 +365,17 @@ impl ActionProvider for CatalogProvider {
                 "required": ["id", "installed", "managed"],
                 "additionalProperties": false
             }),
+            PATCH_INSTALL => json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "installed": { "type": "boolean", "description": "set up to try at the next restart" },
+                    "state": { "type": "string" },
+                    "managed": managed
+                },
+                "required": ["id", "installed", "state", "managed"],
+                "additionalProperties": false
+            }),
             _ => return None,
         })
     }
@@ -314,13 +388,8 @@ impl ActionProvider for CatalogProvider {
     ) -> Result<Preview, ActionError> {
         match action.as_str() {
             SEARCH => {}
-            LIST | INSTALL | REMOVE => {
-                return store::preview(
-                    self.catalog.current().as_deref(),
-                    ctx,
-                    action.as_str(),
-                    input,
-                );
+            LIST | INSTALL | REMOVE | PATCH_INSTALL => {
+                return store::preview(&self.catalog, ctx, action.as_str(), input);
             }
             _ => {
                 return Err(ActionError::InvalidInput(format!(
@@ -343,13 +412,8 @@ impl ActionProvider for CatalogProvider {
         action: &ActionName,
         input: &Value,
     ) -> Result<ActionOutput, ActionError> {
-        if matches!(action.as_str(), LIST | INSTALL | REMOVE) {
-            let mut out = store::invoke(
-                self.catalog.current().as_deref(),
-                ctx,
-                action.as_str(),
-                input,
-            )?;
+        if matches!(action.as_str(), LIST | INSTALL | REMOVE | PATCH_INSTALL) {
+            let mut out = store::invoke(&self.catalog, ctx, action.as_str(), input)?;
             if let Some(data) = out.data.as_object_mut() {
                 data.insert("managed".into(), json!(self.managed));
             }
@@ -440,6 +504,7 @@ impl ActionProvider for CatalogProvider {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Mutex;
 
     use glass_actions::testing::context;
     use glass_managed::Declared;
@@ -468,6 +533,7 @@ mod tests {
             pinned: false,
             provenance: Default::default(),
             app: None,
+            patch: None,
         }
     }
 
@@ -865,8 +931,219 @@ mod tests {
         check(&p, &groups, LIST, json!({ "kind": "agent" }));
         check(&p, &groups, REMOVE, json!({ "id": "vendor-disputes" }));
 
+        // A kernel patch for this computer, listed and installed.
+        let (p, _) = with_patch();
+        let listed = check(&p, &["ap-ops"], LIST, json!({}));
+        assert!(
+            listed["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["patch"].is_object())
+        );
+        check(
+            &p,
+            &["ap-ops"],
+            PATCH_INSTALL,
+            json!({ "id": "iwlwifi-resume" }),
+        );
+
         for def in p.actions() {
             assert!(p.returns(&def.name).is_some(), "{}", def.name);
         }
+    }
+
+    /// This computer, as glassd's kernel patches see it.
+    #[derive(Default)]
+    struct Computer {
+        installed: Mutex<Vec<String>>,
+    }
+
+    impl OrgPatches for Computer {
+        fn fits(&self, patch: &OrgPatch) -> bool {
+            patch.targets.iter().any(|t| t == "pci:8086:2725")
+        }
+        fn state(&self, patch: &OrgPatch) -> Option<TrialState> {
+            self.installed
+                .lock()
+                .unwrap()
+                .contains(&patch.patch)
+                .then_some(TrialState::Staged)
+        }
+        fn install(&self, _: &AgentId, patch: &OrgPatch) -> Result<PatchTrial, String> {
+            self.installed.lock().unwrap().push(patch.patch.clone());
+            Ok(PatchTrial {
+                id: patch.patch.clone(),
+                revision: patch.revision,
+                summary: String::new(),
+                review: "reviewed".into(),
+                env: "glass-hw-iwlwifi-resume-r1".into(),
+                from_env: "default".into(),
+                state: TrialState::Staged,
+                modules: vec!["if_iwlwifi.ko".into()],
+                staged_at: glass_types::Timestamp::now(),
+                ended_at: None,
+                note: None,
+                ran_minutes: 0,
+                probation_minutes: 0,
+                woke: 0,
+                probation_resumes: 0,
+            })
+        }
+    }
+
+    /// A catalog with an app, a patch for this computer's Wi-Fi and one
+    /// for another computer's, both available to AP Ops.
+    fn with_patch() -> (CatalogProvider, Arc<Computer>) {
+        let patch = |id: &str, target: &str| {
+            let mut i = item(
+                id,
+                "Wi-Fi works again after sleep",
+                "Wi-Fi works again after sleep",
+                &[("ap-ops", InstallMode::Available)],
+            );
+            i.kind = ItemKind::HardwarePatch;
+            i.declares = glass_managed::Declared::default();
+            i.patch = Some(OrgPatch {
+                patch: id.into(),
+                release: "15.1-RELEASE".into(),
+                targets: vec![target.into()],
+                revision: 1,
+                bundle_sha256: "00".repeat(32),
+                bytes: 4096,
+                kernel: false,
+                reviewed_by: "pat".into(),
+            });
+            i
+        };
+        let handle = CatalogHandle::new();
+        handle.set(Applied {
+            version: 3,
+            release: CatalogRelease {
+                items: vec![
+                    item(
+                        "vendor-disputes",
+                        "Vendor Disputes",
+                        "Track vendor disputes with overdue reminders",
+                        &[("ap-ops", InstallMode::Available)],
+                    ),
+                    patch("iwlwifi-resume", "pci:8086:2725"),
+                    patch("rtw89-resume", "pci:10ec:8852"),
+                ],
+            },
+        });
+        let computer = Arc::new(Computer::default());
+        handle.set_patches(computer.clone());
+        (CatalogProvider::new(handle).managed(true), computer)
+    }
+
+    /// ADR 0057, slice 3: the Store's Hardware category offers a patch IT
+    /// reviewed only to a computer it's for; the person installs it with
+    /// its own action; nothing else installs it, and agents never find it.
+    #[test]
+    fn adr0057_the_store_offers_a_reviewed_patch_only_to_a_computer_it_is_for() {
+        let home = tempfile::tempdir().unwrap();
+        let (p, computer) = with_patch();
+        let groups = ["ap-ops"];
+        let listed = as_in(&p, home.path(), &groups, LIST, json!({})).unwrap();
+        assert_eq!(ids(&listed), ["vendor-disputes", "iwlwifi-resume"]);
+        let patch = &listed.data["items"][1];
+        assert_eq!(patch["kind"], "hardware_patch");
+        assert_eq!(patch["installed"], false);
+        assert_eq!(patch["patch"]["reviewed_by"], "pat");
+        let only = as_in(
+            &p,
+            home.path(),
+            &groups,
+            LIST,
+            json!({ "kind": "hardware_patch" }),
+        );
+        assert_eq!(ids(&only.unwrap()), ["iwlwifi-resume"]);
+        // A search for an app or an agent never turns one up.
+        let mut ctx = context(home.path());
+        ctx.groups = vec!["ap-ops".into()];
+        let found = p
+            .invoke(
+                &ctx,
+                &SEARCH.parse().unwrap(),
+                &json!({ "need": "Wi-Fi after sleep" }),
+            )
+            .unwrap();
+        assert!(ids(&found).is_empty(), "{:?}", ids(&found));
+
+        // Not the person's list: its own action, for this computer only.
+        let wrong = as_in(
+            &p,
+            home.path(),
+            &groups,
+            INSTALL,
+            json!({ "id": "iwlwifi-resume" }),
+        );
+        assert!(wrong.unwrap_err().to_string().contains(PATCH_INSTALL));
+        let other = as_in(
+            &p,
+            home.path(),
+            &groups,
+            PATCH_INSTALL,
+            json!({ "id": "rtw89-resume" }),
+        );
+        assert!(
+            other
+                .unwrap_err()
+                .to_string()
+                .contains("isn't for this computer")
+        );
+        let outside = as_in(
+            &p,
+            home.path(),
+            &["legal"],
+            PATCH_INSTALL,
+            json!({ "id": "iwlwifi-resume" }),
+        );
+        assert!(outside.is_err());
+        assert!(computer.installed.lock().unwrap().is_empty());
+
+        let preview = p
+            .preview(
+                &ctx,
+                &PATCH_INSTALL.parse().unwrap(),
+                &json!({ "id": "iwlwifi-resume" }),
+            )
+            .unwrap();
+        assert!(
+            preview
+                .items
+                .iter()
+                .any(|i| i.contains("outside every sandbox"))
+        );
+        let installed = as_in(
+            &p,
+            home.path(),
+            &groups,
+            PATCH_INSTALL,
+            json!({ "id": "iwlwifi-resume" }),
+        )
+        .unwrap();
+        assert!(
+            installed.text.contains("restart to try it"),
+            "{}",
+            installed.text
+        );
+        assert!(
+            !installed.changes[0].reversible,
+            "Settings takes it out, not undo"
+        );
+        assert_eq!(*computer.installed.lock().unwrap(), ["iwlwifi-resume"]);
+        let again = as_in(
+            &p,
+            home.path(),
+            &groups,
+            PATCH_INSTALL,
+            json!({ "id": "iwlwifi-resume" }),
+        );
+        assert!(again.unwrap_err().to_string().contains("already"));
+        let listed = as_in(&p, home.path(), &groups, LIST, json!({})).unwrap();
+        assert_eq!(listed.data["items"][1]["installed"], true);
+        assert_eq!(listed.data["items"][1]["patch"]["state"], "staged");
     }
 }

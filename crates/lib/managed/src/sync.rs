@@ -200,7 +200,20 @@ pub struct DeviceReport {
     /// they make is hidden from IT.
     #[serde(default)]
     pub made_here: Vec<MadeApp>,
+    /// The kernel patches it tries or keeps, and the last that went back
+    /// (ADR 0057): how many computers confirmed a start on each.
+    #[serde(default)]
+    pub patches: Vec<PatchReport>,
     pub reported_at: Timestamp,
+}
+
+/// A kernel patch on a computer, as IT's review queue counts it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchReport {
+    pub id: String,
+    pub revision: u64,
+    /// `probation`, `kept`, `failed`, `rolled_back`, `undone`...
+    pub state: String,
 }
 
 /// An app someone made on a computer, at its latest version: what IT's
