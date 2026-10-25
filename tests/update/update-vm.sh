@@ -219,7 +219,16 @@ undo() {
 	env=$(status 'd["running"]')
 	log "undo: back to the version before $(status 'd["version"]')"
 	in_vm 'glassctl update undo' >&2
-	restart
+	in_vm 'shutdown -r now' >/dev/null 2>&1 || true
+	"$vm" ssh-close
+	sleep 20
+	# Emulated, a start now and then waits for an interrupt that never comes: then a power cut,
+	# which starts the version before all the same.
+	"$vm" wait 600 >/dev/null || {
+		log "undo: no answer; a power cut"
+		"$vm" power-cut >&2
+	}
+	back
 	[[ $(status 'd["update"]["state"]') == undone ]] || fail "undo: not taken out: $(status 'd["update"]')"
 	[[ -z $base_version || $(status 'd["version"]') == "$base_version" ]] || fail "undo: not back on $base_version"
 	in_vm 'bectl list -H' | grep -q "^$env	" && fail "undo: $env is still there"
