@@ -121,6 +121,8 @@ pub struct RuntimeConfig {
     pub org_apps: Arc<dyn OrgApps>,
     /// Which kernel patches this computer takes (ADR 0057).
     pub hardware: crate::hwpatch::HardwarePatches,
+    /// Which OS updates this computer takes, and from where (ADR 0061).
+    pub update: crate::osupdate::OsUpdates,
 }
 
 /// Whether the org's catalog lets an agent or app reach a person, asked

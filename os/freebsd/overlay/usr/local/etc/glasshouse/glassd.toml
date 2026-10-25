@@ -60,6 +60,14 @@ backend = "zfs"
 # [wifi]
 # secrets = "/usr/local/etc/glasshouse/wifi-secrets.toml"
 
+# OS updates (ADR 0061): the root key this image trusts, the channel it
+# follows, and the folder releases are read from. With no root key, no
+# update is taken.
+# [update]
+# roots = ["ed25519:..."]
+# channel = "broad"
+# source = "/var/db/glasshouse-updates"
+
 # The agent catalog (AD-5): what IT has published to this machine. What each
 # agent may do is set by policy, not here.
 

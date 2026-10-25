@@ -77,6 +77,12 @@ pub trait Envs: Send + Sync {
     /// Whether `env` is the one every start uses otherwise.
     fn permanent(&self, env: &str) -> Result<bool, String>;
     fn create(&self, env: &str) -> Result<(), String>;
+    /// A new environment received whole from an OS update's image (ADR
+    /// 0061).
+    fn import(&self, env: &str, image: &Path) -> Result<(), String>;
+    /// A new environment received from a delta: the changes since `base`'s
+    /// image (ADR 0061).
+    fn import_onto(&self, env: &str, image: &Path, base: &str) -> Result<(), String>;
     fn mount(&self, env: &str, at: &Path) -> Result<(), String>;
     fn unmount(&self, env: &str) -> Result<(), String>;
     fn activate_once(&self, env: &str) -> Result<(), String>;
@@ -118,6 +124,18 @@ impl Envs for System {
     }
     fn create(&self, env: &str) -> Result<(), String> {
         glass_platform::bootenv::create(env).map_err(|e| e.to_string())
+    }
+    fn import(&self, env: &str, image: &Path) -> Result<(), String> {
+        glass_platform::bootenv::import(env, image).map_err(|e| e.to_string())
+    }
+    fn import_onto(&self, env: &str, image: &Path, base: &str) -> Result<(), String> {
+        glass_platform::bootenv::import_onto(
+            env,
+            image,
+            base,
+            glass_managed::osupdate::IMAGE_SNAPSHOT,
+        )
+        .map_err(|e| e.to_string())
     }
     fn mount(&self, env: &str, at: &Path) -> Result<(), String> {
         glass_platform::bootenv::mount(env, at).map_err(|e| e.to_string())
@@ -171,8 +189,8 @@ fn listed(env: &str) -> Result<Option<glass_platform::bootenv::BootEnv>, String>
 
 /// The trial's record: what [`at_start`] checks against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Record {
-    trial: PatchTrial,
+pub(crate) struct Record {
+    pub(crate) trial: PatchTrial,
     modules: Vec<ModuleRecord>,
     /// The key that signed it ([`PublicKey::id`]): still trusted when it's
     /// kept?
@@ -200,12 +218,12 @@ impl Store {
         }
     }
 
-    fn trial(&self) -> Option<Record> {
+    pub(crate) fn trial(&self) -> Option<Record> {
         let text = std::fs::read(self.dir.join("trial.json")).ok()?;
         serde_json::from_slice(&text).ok()
     }
 
-    fn history(&self) -> Vec<PatchTrial> {
+    pub(crate) fn history(&self) -> Vec<PatchTrial> {
         std::fs::read(self.dir.join("history.json"))
             .ok()
             .and_then(|text| serde_json::from_slice(&text).ok())
@@ -230,6 +248,23 @@ impl Store {
         self.keep(record)
     }
 
+    /// Patches an OS update carried, rebuilt, into its environment `env`
+    /// (ADR 0061): kept there, on top of nothing before.
+    pub(crate) fn carry(&self, env: &str, carried: &[PatchTrial]) -> Result<(), String> {
+        let mut history = self.history();
+        for trial in carried {
+            let mut kept = trial.clone();
+            kept.env = env.to_owned();
+            kept.from_env = env.to_owned();
+            kept.state = TrialState::Kept;
+            kept.ended_at = Some(Timestamp::now());
+            history.insert(0, kept);
+        }
+        history.truncate(50);
+        let text = serde_json::to_vec_pretty(&history).map_err(|e| e.to_string())?;
+        write_whole(&self.dir.join("history.json"), &text, 0o600)
+    }
+
     /// The revision of patch `id` this computer last kept.
     fn kept_revision(&self, id: &str) -> Option<u64> {
         self.history()
@@ -241,26 +276,35 @@ impl Store {
 }
 
 /// The patches kept in `env`: its own and those of the environments it was
-/// made from, newest first (`InEffect` in HardwarePatchStack.tla).
-fn in_effect(history: &[PatchTrial], env: &str) -> Vec<PatchTrial> {
+/// made from, newest first (`InEffect` in HardwarePatchStack.tla). An OS
+/// update's environment keeps the rebuilds it carried, and nothing from
+/// before it (ADR 0061).
+pub(crate) fn in_effect(history: &[PatchTrial], env: &str) -> Vec<PatchTrial> {
     let mut kept: Vec<PatchTrial> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     let mut at = env.to_owned();
-    while let Some(t) = history
-        .iter()
-        .find(|t| t.state == TrialState::Kept && t.env == at)
-    {
-        if kept.iter().any(|k| k.env == t.env) {
+    while !seen.contains(&at) {
+        let here: Vec<&PatchTrial> = history
+            .iter()
+            .filter(|t| t.state == TrialState::Kept && t.env == at)
+            .collect();
+        let Some(first) = here.first() else {
             break;
+        };
+        seen.push(at.clone());
+        for t in &here {
+            if !kept.iter().any(|k| k.id == t.id) {
+                kept.push((*t).clone());
+            }
         }
-        kept.push(t.clone());
-        at = t.from_env.clone();
+        at = first.from_env.clone();
     }
     kept
 }
 
 /// Writes a sibling file, syncs it, renames it over `path` and syncs the
 /// directory: a crash leaves the old file or the new one.
-fn write_whole(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
+pub(crate) fn write_whole(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let dir = path.parent().unwrap_or(Path::new("/"));
     std::fs::create_dir_all(dir).map_err(|e| format!("making {}: {e}", dir.display()))?;
@@ -502,7 +546,12 @@ fn admit(
 
 /// The modules into the new environment's `/boot/kernel`, and those the
 /// loader loads at every start into its `loader.conf`.
-fn write_modules(envs: &dyn Envs, store: &Store, env: &str, opened: &Opened) -> Result<(), String> {
+pub(crate) fn write_modules(
+    envs: &dyn Envs,
+    store: &Store,
+    env: &str,
+    opened: &Opened,
+) -> Result<(), String> {
     let at = store.dir.join("mnt").join(env);
     std::fs::create_dir_all(&at).map_err(|e| format!("making {}: {e}", at.display()))?;
     envs.mount(env, &at)?;
@@ -1047,188 +1096,13 @@ fn event(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::Mutex;
 
     use glass_managed::hwpatch::{Manifest, Module};
     use glass_managed::{DocKind, OrgKey, base64, sha256_hex};
 
     use super::*;
 
-    /// Boot environments in a temporary directory, as the loader and `bectl`
-    /// treat them: a start takes the start-once environment, clearing it,
-    /// and a module that panics as it loads sends the computer back round.
-    struct Fake {
-        dir: tempfile::TempDir,
-        state: Mutex<FakeState>,
-    }
-
-    #[derive(Default)]
-    struct FakeState {
-        envs: Vec<String>,
-        running: String,
-        permanent: String,
-        once: Option<String>,
-        /// Modules that panic as they load.
-        panics: Vec<String>,
-        /// Modules that don't link against this kernel.
-        broken: Vec<String>,
-        loaded: Vec<String>,
-        mounts: BTreeMap<String, PathBuf>,
-        /// The hardware watchdog is armed.
-        watchdog: bool,
-        /// The last start came from the watchdog's restart.
-        restarted: bool,
-    }
-
-    impl Fake {
-        fn new() -> Self {
-            let fake = Self {
-                dir: tempfile::tempdir().unwrap(),
-                state: Mutex::new(FakeState {
-                    envs: vec!["default".into()],
-                    running: "default".into(),
-                    permanent: "default".into(),
-                    ..FakeState::default()
-                }),
-            };
-            std::fs::create_dir_all(fake.env_dir("default").join("boot/kernel")).unwrap();
-            std::fs::write(
-                fake.env_dir("default").join("boot/kernel/if_iwlwifi.ko"),
-                b"stock",
-            )
-            .unwrap();
-            fake
-        }
-
-        fn env_dir(&self, env: &str) -> PathBuf {
-            self.dir.path().join("envs").join(env)
-        }
-
-        fn s(&self) -> std::sync::MutexGuard<'_, FakeState> {
-            self.state.lock().unwrap()
-        }
-
-        /// A restart: the loader's choice, then the modules loaded at start;
-        /// one that panics restarts the computer at once.
-        fn restart(&self) {
-            loop {
-                let mut s = self.s();
-                let env = s.once.take().unwrap_or_else(|| s.permanent.clone());
-                s.running = env.clone();
-                s.loaded.clear();
-                s.restarted = false;
-                s.watchdog = false;
-                drop(s);
-                let conf = std::fs::read_to_string(self.env_dir(&env).join("boot/loader.conf"))
-                    .unwrap_or_default();
-                let at_start: Vec<String> = conf
-                    .lines()
-                    .filter_map(|l| l.strip_suffix("_load=\"YES\""))
-                    .map(str::to_owned)
-                    .collect();
-                let mut s = self.s();
-                if at_start.iter().any(|m| s.panics.contains(m)) {
-                    continue;
-                }
-                s.loaded = at_start;
-                return;
-            }
-        }
-    }
-
-    impl Envs for Fake {
-        fn running(&self) -> Result<String, String> {
-            Ok(self.s().running.clone())
-        }
-        fn exists(&self, env: &str) -> Result<bool, String> {
-            Ok(self.s().envs.iter().any(|e| e == env))
-        }
-        fn starts_once(&self, env: &str) -> Result<bool, String> {
-            Ok(self.s().once.as_deref() == Some(env))
-        }
-        fn permanent(&self, env: &str) -> Result<bool, String> {
-            Ok(self.s().permanent == env)
-        }
-        fn create(&self, env: &str) -> Result<(), String> {
-            let from = self.env_dir(&self.s().running);
-            let to = self.env_dir(env);
-            std::fs::create_dir_all(to.join("boot/kernel")).unwrap();
-            for entry in std::fs::read_dir(from.join("boot/kernel")).unwrap() {
-                let entry = entry.unwrap();
-                std::fs::copy(entry.path(), to.join("boot/kernel").join(entry.file_name()))
-                    .unwrap();
-            }
-            if let Ok(conf) = std::fs::read(from.join("boot/loader.conf")) {
-                std::fs::write(to.join("boot/loader.conf"), conf).unwrap();
-            }
-            self.s().envs.push(env.into());
-            Ok(())
-        }
-        fn mount(&self, env: &str, at: &Path) -> Result<(), String> {
-            std::fs::remove_dir(at).map_err(|e| e.to_string())?;
-            std::os::unix::fs::symlink(self.env_dir(env), at).map_err(|e| e.to_string())?;
-            self.s().mounts.insert(env.into(), at.to_owned());
-            Ok(())
-        }
-        fn unmount(&self, env: &str) -> Result<(), String> {
-            let at = self.s().mounts.remove(env).ok_or("not mounted")?;
-            std::fs::remove_file(&at).map_err(|e| e.to_string())?;
-            std::fs::create_dir(&at).map_err(|e| e.to_string())
-        }
-        fn activate_once(&self, env: &str) -> Result<(), String> {
-            self.s().once = Some(env.into());
-            Ok(())
-        }
-        fn cancel_once(&self) -> Result<(), String> {
-            self.s().once = None;
-            Ok(())
-        }
-        fn activate(&self, env: &str) -> Result<(), String> {
-            self.s().permanent = env.into();
-            Ok(())
-        }
-        fn destroy(&self, env: &str) -> Result<(), String> {
-            let mut s = self.s();
-            if s.running == env || s.permanent == env {
-                return Err(format!("{env} is in use"));
-            }
-            s.envs.retain(|e| e != env);
-            drop(s);
-            let _ = std::fs::remove_dir_all(self.env_dir(env));
-            Ok(())
-        }
-        fn kernel_release(&self) -> Result<String, String> {
-            Ok("15.1-RELEASE-p1".into())
-        }
-        fn root(&self) -> PathBuf {
-            self.env_dir(&self.s().running)
-        }
-        fn module_loaded(&self, name: &str) -> bool {
-            self.s().loaded.iter().any(|m| m == name)
-        }
-        fn load_module(&self, name: &str) -> Result<(), String> {
-            let mut s = self.s();
-            if s.broken.iter().any(|m| m == name) {
-                return Err("kldload: an error occurred while loading module".into());
-            }
-            s.loaded.push(name.into());
-            Ok(())
-        }
-        fn watchdog(&self, on: bool) -> Result<(), String> {
-            self.s().watchdog = on;
-            Ok(())
-        }
-        fn watchdog_restarted(&self) -> bool {
-            self.s().restarted
-        }
-        fn kernel_messages(&self, name: &str) -> String {
-            if self.s().broken.iter().any(|m| m == name) {
-                "link_elf_obj: symbol lkpi_80211_pm_driver undefined".into()
-            } else {
-                String::new()
-            }
-        }
-    }
+    use crate::testenvs::Fake;
 
     fn key() -> OrgKey {
         OrgKey::from_seed([3; 32])

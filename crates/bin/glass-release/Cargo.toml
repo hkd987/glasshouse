@@ -1,0 +1,23 @@
+[package]
+name = "glass-release"
+description = "The release side of OS updates (ADR 0061): the root, OS and channel keys, the root's key list, and signed releases of an image. Runs where releases are made, never on a device."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+glass-crypto.workspace = true
+glass-managed.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

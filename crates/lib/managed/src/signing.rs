@@ -42,6 +42,13 @@ pub enum DocKind {
     Chat,
     /// A kernel patch and the modules built from it (ADR 0057).
     HardwarePatch,
+    /// The keys the root lists for OS updates, and those it revoked (ADR
+    /// 0061, EP-11, EP-12).
+    OsKeys,
+    /// An OS release on a channel, signed by that channel's key.
+    OsRelease,
+    /// An OS image's digest, signed by the OS key.
+    OsImage,
 }
 
 impl DocKind {
@@ -52,6 +59,9 @@ impl DocKind {
             Self::Directory => "directory",
             Self::Chat => "chat",
             Self::HardwarePatch => "hardware_patch",
+            Self::OsKeys => "os_keys",
+            Self::OsRelease => "os_release",
+            Self::OsImage => "os_image",
         }
     }
 }

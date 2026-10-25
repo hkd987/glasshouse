@@ -541,6 +541,11 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
                 probation_resumes: config.hardware.probation_resumes,
                 sleeps: glass_platform::hardware::sleeps(),
             },
+            update: glass_runtime::osupdate::OsUpdates {
+                roots: config.update.roots.clone(),
+                channel: config.update.channel.clone(),
+                source: config.update.source.clone(),
+            },
         },
         policy: loaded.policy.clone(),
         policy_source: policy_source.clone(),

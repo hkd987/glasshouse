@@ -178,6 +178,31 @@ enum Command {
     /// The screen (the person at it, or root).
     #[command(subcommand)]
     Display(DisplayCommand),
+    /// OS updates (root; ADR 0061): the version running and the updates
+    /// before, or check for, install, take back or take out one.
+    Update {
+        #[command(subcommand)]
+        command: Option<UpdateCommand>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum UpdateCommand {
+    /// The newest release on this computer's channel, checked, and what
+    /// taking it would do. Nothing changes.
+    Check,
+    /// Installs it in a boot environment of its own; the next start uses
+    /// it, once, and keeps it if it starts.
+    Apply {
+        /// Take it even though it neither fixes a kept kernel patch's
+        /// problem nor brings a rebuild of it.
+        #[arg(long)]
+        drop_patches: bool,
+    },
+    /// Takes back an update installed but not yet started.
+    Cancel,
+    /// Goes back to the version before, from the next start.
+    Undo,
 }
 
 #[derive(Debug, Subcommand)]
@@ -713,6 +738,31 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             until,
             timeout,
         } => wait(&ctl, &task, until, timeout).await,
+        Command::Update { command } => {
+            let status: glass_api::UpdateStatus = match command {
+                None => ctl.call(methods::SYSTEM_UPDATE_STATUS, Value::Null).await?,
+                Some(UpdateCommand::Check) => {
+                    ctl.call(methods::SYSTEM_UPDATE_CHECK, Value::Null).await?
+                }
+                Some(cmd) => {
+                    let _: glass_api::OsUpdate = match cmd {
+                        UpdateCommand::Apply { drop_patches } => {
+                            ctl.call(
+                                methods::SYSTEM_UPDATE_APPLY,
+                                &glass_api::UpdateApply { drop_patches },
+                            )
+                            .await?
+                        }
+                        UpdateCommand::Cancel => {
+                            ctl.call(methods::SYSTEM_UPDATE_CANCEL, Value::Null).await?
+                        }
+                        _ => ctl.call(methods::SYSTEM_UPDATE_UNDO, Value::Null).await?,
+                    };
+                    ctl.call(methods::SYSTEM_UPDATE_STATUS, Value::Null).await?
+                }
+            };
+            ctl.show(&status, render::update_status)
+        }
         Command::Display(DisplayCommand::Brightness { to }) => {
             use glass_api::settings::{Brightness, BrightnessChange, BrightnessStep};
             let change = match to.as_deref() {

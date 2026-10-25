@@ -77,6 +77,9 @@ pub struct Config {
     /// The screen's backlight (ADR 0060).
     #[serde(default)]
     pub display: DisplayConfig,
+    /// The OS updates this computer takes (ADR 0061).
+    #[serde(default)]
+    pub update: UpdateConfig,
     #[serde(default, rename = "agent")]
     pub agents: Vec<CatalogEntry>,
 }
@@ -118,6 +121,34 @@ fn default_resumes() -> u64 {
 
 fn default_probation() -> u64 {
     8 * 60
+}
+
+/// `[update]`: the root keys the image trusts for OS updates, the channel
+/// the computer follows, and the folder releases are found in (ADR 0061).
+/// With no root keys it takes no update.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateConfig {
+    #[serde(default)]
+    pub roots: Vec<glass_managed::PublicKey>,
+    #[serde(default = "default_channel")]
+    pub channel: String,
+    #[serde(default)]
+    pub source: Option<PathBuf>,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            roots: Vec::new(),
+            channel: default_channel(),
+            source: None,
+        }
+    }
+}
+
+fn default_channel() -> String {
+    "broad".into()
 }
 
 /// `[display]`: `backlight`, a file holding a percent that stands in for
@@ -486,6 +517,19 @@ impl Config {
         }
         if self.app_socket == self.control_socket {
             bail!("app_socket and control_socket must be different sockets");
+        }
+        // A folder name under the update source, nothing else (ADR 0061).
+        if self.update.channel.is_empty()
+            || !self
+                .update
+                .channel
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            bail!(
+                "update.channel {:?}: lowercase letters, digits and -",
+                self.update.channel
+            );
         }
         if let Some(managed) = &self.managed {
             if managed.org_keys.is_empty() {

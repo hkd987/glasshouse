@@ -34,6 +34,7 @@ pub mod hwpatch;
 pub mod mail;
 pub mod meet;
 pub mod models;
+pub mod osupdate;
 pub mod shared;
 pub mod signing;
 pub mod skills;

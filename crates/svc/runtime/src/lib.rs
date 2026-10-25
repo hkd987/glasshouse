@@ -31,6 +31,7 @@ mod flows;
 pub mod hwpatch;
 mod labels;
 mod model;
+pub mod osupdate;
 mod routines;
 mod runtime;
 mod seat;
@@ -38,6 +39,8 @@ mod studio;
 mod supervise;
 mod tailor;
 mod task;
+#[cfg(test)]
+mod testenvs;
 mod title;
 mod undo;
 mod written;

@@ -104,6 +104,9 @@ pub struct Runtime {
     /// Kernel patches tried in boot environments of their own (ADR 0057):
     /// one at a time, under this lock.
     hardware: Mutex<crate::hwpatch::Store>,
+    /// OS updates (ADR 0061): changed only under `hardware`'s lock, as one
+    /// update and one kernel patch never go at once.
+    updates: crate::osupdate::Store,
     /// glassd's start check of a kernel patch has run (ADR 0057).
     hardware_started: AtomicBool,
 }
@@ -168,6 +171,7 @@ impl Runtime {
             device_settings: parts.settings,
             layers: LayerStore::new(parts.config.state_dir.join("layers")),
             hardware: Mutex::new(crate::hwpatch::Store::new(&parts.config.state_dir)),
+            updates: crate::osupdate::Store::new(&parts.config.state_dir),
             hardware_started: AtomicBool::new(false),
             config: parts.config,
             settings: RwLock::new(Arc::new(Settings {
@@ -1460,6 +1464,81 @@ impl Runtime {
             .map_err(|e| RuntimeError::Internal(e.to_string()))
     }
 
+    fn updates_admin(&self, caller: &Caller) -> Result<()> {
+        if caller.is_admin() {
+            Ok(())
+        } else {
+            Err(RuntimeError::PermissionDenied(
+                "only root updates the OS".into(),
+            ))
+        }
+    }
+
+    /// The newest release on this computer's channel, and what taking it
+    /// would do (ADR 0061). Root only.
+    pub fn update_check(&self, caller: &Caller) -> Result<glass_api::UpdateStatus> {
+        self.updates_admin(caller)?;
+        let store = self.hardware_checked();
+        Ok(crate::osupdate::check(
+            &crate::hwpatch::System,
+            &self.updates,
+            &store,
+            &self.config.update,
+            &self.config.hardware,
+        ))
+    }
+
+    /// Installs the newest release in a boot environment of its own, which
+    /// the next start uses once (ADR 0061). Root only.
+    pub fn update_apply(
+        &self,
+        caller: &Caller,
+        request: glass_api::UpdateApply,
+    ) -> Result<glass_api::OsUpdate> {
+        self.updates_admin(caller)?;
+        let store = self.hardware_checked();
+        crate::osupdate::apply(
+            &crate::hwpatch::System,
+            &self.updates,
+            &store,
+            &self.config.update,
+            &self.config.hardware,
+            request.drop_patches,
+            &mut |event| {
+                self.audit(event);
+            },
+        )
+        .map_err(RuntimeError::Invalid)
+    }
+
+    pub fn update_status(&self, caller: &Caller) -> Result<glass_api::UpdateStatus> {
+        self.updates_admin(caller)?;
+        let _store = self.hardware_checked();
+        Ok(crate::osupdate::status(
+            &crate::hwpatch::System,
+            &self.updates,
+            &self.config.update,
+        ))
+    }
+
+    pub fn update_cancel(&self, caller: &Caller) -> Result<glass_api::OsUpdate> {
+        self.updates_admin(caller)?;
+        let _store = self.hardware_checked();
+        crate::osupdate::cancel(&crate::hwpatch::System, &self.updates, &mut |event| {
+            self.audit(event);
+        })
+        .map_err(RuntimeError::Invalid)
+    }
+
+    pub fn update_undo(&self, caller: &Caller) -> Result<glass_api::OsUpdate> {
+        self.updates_admin(caller)?;
+        let _store = self.hardware_checked();
+        crate::osupdate::undo(&crate::hwpatch::System, &self.updates, &mut |event| {
+            self.audit(event);
+        })
+        .map_err(RuntimeError::Invalid)
+    }
+
     /// Checks a kernel patch's bundle and sets it up in a boot environment
     /// of its own, which the next start tries once (ADR 0057). Root only.
     pub fn hardware_patch_apply(
@@ -1551,6 +1630,16 @@ impl Runtime {
     fn hardware_checked(&self) -> std::sync::MutexGuard<'_, crate::hwpatch::Store> {
         let store = self.hardware.lock().unwrap_or_else(|p| p.into_inner());
         if !self.hardware_started.swap(true, Ordering::SeqCst) {
+            // An OS update first: one kept writes the kernel patches it
+            // carried (ADR 0061).
+            crate::osupdate::at_start(
+                &crate::hwpatch::System,
+                &self.updates,
+                &store,
+                &mut |event| {
+                    self.audit(event);
+                },
+            );
             crate::hwpatch::at_start(
                 &crate::hwpatch::System,
                 &store,

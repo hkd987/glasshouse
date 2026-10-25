@@ -142,6 +142,10 @@ git -C "$REPO_ROOT" diff --quiet HEAD 2>/dev/null || build="$build-dirty"
 install -d "$DIST_DIR/usr/local/share/glasshouse/branding"
 printf 'version=%s\nbuild=%s\nprofile=%s\n' "$version" "$build" "${DIST_PROFILE:-release}" \
 	>"$DIST_DIR/usr/local/share/glasshouse/branding/build-info"
+# What the image says it is, which an OS update checks as it starts (ADR 0061). A release image's
+# version is its release's; a development build's, its commit.
+printf '{"version": "%s", "base": "%s"}\n' "${GLASSHOUSE_RELEASE_VERSION:-$version-$build}" "$FREEBSD_RELEASE" \
+	>"$DIST_DIR/usr/local/share/glasshouse/os-release.json"
 
 if ((${#missing[@]})); then
 	die "missing binaries: ${missing[*]} (build them: make freebsd FREEBSD_PROFILE=${DIST_PROFILE:-release})"

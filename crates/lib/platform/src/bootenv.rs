@@ -47,6 +47,63 @@ pub fn create(name: &str) -> Result<()> {
     cmd::run("bectl", &["create", name]).map(|_| ())
 }
 
+/// A new boot environment, received whole from `image`: a ZFS stream of
+/// another computer's environment, as an OS update brings it (ADR 0061).
+pub fn import(name: &str, image: &Path) -> Result<()> {
+    checked(name)?;
+    cmd::run_with_file("bectl", &["import", name], image).map(|_| ())
+}
+
+/// A new boot environment received from `image`, a ZFS stream of the
+/// changes since `base`'s image snapshot (`@glass-image`, ADR 0061): a
+/// clone of that snapshot with the changes on top, set up as `bectl`
+/// sets up its own.
+pub fn import_onto(name: &str, image: &Path, base: &str, snapshot: &str) -> Result<()> {
+    checked(name)?;
+    checked(base)?;
+    if !valid_name(snapshot) {
+        return Err(PlatformError::Unsupported(format!(
+            "a snapshot named {snapshot:?}"
+        )));
+    }
+    let root = be_root()?;
+    let origin = format!("origin={root}/{base}@{snapshot}");
+    let target = format!("{root}/{name}");
+    cmd::run_with_file(
+        "zfs",
+        &[
+            "receive",
+            "-u",
+            "-o",
+            &origin,
+            "-o",
+            "canmount=noauto",
+            "-o",
+            "mountpoint=/",
+            &target,
+        ],
+        image,
+    )
+    .map(|_| ())
+}
+
+/// Where boot environments live: the dataset holding the one the
+/// computer starts from (`zroot/ROOT`).
+fn be_root() -> Result<String> {
+    let pools = cmd::run("zpool", &["list", "-H", "-o", "name"])?;
+    for pool in pools.lines().map(str::trim).filter(|p| !p.is_empty()) {
+        let bootfs = cmd::run("zpool", &["get", "-H", "-o", "value", "bootfs", pool])?;
+        if let Some((root, _)) = bootfs.trim().rsplit_once('/')
+            && bootfs.trim() != "-"
+        {
+            return Ok(root.to_owned());
+        }
+    }
+    Err(PlatformError::Unsupported(
+        "a pool the computer boots from".into(),
+    ))
+}
+
 /// Mounts `name` at `at`, so its files can be changed.
 pub fn mount(name: &str, at: &Path) -> Result<()> {
     checked(name)?;

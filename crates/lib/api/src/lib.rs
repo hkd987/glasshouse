@@ -21,6 +21,7 @@ pub mod settings;
 mod tailoring;
 mod task;
 mod text;
+mod update;
 
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +46,7 @@ pub use task::{
     TaskView, TileState, UndoReport, UndoRequest,
 };
 pub use text::{DisplaySafe, STAND_IN, display_char, display_line, invisible};
+pub use update::{OsUpdate, UpdateApply, UpdateAvailable, UpdateStatus};
 
 /// Where `glassd` listens unless configured otherwise.
 pub const DEFAULT_CONTROL_SOCKET: &str = "/var/run/glasshouse/control.sock";
@@ -156,6 +158,20 @@ pub mod methods {
     /// kernel patch on probation is started again by the next start, once
     /// (ADR 0057). A crash never runs this, so it goes back instead.
     pub const SYSTEM_SHUTDOWN: &str = "system.shutdown";
+    /// `()` → [`crate::UpdateStatus`] with what's available: the newest
+    /// release on this computer's channel, checked (ADR 0061). Root only.
+    pub const SYSTEM_UPDATE_CHECK: &str = "system.update.check";
+    /// [`crate::UpdateApply`] → [`crate::OsUpdate`]: installs the newest
+    /// release in a boot environment of its own, which the next start uses
+    /// once. Root only.
+    pub const SYSTEM_UPDATE_APPLY: &str = "system.update.apply";
+    /// `()` → [`crate::UpdateStatus`]. Root only.
+    pub const SYSTEM_UPDATE_STATUS: &str = "system.update.status";
+    /// `()` → [`crate::OsUpdate`]: takes back an update not yet started.
+    pub const SYSTEM_UPDATE_CANCEL: &str = "system.update.cancel";
+    /// `()` → [`crate::OsUpdate`]: back to the version before, from the
+    /// next start.
+    pub const SYSTEM_UPDATE_UNDO: &str = "system.update.undo";
     /// `()` → [`crate::settings::SettingsView`]: the caller's device
     /// settings (UX-1), as their desktop applies them.
     pub const SETTINGS_GET: &str = "settings.get";

@@ -1414,6 +1414,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-release"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "glass-crypto",
+ "glass-managed",
+ "hex",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "glass-replay"
 version = "0.1.0"
 dependencies = [
@@ -1467,6 +1481,7 @@ dependencies = [
  "glass-rpc",
  "glass-tailoring",
  "glass-types",
+ "hex",
  "serde",
  "serde_json",
  "sha2",

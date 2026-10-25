@@ -127,6 +127,9 @@ pub enum EventKind {
     /// A kernel patch set up in a boot environment of its own, kept, failed,
     /// rolled back or taken back (ADR 0057).
     HardwarePatch,
+    /// An OS update installed in a boot environment of its own, kept,
+    /// rolled back, refused or taken out (ADR 0061).
+    OsUpdate,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

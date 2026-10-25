@@ -1008,6 +1008,7 @@ mod tests {
                 personal: Arc::new(org.studio.clone()),
                 org_apps: Arc::new(org.org_apps.clone()),
                 hardware: Default::default(),
+                update: Default::default(),
             },
             policy,
             policy_source: "policy file".into(),

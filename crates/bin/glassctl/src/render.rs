@@ -717,6 +717,99 @@ pub fn patch_status(status: &glass_api::PatchStatus) -> String {
     out
 }
 
+/// `glassctl update`: the version running, the update being installed or
+/// the last one, what a check found, and the updates before (ADR 0061).
+pub fn update_status(status: &glass_api::UpdateStatus) -> String {
+    use glass_api::TrialState;
+
+    let mark = |state: TrialState| match state {
+        TrialState::Kept => green("✓"),
+        TrialState::Staging | TrialState::Staged | TrialState::Probation => orange("◉"),
+        TrialState::Failed | TrialState::RolledBack => red("✗"),
+        TrialState::Cancelled | TrialState::Undone => dim("–"),
+    };
+    let label = |state: TrialState| match state {
+        TrialState::Staged => "Restart to update",
+        TrialState::Undone => "Taken out",
+        other => other.label().split(':').next().unwrap_or_default(),
+    };
+    let mut out = format!(
+        "Running {} · boot environment {} · channel {}\n",
+        bold(
+            status
+                .version
+                .as_deref()
+                .unwrap_or("a version this computer doesn't know")
+        ),
+        status.running,
+        status.channel
+    );
+    if let Some(u) = status.update.as_ref().filter(|u| u.state.open()) {
+        let _ = writeln!(
+            out,
+            "\n{} Update {} (release {}) · {}\n  boot environment {}, from {}",
+            mark(u.state),
+            bold(&u.version),
+            u.number,
+            label(u.state),
+            u.env,
+            u.from_env
+        );
+        for p in &u.patches {
+            let _ = writeln!(out, "  Kernel patch {p}");
+        }
+    }
+    if let Some(a) = &status.available {
+        let _ = writeln!(
+            out,
+            "\n{} {} is available (release {}){}",
+            if a.blocked.is_some() {
+                orange("◉")
+            } else {
+                green("↑")
+            },
+            bold(&a.version),
+            a.number,
+            if a.notes.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", a.notes)
+            }
+        );
+        for p in &a.patches {
+            let _ = writeln!(out, "  Kernel patch {p}");
+        }
+        match &a.blocked {
+            Some(why) => {
+                let _ = writeln!(out, "  {}", orange(&format!("Not now: {why}")));
+            }
+            None => out += "  glassctl update apply installs it; the next start uses it.\n",
+        }
+    } else if let Some(why) = &status.checked {
+        let _ = writeln!(out, "\nNo update: {why}");
+    }
+    if !status.history.is_empty() {
+        out += "\nUpdates before:\n";
+        for u in &status.history {
+            let when = u.ended_at.unwrap_or(u.staged_at);
+            let _ = writeln!(
+                out,
+                "  {} {:<12} {} (release {})  {}{}",
+                mark(u.state),
+                label(u.state),
+                u.version,
+                u.number,
+                dim(&when.to_string()),
+                u.note
+                    .as_deref()
+                    .map(|n| format!("\n      {n}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    out
+}
+
 /// "1 change", "3 changes".
 fn plural(n: u32, noun: &str) -> String {
     if n == 1 {

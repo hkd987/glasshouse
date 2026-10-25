@@ -68,6 +68,32 @@ pub fn run_with_input(program: &str, args: &[&str], input: &[u8]) -> Result<Stri
     }
 }
 
+/// [`run`] with the file at `input` on the program's standard input, such
+/// as an image for `bectl import`: it's read as the program reads, never
+/// whole into memory.
+pub fn run_with_file(program: &str, args: &[&str], input: &std::path::Path) -> Result<String> {
+    let rendered = render(program, args);
+    tracing::debug!(command = %rendered, input = %input.display(), "running with a file");
+    let file = std::fs::File::open(input)
+        .map_err(|e| PlatformError::io(format!("opening {}", input.display()), e))?;
+    let output = Command::new(program)
+        .args(args)
+        .env_clear()
+        .env("PATH", "/sbin:/bin:/usr/sbin:/usr/bin")
+        .stdin(file)
+        .output()
+        .map_err(|e| PlatformError::io(format!("cannot run `{rendered}`"), e))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(PlatformError::Command {
+            command: rendered,
+            status: output.status.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        })
+    }
+}
+
 fn render(program: &str, args: &[&str]) -> String {
     std::iter::once(program)
         .chain(args.iter().copied())
