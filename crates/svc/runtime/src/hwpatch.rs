@@ -995,6 +995,10 @@ fn remove(envs: &dyn Envs, env: &str, running: &str) {
 /// start are loaded, and the rest load.
 fn check(envs: &dyn Envs, record: &Record) -> Result<(), String> {
     let kernel = envs.root().join("boot/kernel");
+    let with_kernel = record
+        .modules
+        .iter()
+        .any(|m| m.file == glass_managed::hwpatch::KERNEL);
     for module in &record.modules {
         let path = kernel.join(&module.file);
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1014,8 +1018,12 @@ fn check(envs: &dyn Envs, record: &Record) -> Result<(), String> {
                 .map_err(|e| said(format!("{name} doesn't load: {e}")))?;
         }
         // Its own file, not a driver of that name the kernel has built in,
-        // which `kldload -n` takes for it.
+        // which `kldload -n` takes for it, unless the kernel is the patch's
+        // own: then the change is in it.
         if !envs.module_loaded(name) {
+            if with_kernel && envs.built_in(name) {
+                continue;
+            }
             return Err(said(if envs.built_in(name) {
                 format!(
                     "the kernel has {name} built in, so the patch's {} never ran",
@@ -1897,6 +1905,36 @@ mod tests {
         let ended = store.trial().unwrap().trial;
         assert_eq!(ended.state, TrialState::Failed);
         assert!(ended.note.unwrap().contains("never ran"));
+        fake.restart();
+
+        // Built into the kernel the patch brings, the driver is the
+        // patch's: that's how it must be built.
+        let bytes = bundle_edited(
+            "lkpi-wlan-suspend",
+            2,
+            "if_iwlwifi.ko",
+            false,
+            Review::Reviewed,
+            &[],
+            |m| {
+                m.modules.push(Module {
+                    file: glass_managed::hwpatch::KERNEL.into(),
+                    sha256: sha256_hex(b"\x7fELF kernel patched"),
+                    load_at_boot: false,
+                })
+            },
+        );
+        let mut bundle: Bundle = serde_json::from_slice(&bytes).unwrap();
+        bundle.modules.insert(
+            glass_managed::hwpatch::KERNEL.into(),
+            base64::encode(b"\x7fELF kernel patched"),
+        );
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        would_take(&fake, &store, &waking(), &bytes).unwrap();
+        apply(&fake, &store, &waking(), &bytes, &mut |e| audit.push(e)).unwrap();
+        fake.restart();
+        at_start(&fake, &store, &waking(), &mut |e| audit.push(e));
+        assert_eq!(state(&store), TrialState::Probation);
     }
 
     /// HardwarePatch.tla's "noWatchdog": a patch that hangs the computer in
