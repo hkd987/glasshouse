@@ -96,37 +96,77 @@ deploys on their own AWS" (2026-10-27): the hosted form is decided, §9.
    ship it; the org deploys it; nothing runs on our servers and no data
    leaves their account. One stack (CloudFormation, later on AWS
    Marketplace) puts in their account:
-   - **A private network:** a VPC whose agent subnets have no route to the
-     internet. VPC endpoints reach Bedrock, S3 and the rest; anything else
-     goes through the policy proxy, if policy allows it at all.
+   - **A private network:** a VPC whose agent hosts have no route to the
+     internet. VPC endpoints reach Bedrock, S3 and KMS; anything else goes
+     through the policy proxy, if policy allows it at all.
    - **The admin console** (`glass-console`), behind their load balancer,
      signed into with their SSO (IAM Identity Center or Entra): AD-6's
      production console.
-   - **Agent hosts:** glassd on our signed image, the broker and the rules
-     at the edge for the agents they run, writing the audit record (and
-     streaming it to the org's S3 or SIEM, AU-2).
-   - **Agent computers: one EC2 instance each,** from our signed image,
-     in a private subnet, with no AWS permissions of its own and a
-     security group that lets it reach only its host's broker. Nitro is
-     the hypervisor: no nested virtualization, which AWS supports for KVM
-     and Hyper-V, not bhyve. Undo of a task is an EBS snapshot of its
-     disk. Its screen reaches its host only, and through it the person
-     (§4).
    - **Models through their Bedrock** (MP-1, MP-2): already the plan.
    - **Updates** from our update server, signed, mirrored by their console
-     (ADR 0061); new computer images the same way.
-
-   So the `VmSandbox` has two backends behind one contract: bhyve on a
-   laptop, EC2 in an org's AWS. People reach hosted agents from a
-   Glasshouse laptop's Agents view, and from any browser through the
-   console: the hosted product doesn't need the Glasshouse laptop, which
-   is the richer way in.
+     (ADR 0061), host and computer images the same way.
+   - **Agent hosts and agent computers,** §10 and §11.
+10. **Agent computers on AWS are Firecracker microVMs** (the owner,
+    2026-10-27), many to an agent host, not an EC2 instance each:
+    - **Why:** a microVM starts in well under a second and costs a few MB
+      beside its guest's memory, so a host carries dozens; and a running
+      computer can be snapshotted whole and put away (§11).
+    - **Agent hosts** are EC2 instances with KVM: the 8th-generation Intel
+      types with nested virtualization (C8i, M8i, R8i, from February 2026,
+      KVM supported as the hypervisor inside, Firecracker shown running on
+      an `m8i.large`), or metal ones for density. They run Linux: KVM is
+      Linux's. The host service (the broker, the rules at the edge, the
+      audit record) is glassd's runtime on Linux, a second target for the
+      host role only (PL-1); the desktop stays as it is.
+    - **Each computer** runs under Firecracker's jailer: our signed guest
+      kernel, a read-only base disk (the signed image, cached on each
+      host) and a data disk of its own. **No network device at all:** the
+      task socket, the screen and the policy proxy are vsock ports to its
+      host.
+    - **The screen:** Firecracker has no display device, so the guest draws
+      on a virtual display of its own (a headless compositor) and streams
+      it over vsock to the host, which relays it to the person (§4): from
+      the console in a browser, or a Glasshouse laptop.
+    - **Files** go in as copies (Firecracker has no shared folders, and
+      copies were the choice anyway), changes come back over vsock.
+    - Cloud Hypervisor, also KVM, is the fallback if a computer needs a
+      device Firecracker lacks (shared folders, a GPU).
+11. **No hot files for a computer that isn't working** (the owner,
+    2026-10-27): S3 is where a computer lives; a host's disk is a cache.
+    - **The data disk in S3** as content-addressed chunks (a few MB each,
+      compressed, named by their SHA-256, encrypted with the org's KMS
+      key). A version of the disk is a list of chunks; saving one uploads
+      only the chunks S3 doesn't have yet, so versions and agents share
+      what's the same.
+    - **Spinning down:** idle past the time IT sets (15 minutes, say), the
+      computer is paused and snapshotted whole (memory and device state:
+      Firecracker's full snapshot), memory compressed with its empty pages
+      left out, the disk's new chunks uploaded, and every local file
+      removed. An idle agent costs S3, nothing else.
+    - **Spinning up,** for a task or a person clicking in: the snapshot and
+      the chunks it needs fetched, the computer resumed where it was, its
+      programs still open. A snapshot the host's Firecracker can't restore
+      (snapshots are bound to the version that made them; an update moved
+      it) means a cold start from the disk: open programs are lost, files
+      never are.
+    - **Undo** of a task restores the disk version it started from; "start
+      this computer over" is an empty data disk. Both are lists of chunks,
+      so they cost nothing to keep.
+    - **Retention** is IT's (CF-61), by S3 lifecycle; removing an agent
+      removes its chunks.
+    - **Moving** between the laptop and AWS (FD-2) goes by the data disk,
+      a cold start on the other side: a memory snapshot doesn't cross
+      hypervisors.
+    - Incremental memory snapshots (Firecracker's diff snapshots) would
+      make spinning down cheaper; they're a developer preview, so full
+      snapshots first.
 
 ## What it needs
 - **Hardware virtualization** (Intel VT-x, AMD-V). The cloud sessions
   this is built in have none, and the emulated dev VM can't run bhyve
-  inside it. Each slice that boots a guest is tested on a laptop or a
-  host with nested virtualization.
+  inside it. Each slice that boots a guest is tested on a laptop, or on
+  AWS: Firecracker on a nested-virtualization instance, bhyve on a metal
+  one.
 - **A guest image:** Linux, since agents' tools expect it (apt, Docker,
   Chrome), built and signed by us like the OS (ADR 0061, ADR 0064).
 - **Memory:** about 0.5 to 1 GB per running computer; on a 16 GB laptop,
@@ -143,12 +183,11 @@ deploys on their own AWS" (2026-10-27): the hosted form is decided, §9.
    against a stand-in for the VM.
 3. **The Agents view and click in:** live screens in tiles, watch, take
    over, hand back; the console's view and IT's switch per agent.
-4. **In the org's AWS (§9):** the stack; agent hosts on EC2; computers as
-   EC2 instances, the edge as the VPC and security groups; undo by EBS
-   snapshots; the console's browser view to click in; licensing and
+4. **In the org's AWS (§9 to §11):** the stack; Linux agent hosts with
+   Firecracker; the chunk store in S3, spinning down and up, undo by disk
+   versions; the console's browser view to click in; licensing and
    metering (LA, AWS Marketplace). Built and tested in a sandbox AWS
-   account of our own, which also gives slice 1 its hardware: metal
-   instances run bhyve natively.
+   account of our own, which also gives slice 1 its hardware.
 
 ## Open questions (owner)
 1. One computer per agent (kept, like a desk: proposed), or a fresh one
@@ -172,8 +211,11 @@ deploys on their own AWS" (2026-10-27): the hosted form is decided, §9.
 - AW-2, NV-20 and AW-20 come with slice 3; FD-1 and FD-2 with slice 4.
 - Deploying into the org's AWS turns several pilot blockers into one
   stack: the production console (AD-6), Bedrock (MP-1, MP-2) and SSO.
-  It adds a CloudFormation stack and its tests, the AMIs, and EC2's API
-  to the platform layer.
+  It adds a CloudFormation stack and its tests, the host and guest
+  images, and Linux with KVM and Firecracker to the platform layer, for
+  the agent host only.
+- An idle agent costs its S3 storage; a host's cost is spread over the
+  computers running on it, and hosts scale with the work.
 - Grok Bot runs on xAI's computers; I found no sign of it deploying
   into a customer's cloud. Running in theirs, with their models, their
   keys and their audit, is the enterprise difference.
