@@ -5,7 +5,8 @@ questions below are theirs to settle. The owner: "thinking this is the way
 forward with sandboxed VMs for agents moving forward to give them this
 level of OS", and "its own service ... you can handle your agents and then
 you can click into the VM ... this is the big difference from the other
-agent frameworks."
+agent frameworks." Then: "This should be like a enterprise grokbot so it
+deploys on their own AWS" (2026-10-27): the hosted form is decided, §9.
 
 ## Context
 - Today an agent runs in a jail (PA-1). Each thing it does on the person's
@@ -90,6 +91,36 @@ agent frameworks."
    (the `Sandbox` trait was made for a second backend). The task socket
    reaches the guest through a virtio-console port, not the network. The
    screen comes out through bhyve's framebuffer (VNC), to glassd only.
+9. **Hosted means in the org's own AWS account** (the owner, 2026-10-27):
+   an enterprise Grok Bot that runs where the org's data already is. We
+   ship it; the org deploys it; nothing runs on our servers and no data
+   leaves their account. One stack (CloudFormation, later on AWS
+   Marketplace) puts in their account:
+   - **A private network:** a VPC whose agent subnets have no route to the
+     internet. VPC endpoints reach Bedrock, S3 and the rest; anything else
+     goes through the policy proxy, if policy allows it at all.
+   - **The admin console** (`glass-console`), behind their load balancer,
+     signed into with their SSO (IAM Identity Center or Entra): AD-6's
+     production console.
+   - **Agent hosts:** glassd on our signed image, the broker and the rules
+     at the edge for the agents they run, writing the audit record (and
+     streaming it to the org's S3 or SIEM, AU-2).
+   - **Agent computers: one EC2 instance each,** from our signed image,
+     in a private subnet, with no AWS permissions of its own and a
+     security group that lets it reach only its host's broker. Nitro is
+     the hypervisor: no nested virtualization, which AWS supports for KVM
+     and Hyper-V, not bhyve. Undo of a task is an EBS snapshot of its
+     disk. Its screen reaches its host only, and through it the person
+     (§4).
+   - **Models through their Bedrock** (MP-1, MP-2): already the plan.
+   - **Updates** from our update server, signed, mirrored by their console
+     (ADR 0061); new computer images the same way.
+
+   So the `VmSandbox` has two backends behind one contract: bhyve on a
+   laptop, EC2 in an org's AWS. People reach hosted agents from a
+   Glasshouse laptop's Agents view, and from any browser through the
+   console: the hosted product doesn't need the Glasshouse laptop, which
+   is the richer way in.
 
 ## What it needs
 - **Hardware virtualization** (Intel VT-x, AMD-V). The cloud sessions
@@ -112,8 +143,12 @@ agent frameworks."
    against a stand-in for the VM.
 3. **The Agents view and click in:** live screens in tiles, watch, take
    over, hand back; the console's view and IT's switch per agent.
-4. **Hosted agent computers:** the same backend on an agent host, reached
-   with device keys, one org per host or per VM, metered.
+4. **In the org's AWS (§9):** the stack; agent hosts on EC2; computers as
+   EC2 instances, the edge as the VPC and security groups; undo by EBS
+   snapshots; the console's browser view to click in; licensing and
+   metering (LA, AWS Marketplace). Built and tested in a sandbox AWS
+   account of our own, which also gives slice 1 its hardware: metal
+   instances run bhyve natively.
 
 ## Open questions (owner)
 1. One computer per agent (kept, like a desk: proposed), or a fresh one
@@ -121,8 +156,9 @@ agent frameworks."
 2. IT allows it per agent (proposed), or per group of people?
 3. Files in as copies (proposed: safer), or read-only mounts (faster, but
    the agent sees later changes)?
-4. Hosted: the org's own servers, our service, or both? Our service is a
-   business of its own (pricing, data residency, uptime).
+4. ~~Hosted where?~~ Decided: the org's own AWS (§9). Still open: Azure
+   and Google Cloud later, and whether we ever run a hosted service of our
+   own for orgs without a cloud.
 5. May an agent computer hold logins of its own (an agent's own email or
    accounts, PA-7), or only what the broker lends it per call?
 
@@ -134,3 +170,10 @@ agent frameworks."
   image, the console port, the proxy. Each is a probe check.
 - The laptop list (ADR 0057) needs VT-x on, which the pilot models have.
 - AW-2, NV-20 and AW-20 come with slice 3; FD-1 and FD-2 with slice 4.
+- Deploying into the org's AWS turns several pilot blockers into one
+  stack: the production console (AD-6), Bedrock (MP-1, MP-2) and SSO.
+  It adds a CloudFormation stack and its tests, the AMIs, and EC2's API
+  to the platform layer.
+- Grok Bot runs on xAI's computers; I found no sign of it deploying
+  into a customer's cloud. Running in theirs, with their models, their
+  keys and their audit, is the enterprise difference.
