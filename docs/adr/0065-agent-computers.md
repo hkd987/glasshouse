@@ -161,6 +161,44 @@ deploys on their own AWS" (2026-10-27): the hosted form is decided, §9.
       make spinning down cheaper; they're a developer preview, so full
       snapshots first.
 
+12. **How people use it: one service, four ways in** (the owner,
+    2026-10-27: "a really clean way for non technical and technical
+    employees"). Every way in is the person, signed in with the org's SSO,
+    under the same policy, tiers, approvals and audit record. An approval
+    answered in one is answered everywhere. IT sees each and can turn any
+    off.
+    - **The web app,** for everyone, at an address in the org's domain
+      (`agents.<org>`), served by their console. Home is their agents,
+      like a team chat: each with its name, what it's doing in a line,
+      Working, Needs you or Asleep, and its screen, live. Opening one
+      shows a conversation: ask in plain words; its answers, the files it
+      made and its questions come back as cards, Approve and Deny on
+      them. Beside it, its computer: watch, Take over, Hand back. A new
+      agent comes from the ones IT approved, never a blank form. Nothing
+      technical on the way: no terminal, no settings IT didn't leave to
+      the person.
+    - **The desktop app,** the same web app in a small native window, for
+      Mac and Windows: a menu-bar icon that says who needs you,
+      notifications, a file dropped on an agent goes to it, the sign-in
+      kept in the system's keychain. One interface to build; the app
+      adds only what a browser can't. Tauri (Rust, permissively licensed).
+      On a Glasshouse laptop the same agents are in the desktop itself:
+      tiles, the command bar, take over.
+    - **The CLI,** `glass`, for technical people and scripts, grown from
+      `glassctl`: `glass login` (SSO, a code in the browser), `glass
+      agents`, `glass ask <agent> "..."` (the answer streamed), `glass
+      watch`, `glass approve`, `glass cp` to put files in and get them
+      out, `glass shell <agent>` (a terminal in its computer, on the
+      record), `glass open <agent>` (its screen in the browser), and
+      `--json` on all of them. Tokens per person, short-lived.
+    - **For tools:** the same API (HTTP and a stream of events), an MCP
+      server so a person's Claude Code, an IDE or a CI job hands work to
+      an agent and gets the result (as `glass-mcp` does for a local task
+      today), and webhooks out.
+    - **Where people already are** (CF-90): ask an agent in Slack or
+      Teams, and answer its questions with buttons there. Later than the
+      four above.
+
 ## What it needs
 - **Hardware virtualization** (Intel VT-x, AMD-V). The cloud sessions
   this is built in have none, and the emulated dev VM can't run bhyve
@@ -181,8 +219,10 @@ deploys on their own AWS" (2026-10-27): the hosted form is decided, §9.
 2. **The edge:** files in as copies and changes out, at their tiers; the
    egress proxy; per-task snapshots and undo; audit. Mostly testable here
    against a stand-in for the VM.
-3. **The Agents view and click in:** live screens in tiles, watch, take
-   over, hand back; the console's view and IT's switch per agent.
+3. **The ways in (§12):** the web app (agents, conversations, approvals,
+   live screens, click in, take over, hand back), then the desktop app
+   around it, the `glass` CLI and the API with its MCP server; the
+   console's view and IT's switch per agent.
 4. **In the org's AWS (§9 to §11):** the stack; Linux agent hosts with
    Firecracker; the chunk store in S3, spinning down and up, undo by disk
    versions; the console's browser view to click in; licensing and
