@@ -195,9 +195,43 @@ deploys on their own AWS" (2026-10-27): the hosted form is decided, §9.
       server so a person's Claude Code, an IDE or a CI job hands work to
       an agent and gets the result (as `glass-mcp` does for a local task
       today), and webhooks out.
-    - **Where people already are** (CF-90): ask an agent in Slack or
-      Teams, and answer its questions with buttons there. Later than the
-      four above.
+    - **Microsoft Teams,** §13, with the web app first. Slack after.
+
+13. **Agents ask in Teams** (the owner, 2026-10-27: "we should support
+    your agent reaching out and asking permission in teams"; CF-90). The
+    org's Teams gets a Glasshouse Agents app, installed for everyone by
+    its Teams admin.
+    - **An agent reaches out:** when it needs the person, the app messages
+      them in Teams, one to one, as a card: which agent, what it wants to
+      do, the detail, and Approve, Don't and Open. Answered, the card
+      changes for everyone who can see it to say who answered, when, and
+      what happened (Adaptive Cards' universal actions). Answered
+      elsewhere first, the card says so and its buttons go.
+    - **Only the person answers.** Teams says who clicked (their Entra
+      object id). The service matches it to the person the approval is
+      for, through the org's directory (AD-1). Anyone else clicking a
+      forwarded card is refused, unless policy names them a delegate:
+      CF-90's "delegate an approval to a manager". Each card answers one
+      approval once, and an old one has expired.
+    - **Labels decide what goes into Teams** (ADR 0018): a card carries the
+      request's words only when its data may go there. Otherwise it says
+      "Reconciler needs you" and Open, and the detail stays in the web
+      app.
+    - **Asking an agent** in a chat with the app: "@Reconciler which
+      invoices don't match?". The answer comes back there, with the same
+      cards. A colleague not on Glasshouse can be asked to review or
+      approve too (CF-90).
+    - **On the record:** each answer is audited as from any way in, "in
+      Teams" beside it.
+    - **In the org's AWS:** Teams reaches the app through Microsoft's Bot
+      Framework, which calls an HTTPS address. That address is the stack's
+      only door from the internet: a small relay on its own, in a public
+      subnet, that accepts only requests Microsoft signed for the org's
+      app, and passes on only messages and answers. The agent hosts stay
+      private. The app's registration is in the org's Entra tenant, the
+      relay's secret in their Secrets Manager.
+    - **Not in Teams:** taking over a computer, or watching it. Open goes to
+      the web app for those.
 
 ## What it needs
 - **Hardware virtualization** (Intel VT-x, AMD-V). The cloud sessions
@@ -219,10 +253,11 @@ deploys on their own AWS" (2026-10-27): the hosted form is decided, §9.
 2. **The edge:** files in as copies and changes out, at their tiers; the
    egress proxy; per-task snapshots and undo; audit. Mostly testable here
    against a stand-in for the VM.
-3. **The ways in (§12):** the web app (agents, conversations, approvals,
-   live screens, click in, take over, hand back), then the desktop app
-   around it, the `glass` CLI and the API with its MCP server; the
-   console's view and IT's switch per agent.
+3. **The ways in (§12, §13):** the web app (agents, conversations,
+   approvals, live screens, click in, take over, hand back), Teams (the
+   app, approval cards, asking in a chat, the relay), then the desktop
+   app around the web app, the `glass` CLI and the API with its MCP
+   server; the console's view and IT's switch per agent.
 4. **In the org's AWS (§9 to §11):** the stack; Linux agent hosts with
    Firecracker; the chunk store in S3, spinning down and up, undo by disk
    versions; the console's browser view to click in; licensing and
