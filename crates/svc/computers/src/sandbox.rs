@@ -39,8 +39,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use glass_api::{
-    ComputerNew, ComputerState, ComputerView, PERSONAS_MAX, PersonaNew, PersonaView, ScreenView,
-    StoredView,
+    ComputerNew, ComputerState, ComputerView, DisplayInput, PERSONAS_MAX, PersonaNew, PersonaView,
+    ScreenView, StoredView,
 };
 use glass_platform::sandbox::{
     AGENT_SOCKET_PATH, ProcessSpec, Sandbox, SandboxSpec, ToolOutput, ToolRun, ToolRunner,
@@ -49,8 +49,9 @@ use glass_platform::sandbox::{
 use glass_platform::{PlatformError, Result};
 use glass_types::{AgentId, Timestamp};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::hypervisor::{ComputerSpec, Hypervisor, TaskRun};
+use crate::hypervisor::{ComputerSpec, Frame, Hypervisor, TaskRun};
 use crate::store::Store;
 
 /// Where a task works inside its computer: kept, like the rest of it.
@@ -130,6 +131,9 @@ pub struct ComputerSandbox {
     store: Option<(Arc<Store>, String)>,
     owners: OwnerKeys,
     state: Mutex<State>,
+    /// Computers with a display booting in the background, by folder: one
+    /// boot each (ADR 0072).
+    booting: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 #[derive(Debug, Default)]
@@ -202,6 +206,7 @@ impl ComputerSandbox {
             store: None,
             owners: OwnerKeys::by_uid(),
             state: Mutex::new(State::default()),
+            booting: Arc::default(),
         })
     }
 
@@ -571,6 +576,7 @@ impl ComputerSandbox {
             stored: meta.stored,
             created_at: meta.created_at,
             personas: meta.personas,
+            display: self.hypervisor.display(),
         }
     }
 
@@ -679,6 +685,104 @@ impl ComputerSandbox {
                 let _ = fs::rename(&making, &path);
             }
         }
+    }
+
+    /// What its display shows (ADR 0072): its owner's only. Opening it
+    /// turns it on, as opening a laptop does: until it's up, it says so.
+    /// `since` the version they have, the picture is left out.
+    pub fn frame(&self, uid: u32, id: &str, since: Option<&str>) -> Result<(Frame, String, bool)> {
+        let (computer, meta) = self.find(uid, id)?;
+        if !self.hypervisor.display() {
+            return Err(refuse(
+                "this computer's screen is a terminal: it has no desktop to show",
+            ));
+        }
+        if meta.stored.is_some() {
+            return Err(refuse(format!(
+                "{} is asleep: wake it to see it",
+                meta.name
+            )));
+        }
+        if !self.hypervisor.running(&computer) || self.is_booting(&computer) {
+            self.power_on(&computer);
+            return Err(refuse(
+                "Your computer is starting. It shows here as soon as it's up.",
+            ));
+        }
+        let frame = self.hypervisor.frame(&computer).map_err(refuse)?;
+        let version = hex::encode(&Sha256::digest(&frame.png)[..8]);
+        let unchanged = since == Some(version.as_str());
+        Ok((frame, version, unchanged))
+    }
+
+    fn is_booting(&self, computer: &ComputerSpec) -> bool {
+        self.booting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&computer.dir)
+    }
+
+    /// Starts a computer with a display in the background, once: a VM
+    /// takes seconds to boot, minutes where there's no KVM.
+    fn power_on(&self, computer: &ComputerSpec) {
+        if self.leaving() || self.is_booting(computer) {
+            return;
+        }
+        self.booting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(computer.dir.clone());
+        let (hypervisor, booting, computer) = (
+            Arc::clone(&self.hypervisor),
+            Arc::clone(&self.booting),
+            computer.clone(),
+        );
+        std::thread::spawn(move || {
+            if let Err(why) = hypervisor.start(&computer)
+                && let Ok(mut file) = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(computer.screen())
+            {
+                let _ = writeln!(file, "\n── couldn't start: {why} ──");
+            }
+            booting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&computer.dir);
+        });
+    }
+
+    /// Its person's pointer and keys on its display, while they have the
+    /// keyboard: refused otherwise, as typed lines are.
+    pub fn display_input(&self, uid: u32, id: &str, events: &[DisplayInput]) -> Result<()> {
+        let (computer, meta) = self.find(uid, id)?;
+        if !self.hypervisor.display() {
+            return Err(refuse(
+                "this computer's screen is a terminal: type lines on it",
+            ));
+        }
+        if !self.taken_over(uid, id) {
+            return Err(refuse(format!(
+                "take over {} first: it's {}'s keyboard until then",
+                meta.name, meta.name
+            )));
+        }
+        if meta.stored.is_some() || !self.hypervisor.running(&computer) {
+            return Err(refuse(format!(
+                "{} isn't running: wake it first",
+                meta.name
+            )));
+        }
+        if events.is_empty() || events.len() > glass_api::DISPLAY_INPUT_MAX {
+            return Err(refuse(format!(
+                "1 to {} input events at a time",
+                glass_api::DISPLAY_INPUT_MAX
+            )));
+        }
+        self.hypervisor
+            .send_input(&computer, events)
+            .map_err(refuse)
     }
 
     /// A line its person typed while they have the keyboard: the command
@@ -1278,6 +1382,123 @@ mod tests {
             role: "Matches invoices to payments".into(),
             agent: "desktop-agent".parse().unwrap(),
         }
+    }
+
+    /// A computer with a display, standing in for a Glasshouse OS VM: its
+    /// display a fixed picture, what its person does on it kept.
+    #[derive(Debug, Default)]
+    struct Display {
+        inputs: Mutex<Vec<DisplayInput>>,
+    }
+
+    impl Hypervisor for Display {
+        fn kind(&self) -> &'static str {
+            "Glasshouse OS virtual machine"
+        }
+        fn contained(&self) -> bool {
+            true
+        }
+        fn start(&self, computer: &ComputerSpec) -> std::result::Result<(), String> {
+            fs::create_dir_all(&computer.dir).map_err(|e| e.to_string())
+        }
+        fn running(&self, computer: &ComputerSpec) -> bool {
+            computer.dir.exists()
+        }
+        fn command(&self, _: &ComputerSpec, _: &TaskRun) -> std::result::Result<Command, String> {
+            Err("not in this test".into())
+        }
+        fn host_path(&self, _: &ComputerSpec, _: &Path) -> Option<PathBuf> {
+            None
+        }
+        fn suspend(&self, _: &ComputerSpec) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        fn display(&self) -> bool {
+            true
+        }
+        fn frame(&self, _: &ComputerSpec) -> std::result::Result<Frame, String> {
+            let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+            png.extend_from_slice(&1280u32.to_be_bytes());
+            png.extend_from_slice(&800u32.to_be_bytes());
+            Frame::from_png(png)
+        }
+        fn send_input(
+            &self,
+            _: &ComputerSpec,
+            events: &[DisplayInput],
+        ) -> std::result::Result<(), String> {
+            self.inputs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(events);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn adr0072_only_its_person_sees_its_display_and_drives_it_only_once_taken_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let display = Arc::new(Display::default());
+        let sandbox =
+            ComputerSandbox::new(dir.path().join("computers"), display.clone(), 1024, 1).unwrap();
+        let (uid, gid) = me();
+        let view = sandbox.make(uid, gid, &reconciler()).unwrap();
+        assert!(view.display, "a computer with a display says so");
+
+        let (frame, version, unchanged) = sandbox.frame(uid, "reconciler", None).unwrap();
+        assert_eq!((frame.width, frame.height), (1280, 800));
+        assert!(!unchanged);
+        let (_, again, unchanged) = sandbox.frame(uid, "reconciler", Some(&version)).unwrap();
+        assert_eq!(again, version);
+        assert!(unchanged, "the same picture isn't sent twice");
+
+        // Someone else: no computer of that name for them, seen or driven.
+        let other = uid + 1;
+        assert!(sandbox.frame(other, "reconciler", None).is_err());
+        let click = [
+            DisplayInput::Move { x: 10, y: 10 },
+            DisplayInput::Button {
+                button: glass_api::PointerButton::Left,
+                down: true,
+            },
+        ];
+        assert!(sandbox.display_input(other, "reconciler", &click).is_err());
+
+        // Its person, watching: refused until they take it over.
+        let refused = sandbox
+            .display_input(uid, "reconciler", &click)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("take over"), "{refused}");
+        sandbox.take_over(uid, "reconciler").unwrap();
+        assert!(sandbox.display_input(other, "reconciler", &click).is_err());
+        sandbox.display_input(uid, "reconciler", &click).unwrap();
+        assert!(sandbox.display_input(uid, "reconciler", &[]).is_err());
+        let too_many = vec![DisplayInput::Wheel { dy: 1 }; glass_api::DISPLAY_INPUT_MAX + 1];
+        assert!(sandbox.display_input(uid, "reconciler", &too_many).is_err());
+        sandbox.hand_back(uid, "reconciler").unwrap();
+        assert!(sandbox.display_input(uid, "reconciler", &click).is_err());
+
+        assert_eq!(
+            *display.inputs.lock().unwrap(),
+            click.to_vec(),
+            "only what its person did while they had it reached it"
+        );
+    }
+
+    #[test]
+    fn adr0072_a_terminal_computer_has_no_display_to_drive() {
+        let (_dir, sandbox) = sandbox();
+        let (uid, gid) = me();
+        let view = sandbox.make(uid, gid, &reconciler()).unwrap();
+        assert!(!view.display);
+        assert!(sandbox.frame(uid, "reconciler", None).is_err());
+        sandbox.take_over(uid, "reconciler").unwrap();
+        assert!(
+            sandbox
+                .display_input(uid, "reconciler", &[DisplayInput::Wheel { dy: 1 }])
+                .is_err()
+        );
     }
 
     #[test]

@@ -46,6 +46,7 @@ impl StandInGlassd {
             disk_bytes: 1 << 20,
             live_tasks: vec![self.task],
             taken_over: false,
+            display: false,
             stored: None,
             created_at: Timestamp::now(),
             personas: vec![glass_api::PersonaView {
@@ -493,6 +494,7 @@ impl Handler for PeopleGlassd {
                     disk_bytes: 0,
                     live_tasks: Vec::new(),
                     taken_over: false,
+                    display: false,
                     stored: None,
                     created_at: Timestamp::now(),
                     personas: vec![glass_api::PersonaView {

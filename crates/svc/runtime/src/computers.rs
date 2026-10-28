@@ -6,7 +6,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use glass_api::{ComputerNew, ComputerView, PersonaNew, ScreenInput, ScreenRequest, ScreenView};
+use glass_api::{
+    ComputerNew, ComputerView, DisplayInputRequest, FrameRequest, FrameView, PersonaNew,
+    ScreenInput, ScreenRequest, ScreenView,
+};
 use glass_audit::{AuditEvent, EventKind};
 use glass_computers::sandbox::ComputerSandbox;
 
@@ -137,6 +140,31 @@ impl Runtime {
     pub fn computer_screen(&self, caller: &Caller, request: &ScreenRequest) -> Result<ScreenView> {
         let computers = self.computers()?;
         blocking(|| computers.screen(caller.uid, &request.id, request.offset)).map_err(refused)
+    }
+
+    /// What its display shows (ADR 0072): the picture, unless it's the
+    /// version the caller has.
+    pub fn computer_frame(&self, caller: &Caller, request: &FrameRequest) -> Result<FrameView> {
+        let computers = self.computers()?;
+        let (frame, version, unchanged) =
+            blocking(|| computers.frame(caller.uid, &request.id, request.since.as_deref()))
+                .map_err(refused)?;
+        Ok(FrameView {
+            version,
+            width: frame.width,
+            height: frame.height,
+            png: (!unchanged).then(|| glass_managed::base64::encode(&frame.png)),
+            taken_over: computers.taken_over(caller.uid, &request.id),
+        })
+    }
+
+    /// Its person's pointer and keys on its display, while they have it.
+    /// Taking it over and handing it back are on the record; what they do
+    /// on it in between is theirs, as on their own laptop.
+    pub fn computer_display(&self, caller: &Caller, request: &DisplayInputRequest) -> Result<()> {
+        let computers = self.computers()?;
+        blocking(|| computers.display_input(caller.uid, &request.id, &request.events))
+            .map_err(refused)
     }
 
     /// Its person takes the keyboard. The agent's running tasks carry on;

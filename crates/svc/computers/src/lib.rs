@@ -6,11 +6,14 @@
 //!   backend over a hypervisor: one computer per agent, each task run in it.
 //! - [`namespaces`]: Linux namespaces (`unshare`), where there's no KVM.
 //! - [`firecracker`]: Firecracker microVMs, on AWS.
+//! - [`qemu`]: Glasshouse OS computers, with a desktop to show and drive
+//!   (ADR 0072).
 //! - [`store`]: where a computer lives while it sleeps: chunks in S3, or a
 //!   folder standing in for it.
 
 pub mod firecracker;
 pub mod hypervisor;
 pub mod namespaces;
+pub mod qemu;
 pub mod sandbox;
 pub mod store;

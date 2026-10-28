@@ -19,6 +19,9 @@
 # people (ADR 0067): the front as the account glass-agents (made if
 # missing; root only), behind the stand-in load balancer at
 # $GLASS_LOCAL_LOAD_BALANCER, which sends people to GLASS_AGENTS_LISTEN.
+# GLASS_DEV_OS_COMPUTERS=1 makes each person's computer a Glasshouse OS VM
+# whose desktop the Agents app shows and takes over (ADR 0072;
+# tools/dev/host-run.sh says what it needs).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)

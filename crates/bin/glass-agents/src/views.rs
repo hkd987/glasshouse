@@ -117,6 +117,7 @@ fn computer_view(computer: &ComputerView) -> api::ComputerView {
             at: time(&s.at),
             place: s.place.clone(),
         }),
+        display: computer.display,
     }
 }
 
@@ -441,6 +442,7 @@ mod tests {
             disk_bytes: 4096,
             live_tasks: Vec::new(),
             taken_over: false,
+            display: false,
             stored: None,
             created_at: Timestamp::from_unix_seconds(1_700_000_000).unwrap(),
             personas: vec![persona()],

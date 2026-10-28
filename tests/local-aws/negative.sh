@@ -19,6 +19,8 @@
 #     names that aren't names.
 #   - the keyboard: typing without it, asking while he has it (refused,
 #     saying why), asking once it's handed back.
+#   - the display: none on a terminal computer, and nobody else's to see
+#     or drive.
 # Needs root: it makes the front's account, as the stack does.
 set -Eeuo pipefail
 trap 'echo "negative: stopped at line $LINENO: $BASH_COMMAND" >&2' ERR
@@ -154,6 +156,16 @@ ask_and_wait sam closer "$(run 'echo asked-after')"
 # Read whole before searching: grep -q stopping early would break the pipe.
 after=$(screen sam closer)
 if grep -q asked-after <<<"$after"; then pass "  and the next ask runs"; else fail "  the next ask didn't run: $(tail -3 <<<"$after")"; fi
+
+# --- the display (ADR 0072) --------------------------------------------------
+# These computers are terminals; a Glasshouse OS computer's display is
+# driven only by its person, once taken over (glass-computers' tests).
+key='{"events":[{"kind":"key","code":"KeyA","down":true}]}'
+expect "a terminal computer has no desktop to show" 409 "$(as sam GET agents/closer/display)"
+expect "  nor to drive" 409 "$(as sam POST agents/closer/display "$key")"
+expect "Dana can't see Sam's computer's display" 404 "$(as dana GET agents/helper-3/display)"
+expect "  nor drive it" 404 "$(as dana POST agents/helper-3/display "$key")"
+expect "input of the wrong shape" 400 "$(as sam POST agents/closer/display '{"events":[{"kind":"teleport"}]}')"
 
 stop_host
 trap - EXIT

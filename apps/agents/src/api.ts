@@ -54,7 +54,27 @@ export interface ComputerView {
   disk_bytes?: number;
   /** Asleep: what it takes in storage, and since when. */
   stored?: Stored;
+  /** It has a display of its own, a Glasshouse OS desktop, to watch and,
+   * taken over, to drive (ADR 0072); otherwise its screen is a terminal. */
+  display?: boolean;
 }
+
+/** `GET /api/v1/agents/<id>/display?since=<version>`. */
+export interface Display {
+  version: string;
+  width: number;
+  height: number;
+  /** PNG in base64; left out when it's the version asked about. */
+  png?: string;
+  taken_over: boolean;
+}
+
+/** One thing the person does on the display, while they have it. */
+export type DisplayInput =
+  | { kind: "move"; x: number; y: number }
+  | { kind: "button"; button: "left" | "middle" | "right"; down: boolean }
+  | { kind: "wheel"; dy: number }
+  | { kind: "key"; code: string; down: boolean };
 
 export interface Stored {
   bytes: number;

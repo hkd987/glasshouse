@@ -20,8 +20,9 @@ use std::time::Duration;
 use glass_agents_api as api;
 use glass_api::{
     AgentSummary, AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalView, ComputerRef,
-    ComputerView, PersonaNew, PersonaView, ScreenInput, ScreenRequest, ScreenView, TaskDetail,
-    TaskRef, TaskRequest, TaskView, UndoReport, UndoRequest, methods,
+    ComputerView, DisplayInput, DisplayInputRequest, FrameRequest, FrameView, PersonaNew,
+    PersonaView, PointerButton, ScreenInput, ScreenRequest, ScreenView, TaskDetail, TaskRef,
+    TaskRequest, TaskView, UndoReport, UndoRequest, methods,
 };
 use glass_http::{ReadError, Request, Response};
 use serde::Serialize;
@@ -586,6 +587,11 @@ impl Front {
                 ok(&self.computer(id, methods::COMPUTER_WAKE).await?)
             }
             ("POST", ["agents", id, "input"]) => ok(&self.input(id, body(request)?).await?),
+            ("GET", ["agents", id, "display"]) => {
+                let since = query(&request.query, "since").map(str::to_owned);
+                ok(&self.display(id, since).await?)
+            }
+            ("POST", ["agents", id, "display"]) => ok(&self.drive(id, body(request)?).await?),
             ("POST", ["agents", id, "undo"]) => ok(&self.undo(id).await?),
             ("GET", ["approvals"]) => ok(&self.approvals().await?),
             ("POST", ["approvals", id]) => ok(&self.answer(id, body(request)?).await?),
@@ -887,6 +893,63 @@ impl Front {
             })?;
         self.changed(None);
         self.view(id).await
+    }
+
+    /// What the display of the computer the agent works on shows (ADR
+    /// 0072): unchanged since `since`, no picture.
+    async fn display(&self, id: &str, since: Option<String>) -> Reply<api::Display> {
+        let (computer, _, _) = self.find(id).await?;
+        let since = since.filter(|v| v.len() <= 64 && v.bytes().all(|b| b.is_ascii_hexdigit()));
+        let frame: FrameView = self
+            .glassd
+            .call(
+                methods::COMPUTER_FRAME,
+                FrameRequest {
+                    id: computer.id,
+                    since,
+                },
+            )
+            .await?;
+        Ok(api::Display {
+            version: frame.version,
+            width: frame.width,
+            height: frame.height,
+            png: frame.png,
+            taken_over: frame.taken_over,
+        })
+    }
+
+    /// The person's pointer and keys on that display, while they have it.
+    async fn drive(&self, id: &str, input: api::DisplayEvents) -> Reply<serde_json::Value> {
+        let (computer, _, _) = self.find(id).await?;
+        let events = input
+            .events
+            .into_iter()
+            .map(|e| match e {
+                api::DisplayInput::Move { x, y } => DisplayInput::Move { x, y },
+                api::DisplayInput::Button { button, down } => DisplayInput::Button {
+                    button: match button {
+                        api::Button::Left => PointerButton::Left,
+                        api::Button::Middle => PointerButton::Middle,
+                        api::Button::Right => PointerButton::Right,
+                    },
+                    down,
+                },
+                api::DisplayInput::Wheel { dy } => DisplayInput::Wheel { dy },
+                api::DisplayInput::Key { code, down } => DisplayInput::Key { code, down },
+            })
+            .collect();
+        let _: serde_json::Value = self
+            .glassd
+            .call(
+                methods::COMPUTER_DISPLAY,
+                DisplayInputRequest {
+                    id: computer.id,
+                    events,
+                },
+            )
+            .await?;
+        Ok(serde_json::json!({}))
     }
 
     async fn input(&self, id: &str, input: api::Input) -> Reply<api::Screen> {

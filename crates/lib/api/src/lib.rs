@@ -38,8 +38,9 @@ pub use apps::{
     app_bridge_port, app_methods,
 };
 pub use computer::{
-    ComputerNew, ComputerRef, ComputerState, ComputerView, INPUT_MAX_BYTES, PERSON_COMPUTER,
-    PERSONAS_MAX, PersonaNew, PersonaRef, PersonaView, ScreenInput, ScreenRequest, ScreenView,
+    ComputerNew, ComputerRef, ComputerState, ComputerView, DISPLAY_INPUT_MAX, DisplayInput,
+    DisplayInputRequest, FrameRequest, FrameView, INPUT_MAX_BYTES, PERSON_COMPUTER, PERSONAS_MAX,
+    PersonaNew, PersonaRef, PersonaView, PointerButton, ScreenInput, ScreenRequest, ScreenView,
     StoredView,
 };
 pub use hardware::{PatchApply, PatchStatus, PatchTrial, TrialState};
@@ -133,6 +134,12 @@ pub mod methods {
     /// [`crate::ScreenInput`] → `()`: runs a line its person typed; what it
     /// prints shows on the screen. Only while taken over.
     pub const COMPUTER_INPUT: &str = "computer.input";
+    /// [`crate::FrameRequest`] → [`crate::FrameView`]: what its display
+    /// shows, for a computer with one (ADR 0072).
+    pub const COMPUTER_FRAME: &str = "computer.frame";
+    /// [`crate::DisplayInputRequest`] → `()`: its person's pointer and keys
+    /// on its display. Only while taken over.
+    pub const COMPUTER_DISPLAY: &str = "computer.display";
     /// [`crate::ComputerRef`] → [`crate::ComputerView`]: saved to the store
     /// and gone from this host (ADR 0065 §11).
     pub const COMPUTER_SLEEP: &str = "computer.sleep";

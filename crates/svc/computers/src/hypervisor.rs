@@ -10,6 +10,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use glass_api::DisplayInput;
 use glass_platform::sandbox::ProcessSpec;
 
 /// One agent's computer.
@@ -40,6 +41,30 @@ pub struct TaskRun {
     /// The task's own folder inside the computer: `/work/<task>`.
     pub workdir: PathBuf,
     pub process: ProcessSpec,
+}
+
+/// A picture of a computer's display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Frame {
+    /// `png`, its size read from its header.
+    pub fn from_png(png: Vec<u8>) -> Result<Self, String> {
+        const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+        if png.len() < 24 || &png[..8] != SIGNATURE || &png[12..16] != b"IHDR" {
+            return Err("The display's picture isn't a PNG.".into());
+        }
+        let at = |i: usize| u32::from_be_bytes([png[i], png[i + 1], png[i + 2], png[i + 3]]);
+        Ok(Self {
+            width: at(16),
+            height: at(20),
+            png,
+        })
+    }
 }
 
 /// What runs computers.
@@ -77,5 +102,23 @@ pub trait Hypervisor: Send + Sync + fmt::Debug {
     /// glassd left running in computers under `dir`, and says what.
     fn stop_leftovers(&self, _dir: &Path) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Whether its computers have a display of their own, a Glasshouse OS
+    /// desktop, to show and to drive (ADR 0072); otherwise their screen is
+    /// a terminal ([`ComputerSpec::screen`]).
+    fn display(&self) -> bool {
+        false
+    }
+
+    /// What a running computer's display shows now.
+    fn frame(&self, _computer: &ComputerSpec) -> Result<Frame, String> {
+        Err("This computer has no display: its screen is a terminal.".into())
+    }
+
+    /// Its person's pointer and keys, in order, on a running computer's
+    /// display.
+    fn send_input(&self, _computer: &ComputerSpec, _events: &[DisplayInput]) -> Result<(), String> {
+        Err("This computer has no display: its screen is a terminal.".into())
     }
 }

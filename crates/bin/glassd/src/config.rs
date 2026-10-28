@@ -447,6 +447,8 @@ pub struct ComputersConfig {
     pub sleep_after_idle_minutes: u32,
     /// `[sandbox.computers.firecracker]`, for `hypervisor = "firecracker"`.
     pub firecracker: Option<FirecrackerSettings>,
+    /// `[sandbox.computers.qemu]`, for `hypervisor = "qemu"`.
+    pub qemu: Option<QemuSettings>,
 }
 
 impl Default for ComputersConfig {
@@ -464,6 +466,7 @@ impl Default for ComputersConfig {
             folder: None,
             sleep_after_idle_minutes: 30,
             firecracker: None,
+            qemu: None,
         }
     }
 }
@@ -478,6 +481,9 @@ impl ComputersConfig {
                 bail!("sandbox.computers.store = \"folder\" needs folder")
             }
             _ => {}
+        }
+        if self.hypervisor == HypervisorKind::Qemu && self.qemu.is_none() {
+            bail!("hypervisor = \"qemu\" needs [sandbox.computers.qemu]");
         }
         if self.hypervisor == HypervisorKind::Firecracker && self.firecracker.is_none() {
             bail!("hypervisor = \"firecracker\" needs [sandbox.computers.firecracker]");
@@ -494,6 +500,9 @@ pub enum HypervisorKind {
     Namespaces,
     /// Firecracker microVMs, on hosts with KVM (AWS's C8i, M8i, R8i).
     Firecracker,
+    /// Glasshouse OS computers under QEMU, each with a desktop to show and
+    /// drive (ADR 0072). KVM where there is one; emulated otherwise.
+    Qemu,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -523,6 +532,67 @@ pub struct FirecrackerSettings {
 
 fn default_data_disk_gib() -> u64 {
     16
+}
+
+/// `[sandbox.computers.qemu]`: the Glasshouse OS image computers start
+/// from, and how they run (ADR 0072).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QemuSettings {
+    /// The Glasshouse OS disk (qcow2) each computer's disk is a layer over;
+    /// it must not change while they use it.
+    pub image: PathBuf,
+    pub firmware_code: PathBuf,
+    /// The firmware variables each start copies.
+    pub firmware_vars: PathBuf,
+    /// The exec channel's key, as the image trusts it.
+    pub ssh_key: PathBuf,
+    #[serde(default = "default_qemu")]
+    pub qemu: PathBuf,
+    #[serde(default = "default_qemu_img")]
+    pub qemu_img: PathBuf,
+    /// `kvm` when this host can, else emulated.
+    pub accel: Option<String>,
+    pub cpu: Option<String>,
+    #[serde(default = "default_screen_width")]
+    pub width: u32,
+    #[serde(default = "default_screen_height")]
+    pub height: u32,
+    /// The account the desktop runs as in the guest.
+    #[serde(default = "default_desktop_user")]
+    pub desktop_user: String,
+    #[serde(default = "default_agents_dir")]
+    pub agents_dir: PathBuf,
+    #[serde(default = "default_boot_timeout_secs")]
+    pub boot_timeout_secs: u64,
+}
+
+fn default_qemu() -> PathBuf {
+    "qemu-system-x86_64".into()
+}
+
+fn default_qemu_img() -> PathBuf {
+    "qemu-img".into()
+}
+
+fn default_screen_width() -> u32 {
+    1280
+}
+
+fn default_screen_height() -> u32 {
+    800
+}
+
+fn default_desktop_user() -> String {
+    "demo".into()
+}
+
+fn default_agents_dir() -> PathBuf {
+    "/usr/local/libexec/glasshouse".into()
+}
+
+fn default_boot_timeout_secs() -> u64 {
+    600
 }
 
 /// `[sandbox.limits]`: agents run below the person's CPU priority, and each

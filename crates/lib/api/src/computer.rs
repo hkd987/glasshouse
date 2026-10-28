@@ -44,6 +44,11 @@ pub struct ComputerView {
     /// Its person's agents, all working on it (ADR 0068), oldest first.
     #[serde(default)]
     pub personas: Vec<PersonaView>,
+    /// It has a display of its own, a Glasshouse OS desktop, to watch and,
+    /// taken over, to drive with a pointer and keys; not only a terminal
+    /// (ADR 0072).
+    #[serde(default)]
+    pub display: bool,
 }
 
 /// One of a person's agents: a name and a role, a catalog agent to run,
@@ -161,3 +166,63 @@ pub struct ScreenInput {
 
 /// The longest line a person types on a computer.
 pub const INPUT_MAX_BYTES: usize = 4096;
+
+/// `computer.frame`: what its display shows (ADR 0072).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameRequest {
+    pub id: String,
+    /// The version the caller has: unchanged since, the answer leaves the
+    /// picture out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+/// A picture of a computer's display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameView {
+    /// Changes when the picture does.
+    pub version: String,
+    pub width: u32,
+    pub height: u32,
+    /// The picture, PNG in base64; left out when it's the version the
+    /// caller had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub png: Option<String>,
+    pub taken_over: bool,
+}
+
+/// `computer.display`: its person's pointer and keys, while they have it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayInputRequest {
+    pub id: String,
+    /// In order; at most [`DISPLAY_INPUT_MAX`].
+    pub events: Vec<DisplayInput>,
+}
+
+/// The most input events in one call.
+pub const DISPLAY_INPUT_MAX: usize = 64;
+
+/// One thing a person does on a computer's display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DisplayInput {
+    /// The pointer goes to (`x`, `y`), in the display's pixels.
+    Move { x: u32, y: u32 },
+    /// A button goes down or up where the pointer is.
+    Button { button: PointerButton, down: bool },
+    /// The wheel turns: `dy` notches, up when negative.
+    Wheel { dy: i32 },
+    /// A key goes down or up, named by its place on the keyboard as a
+    /// browser's `KeyboardEvent.code` does: "KeyA", "Enter", "ShiftLeft".
+    Key { code: String, down: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointerButton {
+    Left,
+    Middle,
+    Right,
+}

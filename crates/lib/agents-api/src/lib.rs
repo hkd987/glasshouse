@@ -109,6 +109,10 @@ pub struct ComputerView {
     /// Asleep: bytes it takes in storage, and when it went to sleep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored: Option<Stored>,
+    /// It has a display of its own, a Glasshouse OS desktop, to watch and,
+    /// taken over, to drive (ADR 0072); otherwise its screen is a terminal.
+    #[serde(default)]
+    pub display: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +309,46 @@ pub struct Screen {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Input {
     pub line: String,
+}
+
+/// `GET /api/v1/agents/<id>/display?since=<version>`: what its computer's
+/// display shows (ADR 0072).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Display {
+    /// Changes when the picture does.
+    pub version: String,
+    pub width: u32,
+    pub height: u32,
+    /// PNG, in base64; left out when it's the version asked about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub png: Option<String>,
+    pub taken_over: bool,
+}
+
+/// `POST /api/v1/agents/<id>/display`: the person's pointer and keys on
+/// it, in order, while they have it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayEvents {
+    pub events: Vec<DisplayInput>,
+}
+
+/// One thing the person does on the display. Positions are the display's
+/// pixels; keys are named by their place, as `KeyboardEvent.code` does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DisplayInput {
+    Move { x: u32, y: u32 },
+    Button { button: Button, down: bool },
+    Wheel { dy: i32 },
+    Key { code: String, down: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Button {
+    Left,
+    Middle,
+    Right,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

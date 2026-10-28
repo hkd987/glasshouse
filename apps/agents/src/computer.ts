@@ -1,14 +1,17 @@
 // Its computer, full screen (ADR 0065 §4, §12): the screen as a terminal,
 // read from where the last read ended and appended; Take over pauses the
 // agent and gives the person a command line, on the record; Hand back
-// returns it. This view may be technical; it says plainly that the agent
-// waits while the person has it.
+// returns it. A computer with a display of its own, a Glasshouse OS, shows
+// its desktop first, and Take over gives the person its pointer and
+// keyboard (ADR 0072). This view may be technical; it says plainly that the
+// agent waits while the person has it.
 
 import { h, show } from "@glasshouse/sdk";
 
 import { type AgentView, type Screen, SignedOut, agentPath, api } from "./api.ts";
 import { agent, app, control, loadDetail, undoControl } from "./app.ts";
 import { sleep } from "./events.ts";
+import { DesktopView } from "./desktop.ts";
 import { computerWords, undoable } from "./model.ts";
 import { ScreenBuffer } from "./screen.ts";
 import { button, focusHeading, icon, keepFocus, notice } from "./ui.ts";
@@ -36,6 +39,10 @@ export class ComputerScreen {
   private wake: AbortController | null = null;
   /** One screen request at a time, so an answer can't arrive out of order. */
   private chain: Promise<unknown> = Promise.resolve();
+  /** Its desktop, for a computer with a display; and which view shows. */
+  private desktop: DesktopView | null = null;
+  private mode: "desktop" | "terminal" = "desktop";
+  private readonly body = h("div", { class: "screen-body" });
 
   constructor(main: HTMLElement, id: string) {
     this.id = id;
@@ -55,12 +62,25 @@ export class ComputerScreen {
       h(
         "div",
         { class: "screen-wrap" },
-        h("div", { class: "screen-frame" }, this.frameHead, h("div", { class: "screen-body" }, this.term, this.cover), this.inputBox, this.lineError),
+        h("div", { class: "screen-frame" }, this.frameHead, this.body, this.inputBox, this.lineError),
       ),
       h("p", { class: "sleep-line" }, "Your computer sleeps after a while with nothing to do: saved to your company’s storage, nothing left running."),
     );
+    show(this.body, this.term, this.cover);
     show(main, this.root);
     this.term.textContent = "Connecting to its screen…";
+  }
+
+  /** The desktop, made the first time the computer says it has one. */
+  private desktopOf(): DesktopView {
+    if (!this.desktop) {
+      const desktop = new DesktopView(this.id);
+      desktop.onError = (message) => show(this.lineError, notice(message, "bad"));
+      this.body.prepend(desktop.element);
+      desktop.start();
+      this.desktop = desktop;
+    }
+    return this.desktop;
   }
 
   async open(): Promise<void> {
@@ -83,6 +103,8 @@ export class ComputerScreen {
     if (!view) return;
     const yours = this.yours(view);
     const state = this.screen?.state ?? view.computer.state;
+    const desktop = view.computer.display && state !== "asleep" ? this.desktopOf() : null;
+    const showDesktop = desktop !== null && this.mode === "desktop";
     const words = computerWords({ ...view.computer, state });
     document.title = "Your computer · Glasshouse Agents";
     const detail = app.details.get(this.id);
@@ -115,13 +137,22 @@ export class ComputerScreen {
         ? h(
             "p",
             { class: "control-note", role: "status" },
-            "Your agents wait for you: asking them is refused until you hand your computer back. It's yours: type below. What you do here is on the record.",
+            showDesktop
+              ? "Your agents wait for you: asking them is refused until you hand your computer back. It's yours: click and type on it. Taking it over and handing it back are on the record."
+              : "Your agents wait for you: asking them is refused until you hand your computer back. It's yours: type below. What you do here is on the record.",
           )
         : null,
     );
     show(
       this.frameHead,
-      h("span", {}, "Terminal"),
+      desktop
+        ? h(
+            "span",
+            { class: "screen-tabs", role: "group", "aria-label": "What to show" },
+            button("Desktop", () => this.choose("desktop"), showDesktop ? "tab on" : "tab", { "aria-pressed": String(showDesktop) }),
+            button("Terminal", () => this.choose("terminal"), showDesktop ? "tab" : "tab on", { "aria-pressed": String(!showDesktop) }),
+          )
+        : h("span", {}, "Terminal"),
       h("span", { id: "screen-state" }, `${words.short} · ${view.computer.kind}${view.computer.contained ? "" : " (not a security boundary)"}`),
     );
     show(
@@ -138,11 +169,23 @@ export class ComputerScreen {
           ? h("div", { class: "screen-cover light" }, h("span", {}, words.line))
           : null,
     );
-    this.inputBox.hidden = !yours;
+    this.inputBox.hidden = !yours || showDesktop;
+    this.term.hidden = showDesktop;
+    if (desktop) {
+      desktop.element.hidden = !showDesktop;
+      desktop.setYours(yours && showDesktop);
+    }
     this.root.classList.toggle("is-yours", yours);
+    this.root.classList.toggle("has-desktop", showDesktop);
+  }
+
+  private choose(mode: "desktop" | "terminal"): void {
+    this.mode = mode;
+    this.draw();
   }
 
   destroy(): void {
+    this.desktop?.stop();
     this.abort.abort();
     this.wake?.abort();
     this.root.remove();
@@ -151,6 +194,7 @@ export class ComputerScreen {
   /** Reads now, as when the events stream says it changed. */
   poke(): void {
     this.wake?.abort();
+    this.desktop?.poke();
   }
 
   private yours(view: AgentView): boolean {
@@ -209,7 +253,8 @@ export class ComputerScreen {
     if (this.screen) this.screen = { ...this.screen, taken_over: view.status === "taken_over", state: view.computer.state };
     this.draw();
     this.poke();
-    if (what === "take-over") this.line.focus();
+    if (what === "take-over" && this.desktop && this.mode === "desktop") this.desktop.element.focus({ preventScroll: true });
+    else if (what === "take-over") this.line.focus();
     else this.bar.querySelector<HTMLElement>('[data-key="control"]')?.focus();
   }
 

@@ -127,6 +127,15 @@ impl Handler for ControlApi {
             methods::COMPUTER_INPUT => {
                 to_result(&rt.computer_input(&caller, parse_params(params)?)?)
             }
+            methods::COMPUTER_FRAME => {
+                let request: glass_api::FrameRequest = parse_params(params)?;
+                to_result(&rt.computer_frame(&caller, &request)?)
+            }
+            methods::COMPUTER_DISPLAY => {
+                let request: glass_api::DisplayInputRequest = parse_params(params)?;
+                rt.computer_display(&caller, &request)?;
+                to_result(&())
+            }
             methods::COMPUTER_SLEEP => {
                 let computer: glass_api::ComputerRef = parse_params(params)?;
                 to_result(&rt.computer_sleep(&caller, &computer.id).await?)

@@ -537,6 +537,47 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
                         config.sandbox.agent_dirs.clone(),
                     ))
                 }
+                HypervisorKind::Qemu => {
+                    let q = settings
+                        .qemu
+                        .clone()
+                        .context("[sandbox.computers.qemu] is missing")?;
+                    let kvm = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open("/dev/kvm")
+                        .is_ok();
+                    if !kvm {
+                        tracing::warn!("Glasshouse OS computers emulated: no KVM, so slow");
+                    }
+                    Arc::new(glass_computers::qemu::QemuHypervisor::new(
+                        glass_computers::qemu::QemuConfig {
+                            qemu: q.qemu,
+                            qemu_img: q.qemu_img,
+                            image: q.image,
+                            firmware_code: q.firmware_code,
+                            firmware_vars: q.firmware_vars,
+                            accel: q.accel.unwrap_or_else(|| {
+                                if kvm { "kvm" } else { "tcg,thread=multi" }.into()
+                            }),
+                            // QEMU 8.2 emulates AVX wrongly (lib.sh): none under TCG.
+                            cpu: q.cpu.unwrap_or_else(|| {
+                                if kvm {
+                                    "host"
+                                } else {
+                                    "max,la57=off,avx=off,avx2=off"
+                                }
+                                .into()
+                            }),
+                            width: q.width,
+                            height: q.height,
+                            ssh_key: q.ssh_key,
+                            desktop_user: q.desktop_user,
+                            agents_dir: q.agents_dir,
+                            boot_timeout: std::time::Duration::from_secs(q.boot_timeout_secs),
+                        },
+                    ))
+                }
                 HypervisorKind::Firecracker => {
                     let fc = settings
                         .firecracker
