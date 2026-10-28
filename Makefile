@@ -193,6 +193,25 @@ console-lint: apps/node_modules ## Admin console: clippy, types, and no base-sys
 agents-dev: ## Glasshouse Agents here: glassd with agent computers (namespaces) and the front on http://127.0.0.1:7500 (GLASS_AGENTS_MODEL=anthropic for Claude)
 	tools/dev/agents-run.sh
 
+# AWS on this machine (deploy/local): moto for S3 and KMS, and stand-ins for
+# the instance role, Marketplace metering and the load balancer's sign-in.
+.PHONY: aws-local aws-local-down aws-local-test
+aws-local: ## AWS on this machine for Glasshouse Agents (Docker, or processes without it); writes build/local-aws/env
+	tools/dev/local-aws.sh up
+
+aws-local-down: ## Stop AWS on this machine (moto forgets everything)
+	tools/dev/local-aws.sh down
+
+aws-local-test: aws-local apps-build ## Agent computers to S3 and back, and metering, against AWS on this machine
+	cargo build -p glassd -p glass-agents -p glass -p glass-desktop-agent -p glass-e2e
+	. build/local-aws/env && env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+		AWS_EC2_METADATA_SERVICE_ENDPOINT="$$GLASS_LOCAL_IMDS" GLASS_LOCAL_REGION="$$GLASS_LOCAL_REGION" \
+		GLASS_LOCAL_S3="$$GLASS_LOCAL_S3" GLASS_LOCAL_BUCKET="$$GLASS_LOCAL_BUCKET" \
+		GLASS_LOCAL_KMS_KEY="$$GLASS_LOCAL_KMS_KEY" GLASS_LOCAL_METERING="$$GLASS_LOCAL_METERING" \
+		GLASS_LOCAL_PRODUCT_CODE="$$GLASS_LOCAL_PRODUCT_CODE" \
+		cargo test -p glass-gateway-providers -p glass-computers --lib -- --ignored local_aws
+	tests/local-aws/agents-s3.sh
+
 .PHONY: aws-lint
 aws-lint: ## The stack a buyer deploys on AWS (deploy/aws): cfn-lint, installed into build/tools/cfn-lint on first use
 	@test -x build/tools/cfn-lint/bin/cfn-lint || { python3 -m venv build/tools/cfn-lint && \

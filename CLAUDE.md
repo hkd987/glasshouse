@@ -55,6 +55,11 @@ details this file leaves out.
   - `make console-dev` serves it at http://127.0.0.1:7400 (`FIXTURE=500,50`); `GLASS_DEV_ENROLL=build/console/enrollment.json make dev-host` enrolls glassd.
   - `make console-test`: Rust tests, then Playwright on a 500-device fixture and an enrolled dev-host glassd (page and propagation budgets).
   - `make console-lint`: clippy, types, BR-1; `make lint` runs it when the console changes.
+- Glasshouse Agents (ADR 0066): `make agents-dev` runs glassd with agent
+  computers and the front on :7500. `make aws-local` simulates its AWS
+  (`deploy/local`: moto, instance role, metering, load balancer sign-in),
+  `make aws-local-test` tests against it, and `GLASS_DEV_STORE=s3` sleeps
+  computers to it.
 - Anything a person waits on has a latency budget in `glass-e2e perf`
   (`docs/dev/performance.md`).
 

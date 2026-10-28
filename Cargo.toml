@@ -133,6 +133,11 @@ split-debuginfo = "unpacked"
 [profile.dev.package."*"]
 debug = false
 
+# SHA-256 over every chunk of an agent computer's disk and every S3 body:
+# unoptimized, it holds a sleep to a few MB/s (ADR 0065 §11).
+[profile.dev.package.sha2]
+opt-level = 3
+
 # The FreeBSD VM edit-deploy-test loop (`make vm-deploy`): optimized enough
 # to behave like release, but incremental and without LTO so a one-crate
 # change rebuilds in seconds. Never ship it.

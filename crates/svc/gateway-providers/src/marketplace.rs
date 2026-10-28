@@ -130,12 +130,17 @@ impl MarketplaceMetering {
     /// Region: the service refuses others), or `endpoint` (a VPC endpoint's
     /// DNS name, when private DNS doesn't answer for the regional name).
     /// `credentials` are the host's instance role's.
+    /// Plain HTTP only to a stand-in on this machine's loopback address
+    /// (deploy/local).
     pub fn new(region: &str, endpoint: Option<&str>, credentials: AwsCredentials) -> Self {
         let base = endpoint.map_or_else(
             || format!("https://metering.marketplace.{region}.amazonaws.com"),
             |e| e.trim_end_matches('/').to_owned(),
         );
-        Self::with_http(Http::new(), region, &base, credentials)
+        let local = crate::http::Target::parse(&format!("{base}/"))
+            .is_some_and(|t| !t.tls && crate::console::is_loopback(&t.host));
+        let http = if local { Http::loopback() } else { Http::new() };
+        Self::with_http(http, region, &base, credentials)
     }
 
     fn with_http(http: Http, region: &str, base: &str, credentials: AwsCredentials) -> Self {
@@ -189,7 +194,9 @@ impl MarketplaceMetering {
             &Credentials {
                 access_key_id: self.credentials.access_key_id.expose(),
                 secret_access_key: self.credentials.secret_access_key.expose(),
-                session_token: Some(self.credentials.session_token.expose()),
+                // Long-lived keys (a developer's) have none to send.
+                session_token: Some(self.credentials.session_token.expose())
+                    .filter(|t| !t.is_empty()),
             },
             &self.region,
             SIGNING_NAME,
@@ -455,6 +462,92 @@ mod tests {
                 "DryRun": false,
             })
         );
+    }
+
+    #[test]
+    fn plain_http_only_to_a_stand_in_on_this_machine() {
+        let at = |endpoint: &str| MarketplaceMetering::new("us-east-1", Some(endpoint), role());
+        assert!(!at("http://127.0.0.1:7612").http.https_only);
+        assert!(at("http://metering.example.com").http.https_only);
+        assert!(
+            at("https://vpce-0abc.metering.marketplace.us-east-1.vpce.amazonaws.com")
+                .http
+                .https_only
+        );
+        assert!(
+            MarketplaceMetering::new("us-east-1", None, role())
+                .http
+                .https_only
+        );
+    }
+
+    /// Against the Metering Service's stand-in on this machine
+    /// (deploy/local), which checks every signature: the host's keys come
+    /// from the stand-in metadata service, as an agent host's come from its
+    /// instance role.
+    #[test]
+    #[ignore = "against AWS on this machine: make aws-local-test"]
+    fn adr0066_local_aws_meters_hours_signed_with_the_instance_role() {
+        let var = |name: &str| {
+            std::env::var(name).unwrap_or_else(|_| {
+                panic!("{name} isn't set: make aws-local, then make aws-local-test")
+            })
+        };
+        let (region, endpoint) = (var("GLASS_LOCAL_REGION"), var("GLASS_LOCAL_METERING"));
+        let host = crate::s3::S3Credentials::from_host().unwrap();
+        let client =
+            MarketplaceMetering::new(&region, Some(&endpoint), host.aws_credentials().unwrap());
+        let records = |method: &str| {
+            let reply = Http::loopback()
+                .send(method, &format!("{endpoint}/_fake/records"), &[], b"")
+                .unwrap();
+            serde_json::from_str::<Value>(&reply.body).unwrap()
+        };
+        records("DELETE");
+        let product = var("GLASS_LOCAL_PRODUCT_CODE");
+        let report = |quantity, dry_run| Usage {
+            product_code: &product,
+            hour: OffsetDateTime::now_utc() - time::Duration::hours(2),
+            quantity,
+            dry_run,
+        };
+
+        assert_eq!(
+            client.meter(&report(3, true)).unwrap(),
+            Metered::WouldRecord
+        );
+        assert_eq!(records("GET"), json!([]), "a dry run records nothing");
+        let Metered::Recorded { record_id } = client.meter(&report(3, false)).unwrap() else {
+            panic!("not recorded");
+        };
+        // Sent again, the same record; another quantity, refused.
+        assert_eq!(
+            client.meter(&report(3, false)).unwrap(),
+            Metered::Recorded {
+                record_id: record_id.clone()
+            }
+        );
+        assert!(matches!(
+            client.meter(&report(4, false)),
+            Err(MeteringError::Duplicate(_))
+        ));
+        let kept = records("GET");
+        assert_eq!(kept[0]["record_id"], json!(record_id));
+        assert_eq!(kept[0]["quantity"], json!(3));
+        assert_eq!(kept[0]["dimension"], json!(AGENT_COMPUTER_HOURS));
+
+        // Keys that aren't the role's current ones are refused.
+        let keys = host.keys(OffsetDateTime::now_utc()).unwrap();
+        let forged = AwsCredentials::from_parts(
+            keys.access_key_id,
+            glass_gateway::Secret::new("not-the-roles-secret"),
+            keys.session_token,
+            None,
+        );
+        let refused = MarketplaceMetering::new(&region, Some(&endpoint), forged)
+            .meter(&report(3, false))
+            .unwrap_err();
+        assert!(matches!(refused, MeteringError::Denied(_)), "{refused:?}");
     }
 
     /// The body `meters_an_hour_of_agent_computer_hours_signed_as_the_host`

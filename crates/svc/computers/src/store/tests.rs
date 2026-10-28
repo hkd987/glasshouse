@@ -556,6 +556,86 @@ fn adr0065_s3_blobs_carry_a_computer_to_s3_and_back() {
     );
 }
 
+/// Against S3 and KMS on this machine (deploy/local, moto): the real
+/// client, signed with keys from the stand-in metadata service as an agent
+/// host's are from its instance role, every object under the stack's KMS key.
+#[test]
+#[ignore = "against S3 and KMS on this machine: make aws-local-test"]
+fn adr0065_local_aws_a_computer_goes_to_s3_and_comes_back_the_same() {
+    let var = |name: &str| {
+        std::env::var(name).unwrap_or_else(|_| {
+            panic!("{name} isn't set: make aws-local, then make aws-local-test")
+        })
+    };
+    let client = || {
+        S3Client::new(
+            &glass_gateway_providers::s3::S3Config {
+                bucket: var("GLASS_LOCAL_BUCKET"),
+                region: var("GLASS_LOCAL_REGION"),
+                endpoint: Some(var("GLASS_LOCAL_S3")),
+                kms_key_id: Some(var("GLASS_LOCAL_KMS_KEY")),
+            },
+            glass_gateway_providers::s3::S3Credentials::from_host().unwrap(),
+        )
+        .unwrap()
+    };
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let prefix = format!("test-{}-{nanos}/", std::process::id());
+    let store = Store::new(Arc::new(S3Blobs::new(client(), &prefix)));
+    // Collects at once, with no save under way.
+    let collector =
+        Store::new(Arc::new(S3Blobs::new(client(), &prefix))).with_grace(Duration::ZERO);
+    let tmp = tempfile::tempdir().unwrap();
+    let tree = tmp.path().join("dana");
+    make_tree(&tree);
+    write(
+        &tree.join("work.bin"),
+        &noise(9, 10 * CHUNK_SIZE + 77),
+        0o600,
+    );
+
+    let first = store.save_tree("dana", &tree).unwrap();
+    assert!(first.uploaded > 10 * CHUNK_SIZE as u64, "{first:?}");
+    let woken = tmp.path().join("woken");
+    store.restore_tree("dana", &first.version, &woken).unwrap();
+    assert_eq!(snapshot(&woken), snapshot(&tree));
+    writable(&woken);
+    fs::remove_dir_all(&woken).unwrap();
+
+    // Asleep again unchanged: nothing new goes up. One byte changed: one chunk.
+    let second = store.save_tree("dana", &tree).unwrap();
+    assert_eq!(second.uploaded, 0);
+    let file = OpenOptions::new()
+        .write(true)
+        .open(tree.join("work.bin"))
+        .unwrap();
+    file.write_at(b"!", 5 * CHUNK_SIZE as u64 + 3).unwrap();
+    drop(file);
+    let third = store.save_tree("dana", &tree).unwrap();
+    assert_eq!(third.uploaded, CHUNK_SIZE as u64);
+
+    // Older versions go, and with them the one chunk only they had.
+    store.remove_version("dana", &first.version).unwrap();
+    store.remove_version("dana", &second.version).unwrap();
+    let collected = collector.gc().unwrap();
+    assert_eq!((collected.deleted, collected.freed), (1, CHUNK_SIZE as u64));
+    assert_eq!(
+        store.versions("dana").unwrap(),
+        std::slice::from_ref(&third.version)
+    );
+    store.restore_tree("dana", &third.version, &woken).unwrap();
+    assert_eq!(snapshot(&woken), snapshot(&tree));
+
+    store.remove("dana").unwrap();
+    collector.gc().unwrap();
+    assert_eq!(client().list(&prefix).unwrap(), []);
+    writable(&woken);
+    writable(&tree);
+}
+
 #[test]
 fn adr0065_the_store_folder_writes_whole_objects_and_lists_by_prefix() {
     let tmp = tempfile::tempdir().unwrap();

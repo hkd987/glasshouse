@@ -160,6 +160,20 @@ tenant). `make agents-dev` runs it all on one machine.
     again for the six hours AWS takes it;
   - every report is on the record.
 
+- **AWS on this machine** (`deploy/local`, `make aws-local`): moto for S3
+  and KMS, and stand-ins for the instance metadata service, Marketplace
+  metering (it checks each signature) and the load balancer's sign-in
+  (ES256 `x-amzn-oidc-data`, with its public key). It runs in Docker, or
+  as processes without it.
+  - `make aws-local-test` runs the real clients against it: the store
+    through S3 under KMS, and metering signed with the role's keys. Then
+    glassd sleeps an agent's computer with 300 MB on it to S3 and wakes
+    it the same, byte for byte (14.8 s and 5.3 s here, against moto).
+  - It found the CLI missing a quick task's screen, and dev builds hashing
+    at a few MB/s, both fixed. It also found that a computer's key in the
+    store (`u<uid>-<id>`) isn't unique across hosts or a remade computer
+    (next).
+
 Needs an AWS account (and a Marketplace seller account), a Teams tenant
 and a host with KVM: run each against the real thing.
 
@@ -178,6 +192,9 @@ and a host with KVM: run each against the real thing.
 - **Confidential asks**: glassd says which asks carry labelled data, so
   their detail stays out of Teams.
 - **The store**:
+  - a computer's key from its owner's sign-in subject and an id of its
+    own, with its record kept in the store, so another host wakes it and
+    no two computers share versions;
   - parallel transfers, so a computer wakes fast on S3;
   - a lock against GC deleting a chunk a save reused but hasn't recorded
     yet;

@@ -268,14 +268,13 @@ fn agent_id(api: &Api, named: &str) -> anyhow::Result<String> {
 }
 
 /// Waits for a task to end or ask, printing its computer's screen as it
-/// goes and what it said at the end.
-fn wait_for(api: &Api, agent: &str, task: &str) -> anyhow::Result<()> {
+/// goes and what it said at the end. `offset` is where the screen was
+/// before the task was asked for: a quick task has written to it by the
+/// time this starts.
+fn wait_for(api: &Api, agent: &str, task: &str, mut offset: u64) -> anyhow::Result<()> {
     // Its screen from where this task starts on it: a computer that was
     // asleep gets its whole screen back as it wakes.
     let marker = format!("── task glass-{} ──", &task[task.len().saturating_sub(8)..]);
-    let mut offset = api
-        .get::<api::Screen>(&format!("agents/{agent}/screen"))?
-        .offset;
     let mut before = Some(String::new());
     let started = Instant::now();
     let mut said_waiting = false;
@@ -359,6 +358,9 @@ fn run(command: Command) -> anyhow::Result<()> {
             no_wait,
         } => {
             let id = agent_id(&api, &agent)?;
+            let offset = api
+                .get::<api::Screen>(&format!("agents/{id}/screen"))?
+                .offset;
             let asked: api::Asked = api.post(
                 &format!("agents/{id}/ask"),
                 json!({ "text": text.join(" "), "via": "cli" }),
@@ -366,7 +368,7 @@ fn run(command: Command) -> anyhow::Result<()> {
             if no_wait {
                 println!("Asked {id}: task {}", asked.task);
             } else {
-                wait_for(&api, &id, &asked.task)?;
+                wait_for(&api, &id, &asked.task, offset)?;
             }
         }
         Command::Show { agent, last } => {

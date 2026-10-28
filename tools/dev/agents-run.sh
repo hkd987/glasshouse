@@ -10,9 +10,11 @@
 # GLASS_AGENTS_MODEL=anthropic runs the agents on Claude (claude-opus-5-5,
 # or GLASS_AGENTS_MODEL_ID), its key from GLASS_ANTHROPIC_API_KEY, kept in
 # a file only its owner reads and removed on exit; otherwise the scripted
-# model (no network). GLASS_DEV_DIR, GLASS_DEV_RUN and GLASS_AGENTS_LISTEN
-# (default 127.0.0.1:7500) put things elsewhere; GLASS_DEV_SKIP_BUILD=1 runs
-# what is built.
+# model (no network). GLASS_DEV_DIR, GLASS_DEV_RUN, GLASS_AGENTS_LISTEN
+# (default 127.0.0.1:7500) and GLASS_AGENTS_TOKEN_FILE (default
+# ~/.config/glasshouse/agents.json) put things elsewhere;
+# GLASS_DEV_SKIP_BUILD=1 runs what is built. GLASS_DEV_STORE=s3 keeps
+# computers in S3 on this machine (make aws-local, tools/dev/host-run.sh).
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -63,5 +65,9 @@ for _ in $(seq 1 300); do
 	sleep 0.1
 done
 
+token_file=()
+if [ -n "${GLASS_AGENTS_TOKEN_FILE:-}" ]; then
+	token_file=(--token-file "$GLASS_AGENTS_TOKEN_FILE")
+fi
 "$bin/glass-agents" --listen "$listen" --control-socket "$run/control.sock" \
-	--web "$repo/apps/agents/dist" --name "${GLASS_AGENTS_NAME:-Dana Alvarez}"
+	--web "$repo/apps/agents/dist" --name "${GLASS_AGENTS_NAME:-Dana Alvarez}" "${token_file[@]}"

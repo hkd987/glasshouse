@@ -41,7 +41,7 @@ const HOP_SLACK: Duration = Duration::from_secs(30);
 pub(crate) struct Http {
     /// Why not, if OpenSSL couldn't give us a connector; calls report it.
     tls: Result<native_tls::TlsConnector, String>,
-    https_only: bool,
+    pub(crate) https_only: bool,
     proxy: Option<Proxy>,
     pub(crate) idle: Duration,
     pub(crate) total: Duration,

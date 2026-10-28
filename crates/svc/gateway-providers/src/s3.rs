@@ -575,10 +575,10 @@ enum Source {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Keys {
-    access_key_id: Secret,
-    secret_access_key: Secret,
-    session_token: Option<Secret>,
-    expires: Option<OffsetDateTime>,
+    pub(crate) access_key_id: Secret,
+    pub(crate) secret_access_key: Secret,
+    pub(crate) session_token: Option<Secret>,
+    pub(crate) expires: Option<OffsetDateTime>,
 }
 
 /// The instance metadata service's credentials document.
@@ -626,9 +626,24 @@ impl S3Credentials {
 
     fn from_host_vars(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         if get("AWS_ACCESS_KEY_ID").is_some_and(|v| !v.is_empty()) {
-            Self::from_vars(get)
-        } else {
-            Ok(Self::instance_role())
+            return Self::from_vars(get);
+        }
+        // AWS's own name for another metadata service: a stand-in on this
+        // machine (deploy/local), never anywhere else.
+        match get("AWS_EC2_METADATA_SERVICE_ENDPOINT").filter(|v| !v.is_empty()) {
+            None => Ok(Self::instance_role()),
+            Some(endpoint) => {
+                let base = endpoint.trim_end_matches('/');
+                let local = Target::parse(&format!("{base}/"))
+                    .is_some_and(|t| !t.tls && crate::console::is_loopback(&t.host));
+                if !local {
+                    return Err(format!(
+                        "AWS_EC2_METADATA_SERVICE_ENDPOINT ({endpoint:?}) must be http:// on this \
+                         machine's loopback address: a stand-in for development"
+                    ));
+                }
+                Ok(Self::instance_role_at(base))
+            }
         }
     }
 
@@ -1551,7 +1566,28 @@ mod tests {
         assert!(S3Credentials::from_vars(vars(&[])).is_err());
         // Without keys in the environment, an agent host uses its role.
         let host = S3Credentials::from_host_vars(vars(&[])).unwrap();
-        assert!(matches!(host.source, Source::Instance { .. }));
+        assert!(matches!(&host.source, Source::Instance { base, .. } if base == IMDS));
+        // A stand-in metadata service on this machine (deploy/local), and
+        // nowhere else.
+        let local = S3Credentials::from_host_vars(vars(&[(
+            "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+            "http://127.0.0.1:7611/",
+        )]))
+        .unwrap();
+        assert!(
+            matches!(&local.source, Source::Instance { base, .. } if base == "http://127.0.0.1:7611")
+        );
+        for elsewhere in [
+            "http://imds.example.com",
+            "https://127.0.0.1:7611",
+            "127.0.0.1",
+        ] {
+            let err = S3Credentials::from_host_vars(move |name: &str| {
+                (name == "AWS_EC2_METADATA_SERVICE_ENDPOINT").then(|| elsewhere.to_owned())
+            })
+            .unwrap_err();
+            assert!(err.contains("loopback"), "{elsewhere}: {err}");
+        }
     }
 
     #[test]
