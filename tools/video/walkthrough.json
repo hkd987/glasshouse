@@ -70,7 +70,7 @@
       "title": "In the cloud: a computer of their own for each person",
       "tag": "Live, Glasshouse Agents",
       "shots": ["agents-list.png", "agents-detail.png"],
-      "say": "The same rules run in the cloud. Glasshouse Agents deploys into your own AWS account, and gives each person a computer of their own for their agents. Their agents are personas on it, a reconciler, a researcher, and people direct them from the web, the command line, or Teams."
+      "say": "The same rules run in the cloud. Glasshouse Agents deploys into your own AWS account, and gives each person a computer of their own for their agents. Their agents are personas on it, a reconciler, a researcher, and people direct them from the web or the command line."
     },
     {
       "id": "sleep",

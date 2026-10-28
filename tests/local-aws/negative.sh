@@ -104,8 +104,7 @@ else
 fi
 as sam GET approvals >/dev/null
 expect "  nothing asked of Sam" 0 "$(json 'len(d)')"
-as dana POST agents/closer/ask "$(use mail_send "$send")" >/dev/null
-settle dana closer
+ask_and_wait dana closer "$(use mail_send "$send")"
 as dana GET approvals >/dev/null
 expect "Dana's agent (Finance keeps Mail) asks her before sending" 1 "$(json 'len(d)')"
 approval=$(json 'd[0]["approval"]["id"]')
@@ -151,7 +150,9 @@ expect "  an ask while he has it is refused" 409 "$(as sam POST agents/closer/as
 if json 'd["error"]' | grep -q keyboard; then pass "    saying he has the keyboard"; else fail "    it said $(json 'd')"; fi
 expect "  he hands it back" 200 "$(as sam POST agents/closer/hand-back)"
 ask_and_wait sam closer "$(run 'echo asked-after')"
-if screen sam closer | grep -q asked-after; then pass "  and the next ask runs"; else fail "  the next ask didn't run"; fi
+# Read whole before searching: grep -q stopping early would break the pipe.
+after=$(screen sam closer)
+if grep -q asked-after <<<"$after"; then pass "  and the next ask runs"; else fail "  the next ask didn't run: $(tail -3 <<<"$after")"; fi
 
 stop_host
 trap - EXIT

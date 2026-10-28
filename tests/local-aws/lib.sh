@@ -50,20 +50,20 @@ direct() {
 use() { python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1] + " " + sys.argv[2]}))' "$1" "$2"; }
 # ...or runs <command> on its computer.
 run() { use computer_run "$(python3 -c 'import json,sys; print(json.dumps({"command": sys.argv[1]}))' "$1")"; }
-# <person> <agent>: waits until the agent is idle or asleep again.
-settle() {
+# <person> <agent> <text json>: asks, and waits for that task to end or
+# ask its person something. Files of its own: these may run at once.
+ask_and_wait() {
+	local file task
+	file=$(mktemp -p "$work")
+	curl -s -o "$file" -b "$work/$1.jar" -H 'content-type: application/json' --data-binary "$3" "$lb/api/v1/agents/$2/ask"
+	task=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("task",""))' "$file")
 	for _ in $(seq 1 150); do
-		curl -s -o "$work/settle.$1" -b "$work/$1.jar" "$lb/api/v1/agents/$2"
-		python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["agent"]["status"] in ("idle","asleep","needs_you") else 1)' "$work/settle.$1" 2>/dev/null && return 0
+		[ -n "$task" ] || break
+		curl -s -o "$file" -b "$work/$1.jar" "$lb/api/v1/agents/$2"
+		python3 "$repo/tests/local-aws/ended.py" "$file" "$task" && break
 		sleep 0.3
 	done
-	return 1
-}
-# <person> <agent> <text json>: asks and waits.
-ask_and_wait() {
-	as "$1" POST "agents/$2/ask" "$3" >/dev/null
-	sleep 0.3
-	settle "$1" "$2"
+	rm -f "$file"
 }
 screen() { curl -s -b "$work/$1.jar" "$lb/api/v1/agents/$2/screen?since=0" | python3 -c 'import json,sys; print(json.load(sys.stdin)["text"])'; }
 

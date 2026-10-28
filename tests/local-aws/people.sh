@@ -80,15 +80,19 @@ direct() {
 }
 ids() { python3 -c 'import json,sys; print(" ".join(sorted(a["id"] for a in json.load(open(sys.argv[1])))))' "$work/body"; }
 screen() { as "$1" GET "agents/$2/screen?since=0" >/dev/null && python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["text"])' "$work/body"; }
-ask_and_wait() { # <person> <agent> <command>: waits for its task to end
-	local body
+ask_and_wait() { # <person> <agent> <command>: waits for that task to end
+	local body file task
+	# Files of its own: these run at once.
+	file=$(mktemp -p "$work")
 	body=$(python3 -c 'import json,sys; print(json.dumps({"text": "computer_run " + json.dumps({"command": sys.argv[1]})}))' "$3")
-	as "$1" POST "agents/$2/ask" "$body" >/dev/null
-	for _ in $(seq 1 100); do
-		as "$1" GET "agents/$2" >/dev/null
-		python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["agent"]["status"] in ("idle","asleep") else 1)' "$work/body" && return 0
+	curl -s -o "$file" -b "$work/$1.jar" -H 'content-type: application/json' -d "$body" "$lb/api/v1/agents/$2/ask"
+	task=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["task"])' "$file")
+	for _ in $(seq 1 150); do
+		curl -s -o "$file" -b "$work/$1.jar" "$lb/api/v1/agents/$2"
+		python3 "$(dirname "$0")/ended.py" "$file" "$task" && break
 		sleep 0.3
 	done
+	rm -f "$file"
 }
 # A raw call to glassd's control socket: <as-account> <method> <params>
 rpc() {
@@ -119,13 +123,17 @@ as sam GET agents >/dev/null
 expect "Sam sees his one only" "reconciler" "$(ids)"
 ask_and_wait dana reconciler "echo dana-secret > /root/ledger.txt"
 ask_and_wait sam reconciler "cat /root/ledger.txt 2>&1; ls /root"
-if screen sam reconciler | grep -q "No such file"; then
+# Screens are read whole before searching: grep -q stopping early would
+# break the pipe, and pipefail would take that for no match.
+sams=$(screen sam reconciler)
+danas=$(screen dana reconciler)
+if grep -q "No such file" <<<"$sams"; then
 	pass "Sam's Reconciler works on Sam's computer: Dana's file isn't there"
 else
-	fail "Sam's agent saw something of Dana's: $(screen sam reconciler | tail -3)"
+	fail "Sam's agent saw something of Dana's: $(tail -3 <<<"$sams")"
 fi
-if screen sam reconciler | grep -q dana-secret; then fail "Dana's file showed on Sam's screen"; fi
-if screen dana reconciler | grep -q "No such file"; then fail "Sam's task showed on Dana's screen"; else pass "and Sam's task isn't on Dana's screen"; fi
+if grep -q dana-secret <<<"$sams"; then fail "Dana's file showed on Sam's screen"; fi
+if grep -q "No such file" <<<"$danas"; then fail "Sam's task showed on Dana's screen"; else pass "and Sam's task isn't on Dana's screen"; fi
 
 # Every route on an agent Sam doesn't have: absent, as if it didn't exist.
 gone=0
@@ -225,10 +233,13 @@ two=$!
 ask_and_wait sam reconciler "sleep 1; echo sams-done" &
 three=$!
 wait "$one" "$two" "$three"
-if screen dana closer | grep -q closer-done && screen dana reconciler | grep -q reconciler-done && screen sam reconciler | grep -q sams-done; then
+closer=$(screen dana closer)
+danas=$(screen dana reconciler)
+sams=$(screen sam reconciler)
+if grep -q closer-done <<<"$closer" && grep -q reconciler-done <<<"$danas" && grep -q sams-done <<<"$sams"; then
 	pass "two people at once, and two of Dana's agents at once on her computer"
 else
-	fail "at once: $(screen dana closer | tail -2)"
+	fail "at once: $(tail -2 <<<"$closer")"
 fi
 
 # --- one identity never leaves the machine ------------------------------
