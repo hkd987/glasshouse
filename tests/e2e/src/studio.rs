@@ -48,6 +48,7 @@ pub async fn studio(h: &Harness) -> anyhow::Result<()> {
         prompt: "Make my Mail say Write instead of New message".into(),
         scope: ScopeRequest::default(),
         title: None,
+        computer: None,
     };
     let view: TaskView = h.call(methods::TASK_START, &request).await?;
     let socket = view

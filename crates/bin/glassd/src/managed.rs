@@ -1152,6 +1152,7 @@ mod tests {
             ),
             gateway: Arc::new(Gateway::new()),
             settings: org.settings.clone(),
+            computers: None,
         });
         Device {
             dir,

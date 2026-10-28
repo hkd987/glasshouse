@@ -47,6 +47,11 @@ pub struct TaskRequest {
     /// characters. Without one, the OS names it from the prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The caller's agent computer to run it in (ADR 0065, 0066), by its
+    /// id (`reconciler`), where the agent keeps its files between tasks.
+    /// Only a computer backend runs one; elsewhere it's refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
 }
 
 /// The longest task title, in characters.
@@ -258,6 +263,9 @@ pub struct TaskView {
     /// user's harness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continues: Option<TaskId>,
+    /// The agent computer it runs in (ADR 0065).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
 }
 
 /// What an ended task did: the Done tile's receipt, and the line under a

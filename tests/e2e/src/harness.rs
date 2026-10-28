@@ -69,6 +69,7 @@ impl Harness {
                 restrict: Vec::new(),
             },
             title: None,
+            computer: None,
         };
         let view: TaskView = self.call(methods::TASK_START, request).await?;
         Ok(view.id)

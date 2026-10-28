@@ -88,6 +88,10 @@ pub struct Config {
     /// The OS updates this computer takes (ADR 0061).
     #[serde(default)]
     pub update: UpdateConfig,
+    /// `[metering]`: agent computer hours reported to AWS Marketplace
+    /// (ADR 0066), on hosts the stack made.
+    #[serde(default)]
+    pub metering: Option<crate::metering::MeteringConfig>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<CatalogEntry>,
 }
@@ -355,6 +359,9 @@ pub struct SandboxConfig {
     /// What each task may use, so the person's own work comes first.
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// `[sandbox.computers]`, for the `computers` backend (ADR 0066).
+    #[serde(default)]
+    pub computers: ComputersConfig,
 }
 
 impl Default for SandboxConfig {
@@ -365,8 +372,114 @@ impl Default for SandboxConfig {
             base_mounts: None,
             agent_dirs: default_agent_dirs(),
             limits: LimitsConfig::default(),
+            computers: ComputersConfig::default(),
         }
     }
+}
+
+/// `[sandbox.computers]`: agents keep computers of their own between tasks
+/// (ADR 0065, ADR 0066).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ComputersConfig {
+    /// What runs them.
+    pub hypervisor: HypervisorKind,
+    /// Where they live on this host: `<state_dir>/computers` by default.
+    pub dir: Option<PathBuf>,
+    /// What each computer gets (a VM's; namespaces share the host's).
+    pub memory_mib: u32,
+    pub vcpus: u32,
+    /// Where computers sleep (ADR 0065 §11): `s3` (with `bucket`,
+    /// `region` and `kms_key_arn`), or `folder` (with `folder`) in
+    /// development. None keeps them on this host.
+    pub store: Option<StoreKind>,
+    pub bucket: Option<String>,
+    pub region: Option<String>,
+    pub kms_key_arn: Option<String>,
+    /// Another S3 endpoint (an S3-compatible store, or a test's).
+    pub endpoint: Option<String>,
+    pub folder: Option<PathBuf>,
+    /// Minutes a computer may stay unused on this host before it sleeps;
+    /// 0 sleeps them only when asked.
+    pub sleep_after_idle_minutes: u32,
+    /// `[sandbox.computers.firecracker]`, for `hypervisor = "firecracker"`.
+    pub firecracker: Option<FirecrackerSettings>,
+}
+
+impl Default for ComputersConfig {
+    fn default() -> Self {
+        Self {
+            hypervisor: HypervisorKind::default(),
+            dir: None,
+            memory_mib: 2048,
+            vcpus: 2,
+            store: None,
+            bucket: None,
+            region: None,
+            kms_key_arn: None,
+            endpoint: None,
+            folder: None,
+            sleep_after_idle_minutes: 30,
+            firecracker: None,
+        }
+    }
+}
+
+impl ComputersConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        match self.store {
+            Some(StoreKind::S3) if self.bucket.is_none() || self.region.is_none() => {
+                bail!("sandbox.computers.store = \"s3\" needs bucket and region")
+            }
+            Some(StoreKind::Folder) if self.folder.is_none() => {
+                bail!("sandbox.computers.store = \"folder\" needs folder")
+            }
+            _ => {}
+        }
+        if self.hypervisor == HypervisorKind::Firecracker && self.firecracker.is_none() {
+            bail!("hypervisor = \"firecracker\" needs [sandbox.computers.firecracker]");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HypervisorKind {
+    /// Linux namespaces, where there's no KVM: a boundary weaker than a VM.
+    #[default]
+    Namespaces,
+    /// Firecracker microVMs, on hosts with KVM (AWS's C8i, M8i, R8i).
+    Firecracker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoreKind {
+    S3,
+    Folder,
+}
+
+/// `[sandbox.computers.firecracker]`: the binaries and images, from the
+/// host image.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirecrackerSettings {
+    pub firecracker: PathBuf,
+    pub jailer: PathBuf,
+    pub vmexec: PathBuf,
+    pub kernel: PathBuf,
+    pub root_image: PathBuf,
+    /// The unprivileged account Firecracker runs as.
+    pub uid: u32,
+    pub gid: u32,
+    /// A new computer's data disk, in GiB.
+    #[serde(default = "default_data_disk_gib")]
+    pub data_disk_gib: u64,
+}
+
+fn default_data_disk_gib() -> u64 {
+    16
 }
 
 /// `[sandbox.limits]`: agents run below the person's CPU priority, and each
@@ -450,6 +563,8 @@ pub enum SandboxBackend {
     #[serde(alias = "freebsd-jail")]
     Jail,
     HostInsecure,
+    /// A computer of its own per agent, kept between tasks (ADR 0066).
+    Computers,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -584,10 +699,10 @@ impl Config {
                  set sandbox.allow_insecure = true to use it for development"
             );
         }
-        if self.dev_home.is_some() && self.sandbox.backend != SandboxBackend::HostInsecure {
+        if self.dev_home.is_some() && self.sandbox.backend == SandboxBackend::Jail {
             bail!(
                 "dev_home moves every user's app data to one folder; it is for the \
-                 development host backend only"
+                 development backends only"
             );
         }
         if self.app_socket == self.control_socket {
@@ -640,6 +755,7 @@ impl Config {
             }
         }
         self.sandbox.limits.validate()?;
+        self.sandbox.computers.validate()?;
         for agent in &self.agents {
             agent
                 .check()
@@ -651,7 +767,7 @@ impl Config {
             if !agent.program.is_absolute() {
                 bail!("agent {}: program must be an absolute path", agent.id);
             }
-            if self.sandbox.backend == SandboxBackend::Jail
+            if self.sandbox.backend != SandboxBackend::HostInsecure
                 && !self
                     .sandbox
                     .agent_dirs
@@ -659,7 +775,7 @@ impl Config {
                     .any(|d| agent.program.starts_with(d))
             {
                 bail!(
-                    "agent {}: {} is not under any sandbox.agent_dirs entry, so it would not exist inside the jail",
+                    "agent {}: {} is not under any sandbox.agent_dirs entry, so it would not exist inside its sandbox",
                     agent.id,
                     agent.program.display()
                 );

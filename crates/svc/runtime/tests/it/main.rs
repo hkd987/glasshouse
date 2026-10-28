@@ -11,6 +11,7 @@ mod artifacts;
 mod audit;
 mod catalog;
 mod chat;
+mod computers;
 mod continuation;
 mod docs;
 mod flows;

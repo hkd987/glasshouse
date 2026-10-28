@@ -15,6 +15,11 @@
 //! One suite only. Every key here is P-256, every hash SHA-256 and every
 //! cipher AES-256-GCM, so the TypeScript copy for IT's browser has the
 //! same and nothing to negotiate.
+//!
+//! [`rsa`] only checks others' signatures: Microsoft's RS256 tokens on
+//! calls to the Teams relay (ADR 0065 §13). Nothing here signs with RSA.
+
+pub mod rsa;
 
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::derive::Deriver;

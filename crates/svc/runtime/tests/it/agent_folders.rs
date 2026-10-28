@@ -21,6 +21,7 @@ fn asked(agent: &str, prompt: &str) -> TaskRequest {
         prompt: prompt.into(),
         scope: ScopeRequest::default(),
         title: None,
+        computer: None,
     }
 }
 

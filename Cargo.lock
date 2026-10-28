@@ -828,6 +828,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "glass-agents-api",
+ "glass-gateway-providers",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "glass-actions"
 version = "0.1.0"
 dependencies = [
@@ -848,6 +860,37 @@ dependencies = [
  "glass-rpc",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "glass-agents"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "glass-agents-api",
+ "glass-api",
+ "glass-gateway-providers",
+ "glass-http",
+ "glass-platform",
+ "glass-rpc",
+ "glass-teams",
+ "glass-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "glass-agents-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1180,6 +1223,23 @@ dependencies = [
  "glass-agent-sdk",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "glass-computers"
+version = "0.1.0"
+dependencies = [
+ "cap-std",
+ "glass-api",
+ "glass-gateway-providers",
+ "glass-platform",
+ "glass-types",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "time",
 ]
 
 [[package]]
@@ -1516,6 +1576,7 @@ dependencies = [
  "glass-app-system",
  "glass-audit",
  "glass-broker",
+ "glass-computers",
  "glass-crypto",
  "glass-gateway",
  "glass-gateway-providers",
@@ -1583,6 +1644,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "glass-teams"
+version = "0.1.0"
+dependencies = [
+ "glass-agents-api",
+ "glass-crypto",
+ "serde",
+ "serde_json",
+ "time",
+]
+
+[[package]]
 name = "glass-types"
 version = "0.1.0"
 dependencies = [
@@ -1591,6 +1663,20 @@ dependencies = [
  "thiserror",
  "time",
  "uuid",
+]
+
+[[package]]
+name = "glass-vmexec"
+version = "0.1.0"
+dependencies = [
+ "glass-computers",
+]
+
+[[package]]
+name = "glass-vmguest"
+version = "0.1.0"
+dependencies = [
+ "glass-computers",
 ]
 
 [[package]]
@@ -1624,6 +1710,7 @@ dependencies = [
  "glass-app-studio",
  "glass-app-system",
  "glass-audit",
+ "glass-computers",
  "glass-first-party",
  "glass-gateway",
  "glass-gateway-providers",
@@ -1637,6 +1724,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "time",
  "tokio",
  "toml",
  "tracing",

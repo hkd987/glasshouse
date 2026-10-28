@@ -162,6 +162,7 @@ pub async fn perf(h: &Harness) -> anyhow::Result<()> {
             restrict: Vec::new(),
         },
         title: None,
+        computer: None,
     };
     let mut results = Vec::new();
 

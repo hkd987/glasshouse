@@ -15,6 +15,7 @@ mod device;
 mod hardware;
 mod managed;
 mod meetings;
+mod metering;
 mod org_apps;
 mod org_patches;
 mod personal;
@@ -45,7 +46,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::prelude::*;
 
-use crate::config::{Config, SandboxBackend, SnapshotBackend};
+use crate::config::{Config, HypervisorKind, SandboxBackend, SnapshotBackend};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Glasshouse system daemon")]
@@ -481,6 +482,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
 
+    let mut computers = None;
     let sandbox: Arc<dyn Sandbox> = match config.sandbox.backend {
         SandboxBackend::Jail => {
             let machine = glass_platform::system::resources();
@@ -513,6 +515,60 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
                 "SANDBOX IS NOT A SECURITY BOUNDARY: agents run unconfined (development only)"
             );
             Arc::new(HostSandbox)
+        }
+        SandboxBackend::Computers => {
+            let settings = &config.sandbox.computers;
+            let hypervisor: Arc<dyn glass_computers::hypervisor::Hypervisor> = match settings
+                .hypervisor
+            {
+                HypervisorKind::Namespaces => {
+                    glass_computers::namespaces::NamespaceHypervisor::available()
+                        .map_err(anyhow::Error::msg)?;
+                    tracing::warn!("agent computers on namespaces: a boundary, weaker than a VM");
+                    Arc::new(glass_computers::namespaces::NamespaceHypervisor::new(
+                        config.sandbox.agent_dirs.clone(),
+                    ))
+                }
+                HypervisorKind::Firecracker => {
+                    let fc = settings
+                        .firecracker
+                        .clone()
+                        .context("[sandbox.computers.firecracker] is missing")?;
+                    Arc::new(glass_computers::firecracker::FirecrackerHypervisor::new(
+                        glass_computers::firecracker::FirecrackerConfig {
+                            firecracker: fc.firecracker,
+                            jailer: fc.jailer,
+                            vmexec: fc.vmexec,
+                            kernel: fc.kernel,
+                            root_image: fc.root_image,
+                            data_disk_bytes: fc.data_disk_gib << 30,
+                            boot_args: glass_computers::firecracker::DEFAULT_BOOT_ARGS.into(),
+                            uid: fc.uid,
+                            gid: fc.gid,
+                            overhead_mib: glass_computers::firecracker::DEFAULT_OVERHEAD_MIB,
+                            parent_cgroup: None,
+                            netns: None,
+                            api_timeout: glass_computers::firecracker::DEFAULT_API_TIMEOUT,
+                        },
+                    ))
+                }
+            };
+            let mut made = glass_computers::sandbox::ComputerSandbox::new(
+                settings
+                    .dir
+                    .clone()
+                    .unwrap_or_else(|| config.state_dir.join("computers")),
+                hypervisor,
+                settings.memory_mib,
+                settings.vcpus,
+            )?;
+            if let Some((store, place)) = computer_store(settings)? {
+                tracing::info!(%place, "agent computers sleep in the store");
+                made = made.with_store(Arc::new(store), place);
+            }
+            let made = Arc::new(made);
+            computers = Some(Arc::clone(&made));
+            made
         }
     };
     let snapshots: Arc<dyn Snapshotter> = match config.snapshots.backend {
@@ -610,6 +666,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         audit,
         gateway: models.gateway,
         settings: org.settings.clone(),
+        computers,
     });
 
     // Apps people make are bundled in jails like agents' (ADR 0032), and
@@ -690,6 +747,77 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
                     .await;
                 if let Err(e) = slept {
                     tracing::warn!("couldn't sleep the computer: {e}");
+                }
+            }
+        });
+    }
+
+    // Agent computers nobody used for a while go to sleep in the store,
+    // so nothing stays on a host it needn't (ADR 0065 §11).
+    let idle_minutes = config.sandbox.computers.sleep_after_idle_minutes;
+    if config.sandbox.backend == SandboxBackend::Computers
+        && config.sandbox.computers.store.is_some()
+        && idle_minutes > 0
+    {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            let idle = std::time::Duration::from_secs(u64::from(idle_minutes) * 60);
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                runtime.sleep_idle_computers(idle).await;
+            }
+        });
+    }
+
+    // Agent computer hours, reported to AWS Marketplace each hour (ADR 0066).
+    if let Some(metering) = config.metering.clone().filter(|m| m.enabled)
+        && config.sandbox.backend == SandboxBackend::Computers
+    {
+        let runtime = Arc::clone(&runtime);
+        let path = config.state_dir.join("metering.json");
+        tokio::spawn(async move {
+            let mut meter = metering::Meter::load(&path);
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let now = time::OffsetDateTime::now_utc();
+                meter.tick(now, runtime.computers_awake());
+                let (due, late) = meter.due(now);
+                for (hour, quantity) in late {
+                    runtime.append_audit(metering_event(
+                        format!(
+                            "Couldn't report {quantity} agent computer hours to AWS Marketplace \
+                             within {} hours",
+                            metering::LATE_HOURS
+                        ),
+                        hour,
+                        quantity,
+                    ));
+                }
+                for (hour, quantity) in due {
+                    let config = metering.clone();
+                    let sent =
+                        tokio::task::spawn_blocking(move || meter_hour(&config, hour, quantity))
+                            .await
+                            .unwrap_or_else(|e| Err((e.to_string(), true)));
+                    match sent {
+                        Ok(said) => runtime.append_audit(metering_event(said, hour, quantity)),
+                        Err((why, true)) => {
+                            tracing::warn!("metering: {why}; trying again");
+                            meter.retry(hour, quantity);
+                        }
+                        Err((why, false)) => runtime.append_audit(metering_event(
+                            format!(
+                                "AWS Marketplace refused {quantity} agent computer hours: {why}"
+                            ),
+                            hour,
+                            quantity,
+                        )),
+                    }
+                }
+                if let Err(e) = meter.save(&path) {
+                    tracing::warn!("keeping what was metered: {e}");
                 }
             }
         });
@@ -951,6 +1079,87 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
 
 /// How often a kernel patch on probation counts its minutes of use: every
 /// five, or a quarter of a short probation (tests), at least one.
+/// Reports one hour's agent computer hours, signed with the host's
+/// instance role. What it says for the record, or why not and whether to
+/// try again.
+fn meter_hour(
+    config: &metering::MeteringConfig,
+    hour: i64,
+    quantity: u32,
+) -> Result<String, (String, bool)> {
+    use glass_gateway_providers::marketplace::{MarketplaceMetering, Metered, Usage};
+    let credentials = glass_gateway_providers::s3::S3Credentials::from_host()
+        .and_then(|c| c.aws_credentials())
+        .map_err(|e| (e, true))?;
+    let client = MarketplaceMetering::new(&config.region, config.endpoint.as_deref(), credentials);
+    let at = time::OffsetDateTime::from_unix_timestamp(hour).map_err(|e| (e.to_string(), false))?;
+    match client.meter(&Usage {
+        product_code: &config.product_code,
+        hour: at,
+        quantity,
+        dry_run: config.dry_run,
+    }) {
+        Ok(Metered::Recorded { .. }) => Ok(format!(
+            "Reported {quantity} agent computer hours to AWS Marketplace"
+        )),
+        Ok(Metered::WouldRecord) => Ok(format!(
+            "Checked that {quantity} agent computer hours could be reported (dry run)"
+        )),
+        Err(e) => Err((e.to_string(), e.retry())),
+    }
+}
+
+fn metering_event(summary: String, hour: i64, quantity: u32) -> glass_audit::AuditEvent {
+    let mut event = glass_audit::AuditEvent::new(glass_audit::EventKind::Computer, summary);
+    event.detail = serde_json::json!({
+        "metering": "agent_computer_hours",
+        "hour": hour,
+        "quantity": quantity,
+    });
+    event
+}
+
+/// Where agent computers sleep (ADR 0065 §11), and its name for people.
+fn computer_store(
+    settings: &crate::config::ComputersConfig,
+) -> anyhow::Result<Option<(glass_computers::store::Store, String)>> {
+    use glass_computers::store::{Blobs, FolderBlobs, S3Blobs, Store};
+    use glass_gateway_providers::s3::{S3Client, S3Config, S3Credentials};
+    let (blobs, place): (Arc<dyn Blobs>, String) = match settings.store {
+        None => return Ok(None),
+        Some(crate::config::StoreKind::Folder) => {
+            let folder = settings
+                .folder
+                .clone()
+                .context("sandbox.computers.folder")?;
+            let blobs = FolderBlobs::new(&folder).map_err(anyhow::Error::msg)?;
+            let place = format!("a folder on this host ({})", folder.display());
+            (Arc::new(blobs), place)
+        }
+        Some(crate::config::StoreKind::S3) => {
+            let bucket = settings
+                .bucket
+                .clone()
+                .context("sandbox.computers.bucket")?;
+            let client = S3Client::new(
+                &S3Config {
+                    bucket: bucket.clone(),
+                    region: settings
+                        .region
+                        .clone()
+                        .context("sandbox.computers.region")?,
+                    endpoint: settings.endpoint.clone(),
+                    kms_key_id: settings.kms_key_arn.clone(),
+                },
+                S3Credentials::from_host().map_err(anyhow::Error::msg)?,
+            )
+            .map_err(anyhow::Error::msg)?;
+            (Arc::new(S3Blobs::new(client, "")), format!("S3: {bucket}"))
+        }
+    };
+    Ok(Some((Store::new(blobs), place)))
+}
+
 fn patch_tick(probation_minutes: u64) -> std::time::Duration {
     std::time::Duration::from_secs((probation_minutes / 4).clamp(1, 5) * 60)
 }

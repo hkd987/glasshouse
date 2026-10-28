@@ -220,6 +220,7 @@ agents = ["claude-code"]
                 prompt: "Why does my screen lock so fast?".into(),
                 scope: ScopeRequest::default(),
                 title: None,
+                computer: None,
             },
         )
         .unwrap();

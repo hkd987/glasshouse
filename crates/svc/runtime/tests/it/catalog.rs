@@ -81,6 +81,7 @@ async fn harness_task(h: &Harness) -> (glass_types::TaskId, Client) {
                 prompt: "Build me a way to track vendor disputes".into(),
                 scope: ScopeRequest::default(),
                 title: None,
+                computer: None,
             },
         )
         .unwrap();

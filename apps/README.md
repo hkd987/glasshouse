@@ -56,6 +56,15 @@ apps/
               buttons pressed (glass-app-try, ADR 0049)
   console/    the admin console's web app (ADR 0023): a site glass-console serves,
               not a device app (no manifest, no service worker)
+  agents/     Glasshouse Agents' web app (ADR 0066): a site glass-agents serves,
+              like the console. A person's agents, each on a computer of its own:
+              their conversations, the questions waiting on them, each computer's
+              screen with take over and hand back, sleep and wake. Routes by path
+              (/, /new, /agents/<id>, /agents/<id>/computer); live through the
+              front's long poll. model.ts, screen.ts and events.ts are the logic
+              without a DOM; dev/serve.ts answers from test/fixture.ts
+              (`node agents/dev/serve.ts`, port 7510); `make agents-dev` runs it
+              on the real front
   e2e/        Playwright: the apps against dev-host glassd and the bridge;
               console.config.ts: the console against glass-console and glassd,
               and Chat and Artifacts with a colleague scripted on another

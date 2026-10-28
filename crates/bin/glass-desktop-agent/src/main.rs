@@ -34,6 +34,11 @@ const STRONGER: &str = "use_a_stronger_model";
 const RUN_SCRIPT: &str = "run_script";
 /// What a routine's run reads its script with (DA-4).
 const ROUTINES_READ: &str = "routines_read";
+/// The tool for a command on the agent's own computer (ADR 0066), which
+/// the agent runs there itself: nothing of it passes the task socket.
+const COMPUTER_RUN: &str = "computer_run";
+/// How long one command on its computer may run.
+const COMPUTER_RUN_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
 
 const SYSTEM: &str = "You are the Glasshouse desktop agent, working for the person \
 on this computer. Do what they ask using the tools you're given; they're the only \
@@ -242,6 +247,79 @@ fn script_tool() -> Value {
     })
 }
 
+/// Commands on its own computer (ADR 0066), offered when it has one.
+fn computer_tool() -> Value {
+    json!({
+        "name": COMPUTER_RUN,
+        "description": "Run a shell command on your own computer, a Linux machine you are root             on and keep between tasks. /work holds your files from earlier tasks; python3 and the             usual tools are there. It has no network: the person's files, mail and the rest come             only through your other tools, and nothing leaves except through them. Use it to             keep notes and data between tasks, and to work things out with programs you write.             Returns the exit status and what it printed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "The command, for sh -c" }
+            },
+            "required": ["command"],
+            "additionalProperties": false
+        }
+    })
+}
+
+/// Runs `command` on the computer, echoing it and what it prints to the
+/// agent's own output, which its person watches as the computer's screen.
+async fn computer_run(command: &str, work: &std::path::Path) -> anyhow::Result<(String, bool)> {
+    use std::io::Write;
+    use tokio::io::AsyncReadExt;
+
+    // Its output is its computer's screen, which its person watches.
+    let _ = writeln!(std::io::stdout(), "# {command}");
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .args(["-c", "exec 2>&1; eval \"$1\"", "sh", command])
+        .current_dir(work)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("starting a shell")?;
+    let mut out = child.stdout.take().context("the shell's output")?;
+    let mut printed = Vec::new();
+    let mut buf = [0u8; 8192];
+    let read = async {
+        loop {
+            match out.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut stdout = std::io::stdout();
+                    let _ = stdout.write_all(&buf[..n]);
+                    let _ = stdout.flush();
+                    printed.extend_from_slice(&buf[..n]);
+                }
+            }
+        }
+        child.wait().await
+    };
+    let status = match tokio::time::timeout(COMPUTER_RUN_LIMIT, read).await {
+        Ok(status) => status.context("waiting for the shell")?,
+        Err(_) => {
+            return Ok((
+                format!(
+                    "Stopped after {} seconds. What it printed:\n{}",
+                    COMPUTER_RUN_LIMIT.as_secs(),
+                    String::from_utf8_lossy(&printed)
+                ),
+                true,
+            ));
+        }
+    };
+    let mut text = String::from_utf8_lossy(&printed).into_owned();
+    if text.chars().count() > MAX_RESULT_CHARS {
+        text = text.chars().take(MAX_RESULT_CHARS).collect();
+        text.push_str("\n[cut short]");
+    }
+    let code = status
+        .code()
+        .map_or("a signal".to_owned(), |c| c.to_string());
+    Ok((format!("exit status {code}\n{text}"), !status.success()))
+}
+
 /// What a script came to, as the model reads it.
 fn script_result(run: &glass_script::Run) -> String {
     json!({ "result": run.result, "printed": run.printed, "tool_calls": run.calls }).to_string()
@@ -342,6 +420,9 @@ async fn run() -> anyhow::Result<()> {
     }
     tools.push(stronger_tool());
     tools.push(script_tool());
+    if agent.computer.is_some() {
+        tools.push(computer_tool());
+    }
     let mut ladder = Ladder::default();
     let mut opening = format!(
         "{}\n\n{}",
@@ -355,6 +436,12 @@ async fn run() -> anyhow::Result<()> {
              see the fix, you may save it as the routine's next version (routine \"{id}\"); \
              the person approves it."
         ));
+    }
+    if agent.computer.is_some() {
+        opening.push_str(
+            "\n\nYou have a computer of your own (computer_run), kept between your tasks: \
+             look in /work for what you kept last time.",
+        );
     }
     let mut messages = vec![json!({ "role": "user", "content": opening })];
 
@@ -437,6 +524,15 @@ async fn run() -> anyhow::Result<()> {
                         "ran".to_owned()
                     }
                 );
+                results.push(json!({ "id": id, "content": content, "is_error": is_error }));
+                continue;
+            }
+            if name == COMPUTER_RUN && agent.computer.is_some() {
+                let command = call["input"]["command"].as_str().unwrap_or_default();
+                agent
+                    .progress("Working on its computer", None, None)
+                    .await?;
+                let (content, is_error) = computer_run(command, &agent.work_dir).await?;
                 results.push(json!({ "id": id, "content": content, "is_error": is_error }));
                 continue;
             }

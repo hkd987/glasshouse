@@ -151,6 +151,7 @@ mod views {
                 updated_at: _,
                 driver_socket: _,
                 continues: _,
+                computer: _,
             } = self;
             for text in [agent_name, user, title, caption] {
                 text.make_display_safe();
@@ -469,6 +470,7 @@ mod tests {
             updated_at: Timestamp::now(),
             driver_socket: None,
             continues: None,
+            computer: None,
         };
         view.make_display_safe();
         let shown = serde_json::to_string(&view).unwrap();

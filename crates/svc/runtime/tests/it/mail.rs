@@ -117,6 +117,7 @@ async fn claude_code(h: &Harness) -> (TaskId, Arc<Client>) {
                 prompt: "Deal with my mail".into(),
                 scope: ScopeRequest::default(),
                 title: None,
+                computer: None,
             },
         )
         .unwrap();

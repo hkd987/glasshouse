@@ -219,14 +219,38 @@ async fn setup_and_wait(
         return Ok(Exit::Stopped);
     }
     let mut command = tokio::process::Command::from(rt.sandbox.command(&task.sandbox, &process));
-    command
-        .stdin(Stdio::null())
-        .stdout(log_file.try_clone().map_err(|e| e.to_string())?)
-        .stderr(log_file)
-        .kill_on_drop(true);
+    // On an agent computer its person watches the screen, so the output
+    // goes there too (ADR 0065).
+    let screen = match rt.sandbox.screen(&task.sandbox) {
+        Some(path) => Some(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| format!("the computer's screen: {e}"))?,
+        ),
+        None => None,
+    };
+    command.stdin(Stdio::null()).kill_on_drop(true);
+    if screen.is_some() {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    } else {
+        command
+            .stdout(log_file.try_clone().map_err(|e| e.to_string())?)
+            .stderr(log_file.try_clone().map_err(|e| e.to_string())?);
+    }
     let mut child = command
         .spawn()
         .map_err(|e| format!("starting {}: {e}", task.entry.program.display()))?;
+    if let Some(screen) = screen {
+        let files = Arc::new(std::sync::Mutex::new([log_file, screen]));
+        if let Some(out) = child.stdout.take() {
+            tee(out, Arc::clone(&files));
+        }
+        if let Some(err) = child.stderr.take() {
+            tee(err, files);
+        }
+    }
 
     {
         let mut state = task.lock();
@@ -238,14 +262,7 @@ async fn setup_and_wait(
         // record carries the backend for security teams. A task stopped
         // just as its agent started doesn't say it runs.
         if state.tile.is_live() {
-            state.note(
-                ActivityKind::State,
-                if rt.sandbox.is_security_boundary() {
-                    "Agent running in its own sealed sandbox"
-                } else {
-                    "Agent running WITHOUT containment (development mode)"
-                },
-            );
+            state.note(ActivityKind::State, rt.sandbox.running_note());
         }
     }
     rt.publish(task);
@@ -345,6 +362,26 @@ fn bind_task_socket(path: &Path, task: &Task) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
+/// Copies what an agent prints to its log and its computer's screen, until
+/// it closes its end.
+fn tee(
+    mut from: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    files: Arc<std::sync::Mutex<[fs::File; 2]>>,
+) {
+    use std::io::Write;
+    use tokio::io::AsyncReadExt;
+
+    tokio::spawn(async move {
+        let mut buf = vec![0; 8192];
+        while let Ok(n @ 1..) = from.read(&mut buf).await {
+            let mut files = files.lock().unwrap_or_else(|e| e.into_inner());
+            for file in files.iter_mut() {
+                let _ = file.write_all(&buf[..n]);
+            }
+        }
+    });
+}
+
 /// The agent's whole environment. Nothing leaks in from the daemon.
 fn agent_env(rt: &Runtime, task: &Task) -> Vec<(String, String)> {
     let inside = |p: &str| {
@@ -376,6 +413,16 @@ fn agent_env(rt: &Runtime, task: &Task) -> Vec<(String, String)> {
                 .as_ref()
                 .map(|r| r.id.clone())
                 .unwrap_or_default(),
+        ),
+        // Its own computer, kept between its tasks (ADR 0066): the agent
+        // may run commands there. Empty in a sandbox that's gone after.
+        (
+            "GLASS_COMPUTER".into(),
+            match (&task.sandbox.computer, rt.sandbox.keeps_computers()) {
+                (Some(id), true) => id.clone(),
+                (None, true) => "task".into(),
+                _ => String::new(),
+            },
         ),
         ("GLASS_WORK".into(), inside(WORK_DIR)),
         ("HOME".into(), inside(WORK_DIR)),

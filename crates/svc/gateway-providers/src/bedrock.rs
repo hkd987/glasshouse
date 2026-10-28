@@ -21,13 +21,28 @@ use crate::sigv4::{self, Credentials, uri_encode};
 /// Temporary AWS credentials (MP-1).
 #[derive(Debug, Clone)]
 pub struct AwsCredentials {
-    access_key_id: Secret,
-    secret_access_key: Secret,
-    session_token: Secret,
+    pub(crate) access_key_id: Secret,
+    pub(crate) secret_access_key: Secret,
+    pub(crate) session_token: Secret,
     expires: Option<OffsetDateTime>,
 }
 
 impl AwsCredentials {
+    /// Keys already in hand, such as the instance role's.
+    pub(crate) fn from_parts(
+        access_key_id: Secret,
+        secret_access_key: Secret,
+        session_token: Option<Secret>,
+        expires: Option<OffsetDateTime>,
+    ) -> Self {
+        Self {
+            access_key_id,
+            secret_access_key,
+            session_token: session_token.unwrap_or_else(|| Secret::new(String::new())),
+            expires,
+        }
+    }
+
     /// Reads `[<provider>]` from the secrets file: `access_key_id`,
     /// `secret_access_key`, `session_token` and optionally `expires`.
     pub fn from_secrets(secrets: &Secrets, provider: &str) -> Result<Self, String> {
@@ -62,7 +77,7 @@ impl AwsCredentials {
         })
     }
 
-    fn check(&self, now: OffsetDateTime) -> Result<(), ProviderError> {
+    pub(crate) fn check(&self, now: OffsetDateTime) -> Result<(), ProviderError> {
         match self.expires {
             Some(at) if at <= now => Err(ProviderError::NotConfigured(format!(
                 "its temporary AWS credentials expired at {}",

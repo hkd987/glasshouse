@@ -16,6 +16,7 @@
 //! the secrets file. A provider without usable credentials is left out with
 //! a note, so calls routed to it fail over to the next model (MP-8).
 
+pub mod agents;
 mod anthropic;
 mod bedrock;
 pub mod billing;
@@ -24,9 +25,12 @@ mod credits;
 mod http;
 mod kbuild;
 pub mod mail;
+pub mod marketplace;
 mod openrouter;
+pub mod s3;
 mod sigv4;
 pub mod stripe;
+pub mod teams;
 mod tools;
 mod updates;
 

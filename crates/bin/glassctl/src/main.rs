@@ -341,6 +341,7 @@ impl TaskArgs {
                 restrict,
             },
             title: self.title.clone(),
+            computer: None,
         })
     }
 }

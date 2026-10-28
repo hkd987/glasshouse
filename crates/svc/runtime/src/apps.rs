@@ -389,6 +389,7 @@ impl Runtime {
             user: caller.name.clone(),
             uid: caller.uid,
             gid: caller.gid,
+            computer: None,
         };
         let actions = self.app_actions(&manifest, &policy);
         let (stop_tx, stop_rx) = oneshot::channel();

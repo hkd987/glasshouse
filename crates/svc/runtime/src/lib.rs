@@ -22,6 +22,7 @@ mod agent_api;
 mod app_api;
 mod apps;
 mod caller;
+mod computers;
 mod config;
 mod continuation;
 mod control_api;

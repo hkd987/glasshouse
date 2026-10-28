@@ -1,6 +1,6 @@
 [package]
 name = "glass-crypto"
-description = "Sealing for chat and meetings (ADR 0030): HPKE to a computer's or IT's key, ECDSA signatures, sealed messages and epoch chains, on the base system's OpenSSL."
+description = "Sealing for chat and meetings (ADR 0030): HPKE to a computer's or IT's key, ECDSA signatures, sealed messages and epoch chains, on the base system's OpenSSL; and RS256 checks of tokens others sign (ADR 0065)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,11 @@ publish.workspace = true
 [dependencies]
 openssl.workspace = true
 thiserror.workspace = true
+
+[features]
+# `rsa::testing`: an RSA key that signs RS256, standing in for a token
+# issuer in other crates' tests (ADR 0065 §13). Tests only.
+testing = []
 
 [dev-dependencies]
 hex.workspace = true

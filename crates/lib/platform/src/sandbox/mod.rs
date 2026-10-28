@@ -62,6 +62,11 @@ pub struct SandboxSpec {
     pub user: String,
     pub uid: u32,
     pub gid: u32,
+    /// The agent computer the task runs in (ADR 0065, 0066), kept between
+    /// its tasks; only the computer backend reads it, and gives a task
+    /// without one a computer of its own that goes with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
 }
 
 /// What one task's processes may use, so the person's own work stays
@@ -177,6 +182,39 @@ pub trait Sandbox: ToolRunner + Send + Sync + fmt::Debug {
 
     /// Destroys sandboxes left behind by an earlier daemon run.
     fn cleanup_stale(&self) -> Result<Vec<String>>;
+
+    /// A file the task's output is also appended to, as it comes: an agent
+    /// computer's screen, which its person watches (ADR 0065).
+    fn screen(&self, _spec: &SandboxSpec) -> Option<PathBuf> {
+        None
+    }
+
+    /// Whether tasks may name an agent computer to run in
+    /// ([`SandboxSpec::computer`]).
+    fn keeps_computers(&self) -> bool {
+        false
+    }
+
+    /// The line people read as the agent starts. It names no backend
+    /// (BR-1); the audit record carries [`Self::kind`].
+    fn running_note(&self) -> &'static str {
+        if self.is_security_boundary() {
+            "Agent running in its own sealed sandbox"
+        } else {
+            "Agent running WITHOUT containment (development mode)"
+        }
+    }
+}
+
+/// Whether `id` may name an agent computer: lowercase letters, digits and
+/// `-`, starting with a letter or digit, at most 48 (it names a folder).
+pub fn valid_computer_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 48
+        && !id.starts_with('-')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// Validates a sandbox name: it doubles as a jail name and a file name.
@@ -242,6 +280,15 @@ mod tests {
         let quiet = limits.priority_only();
         assert_eq!(quiet.nice, 10);
         assert!(quiet.rctl_rules("glass-1").is_empty());
+    }
+
+    #[test]
+    fn adr0065_computer_ids_name_one_folder() {
+        assert!(valid_computer_id("dana-reconciler"));
+        assert!(valid_computer_id("r2"));
+        for bad in ["", "-x", "A", "a.b", "a/b", "..", "a b", &"x".repeat(49)] {
+            assert!(!valid_computer_id(bad), "{bad:?}");
+        }
     }
 
     #[test]

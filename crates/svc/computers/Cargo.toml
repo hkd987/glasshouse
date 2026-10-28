@@ -1,0 +1,31 @@
+[package]
+name = "glass-computers"
+description = "Agent computers: a computer of its own per agent, on Firecracker or Linux namespaces, kept in a chunk store while it sleeps (ADR 0065, ADR 0066)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The chunk store reads and writes a computer's tree beneath its own folder,
+# never outside it, whatever its symlinks say (store::tree).
+cap-std.workspace = true
+glass-api.workspace = true
+# S3, for the chunk store (ADR 0065 §11).
+glass-gateway-providers.workspace = true
+glass-platform.workspace = true
+glass-types.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+# The S3 stand-in (`s3::testing`).
+glass-gateway-providers = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

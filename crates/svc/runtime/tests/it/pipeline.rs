@@ -1356,6 +1356,7 @@ async fn only_the_it_agent_reaches_the_system_and_its_fixes_stay_undoable() {
         prompt: "My disk is full".into(),
         scope: ScopeRequest::default(),
         title: None,
+        computer: None,
     };
     let task = h.rt.start(&h.me, request).unwrap().id;
     let agent = Arc::new(h.agent(task).await);

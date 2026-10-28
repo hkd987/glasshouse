@@ -44,6 +44,31 @@ impl Handler for ControlApi {
         // (`blocking`).
         match method.as_str() {
             methods::SYSTEM_STATUS => to_result(&rt.status()),
+            methods::COMPUTER_LIST => to_result(&rt.computer_list(&caller)?),
+            methods::COMPUTER_MAKE => to_result(&rt.computer_make(&caller, parse_params(params)?)?),
+            methods::COMPUTER_SCREEN => {
+                let request: glass_api::ScreenRequest = parse_params(params)?;
+                to_result(&rt.computer_screen(&caller, &request)?)
+            }
+            methods::COMPUTER_TAKE_OVER => {
+                let computer: glass_api::ComputerRef = parse_params(params)?;
+                to_result(&rt.computer_take_over(&caller, &computer.id)?)
+            }
+            methods::COMPUTER_HAND_BACK => {
+                let computer: glass_api::ComputerRef = parse_params(params)?;
+                to_result(&rt.computer_hand_back(&caller, &computer.id)?)
+            }
+            methods::COMPUTER_INPUT => {
+                to_result(&rt.computer_input(&caller, parse_params(params)?)?)
+            }
+            methods::COMPUTER_SLEEP => {
+                let computer: glass_api::ComputerRef = parse_params(params)?;
+                to_result(&rt.computer_sleep(&caller, &computer.id).await?)
+            }
+            methods::COMPUTER_WAKE => {
+                let computer: glass_api::ComputerRef = parse_params(params)?;
+                to_result(&rt.computer_wake(&caller, &computer.id).await?)
+            }
             methods::AGENTS_LIST => to_result(&rt.agents_for(&caller)),
             methods::APPS_LIST => to_result(&rt.profile_apps(&caller)),
             methods::SETTINGS_GET => to_result(&blocking(|| rt.settings_view(&caller))),

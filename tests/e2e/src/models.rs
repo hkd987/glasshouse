@@ -190,6 +190,7 @@ pub async fn models(h: &Harness) -> anyhow::Result<()> {
             restrict: Vec::new(),
         },
         title: None,
+        computer: None,
     };
     // DP-2: the card says where this task's data would go.
     let card: HandoffCard = h.call(methods::TASK_PLAN, &request).await?;

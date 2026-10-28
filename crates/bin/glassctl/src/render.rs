@@ -922,6 +922,7 @@ mod tests {
             updated_at: Timestamp::now(),
             driver_socket: None,
             continues: None,
+            computer: None,
         };
         (ask, view)
     }

@@ -120,6 +120,7 @@ async fn claude_code(h: &Harness) -> Arc<Client> {
                 prompt: "Share the Q3 forecast with Priya".into(),
                 scope: ScopeRequest::default(),
                 title: None,
+                computer: None,
             },
         )
         .unwrap();

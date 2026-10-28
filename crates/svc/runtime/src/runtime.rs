@@ -46,6 +46,9 @@ pub struct RuntimeParts {
     pub gateway: Arc<Gateway>,
     /// Device settings (UX-1): the same handle the `settings` actions use.
     pub settings: SettingsHandle,
+    /// Agent computers, when the sandbox keeps them (ADR 0066): the same
+    /// backend as `sandbox`, for its people's screens and keyboards.
+    pub computers: Option<Arc<glass_computers::sandbox::ComputerSandbox>>,
 }
 
 /// Events carry the owner's uid so subscribers only see their own tasks.
@@ -61,6 +64,7 @@ pub struct Runtime {
     policy_source: Mutex<String>,
     pub(crate) desk: ApprovalDesk,
     pub(crate) sandbox: Arc<dyn Sandbox>,
+    pub(crate) computers: Option<Arc<glass_computers::sandbox::ComputerSandbox>>,
     pub(crate) snapshots: Arc<dyn Snapshotter>,
     /// Each person's turn to change their files, by uid: a reversible step
     /// from its snapshot to its record, and an undo (ADR 0051).
@@ -187,6 +191,7 @@ impl Runtime {
             policy_source: Mutex::new(parts.policy_source),
             desk: ApprovalDesk::new(),
             sandbox: parts.sandbox,
+            computers: parts.computers,
             snapshots: parts.snapshots,
             writing: Mutex::new(std::collections::HashMap::new()),
             gateway: RwLock::new(parts.gateway),
@@ -928,6 +933,7 @@ impl Runtime {
             prompt: task.prompt.clone(),
             scope: task.scope.clone(),
             title: Some(task.lock().title.clone()),
+            computer: task.sandbox.computer.clone(),
         };
         self.start_task(caller, request, Origin::RetryOf(id))
     }
@@ -946,6 +952,29 @@ impl Runtime {
             Origin::Routine(_) => request,
             _ => self.with_agent_folders(caller, request),
         };
+        if let Some(computer) = &request.computer {
+            if !self.sandbox.keeps_computers() {
+                return Err(RuntimeError::Invalid(
+                    "this system doesn't keep agent computers".into(),
+                ));
+            }
+            if !glass_platform::sandbox::valid_computer_id(computer) {
+                return Err(RuntimeError::Invalid(format!(
+                    "{computer:?} isn't a computer's id: lowercase letters, digits and -"
+                )));
+            }
+            if let Some(computers) = &self.computers {
+                let view = blocking(|| computers.get(caller.uid, computer)).map_err(|_| {
+                    RuntimeError::NotFound(format!("you have no computer {computer}"))
+                })?;
+                if view.taken_over {
+                    return Err(RuntimeError::Conflict(format!(
+                        "you have {}'s keyboard: hand it back for it to work",
+                        view.name
+                    )));
+                }
+            }
+        }
         let prepared = self.prepare(caller, &request)?;
         // Counted and inserted under one lock, so starts at once can't all
         // fit under the limit, nor one land after shutdown's stops
@@ -984,6 +1013,7 @@ impl Runtime {
             user: caller.name.clone(),
             uid: caller.uid,
             gid: caller.gid,
+            computer: request.computer.clone(),
         };
         let ctx = TaskContext {
             principal: AgentPrincipal {

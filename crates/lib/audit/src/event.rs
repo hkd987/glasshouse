@@ -134,6 +134,9 @@ pub enum EventKind {
     /// signed, as it started: unchanged, changed, or not checked and why
     /// (ADR 0064, EP-1).
     SystemChecked,
+    /// A person's agent computer was made, taken over, typed on, handed
+    /// back, put to sleep or woken (ADR 0065, ADR 0066).
+    Computer,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

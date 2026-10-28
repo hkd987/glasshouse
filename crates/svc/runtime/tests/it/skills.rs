@@ -145,6 +145,7 @@ async fn agent(h: &Harness, id: &str, prompt: &str) -> Arc<Client> {
                 prompt: prompt.into(),
                 scope: ScopeRequest::default(),
                 title: None,
+                computer: None,
             },
         )
         .unwrap();

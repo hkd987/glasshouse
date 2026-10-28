@@ -24,6 +24,7 @@ async fn claude_code(h: &Harness) -> (TaskId, Client) {
                 prompt: "Make Chat ask before every message I send".into(),
                 scope: ScopeRequest::default(),
                 title: None,
+                computer: None,
             },
         )
         .unwrap();

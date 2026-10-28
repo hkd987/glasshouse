@@ -133,6 +133,7 @@ async fn claude_code(h: &Harness) -> (TaskId, Arc<Client>) {
                 prompt: "Catch me up on chat".into(),
                 scope: ScopeRequest::default(),
                 title: None,
+                computer: None,
             },
         )
         .unwrap();

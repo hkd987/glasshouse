@@ -124,6 +124,7 @@ async fn dv11_available_reaches_a_person_once_installed_and_never_beyond_policy(
                 prompt: "Total the invoices".into(),
                 scope: Default::default(),
                 title: None,
+                computer: None,
             },
         )
         .unwrap_err();

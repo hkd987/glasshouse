@@ -58,6 +58,9 @@ glass-app-artifacts = { path = "crates/apps/artifacts" }
 glass-app-skills = { path = "crates/apps/skills" }
 glass-app-docs = { path = "crates/apps/docs" }
 glass-media-relay = { path = "crates/svc/media-relay" }
+glass-agents-api = { path = "crates/lib/agents-api" }
+glass-computers = { path = "crates/svc/computers" }
+glass-teams = { path = "crates/svc/teams" }
 
 # Third-party crates. Licenses must pass `deny.toml` (no copyleft).
 anyhow = "1.0.104"

@@ -77,6 +77,7 @@ agents = ["claude-code"]
                 prompt: "Email Priya the renewal terms".into(),
                 scope: ScopeRequest::default(),
                 title: None,
+                computer: None,
             },
         )
         .unwrap();

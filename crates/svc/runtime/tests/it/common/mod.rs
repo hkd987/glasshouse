@@ -141,6 +141,7 @@ impl Harness {
                 restrict: Vec::new(),
             },
             title: None,
+            computer: None,
         }
     }
 
@@ -428,6 +429,7 @@ pub fn harness_with(policy_extra: &str) -> Harness {
         audit: Arc::clone(&audit),
         gateway: Arc::new(gateway),
         settings: settings.clone(),
+        computers: None,
     });
     studio.set_surroundings(Arc::new(glass_runtime::StudioSurroundings::new(
         &rt,
@@ -502,6 +504,17 @@ pub fn rebuild(h: &Harness, policy: &str) -> Arc<Runtime> {
 /// A new runtime on the same state, as after a restart with this policy and
 /// catalog.
 pub fn rebuild_with(h: &Harness, policy: &str, catalog: Vec<CatalogEntry>) -> Arc<Runtime> {
+    rebuild_on(h, policy, catalog, Arc::new(HostSandbox), None)
+}
+
+/// [`rebuild_with`] on another sandbox backend, such as agent computers.
+pub fn rebuild_on(
+    h: &Harness,
+    policy: &str,
+    catalog: Vec<CatalogEntry>,
+    sandbox: Arc<dyn glass_platform::sandbox::Sandbox>,
+    computers: Option<Arc<glass_computers::sandbox::ComputerSandbox>>,
+) -> Arc<Runtime> {
     let mut registry = Registry::new();
     registry.register(Arc::new(FilesProvider)).unwrap();
     registry
@@ -527,11 +540,12 @@ pub fn rebuild_with(h: &Harness, policy: &str, catalog: Vec<CatalogEntry>) -> Ar
         policy: Policy::from_toml(policy).unwrap(),
         policy_source: "test".into(),
         registry,
-        sandbox: Arc::new(HostSandbox),
+        sandbox,
         snapshots: Arc::new(CopySnapshotter::new(h.dir.path().join("snapshots"))),
         audit: Arc::new(AuditLog::open(h.audit_path(), Durability::Buffered).unwrap()),
         gateway: Arc::new(Gateway::new()),
         settings: SettingsHandle::new(h.dir.path().join("state/settings")),
+        computers,
     })
 }
 

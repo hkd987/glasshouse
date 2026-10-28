@@ -42,6 +42,7 @@ impl Runtime {
             prompt: task.prompt.clone(),
             scope: task.scope.clone(),
             title: Some(task.lock().title.clone()),
+            computer: task.sandbox.computer.clone(),
         };
         self.start_task(caller, request, Origin::Continues(continued(&task)))
     }

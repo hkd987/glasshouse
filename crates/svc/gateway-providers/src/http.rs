@@ -94,7 +94,7 @@ pub(crate) struct Target {
     path: String,
 }
 
-trait Stream: Read + Write {}
+pub(crate) trait Stream: Read + Write {}
 impl<T: Read + Write> Stream for T {}
 
 impl Http {
@@ -287,7 +287,7 @@ impl Http {
     }
 
     /// A connection with `method` sent on it, its headers and body.
-    fn request(
+    pub(crate) fn request(
         &self,
         method: &str,
         url: &str,
@@ -429,18 +429,18 @@ fn tunnel(tcp: &mut TcpStream, target: &Target) -> Result<(), ProviderError> {
 }
 
 /// How a reply's body ends.
-enum Framing {
+pub(crate) enum Framing {
     Length(usize),
     Chunked,
     Close,
 }
 
 /// A reply's head, once it's all there.
-struct Head {
-    status: u16,
+pub(crate) struct Head {
+    pub(crate) status: u16,
     /// Where the body starts.
     at: usize,
-    framing: Framing,
+    pub(crate) framing: Framing,
     retry_after: Option<Duration>,
 }
 
@@ -652,7 +652,7 @@ impl Read for Body<'_> {
 }
 
 /// The reply's head, once it's all there.
-fn head(buf: &[u8], max: usize) -> Result<Option<Head>, ProviderError> {
+pub(crate) fn head(buf: &[u8], max: usize) -> Result<Option<Head>, ProviderError> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut response = httparse::Response::new(&mut headers);
     let at = match response.parse(buf) {
@@ -761,7 +761,7 @@ impl Target {
     }
 
     /// `host` or `host:port`, as the Host header carries it.
-    fn authority(&self) -> String {
+    pub(crate) fn authority(&self) -> String {
         match (self.tls, self.port) {
             (true, 443) | (false, 80) => self.host.clone(),
             _ => format!("{}:{}", self.host, self.port),

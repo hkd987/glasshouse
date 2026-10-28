@@ -16,6 +16,7 @@ glass-app-routines.workspace = true
 glass-replay.workspace = true
 glass-audit.workspace = true
 glass-broker.workspace = true
+glass-computers.workspace = true
 glass-gateway.workspace = true
 glass-managed.workspace = true
 glass-platform.workspace = true

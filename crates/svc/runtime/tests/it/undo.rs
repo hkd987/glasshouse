@@ -275,6 +275,7 @@ async fn a_cache_cleanup_comes_back_whole_and_new_cache_files_stay() {
         prompt: "My disk is full".into(),
         scope: ScopeRequest::default(),
         title: None,
+        computer: None,
     };
     let task = h.rt.start(&h.me, request).unwrap().id;
     let agent = h.agent(task).await;

@@ -73,6 +73,7 @@ impl AskAgent for Asks {
             prompt: prompt(meeting, title_, request),
             scope: ScopeRequest::default(),
             title: Some(title(request)),
+            computer: None,
         };
         // Called from an action's worker thread; starting a task spawns
         // its supervisor on glassd's runtime.

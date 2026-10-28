@@ -27,6 +27,10 @@ pub mod env {
     /// The id of the routine this task runs, empty for any other task
     /// (DA-4): `routines.read` gives its script.
     pub const ROUTINE: &str = "GLASS_ROUTINE";
+    /// The agent's own computer (ADR 0066), kept between its tasks, where it
+    /// is root and may run what it likes; empty in a sandbox that goes with
+    /// the task.
+    pub const COMPUTER: &str = "GLASS_COMPUTER";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +59,8 @@ pub struct Agent {
     pub utc_offset_secs: i32,
     /// The routine this task runs, by id (DA-4).
     pub routine: Option<String>,
+    /// Its own computer, by id, when it has one (ADR 0066).
+    pub computer: Option<String>,
 }
 
 impl Agent {
@@ -97,6 +103,7 @@ impl Agent {
                 .and_then(|text| text.parse().ok())
                 .unwrap_or(0),
             routine: var(env::ROUTINE).ok().filter(|id| !id.is_empty()),
+            computer: var(env::COMPUTER).ok().filter(|id| !id.is_empty()),
         })
     }
 

@@ -397,6 +397,7 @@ impl Sandbox for JailSandbox {
                 user: String::new(),
                 uid: 0,
                 gid: 0,
+                computer: None,
             })?;
             cleaned.push(name);
         }
@@ -458,6 +459,7 @@ mod tests {
             user: "demo".into(),
             uid: 1001,
             gid: 1001,
+            computer: None,
         }
     }
 

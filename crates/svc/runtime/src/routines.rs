@@ -143,6 +143,7 @@ impl Runtime {
                 restrict: Vec::new(),
             },
             title: Some(routine.name.clone()),
+            computer: None,
         };
         let run = RoutineRun {
             id: routine.id.clone(),

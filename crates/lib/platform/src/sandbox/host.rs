@@ -111,6 +111,7 @@ mod tests {
             user: "me".into(),
             uid: meta.uid(),
             gid: meta.gid(),
+            computer: None,
         };
         let sandbox = HostSandbox;
         sandbox.create(&spec).unwrap();

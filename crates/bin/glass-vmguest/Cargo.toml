@@ -1,0 +1,14 @@
+[package]
+name = "glass-vmguest"
+description = "The exec service in a Firecracker agent computer's guest: runs each task's process as the host asks (ADR 0065 §10)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-computers.workspace = true
+
+[lints]
+workspace = true

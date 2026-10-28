@@ -1,0 +1,28 @@
+[package]
+name = "glass-teams"
+description = "Agents in Microsoft Teams: the Bot Framework relay and approval cards (ADR 0065 §13)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+# RS256 checks of the Bot Connector's tokens are glass-crypto's: only it and
+# glass-gateway-providers use OpenSSL (tools/check-layers.py).
+[dependencies]
+glass-agents-api.workspace = true
+glass-crypto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+glass-crypto = { workspace = true, features = ["testing"] }
+
+[features]
+# `testing`: a stand-in for the Bot Connector's signing key, for other
+# crates' tests. Tests only.
+testing = ["glass-crypto/testing"]
+
+[lints]
+workspace = true

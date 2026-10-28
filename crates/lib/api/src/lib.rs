@@ -16,6 +16,7 @@
 
 mod approval;
 mod apps;
+mod computer;
 mod hardware;
 pub mod settings;
 mod tailoring;
@@ -33,6 +34,10 @@ pub use apps::{
     AppLiveResult, AppManifest, AppOpen, AppPermission, AppSession, AppSessionRef, AppStatus,
     AppStatusRequest, AppWaiting, DEFAULT_APP_SOCKET, LiveOp, ProfileApp, ProfileAppKind,
     app_bridge_port, app_methods,
+};
+pub use computer::{
+    ComputerNew, ComputerRef, ComputerState, ComputerView, INPUT_MAX_BYTES, ScreenInput,
+    ScreenRequest, ScreenView, StoredView,
 };
 pub use hardware::{PatchApply, PatchStatus, PatchTrial, TrialState};
 pub use tailoring::{
@@ -72,6 +77,26 @@ pub struct SeatBegin {
 pub mod methods {
     /// `()` → [`crate::SystemStatus`]
     pub const SYSTEM_STATUS: &str = "system.status";
+    /// `()` → `Vec<`[`crate::ComputerView`]`>`: the caller's agent
+    /// computers (ADR 0065, 0066).
+    pub const COMPUTER_LIST: &str = "computer.list";
+    /// [`crate::ComputerNew`] → [`crate::ComputerView`]
+    pub const COMPUTER_MAKE: &str = "computer.make";
+    /// [`crate::ScreenRequest`] → [`crate::ScreenView`]
+    pub const COMPUTER_SCREEN: &str = "computer.screen";
+    /// [`crate::ComputerRef`] → [`crate::ComputerView`]: its person has the
+    /// keyboard; its tasks wait.
+    pub const COMPUTER_TAKE_OVER: &str = "computer.take_over";
+    /// [`crate::ComputerRef`] → [`crate::ComputerView`]
+    pub const COMPUTER_HAND_BACK: &str = "computer.hand_back";
+    /// [`crate::ScreenInput`] → `()`: runs a line its person typed; what it
+    /// prints shows on the screen. Only while taken over.
+    pub const COMPUTER_INPUT: &str = "computer.input";
+    /// [`crate::ComputerRef`] → [`crate::ComputerView`]: saved to the store
+    /// and gone from this host (ADR 0065 §11).
+    pub const COMPUTER_SLEEP: &str = "computer.sleep";
+    /// [`crate::ComputerRef`] → [`crate::ComputerView`]
+    pub const COMPUTER_WAKE: &str = "computer.wake";
     /// `()` → `Vec<`[`crate::AgentSummary`]`>`: agents the caller may run.
     pub const AGENTS_LIST: &str = "agents.list";
     /// `()` → `Vec<`[`crate::ProfileApp`]`>`: the apps in the caller's

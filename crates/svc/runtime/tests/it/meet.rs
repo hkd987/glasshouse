@@ -162,6 +162,7 @@ async fn cf21_agents_cannot_join_meetings() {
                 prompt: "Join my 2pm and take notes".into(),
                 scope: ScopeRequest::default(),
                 title: None,
+                computer: None,
             },
         )
         .unwrap();

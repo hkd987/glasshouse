@@ -18,8 +18,9 @@ const WORKERS = { meet: { worker: "src/worker.ts", speech: "src/speech.ts" } };
 const SPEECH = join(here, "../build/cache/models/speech.json");
 const ORT_WASM = join(here, "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm");
 /** Web apps our web servers serve rather than a device: the admin console
- * (ADR 0023). No offline service worker: they read from their server. */
-export const SITES = ["console"];
+ * (ADR 0023) and Glasshouse Agents (ADR 0066, served by glass-agents). No
+ * offline service worker: they read from their server. */
+export const SITES = ["console", "agents"];
 
 /** @param {string} app */
 function options(app) {
