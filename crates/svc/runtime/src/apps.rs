@@ -179,11 +179,15 @@ impl Runtime {
         let listed = self.config.org_catalog.lists();
         let policy = self.policy();
         let profile = policy.apps_for(&caller.name);
+        // An app IT turned off reaches nobody it's off for, whatever the
+        // catalog offers (ADR 0070).
+        let off = policy.apps_off_for(&caller.name);
         self.config
             .org_apps
             .apps()
             .into_iter()
             .filter(|m| !m.id.is_personal())
+            .filter(|m| !off.contains(&m.id))
             .filter(|m| self.installed_app(&m.id).is_none() || profile.contains(&m.id))
             .filter(|m| listed.contains(&m.id) && reaches(&m.id))
             .collect()

@@ -33,7 +33,8 @@ pub struct ComputerView {
     /// Its tasks running now.
     #[serde(default)]
     pub live_tasks: Vec<TaskId>,
-    /// Its person has the keyboard: new tasks wait until they hand it back.
+    /// Its person has the keyboard: new tasks are refused, saying so, until
+    /// they hand it back.
     #[serde(default)]
     pub taken_over: bool,
     /// Where it was kept when it last slept.

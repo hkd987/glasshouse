@@ -74,7 +74,8 @@ enum Command {
         #[arg(long, short)]
         follow: bool,
     },
-    /// Takes an agent's keyboard: its new tasks wait until you hand it back.
+    /// Takes your computer's keyboard: asks are refused until you hand it
+    /// back.
     TakeOver { agent: String },
     /// Gives an agent its keyboard back.
     HandBack { agent: String },
@@ -465,7 +466,7 @@ fn run(command: Command) -> anyhow::Result<()> {
             let _: api::AgentView = api.post(&format!("agents/{id}/take-over"), json!({}))?;
             println!(
                 "You have {id}'s keyboard: glass type {id} <command> runs a line on its computer; \
-                 its new tasks wait until glass hand-back {id}."
+                 asks are refused until glass hand-back {id}."
             );
         }
         Command::HandBack { agent } => {

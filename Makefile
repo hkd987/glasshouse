@@ -215,6 +215,7 @@ aws-local-test: aws-local apps-build ## Agent computers to S3 and back, metering
 	tests/local-aws/agents-s3.sh
 	tests/local-aws/people.sh
 	tests/local-aws/schedules.sh
+	tests/local-aws/negative.sh
 
 .PHONY: aws-lint
 aws-lint: ## The stack a buyer deploys on AWS (deploy/aws): cfn-lint, installed into build/tools/cfn-lint on first use

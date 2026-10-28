@@ -603,7 +603,8 @@ impl ComputerSandbox {
         self.state().runs.values().any(|run| *run == key)
     }
 
-    /// Its person takes the keyboard: new tasks wait for it back.
+    /// Its person takes the keyboard: new tasks are refused, saying so,
+    /// until they hand it back.
     pub fn take_over(&self, uid: u32, id: &str) -> Result<ComputerView> {
         let (computer, meta) = self.find(uid, id)?;
         self.state().taken_over.insert((uid, id.to_owned()));

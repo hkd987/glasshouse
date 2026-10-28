@@ -33,11 +33,14 @@ pub enum Edit {
     MaxLabel { group: String, label: Option<Label> },
     /// Network destinations an agent's sandbox may reach (`host:port`).
     Egress { agent: AgentId, egress: Vec<String> },
-    /// Whether an app is in a group's members' profiles.
+    /// An app for a group (ADR 0070). For `everyone`, the org's: on, or
+    /// off unless a group turns it on. For another group: on (whatever the
+    /// org says), off (whatever any other group says), or as the org has
+    /// it.
     App {
         group: String,
         app: AgentId,
-        on: bool,
+        state: AppState,
     },
     /// The org's mail service (NV-3); `None` takes it out.
     Mail { mail: Option<MailSettings> },
@@ -61,6 +64,16 @@ pub enum Edit {
     /// Whether an agent may ask AI models (`model.complete`, AD-2), on
     /// whatever routes the org's models allow. For every group.
     ModelCalls { agent: AgentId, on: bool },
+}
+
+/// An app's state for a group, as the policy page sets it (ADR 0070).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppState {
+    On,
+    Off,
+    /// As the org has it; `everyone` has no other to follow.
+    Inherit,
 }
 
 /// The action an agent needs to ask a model (ADR 0018).
@@ -145,6 +158,8 @@ fn group<'a>(doc: &'a mut PolicyDocument, name: &str) -> &'a mut GroupPolicy {
         members: Vec::new(),
         agents: Vec::new(),
         apps: Vec::new(),
+        apps_on: Vec::new(),
+        apps_off: Vec::new(),
         max_label: None,
         tiers: Default::default(),
         models: None,
@@ -285,12 +300,40 @@ pub fn apply(doc: &mut PolicyDocument, edit: Edit) -> Result<(), String> {
         Edit::App {
             group: name,
             app,
-            on,
+            state,
         } => {
+            if name == glass_policy::EVERYONE {
+                // The org's own: off is off for everyone unless a group
+                // turns it on.
+                let on = match state {
+                    AppState::On => true,
+                    AppState::Off => false,
+                    AppState::Inherit => {
+                        return Err("everyone has no one else's to follow: on or off".into());
+                    }
+                };
+                doc.org.apps_off.retain(|a| a != &app);
+                if !on {
+                    doc.org.apps_off.push(app.clone());
+                }
+                let g = group(doc, &name);
+                g.apps.retain(|a| a != &app);
+                if on {
+                    g.apps.push(app);
+                }
+                return Ok(());
+            }
             let g = group(doc, &name);
             g.apps.retain(|a| a != &app);
-            if on {
-                g.apps.push(app);
+            g.apps_on.retain(|a| a != &app);
+            g.apps_off.retain(|a| a != &app);
+            match state {
+                AppState::On => {
+                    g.apps.push(app.clone());
+                    g.apps_on.push(app);
+                }
+                AppState::Off => g.apps_off.push(app),
+                AppState::Inherit => {}
             }
         }
     }
@@ -438,11 +481,76 @@ mod tests {
             Edit::App {
                 group: "ap-ops".into(),
                 app: "terminal".parse().unwrap(),
-                on: true,
+                state: AppState::On,
             },
         )
         .unwrap();
         glass_policy::Policy::from_document(d).unwrap();
+    }
+
+    #[test]
+    fn adr0070_mail_off_for_the_org_on_for_finance_off_for_contractors() {
+        let mut d = doc();
+        let edit =
+            |d: &mut PolicyDocument, json: &str| apply(d, serde_json::from_str(json).unwrap());
+        edit(
+            &mut d,
+            r#"{"edit":"app","group":"everyone","app":"mail","state":"off"}"#,
+        )
+        .unwrap();
+        edit(
+            &mut d,
+            r#"{"edit":"app","group":"finance","app":"mail","state":"on"}"#,
+        )
+        .unwrap();
+        edit(
+            &mut d,
+            r#"{"edit":"app","group":"contractors","app":"mail","state":"off"}"#,
+        )
+        .unwrap();
+        assert!(
+            edit(
+                &mut d,
+                r#"{"edit":"app","group":"everyone","app":"mail","state":"inherit"}"#
+            )
+            .is_err()
+        );
+        assert!(d.org.apps_off.iter().any(|a| a.as_str() == "mail"));
+        let mut d2 = d.clone();
+        d2.groups
+            .iter_mut()
+            .find(|g| g.name == "finance")
+            .unwrap()
+            .members = vec!["fin".into()];
+        d2.groups
+            .iter_mut()
+            .find(|g| g.name == "contractors")
+            .unwrap()
+            .members = vec!["con".into(), "fin2".into()];
+        let policy = glass_policy::Policy::from_document(d2).unwrap();
+        let has = |user: &str| policy.apps_for(user).iter().any(|a| a.as_str() == "mail");
+        assert!(!has("anyone"));
+        assert!(has("fin"));
+        assert!(!has("con"));
+        // Back as the org has it, and the org's on again: everyone has it.
+        edit(
+            &mut d,
+            r#"{"edit":"app","group":"contractors","app":"mail","state":"inherit"}"#,
+        )
+        .unwrap();
+        edit(
+            &mut d,
+            r#"{"edit":"app","group":"everyone","app":"mail","state":"on"}"#,
+        )
+        .unwrap();
+        assert!(d.org.apps_off.is_empty());
+        let policy = glass_policy::Policy::from_document(d).unwrap();
+        assert!(
+            policy
+                .apps_for("anyone")
+                .iter()
+                .any(|a| a.as_str() == "mail")
+        );
     }
 
     #[test]

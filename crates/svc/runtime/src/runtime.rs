@@ -957,6 +957,13 @@ impl Runtime {
         // Not on a system that differs from its image, nor while that's
         // checked (ADR 0064).
         crate::system::may_start(&self.system_check()).map_err(RuntimeError::Conflict)?;
+        if request.prompt.chars().count() > glass_api::PROMPT_MAX_CHARS {
+            return Err(RuntimeError::Invalid(format!(
+                "that's more than a task takes ({} characters at most): put the rest in a \
+                 file and give it the file",
+                glass_api::PROMPT_MAX_CHARS
+            )));
+        }
         // A routine runs with the scope it was saved with, nothing more.
         let request = match origin {
             Origin::Routine(_) => request,

@@ -144,6 +144,69 @@ mod tests {
     }
 
     #[test]
+    fn adr0070_it_turns_apps_off_for_the_org_and_groups_and_off_wins() {
+        // Mail off for the org, back on for finance; Calendar off for
+        // contractors, whatever everyone gets.
+        let doc = DEFAULT_POLICY
+            .replacen(
+                "[org]\n",
+                "[org]\napps_off = [\"mail\"]\n",
+                1,
+            )
+            .replace(
+                "name = \"it-admins\"\n",
+                "name = \"it-admins\"\nmembers = [\"pat\"]\n\n[[group]]\nname = \"finance\"\nmembers = [\"fin\", \"both\"]\napps_on = [\"mail\"]\n\n[[group]]\nname = \"contractors\"\nmembers = [\"con\", \"both\"]\napps_off = [\"calendar\", \"mail\"]\n\n[[group]]\nname = \"it-admins-2\"\n",
+            );
+        let policy = Policy::from_toml(&doc).unwrap();
+        let has = |user: &str, app: &str| policy.apps_for(user).iter().any(|a| a.as_str() == app);
+        assert!(!has("anyone", "mail"), "off for the org");
+        assert!(has("anyone", "calendar"));
+        assert!(has("fin", "mail"), "finance turns it back on");
+        assert!(!has("con", "calendar"), "contractors have it off");
+        assert!(!has("both", "mail"), "off wins over a group's on");
+        assert!(!has("both", "calendar"));
+
+        // Off for them, an app's actions are Never for every agent and app
+        // acting for them, with why.
+        let agent: glass_types::AgentId = "desktop-agent".parse().unwrap();
+        let send: glass_types::ActionName = "mail.send".parse().unwrap();
+        let hold: glass_types::ActionName = "calendar.read".parse().unwrap();
+        let tier = |user: &str, action: &glass_types::ActionName| {
+            policy
+                .effective(user, &agent)
+                .unwrap()
+                .tier_for(action, glass_types::Tier::Ask)
+        };
+        let refused = tier("anyone", &send);
+        assert_eq!(refused.tier, glass_types::Tier::Never);
+        assert_eq!(
+            refused.source.to_string(),
+            "IT turned the mail app off for you"
+        );
+        assert_ne!(tier("fin", &send).tier, glass_types::Tier::Never);
+        assert_eq!(tier("con", &hold).tier, glass_types::Tier::Never);
+        assert_ne!(tier("anyone", &hold).tier, glass_types::Tier::Never);
+        let app = policy.for_app(
+            "anyone",
+            &"my-mailer".parse().unwrap(),
+            std::slice::from_ref(&send),
+            glass_types::Label::Internal,
+        );
+        assert_eq!(
+            app.tier_for(&send, glass_types::Tier::Auto).tier,
+            glass_types::Tier::Never
+        );
+
+        // Both on and off in one group says nothing clear.
+        let both = doc.replace(
+            "apps_off = [\"calendar\", \"mail\"]",
+            "apps_on = [\"calendar\"]\napps_off = [\"calendar\"]",
+        );
+        let err = Policy::from_toml(&both).unwrap_err().to_string();
+        assert!(err.contains("both on and off"), "{err}");
+    }
+
+    #[test]
     fn an_app_in_a_profile_cant_be_an_agent() {
         // Apps and agents share one namespace (ADR 0024).
         let bad = DEFAULT_POLICY.replace("\"mail\", \"calendar\"", "\"mail\", \"claude-code\"");

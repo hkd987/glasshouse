@@ -409,6 +409,11 @@ pub struct OrgDefaults {
     /// the default tier their app declared.
     #[serde(default)]
     pub tiers: BTreeMap<ActionPattern, Tier>,
+    /// Apps IT turned off for everyone (ADR 0070), such as `mail`: in no
+    /// one's profile, and their actions Never for every agent, unless a
+    /// group a person is in turns one back on (`apps_on`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps_off: Vec<AgentId>,
 }
 
 impl Default for OrgDefaults {
@@ -417,6 +422,7 @@ impl Default for OrgDefaults {
             max_label: default_max_label(),
             approval_timeout_secs: default_approval_timeout_secs(),
             tiers: BTreeMap::new(),
+            apps_off: Vec::new(),
         }
     }
 }
@@ -449,6 +455,13 @@ pub struct GroupPolicy {
     /// the admin console. Apps and agents share one namespace.
     #[serde(default)]
     pub apps: Vec<AgentId>,
+    /// Apps the org turned off that members get all the same (ADR 0070).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps_on: Vec<AgentId>,
+    /// Apps off for members, whatever another group or the org says: off
+    /// wins (ADR 0070).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps_off: Vec<AgentId>,
     #[serde(default)]
     pub max_label: Option<Label>,
     #[serde(default)]

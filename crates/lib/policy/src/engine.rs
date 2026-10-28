@@ -70,6 +70,15 @@ impl Policy {
                 }
             }
         }
+        // An app a group turns both on and off says nothing clear (ADR 0070).
+        for group in &doc.groups {
+            for app in group.apps_on.iter().filter(|a| group.apps_off.contains(a)) {
+                errors.push(format!(
+                    "group {:?} turns app {app:?} both on and off",
+                    group.name
+                ));
+            }
+        }
         let mut seen_apps = std::collections::BTreeSet::new();
         for app in &doc.apps {
             if !seen_apps.insert(&app.id) {
@@ -89,11 +98,14 @@ impl Policy {
             .iter()
             .map(|a| &a.id)
             .chain(doc.agents.iter().map(|a| &a.id))
-            .chain(
-                doc.groups
+            .chain(doc.groups.iter().flat_map(|g| {
+                g.apps
                     .iter()
-                    .flat_map(|g| g.apps.iter().chain(&g.agents)),
-            )
+                    .chain(&g.agents)
+                    .chain(&g.apps_on)
+                    .chain(&g.apps_off)
+            }))
+            .chain(&doc.org.apps_off)
             .filter(|id| id.is_personal());
         for id in personal {
             errors.push(format!(
@@ -235,10 +247,33 @@ impl Policy {
     }
 
     /// The apps in `user`'s profile: every one their groups list
-    /// (role-based delivery). glassd opens no other app for them, and the
-    /// launcher offers no other.
+    /// (role-based delivery), but those IT turned off for them
+    /// ([`Policy::apps_off_for`]). glassd opens no other app for them, and
+    /// the launcher offers no other.
     pub fn apps_for<'a>(&'a self, user: &'a str) -> std::collections::BTreeSet<&'a AgentId> {
-        self.groups_of(user).flat_map(|g| g.apps.iter()).collect()
+        let off = self.apps_off_for(user);
+        self.groups_of(user)
+            .flat_map(|g| g.apps.iter().chain(&g.apps_on))
+            .filter(|app| !off.contains(*app))
+            .collect()
+    }
+
+    /// The apps IT turned off for `user` (ADR 0070): those a group of
+    /// theirs turns off, whatever else turns them on, and those the org
+    /// turned off that no group of theirs turns back on. Their actions are
+    /// Never for every agent acting for them.
+    pub fn apps_off_for<'a>(&'a self, user: &'a str) -> std::collections::BTreeSet<&'a AgentId> {
+        let on: std::collections::BTreeSet<&AgentId> = self
+            .groups_of(user)
+            .flat_map(|g| g.apps_on.iter())
+            .collect();
+        self.doc
+            .org
+            .apps_off
+            .iter()
+            .filter(|app| !on.contains(app))
+            .chain(self.groups_of(user).flat_map(|g| g.apps_off.iter()))
+            .collect()
     }
 
     /// Agents `user` may run, in catalog order.
@@ -327,6 +362,11 @@ impl Policy {
             names: self.doc.names.clone(),
             models: ModelRules::new(&self.doc.models, groups, agent.models.as_deref()),
             app: false,
+            apps_off: self
+                .apps_off_for(user)
+                .into_iter()
+                .map(|a| a.as_str().to_owned())
+                .collect(),
         }
     }
 
@@ -487,6 +527,10 @@ pub enum RuleSource {
     /// The person says yes every time (ADR 0057): rules can't lower it
     /// below Ask.
     EveryTime,
+    /// IT turned the app it belongs to off for this person (ADR 0070).
+    AppOff {
+        app: String,
+    },
 }
 
 impl fmt::Display for RuleSource {
@@ -503,6 +547,7 @@ impl fmt::Display for RuleSource {
                 f.write_str("only the person does this, in their own app, never an agent")
             }
             RuleSource::EveryTime => f.write_str("the person says yes every time"),
+            RuleSource::AppOff { app } => write!(f, "IT turned the {app} app off for you"),
         }
     }
 }
@@ -543,6 +588,8 @@ pub struct EffectivePolicy {
     models: ModelRules,
     /// An app's session (the person in that app's window), not an agent.
     app: bool,
+    /// Apps IT turned off for the user (ADR 0070): their actions are Never.
+    apps_off: Vec<String>,
 }
 
 impl EffectivePolicy {
@@ -590,6 +637,14 @@ impl EffectivePolicy {
     /// both IT overrides of the baseline and combine by taking the stricter;
     /// finally task restrictions, which can only tighten.
     pub fn tier_for(&self, action: &ActionName, app_default: Tier) -> TierDecision {
+        // An app IT turned off is off for agents and other apps too: Mail
+        // off means no agent sends mail for them either (ADR 0070).
+        if let Some(app) = self.app_off(action) {
+            return TierDecision {
+                tier: Tier::Never,
+                source: RuleSource::AppOff { app },
+            };
+        }
         // Whatever a pattern such as `*` allows, an agent never joins a
         // meeting (CF-21, ADR 0030).
         if !self.app && people_only(action) {
@@ -673,6 +728,16 @@ impl EffectivePolicy {
             };
         }
         decision
+    }
+
+    /// The app IT turned off that `action` belongs to (`mail.send` is
+    /// Mail's), if it's one.
+    fn app_off(&self, action: &ActionName) -> Option<String> {
+        let app = action.as_str().split('.').next()?;
+        self.apps_off
+            .iter()
+            .find(|off| off.as_str() == app)
+            .cloned()
     }
 
     /// Makes every action matching `pattern` at least `tier` for this task

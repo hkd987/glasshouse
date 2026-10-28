@@ -65,6 +65,13 @@ replaced, as the Auto Scaling group's lifecycle hook does.
     run on the minute.
   - and `adr0069_local_aws_one_claim_holds`: of two hosts' claims of one
     run, one holds.
+  - then `tests/local-aws/negative.sh`: eight people at once, each
+    seeing only their own agent, file and screen. Mail off for the org
+    and on for Finance (ADR 0070): one person's agent has no Mail, the
+    other's asks first. Another's approval can't be answered or seen;
+    events stay their own. Bad input is refused: empty, too long, not
+    JSON, the wrong shape, a 21st agent, names that aren't names. The
+    keyboard: typing without it, asking while someone has it.
 - moto keeps objects in memory and doesn't enforce bucket policies or KMS
   key policies. Its speed says nothing about S3's, so time sleeps and wakes
   on AWS.

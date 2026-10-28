@@ -172,3 +172,70 @@ agents = []
     .unwrap();
     assert_eq!(blocked.len(), 1, "the refusal is on the record");
 }
+
+/// ADR 0070: IT turns an app off for the org, and a group turns it back on
+/// or off, off winning. Off, it isn't offered and doesn't open, and no
+/// agent acting for the person reaches it: its tools aren't listed, and a
+/// call is refused with why, on the record.
+#[tokio::test]
+async fn adr0070_an_app_it_turned_off_is_off_for_their_agents_too() {
+    use glass_rpc::mcp::ListToolsResult;
+    use serde_json::json;
+
+    let h = harness();
+    let mail_off = "[org]\napps_off = [\"mail\"]\n";
+    h.apply_policy_replacing("[org]\n", mail_off, "");
+    assert!(!ids(&h).iter().any(|(id, _)| id == "mail"));
+    assert!(ids(&h).iter().any(|(id, _)| id == "calendar"));
+    assert!(matches!(
+        h.rt.open_app(&h.me, &"mail".parse().unwrap()),
+        Err(RuntimeError::PermissionDenied(_))
+    ));
+
+    let task = h.rt.start(&h.me, h.request(&["Invoices"], &[])).unwrap().id;
+    let agent = h.agent(task).await;
+    let tools: ListToolsResult = agent.call("tools/list", json!({})).await.unwrap();
+    assert!(
+        !tools.tools.iter().any(|t| t.name.starts_with("mail_")),
+        "{:?}",
+        tools.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+    );
+    assert!(tools.tools.iter().any(|t| t.name == "files_read"));
+    let refused = common::tool(&agent, "mail_send", common::send_args(1)).await;
+    assert!(refused.is_error);
+    assert!(
+        refused
+            .text()
+            .contains("IT turned the mail app off for you"),
+        "{}",
+        refused.text()
+    );
+    let blocked = glass_audit::read(&h.audit_path(), |r| {
+        r.event.task == Some(task)
+            && r.event
+                .action
+                .as_ref()
+                .is_some_and(|a| a.as_str() == "mail.send")
+    })
+    .unwrap();
+    assert!(!blocked.is_empty(), "the refusal is on the record");
+    assert!(
+        blocked
+            .iter()
+            .all(|r| r.event.outcome != Some(glass_audit::Outcome::Completed)),
+        "nothing was sent"
+    );
+
+    // A group turns it back on for its members...
+    let finance = "[[group]]\nname = \"finance\"\nmembers = [\"{me}\"]\napps_on = [\"mail\"]\n";
+    h.apply_policy_replacing("[org]\n", mail_off, finance);
+    assert!(ids(&h).iter().any(|(id, _)| id == "mail"));
+    assert!(h.rt.open_app(&h.me, &"mail".parse().unwrap()).is_ok());
+    // ...but a group that turns it off wins, and the open Mail closes.
+    let contractors = format!(
+        "{finance}\n[[group]]\nname = \"contractors\"\nmembers = [\"{{me}}\"]\napps_off = [\"mail\"]\n"
+    );
+    h.apply_policy_replacing("[org]\n", mail_off, &contractors);
+    assert!(!ids(&h).iter().any(|(id, _)| id == "mail"));
+    assert!(h.rt.open_app(&h.me, &"mail".parse().unwrap()).is_err());
+}

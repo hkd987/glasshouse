@@ -307,6 +307,8 @@ pub fn fill(
             members: Vec::new(),
             agents: agents.iter().map(|a| a.parse().expect("valid")).collect(),
             apps: Vec::new(),
+            apps_on: Vec::new(),
+            apps_off: Vec::new(),
             max_label: None,
             tiers: Default::default(),
             models: None,

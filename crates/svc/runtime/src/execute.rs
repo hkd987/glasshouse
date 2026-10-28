@@ -104,7 +104,9 @@ impl Runtime {
         // its input at all (ADR 0047).
         let people_only = matches!(
             policy.tier_for(&def.name, def.default_tier).source,
-            glass_policy::RuleSource::PeopleOnly | glass_policy::RuleSource::PersonsOwn
+            glass_policy::RuleSource::PeopleOnly
+                | glass_policy::RuleSource::PersonsOwn
+                | glass_policy::RuleSource::AppOff { .. }
         );
         let preview = if people_only {
             Ok(Preview {

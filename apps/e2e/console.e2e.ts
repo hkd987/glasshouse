@@ -665,3 +665,39 @@ test("adr0030 IT removes a computer from the organization, then forgets it", asy
   await expect(page.locator(`tr[data-device="${id}"]`)).toHaveCount(0);
   await close();
 });
+
+test("adr0070 IT turns Calendar off for the org, and the device stops offering it", async ({ browser }) => {
+  const { page, close } = await session(browser);
+  const offered = () => glassctlJson<{ id: string }[]>("apps").some((a) => a.id === "calendar");
+  expect(offered()).toBe(true);
+  // The preview compares with what every device runs, which a pilot-only
+  // release hasn't changed: turning it back on says nothing of Calendar.
+  const publish = async (state: "on" | "off", line: string | null) => {
+    await open(page, "#/policy/everyone", "policy");
+    await page.locator("[data-test=app-calendar] select").selectOption(state);
+    await expect(page.locator("[data-test=app-calendar] select")).toHaveValue(state);
+    await page.click("button[data-test=preview]");
+    if (line) await expect(page.locator("[data-test=changes]")).toContainText(line);
+    if (state === "off") await shot(page, "policy-app-off-for-the-org");
+    await page.click("button[data-test=publish]");
+    await expect(page.locator(".notice")).toContainText("Published");
+  };
+  await publish("off", "Everyone: apps turned off adds calendar");
+  try {
+    // In force on the device within the budget: not offered.
+    const started = Date.now();
+    await expect(async () => expect(offered()).toBe(false)).toPass({ timeout: PROPAGATION_BUDGET_MS });
+    measured.app_off_propagation_ms = Date.now() - started;
+    expect(readFileSync(join(DEV, "policy.toml"), "utf8")).toMatch(/apps_off = \["calendar"\]/);
+
+    // A group's page says what the org has, and can turn it back on for them.
+    await open(page, "#/policy/it-admins", "policy");
+    await expect(page.locator("[data-test=app-calendar] select")).toHaveValue("inherit");
+    await expect(page.locator("[data-test=app-calendar] option[value=inherit]")).toContainText("As the org has it (off)");
+  } finally {
+    // Back on for everyone, as the other tests expect, whatever happened.
+    await publish("on", null);
+    await expect(async () => expect(offered()).toBe(true)).toPass({ timeout: PROPAGATION_BUDGET_MS });
+    await close();
+  }
+});

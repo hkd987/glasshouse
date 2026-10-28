@@ -56,9 +56,9 @@ pub use tailoring::{
 };
 pub use task::{
     ActivityEntry, ActivityKind, AgentMode, AgentSummary, ChangeEntry, ChangeKind, FeedLine,
-    HandoffCard, Progress, Receipt, RoutineDraft, RoutineFromTask, RoutineRef, RoutineView,
-    ScopeLine, ScopeRequest, SnapshotMarker, TITLE_MAX_CHARS, TaskDetail, TaskRef, TaskRequest,
-    TaskView, TileState, UndoReport, UndoRequest,
+    HandoffCard, PROMPT_MAX_CHARS, Progress, Receipt, RoutineDraft, RoutineFromTask, RoutineRef,
+    RoutineView, ScopeLine, ScopeRequest, SnapshotMarker, TITLE_MAX_CHARS, TaskDetail, TaskRef,
+    TaskRequest, TaskView, TileState, UndoReport, UndoRequest,
 };
 pub use text::{DisplaySafe, STAND_IN, display_char, display_line, invisible};
 pub use update::{

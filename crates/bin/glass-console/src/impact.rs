@@ -136,6 +136,8 @@ fn group_lines(
         members: Vec::new(),
         agents: Vec::new(),
         apps: Vec::new(),
+        apps_on: Vec::new(),
+        apps_off: Vec::new(),
         max_label: None,
         tiers: BTreeMap::new(),
         models: None,
@@ -145,6 +147,8 @@ fn group_lines(
     tier_lines(name, &o.tiers, &n.tiers, draft, titles, out);
     set_lines(name, "allowed agents", &o.agents, &n.agents, out);
     set_lines(name, "apps in profiles", &o.apps, &n.apps, out);
+    set_lines(name, "apps turned on", &o.apps_on, &n.apps_on, out);
+    set_lines(name, "apps turned off", &o.apps_off, &n.apps_off, out);
     if o.max_label != n.max_label {
         out.push(format!(
             "{name}: data up to {}",
@@ -334,6 +338,13 @@ pub fn preview(
     );
     let org_wide_before = changes.len();
     let mut org_wide = !changes.is_empty();
+    set_lines(
+        "Everyone",
+        "apps turned off",
+        &old.org.apps_off,
+        &draft.org.apps_off,
+        &mut changes,
+    );
     if old.org.max_label != draft.org.max_label {
         changes.push(format!("Everyone: data up to {}", draft.org.max_label));
     }
@@ -450,6 +461,8 @@ pub fn preview(
                 .map(|x| GroupPolicy {
                     members: Vec::new(),
                     apps: Vec::new(),
+                    apps_on: Vec::new(),
+                    apps_off: Vec::new(),
                     settings: BTreeMap::new(),
                     ..x.clone()
                 })

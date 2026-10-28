@@ -88,6 +88,11 @@ export interface PolicyPage {
     egress: string[];
   }[];
   apps: string[];
+  /** ADR 0070: what the group turns on or off, and the org's own. */
+  apps_on: string[];
+  apps_off: string[];
+  org_apps: string[];
+  org_apps_off: string[];
   max_label: string | null;
   org_max_label: string;
   routes: { label: string; route: string }[];

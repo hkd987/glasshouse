@@ -60,6 +60,10 @@ pub struct TaskRequest {
 
 /// The longest task title, in characters.
 pub const TITLE_MAX_CHARS: usize = 60;
+/// The longest request a task takes, in characters: from the command bar,
+/// the web app, `glass`, Teams or a schedule alike. Longer belongs in a
+/// file the task is given.
+pub const PROMPT_MAX_CHARS: usize = 32_000;
 
 /// What the task may touch. Paths are absolute paths on this machine and must
 /// be ones the requesting user can access.

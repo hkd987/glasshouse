@@ -28,6 +28,9 @@
 # stand-ins: any AWS keys in the environment are kept from glassd.
 # GLASS_DEV_HOST names this host to the stand-in metadata service (default
 # dev), for tests of a host being replaced.
+# GLASS_DEV_APPS_OFF=mail,calendar turns those apps off for the org, and
+# GLASS_DEV_POLICY_EXTRA names a file of policy to add, such as a group
+# that turns one back on (ADR 0070).
 # GLASS_DEV_PEOPLE=1 makes it an agent host for many people (ADR 0067): the
 # front, as the account glass-agents, acts for whoever the stand-in load
 # balancer signed in (make aws-local), and glassd checks its signed claims
@@ -251,9 +254,17 @@ TOML
 fi
 
 # The default policy labels /home/*/Finance; label the dev home's too.
+apps_off=""
+if [ -n "${GLASS_DEV_APPS_OFF:-}" ]; then
+	apps_off="apps_off = [\"${GLASS_DEV_APPS_OFF//,/\", \"}\"]"
+fi
 {
-	"$bin/glassctl" policy default
+	"$bin/glassctl" policy default | awk -v off="$apps_off" '{ print } /^\[org\]$/ && off != "" { print off }'
 	printf '\n[[label]]\npath = "%s/Finance"\nlabel = "confidential"\n' "$dev/home"
+	if [ -n "${GLASS_DEV_POLICY_EXTRA:-}" ]; then
+		echo
+		cat "$GLASS_DEV_POLICY_EXTRA"
+	fi
 	if [ -n "${GLASS_DEV_SCRIPTED_MODEL:-}" ]; then
 		cat <<'MODELS'
 

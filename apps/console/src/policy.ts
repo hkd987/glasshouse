@@ -16,6 +16,11 @@ const PROFILE_APPS: [string, string][] = [
   ["browser", "Browser"],
   ["mail", "Mail"],
   ["calendar", "Calendar"],
+  ["chat", "Chat"],
+  ["docs", "Docs"],
+  ["artifacts", "Artifacts"],
+  ["meet", "Meet"],
+  ["routines", "Routines"],
   ["store", "Store"],
   ["console", "Admin console"],
   ["activity-monitor", "Activity Monitor"],
@@ -250,19 +255,32 @@ function render(view: View, act: Act): HTMLElement {
     ),
   );
 
+  // ADR 0070: Everyone's is the org's; a group turns an app on or off for
+  // its members, off winning. Off, an app isn't offered or opened, and no
+  // agent acting for them uses it.
+  const everyone = g.name === "everyone";
+  const orgOn = (id: string) => p.org_apps.includes(id) && !p.org_apps_off.includes(id);
+  const appState = (id: string) =>
+    everyone ? (orgOn(id) ? "on" : "off") : p.apps_off.includes(id) ? "off" : p.apps.includes(id) || p.apps_on.includes(id) ? "on" : "inherit";
   const profiles = card(
     "Apps in their profiles",
-    "Which apps people get is policy: the device offers and opens only these.",
+    everyone
+      ? "The org's apps. Off, an app isn't offered or opened for anyone, and no agent uses it for them, unless a group turns it on."
+      : "On or off for this group, whatever the org says; off wins over any other group. Off, no agent uses it for them either.",
     ...PROFILE_APPS.map(([id, name]) =>
       h(
         "label",
-        { class: "check-row" },
+        { class: "check-row", "data-test": `app-${id}` },
         h("span", {}, name),
-        h("input", {
-          type: "checkbox",
-          checked: p.apps.includes(id),
-          onchange: (e: Event) => act(() => edit({ edit: "app", group: g.name, app: id, on: (e.target as HTMLInputElement).checked })),
-        }),
+        h(
+          "select",
+          {
+            onchange: (e: Event) => act(() => edit({ edit: "app", group: g.name, app: id, state: (e.target as HTMLSelectElement).value })),
+          },
+          ...(everyone ? [] : [h("option", { value: "inherit", selected: appState(id) === "inherit" }, `As the org has it (${orgOn(id) ? "on" : "off"})`)]),
+          h("option", { value: "on", selected: appState(id) === "on" }, "On"),
+          h("option", { value: "off", selected: appState(id) === "off" }, "Off"),
+        ),
       ),
     ),
   );
@@ -352,7 +370,7 @@ function render(view: View, act: Act): HTMLElement {
             ? `This change affects ${plural(view.impact.users, "user")} and ${plural(view.impact.agents, "agent")}.`
             : "Nothing changes: the draft is what every device runs.",
         ),
-        view.impact.changes.length ? h("ul", { class: "changes" }, ...view.impact.changes.map((c) => h("li", {}, c))) : null,
+        view.impact.changes.length ? h("ul", { class: "changes", "data-test": "changes" }, ...view.impact.changes.map((c) => h("li", {}, c))) : null,
         ...view.impact.warnings.map((w) => h("p", { class: "warning" }, w)),
         p.draft_changed
           ? h(

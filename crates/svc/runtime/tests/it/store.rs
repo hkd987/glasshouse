@@ -304,3 +304,55 @@ async fn ga11_an_edition_replaces_our_app_only_for_the_people_it_reaches() {
     assert_eq!(session.name, "Mail (Acme)");
     assert_eq!(session.actions.len(), 2, "what the edition declares");
 }
+
+/// ADR 0070: an app IT turned off reaches nobody it's off for, whatever
+/// the catalog requires: neither an org app nor the org's edition of ours.
+#[tokio::test]
+async fn adr0070_the_store_doesnt_bring_back_an_app_it_turned_off() {
+    use InstallMode::*;
+    let h = harness();
+    let manifest: glass_api::AppManifest = serde_json::from_value(json!({
+        "id": "expenses", "name": "Expenses", "version": "1.0.0",
+        "actions": ["files.list"], "labels": ["internal"],
+    }))
+    .unwrap();
+    let mut expenses = item("expenses", ItemKind::App, &[("everyone", Required)]);
+    expenses.app = Some(glass_managed::studio::OrgApp {
+        manifest: manifest.clone(),
+        bundle_sha256: String::new(),
+        source_sha256: String::new(),
+        made_by: "dana".into(),
+        based_on: None,
+    });
+    publish(&h, vec![expenses]);
+    h.org_apps.set(vec![(
+        manifest,
+        BTreeMap::from([(
+            "index.html".to_owned(),
+            "<title>Expenses</title>".to_owned(),
+        )]),
+    )]);
+    let id: glass_types::AgentId = "expenses".parse().unwrap();
+    assert!(
+        apps(&h).contains(&"expenses".to_owned()),
+        "required, it reaches them"
+    );
+    assert!(h.rt.app_files(&h.me, &id).is_ok());
+
+    h.apply_policy_replacing(
+        "[org]\n",
+        "[org]\napps_off = [\"expenses\", \"mail\"]\n",
+        "",
+    );
+    assert!(!apps(&h).contains(&"expenses".to_owned()));
+    assert!(
+        h.rt.app_files(&h.me, &id).is_err(),
+        "the bridge serves it to nobody it's off for"
+    );
+    assert!(h.rt.open_app(&h.me, &id).is_err());
+    mail_edition(&h, &[("everyone", Required)]);
+    assert!(
+        !apps(&h).contains(&"mail".to_owned()),
+        "nor the org's edition of ours"
+    );
+}

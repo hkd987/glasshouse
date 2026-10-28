@@ -259,6 +259,15 @@ pub fn policy(
         "classes": classes,
         "agents": agents,
         "apps": rules.map(|g| g.apps.clone()).unwrap_or_default(),
+        "apps_on": rules.map(|g| g.apps_on.clone()).unwrap_or_default(),
+        "apps_off": rules.map(|g| g.apps_off.clone()).unwrap_or_default(),
+        "org_apps_off": doc.org.apps_off,
+        "org_apps": doc
+            .groups
+            .iter()
+            .find(|g| g.name == glass_policy::EVERYONE)
+            .map(|g| g.apps.clone())
+            .unwrap_or_default(),
         "max_label": rules.and_then(|g| g.max_label),
         "org_max_label": doc.org.max_label,
         "routes": routes(&doc),
