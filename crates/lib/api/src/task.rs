@@ -52,6 +52,10 @@ pub struct TaskRequest {
     /// Only a computer backend runs one; elsewhere it's refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer: Option<String>,
+    /// The persona on that computer the task is for (ADR 0068): one of
+    /// the person's agents, all of which work on their one computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
 }
 
 /// The longest task title, in characters.
@@ -266,6 +270,9 @@ pub struct TaskView {
     /// The agent computer it runs in (ADR 0065).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer: Option<String>,
+    /// The persona it's for, on that computer (ADR 0068).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
 }
 
 /// What an ended task did: the Done tile's receipt, and the line under a

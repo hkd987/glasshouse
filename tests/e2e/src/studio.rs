@@ -44,6 +44,7 @@ fn output(program: &str, args: &[&str]) -> anyhow::Result<String> {
 
 pub async fn studio(h: &Harness) -> anyhow::Result<()> {
     let request = TaskRequest {
+        persona: None,
         agent: "claude-code".parse().map_err(|e| anyhow::anyhow!("{e}"))?,
         prompt: "Make my Mail say Write instead of New message".into(),
         scope: ScopeRequest::default(),

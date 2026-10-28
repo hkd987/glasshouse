@@ -182,6 +182,7 @@ async fn tool(
 pub async fn models(h: &Harness) -> anyhow::Result<()> {
     let ws = h.workspace("models")?;
     let request = TaskRequest {
+        persona: None,
         agent: "claude-code".parse().map_err(|e| anyhow::anyhow!("{e}"))?,
         prompt: "Draft a reply to a vendor with a model's help".into(),
         scope: ScopeRequest {

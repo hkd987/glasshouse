@@ -154,6 +154,7 @@ async fn busy(h: &Harness, task: TaskId) -> anyhow::Result<()> {
 pub async fn perf(h: &Harness) -> anyhow::Result<()> {
     let ws = h.workspace("perf")?;
     let request = TaskRequest {
+        persona: None,
         agent: "invoice-demo".parse().map_err(|e| anyhow::anyhow!("{e}"))?,
         prompt: "Reconcile invoices".into(),
         scope: ScopeRequest {

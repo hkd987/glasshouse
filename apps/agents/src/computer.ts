@@ -115,7 +115,7 @@ export class ComputerScreen {
         ? h(
             "p",
             { class: "control-note", role: "status" },
-            `${view.name} waits for you: what you ask it starts once you hand its computer back. Its computer is yours: type below. What you do here is on the record.`,
+            `Your agents wait for you: what you ask them starts once you hand your computer back. It's yours: type below. What you do here is on the record.`,
           )
         : null,
     );

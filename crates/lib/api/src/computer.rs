@@ -1,7 +1,10 @@
-//! Agent computers (ADR 0065, ADR 0066): an agent with a computer of its
-//! own, kept between its tasks, where it is root and nothing asks. Its
+//! Agent computers (ADR 0065, ADR 0066, ADR 0068): each person has a
+//! computer of their own, kept between tasks, where their agents are root
+//! and nothing asks. Their agents are personas on it ([`PersonaView`]),
+//! each with its own name and role, all working on the one computer. The
 //! person watches its screen, takes over its keyboard, and puts it to
-//! sleep; tasks name it in [`crate::TaskRequest::computer`].
+//! sleep; tasks name it in [`crate::TaskRequest::computer`] and the
+//! persona in [`crate::TaskRequest::persona`].
 
 use glass_types::{AgentId, TaskId, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -37,7 +40,43 @@ pub struct ComputerView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored: Option<StoredView>,
     pub created_at: Timestamp,
+    /// Its person's agents, all working on it (ADR 0068), oldest first.
+    #[serde(default)]
+    pub personas: Vec<PersonaView>,
 }
+
+/// One of a person's agents: a name and a role, a catalog agent to run,
+/// and their computer to run on (ADR 0068).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonaView {
+    /// `reconciler`: lowercase letters, digits and `-`.
+    pub id: String,
+    /// What people call it: "Reconciler".
+    pub name: String,
+    #[serde(default)]
+    pub role: String,
+    /// The catalog agent its tasks run.
+    pub agent: AgentId,
+    pub created_at: Timestamp,
+}
+
+/// `persona.make`: a new agent on the caller's computer, made first if
+/// they have none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersonaNew {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub role: String,
+    pub agent: AgentId,
+}
+
+/// The id of a person's own computer, the one their agents share.
+pub const PERSON_COMPUTER: &str = "computer";
+
+/// The most agents a person keeps on their computer.
+pub const PERSONAS_MAX: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +111,13 @@ pub struct ComputerNew {
     #[serde(default)]
     pub role: String,
     pub agent: AgentId,
+}
+
+/// Names one of the caller's agents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersonaRef {
+    pub id: String,
 }
 
 /// Names one of the caller's computers.

@@ -382,6 +382,7 @@ impl Runtime {
         };
         let name = format!("app-{}", id.short());
         let sandbox = SandboxSpec {
+            persona: None,
             // Never created: an app session has no sandbox.
             root: self.config.state_dir.join("sandboxes").join(&name),
             name,

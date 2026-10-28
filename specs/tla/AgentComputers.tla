@@ -3,7 +3,7 @@
 (* An agent's computer over its life (ADR 0065, ADR 0066): kept between    *)
 (* its tasks, each task run in it with its own socket; its person taking   *)
 (* its keyboard; asleep in the store and woken; and glassd dying at any    *)
-(* step. One computer, the tasks of one agent.                             *)
+(* step. One computer, the tasks of its person's agents (ADR 0068).       *)
 (*                                                                         *)
 (* The code:                                                               *)
 (*  - crates/svc/computers/src/sandbox.rs `create` (Start: refused while   *)

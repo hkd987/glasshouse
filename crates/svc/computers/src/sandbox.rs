@@ -38,7 +38,10 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
-use glass_api::{ComputerNew, ComputerState, ComputerView, ScreenView, StoredView};
+use glass_api::{
+    ComputerNew, ComputerState, ComputerView, PERSONAS_MAX, PersonaNew, PersonaView, ScreenView,
+    StoredView,
+};
 use glass_platform::sandbox::{
     AGENT_SOCKET_PATH, ProcessSpec, Sandbox, SandboxSpec, ToolOutput, ToolRun, ToolRunner,
     UnshareTools, valid_computer_id,
@@ -81,6 +84,10 @@ pub struct ComputerMeta {
     /// part. Empty for a computer made before keys were (`u<uid>-<id>`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub key: String,
+    /// Its person's agents, all working on it (ADR 0068): in its record,
+    /// so they go where it goes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub personas: Vec<PersonaView>,
 }
 
 /// Each owner's key in the store, by uid: the same person's on every host
@@ -299,9 +306,118 @@ impl ComputerSandbox {
             fresh: false,
             stored: None,
             key,
+            personas: Vec::new(),
         };
         Self::write_meta(&computer, &meta)?;
         Ok(self.view_of(uid, &computer, meta))
+    }
+
+    /// A new agent on the person's own computer (ADR 0068), which is made
+    /// first, called `computer_name`, if they have none.
+    pub fn add_persona(
+        &self,
+        uid: u32,
+        gid: u32,
+        computer_name: &str,
+        new: &PersonaNew,
+    ) -> Result<ComputerView> {
+        self.refuse_if_leaving()?;
+        if !valid_computer_id(&new.id) || new.id.starts_with("task-") {
+            return Err(refuse(format!(
+                "{:?} isn't an agent's id: lowercase letters, digits and -",
+                new.id
+            )));
+        }
+        let name = glass_api::display_line(new.name.trim()).into_owned();
+        if name.is_empty() || name.chars().count() > 40 {
+            return Err(refuse("an agent's name is 1 to 40 characters"));
+        }
+        let id = glass_api::PERSON_COMPUTER;
+        if self.find(uid, id).is_err() {
+            self.make(
+                uid,
+                gid,
+                &ComputerNew {
+                    id: id.to_owned(),
+                    name: computer_name.to_owned(),
+                    role: String::new(),
+                    agent: new.agent.clone(),
+                },
+            )?;
+        }
+        let (computer, _) = self.find(uid, id)?;
+        // Its record changes only while nothing else rewrites it: a sleep
+        // or a wake takes it first (`moving`), under this same lock.
+        let state = self.state();
+        if state.moving.contains(&(uid, id.to_owned())) {
+            return Err(refuse(
+                "your computer is going to sleep or waking; try again in a moment",
+            ));
+        }
+        let mut meta = Self::read_meta(&computer)
+            .ok_or_else(|| PlatformError::Unsupported(format!("a computer called {id} for you")))?;
+        if meta.personas.iter().any(|p| p.id == new.id) {
+            return Err(refuse(format!(
+                "you already have an agent called {}",
+                new.id
+            )));
+        }
+        if meta
+            .personas
+            .iter()
+            .any(|p| p.name.eq_ignore_ascii_case(&name))
+        {
+            return Err(refuse(format!("you already have an agent named {name}")));
+        }
+        if meta.personas.len() >= PERSONAS_MAX {
+            return Err(refuse(format!(
+                "you have {PERSONAS_MAX} agents, the most a computer keeps: remove one first"
+            )));
+        }
+        meta.personas.push(PersonaView {
+            id: new.id.clone(),
+            name,
+            role: glass_api::display_line(new.role.trim()).into_owned(),
+            agent: new.agent.clone(),
+            created_at: Timestamp::now(),
+        });
+        Self::write_meta(&computer, &meta)?;
+        drop(state);
+        Ok(self.view_of(uid, &computer, meta))
+    }
+
+    /// The agent goes from the person's computer; what it left there stays.
+    pub fn remove_persona(&self, uid: u32, id: &str) -> Result<ComputerView> {
+        let computer_id = glass_api::PERSON_COMPUTER;
+        let (computer, _) = self.find(uid, computer_id)?;
+        let state = self.state();
+        if state.moving.contains(&(uid, computer_id.to_owned())) {
+            return Err(refuse(
+                "your computer is going to sleep or waking; try again in a moment",
+            ));
+        }
+        let mut meta = Self::read_meta(&computer).ok_or_else(|| {
+            PlatformError::Unsupported(format!("a computer called {computer_id} for you"))
+        })?;
+        let before = meta.personas.len();
+        meta.personas.retain(|p| p.id != id);
+        if meta.personas.len() == before {
+            return Err(PlatformError::Unsupported(format!(
+                "an agent called {id} for you"
+            )));
+        }
+        Self::write_meta(&computer, &meta)?;
+        drop(state);
+        Ok(self.view_of(uid, &computer, meta))
+    }
+
+    /// One of the person's agents on one of their computers.
+    pub fn persona(&self, uid: u32, computer: &str, id: &str) -> Result<PersonaView> {
+        let (_, meta) = self.find(uid, computer)?;
+        meta.personas
+            .into_iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| PlatformError::Unsupported(format!("an agent called {id} for you")))
     }
 
     /// The caller's computers, oldest first; tasks' own computers aren't
@@ -433,6 +549,7 @@ impl ComputerSandbox {
             taken_over,
             stored: meta.stored,
             created_at: meta.created_at,
+            personas: meta.personas,
         }
     }
 
@@ -655,11 +772,13 @@ impl ComputerSandbox {
             .store
             .as_ref()
             .ok_or_else(|| refuse("this host has nowhere to keep computers asleep"))?;
-        let (computer, mut meta) = self.find(uid, id)?;
+        let (computer, meta) = self.find(uid, id)?;
         if meta.stored.is_some() {
             return Ok(self.view_of(uid, &computer, meta));
         }
         let moving = self.moving(uid, id)?;
+        // Read again now it's ours: an agent added since is kept.
+        let mut meta = Self::read_meta(&computer).unwrap_or(meta);
         self.hypervisor
             .suspend(&computer)
             .map_err(|e| fail(format!("stopping {}", meta.name), e))?;
@@ -716,12 +835,13 @@ impl ComputerSandbox {
             .store
             .as_ref()
             .ok_or_else(|| refuse("this host has nowhere computers sleep"))?;
-        let (computer, mut meta) = self.find(uid, id)?;
+        let (computer, meta) = self.find(uid, id)?;
         let Some(stored) = meta.stored.clone() else {
             return Ok(self.view_of(uid, &computer, meta));
         };
         self.refuse_if_leaving()?;
         let moving = self.moving(uid, id)?;
+        let mut meta = Self::read_meta(&computer).unwrap_or(meta);
         // Asleep, the store holds all of it: anything here is what a wake
         // or a sleep that glassd didn't live through left, and goes.
         Self::clear_but_record(&computer).map_err(|e| {
@@ -896,6 +1016,7 @@ impl Sandbox for ComputerSandbox {
                 fresh: true,
                 stored: None,
                 key: String::new(),
+                personas: Vec::new(),
             };
             Self::write_meta(&computer, &meta)?;
             meta
@@ -922,10 +1043,23 @@ impl Sandbox for ComputerSandbox {
         self.hypervisor
             .start(&computer)
             .map_err(|e| fail(format!("starting {}", meta.name), e))?;
+        // A persona's task, its person's agent on this computer.
+        let persona = match &spec.persona {
+            Some(id) => Some(
+                meta.personas
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .ok_or_else(|| refuse(format!("there's no agent {id} on {}", meta.name)))?
+                    .name
+                    .clone(),
+            ),
+            None => None,
+        };
         let task = Self::task_dir(&computer, spec);
         fs::create_dir_all(&task).map_err(|e| fail(format!("creating {}", task.display()), e))?;
         Self::trim_screen(&computer);
-        self.screen_line(&computer, &format!("\n── task {} ──\n", spec.name));
+        let by = persona.map(|name| format!(" {name}")).unwrap_or_default();
+        self.screen_line(&computer, &format!("\n── task {} ──{by}\n", spec.name));
         self.state().runs.insert(spec.name.clone(), key);
         Ok(())
     }
@@ -934,7 +1068,12 @@ impl Sandbox for ComputerSandbox {
         let (computer, _) = self.run_of(spec);
         let run = TaskRun {
             socket: self.host_path(spec, Path::new(AGENT_SOCKET_PATH)),
-            workdir: WORK.into(),
+            // Each persona starts in a folder of its own; all of the
+            // computer is theirs to share (ADR 0068).
+            workdir: match &spec.persona {
+                Some(persona) if valid_computer_id(persona) => Path::new(WORK).join(persona),
+                _ => WORK.into(),
+            },
             process: process.clone(),
         };
         match self.hypervisor.command(&computer, &run) {
@@ -1098,6 +1237,7 @@ mod tests {
             uid,
             gid,
             computer: computer.map(str::to_owned),
+            persona: None,
         }
     }
 
@@ -1247,6 +1387,156 @@ mod tests {
         let spec = task("glass-0005", Some("reconciler"));
         sandbox.create(&spec).unwrap();
         sandbox.destroy(&spec).unwrap();
+    }
+
+    fn persona(id: &str, name: &str) -> PersonaNew {
+        PersonaNew {
+            id: id.into(),
+            name: name.into(),
+            role: String::new(),
+            agent: "desktop-agent".parse().unwrap(),
+        }
+    }
+
+    fn persona_task(name: &str, persona: &str) -> SandboxSpec {
+        SandboxSpec {
+            persona: Some(persona.into()),
+            ..task(name, Some(glass_api::PERSON_COMPUTER))
+        }
+    }
+
+    #[test]
+    fn adr0068_a_persons_agents_share_their_one_computer() {
+        if let Err(why) = NamespaceHypervisor::available() {
+            eprintln!("skipped: {why}");
+            return;
+        }
+        let (dir, sandbox) = sandbox();
+        let blobs = crate::store::FolderBlobs::new(dir.path().join("s3")).unwrap();
+        let store = Arc::new(Store::new(Arc::new(blobs)));
+        let sandbox = sandbox.with_store(store.clone(), "S3");
+        let (uid, gid) = me();
+
+        // The first agent makes their computer; the second joins it.
+        let view = sandbox
+            .add_persona(
+                uid,
+                gid,
+                "Dana's computer",
+                &persona("reconciler", "Reconciler"),
+            )
+            .unwrap();
+        assert_eq!(view.id, glass_api::PERSON_COMPUTER);
+        assert_eq!(view.name, "Dana's computer");
+        let view = sandbox
+            .add_persona(uid, gid, "ignored", &persona("researcher", "Researcher"))
+            .unwrap();
+        assert_eq!(view.name, "Dana's computer");
+        assert_eq!(
+            view.personas
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            ["reconciler", "researcher"]
+        );
+        assert_eq!(sandbox.list(uid).len(), 1, "one computer, two agents");
+
+        // Both at once, each in a folder of its own, on one disk.
+        let a = persona_task("glass-0021", "reconciler");
+        let b = persona_task("glass-0022", "researcher");
+        sandbox.create(&a).unwrap();
+        sandbox.create(&b).unwrap();
+        let out_a = sandbox
+            .command(&a, &shell("pwd; echo matched > notes.txt"))
+            .output()
+            .unwrap();
+        let out_b = sandbox
+            .command(&b, &shell("pwd; cat ../reconciler/notes.txt"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out_a.stdout), "/work/reconciler\n");
+        assert_eq!(
+            String::from_utf8_lossy(&out_b.stdout),
+            "/work/researcher\nmatched\n",
+            "one person's agents share their computer"
+        );
+        sandbox.destroy(&a).unwrap();
+        sandbox.destroy(&b).unwrap();
+        let screen = sandbox.screen(uid, glass_api::PERSON_COMPUTER, 0).unwrap();
+        assert!(
+            screen.text.contains("── task glass-0021 ── Reconciler"),
+            "{}",
+            screen.text
+        );
+        assert!(screen.text.contains("── task glass-0022 ── Researcher"));
+
+        // A task for an agent the computer doesn't have is refused.
+        let stranger = persona_task("glass-0023", "nobody");
+        assert!(
+            sandbox
+                .create(&stranger)
+                .unwrap_err()
+                .to_string()
+                .contains("no agent nobody")
+        );
+
+        // Ids and names are each the person's once; a computer keeps 20.
+        for (id, name) in [
+            ("reconciler", "Other"),
+            ("other", "reconciler"),
+            ("Bad Id", "X"),
+            ("task-x", "X"),
+            ("x", ""),
+        ] {
+            assert!(
+                sandbox
+                    .add_persona(uid, gid, "", &persona(id, name))
+                    .is_err(),
+                "{id} {name}"
+            );
+        }
+        for n in 2..glass_api::PERSONAS_MAX {
+            sandbox
+                .add_persona(
+                    uid,
+                    gid,
+                    "",
+                    &persona(&format!("helper-{n}"), &format!("Helper {n}")),
+                )
+                .unwrap();
+        }
+        let full = sandbox.add_persona(uid, gid, "", &persona("one-more", "One more"));
+        assert!(
+            full.unwrap_err()
+                .to_string()
+                .contains("the most a computer keeps")
+        );
+        // Another person has none of them.
+        let other = uid.wrapping_add(1);
+        assert!(
+            sandbox
+                .persona(other, glass_api::PERSON_COMPUTER, "reconciler")
+                .is_err()
+        );
+        assert!(sandbox.remove_persona(other, "reconciler").is_err());
+
+        // Removed, an agent goes; what it left on the computer stays.
+        let view = sandbox.remove_persona(uid, "researcher").unwrap();
+        assert!(view.personas.iter().all(|p| p.id != "researcher"));
+        assert!(sandbox.remove_persona(uid, "researcher").is_err());
+
+        // Asleep, its agents go with it: another host has them all.
+        sandbox.sleep(uid, glass_api::PERSON_COMPUTER).unwrap();
+        let (_dir_b, host_b) = self::sandbox();
+        let host_b = host_b.with_store(store, "S3");
+        let listed = host_b.list(uid);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].personas.len(), glass_api::PERSONAS_MAX - 1);
+        assert!(
+            host_b
+                .persona(uid, glass_api::PERSON_COMPUTER, "reconciler")
+                .is_ok()
+        );
     }
 
     #[test]

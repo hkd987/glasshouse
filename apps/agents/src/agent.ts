@@ -1,4 +1,4 @@
-// An agent: its conversation, and beside it its computer, what it can
+// An agent: its conversation, and beside it your computer it works on, what it can
 // reach and its record (ADR 0065 §12). Ask in plain words; its answers,
 // files and questions come back as cards. The skeleton is drawn once and
 // its parts redrawn as things change, so the ask box keeps its words and
@@ -98,7 +98,7 @@ export class AgentScreen {
       h(
         "span",
         { class: "row" },
-        h("a", { class: "btn secondary", href: `/agents/${agent.id}/computer` }, "Open its computer"),
+        h("a", { class: "btn secondary", href: `/agents/${agent.id}/computer` }, "Open your computer"),
         button("Hand back", () => control(agent.id, "hand-back"), "primary", { "data-key": "hand-back" }),
       ),
     );
@@ -153,7 +153,7 @@ export class AgentScreen {
           body.files?.length
             ? h(
                 "ul",
-                { class: "files", "aria-label": "Files copied into its computer" },
+                { class: "files", "aria-label": "Files copied into your computer" },
                 ...body.files.map((f) => h("li", { class: "file-chip", title: f }, icon("file"), splitPath(f).name, h("span", { class: "muted" }, "copied in"))),
               )
             : null,
@@ -287,7 +287,7 @@ export class AgentScreen {
         h(
           "details",
           { class: "about" },
-          h("summary", {}, "About its computer"),
+          h("summary", {}, "About your computer"),
           h(
             "ul",
             {},

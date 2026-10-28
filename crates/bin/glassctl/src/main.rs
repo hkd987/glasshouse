@@ -333,6 +333,7 @@ impl TaskArgs {
             .chain(self.ask.iter().map(|a| (a.clone(), Tier::Ask)))
             .collect();
         Ok(TaskRequest {
+            persona: None,
             agent: self.agent.parse().map_err(|e| anyhow::anyhow!("{e}"))?,
             prompt: self.prompt.join(" "),
             scope: ScopeRequest {

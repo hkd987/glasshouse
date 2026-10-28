@@ -905,6 +905,7 @@ mod tests {
             labels: AskLabels::new("Review drafts", "Approve and send"),
         };
         let view = TaskView {
+            persona: None,
             id,
             agent: "invoice-demo".parse().unwrap(),
             agent_name: "Invoice demo".into(),

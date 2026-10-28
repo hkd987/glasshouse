@@ -152,6 +152,8 @@ mod views {
                 driver_socket: _,
                 continues: _,
                 computer: _,
+                // A persona's id is checked as glassd makes it.
+                persona: _,
             } = self;
             for text in [agent_name, user, title, caption] {
                 text.make_display_safe();
@@ -431,6 +433,7 @@ mod tests {
     fn aw4_every_agent_reachable_string_in_a_task_view_is_made_safe() {
         let hostile = |what: &str| format!("{what}\x1b[2J\u{202E}\r");
         let mut view = TaskView {
+            persona: None,
             id: TaskId::new(),
             agent: "invoice-demo".parse().unwrap(),
             agent_name: hostile("name"),

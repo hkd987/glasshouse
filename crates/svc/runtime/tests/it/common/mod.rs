@@ -133,6 +133,7 @@ impl Harness {
 
     pub fn request(&self, read: &[&str], write: &[&str]) -> TaskRequest {
         TaskRequest {
+            persona: None,
             agent: "invoice-demo".parse().unwrap(),
             prompt: "Reconcile this month's invoices and remind vendors".into(),
             scope: ScopeRequest {

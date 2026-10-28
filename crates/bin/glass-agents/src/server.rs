@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use glass_agents_api as api;
 use glass_api::{
-    AgentSummary, AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalView, ComputerNew,
-    ComputerRef, ComputerView, ScreenInput, ScreenRequest, ScreenView, TaskDetail, TaskRef,
-    TaskRequest, TaskView, UndoReport, UndoRequest, methods,
+    AgentSummary, AnswerApproval, ApprovalAnswer, ApprovalScope, ApprovalView, ComputerRef,
+    ComputerView, PersonaNew, PersonaView, ScreenInput, ScreenRequest, ScreenView, TaskDetail,
+    TaskRef, TaskRequest, TaskView, UndoReport, UndoRequest, methods,
 };
 use glass_http::{ReadError, Request, Response};
 use serde::Serialize;
@@ -136,7 +136,7 @@ impl Front {
     }
 
     /// Follows glassd's events for as long as the front runs: a task's
-    /// change is its computer's agent's.
+    /// change is its agent's.
     pub async fn follow(self: Arc<Self>) {
         let mut wait = Duration::from_millis(250);
         loop {
@@ -153,8 +153,8 @@ impl Front {
                             note.params.and_then(|p| serde_json::from_value(p).ok());
                         match event {
                             Some(glass_api::Event::TaskUpdated { task }) => {
-                                if let Some(computer) = task.computer {
-                                    self.changed(Some(computer));
+                                if let Some(persona) = task.persona {
+                                    self.changed(Some(persona));
                                 }
                             }
                             Some(glass_api::Event::TaskRemoved { .. }) => self.changed(None),
@@ -325,41 +325,66 @@ impl Front {
         self.glassd.call(methods::TASK_LIST, ()).await
     }
 
-    fn by_computer<'a>(tasks: &'a [TaskView], id: &str) -> Vec<&'a TaskView> {
+    /// A persona's tasks on its computer.
+    fn by_persona<'a>(tasks: &'a [TaskView], computer: &str, persona: &str) -> Vec<&'a TaskView> {
         tasks
             .iter()
-            .filter(|t| t.computer.as_deref() == Some(id))
+            .filter(|t| {
+                t.computer.as_deref() == Some(computer) && t.persona.as_deref() == Some(persona)
+            })
             .collect()
+    }
+
+    /// The person's computer, the one their agents share (ADR 0068).
+    fn own(computers: Vec<ComputerView>) -> Option<ComputerView> {
+        computers
+            .into_iter()
+            .find(|c| c.id == glass_api::PERSON_COMPUTER)
     }
 
     pub async fn agents(&self) -> Reply<Vec<api::AgentView>> {
         let (computers, tasks) = tokio::try_join!(self.computers(), self.tasks())?;
-        Ok(computers
+        let Some(computer) = Self::own(computers) else {
+            return Ok(Vec::new());
+        };
+        Ok(computer
+            .personas
             .iter()
-            .map(|c| views::agent(c, &Self::by_computer(&tasks, &c.id)))
+            .map(|p| views::agent(&computer, p, &Self::by_persona(&tasks, &computer.id, &p.id)))
             .collect())
     }
 
-    async fn find(&self, id: &str) -> Reply<(ComputerView, Vec<TaskView>)> {
+    /// One of the person's agents: their computer, it, and its tasks,
+    /// oldest first. Another person's agent is as absent as one that
+    /// doesn't exist: glassd lists only the caller's computer.
+    async fn find(&self, id: &str) -> Reply<(ComputerView, PersonaView, Vec<TaskView>)> {
         if !api::valid_id(id) {
             return Err(Failure::new(404, "no such agent"));
         }
         let (computers, tasks) = tokio::try_join!(self.computers(), self.tasks())?;
-        let computer = computers
+        let missing = || Failure::new(404, format!("you have no agent {id}"));
+        let computer = Self::own(computers).ok_or_else(missing)?;
+        let persona = computer
+            .personas
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .ok_or_else(missing)?;
+        let mut own: Vec<TaskView> = Self::by_persona(&tasks, &computer.id, id)
             .into_iter()
-            .find(|c| c.id == id)
-            .ok_or_else(|| Failure::new(404, format!("you have no agent {id}")))?;
-        let mut own: Vec<TaskView> = tasks
-            .into_iter()
-            .filter(|t| t.computer.as_deref() == Some(id))
+            .cloned()
             .collect();
         own.sort_by_key(|t| t.started_at.unix_seconds());
-        Ok((computer, own))
+        Ok((computer, persona, own))
     }
 
     async fn view(&self, id: &str) -> Reply<api::AgentView> {
-        let (computer, tasks) = self.find(id).await?;
-        Ok(views::agent(&computer, &tasks.iter().collect::<Vec<_>>()))
+        let (computer, persona, tasks) = self.find(id).await?;
+        Ok(views::agent(
+            &computer,
+            &persona,
+            &tasks.iter().collect::<Vec<_>>(),
+        ))
     }
 
     async fn make(&self, new: api::NewAgent) -> Reply<api::AgentView> {
@@ -375,25 +400,33 @@ impl Front {
             .filter(|n| !n.is_empty())
             .unwrap_or(&template.name)
             .to_owned();
-        let taken: Vec<String> = self.computers().await?.into_iter().map(|c| c.id).collect();
+        let taken: Vec<String> = Self::own(self.computers().await?)
+            .map(|c| c.personas.into_iter().map(|p| p.id).collect())
+            .unwrap_or_default();
+        let id = views::new_id(&name, &taken);
         let made: ComputerView = self
             .glassd
             .call(
-                methods::COMPUTER_MAKE,
-                ComputerNew {
-                    id: views::new_id(&name, &taken),
+                methods::PERSONA_MAKE,
+                PersonaNew {
+                    id: id.clone(),
                     name,
                     role: template.description.clone(),
                     agent: template.id.clone(),
                 },
             )
             .await?;
-        self.changed(Some(made.id.clone()));
-        Ok(views::agent(&made, &[]))
+        let persona = made
+            .personas
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| Failure::new(500, "glassd didn't keep the new agent"))?;
+        self.changed(Some(id.clone()));
+        Ok(views::agent(&made, persona, &[]))
     }
 
     async fn detail(&self, id: &str) -> Reply<api::AgentDetail> {
-        let (computer, tasks) = self.find(id).await?;
+        let (computer, persona, tasks) = self.find(id).await?;
         let recent: Vec<&TaskView> = tasks.iter().rev().take(CONVERSATION_TASKS).collect();
         let mut details = Vec::with_capacity(recent.len());
         for task in recent.iter().rev() {
@@ -408,7 +441,8 @@ impl Front {
             .call(
                 methods::TASK_PLAN,
                 TaskRequest {
-                    agent: computer.agent.clone(),
+                    persona: None,
+                    agent: persona.agent.clone(),
                     prompt: "What can you reach?".into(),
                     scope: Default::default(),
                     title: None,
@@ -423,7 +457,7 @@ impl Front {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         Ok(api::AgentDetail {
-            agent: views::agent(&computer, &tasks.iter().collect::<Vec<_>>()),
+            agent: views::agent(&computer, &persona, &tasks.iter().collect::<Vec<_>>()),
             reach: views::reach(&computer, card.as_ref()),
             messages: views::messages(&details, &answered),
             record: views::record(&details, 50),
@@ -435,36 +469,37 @@ impl Front {
         if text.is_empty() {
             return Err(Failure::new(400, "Say what you'd like it to do"));
         }
-        let (computer, _) = self.find(id).await?;
+        let (computer, persona, _) = self.find(id).await?;
         let started: TaskView = self
             .glassd
             .call(
                 methods::TASK_START,
                 TaskRequest {
-                    agent: computer.agent.clone(),
+                    agent: persona.agent.clone(),
                     prompt: text.to_owned(),
                     scope: Default::default(),
                     title: None,
                     computer: Some(computer.id.clone()),
+                    persona: Some(persona.id.clone()),
                 },
             )
             .await?;
-        self.changed(Some(computer.id));
+        self.changed(Some(persona.id));
         Ok(api::Asked {
             task: started.id.to_string(),
         })
     }
 
+    /// The screen of the computer the agent works on: its person's, shared
+    /// by all their agents.
     async fn screen(&self, id: &str, since: u64) -> Reply<api::Screen> {
-        if !api::valid_id(id) {
-            return Err(Failure::new(404, "no such agent"));
-        }
+        let (computer, _, _) = self.find(id).await?;
         let screen: ScreenView = self
             .glassd
             .call(
                 methods::COMPUTER_SCREEN,
                 ScreenRequest {
-                    id: id.to_owned(),
+                    id: computer.id,
                     offset: since,
                 },
             )
@@ -477,13 +512,13 @@ impl Front {
         })
     }
 
+    /// Takes over, hands back, sleeps or wakes the computer the agent works
+    /// on: all the person's agents share it, so all of them change.
     async fn computer(&self, id: &str, method: &str) -> Reply<api::AgentView> {
-        if !api::valid_id(id) {
-            return Err(Failure::new(404, "no such agent"));
-        }
+        let (computer, _, _) = self.find(id).await?;
         let _: ComputerView = self
             .glassd
-            .call(method, ComputerRef { id: id.to_owned() })
+            .call(method, ComputerRef { id: computer.id })
             .await
             .map_err(|f| {
                 if f.status == 500 && f.message.contains("method") {
@@ -492,20 +527,18 @@ impl Front {
                     f
                 }
             })?;
-        self.changed(Some(id.to_owned()));
+        self.changed(None);
         self.view(id).await
     }
 
     async fn input(&self, id: &str, input: api::Input) -> Reply<api::Screen> {
-        if !api::valid_id(id) {
-            return Err(Failure::new(404, "no such agent"));
-        }
+        let (computer, _, _) = self.find(id).await?;
         let _: serde_json::Value = self
             .glassd
             .call(
                 methods::COMPUTER_INPUT,
                 ScreenInput {
-                    id: id.to_owned(),
+                    id: computer.id,
                     line: input.line,
                 },
             )
@@ -515,7 +548,7 @@ impl Front {
 
     /// Takes back its latest task's changes that can be.
     async fn undo(&self, id: &str) -> Reply<api::UndoResult> {
-        let (_, tasks) = self.find(id).await?;
+        let (_, _, tasks) = self.find(id).await?;
         for task in tasks.iter().rev() {
             let detail: TaskDetail = self
                 .glassd
@@ -561,12 +594,14 @@ impl Front {
             .filter(|a| a.state == glass_api::ApprovalState::Pending)
             .filter_map(|a| {
                 let task = tasks.iter().find(|t| t.id == a.task)?;
-                let computer = computers
+                let persona = computers
                     .iter()
-                    .find(|c| Some(&c.id) == task.computer.as_ref())?;
+                    .filter(|c| Some(&c.id) == task.computer.as_ref())
+                    .flat_map(|c| c.personas.iter())
+                    .find(|p| Some(&p.id) == task.persona.as_ref())?;
                 Some(api::PendingApproval {
-                    agent: computer.id.clone(),
-                    agent_name: computer.name.clone(),
+                    agent: persona.id.clone(),
+                    agent_name: persona.name.clone(),
                     approval: views::approval(a, None),
                 })
             })

@@ -101,6 +101,7 @@ mod tests {
         fs::write(data.join("inv-1.txt"), "100.00").unwrap();
         let meta = fs::metadata(dir.path()).unwrap();
         let spec = SandboxSpec {
+            persona: None,
             name: "glass-test".into(),
             root: dir.path().join("sandbox"),
             mounts: vec![Mount {

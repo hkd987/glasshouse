@@ -17,6 +17,7 @@ use crate::common::{Harness, harness, tool};
 
 fn asked(agent: &str, prompt: &str) -> TaskRequest {
     TaskRequest {
+        persona: None,
         agent: agent.parse().unwrap(),
         prompt: prompt.into(),
         scope: ScopeRequest::default(),

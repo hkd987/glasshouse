@@ -16,7 +16,7 @@ and untracked files. Each check runs only when its inputs changed:
   layering     any Cargo.toml or tools/check-layers.py
   art          tools/branding/ or the overlay's branding outputs
   clippy       the desktop shell's workspace, when anything under shell/
-               changed
+               or crates/lib/ (the libraries it builds on) changed
   shellcheck   the changed shell scripts
   python       the changed .py files compile
   apps         `make apps-lint` (types, manifests, npm licenses) when anything
@@ -107,8 +107,10 @@ def plan(files: set[str], everything: bool) -> list[tuple[str, list[str]]]:
                       ["cargo", "clippy", "--workspace", "--target", FREEBSD, "--", "-D", "warnings"]))
 
     # The desktop shell is its own workspace (shell/README.md); `make
-    # shell-lint` covers it in full, so `--all` leaves it to that.
-    if not everything and any(f.startswith("shell/") for f in files):
+    # shell-lint` covers it in full, so `--all` leaves it to that. It
+    # builds on the main workspace's libraries, so a change there (a field
+    # added to an API type) is checked against it too.
+    if not everything and any(f.startswith(("shell/", "crates/lib/")) for f in files):
         steps.append(("clippy (shell)",
                       ["cargo", "clippy", "--manifest-path", "shell/Cargo.toml", "--workspace",
                        "--all-targets", "--", "-D", "warnings"]))

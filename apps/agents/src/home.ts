@@ -1,6 +1,6 @@
 // Home: the person's agents, like a team chat (ADR 0065 §12). Questions
 // waiting on them first, answerable right there; then each agent with
-// what it's doing and its computer's state. Plain words only.
+// what it's doing and your computer's state. Plain words only.
 
 import { h, show } from "@glasshouse/sdk";
 
@@ -98,7 +98,7 @@ function cards(): HTMLElement {
     return h(
       "div",
       { class: "empty-card" },
-      h("p", {}, "You don’t have any agents yet. Each one gets a computer of its own, and asks you before anything leaves it."),
+      h("p", {}, "You don’t have any agents yet. They all work on a computer of your own, and ask you before anything leaves it."),
       h("a", { class: "btn primary", href: "/new" }, "Add your first agent"),
     );
   }

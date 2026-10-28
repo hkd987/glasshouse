@@ -61,6 +61,7 @@ impl Harness {
         write: &[&Path],
     ) -> anyhow::Result<TaskId> {
         let request = TaskRequest {
+            persona: None,
             agent: agent.parse().map_err(|e| anyhow::anyhow!("{e}"))?,
             prompt: prompt.into(),
             scope: ScopeRequest {

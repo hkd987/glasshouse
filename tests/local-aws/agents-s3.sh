@@ -102,7 +102,8 @@ if [ "$(printf '%s\n' "$before" | wc -l)" = 3 ]; then
 else
 	fail "the computer's files: $before"
 fi
-record=$(find "$host" -name computer.json -path '*keeper*' | head -1)
+# The person's computer, which Keeper works on (ADR 0068).
+record=$(find "$host/state/computers" -name computer.json -path '*/computer/*' | head -1)
 computer=$(dirname "$record")
 key=$(field key <"$record")
 on_host=$(du -sm "$computer" | cut -f1)

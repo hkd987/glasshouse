@@ -1,6 +1,8 @@
 # 0066. Glasshouse Agents: the product on AWS
 
-Status: **Accepted, being built** (2026-10-27; first slice built 2026-10-28). The owner: "let's build it
+Status: **Accepted, being built**. Each agent's own computer is replaced
+by one computer per person with their agents as personas on it (ADR 0068).
+Earlier status: (2026-10-27; first slice built 2026-10-28). The owner: "let's build it
 out here and see how it all works together. Really think about this as an
 entire product that we can sell through AWS and get spend that large
 companies already have allocated to AWS. This is just how we get them

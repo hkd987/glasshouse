@@ -8,7 +8,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
-use glass_api::{ComputerNew, ComputerState, ScreenInput, ScreenRequest, TileState};
+use glass_api::{ComputerNew, ComputerState, PersonaNew, ScreenInput, ScreenRequest, TileState};
 use glass_computers::namespaces::NamespaceHypervisor;
 use glass_computers::sandbox::ComputerSandbox;
 use glass_computers::store::{FolderBlobs, Store};
@@ -84,6 +84,7 @@ fn on_computers_with_store(h: &Harness) -> Option<Arc<glass_runtime::Runtime>> {
 
 fn ask(prompt: &str) -> glass_api::TaskRequest {
     glass_api::TaskRequest {
+        persona: None,
         agent: "invoice-demo".parse().unwrap(),
         prompt: prompt.into(),
         scope: Default::default(),
@@ -295,4 +296,97 @@ async fn adr0066_unused_computers_sleep_and_a_host_being_replaced_sleeps_them_al
     assert!(audit.contains("after 0 minutes unused"), "{audit}");
     assert!(audit.contains("This host is being replaced"));
     assert!(audit.contains("Put Reconciler's computer to sleep: this host is being replaced"));
+}
+
+fn persona_ask(persona: &str, prompt: &str) -> glass_api::TaskRequest {
+    glass_api::TaskRequest {
+        computer: Some(glass_api::PERSON_COMPUTER.into()),
+        persona: Some(persona.into()),
+        ..ask(prompt)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0068_a_persons_agents_work_on_their_one_computer() {
+    let h = harness();
+    let Some(rt) = on_computers(&h) else {
+        return;
+    };
+    let new = |id: &str, name: &str| PersonaNew {
+        id: id.into(),
+        name: name.into(),
+        role: String::new(),
+        agent: "invoice-demo".parse().unwrap(),
+    };
+    rt.persona_make(&h.me, new("reconciler", "Reconciler"))
+        .unwrap();
+    let view = rt
+        .persona_make(&h.me, new("closer", "Month-end closer"))
+        .unwrap();
+    assert_eq!(view.personas.len(), 2);
+    assert_eq!(rt.computer_list(&h.me).unwrap().len(), 1);
+
+    // An agent IT didn't make available can't be one of theirs.
+    let refused = rt.persona_make(
+        &h.me,
+        PersonaNew {
+            agent: "not-in-the-catalog".parse().unwrap(),
+            ..new("rogue", "Rogue")
+        },
+    );
+    assert!(
+        matches!(refused, Err(RuntimeError::PermissionDenied(_))),
+        "{refused:?}"
+    );
+
+    // Each persona's task is its own, on the one computer.
+    let first = rt
+        .start(&h.me, persona_ask("reconciler", "Match March's invoices"))
+        .unwrap();
+    assert_eq!(first.persona.as_deref(), Some("reconciler"));
+    eventually(|| rt.get(&h.me, first.id).unwrap().view.state == TileState::Done).await;
+    let second = rt
+        .start(&h.me, persona_ask("closer", "How many are left?"))
+        .unwrap();
+    eventually(|| rt.get(&h.me, second.id).unwrap().view.state == TileState::Done).await;
+    assert_eq!(
+        rt.get(&h.me, second.id).unwrap().view.persona.as_deref(),
+        Some("closer")
+    );
+
+    // Asks that don't fit are refused before anything starts.
+    let unknown = rt.start(&h.me, persona_ask("nobody", "Hello"));
+    assert!(
+        matches!(unknown, Err(RuntimeError::NotFound(_))),
+        "{unknown:?}"
+    );
+    let homeless = rt.start(
+        &h.me,
+        glass_api::TaskRequest {
+            persona: Some("reconciler".into()),
+            computer: None,
+            ..ask("Hello")
+        },
+    );
+    assert!(
+        matches!(homeless, Err(RuntimeError::Invalid(_))),
+        "{homeless:?}"
+    );
+    let other_agent = rt.start(
+        &h.me,
+        glass_api::TaskRequest {
+            agent: "repeater".parse().unwrap(),
+            ..persona_ask("reconciler", "Hello")
+        },
+    );
+    assert!(other_agent.is_err(), "a persona runs only its own agent");
+
+    let audit = fs::read_to_string(h.audit_path()).unwrap();
+    assert!(
+        audit.contains("Made a computer of their own, with Reconciler on it"),
+        "{audit}"
+    );
+    assert!(audit.contains("Added Month-end closer to their computer"));
+    let removed = rt.persona_remove(&h.me, "closer").unwrap();
+    assert_eq!(removed.personas.len(), 1);
 }

@@ -98,7 +98,7 @@ export function waitingLabel(approvals: PendingApproval[]): string | null {
 export function whenLine(agent: AgentView, now: Date): string {
   if (agent.status === "working") return "Working now";
   if (agent.status === "starting") return "Starting now";
-  if (agent.status === "taken_over") return "You have its computer";
+  if (agent.status === "taken_over") return "You have your computer";
   return capital(ago(agent.updated_at, now));
 }
 
@@ -109,13 +109,13 @@ export function computerWords(computer: ComputerView): { short: string; line: st
     case "new":
       return { short: "Not started", line: "Not started yet. It starts when you ask it something." };
     case "starting":
-      return { short: "Starting", line: "Starting its computer. It's ready in a few seconds." };
+      return { short: "Starting", line: "Starting your computer. It's ready in a few seconds." };
     case "ready":
       return { short: "On", line: "On, with nothing running. Its own, kept between tasks." };
     case "running":
       return { short: "Running", line: "Running. Its own, kept between tasks." };
     case "saving":
-      return { short: "Going to sleep", line: "Going to sleep: saving its computer to your company's storage." };
+      return { short: "Going to sleep", line: "Going to sleep: saving your computer to your company's storage." };
     case "asleep":
       return {
         short: "Asleep",
@@ -127,7 +127,7 @@ export function computerWords(computer: ComputerView): { short: string; line: st
   return { short: "", line: "" };
 }
 
-/** Whether its computer can be put to sleep or woken now. */
+/** Whether your computer can be put to sleep or woken now. */
 export function sleepAction(computer: ComputerView): "sleep" | "wake" | null {
   if (computer.state === "asleep") return "wake";
   if (computer.state === "running" || computer.state === "ready") return "sleep";

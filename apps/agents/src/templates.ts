@@ -1,5 +1,5 @@
 // A new agent comes from the ones IT approved, never a blank form (ADR
-// 0065 §12): pick one, name it if you like, and its computer starts.
+// 0065 §12): pick one, name it if you like, and it joins your computer (ADR 0068).
 
 import { h, show } from "@glasshouse/sdk";
 
@@ -18,7 +18,7 @@ export async function drawNew(main: HTMLElement): Promise<void> {
       "div",
       {},
       h("h1", {}, "New agent"),
-      h("p", { class: "sub" }, "Pick one your IT team approved. Each gets a computer of its own, and asks you before anything leaves it."),
+      h("p", { class: "sub" }, "Pick one your IT team approved. Your agents share a computer of your own, and ask you before anything leaves it."),
     ),
     grid,
     h("p", { class: "muted small" }, "Want one that isn’t here? Ask IT: they add agents to this list for your team."),
@@ -45,7 +45,7 @@ function templateCard(t: Template): HTMLElement {
       remember(view);
       app.tab = "all";
       go("/");
-      toast(`${view.name} is starting its computer. It’s ready in a few seconds.`);
+      toast(`${view.name} is ready on your computer.`);
       void refetch().catch(() => undefined);
     } catch (error) {
       failed(error);

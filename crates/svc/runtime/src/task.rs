@@ -394,6 +394,7 @@ impl Task {
             driver_socket: self.driver_socket.clone(),
             continues: self.continues.as_ref().map(|c| c.id),
             computer: self.sandbox.computer.clone(),
+            persona: self.sandbox.persona.clone(),
         }
     }
 

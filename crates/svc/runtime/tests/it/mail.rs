@@ -113,6 +113,7 @@ async fn claude_code(h: &Harness) -> (TaskId, Arc<Client>) {
         h.rt.start(
             &h.me,
             TaskRequest {
+                persona: None,
                 agent: "claude-code".parse().unwrap(),
                 prompt: "Deal with my mail".into(),
                 scope: ScopeRequest::default(),

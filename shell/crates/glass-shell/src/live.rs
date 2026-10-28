@@ -1053,6 +1053,7 @@ impl Live {
                 }
                 self.asked = Some(query.clone());
                 Some(Effect::Start(TaskRequest {
+                    persona: None,
                     agent: DESKTOP_AGENT.parse().ok()?,
                     prompt: query,
                     scope: ScopeRequest::default(),

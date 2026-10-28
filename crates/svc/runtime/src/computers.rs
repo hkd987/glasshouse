@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use glass_api::{ComputerNew, ComputerView, ScreenInput, ScreenRequest, ScreenView};
+use glass_api::{ComputerNew, ComputerView, PersonaNew, ScreenInput, ScreenRequest, ScreenView};
 use glass_audit::{AuditEvent, EventKind};
 use glass_computers::sandbox::ComputerSandbox;
 
@@ -84,6 +84,54 @@ impl Runtime {
         event.detail["kind"] = view.kind.clone().into();
         self.audit(event);
         Ok(view)
+    }
+
+    /// A new agent on the caller's own computer (ADR 0068), made first if
+    /// they have none: one of the catalog's agents they may run, with a
+    /// name and a role of their choosing.
+    pub fn persona_make(&self, caller: &Caller, new: PersonaNew) -> Result<ComputerView> {
+        let computers = self.computers()?;
+        if !self.agents_for(caller).iter().any(|a| a.id == new.agent) {
+            return Err(RuntimeError::PermissionDenied(format!(
+                "{} isn't an agent you may run",
+                new.agent
+            )));
+        }
+        let made_computer =
+            blocking(|| computers.get(caller.uid, glass_api::PERSON_COMPUTER)).is_err();
+        let view =
+            blocking(|| computers.add_persona(caller.uid, caller.gid, "Your computer", &new))
+                .map_err(refused)?;
+        let name = view
+            .personas
+            .iter()
+            .find(|p| p.id == new.id)
+            .map_or_else(|| new.id.clone(), |p| p.name.clone());
+        let summary = if made_computer {
+            format!("Made a computer of their own, with {name} on it")
+        } else {
+            format!("Added {name} to their computer")
+        };
+        let mut event = self.computer_event(caller, &view.id, summary);
+        event.agent = Some(new.agent.clone());
+        event.detail["persona"] = new.id.clone().into();
+        event.detail["kind"] = view.kind.clone().into();
+        self.audit(event);
+        Ok(self.with_tasks(caller, view))
+    }
+
+    /// The agent goes from the caller's computer; what it left there stays.
+    pub fn persona_remove(&self, caller: &Caller, id: &str) -> Result<ComputerView> {
+        let computers = self.computers()?;
+        let view = blocking(|| computers.remove_persona(caller.uid, id)).map_err(refused)?;
+        let mut event = self.computer_event(
+            caller,
+            &view.id,
+            format!("Removed {id} from their computer"),
+        );
+        event.detail["persona"] = id.into();
+        self.audit(event);
+        Ok(self.with_tasks(caller, view))
     }
 
     pub fn computer_screen(&self, caller: &Caller, request: &ScreenRequest) -> Result<ScreenView> {

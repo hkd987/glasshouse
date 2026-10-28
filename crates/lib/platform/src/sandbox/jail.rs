@@ -391,6 +391,7 @@ impl Sandbox for JailSandbox {
         }
         for (name, root) in self.orphans(&entries, &cleaned) {
             self.destroy(&SandboxSpec {
+                persona: None,
                 name: name.clone(),
                 root,
                 mounts: Vec::new(),
@@ -449,6 +450,7 @@ mod tests {
 
     fn spec() -> SandboxSpec {
         SandboxSpec {
+            persona: None,
             name: "glass-0193ab12".into(),
             root: "/var/db/glasshouse/jails/glass-0193ab12".into(),
             mounts: vec![Mount {

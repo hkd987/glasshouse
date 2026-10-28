@@ -1,5 +1,5 @@
 // Glasshouse Agents, the web app (ADR 0065 §12, ADR 0066): every
-// employee's agents, each on a computer of its own, served by the front
+// employee's agents, all on a computer of their own, served by the front
 // (`glass-agents`) at an address in the org's domain. Pages, by path (the
 // front serves this page at each): / (home), /new, /agents/<id> (its
 // conversation; ?approval=<id> opens at that question, as Teams' Open

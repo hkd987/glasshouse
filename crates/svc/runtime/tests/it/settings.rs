@@ -216,6 +216,7 @@ agents = ["claude-code"]
         h.rt.start(
             &h.me,
             TaskRequest {
+                persona: None,
                 agent: "claude-code".parse().unwrap(),
                 prompt: "Why does my screen lock so fast?".into(),
                 scope: ScopeRequest::default(),

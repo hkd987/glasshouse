@@ -44,6 +44,7 @@ pub fn tasks() -> Vec<TaskView> {
     let expense = TaskId::new();
     let base =
         |agent: &str, name: &str, mode, state, title: &str, caption: &str, started| TaskView {
+            persona: None,
             id: TaskId::new(),
             agent: agent
                 .parse()
@@ -154,6 +155,7 @@ pub fn invoice_detail() -> TaskDetail {
         target: target.into(),
     };
     let view = TaskView {
+        persona: None,
         id: TaskId::new(),
         agent: "invoice-agent".parse().expect("valid id"),
         agent_name: "Invoice agent".into(),

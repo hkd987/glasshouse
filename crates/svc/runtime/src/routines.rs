@@ -135,6 +135,7 @@ impl Runtime {
         // The request it was saved with, as a new task: policy and the
         // folders' access are checked again, as for any start.
         let request = TaskRequest {
+            persona: None,
             agent: routine.agent.clone(),
             prompt: routine.request.clone(),
             scope: ScopeRequest {

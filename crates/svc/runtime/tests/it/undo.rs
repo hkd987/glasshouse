@@ -271,6 +271,7 @@ async fn a_cache_cleanup_comes_back_whole_and_new_cache_files_stay() {
     fs::write(cache.join("thumbs/a.png"), vec![0u8; 4096]).unwrap();
     fs::write(cache.join("b.bin"), "old b").unwrap();
     let request = TaskRequest {
+        persona: None,
         agent: "it-agent".parse().unwrap(),
         prompt: "My disk is full".into(),
         scope: ScopeRequest::default(),

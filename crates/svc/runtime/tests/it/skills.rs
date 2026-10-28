@@ -141,6 +141,7 @@ async fn agent(h: &Harness, id: &str, prompt: &str) -> Arc<Client> {
         h.rt.start(
             &h.me,
             TaskRequest {
+                persona: None,
                 agent: id.parse().unwrap(),
                 prompt: prompt.into(),
                 scope: ScopeRequest::default(),

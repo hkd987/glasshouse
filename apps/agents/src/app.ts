@@ -170,7 +170,7 @@ export function undoControl(id: string, since: string, label: string, cls = ""):
       h(
         "span",
         { class: "undo-ask", role: "group", "aria-label": "Undo this task?" },
-        h("span", {}, `Put its computer and any file of yours it changed back as they were at ${clock(since)}?`),
+        h("span", {}, `Put any file of yours it changed back as it was at ${clock(since)}?`),
         h("span", { class: "row" }, button("Undo it", go, "danger"), keep),
       ),
     );

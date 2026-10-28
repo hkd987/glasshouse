@@ -1,13 +1,13 @@
 //! What the web app, the CLI and Teams read, made from what glassd says:
-//! its computers become agents, their tasks a conversation (ADR 0066).
-//! No I/O here.
+//! the agents on a person's computer, each one's tasks a conversation
+//! (ADR 0066, ADR 0068). No I/O here.
 
 use std::collections::BTreeMap;
 
 use glass_agents_api as api;
 use glass_api::{
-    ActivityKind, AgentSummary, ApprovalView, ComputerState, ComputerView, TaskDetail, TaskView,
-    TileState,
+    ActivityKind, AgentSummary, ApprovalView, ComputerState, ComputerView, PersonaView, TaskDetail,
+    TaskView, TileState,
 };
 
 /// How an answer was given, kept by the front: glassd records that it was,
@@ -28,9 +28,13 @@ pub fn time(at: &glass_types::Timestamp) -> String {
         .unwrap_or_default()
 }
 
-/// One of the person's agents, from its computer and the tasks it ran.
-/// `tasks` are its own, any order.
-pub fn agent(computer: &ComputerView, tasks: &[&TaskView]) -> api::AgentView {
+/// One of the person's agents, from the computer it works on (theirs) and
+/// the tasks it ran. `tasks` are its own, any order.
+pub fn agent(
+    computer: &ComputerView,
+    persona: &PersonaView,
+    tasks: &[&TaskView],
+) -> api::AgentView {
     let live: Vec<&&TaskView> = tasks.iter().filter(|t| t.state.is_live()).collect();
     let status = if computer.taken_over {
         api::AgentStatus::TakenOver
@@ -57,15 +61,15 @@ pub fn agent(computer: &ComputerView, tasks: &[&TaskView]) -> api::AgentView {
         _ => String::new(),
     };
     api::AgentView {
-        id: computer.id.clone(),
-        name: computer.name.clone(),
-        role: computer.role.clone(),
-        template: computer.agent.to_string(),
+        id: persona.id.clone(),
+        name: persona.name.clone(),
+        role: persona.role.clone(),
+        template: persona.agent.to_string(),
         status,
         doing,
         updated_at: latest
             .map(|t| time(&t.updated_at))
-            .unwrap_or_else(|| time(&computer.created_at)),
+            .unwrap_or_else(|| time(&persona.created_at)),
         pending: live.iter().filter(|t| t.needs.is_some()).count() as u32,
         computer: computer_view(computer),
     }
@@ -389,11 +393,21 @@ mod tests {
 
     use super::*;
 
-    fn computer() -> ComputerView {
-        ComputerView {
+    fn persona() -> PersonaView {
+        PersonaView {
             id: "reconciler".into(),
             name: "Reconciler".into(),
             role: "Matches invoices".into(),
+            agent: "desktop-agent".parse().unwrap(),
+            created_at: Timestamp::from_unix_seconds(1_700_000_000).unwrap(),
+        }
+    }
+
+    fn computer() -> ComputerView {
+        ComputerView {
+            id: glass_api::PERSON_COMPUTER.into(),
+            name: "Your computer".into(),
+            role: String::new(),
             agent: "desktop-agent".parse().unwrap(),
             state: ComputerState::Ready,
             kind: "Linux namespaces".into(),
@@ -403,6 +417,7 @@ mod tests {
             taken_over: false,
             stored: None,
             created_at: Timestamp::from_unix_seconds(1_700_000_000).unwrap(),
+            personas: vec![persona()],
         }
     }
 
@@ -426,36 +441,40 @@ mod tests {
             updated_at: at,
             driver_socket: None,
             continues: None,
-            computer: Some("reconciler".into()),
+            computer: Some(glass_api::PERSON_COMPUTER.into()),
+            persona: Some("reconciler".into()),
         }
     }
 
     #[test]
     fn adr0066_an_agents_status_reads_from_its_computer_and_tasks() {
-        let idle = agent(&computer(), &[]);
+        let idle = agent(&computer(), &persona(), &[]);
         assert_eq!(idle.status, api::AgentStatus::Idle);
         assert_eq!(idle.computer.state, api::ComputerState::Ready);
         assert_eq!(idle.updated_at, "2023-11-14T22:13:20Z");
 
         let done = task(TileState::Done, "Matched 207 of 214");
         let working = task(TileState::Working, "Matching invoices");
-        let view = agent(&computer(), &[&done, &working]);
+        let view = agent(&computer(), &persona(), &[&done, &working]);
         assert_eq!(view.status, api::AgentStatus::Working);
         assert_eq!(view.doing, "Matching invoices");
 
-        let view = agent(&computer(), &[&done]);
+        let view = agent(&computer(), &persona(), &[&done]);
         assert_eq!(view.status, api::AgentStatus::Idle);
         assert_eq!(view.doing, "Done: March invoices");
 
         let mut taken = computer();
         taken.taken_over = true;
         assert_eq!(
-            agent(&taken, &[&working]).status,
+            agent(&taken, &persona(), &[&working]).status,
             api::AgentStatus::TakenOver
         );
         let mut asleep = computer();
         asleep.state = ComputerState::Asleep;
-        assert_eq!(agent(&asleep, &[]).status, api::AgentStatus::Asleep);
+        assert_eq!(
+            agent(&asleep, &persona(), &[]).status,
+            api::AgentStatus::Asleep
+        );
     }
 
     #[test]

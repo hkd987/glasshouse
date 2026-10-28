@@ -441,6 +441,7 @@ pub async fn tailor(h: &Harness) -> anyhow::Result<()> {
         "history stays"
     );
     let request = TaskRequest {
+        persona: None,
         agent,
         prompt: "Reconcile invoices".into(),
         scope: ScopeRequest::default(),

@@ -36,8 +36,9 @@ pub use apps::{
     app_bridge_port, app_methods,
 };
 pub use computer::{
-    ComputerNew, ComputerRef, ComputerState, ComputerView, INPUT_MAX_BYTES, ScreenInput,
-    ScreenRequest, ScreenView, StoredView,
+    ComputerNew, ComputerRef, ComputerState, ComputerView, INPUT_MAX_BYTES, PERSON_COMPUTER,
+    PERSONAS_MAX, PersonaNew, PersonaRef, PersonaView, ScreenInput, ScreenRequest, ScreenView,
+    StoredView,
 };
 pub use hardware::{PatchApply, PatchStatus, PatchTrial, TrialState};
 pub use tailoring::{
@@ -82,6 +83,12 @@ pub mod methods {
     pub const COMPUTER_LIST: &str = "computer.list";
     /// [`crate::ComputerNew`] → [`crate::ComputerView`]
     pub const COMPUTER_MAKE: &str = "computer.make";
+    /// [`crate::PersonaNew`] → [`crate::ComputerView`]: a new agent on the
+    /// caller's computer, made first if they have none (ADR 0068).
+    pub const PERSONA_MAKE: &str = "persona.make";
+    /// [`crate::PersonaRef`] → [`crate::ComputerView`]: the agent goes; its
+    /// files on the computer stay.
+    pub const PERSONA_REMOVE: &str = "persona.remove";
     /// [`crate::ScreenRequest`] → [`crate::ScreenView`]
     pub const COMPUTER_SCREEN: &str = "computer.screen";
     /// [`crate::ComputerRef`] → [`crate::ComputerView`]: its person has the

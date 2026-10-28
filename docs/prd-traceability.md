@@ -347,13 +347,14 @@ artifacts* = `crates/svc/runtime/tests/it/artifacts.rs`.
 
 ## Glasshouse Agents (ADR 0066; not in the PRD yet)
 
-The product on AWS: each agent a computer of its own, the web app, the
-`glass` CLI and Teams over glassd's runtime. Rows by ADR section until the
-PRD names them.
+The product on AWS: each person a computer of their own with their agents
+as personas on it (ADR 0068), the web app, the `glass` CLI and Teams over
+glassd's runtime. Rows by ADR section until the PRD names them.
 
 | What | Status | Where | Verified by |
 |---|---|---|---|
-| A computer per agent, kept between tasks (ADR 0065 §2, §8) | **Done** on namespaces | `glass-computers` (`sandbox.rs`, `namespaces.rs`), glassd `[sandbox] backend = "computers"`, `TaskRequest.computer` | computers `adr0066_*` (root inside, owner outside, no network, socket the only way out, nothing secret in its `/etc`, leftovers stopped); runtime it `computers::adr0066_*` |
+| One computer per person, their agents personas on it (ADR 0068) | **Done** | `sandbox.rs` (`add_persona`, `remove_persona`), runtime `persona_make`, `TaskRequest.persona`, the front's agents as personas | computers `adr0068_a_persons_agents_share_their_one_computer`; runtime it `adr0068_a_persons_agents_work_on_their_one_computer`; `tests/local-aws/agents-s3.sh` |
+| A computer kept between tasks (ADR 0065 §2, §8) | **Done** on namespaces | `glass-computers` (`sandbox.rs`, `namespaces.rs`), glassd `[sandbox] backend = "computers"`, `TaskRequest.computer` | computers `adr0066_*` (root inside, owner outside, no network, socket the only way out, nothing secret in its `/etc`, leftovers stopped); runtime it `computers::adr0066_*` |
 | Firecracker microVMs (ADR 0065 §10) | Partial | `glass-computers/src/firecracker` (API v1.17, jailer, snapshots); `glass-vmexec`, `glass-vmguest` | firecracker `adr0065_*` against a stand-in API. Missing: a host with KVM, the guest image |
 | Sleep to S3, wake on a task (ADR 0065 §11) | **Done** (stand-ins) | `store.rs`, `s3.rs` (SigV4, SSE-KMS, IMDSv2), idle sleep in glassd | store tests, `adr0065_a_computer_sleeps_to_the_store_and_a_task_wakes_it`, `AgentComputers.tla`. Missing: real S3 |
 | The front: web app and API (ADR 0066) | Partial | `glass-agents`, `glass-agents-api`, `apps/agents` | front unit tests; `make agents-dev` by hand. Missing: sign-in behind the load balancer, Playwright |

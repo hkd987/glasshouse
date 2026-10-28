@@ -69,6 +69,7 @@ impl AskAgent for Asks {
             .filter(|c| c.name == login)
             .ok_or_else(|| format!("{login} isn't a person on this computer"))?;
         let request = TaskRequest {
+            persona: None,
             agent: AGENT.parse().map_err(|e| format!("{e}"))?,
             prompt: prompt(meeting, title_, request),
             scope: ScopeRequest::default(),

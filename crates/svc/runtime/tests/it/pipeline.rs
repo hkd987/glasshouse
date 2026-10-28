@@ -1352,6 +1352,7 @@ async fn only_the_it_agent_reaches_the_system_and_its_fixes_stay_undoable() {
     fs::create_dir_all(h.home().join(".cache/thumbs")).unwrap();
     fs::write(h.home().join(".cache/thumbs/a.png"), vec![0u8; 4096]).unwrap();
     let request = TaskRequest {
+        persona: None,
         agent: "it-agent".parse().unwrap(),
         prompt: "My disk is full".into(),
         scope: ScopeRequest::default(),

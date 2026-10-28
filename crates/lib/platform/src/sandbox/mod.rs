@@ -67,6 +67,10 @@ pub struct SandboxSpec {
     /// without one a computer of its own that goes with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer: Option<String>,
+    /// The persona the task is for, on that computer (ADR 0068): it
+    /// starts in a folder of its own there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
 }
 
 /// What one task's processes may use, so the person's own work stays

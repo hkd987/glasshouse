@@ -36,9 +36,9 @@ struct StandInGlassd {
 impl StandInGlassd {
     fn computer(&self) -> ComputerView {
         ComputerView {
-            id: "reconciler".into(),
-            name: "Reconciler".into(),
-            role: "Matches invoices".into(),
+            id: glass_api::PERSON_COMPUTER.into(),
+            name: "Your computer".into(),
+            role: String::new(),
             agent: "desktop-agent".parse().unwrap(),
             state: ComputerState::Running,
             kind: "Firecracker microVM".into(),
@@ -48,6 +48,13 @@ impl StandInGlassd {
             taken_over: false,
             stored: None,
             created_at: Timestamp::now(),
+            personas: vec![glass_api::PersonaView {
+                id: "reconciler".into(),
+                name: "Reconciler".into(),
+                role: "Matches invoices".into(),
+                agent: "desktop-agent".parse().unwrap(),
+                created_at: Timestamp::now(),
+            }],
         }
     }
 
@@ -70,7 +77,8 @@ impl StandInGlassd {
             updated_at: Timestamp::now(),
             driver_socket: None,
             continues: None,
-            computer: Some("reconciler".into()),
+            computer: Some(glass_api::PERSON_COMPUTER.into()),
+            persona: Some("reconciler".into()),
         }
     }
 
@@ -387,7 +395,8 @@ async fn adr0065_an_agent_asks_in_teams_and_the_answer_comes_back() {
     let started = w.glassd.asked.lock().unwrap().clone();
     assert_eq!(started.len(), 1);
     assert_eq!(started[0]["prompt"], "which invoices don't match?");
-    assert_eq!(started[0]["computer"], "reconciler");
+    assert_eq!(started[0]["computer"], glass_api::PERSON_COMPUTER);
+    assert_eq!(started[0]["persona"], "reconciler");
     w.front.teams_look_once().await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let texts: Vec<String> = w

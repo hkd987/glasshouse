@@ -934,6 +934,7 @@ impl Runtime {
             scope: task.scope.clone(),
             title: Some(task.lock().title.clone()),
             computer: task.sandbox.computer.clone(),
+            persona: task.sandbox.persona.clone(),
         };
         self.start_task(caller, request, Origin::RetryOf(id))
     }
@@ -973,7 +974,28 @@ impl Runtime {
                         view.name
                     )));
                 }
+                // One of the person's agents on it, running what it runs
+                // (ADR 0068).
+                if let Some(persona) = &request.persona {
+                    let found =
+                        view.personas
+                            .iter()
+                            .find(|p| &p.id == persona)
+                            .ok_or_else(|| {
+                                RuntimeError::NotFound(format!("you have no agent {persona}"))
+                            })?;
+                    if found.agent != request.agent {
+                        return Err(RuntimeError::Invalid(format!(
+                            "{} runs {}, not {}",
+                            found.name, found.agent, request.agent
+                        )));
+                    }
+                }
             }
+        } else if request.persona.is_some() {
+            return Err(RuntimeError::Invalid(
+                "an agent works on a computer: name the computer too".into(),
+            ));
         }
         let prepared = self.prepare(caller, &request)?;
         // Counted and inserted under one lock, so starts at once can't all
@@ -1014,6 +1036,7 @@ impl Runtime {
             uid: caller.uid,
             gid: caller.gid,
             computer: request.computer.clone(),
+            persona: request.persona.clone(),
         };
         let ctx = TaskContext {
             principal: AgentPrincipal {

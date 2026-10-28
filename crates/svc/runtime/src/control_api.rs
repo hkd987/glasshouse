@@ -46,6 +46,11 @@ impl Handler for ControlApi {
             methods::SYSTEM_STATUS => to_result(&rt.status()),
             methods::COMPUTER_LIST => to_result(&rt.computer_list(&caller)?),
             methods::COMPUTER_MAKE => to_result(&rt.computer_make(&caller, parse_params(params)?)?),
+            methods::PERSONA_MAKE => to_result(&rt.persona_make(&caller, parse_params(params)?)?),
+            methods::PERSONA_REMOVE => {
+                let persona: glass_api::PersonaRef = parse_params(params)?;
+                to_result(&rt.persona_remove(&caller, &persona.id)?)
+            }
             methods::COMPUTER_SCREEN => {
                 let request: glass_api::ScreenRequest = parse_params(params)?;
                 to_result(&rt.computer_screen(&caller, &request)?)

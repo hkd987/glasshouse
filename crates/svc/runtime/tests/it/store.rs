@@ -120,6 +120,7 @@ async fn dv11_available_reaches_a_person_once_installed_and_never_beyond_policy(
         h.rt.start(
             &h.me,
             TaskRequest {
+                persona: None,
                 agent: "invoice-demo".parse().unwrap(),
                 prompt: "Total the invoices".into(),
                 scope: Default::default(),

@@ -77,6 +77,7 @@ async fn harness_task(h: &Harness) -> (glass_types::TaskId, Client) {
         h.rt.start(
             &h.me,
             TaskRequest {
+                persona: None,
                 agent: "claude-code".parse().unwrap(),
                 prompt: "Build me a way to track vendor disputes".into(),
                 scope: ScopeRequest::default(),
