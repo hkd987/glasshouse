@@ -389,6 +389,14 @@ impl Front {
                         .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
             })
             .unwrap_or("your computer");
+        // Who asks: `glass`, or the desktop app (ADR 0071). Nothing else
+        // is named on the page.
+        let app = query(&form, "app") == Some("desktop");
+        let (who, who_starts) = if app {
+            ("the Glasshouse Agents app", "The Glasshouse Agents app")
+        } else {
+            ("glass", "glass")
+        };
         if request.method == "GET" {
             let me: api::Person = self.as_person(request, async { self.person() }).await?;
             // The referrer policy is the page's own: every response says
@@ -400,16 +408,21 @@ impl Front {
                 "<!doctype html><meta charset=\"utf-8\">\
                  <meta name=\"referrer\" content=\"same-origin\">\
                  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-                 <title>Sign in glass</title><link rel=\"stylesheet\" href=\"/app.css\">\
-                 <main class=\"page\"><h1>Let glass on {host} use your agents?</h1>\
-                 <p class=\"sub\">Signed in as {name}. glass will reach your agents and your \
-                 computer as you, for 30 days or until you sign it out.</p>\
+                 <title>Sign in {who}</title><link rel=\"stylesheet\" href=\"/app.css\">\
+                 <main class=\"page\"><h1>Let {who} on {host} use your agents?</h1>\
+                 <p class=\"sub\">Signed in as {name}. {who_starts} will reach your agents and \
+                 your computer as you, for 30 days or until you sign it out.</p>\
                  <form method=\"post\" action=\"/login/cli\">\
                  <input type=\"hidden\" name=\"port\" value=\"{port}\">\
                  <input type=\"hidden\" name=\"state\" value=\"{state}\">\
-                 <input type=\"hidden\" name=\"host\" value=\"{host}\">\
+                 <input type=\"hidden\" name=\"host\" value=\"{host}\">{app_field}\
                  <button class=\"btn primary big\">Allow</button></form></main>",
                 name = html_text(&me.name),
+                app_field = if app {
+                    "<input type=\"hidden\" name=\"app\" value=\"desktop\">"
+                } else {
+                    ""
+                },
             );
             return Ok(Response::new(200, "text/html; charset=utf-8", page)
                 .with(
@@ -426,7 +439,7 @@ impl Front {
             .as_person(request, self.glassd.call(methods::TOKEN_CODE, ()))
             .await??;
         Ok(
-            Response::new(303, "text/plain; charset=utf-8", "Back to glass")
+            Response::new(303, "text/plain; charset=utf-8", format!("Back to {who}"))
                 .with(
                     "Location",
                     format!(

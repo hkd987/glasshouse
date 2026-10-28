@@ -110,9 +110,10 @@ host".
      days.
 
   The token itself never passes through the browser. `glass logout`
-  revokes all of the person's tokens. The Glasshouse desktop signs in the
-  same way, keeping its token in the person's keyring. Trading the
-  desktop's own sign-in token for one is a later refinement.
+  revokes all of the person's tokens. The desktop app signs in the
+  same way, keeping its token in the system's keychain (ADR 0071; the
+  code is shared, `agents::SignIn`). Trading the desktop's own sign-in
+  token for one is a later refinement.
 - Tested: `tests/local-aws/people.sh` (36 checks, two people behind the
   stand-in load balancer), runtime `people::tests` and front
   `adr0067_*`.

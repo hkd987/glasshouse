@@ -177,7 +177,7 @@ deploys on their own AWS" (2026-10-27): the hosted form is decided, §9.
       agent comes from the ones IT approved, never a blank form. Nothing
       technical on the way: no terminal, no settings IT didn't leave to
       the person.
-    - **The desktop app,** the same web app in a small native window, for
+    - **The desktop app** (built: ADR 0071, `agents-app/`), the same web app in a small native window, for
       Mac and Windows: a menu-bar icon that says who needs you,
       notifications, a file dropped on an agent goes to it, the sign-in
       kept in the system's keychain. One interface to build; the app

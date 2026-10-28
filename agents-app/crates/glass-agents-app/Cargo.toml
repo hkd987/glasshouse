@@ -1,0 +1,33 @@
+[package]
+name = "glass-agents-app"
+description = "Glasshouse Agents' desktop app: the web app in a native window, signed in through the browser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+glass-agents-api.workspace = true
+glass-gateway.workspace = true
+glass-gateway-providers.workspace = true
+wry.workspace = true
+tao.workspace = true
+tray-icon.workspace = true
+notify-rust.workspace = true
+keyring-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-keyutils-keyring-store.workspace = true
+
+[lints]
+workspace = true

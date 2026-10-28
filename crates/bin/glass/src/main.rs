@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use glass_agents_api as api;
-use glass_gateway_providers::agents::AgentsClient;
+use glass_gateway_providers::agents::{AgentsClient, Client, SignIn};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -657,44 +657,19 @@ fn answer(api: &Api, approval: &str, yes: bool) -> anyhow::Result<()> {
 
 /// How long `glass login` waits for the browser.
 const LOGIN_WAIT: Duration = Duration::from_secs(300);
-/// What a one-time login code starts with (glassd's `token.code`).
-const CODE_PREFIX: &str = "gac_";
-
 /// Signs in through the organization's sign-in (ADR 0067): the browser
 /// opens the front's page, behind the load balancer's sign-in; the person
 /// allows `glass`; the front sends a one-time code to this computer's
 /// loopback address, where `glass` waits; `glass` trades the code for a
-/// token. The token itself never passes through the browser.
+/// token. The token itself never passes through the browser. The desktop
+/// app signs in the same way ([`SignIn`], ADR 0071).
 fn login(url: &str) -> anyhow::Result<()> {
-    use std::io::Read;
     let url = url.trim_end_matches('/');
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").context("waiting for the browser")?;
-    let port = listener.local_addr()?.port();
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut bytes))
-        .context("reading /dev/urandom")?;
-    let state: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    let host: String = std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
-        .unwrap_or_default()
-        .trim()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || "-._".contains(*c))
-        .take(64)
-        .collect();
-    let page = format!(
-        "{url}/login/cli?port={port}&state={state}&host={}",
-        if host.is_empty() {
-            "this-computer"
-        } else {
-            &host
-        }
-    );
-    eprintln!("Sign in in your browser: {page}");
+    let sign_in = SignIn::start(url, Client::Glass)?;
+    eprintln!("Sign in in your browser: {}", sign_in.page());
     for opener in ["xdg-open", "open"] {
         if std::process::Command::new(opener)
-            .arg(&page)
+            .arg(sign_in.page())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -703,69 +678,8 @@ fn login(url: &str) -> anyhow::Result<()> {
             break;
         }
     }
-    let code = wait_for_code(&listener, &state)?;
-    let exchange = AgentsClient::new(url, &code).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let issued: Value = Api(exchange).post("tokens", json!({}))?;
-    let token = issued["token"]
-        .as_str()
-        .context("the front answered without a token")?;
-    keep_token(url, token)
-}
-
-/// The code the browser brings to this computer's loopback address.
-fn wait_for_code(listener: &std::net::TcpListener, state: &str) -> anyhow::Result<String> {
-    use std::io::Read;
-    listener.set_nonblocking(true)?;
-    let started = Instant::now();
-    loop {
-        if started.elapsed() > LOGIN_WAIT {
-            bail!("the browser didn't come back within 5 minutes: run glass login again");
-        }
-        let mut stream = match listener.accept() {
-            Ok((stream, _)) => stream,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(200));
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        };
-        stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        let mut request = vec![0u8; 8192];
-        let n = stream.read(&mut request).unwrap_or(0);
-        let request = String::from_utf8_lossy(&request[..n]);
-        let target = request
-            .lines()
-            .next()
-            .and_then(|line| line.strip_prefix("GET "))
-            .and_then(|rest| rest.split(' ').next())
-            .unwrap_or_default();
-        let field = |name: &str| {
-            target
-                .split_once('?')
-                .map(|(_, q)| q)
-                .unwrap_or_default()
-                .split('&')
-                .filter_map(|pair| pair.split_once('='))
-                .find(|(k, _)| *k == name)
-                .map(|(_, v)| v.to_owned())
-        };
-        let ours = target.starts_with("/callback?") && field("state").as_deref() == Some(state);
-        let code = field("code").filter(|c| ours && c.starts_with(CODE_PREFIX));
-        let said = if code.is_some() {
-            "Signed in. You can close this tab and go back to glass."
-        } else {
-            "That isn't the sign-in glass is waiting for."
-        };
-        let _ = write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{said}",
-            said.len()
-        );
-        if let Some(code) = code {
-            return Ok(code);
-        }
-    }
+    let token = sign_in.finish(LOGIN_WAIT)?;
+    keep_token(url, &token)
 }
 
 /// Keeps the address and a token pasted from a development front.

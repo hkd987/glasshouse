@@ -49,7 +49,7 @@ ART_INPUTS = ("tools/branding/", "os/freebsd/overlay/usr/local/share/glasshouse/
 # The admin console (ADR 0023): its server and its web app.
 CONSOLE = ("crates/bin/glass-console/", "apps/console/")
 # Third-party code kept as upstream wrote it, apart from marked patches.
-VENDORED = ("shell/vendor/",)
+VENDORED = ("shell/vendor/", "agents-app/vendor/")
 
 
 def git(*args: str) -> str:
@@ -117,6 +117,21 @@ def plan(files: set[str], everything: bool) -> list[tuple[str, list[str]]]:
         steps.append(("clippy (shell, FreeBSD)",
                       ["cargo", "clippy", "--manifest-path", "shell/Cargo.toml", "--workspace",
                        "--all-targets", "--target", FREEBSD, "--", "-D", "warnings"]))
+
+    # The Agents desktop app is its own workspace too (agents-app/README.md),
+    # built on the Agents API's types and client. It needs WebKitGTK to
+    # build here (make agents-app-deps); without it, `make agents-app-lint`
+    # on a machine that has it checks it.
+    if not everything and any(
+        f.startswith(("agents-app/", "crates/lib/", "crates/svc/gateway")) for f in files
+    ):
+        if subprocess.run(["pkg-config", "--exists", "webkit2gtk-4.1"]).returncode == 0:
+            steps.append(("clippy (agents app)",
+                          ["cargo", "clippy", "--manifest-path", "agents-app/Cargo.toml",
+                           "--target-dir", "target", "--workspace", "--all-targets", "--",
+                           "-D", "warnings"]))
+        else:
+            print("lint: the agents app's clippy is skipped: no WebKitGTK here (make agents-app-deps)")
 
     if everything or any(f.endswith(("Cargo.toml", ".rs")) or f == "tools/check-layers.py" for f in files):
         steps.append(("layering", ["tools/check-layers.py"]))

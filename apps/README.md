@@ -62,7 +62,8 @@ apps/
               screen with take over and hand back, sleep and wake. Routes by path
               (/, /new, /agents/<id>, /agents/<id>/computer); live through the
               front's long poll. model.ts, screen.ts and events.ts are the logic
-              without a DOM; dev/serve.ts answers from test/fixture.ts
+              without a DOM; the desktop app (agents-app/, ADR 0071) builds it
+              in and serves it itself; dev/serve.ts answers from test/fixture.ts
               (`node agents/dev/serve.ts`, port 7510); `make agents-dev` runs it
               on the real front
   e2e/        Playwright: the apps against dev-host glassd and the bridge;

@@ -13,7 +13,8 @@ Every workspace crate must also inherit the workspace lints, license and
 `publish = false`, so no crate quietly opts out of the shared rules.
 
 FreeBSD-specific code lives only in glass-platform (PL-1, PL-2, ADR 0022):
-no `target_os = "freebsd"` anywhere else, in this workspace or the shell's.
+no `target_os = "freebsd"` anywhere else, in this workspace, the shell's or
+the Agents desktop app's.
 
 OpenSSL is used directly by two crates only: glass-gateway-providers for
 TLS, the one way off the machine (ADR 0018), and glass-crypto for sealing
@@ -94,7 +95,7 @@ def main() -> int:
 
     for path in sorted(root.glob("crates/**/*.rs")) + sorted(root.glob("tests/**/*.rs")) + sorted(
         root.glob("shell/crates/**/*.rs")
-    ):
+    ) + sorted(root.glob("agents-app/crates/**/*.rs")):
         if "crates/lib/platform/" in path.as_posix() or "/target/" in path.as_posix():
             continue
         if 'target_os = "freebsd"' in path.read_text(errors="replace"):

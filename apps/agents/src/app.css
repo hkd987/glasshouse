@@ -1186,6 +1186,47 @@ h2:focus,
   background: #fff;
 }
 
+/* The desktop app's own pages (ADR 0071): the address, signing in. */
+
+.page.app-page {
+  max-width: 560px;
+  padding-top: 72px;
+  gap: 18px;
+}
+
+.app-page form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.app-page label {
+  flex: 1 1 100%;
+  font-weight: 600;
+}
+
+.app-page input[type="url"] {
+  flex: 1 1 280px;
+  min-width: 0;
+  height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  font-size: 15px;
+  background: #fff;
+}
+
+.app-page code.link {
+  display: block;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 /* Beside the conversation */
 
 .side {

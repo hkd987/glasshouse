@@ -28,7 +28,7 @@ export DIST_PROFILE := $(FREEBSD_PROFILE)
 
 .PHONY: help build check test lint lint-all fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
 	test-env image-release legal-base ci clean shell shell-test shell-lint shell-preview shell-vm greeter-vm \
-	apps-build apps-test apps-lint apps-dev freebsd-ports \
+	apps-build apps-test apps-lint apps-dev freebsd-ports agents-app agents-app-test agents-app-lint agents-app-deps \
 	console-dev console-test console-lint meet-test tla
 
 help: ## List targets
@@ -59,6 +59,7 @@ check-layers: ## Enforce crate layering and manifest conventions
 deny: ## Check dependency licenses and advisories, both workspaces (needs cargo-deny)
 	cargo deny check licenses bans sources
 	cd shell && cargo deny check licenses bans sources
+	cd agents-app && cargo deny check licenses bans sources
 
 legal-base: ## Regenerate the base system's notices and source offer from its src.txz (BR-2, BR-3)
 	os/freebsd/scripts/fetch.sh src
@@ -131,6 +132,25 @@ shell-vm: ## Show the shell on the dev VM's screen with live tiles (see it with 
 greeter-vm: ## Boot-like sign-in on the dev VM: the sign-in screen, then the desktop (password demo)
 	cargo build $(SHELL_MANIFEST) --target $(FREEBSD_TARGET) -p glass-shell-fb -p glass-greeter
 	os/freebsd/scripts/shell-vm.sh greeter
+
+# Glasshouse Agents' desktop app (ADR 0065 §12, ADR 0071): its own workspace
+# under agents-app/, so the core never compiles a webview. It shares target/,
+# where the libraries it links are already built. Linux builds need WebKitGTK
+# (make agents-app-deps); see agents-app/README.md.
+AGENTS_APP := --manifest-path agents-app/Cargo.toml --target-dir target
+
+agents-app: apps-build ## Build the Agents desktop app, the web app built into it
+	cargo build $(AGENTS_APP) --workspace
+
+agents-app-test: ## The Agents desktop app's tests
+	cargo test $(AGENTS_APP) --workspace
+
+agents-app-lint: ## The Agents desktop app's formatting and clippy (warnings are errors)
+	cargo fmt --manifest-path agents-app/Cargo.toml --all --check
+	cargo clippy $(AGENTS_APP) --workspace --all-targets -- -D warnings
+
+agents-app-deps: ## Linux: WebKitGTK and the tray's libraries, to build the Agents desktop app
+	apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
 
 # The first-party web apps and their SDK (ADR 0009, 0024): a TypeScript
 # workspace in apps/, built with esbuild, tested in headless Chromium against

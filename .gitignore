@@ -22,3 +22,4 @@ __pycache__/
 
 # TLC's working files when a model is checked by hand (tools/dev/tla.sh tlc)
 specs/tla/states/
+/agents-app/target/

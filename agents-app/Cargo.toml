@@ -1,0 +1,70 @@
+# Glasshouse Agents' desktop app (ADR 0065 §12, ADR 0071): the Agents web app
+# in a small native window for Mac and Windows, signed in as `glass login`
+# signs in (ADR 0067), its token in the system's keychain. Its own workspace,
+# like shell/, so the core never compiles a webview; it reaches Glasshouse
+# Agents only through the API the web app and `glass` use.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license-file = "../LICENSE"
+publish = false
+
+[workspace.dependencies]
+glass-agents-app = { path = "crates/glass-agents-app" }
+# The API's types and its client, shared with the front, the web app's
+# server side and `glass`.
+glass-agents-api = { path = "../crates/lib/agents-api" }
+glass-gateway = { path = "../crates/svc/gateway" }
+glass-gateway-providers = { path = "../crates/svc/gateway-providers" }
+
+# Tauri's own engine, without the framework (ADR 0071): the system's webview
+# (WebView2, WKWebView; WebKitGTK on Linux), its window, the tray and its menu.
+# linux-body: POSTs keep their bodies through WebKitGTK (forms, the API).
+wry = { version = "=0.57.0", features = ["linux-body"] }
+tao = "=0.37.1"
+tray-icon = "=0.26.1"
+# The system's notifications, and its keychain: keyring-core with the one
+# store each system has (Keychain, Credential Manager; on Linux the kernel's
+# keyring, which needs no Secret Service running).
+notify-rust = "=4.18.2"
+keyring-core = "=1.0.1"
+apple-native-keyring-store = "=1.0.2"
+windows-native-keyring-store = "=1.1.0"
+linux-keyutils-keyring-store = "=1.0.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+anyhow = "1.0.104"
+
+# A patched copy: see vendor/README.md.
+[patch.crates-io]
+dirs-sys = { path = "vendor/dirs-sys" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+print_stdout = "warn"
+
+[profile.dev]
+split-debuginfo = "unpacked"
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

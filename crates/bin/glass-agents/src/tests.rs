@@ -631,6 +631,29 @@ async fn adr0067_behind_the_load_balancer_each_request_is_its_own_persons() {
         page.contains(r#"<meta name="referrer" content="same-origin">"#),
         "{page}"
     );
+    // The desktop app signs in the same way, named as itself (ADR 0071);
+    // anything else in `app` names nothing new.
+    let app = front
+        .handle(&get(
+            "/login/cli?port=53111&state=0123456789abcdef&host=dana-laptop&app=desktop",
+            &[("x-amzn-oidc-data", "signed-for-dana")],
+        ))
+        .await;
+    let app_page = String::from_utf8_lossy(&app.body);
+    assert!(
+        app_page.contains("Let the Glasshouse Agents app on dana-laptop use your agents?"),
+        "{app_page}"
+    );
+    assert!(app_page.contains(r#"name="app" value="desktop""#));
+    let odd = front
+        .handle(&get(
+            "/login/cli?port=53111&state=0123456789abcdef&host=dana-laptop&app=%3Cb%3E",
+            &[("x-amzn-oidc-data", "signed-for-dana")],
+        ))
+        .await;
+    let odd_page = String::from_utf8_lossy(&odd.body);
+    assert!(odd_page.contains("Let glass on dana-laptop"), "{odd_page}");
+    assert!(!odd_page.contains("%3Cb%3E") && !odd_page.contains("<b>"));
     // As a browser posts it: from the front's own origin.
     let allow = front
         .handle(&glass_http::Request {

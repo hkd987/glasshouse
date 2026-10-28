@@ -16,6 +16,9 @@ tests/<suite>        end-to-end suites that drive a running system
 os/freebsd/          everything that becomes the OS image: overlay, image and VM tooling
 shell/               the desktop shell UI (ADR 0009): its own Cargo workspace, so the
                      core never compiles the UI toolkit; a control-API client (shell/README.md)
+agents-app/          Glasshouse Agents' desktop app for Mac and Windows (ADR 0065 §12, 0071):
+                     the Agents web app in a native window (wry, tao), its own Cargo workspace
+                     like shell/; signs in as `glass login` does (agents-app/README.md)
 apps/                first-party web apps (ADR 0009, 0024): a TypeScript workspace with the
                      SDK (apps/sdk) and one folder per app with its manifest.json; their OS
                      actions stay in crates/apps (apps/README.md). apps/console is the
