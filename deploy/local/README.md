@@ -7,7 +7,7 @@ only: nothing here ships.
 
 ```sh
 make aws-local         # start it; writes build/local-aws/env
-make aws-local-test    # agent computers to S3 and back, metering, against it
+make aws-local-test    # computers to S3 and back, metering, people, schedules
 make aws-local-down    # stop it (moto forgets everything)
 GLASS_DEV_STORE=s3 make agents-dev   # the dev stack, computers sleeping to it
 ```
@@ -21,18 +21,18 @@ Resources > Network > Enable host networking*.
 
 | Port | Stands in for | What the host does with it |
 |---|---|---|
-| 7610 | S3, KMS, Secrets Manager ([moto](https://github.com/getmoto/moto) 5.1.20, Apache-2.0) | Sleeping computers' chunks and versions, each object under the stack's KMS key (`store = "s3"` with `endpoint`) |
+| 7610 | S3, KMS, DynamoDB, Secrets Manager ([moto](https://github.com/getmoto/moto) 5.1.20, Apache-2.0) | Sleeping computers' chunks and versions, each object under the stack's KMS key (`store = "s3"` with `endpoint`); people's schedules in the stack's table (`[schedules] store = "dynamodb"`, ADR 0069) |
 | 7611 | The instance metadata service (IMDSv2) | The instance role's temporary keys, which sign every S3 and metering call, and its Auto Scaling lifecycle state (`AWS_EC2_METADATA_SERVICE_ENDPOINT`). A path that starts with a name (`/host-a/latest/...`) is that host's own, so each host has its own lifecycle state. |
 | 7612 | AWS Marketplace metering (`MeterUsage`) | Agent computer hours, hourly (`[metering] endpoint`). It checks each SigV4 signature against the role's keys and keeps records as the service does |
 | 7613 | The load balancer with OIDC sign-in | A sign-in page stands in for Entra ID. Requests go on to the front (`GLASS_LOCAL_AWS_FRONT`, default `127.0.0.1:7500`) with `x-amzn-oidc-data` signed ES256, as ADR 0067 verifies. Teams' path and `/api/v1/` with a bearer token skip sign-in, as the stack's rules do |
 | 7614 | `public-keys.auth.elb.<region>.amazonaws.com` | The load balancer's public key, by key id |
 
 `fake-aws.py` is the stand-ins (Python, with `cryptography` and `boto3`
-from moto's image). On start it makes the stack's bucket and KMS key in
-moto. `GLASS_LOCAL_AWS_PORT` moves every port.
+from moto's image). On start it makes the stack's bucket, KMS key and
+schedules table (with its `due` index) in moto. `GLASS_LOCAL_AWS_PORT` moves every port.
 
-`build/local-aws/env` holds the endpoints, bucket, KMS key ARN, product code
-and the load balancer's ARN as `GLASS_LOCAL_*`. `tools/dev/host-run.sh`
+`build/local-aws/env` holds the endpoints, bucket, KMS key ARN, schedules
+table, product code and the load balancer's ARN as `GLASS_LOCAL_*`. `tools/dev/host-run.sh`
 reads it for `GLASS_DEV_STORE=s3`. It never uses AWS keys from the
 environment then: glassd gets only the stand-in metadata service, as an
 agent host gets only its instance role. The stand-in's
@@ -57,6 +57,14 @@ replaced, as the Auto Scaling group's lifecycle hook does.
     forged, expired or foreign proof refused (ADR 0067). It makes the
     front's account, `glass-agents`, as the stack does, so it runs as
     root.
+  - then `tests/local-aws/schedules.sh`: two hosts share the schedules
+    table (ADR 0069). A schedule runs once with both looking; when one
+    host is told it's being replaced, the next runs on the other, which
+    wakes the person's computer from S3. Turned off, it doesn't run;
+    another person can't see or change it. About four minutes: schedules
+    run on the minute.
+  - and `adr0069_local_aws_one_claim_holds`: of two hosts' claims of one
+    run, one holds.
 - moto keeps objects in memory and doesn't enforce bucket policies or KMS
   key policies. Its speed says nothing about S3's, so time sleeps and wakes
   on AWS.

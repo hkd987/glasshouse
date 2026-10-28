@@ -202,16 +202,19 @@ aws-local: ## AWS on this machine for Glasshouse Agents (Docker, or processes wi
 aws-local-down: ## Stop AWS on this machine (moto forgets everything)
 	tools/dev/local-aws.sh down
 
-aws-local-test: aws-local apps-build ## Agent computers to S3 and back, and metering, against AWS on this machine
+aws-local-test: aws-local apps-build ## Agent computers to S3 and back, metering, people and schedules, against AWS on this machine
 	cargo build -p glassd -p glass-agents -p glass -p glass-desktop-agent -p glass-e2e
 	. build/local-aws/env && env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
 		AWS_EC2_METADATA_SERVICE_ENDPOINT="$$GLASS_LOCAL_IMDS" GLASS_LOCAL_REGION="$$GLASS_LOCAL_REGION" \
 		GLASS_LOCAL_S3="$$GLASS_LOCAL_S3" GLASS_LOCAL_BUCKET="$$GLASS_LOCAL_BUCKET" \
 		GLASS_LOCAL_KMS_KEY="$$GLASS_LOCAL_KMS_KEY" GLASS_LOCAL_METERING="$$GLASS_LOCAL_METERING" \
 		GLASS_LOCAL_PRODUCT_CODE="$$GLASS_LOCAL_PRODUCT_CODE" \
-		cargo test -p glass-gateway-providers -p glass-computers --lib -- --ignored local_aws
+		GLASS_LOCAL_DYNAMODB="$$GLASS_LOCAL_DYNAMODB" GLASS_LOCAL_SCHEDULES_TABLE="$$GLASS_LOCAL_SCHEDULES_TABLE" \
+		sh -c 'cargo test -p glass-gateway-providers -p glass-computers --lib -- --ignored local_aws && \
+			cargo test -p glassd --bins -- --ignored local_aws'
 	tests/local-aws/agents-s3.sh
 	tests/local-aws/people.sh
+	tests/local-aws/schedules.sh
 
 .PHONY: aws-lint
 aws-lint: ## The stack a buyer deploys on AWS (deploy/aws): cfn-lint, installed into build/tools/cfn-lint on first use

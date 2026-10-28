@@ -26,7 +26,7 @@ Each listens on this machine's loopback address, from FAKE_AWS_PORT_BASE
   +4  AWS's public keys for those claims, by key id, as
       https://public-keys.auth.elb.<region>.amazonaws.com/<kid> serves them
 
-On start it makes the stack's bucket and KMS key in moto.
+On start it makes the stack's bucket, KMS key and schedules table in moto.
 
 Needs Python 3.10+, cryptography and boto3 (both in moto's image).
 """
@@ -57,6 +57,7 @@ BASE = int(os.environ.get("FAKE_AWS_PORT_BASE", "7610"))
 REGION = os.environ.get("FAKE_AWS_REGION", "us-east-1")
 ACCOUNT = os.environ.get("FAKE_AWS_ACCOUNT", "123456789012")
 BUCKET = os.environ.get("FAKE_AWS_BUCKET", "glasshouse-agents-local")
+SCHEDULES_TABLE = os.environ.get("FAKE_AWS_SCHEDULES_TABLE", "glasshouse-agents-schedules")
 PRODUCT_CODE = os.environ.get("FAKE_AWS_PRODUCT_CODE", "glasshouse-local")
 ROLE = "glasshouse-agents-host"
 UPSTREAM = os.environ.get("FAKE_ALB_UPSTREAM", "http://127.0.0.1:7500")
@@ -477,6 +478,8 @@ def config():
         "s3_endpoint": MOTO,
         "bucket": BUCKET,
         "kms_key_arn": STATE["kms_key_arn"],
+        "dynamodb": MOTO,
+        "schedules_table": SCHEDULES_TABLE,
         "imds": f"http://{HOST}:{BASE + 1}",
         "metering": f"http://{HOST}:{BASE + 2}",
         "product_code": PRODUCT_CODE,
@@ -519,6 +522,37 @@ def s3_remove(prefix):
             s3.delete_object(Bucket=BUCKET, Key=obj["Key"])
 
 
+def make_schedules_table(kms_arn):
+    """People's schedules (ADR 0069), as the stack makes the table: keyed by
+    owner and id, with the sparse index of what's due."""
+    ddb = moto_client("dynamodb")
+    if SCHEDULES_TABLE in ddb.list_tables()["TableNames"]:
+        return
+    ddb.create_table(
+        TableName=SCHEDULES_TABLE,
+        BillingMode="PAY_PER_REQUEST",
+        AttributeDefinitions=[
+            {"AttributeName": "owner", "AttributeType": "S"},
+            {"AttributeName": "id", "AttributeType": "S"},
+            {"AttributeName": "queue", "AttributeType": "S"},
+            {"AttributeName": "next_run", "AttributeType": "N"},
+        ],
+        KeySchema=[
+            {"AttributeName": "owner", "KeyType": "HASH"},
+            {"AttributeName": "id", "KeyType": "RANGE"},
+        ],
+        GlobalSecondaryIndexes=[{
+            "IndexName": "due",
+            "KeySchema": [
+                {"AttributeName": "queue", "KeyType": "HASH"},
+                {"AttributeName": "next_run", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        }],
+        SSESpecification={"Enabled": True, "SSEType": "KMS", "KMSMasterKeyId": kms_arn},
+    )
+
+
 def make_bucket_and_key():
     """The stack's bucket and KMS key, in moto (idempotent)."""
     while True:
@@ -538,8 +572,9 @@ def make_bucket_and_key():
                 "ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "aws:kms", "KMSMasterKeyID": arn},
                 "BucketKeyEnabled": True,
             }]})
+            make_schedules_table(arn)
             STATE.update(ready=True, kms_key_arn=arn, why="")
-            log("ready: bucket", BUCKET, "key", arn)
+            log("ready: bucket", BUCKET, "key", arn, "table", SCHEDULES_TABLE)
             return
         except Exception as e:  # moto still starting
             STATE["why"] = f"waiting for moto at {MOTO}: {e}"

@@ -410,6 +410,7 @@ impl Runtime {
             driver_socket: None,
             continues: None,
             routine: None,
+            schedule: None,
             app: Some(Arc::clone(&manifest)),
             title: manifest.name.clone(),
             title_fixed: true,

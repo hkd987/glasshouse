@@ -18,6 +18,7 @@ mod approval;
 mod apps;
 mod computer;
 mod hardware;
+mod schedule;
 mod session;
 pub mod settings;
 mod tailoring;
@@ -42,6 +43,10 @@ pub use computer::{
     StoredView,
 };
 pub use hardware::{PatchApply, PatchStatus, PatchTrial, TrialState};
+pub use schedule::{
+    SCHEDULE_FAILURES_MAX, SCHEDULE_PROMPT_MAX_CHARS, SCHEDULES_MAX, ScheduleEnable, ScheduleNew,
+    ScheduleRef, ScheduleRunView, ScheduleView,
+};
 pub use session::{
     CODE_PREFIX, IssuedToken, LoginCode, PersonView, SessionAs, TOKEN_PREFIX, TokenExchange,
 };
@@ -108,6 +113,16 @@ pub mod methods {
     /// [`crate::PersonaRef`] → [`crate::ComputerView`]: the agent goes; its
     /// files on the computer stay.
     pub const PERSONA_REMOVE: &str = "persona.remove";
+    /// `()` → `Vec<`[`crate::ScheduleView`]`>`: the caller's schedules
+    /// (ADR 0069).
+    pub const SCHEDULE_LIST: &str = "schedule.list";
+    /// [`crate::ScheduleNew`] → [`crate::ScheduleView`]: one of the caller's
+    /// agents, directed on a schedule, on their computer.
+    pub const SCHEDULE_MAKE: &str = "schedule.make";
+    /// [`crate::ScheduleRef`] → `()`
+    pub const SCHEDULE_REMOVE: &str = "schedule.remove";
+    /// [`crate::ScheduleEnable`] → [`crate::ScheduleView`]
+    pub const SCHEDULE_ENABLE: &str = "schedule.enable";
     /// [`crate::ScreenRequest`] → [`crate::ScreenView`]
     pub const COMPUTER_SCREEN: &str = "computer.screen";
     /// [`crate::ComputerRef`] → [`crate::ComputerView`]: its person has the

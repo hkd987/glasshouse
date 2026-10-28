@@ -123,6 +123,11 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
         let (rt, ended) = (Arc::clone(&rt), Arc::clone(&task));
         let _ = tokio::task::spawn_blocking(move || rt.remember_run(&ended)).await;
     }
+    // A schedule's run: how it went, kept with the schedule (ADR 0069).
+    if task.schedule.is_some() {
+        let (rt, ended) = (Arc::clone(&rt), Arc::clone(&task));
+        let _ = tokio::task::spawn_blocking(move || rt.remember_schedule_run(&ended)).await;
+    }
     let mut event = rt.task_event(&task, EventKind::TaskFinished, summary);
     let receipt = task.lock().receipt();
     event.detail = serde_json::json!({

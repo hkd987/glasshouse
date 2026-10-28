@@ -28,6 +28,7 @@ fn reconciler() -> CatalogEntry {
             "test -S \"$GLASS_AGENT_SOCKET\" || exit 3
              case \"$GLASS_TASK_PROMPT\" in
                Match*) echo 'Matched 207 of 214 invoices'; echo 7 > /work/unmatched ;;
+               Hold*) sleep 60 ;;
                *) echo \"Still $(cat /work/unmatched) unmatched\" ;;
              esac"
                 .into(),
@@ -389,4 +390,289 @@ async fn adr0068_a_persons_agents_work_on_their_one_computer() {
     assert!(audit.contains("Added Month-end closer to their computer"));
     let removed = rt.persona_remove(&h.me, "closer").unwrap();
     assert_eq!(removed.personas.len(), 1);
+}
+
+fn reconciler_persona(rt: &glass_runtime::Runtime, h: &Harness) {
+    rt.persona_make(
+        &h.me,
+        PersonaNew {
+            id: "reconciler".into(),
+            name: "Reconciler".into(),
+            role: String::new(),
+            agent: "invoice-demo".parse().unwrap(),
+        },
+    )
+    .unwrap();
+}
+
+fn daily(persona: &str, when: &str, zone: Option<&str>) -> glass_api::ScheduleNew {
+    glass_api::ScheduleNew {
+        persona: persona.into(),
+        prompt: "Match the day's invoices".into(),
+        when: when.into(),
+        zone: zone.map(Into::into),
+    }
+}
+
+// 2026-10-28 08:30, 09:00, and 09:00 the day after, UTC.
+const BEFORE_NINE: i64 = 1_793_176_200;
+const NINE: i64 = 1_793_178_000;
+const DAY: i64 = 86_400;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0069_a_schedule_wakes_its_sleeping_computer_and_runs_once() {
+    let h = harness();
+    let Some(rt) = on_computers_with_store(&h) else {
+        return;
+    };
+    let store = Arc::new(glass_runtime::FileSchedules::new(
+        h.dir.path().join("schedules.json"),
+    ));
+    rt.set_schedules(store.clone());
+    reconciler_persona(&rt, &h);
+    let made = rt
+        .schedule_make_at(&h.me, daily("reconciler", "daily 09:00", None), BEFORE_NINE)
+        .unwrap();
+    assert_eq!(made.describe, "every day at 09:00");
+    assert_eq!(made.next_run.unwrap().unix_seconds(), NINE);
+    rt.computer_sleep(&h.me, glass_api::PERSON_COMPUTER)
+        .await
+        .unwrap();
+    let state = || rt.computer_list(&h.me).unwrap()[0].state;
+    assert_eq!(state(), ComputerState::Asleep);
+
+    // Not yet; then at nine, once, however many times it's looked for.
+    assert!(rt.run_due_schedules(NINE - 1).is_empty());
+    let turns = rt.run_due_schedules(NINE + 20);
+    let [(id, glass_runtime::Turn::Started(task))] = turns.as_slice() else {
+        panic!("{turns:?}");
+    };
+    assert_eq!(id, &made.id);
+    assert!(
+        rt.run_due_schedules(NINE + 40).is_empty(),
+        "a slot runs once"
+    );
+    eventually(|| rt.get(&h.me, *task).unwrap().view.state == TileState::Done).await;
+    let view = rt.get(&h.me, *task).unwrap().view;
+    assert_eq!(view.persona.as_deref(), Some("reconciler"));
+    assert_eq!(state(), ComputerState::Ready, "the run woke it");
+
+    // How it went is kept with the schedule; the next slot is tomorrow's.
+    eventually(|| {
+        rt.schedules_of(&h.me).unwrap()[0]
+            .last
+            .as_ref()
+            .is_some_and(|l| l.outcome == "done")
+    })
+    .await;
+    let kept = &rt.schedules_of(&h.me).unwrap()[0];
+    assert_eq!(kept.last.as_ref().unwrap().task, Some(*task));
+    assert_eq!(kept.next_run.unwrap().unix_seconds(), NINE + DAY);
+    assert_eq!(kept.failures, 0);
+
+    // Late by more than an hour: let pass, not replayed.
+    let turns = rt.run_due_schedules(NINE + DAY + 2 * 3600);
+    assert_eq!(turns, vec![(made.id.clone(), glass_runtime::Turn::Missed)]);
+    let kept = &rt.schedules_of(&h.me).unwrap()[0];
+    assert_eq!(kept.last.as_ref().unwrap().outcome, "missed");
+    assert_eq!(kept.next_run.unwrap().unix_seconds(), NINE + 2 * DAY);
+
+    // Being replaced, this host claims nothing: another host will.
+    rt.leave_host(std::time::Duration::from_secs(60)).await;
+    assert!(rt.run_due_schedules(NINE + 2 * DAY + 10).is_empty());
+
+    let audit = fs::read_to_string(h.audit_path()).unwrap();
+    assert!(
+        audit.contains("Scheduled reconciler: every day at 09:00"),
+        "{audit}"
+    );
+    assert!(audit.contains("Started the scheduled run for reconciler"));
+    assert!(audit.contains("Let a late slot pass for reconciler"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0069_only_their_own_agents_and_schedules_within_limits() {
+    let h = harness();
+    let Some(rt) = on_computers(&h) else {
+        return;
+    };
+    // No store, no schedules.
+    assert!(matches!(
+        rt.schedule_make_at(&h.me, daily("reconciler", "daily 09:00", None), BEFORE_NINE),
+        Err(RuntimeError::Conflict(_))
+    ));
+    rt.set_schedules(Arc::new(glass_runtime::FileSchedules::new(
+        h.dir.path().join("schedules.json"),
+    )));
+    reconciler_persona(&rt, &h);
+    let make = |new| rt.schedule_make_at(&h.me, new, BEFORE_NINE);
+    for (bad, why) in [
+        (
+            daily("nobody", "daily 09:00", None),
+            "an agent they don't have",
+        ),
+        (
+            daily("reconciler", "at nine-ish", None),
+            "a schedule it can't read",
+        ),
+        (
+            daily("reconciler", "daily 25:00", None),
+            "an hour that isn't one",
+        ),
+        (
+            daily("reconciler", "daily 09:00", Some("Mars/Olympus")),
+            "a zone that isn't one",
+        ),
+        (
+            daily("reconciler", "daily 09:00", Some("../../etc/passwd")),
+            "a path for a zone",
+        ),
+        (
+            glass_api::ScheduleNew {
+                prompt: "  ".into(),
+                ..daily("reconciler", "hourly", None)
+            },
+            "no directions",
+        ),
+        (
+            glass_api::ScheduleNew {
+                prompt: "x".repeat(glass_api::SCHEDULE_PROMPT_MAX_CHARS + 1),
+                ..daily("reconciler", "hourly", None)
+            },
+            "directions too long",
+        ),
+    ] {
+        assert!(make(bad).is_err(), "{why}");
+    }
+
+    // Twenty on at most; off, another may go on.
+    let mut ids = Vec::new();
+    for _ in 0..glass_api::SCHEDULES_MAX {
+        ids.push(make(daily("reconciler", "hourly", None)).unwrap().id);
+    }
+    assert!(matches!(
+        make(daily("reconciler", "hourly", None)),
+        Err(RuntimeError::Conflict(_))
+    ));
+    rt.schedule_enable_at(&h.me, &ids[0], false, BEFORE_NINE)
+        .unwrap();
+    let extra = make(daily("reconciler", "hourly", None)).unwrap();
+    assert!(matches!(
+        rt.schedule_enable_at(&h.me, &ids[0], true, BEFORE_NINE),
+        Err(RuntimeError::Conflict(_))
+    ));
+    rt.schedule_remove(&h.me, &extra.id).unwrap();
+
+    // Someone else sees none of them and changes none of them.
+    let other = glass_runtime::Caller {
+        name: "someone-else".into(),
+        uid: 4242,
+        gid: 4242,
+        home: h.dir.path().join("someone-else"),
+    };
+    assert!(rt.schedules_of(&other).unwrap().is_empty());
+    assert!(matches!(
+        rt.schedule_remove(&other, &ids[1]),
+        Err(RuntimeError::NotFound(_))
+    ));
+    assert!(matches!(
+        rt.schedule_enable_at(&other, &ids[1], false, BEFORE_NINE),
+        Err(RuntimeError::NotFound(_))
+    ));
+    assert!(matches!(
+        rt.schedule_make_at(&other, daily("reconciler", "hourly", None), BEFORE_NINE),
+        Err(RuntimeError::NotFound(_))
+    ));
+    assert_eq!(
+        rt.schedules_of(&h.me).unwrap().len(),
+        glass_api::SCHEDULES_MAX
+    );
+    assert!(
+        rt.schedules_of(&h.me)
+            .unwrap()
+            .iter()
+            .skip(1)
+            .all(|s| s.enabled)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0069_a_schedule_that_keeps_failing_turns_itself_off() {
+    let h = harness();
+    let Some(rt) = on_computers(&h) else {
+        return;
+    };
+    rt.set_schedules(Arc::new(glass_runtime::FileSchedules::new(
+        h.dir.path().join("schedules.json"),
+    )));
+    reconciler_persona(&rt, &h);
+    let made = rt
+        .schedule_make_at(&h.me, daily("reconciler", "daily 09:00", None), BEFORE_NINE)
+        .unwrap();
+    // The agent it directs is gone: every run is refused.
+    rt.persona_remove(&h.me, "reconciler").unwrap();
+    for day in 0..i64::from(glass_api::SCHEDULE_FAILURES_MAX) {
+        let turns = rt.run_due_schedules(NINE + day * DAY + 5);
+        assert!(
+            matches!(turns.as_slice(), [(_, glass_runtime::Turn::Refused(why))] if why.contains("no longer one of their agents")),
+            "{turns:?}"
+        );
+    }
+    let kept = &rt.schedules_of(&h.me).unwrap()[0];
+    assert!(!kept.enabled);
+    assert!(
+        kept.disabled_why
+            .as_deref()
+            .unwrap()
+            .contains("10 runs in a row"),
+        "{kept:?}"
+    );
+    assert!(
+        rt.run_due_schedules(NINE + 20 * DAY).is_empty(),
+        "off, it doesn't run"
+    );
+    // On again, its failures are forgotten and its next slot counted from then.
+    reconciler_persona(&rt, &h);
+    let on = rt
+        .schedule_enable_at(&h.me, &made.id, true, NINE + 20 * DAY + 60)
+        .unwrap();
+    assert_eq!((on.enabled, on.failures), (true, 0));
+    assert_eq!(on.next_run.unwrap().unix_seconds(), NINE + 21 * DAY);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0069_a_late_slot_never_starts_a_second_run_beside_one_going() {
+    let h = harness();
+    let Some(rt) = on_computers(&h) else {
+        return;
+    };
+    rt.set_schedules(Arc::new(glass_runtime::FileSchedules::new(
+        h.dir.path().join("schedules.json"),
+    )));
+    reconciler_persona(&rt, &h);
+    let made = rt
+        .schedule_make_at(
+            &h.me,
+            glass_api::ScheduleNew {
+                prompt: "Hold the ledger".into(),
+                ..daily("reconciler", "daily 09:00", None)
+            },
+            BEFORE_NINE,
+        )
+        .unwrap();
+    let turns = rt.run_due_schedules(NINE + 5);
+    let [(_, glass_runtime::Turn::Started(going))] = turns.as_slice() else {
+        panic!("{turns:?}");
+    };
+    // A day on, the next slot is two hours late while the first run still
+    // goes (ScheduleClaims.tla found it): it passes, and the run going is
+    // still the schedule's last, so the slot after doesn't start a second.
+    let turns = rt.run_due_schedules(NINE + DAY + 2 * 3600);
+    assert_eq!(turns, vec![(made.id.clone(), glass_runtime::Turn::Skipped)]);
+    let kept = &rt.schedules_of(&h.me).unwrap()[0];
+    assert_eq!(kept.last.as_ref().unwrap().outcome, "running");
+    assert_eq!(kept.last.as_ref().unwrap().task, Some(*going));
+    let turns = rt.run_due_schedules(NINE + 2 * DAY + 5);
+    assert_eq!(turns, vec![(made.id.clone(), glass_runtime::Turn::Skipped)]);
+    rt.stop(&h.me, *going).unwrap();
 }

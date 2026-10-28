@@ -90,6 +90,28 @@ enum Command {
     Sleep { agent: String },
     /// Brings an agent's computer back from storage.
     Wake { agent: String },
+    /// Your schedules: your agents, directed on a schedule (ADR 0069).
+    Schedules,
+    /// Directs an agent on a schedule, on your computer whether or not
+    /// it's awake: `glass schedule reconciler "weekdays 09:00" Match the
+    /// day's invoices`.
+    Schedule {
+        agent: String,
+        /// "daily 18:30", "weekdays 09:00", "weekends 10:00",
+        /// "mon,thu 08:30" or "hourly".
+        when: String,
+        #[arg(required = true)]
+        text: Vec<String>,
+        /// The time zone `when` is in: this computer's when left out.
+        #[arg(long)]
+        zone: Option<String>,
+    },
+    /// Turns a schedule off.
+    ScheduleOff { schedule: String },
+    /// Turns a schedule on again, its failures forgotten.
+    ScheduleOn { schedule: String },
+    /// Removes a schedule.
+    Unschedule { schedule: String },
     /// Signs this computer in through your organization's sign-in, in your
     /// browser (ADR 0067). `--paste` takes a token pasted from a
     /// development front instead.
@@ -500,6 +522,51 @@ fn run(command: Command) -> anyhow::Result<()> {
                 computer_word(view.computer.state)
             );
         }
+        Command::Schedules => {
+            let all: Vec<api::Schedule> = api.get("schedules")?;
+            if all.is_empty() {
+                println!("No schedules: glass schedule <agent> \"weekdays 09:00\" <what to do>");
+            }
+            for s in all {
+                println!("{}", schedule_line(&s));
+            }
+        }
+        Command::Schedule {
+            agent,
+            when,
+            text,
+            zone,
+        } => {
+            let id = agent_id(&api, &agent)?;
+            let zone = zone.or_else(local_zone);
+            let made: api::Schedule = api.post(
+                &format!("agents/{id}/schedules"),
+                json!({ "prompt": text.join(" "), "when": when, "zone": zone }),
+            )?;
+            println!("{}", schedule_line(&made));
+        }
+        Command::ScheduleOff { schedule } | Command::ScheduleOn { schedule }
+            if !api::valid_id(&schedule) =>
+        {
+            bail!("{schedule:?} isn't a schedule: glass schedules lists yours");
+        }
+        Command::ScheduleOff { schedule } => {
+            let changed: api::Schedule =
+                api.post(&format!("schedules/{schedule}/off"), json!({}))?;
+            println!("{}", schedule_line(&changed));
+        }
+        Command::ScheduleOn { schedule } => {
+            let changed: api::Schedule =
+                api.post(&format!("schedules/{schedule}/on"), json!({}))?;
+            println!("{}", schedule_line(&changed));
+        }
+        Command::Unschedule { schedule } => {
+            if !api::valid_id(&schedule) {
+                bail!("{schedule:?} isn't a schedule: glass schedules lists yours");
+            }
+            let _: Value = api.delete(&format!("schedules/{schedule}"))?;
+            println!("Removed {schedule}.");
+        }
         Command::Login { .. } => unreachable!("handled above"),
         Command::Logout => {
             let gone: Value = api.delete("tokens")?;
@@ -511,6 +578,46 @@ fn run(command: Command) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A schedule in a line, and how its last slot went.
+fn schedule_line(s: &api::Schedule) -> String {
+    let state = if s.enabled {
+        format!("next {}", s.next_run.as_deref().unwrap_or("?"))
+    } else {
+        format!(
+            "off{}",
+            s.disabled_why
+                .as_deref()
+                .map(|w| format!(": {w}"))
+                .unwrap_or_default()
+        )
+    };
+    let last = s
+        .last
+        .as_ref()
+        .map(|l| format!(" · last {} {}", l.outcome, l.at))
+        .unwrap_or_default();
+    format!(
+        "{}  {}, {} ({}): {} · {state}{last}",
+        s.id, s.agent, s.describe, s.zone, s.prompt
+    )
+}
+
+/// This computer's time zone, by its IANA name, if it says.
+fn local_zone() -> Option<String> {
+    if let Ok(zone) = std::env::var("TZ") {
+        let zone = zone.trim_start_matches(':');
+        if !zone.is_empty() && !zone.starts_with('/') {
+            return Some(zone.to_owned());
+        }
+    }
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let target = target.to_string_lossy();
+    target
+        .split_once("zoneinfo/")
+        .map(|(_, zone)| zone.to_owned())
+        .filter(|zone| !zone.is_empty())
 }
 
 fn answer(api: &Api, approval: &str, yes: bool) -> anyhow::Result<()> {

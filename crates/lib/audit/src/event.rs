@@ -140,6 +140,9 @@ pub enum EventKind {
     /// The front acted for a signed-in person, was refused, or a token for
     /// `glass` was issued or revoked (ADR 0067).
     Session,
+    /// A person's schedule was made, turned on or off, or removed; or a run
+    /// of it was started, let pass or refused (ADR 0069).
+    Schedule,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

@@ -101,6 +101,17 @@ impl Handler for ControlApi {
                 let persona: glass_api::PersonaRef = parse_params(params)?;
                 to_result(&rt.persona_remove(&caller, &persona.id)?)
             }
+            methods::SCHEDULE_LIST => to_result(&rt.schedules_of(&caller)?),
+            methods::SCHEDULE_MAKE => to_result(&rt.schedule_make(&caller, parse_params(params)?)?),
+            methods::SCHEDULE_REMOVE => {
+                let schedule: glass_api::ScheduleRef = parse_params(params)?;
+                rt.schedule_remove(&caller, &schedule.id)?;
+                to_result(&())
+            }
+            methods::SCHEDULE_ENABLE => {
+                let change: glass_api::ScheduleEnable = parse_params(params)?;
+                to_result(&rt.schedule_enable(&caller, &change.id, change.enabled)?)
+            }
             methods::COMPUTER_SCREEN => {
                 let request: glass_api::ScreenRequest = parse_params(params)?;
                 to_result(&rt.computer_screen(&caller, &request)?)

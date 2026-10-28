@@ -180,23 +180,7 @@ impl Runtime {
         person: &Person,
         proven_by: &str,
     ) -> Result<(Caller, PersonView)> {
-        let home = identity.homes.join(person.uid.to_string());
-        if !home.is_dir() {
-            std::fs::create_dir_all(&home)
-                .and_then(|()| {
-                    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))
-                })
-                .and_then(|()| std::os::unix::fs::chown(&home, Some(person.uid), Some(person.uid)))
-                .map_err(|e| {
-                    RuntimeError::Internal(format!("making {}'s folder: {e}", person.name))
-                })?;
-        }
-        let caller = Caller {
-            name: person.login(),
-            uid: person.uid,
-            gid: person.uid,
-            home,
-        };
+        let caller = self.caller_for(identity, person)?;
         // One line per person and kind of proof every ten minutes: the front
         // opens a session for each request.
         let due = {
@@ -224,6 +208,28 @@ impl Runtime {
             self.audit(event);
         }
         Ok((caller, view(person, proven_by)))
+    }
+
+    /// `person` as a caller of their own on this host, their folder made
+    /// the first time.
+    pub(crate) fn caller_for(&self, identity: &Identity, person: &Person) -> Result<Caller> {
+        let home = identity.homes.join(person.uid.to_string());
+        if !home.is_dir() {
+            std::fs::create_dir_all(&home)
+                .and_then(|()| {
+                    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))
+                })
+                .and_then(|()| std::os::unix::fs::chown(&home, Some(person.uid), Some(person.uid)))
+                .map_err(|e| {
+                    RuntimeError::Internal(format!("making {}'s folder: {e}", person.name))
+                })?;
+        }
+        Ok(Caller {
+            name: person.login(),
+            uid: person.uid,
+            gid: person.uid,
+            home,
+        })
     }
 
     fn person_of(&self, caller: &Caller) -> Result<(&Identity, Person)> {

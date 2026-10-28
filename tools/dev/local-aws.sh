@@ -48,6 +48,7 @@ names = {
     "kms_key_arn": "KMS_KEY", "imds": "IMDS", "metering": "METERING",
     "product_code": "PRODUCT_CODE", "load_balancer": "LOAD_BALANCER",
     "public_keys": "PUBLIC_KEYS", "signer": "SIGNER",
+    "dynamodb": "DYNAMODB", "schedules_table": "SCHEDULES_TABLE",
 }
 print("# Written by tools/dev/local-aws.sh: AWS on this machine.")
 print("GLASS_LOCAL_AWS=1")

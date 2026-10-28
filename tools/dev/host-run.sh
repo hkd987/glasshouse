@@ -83,6 +83,7 @@ fi
 store="store = \"folder\"
 folder = \"$dev/computer-store\""
 metering=""
+schedules=""
 case "${GLASS_DEV_STORE:-folder}" in
 folder) ;;
 s3)
@@ -104,6 +105,13 @@ enabled = true
 product_code = \"$GLASS_LOCAL_PRODUCT_CODE\"
 region = \"$GLASS_LOCAL_REGION\"
 endpoint = \"$GLASS_LOCAL_METERING\""
+	schedules="
+# People's schedules, in DynamoDB on this machine (ADR 0069).
+[schedules]
+store = \"dynamodb\"
+table = \"$GLASS_LOCAL_SCHEDULES_TABLE\"
+region = \"$GLASS_LOCAL_REGION\"
+endpoint = \"$GLASS_LOCAL_DYNAMODB\""
 	unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
 	# This host's own metadata (its lifecycle state), by its name.
 	export AWS_EC2_METADATA_SERVICE_ENDPOINT=$GLASS_LOCAL_IMDS/${GLASS_DEV_HOST:-dev}
@@ -140,6 +148,7 @@ agent_dirs = ["$bin"]
 $store
 sleep_after_idle_minutes = ${GLASS_DEV_IDLE_MINUTES:-30}
 $metering
+$schedules
 $people
 
 [snapshots]

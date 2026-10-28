@@ -75,6 +75,28 @@ pub fn agent(
     }
 }
 
+/// One of the person's schedules (ADR 0069).
+pub fn schedule(view: &glass_api::ScheduleView) -> api::Schedule {
+    api::Schedule {
+        id: view.id.clone(),
+        agent: view.persona.clone(),
+        prompt: view.prompt.clone(),
+        when: view.when.clone(),
+        describe: view.describe.clone(),
+        zone: view.zone.clone(),
+        enabled: view.enabled,
+        disabled_why: view.disabled_why.clone(),
+        next_run: view.next_run.as_ref().map(time),
+        failures: view.failures,
+        last: view.last.as_ref().map(|last| api::ScheduleRun {
+            at: time(&last.at),
+            outcome: last.outcome.clone(),
+            task: last.task.map(|t| t.to_string()),
+            note: last.note.clone(),
+        }),
+    }
+}
+
 pub fn computer_state(state: ComputerState, live: bool) -> api::ComputerState {
     match state {
         ComputerState::Asleep => api::ComputerState::Asleep,

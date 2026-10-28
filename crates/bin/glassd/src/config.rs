@@ -96,6 +96,10 @@ pub struct Config {
     /// in, each with an account of their own here (ADR 0067).
     #[serde(default)]
     pub people: Option<PeopleConfig>,
+    /// `[schedules]`: where people's schedules are kept (ADR 0069): a
+    /// DynamoDB table the stack's hosts share, or a file by default.
+    #[serde(default)]
+    pub schedules: Option<crate::schedules::SchedulesConfig>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<CatalogEntry>,
 }
@@ -795,6 +799,9 @@ impl Config {
         }
         self.sandbox.limits.validate()?;
         self.sandbox.computers.validate()?;
+        if let Some(schedules) = &self.schedules {
+            schedules.validate()?;
+        }
         for agent in &self.agents {
             agent
                 .check()

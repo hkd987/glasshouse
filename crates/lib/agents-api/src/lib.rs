@@ -19,6 +19,11 @@
 //! GET  /api/v1/approvals                [PendingApproval], the person's
 //! POST /api/v1/approvals/<id>           Answer → ApprovalView
 //! GET  /api/v1/templates                [Template] IT approved
+//! GET  /api/v1/schedules                [Schedule], the person's (ADR 0069)
+//! POST /api/v1/agents/<id>/schedules    NewSchedule → Schedule
+//! POST /api/v1/schedules/<id>/on        → Schedule (its failures forgotten)
+//! POST /api/v1/schedules/<id>/off       → Schedule
+//! DELETE /api/v1/schedules/<id>         → {}
 //! GET  /api/v1/events                   ?since=<cursor> (long poll) → Events
 //! POST /api/teams/messages              Microsoft's Bot Framework (ADR 0065 §13)
 //! ```
@@ -328,6 +333,57 @@ pub struct NewAgent {
     /// Its name, if not the template's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+/// One of the person's agents, directed on a schedule (ADR 0069): it runs
+/// whether or not their computer is awake.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Schedule {
+    pub id: String,
+    /// The agent it directs.
+    pub agent: String,
+    pub prompt: String,
+    /// As written: "weekdays 09:00".
+    pub when: String,
+    /// In words: "every weekday at 09:00".
+    pub describe: String,
+    pub zone: String,
+    pub enabled: bool,
+    /// Why it turned itself off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_why: Option<String>,
+    /// RFC 3339, while on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run: Option<String>,
+    #[serde(default)]
+    pub failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<ScheduleRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleRun {
+    /// RFC 3339.
+    pub at: String,
+    /// `running`, `done`, `failed`, `stopped`, `missed`, `refused`.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// `POST /api/v1/agents/<id>/schedules`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewSchedule {
+    pub prompt: String,
+    /// "daily 18:30", "weekdays 09:00", "weekends 10:00", "mon,thu 08:30"
+    /// or "hourly".
+    pub when: String,
+    /// An IANA time zone; UTC when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
 }
 
 /// `GET /api/v1/events?since=<cursor>`: what changed since, waiting up to

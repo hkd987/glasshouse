@@ -36,6 +36,7 @@ pub mod osupdate;
 pub mod people;
 mod routines;
 mod runtime;
+mod schedules;
 mod seat;
 mod sessions;
 mod studio;
@@ -59,6 +60,9 @@ pub use config::{
 pub use control_api::ControlApi;
 pub use error::RuntimeError;
 pub use runtime::{RunningAgent, Runtime, RuntimeParts, SettingsHandle};
+pub use schedules::{
+    FileSchedules, Holder, LastRun, ScheduleStore, StoreError, StoredSchedule, Turn, next_slot,
+};
 pub use seat::WAKE_WAIT;
 pub use sessions::{Identity, KeyFetch};
 pub use studio::StudioSurroundings;

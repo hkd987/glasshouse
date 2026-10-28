@@ -57,7 +57,8 @@ details this file leaves out.
   - `make console-lint`: clippy, types, BR-1; `make lint` runs it when the console changes.
 - Glasshouse Agents (ADR 0066): `make agents-dev` runs glassd with agent
   computers and the front on :7500. `make aws-local` simulates its AWS
-  (`deploy/local`: moto, instance role, metering, load balancer sign-in),
+  (`deploy/local`: moto, instance role, metering, load balancer sign-in,
+  the schedules table),
   `make aws-local-test` tests against it, and `GLASS_DEV_STORE=s3` sleeps
   computers to it.
 - Anything a person waits on has a latency budget in `glass-e2e perf`

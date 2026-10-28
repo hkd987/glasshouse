@@ -566,6 +566,23 @@ impl Front {
             ("GET", ["approvals"]) => ok(&self.approvals().await?),
             ("POST", ["approvals", id]) => ok(&self.answer(id, body(request)?).await?),
             ("GET", ["templates"]) => ok(&self.templates().await?),
+            ("GET", ["schedules"]) => ok(&self.schedules().await?),
+            ("POST", ["agents", id, "schedules"]) => ok(&self.schedule(id, body(request)?).await?),
+            ("POST", ["schedules", id, on @ ("on" | "off")]) => {
+                ok(&self.schedule_enable(id, *on == "on").await?)
+            }
+            ("DELETE", ["schedules", id]) => {
+                let () = self
+                    .glassd
+                    .call(
+                        methods::SCHEDULE_REMOVE,
+                        glass_api::ScheduleRef {
+                            id: (*id).to_owned(),
+                        },
+                    )
+                    .await?;
+                ok(&serde_json::json!({}))
+            }
             ("GET", ["events"]) => {
                 let since = query(&request.query, "since")
                     .and_then(|s| s.parse().ok())
@@ -584,12 +601,54 @@ impl Front {
             (
                 _,
                 [
-                    "session" | "agents" | "approvals" | "templates" | "events",
+                    "session" | "agents" | "approvals" | "templates" | "schedules" | "events",
                     ..,
                 ],
             ) => Err(Failure::new(405, "method not allowed")),
             _ => Err(Failure::new(404, "no such route")),
         }
+    }
+
+    /// The person's schedules (ADR 0069).
+    async fn schedules(&self) -> Reply<Vec<api::Schedule>> {
+        let all: Vec<glass_api::ScheduleView> =
+            self.glassd.call(methods::SCHEDULE_LIST, ()).await?;
+        Ok(all.iter().map(views::schedule).collect())
+    }
+
+    /// Directs agent `id` on a schedule: glassd checks it's one of the
+    /// person's.
+    async fn schedule(&self, id: &str, new: api::NewSchedule) -> Reply<api::Schedule> {
+        if !api::valid_id(id) {
+            return Err(Failure::new(404, "no such agent"));
+        }
+        let made: glass_api::ScheduleView = self
+            .glassd
+            .call(
+                methods::SCHEDULE_MAKE,
+                glass_api::ScheduleNew {
+                    persona: id.to_owned(),
+                    prompt: new.prompt,
+                    when: new.when,
+                    zone: new.zone,
+                },
+            )
+            .await?;
+        Ok(views::schedule(&made))
+    }
+
+    async fn schedule_enable(&self, id: &str, enabled: bool) -> Reply<api::Schedule> {
+        let changed: glass_api::ScheduleView = self
+            .glassd
+            .call(
+                methods::SCHEDULE_ENABLE,
+                glass_api::ScheduleEnable {
+                    id: id.to_owned(),
+                    enabled,
+                },
+            )
+            .await?;
+        Ok(views::schedule(&changed))
     }
 
     async fn computers(&self) -> Reply<Vec<ComputerView>> {

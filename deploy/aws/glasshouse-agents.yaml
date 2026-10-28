@@ -312,8 +312,9 @@ Resources:
       SubnetId: !Ref PublicSubnetB
       RouteTableId: !Ref PublicRouteTable
 
-  # The hosts' route table: the VPC itself and the S3 gateway endpoint's
-  # route, which S3GatewayEndpoint adds. Nothing else, ever.
+  # The hosts' route table: the VPC itself and the S3 and DynamoDB gateway
+  # endpoints' routes, which S3GatewayEndpoint and DynamoDbGatewayEndpoint
+  # add. Nothing else, ever.
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -520,6 +521,30 @@ Resources:
             Principal: "*"
             Action: "s3:GetObject"
             Resource: "*"
+
+  # DynamoDB, where people's schedules are kept (ADR 0069). The endpoint
+  # policy reaches this stack's table and nothing else.
+  DynamoDbGatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.dynamodb"
+      RouteTableIds: [!Ref PrivateRouteTable]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ThisStacksSchedules
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+            Resource:
+              - !GetAtt ScheduleTable.Arn
+              - !Sub "${ScheduleTable.Arn}/index/*"
 
   BedrockRuntimeEndpoint:
     Type: AWS::EC2::VPCEndpoint
@@ -750,6 +775,43 @@ Resources:
               StringNotEqualsIfExists:
                 s3:x-amz-server-side-encryption-aws-kms-key-id: !GetAtt DataKey.Arn
 
+  # People's schedules (ADR 0069): kept off their computers, so a schedule
+  # runs while its computer sleeps, on whichever host claims it first.
+  # Keyed by the person's key in the store and the schedule's id; one that's
+  # on carries queue = "due", which puts it in the sparse index every host
+  # asks for what's due. Kept when the stack is deleted, as the computers
+  # are, and recoverable to any second of the last 35 days.
+  ScheduleTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: owner, AttributeType: S }
+        - { AttributeName: id, AttributeType: S }
+        - { AttributeName: queue, AttributeType: S }
+        - { AttributeName: next_run, AttributeType: N }
+      KeySchema:
+        - { AttributeName: owner, KeyType: HASH }
+        - { AttributeName: id, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: due
+          KeySchema:
+            - { AttributeName: queue, KeyType: HASH }
+            - { AttributeName: next_run, KeyType: RANGE }
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !GetAtt DataKey.Arn
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      DeletionProtectionEnabled: true
+      Tags:
+        - { Key: Application, Value: Glasshouse Agents }
+
   HostLogGroup:
     Type: AWS::Logs::LogGroup
     DeletionPolicy: Retain
@@ -764,7 +826,7 @@ Resources:
   HostRole:
     Type: AWS::IAM::Role
     Properties:
-      Description: Glasshouse Agents hosts - this stack's bucket and key, Bedrock models, metering, the Teams secret
+      Description: Glasshouse Agents hosts - this stack's bucket, schedules and key, Bedrock models, metering, the Teams secret
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -803,6 +865,25 @@ Resources:
                   - kms:GenerateDataKey
                   - kms:DescribeKey
                 Resource: !GetAtt DataKey.Arn
+              - Sid: Schedules
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt ScheduleTable.Arn
+                  - !Sub "${ScheduleTable.Arn}/index/due"
+              - Sid: SchedulesUnderTheStacksKey
+                Effect: Allow
+                Action: kms:CreateGrant
+                Resource: !GetAtt DataKey.Arn
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub "dynamodb.${AWS::Region}.amazonaws.com"
+                  Bool:
+                    kms:GrantIsForAWSResource: true
               - Sid: BedrockModels
                 Effect: Allow
                 Action:
@@ -966,6 +1047,12 @@ Resources:
               load_balancer = "${LoadBalancer}"
               region = "${AWS::Region}"
               keys_proxy = "http://${RelayAddress.DNSName}:3128"
+
+              # People's schedules (ADR 0069), shared by every host.
+              [schedules]
+              store = "dynamodb"
+              table = "${ScheduleTable}"
+              region = "${AWS::Region}"
               EOF
 
               # The load balancer speaks HTTPS to the hosts so people's
@@ -1383,6 +1470,9 @@ Outputs:
   ComputersBucket:
     Description: The S3 bucket where agent computers sleep. Kept when the stack is deleted.
     Value: !Ref ChunkBucket
+  ScheduleTableName:
+    Description: Where people's schedules are kept (DynamoDB)
+    Value: !Ref ScheduleTable
   DataKeyArn:
     Description: The KMS key that encrypts the bucket and the host logs. Kept when the stack is deleted.
     Value: !GetAtt DataKey.Arn

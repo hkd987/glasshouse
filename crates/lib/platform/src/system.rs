@@ -459,6 +459,50 @@ pub fn utc_offset_secs() -> Option<i32> {
     parse_offset(cmd::run("date", &["+%z"]).ok()?.trim())
 }
 
+/// Whether `zone` names a time zone this system knows: an IANA name such
+/// as `Europe/London`, a file under `/usr/share/zoneinfo` (ADR 0069).
+pub fn valid_zone(zone: &str) -> bool {
+    if zone == "UTC" {
+        return true;
+    }
+    let fits = !zone.is_empty()
+        && zone.len() <= 64
+        && zone.split('/').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'+'))
+        });
+    fits && std::path::Path::new("/usr/share/zoneinfo")
+        .join(zone)
+        .is_file()
+}
+
+/// `zone`'s offset from UTC at `unix_secs`, in seconds east, from the base
+/// system's `date`: daylight saving included, as it is at that moment.
+pub fn zone_offset_at(zone: &str, unix_secs: i64) -> Option<i32> {
+    if zone == "UTC" {
+        return Some(0);
+    }
+    if !valid_zone(zone) {
+        return None;
+    }
+    let at = unix_secs.to_string();
+    let at_linux = format!("@{unix_secs}");
+    let args: [&str; 3] = if cfg!(target_os = "freebsd") {
+        ["-r", &at, "+%z"]
+    } else {
+        ["-d", &at_linux, "+%z"]
+    };
+    let out = std::process::Command::new("date")
+        .args(args)
+        .env("TZ", zone)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    parse_offset(String::from_utf8_lossy(&out.stdout).trim())
+}
+
 /// `+0200` → 7200, `-0530` → -19800.
 fn parse_offset(text: &str) -> Option<i32> {
     let (sign, digits) = match text.as_bytes().first()? {
@@ -704,6 +748,33 @@ mod tests {
         assert_eq!(parse_offset("+2"), None);
         assert!(utc_offset_secs().is_some(), "date +%z answers here too");
         assert!(set_time_zone("../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn adr0069_a_zones_offset_is_its_own_at_that_moment() {
+        assert_eq!(zone_offset_at("UTC", 1_700_000_000), Some(0));
+        for bad in [
+            "",
+            "../../etc/passwd",
+            "/etc/localtime",
+            "Europe/../UTC",
+            "Mars/Olympus",
+            "a b",
+        ] {
+            assert!(!valid_zone(bad), "{bad}");
+            assert_eq!(zone_offset_at(bad, 0), None, "{bad}");
+        }
+        if std::path::Path::new("/usr/share/zoneinfo/America/New_York").is_file() {
+            // 2023-11-14, standard time; 2023-07-01, daylight saving.
+            assert_eq!(
+                zone_offset_at("America/New_York", 1_700_000_000),
+                Some(-5 * 3600)
+            );
+            assert_eq!(
+                zone_offset_at("America/New_York", 1_688_212_800),
+                Some(-4 * 3600)
+            );
+        }
     }
 
     #[test]

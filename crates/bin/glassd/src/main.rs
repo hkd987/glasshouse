@@ -19,6 +19,7 @@ mod metering;
 mod org_apps;
 mod org_patches;
 mod personal;
+mod schedules;
 mod updates;
 mod wifi;
 
@@ -717,6 +718,17 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             dev_people = settings.dev_people,
             "acting for people the front proves"
         );
+    }
+
+    // People's schedules (ADR 0069), kept off their computers so they run
+    // while the computers sleep: every half minute this host starts the
+    // runs it claims first, waking the computers they're for.
+    if config.sandbox.backend == SandboxBackend::Computers {
+        runtime.set_schedules(schedules::store(
+            config.schedules.as_ref(),
+            config.state_dir.join("schedules.json"),
+        )?);
+        schedules::run(Arc::clone(&runtime));
     }
     {
         let runtime = Arc::clone(&runtime);

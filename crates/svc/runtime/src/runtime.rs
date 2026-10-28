@@ -27,7 +27,7 @@ use crate::error::Result;
 
 /// How long sleep waits for actions already under way.
 const SLEEP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-use crate::task::{Continued, Gate, NewTask, RoutineRun, TakenSnapshot, Task};
+use crate::task::{Continued, Gate, NewTask, RoutineRun, ScheduleRun, TakenSnapshot, Task};
 use crate::{Caller, CatalogEntry, RuntimeConfig, RuntimeError, supervise, title};
 
 /// Everything the runtime is built from. `glassd` assembles these from its
@@ -107,6 +107,9 @@ pub struct Runtime {
     pub(crate) routines: std::sync::OnceLock<glass_app_routines::Routines>,
     /// Who the front may act for, on an agent host (ADR 0067).
     pub(crate) identity: std::sync::OnceLock<crate::Identity>,
+    /// Where people's schedules are kept (ADR 0069), set once at startup.
+    /// Unset, nobody has any.
+    pub(crate) schedules: std::sync::OnceLock<Arc<dyn crate::ScheduleStore>>,
     /// Kernel patches tried in boot environments of their own (ADR 0057):
     /// one at a time, under this lock.
     hardware: Mutex<crate::hwpatch::Store>,
@@ -166,6 +169,8 @@ pub(crate) enum Origin {
     Continues(Continued),
     /// One of the person's routines, by id and version (DA-4).
     Routine(RoutineRun),
+    /// A run of one of the person's schedules (ADR 0069).
+    Schedule(ScheduleRun),
 }
 
 impl Runtime {
@@ -212,6 +217,7 @@ impl Runtime {
             seat_file: std::sync::OnceLock::new(),
             routines: std::sync::OnceLock::new(),
             identity: std::sync::OnceLock::new(),
+            schedules: std::sync::OnceLock::new(),
             seat_user: tokio::sync::watch::Sender::new(None),
         });
         // Settings that list apps by id (DK-1) show them by the names the
@@ -1064,11 +1070,12 @@ impl Runtime {
             .entry
             .attended
             .then(|| self.config.attended_dir.join(format!("{id}.sock")));
-        let (retry_of, continues, routine) = match origin {
-            Origin::New => (None, None, None),
-            Origin::RetryOf(first) => (Some(first), None, None),
-            Origin::Continues(from) => (None, Some(from), None),
-            Origin::Routine(run) => (None, None, Some(run)),
+        let (retry_of, continues, routine, schedule) = match origin {
+            Origin::New => (None, None, None, None),
+            Origin::RetryOf(first) => (Some(first), None, None, None),
+            Origin::Continues(from) => (None, Some(from), None, None),
+            Origin::Routine(run) => (None, None, Some(run), None),
+            Origin::Schedule(run) => (None, None, None, Some(run)),
         };
         let (stop_tx, stop_rx) = oneshot::channel();
         let task = Arc::new(Task::new(NewTask {
@@ -1087,6 +1094,7 @@ impl Runtime {
             driver_socket,
             continues,
             routine,
+            schedule,
             app: None,
             title: prepared.title.clone(),
             title_fixed: request.title.is_some(),
@@ -1113,6 +1121,7 @@ impl Runtime {
             "routine": task.routine.as_ref().map(|r| serde_json::json!({
                 "id": r.id, "version": r.version, "scheduled": r.scheduled,
             })),
+            "schedule": task.schedule.as_ref().map(|s| s.id.clone()),
             "attended": task.entry.attended,
             "layer": task.layer,
             "settings": task.settings,
