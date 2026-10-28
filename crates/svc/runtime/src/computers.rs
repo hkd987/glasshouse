@@ -149,6 +149,65 @@ impl Runtime {
             .map_or(0, |c| blocking(|| c.awake()))
     }
 
+    /// This host is being replaced (its Auto Scaling group's lifecycle
+    /// hook, ADR 0066): no computer starts or wakes here again, and each
+    /// goes to sleep in the store as its work ends, for another host to
+    /// wake. Returns once none is awake, or after `within`, when the group
+    /// stops waiting; what's still awake then is on the record.
+    pub async fn leave_host(&self, within: Duration) {
+        let Some(computers) = self.computers.as_ref().map(Arc::clone) else {
+            return;
+        };
+        computers.leave();
+        self.audit(AuditEvent::new(
+            EventKind::Computer,
+            "This host is being replaced: its agent computers go to sleep, for another host to wake",
+        ));
+        let started = std::time::Instant::now();
+        loop {
+            let sleepy = {
+                let computers = Arc::clone(&computers);
+                tokio::task::spawn_blocking(move || computers.idle(Duration::ZERO))
+                    .await
+                    .unwrap_or_default()
+            };
+            for (uid, id) in sleepy {
+                let computers = Arc::clone(&computers);
+                let owned = id.clone();
+                let slept = tokio::task::spawn_blocking(move || computers.sleep(uid, &owned)).await;
+                let summary = match &slept {
+                    Ok(Ok(view)) => format!(
+                        "Put {}'s computer to sleep: this host is being replaced",
+                        view.name
+                    ),
+                    Ok(Err(e)) => {
+                        format!("Couldn't put a computer to sleep as this host goes: {e}")
+                    }
+                    Err(e) => format!("Couldn't put a computer to sleep as this host goes: {e}"),
+                };
+                let mut event = AuditEvent::new(EventKind::Computer, summary);
+                event.user = glass_platform::users::by_uid(uid).map(|u| u.name);
+                event.detail = serde_json::json!({ "computer": id, "leaving": true });
+                self.audit(event);
+            }
+            let awake = self.computers_awake();
+            if awake == 0 {
+                return;
+            }
+            if started.elapsed() >= within {
+                self.audit(AuditEvent::new(
+                    EventKind::Computer,
+                    format!(
+                        "This host is going with {awake} agent computers still awake: their \
+                         work since they last slept is lost"
+                    ),
+                ));
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
     /// Puts to sleep the computers nobody used for `idle`, so nothing stays
     /// on a host it needn't (ADR 0065 §11). glassd calls it every minute.
     pub async fn sleep_idle_computers(&self, idle: Duration) {

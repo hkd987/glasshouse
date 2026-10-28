@@ -341,6 +341,35 @@ impl Store {
         self.blobs.delete(&manifest_key(computer, version))
     }
 
+    /// Keeps `computer`'s record beside its versions: what a host that
+    /// never had it needs to list it and wake it.
+    pub fn put_record(&self, computer: &str, record: &[u8]) -> Result<(), String> {
+        check_computer(computer)?;
+        self.blobs.put(&record_key(computer), record)
+    }
+
+    /// The records of the computers whose ids start with `prefix`: each
+    /// one's id and record.
+    pub fn records(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+        check_computer(prefix)?;
+        let mut out = Vec::new();
+        for listed in self.blobs.list(&format!("computers/{prefix}"))? {
+            let Some(computer) = listed
+                .key
+                .strip_prefix("computers/")
+                .and_then(|rest| rest.strip_suffix("/record.json"))
+                .filter(|c| !c.contains('/') && check_computer(c).is_ok())
+            else {
+                continue;
+            };
+            // Removed since it was listed.
+            if let Some(record) = self.blobs.get(&listed.key)? {
+                out.push((computer.to_owned(), record));
+            }
+        }
+        Ok(out)
+    }
+
     /// Forgets `computer` and every version of it. Its chunks go at the
     /// next GC, unless another computer's versions refer to them.
     pub fn remove(&self, computer: &str) -> Result<(), String> {
@@ -511,6 +540,10 @@ fn check_computer(computer: &str) -> Result<(), String> {
 
 fn chunk_key(name: &str) -> String {
     format!("chunks/{name}")
+}
+
+fn record_key(computer: &str) -> String {
+    format!("computers/{computer}/record.json")
 }
 
 fn manifest_key(computer: &str, version: &str) -> String {

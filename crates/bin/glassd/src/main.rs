@@ -770,6 +770,46 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         });
     }
 
+    // A host being replaced (scale-in, an update) puts its computers to
+    // sleep in S3 before it goes, for another host to wake: its Auto
+    // Scaling group's lifecycle hook gives it 15 minutes (deploy/aws,
+    // SleepBeforeTermination), and the instance's metadata says when.
+    if config.sandbox.backend == SandboxBackend::Computers
+        && config.sandbox.computers.store == Some(crate::config::StoreKind::S3)
+    {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+            let mut said = false;
+            loop {
+                tick.tick().await;
+                let state = tokio::task::spawn_blocking(|| {
+                    glass_gateway_providers::s3::instance_metadata(
+                        "autoscaling/target-lifecycle-state",
+                    )
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+                match state {
+                    Ok(Some(state)) if state == "Terminated" => {
+                        tracing::info!("this host is being replaced: its computers go to sleep");
+                        // The hook waits 15 minutes; leave a few for the rest.
+                        runtime
+                            .leave_host(std::time::Duration::from_secs(12 * 60))
+                            .await;
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(why) if !said => {
+                        tracing::warn!("can't tell whether this host is being replaced: {why}");
+                        said = true;
+                    }
+                    Err(_) => {}
+                }
+            }
+        });
+    }
+
     // Agent computer hours, reported to AWS Marketplace each hour (ADR 0066).
     if let Some(metering) = config.metering.clone().filter(|m| m.enabled)
         && config.sandbox.backend == SandboxBackend::Computers

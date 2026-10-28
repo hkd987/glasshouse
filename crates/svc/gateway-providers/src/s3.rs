@@ -628,23 +628,7 @@ impl S3Credentials {
         if get("AWS_ACCESS_KEY_ID").is_some_and(|v| !v.is_empty()) {
             return Self::from_vars(get);
         }
-        // AWS's own name for another metadata service: a stand-in on this
-        // machine (deploy/local), never anywhere else.
-        match get("AWS_EC2_METADATA_SERVICE_ENDPOINT").filter(|v| !v.is_empty()) {
-            None => Ok(Self::instance_role()),
-            Some(endpoint) => {
-                let base = endpoint.trim_end_matches('/');
-                let local = Target::parse(&format!("{base}/"))
-                    .is_some_and(|t| !t.tls && crate::console::is_loopback(&t.host));
-                if !local {
-                    return Err(format!(
-                        "AWS_EC2_METADATA_SERVICE_ENDPOINT ({endpoint:?}) must be http:// on this \
-                         machine's loopback address: a stand-in for development"
-                    ));
-                }
-                Ok(Self::instance_role_at(base))
-            }
-        }
+        Ok(Self::instance_role_at(&metadata_base(get)?))
     }
 
     fn from_vars(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
@@ -657,13 +641,9 @@ impl S3Credentials {
 
     /// The instance's role through a metadata service at `base`.
     fn instance_role_at(base: &str) -> Self {
-        let mut http = Http::loopback();
-        // On a computer that isn't an EC2 instance, nothing answers.
-        http.idle = Duration::from_secs(2);
-        http.total = Duration::from_secs(5);
         Self {
             source: Source::Instance {
-                http,
+                http: metadata_http(),
                 base: base.trim_end_matches('/').to_owned(),
                 cached: Mutex::new(None),
             },
@@ -702,17 +682,43 @@ impl S3Credentials {
     }
 }
 
-/// The instance role's keys, from the metadata service at `base`: a
-/// session token first (IMDSv2), then the role's name, then its keys.
-fn from_instance(http: &Http, base: &str) -> Result<Keys, String> {
-    let fail = |why: String| {
-        format!("couldn't get this instance's AWS credentials from its metadata service: {why}")
+/// The metadata service's address: AWS's, or, by AWS's own name for
+/// another (`AWS_EC2_METADATA_SERVICE_ENDPOINT`), a stand-in on this
+/// machine (deploy/local), never anywhere else.
+fn metadata_base(get: impl Fn(&str) -> Option<String>) -> Result<String, String> {
+    let Some(endpoint) = get("AWS_EC2_METADATA_SERVICE_ENDPOINT").filter(|v| !v.is_empty()) else {
+        return Ok(IMDS.to_owned());
     };
-    let reason = |e: ProviderError| match e {
+    let base = endpoint.trim_end_matches('/');
+    let local = Target::parse(&format!("{base}/"))
+        .is_some_and(|t| !t.tls && crate::console::is_loopback(&t.host));
+    if !local {
+        return Err(format!(
+            "AWS_EC2_METADATA_SERVICE_ENDPOINT ({endpoint:?}) must be http:// on this \
+             machine's loopback address: a stand-in for development"
+        ));
+    }
+    Ok(base.to_owned())
+}
+
+fn metadata_http() -> Http {
+    let mut http = Http::loopback();
+    // On a computer that isn't an EC2 instance, nothing answers.
+    http.idle = Duration::from_secs(2);
+    http.total = Duration::from_secs(5);
+    http
+}
+
+fn reason(e: ProviderError) -> String {
+    match e {
         ProviderError::Unavailable(why)
         | ProviderError::NotConfigured(why)
         | ProviderError::Rejected(why) => why,
-    };
+    }
+}
+
+/// A session token from the metadata service at `base` (IMDSv2).
+fn metadata_token(http: &Http, base: &str) -> Result<String, String> {
     let mut token = Vec::new();
     let got = http
         .download(
@@ -726,16 +732,48 @@ fn from_instance(http: &Http, base: &str) -> Result<Keys, String> {
             &mut token,
             4096,
         )
-        .map_err(|e| fail(reason(e)))?;
+        .map_err(reason)?;
     if got.status != 200 {
-        return Err(fail(format!(
-            "it refused a session token (HTTP {})",
-            got.status
-        )));
+        return Err(format!("it refused a session token (HTTP {})", got.status));
     }
-    let token =
-        String::from_utf8(token).map_err(|_| fail("its session token isn't text".into()))?;
-    let headers = [("X-aws-ec2-metadata-token", token.trim())];
+    let token = String::from_utf8(token).map_err(|_| "its session token isn't text")?;
+    Ok(token.trim().to_owned())
+}
+
+/// This instance's `path` under `/latest/meta-data/`, or `None` where it
+/// has none (AWS answers 404): its Auto Scaling lifecycle state, say. On
+/// a computer that isn't an EC2 instance, nothing answers: an error.
+pub fn instance_metadata(path: &str) -> Result<Option<String>, String> {
+    instance_metadata_at(&metadata_base(|name| std::env::var(name).ok())?, path)
+}
+
+fn instance_metadata_at(base: &str, path: &str) -> Result<Option<String>, String> {
+    let fail = |why: String| format!("couldn't read {path} from this instance's metadata: {why}");
+    let http = metadata_http();
+    let token = metadata_token(&http, base).map_err(fail)?;
+    let reply = http
+        .send(
+            "GET",
+            &format!("{base}/latest/meta-data/{path}"),
+            &[("X-aws-ec2-metadata-token", &token)],
+            &[],
+        )
+        .map_err(|e| fail(reason(e)))?;
+    match reply.status {
+        200 => Ok(Some(reply.body.trim().to_owned())),
+        404 => Ok(None),
+        status => Err(fail(format!("HTTP {status}"))),
+    }
+}
+
+/// The instance role's keys, from the metadata service at `base`: a
+/// session token first (IMDSv2), then the role's name, then its keys.
+fn from_instance(http: &Http, base: &str) -> Result<Keys, String> {
+    let fail = |why: String| {
+        format!("couldn't get this instance's AWS credentials from its metadata service: {why}")
+    };
+    let token = metadata_token(http, base).map_err(fail)?;
+    let headers = [("X-aws-ec2-metadata-token", token.as_str())];
     let roles = http
         .send(
             "GET",
@@ -1638,6 +1676,28 @@ mod tests {
         let keys = creds.keys(datetime!(2026-10-27 17:58 UTC)).unwrap();
         assert_eq!(keys.access_key_id.expose(), "ASIASECOND");
         assert_eq!(keys.secret_access_key.expose(), "secret-2");
+    }
+
+    #[test]
+    fn adr0066_an_instance_reads_its_lifecycle_state_from_its_metadata() {
+        let (url, got) = fake::serve_each(vec![(200, "imds-token"), (200, "Terminated\n")]);
+        let state = instance_metadata_at(&url, "autoscaling/target-lifecycle-state").unwrap();
+        assert_eq!(state.as_deref(), Some("Terminated"));
+        let _token = got.recv().unwrap();
+        let read = got.recv().unwrap();
+        assert!(
+            read.head
+                .starts_with("GET /latest/meta-data/autoscaling/target-lifecycle-state "),
+            "{}",
+            read.head
+        );
+        assert!(read.head.contains("X-aws-ec2-metadata-token: imds-token"));
+        // Not in an Auto Scaling group: AWS has no such entry.
+        let (url, _got) = fake::serve_each(vec![(200, "imds-token"), (404, "")]);
+        assert_eq!(
+            instance_metadata_at(&url, "autoscaling/target-lifecycle-state").unwrap(),
+            None
+        );
     }
 
     #[test]

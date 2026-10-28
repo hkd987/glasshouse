@@ -134,14 +134,14 @@ Parameters:
       - r8i.96xlarge
   MinHosts:
     Type: Number
-    Description: Agent hosts kept running. Two keep the service up when one Availability Zone is down.
+    Description: Agent hosts kept running. Keep it at 1 for now. Until hosts route each person to the host their computers are awake on, a second host can wake a computer that is awake on the first (ADR 0066).
     Default: 1
     MinValue: 1
     MaxValue: 100
   MaxHosts:
     Type: Number
-    Description: The most agent hosts the group grows to under load. At least MinHosts.
-    Default: 4
+    Description: The most agent hosts the group grows to under load. At least MinHosts. Keep it at 1 for now, as MinHosts says. A host replaced for an update hands its computers on through S3.
+    Default: 1
     MinValue: 1
     MaxValue: 100
   HostDiskGiB:

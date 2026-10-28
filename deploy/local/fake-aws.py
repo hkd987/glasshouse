@@ -6,12 +6,16 @@ Each listens on this machine's loopback address, from FAKE_AWS_PORT_BASE
 (default 7610, where moto is):
 
   +1  the instance metadata service (IMDSv2): a session token, the
-      instance role's name and its temporary keys
+      instance role's name and its temporary keys, and its Auto Scaling
+      lifecycle state. A path that starts with a name (/host-a/latest/...)
+      is that host's: each host's state is its own
   +2  AWS Marketplace metering (MeterUsage): checks the SigV4 signature
       against the instance role's keys and keeps what was reported, as the
       service does (one record per product, dimension and hour). Also
-      /_fake/ready, /_fake/config, /_fake/records (DELETE forgets them)
-      and /_fake/s3?prefix= (what the bucket holds, and under which key)
+      /_fake/ready, /_fake/config, /_fake/records (DELETE forgets them),
+      /_fake/s3?prefix= (what the bucket holds, and under which key;
+      DELETE removes it) and POST /_fake/lifecycle?host=&state= (Terminated
+      starts a host's replacement)
   +3  the load balancer: people sign in (a stand-in for the identity
       provider), and requests go on to the front with the claims the
       load balancer adds (x-amzn-oidc-data, signed ES256). Teams' path and
@@ -78,6 +82,8 @@ KEYS = {
     "Token": base64.b64encode(secrets.token_bytes(48)).decode(),
 }
 IMDS_TOKENS = {}
+# Each host's Auto Scaling lifecycle state, by the name its path starts with.
+LIFECYCLE = {}
 # The load balancer's signing key: AWS's, for this run.
 SIGNING_KEY = ec.generate_private_key(ec.SECP256R1())
 KID = str(uuid.uuid4())
@@ -154,6 +160,10 @@ class Imds(Handler):
 
     def route(self):
         path = urllib.parse.urlsplit(self.path).path
+        host = "default"
+        if not path.startswith("/latest/"):
+            host, _, rest = path.lstrip("/").partition("/")
+            path = "/" + rest
         if self.command == "PUT" and path == "/latest/api/token":
             self.body()
             ttl = int(self.headers.get("X-aws-ec2-metadata-token-ttl-seconds") or 0)
@@ -180,7 +190,9 @@ class Imds(Handler):
         if path == "/latest/meta-data/placement/region":
             return self.reply(200, REGION)
         if path == "/latest/meta-data/instance-id":
-            return self.reply(200, "i-0localagenthost00")
+            return self.reply(200, "i-0local" + hashlib.sha256(host.encode()).hexdigest()[:9])
+        if path == "/latest/meta-data/autoscaling/target-lifecycle-state":
+            return self.reply(200, LIFECYCLE.get(host, "InService"))
         self.reply(404, "")
 
 
@@ -242,9 +254,19 @@ class Metering(Handler):
             return self.json(200 if STATE["ready"] else 503, STATE)
         if self.command == "GET" and path == "/_fake/config":
             return self.json(200, config())
-        if self.command == "GET" and path == "/_fake/s3":
-            prefix = (urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("prefix") or [""])[0]
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        if path == "/_fake/s3" and self.command in ("GET", "DELETE"):
+            prefix = (query.get("prefix") or [""])[0]
+            if self.command == "DELETE":
+                if not prefix:
+                    return self.reply(400, "a prefix, please")
+                s3_remove(prefix)
             return self.json(200, s3_report(prefix))
+        if self.command == "POST" and path == "/_fake/lifecycle":
+            self.body()
+            host = (query.get("host") or ["default"])[0]
+            LIFECYCLE[host] = (query.get("state") or ["InService"])[0]
+            return self.json(200, LIFECYCLE)
         if path == "/_fake/records" and self.command in ("GET", "DELETE"):
             with LOCK:
                 if self.command == "DELETE":
@@ -472,6 +494,13 @@ def s3_report(prefix):
             report["bytes"] += obj["Size"]
             report["encryption"][how] = report["encryption"].get(how, 0) + 1
     return report
+
+
+def s3_remove(prefix):
+    s3 = moto_client("s3")
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            s3.delete_object(Bucket=BUCKET, Key=obj["Key"])
 
 
 def make_bucket_and_key():

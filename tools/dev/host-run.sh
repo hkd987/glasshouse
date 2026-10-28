@@ -26,6 +26,8 @@
 # stack's KMS key, signed with the stand-in instance role's keys, and
 # reports agent computer hours to the stand-in Metering Service. Only the
 # stand-ins: any AWS keys in the environment are kept from glassd.
+# GLASS_DEV_HOST names this host to the stand-in metadata service (default
+# dev), for tests of a host being replaced.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -82,7 +84,8 @@ product_code = \"$GLASS_LOCAL_PRODUCT_CODE\"
 region = \"$GLASS_LOCAL_REGION\"
 endpoint = \"$GLASS_LOCAL_METERING\""
 	unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
-	export AWS_EC2_METADATA_SERVICE_ENDPOINT=$GLASS_LOCAL_IMDS
+	# This host's own metadata (its lifecycle state), by its name.
+	export AWS_EC2_METADATA_SERVICE_ENDPOINT=$GLASS_LOCAL_IMDS/${GLASS_DEV_HOST:-dev}
 	;;
 *)
 	echo "host-run: GLASS_DEV_STORE is folder or s3" >&2

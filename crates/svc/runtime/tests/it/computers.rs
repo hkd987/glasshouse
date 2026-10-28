@@ -11,6 +11,7 @@ use std::sync::Arc;
 use glass_api::{ComputerNew, ComputerState, ScreenInput, ScreenRequest, TileState};
 use glass_computers::namespaces::NamespaceHypervisor;
 use glass_computers::sandbox::ComputerSandbox;
+use glass_computers::store::{FolderBlobs, Store};
 use glass_runtime::{CatalogEntry, RuntimeError};
 
 use crate::common::{self, Harness, eventually, harness};
@@ -47,6 +48,30 @@ fn on_computers(h: &Harness) -> Option<Arc<glass_runtime::Runtime>> {
     fs::set_permissions(h.dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
     let computers = Arc::new(
         ComputerSandbox::new(dir, Arc::new(NamespaceHypervisor::new(Vec::new())), 1024, 1).unwrap(),
+    );
+    Some(common::rebuild_on(
+        h,
+        glass_policy::DEFAULT_POLICY,
+        vec![reconciler()],
+        computers.clone(),
+        Some(computers),
+    ))
+}
+
+/// As [`on_computers`], with a store for computers to sleep in.
+fn on_computers_with_store(h: &Harness) -> Option<Arc<glass_runtime::Runtime>> {
+    if let Err(why) = NamespaceHypervisor::available() {
+        eprintln!("skipped: {why}");
+        return None;
+    }
+    let dir = h.dir.path().join("computers");
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(h.dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    let blobs = FolderBlobs::new(h.dir.path().join("store")).unwrap();
+    let computers = Arc::new(
+        ComputerSandbox::new(dir, Arc::new(NamespaceHypervisor::new(Vec::new())), 1024, 1)
+            .unwrap()
+            .with_store(Arc::new(Store::new(Arc::new(blobs))), "S3: acme-agents"),
     );
     Some(common::rebuild_on(
         h,
@@ -220,4 +245,54 @@ async fn adr0066_only_its_persons_agents_and_computers() {
         plain.start(&h.me, ask("Match")),
         Err(RuntimeError::Invalid(_))
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0066_unused_computers_sleep_and_a_host_being_replaced_sleeps_them_all() {
+    let h = harness();
+    let Some(rt) = on_computers_with_store(&h) else {
+        return;
+    };
+    rt.computer_make(
+        &h.me,
+        ComputerNew {
+            id: "reconciler".into(),
+            name: "Reconciler".into(),
+            role: "Matches invoices to payments".into(),
+            agent: "invoice-demo".parse().unwrap(),
+        },
+    )
+    .unwrap();
+    let first = rt.start(&h.me, ask("Match March's invoices")).unwrap();
+    eventually(|| rt.get(&h.me, first.id).unwrap().view.state == TileState::Done).await;
+    let state = |rt: &glass_runtime::Runtime| rt.computer_list(&h.me).unwrap()[0].state;
+
+    // Just used, it stays awake; unused for long enough, it sleeps.
+    rt.sleep_idle_computers(std::time::Duration::from_secs(3600))
+        .await;
+    assert_eq!(state(&rt), ComputerState::Ready);
+    assert_eq!(rt.computers_awake(), 1);
+    rt.sleep_idle_computers(std::time::Duration::ZERO).await;
+    assert_eq!(state(&rt), ComputerState::Asleep);
+    assert_eq!(rt.computers_awake(), 0);
+    rt.computer_wake(&h.me, "reconciler").await.unwrap();
+    assert_eq!(rt.computers_awake(), 1);
+
+    // The host is being replaced: its computers sleep, and none starts here
+    // again; the task asked for says why, for its person to ask again.
+    rt.leave_host(std::time::Duration::from_secs(60)).await;
+    assert_eq!(state(&rt), ComputerState::Asleep);
+    let refused = rt.start(&h.me, ask("How many are left?")).unwrap();
+    eventually(|| rt.get(&h.me, refused.id).unwrap().view.state == TileState::Failed).await;
+    let detail = rt.get(&h.me, refused.id).unwrap();
+    assert!(
+        format!("{detail:?}").contains("this host is being replaced"),
+        "{detail:?}"
+    );
+    assert_eq!(state(&rt), ComputerState::Asleep);
+
+    let audit = fs::read_to_string(h.audit_path()).unwrap();
+    assert!(audit.contains("after 0 minutes unused"), "{audit}");
+    assert!(audit.contains("This host is being replaced"));
+    assert!(audit.contains("Put Reconciler's computer to sleep: this host is being replaced"));
 }

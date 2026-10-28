@@ -114,6 +114,25 @@ tenant). `make agents-dev` runs it all on one machine.
     restore, all-zero chunks never stored. Restores can't escape their
     folder (cap-std). Backed by a folder here, or S3 (SigV4, SSE-KMS,
     instance-role credentials through IMDSv2).
+  - **Another host wakes it.**
+    - A computer is known in the store by a key made with it: its
+      owner's key (their uid here; their sign-in subject once ADR 0067 is
+      built) and 64 random bits. Two computers never share versions.
+    - Each sleep keeps its record beside its versions, after the version
+      is saved and before the host forgets it.
+    - A host that never had it finds the owner's records the first time
+      they list their agents, or when a task names a computer it lacks.
+      It shows them asleep, and a task wakes them from the store.
+  - **A host being replaced hands its computers on.** glassd reads the
+    instance's Auto Scaling lifecycle state from its metadata every 10
+    seconds. On `Terminated` (the stack's `SleepBeforeTermination` hook,
+    15 minutes):
+    - it takes no new task and wakes nothing ("this host is being
+      replaced: ask again in a minute, and another host takes it");
+    - it puts each computer to sleep as its work ends, for up to 12
+      minutes;
+    - whatever is still awake then is recorded as losing its work since
+      it last slept.
   - `specs/tla/AgentComputers.tla` checks the lifecycle through glassd
     dying at any step. It found two bugs, both fixed:
     - a wake after a crash failed forever on what the crash left;
@@ -169,10 +188,15 @@ tenant). `make agents-dev` runs it all on one machine.
     through S3 under KMS, and metering signed with the role's keys. Then
     glassd sleeps an agent's computer with 300 MB on it to S3 and wakes
     it the same, byte for byte (14.8 s and 5.3 s here, against moto).
-  - It found the CLI missing a quick task's screen, and dev builds hashing
-    at a few MB/s, both fixed. It also found that a computer's key in the
-    store (`u<uid>-<id>`) isn't unique across hosts or a remade computer
-    (next).
+  - The same test then tells host A it's being replaced. A puts the
+    computer to sleep by itself (11 s) and refuses the next task. Host
+    B, which never had the computer, lists it asleep and wakes it with
+    every file the same.
+  - It found three bugs, all fixed:
+    - the CLI missed a quick task's screen;
+    - dev builds hashed at a few MB/s;
+    - a computer's key in the store (`u<uid>-<id>`) wasn't unique across
+      hosts or a remade computer, so one could trim another's versions.
 
 Needs an AWS account (and a Marketplace seller account), a Teams tenant
 and a host with KVM: run each against the real thing.
@@ -191,10 +215,18 @@ and a host with KVM: run each against the real thing.
   - one front for many people (below).
 - **Confidential asks**: glassd says which asks carry labelled data, so
   their detail stays out of Teams.
+- **One host at a time per computer** (a lease): the host that wakes a
+  computer claims it in S3 (a conditional put), renews the claim while
+  it's awake, and gives it up once it's asleep. Another host refuses to
+  wake it while the claim is fresh. Modelled in `AgentComputers.tla`
+  with two hosts first.
+  - Until then, the stack defaults to one host (`MinHosts` and
+    `MaxHosts` 1).
+  - In an instance refresh the old and new hosts overlap for a few
+    minutes. A computer still busy on the old host can meanwhile be woken
+    from its last sleep on the new one, and one of the two copies' work is
+    lost.
 - **The store**:
-  - a computer's key from its owner's sign-in subject and an id of its
-    own, with its record kept in the store, so another host wakes it and
-    no two computers share versions;
   - parallel transfers, so a computer wakes fast on S3;
   - a lock against GC deleting a chunk a save reused but hasn't recorded
     yet;
@@ -203,6 +235,26 @@ and a host with KVM: run each against the real thing.
   connect race on the jail's sockets.
 - **The template**: it's over CloudFormation's inline size, so it's
   deployed from S3 (Marketplace does).
+
+## Which host serves a person (open: to settle before more than one host)
+The load balancer spreads requests over the hosts, with no stickiness, so
+a person's next request can land on a host other than the one their
+computer is awake on. Teams' calls and the CLI's carry no browser cookie.
+The lease above makes a second host refuse, which is safe but not useful.
+The options:
+1. **The front forwards to the host that holds the lease.** Any host takes
+   any request; the lease names the host, and the fronts forward over the
+   VPC. Works for the browser, the CLI and Teams alike, and needs no new
+   AWS service.
+2. **Load balancer stickiness, plus a home host per person.** Cheap for the
+   browser. The CLI and Teams still need forwarding, so it's option 1
+   anyway, plus a cookie.
+3. **One host per person** (or per team). Simplest to reason about, but it
+   costs a host per person, and Marketplace bills computer hours, not
+   hosts.
+
+Recommended: 1. It builds on the lease, keeps one rule for every way in,
+and lets the group scale on load.
 
 ## Identity on a host (to settle before many people share one)
 Here, the front acts for the one person who runs it, as the apps' bridge

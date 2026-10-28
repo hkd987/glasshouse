@@ -700,3 +700,35 @@ fn adr0065_versions_are_times_that_sort() {
     }
     assert!(version_id(1) < version_id(1_000_000_000_000_000_000));
 }
+
+#[test]
+fn adr0065_a_computers_record_is_kept_beside_it_and_listed_by_its_owner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, _) = folder_store(&tmp.path().join("store"));
+    let tree = tmp.path().join("tree");
+    make_tree(&tree);
+    store.save_tree("u7-aaaa", &tree).unwrap();
+    store.put_record("u7-aaaa", b"{\"id\":\"keeper\"}").unwrap();
+    store.put_record("u7-bbbb", b"{\"id\":\"other\"}").unwrap();
+    store
+        .put_record("u70-cccc", b"{\"id\":\"not-u7s\"}")
+        .unwrap();
+
+    let mut mine = store.records("u7-").unwrap();
+    mine.sort();
+    assert_eq!(
+        mine,
+        [
+            ("u7-aaaa".to_owned(), b"{\"id\":\"keeper\"}".to_vec()),
+            ("u7-bbbb".to_owned(), b"{\"id\":\"other\"}".to_vec()),
+        ]
+    );
+    // GC reads only manifests; a record isn't one.
+    store.gc().unwrap();
+    assert_eq!(store.versions("u7-aaaa").unwrap().len(), 1);
+    assert!(store.records("u7/../").is_err());
+    // Forgetting a computer forgets its record.
+    store.remove("u7-aaaa").unwrap();
+    assert_eq!(store.records("u7-aaaa").unwrap(), []);
+    writable(&tree);
+}

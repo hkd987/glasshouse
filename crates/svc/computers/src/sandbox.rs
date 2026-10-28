@@ -21,6 +21,13 @@
 //! is root of it but its owner outside: who may use a computer is decided
 //! by the uid the kernel reports for the caller (the control socket), never
 //! by a name in a request.
+//!
+//! In the store a computer goes by a key of its own, made with it: its
+//! owner's key (stable across hosts) and a random part, so no two
+//! computers share versions. Each sleep keeps its record beside its
+//! versions, and a host that never had it lists it and wakes it from
+//! there ([`ComputerSandbox::adopt`]): a host replaced, or another host
+//! of the stack.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -70,6 +77,39 @@ pub struct ComputerMeta {
     /// Set as it goes to sleep, cleared as it wakes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored: Option<StoredView>,
+    /// Its name in the store, made with it: its owner's key and a random
+    /// part. Empty for a computer made before keys were (`u<uid>-<id>`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+}
+
+/// Each owner's key in the store, by uid: the same person's on every host
+/// (ADR 0067), letters and digits only.
+pub struct OwnerKeys(Box<dyn Fn(u32) -> String + Send + Sync>);
+
+impl std::fmt::Debug for OwnerKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OwnerKeys")
+    }
+}
+
+impl OwnerKeys {
+    pub fn new(keys: impl Fn(u32) -> String + Send + Sync + 'static) -> Self {
+        Self(Box::new(keys))
+    }
+
+    /// On a computer people have accounts on, their uid is who they are.
+    pub fn by_uid() -> Self {
+        Self::new(|uid| format!("u{uid}"))
+    }
+
+    fn of(&self, uid: u32) -> Result<String> {
+        let key = (self.0)(uid);
+        if key.is_empty() || key.len() > 40 || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(refuse(format!("{key:?} isn't an owner's key")));
+        }
+        Ok(key)
+    }
 }
 
 /// Computers, each task run in one.
@@ -81,6 +121,7 @@ pub struct ComputerSandbox {
     vcpus: u32,
     /// Where computers sleep (ADR 0065 §11), and its name for people.
     store: Option<(Arc<Store>, String)>,
+    owners: OwnerKeys,
     state: Mutex<State>,
 }
 
@@ -94,6 +135,12 @@ struct State {
     moving: HashSet<(u32, String)>,
     /// When each computer's last run ended, since glassd started.
     used: HashMap<(u32, String), Instant>,
+    /// Owners whose computers in the store this host has looked for: done,
+    /// or when it last couldn't.
+    adopted: HashMap<u32, Option<Instant>>,
+    /// This host is being replaced: its computers go to sleep, and none
+    /// starts or wakes here again.
+    leaving: bool,
 }
 
 fn fail(context: impl Into<String>, why: impl std::fmt::Display) -> PlatformError {
@@ -125,8 +172,35 @@ impl ComputerSandbox {
             memory_mib,
             vcpus,
             store: None,
+            owners: OwnerKeys::by_uid(),
             state: Mutex::new(State::default()),
         })
+    }
+
+    /// Owners' keys in the store from `owners` instead of their uids.
+    #[must_use]
+    pub fn with_owner_keys(mut self, owners: OwnerKeys) -> Self {
+        self.owners = owners;
+        self
+    }
+
+    /// This host is being replaced: from now on no computer starts or
+    /// wakes here, and each goes to sleep as its work ends.
+    pub fn leave(&self) {
+        self.state().leaving = true;
+    }
+
+    pub fn leaving(&self) -> bool {
+        self.state().leaving
+    }
+
+    fn refuse_if_leaving(&self) -> Result<()> {
+        if self.leaving() {
+            return Err(refuse(
+                "this host is being replaced: ask again in a minute, and another host takes it",
+            ));
+        }
+        Ok(())
     }
 
     /// Computers sleep in `store`, which people know as `place` ("S3:
@@ -206,13 +280,15 @@ impl ComputerSandbox {
         if name.is_empty() || name.chars().count() > 40 {
             return Err(refuse("an agent's name is 1 to 40 characters"));
         }
-        let computer = self.spec(uid, &new.id);
-        if Self::read_meta(&computer).is_some() {
+        self.refuse_if_leaving()?;
+        if self.find(uid, &new.id).is_ok() {
             return Err(refuse(format!(
                 "you already have a computer called {}",
                 new.id
             )));
         }
+        let computer = self.spec(uid, &new.id);
+        let key = format!("{}-{}", self.owners.of(uid)?, random_hex()?);
         self.make_folder(&computer, uid, gid)?;
         let meta = ComputerMeta {
             id: new.id.clone(),
@@ -222,6 +298,7 @@ impl ComputerSandbox {
             created_at: Timestamp::now(),
             fresh: false,
             stored: None,
+            key,
         };
         Self::write_meta(&computer, &meta)?;
         Ok(self.view_of(uid, &computer, meta))
@@ -230,6 +307,17 @@ impl ComputerSandbox {
     /// The caller's computers, oldest first; tasks' own computers aren't
     /// listed.
     pub fn list(&self, uid: u32) -> Vec<ComputerView> {
+        // Once per owner while glassd runs, and a minute after a try that
+        // couldn't: the store is a network away, and the front lists often.
+        let due = match self.state().adopted.get(&uid) {
+            None => true,
+            Some(None) => false,
+            Some(Some(failed)) => failed.elapsed() >= Duration::from_secs(60),
+        };
+        if due {
+            let done = self.adopt(uid, None).is_ok();
+            self.state().adopted.insert(uid, (!done).then(Instant::now));
+        }
         let Ok(entries) = fs::read_dir(self.dir.join(uid.to_string())) else {
             return Vec::new();
         };
@@ -259,9 +347,56 @@ impl ComputerSandbox {
             return Err(refuse(format!("{id:?} isn't a computer's id")));
         }
         let computer = self.spec(uid, id);
-        let meta = Self::read_meta(&computer)
-            .ok_or_else(|| PlatformError::Unsupported(format!("a computer called {id} for you")))?;
-        Ok((computer, meta))
+        if let Some(meta) = Self::read_meta(&computer) {
+            return Ok((computer, meta));
+        }
+        // Made or last asleep on another host: its record is in the store.
+        if self.store.is_some()
+            && matches!(self.adopt(uid, Some(id)), Ok(n) if n > 0)
+            && let Some(meta) = Self::read_meta(&computer)
+        {
+            return Ok((computer, meta));
+        }
+        Err(PlatformError::Unsupported(format!(
+            "a computer called {id} for you"
+        )))
+    }
+
+    /// Brings the owner's computers this host doesn't have from the
+    /// store, asleep: every one, or only `only`. A computer here by the
+    /// same id stays as it is. Returns how many it brought.
+    pub fn adopt(&self, uid: u32, only: Option<&str>) -> Result<usize> {
+        let Some((store, _)) = &self.store else {
+            return Ok(0);
+        };
+        let owner = self.owners.of(uid)?;
+        let records = store
+            .records(&format!("{owner}-"))
+            .map_err(|e| fail("looking for your computers in the store", e))?;
+        let gid = glass_platform::users::by_uid(uid).map_or(uid, |u| u.gid);
+        let mut adopted = 0;
+        for (key, record) in records {
+            let Ok(meta) = serde_json::from_slice::<ComputerMeta>(&record) else {
+                continue;
+            };
+            // A record names only its own computer, asleep, its owner's.
+            let fits = meta.key == key
+                && valid_computer_id(&meta.id)
+                && !meta.fresh
+                && meta.stored.is_some()
+                && only.is_none_or(|id| id == meta.id);
+            if !fits {
+                continue;
+            }
+            let computer = self.spec(uid, &meta.id);
+            if Self::read_meta(&computer).is_some() {
+                continue;
+            }
+            self.make_folder(&computer, uid, gid)?;
+            Self::write_meta(&computer, &meta)?;
+            adopted += 1;
+        }
+        Ok(adopted)
     }
 
     fn view_of(&self, uid: u32, computer: &ComputerSpec, meta: ComputerMeta) -> ComputerView {
@@ -486,9 +621,14 @@ impl ComputerSandbox {
         self.spec(uid, id)
     }
 
-    /// Its name in the store: owners' ids differ, so the owner is in it.
-    fn store_key(uid: u32, id: &str) -> String {
-        format!("u{uid}-{id}")
+    /// Its name in the store: its own key, or, made before keys were, its
+    /// owner's uid and its id.
+    fn store_key(uid: u32, meta: &ComputerMeta) -> String {
+        if meta.key.is_empty() {
+            format!("u{uid}-{}", meta.id)
+        } else {
+            meta.key.clone()
+        }
     }
 
     /// Marks it moving for as long as the guard lives.
@@ -523,7 +663,7 @@ impl ComputerSandbox {
         self.hypervisor
             .suspend(&computer)
             .map_err(|e| fail(format!("stopping {}", meta.name), e))?;
-        let key = Self::store_key(uid, id);
+        let key = Self::store_key(uid, &meta);
         let saved = store
             .save_tree(&key, &computer.dir)
             .map_err(|e| fail(format!("saving {}", meta.name), e))?;
@@ -533,7 +673,14 @@ impl ComputerSandbox {
             at: Timestamp::now(),
             place: place.clone(),
         });
-        // Its record first: from here it wakes from the store.
+        // Its record in the store, naming a version that's there, so any
+        // host can wake it; then here: from now it wakes from the store.
+        if !meta.key.is_empty() {
+            let record = serde_json::to_vec(&meta).map_err(|e| fail("a computer's record", e))?;
+            store
+                .put_record(&key, &record)
+                .map_err(|e| fail(format!("keeping {}'s record", meta.name), e))?;
+        }
         Self::write_meta(&computer, &meta)?;
         Self::clear_but_record(&computer)
             .map_err(|e| fail(format!("clearing {} from this host", meta.name), e))?;
@@ -573,6 +720,7 @@ impl ComputerSandbox {
         let Some(stored) = meta.stored.clone() else {
             return Ok(self.view_of(uid, &computer, meta));
         };
+        self.refuse_if_leaving()?;
         let moving = self.moving(uid, id)?;
         // Asleep, the store holds all of it: anything here is what a wake
         // or a sleep that glassd didn't live through left, and goes.
@@ -584,7 +732,7 @@ impl ComputerSandbox {
         })?;
         let waking = computer.dir.join(".waking");
         store
-            .restore_tree(&Self::store_key(uid, id), &stored.version, &waking)
+            .restore_tree(&Self::store_key(uid, &meta), &stored.version, &waking)
             .map_err(|e| fail(format!("waking {}", meta.name), e))?;
         let entries = fs::read_dir(&waking).map_err(|e| fail("reading what woke", e))?;
         for entry in entries.flatten() {
@@ -683,6 +831,15 @@ impl Drop for Moving<'_> {
     }
 }
 
+/// 64 random bits, in hex: a computer's own part of its key.
+fn random_hex() -> Result<String> {
+    let mut bytes = [0u8; 8];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .map_err(|e| fail("reading /dev/urandom", e))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 /// Bytes in a computer's folder, its disk among them.
 fn disk_bytes(dir: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
@@ -725,6 +882,7 @@ impl Sandbox for ComputerSandbox {
         {
             return Err(refuse(format!("bad sandbox name {:?}", spec.name)));
         }
+        self.refuse_if_leaving()?;
         let (computer, fresh) = self.run_of(spec);
         let key = (spec.uid, computer.id.clone());
         let meta = if fresh {
@@ -737,6 +895,7 @@ impl Sandbox for ComputerSandbox {
                 created_at: Timestamp::now(),
                 fresh: true,
                 stored: None,
+                key: String::new(),
             };
             Self::write_meta(&computer, &meta)?;
             meta
@@ -1091,6 +1250,87 @@ mod tests {
     }
 
     #[test]
+    fn adr0065_another_host_wakes_a_computer_from_its_record_in_the_store() {
+        if let Err(why) = NamespaceHypervisor::available() {
+            eprintln!("skipped: {why}");
+            return;
+        }
+        let (dir, host_a) = sandbox();
+        let blobs = crate::store::FolderBlobs::new(dir.path().join("s3")).unwrap();
+        let store = Arc::new(Store::new(Arc::new(blobs)));
+        let host_a = host_a.with_store(store.clone(), "S3");
+        let (_dir_b, host_b) = sandbox();
+        let host_b = host_b.with_store(store.clone(), "S3");
+        let (uid, gid) = me();
+
+        // Made on host A, worked on, and asleep: host A is replaced.
+        let made = host_a.make(uid, gid, &reconciler()).unwrap();
+        let spec = task("glass-0011", Some("reconciler"));
+        host_a.create(&spec).unwrap();
+        let out = host_a
+            .command(&spec, &shell("seq 1 300 > /work/ledger.csv"))
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        host_a.destroy(&spec).unwrap();
+        host_a.leave();
+        let refused = host_a.create(&task("glass-0012", Some("reconciler")));
+        assert!(refused.unwrap_err().to_string().contains("being replaced"));
+        assert_eq!(
+            host_a.sleep(uid, "reconciler").unwrap().state,
+            ComputerState::Asleep
+        );
+        assert!(
+            host_a.wake(uid, gid, "reconciler").is_err(),
+            "leaving, it won't wake"
+        );
+
+        // Host B never had it: its person sees it, asleep, and a task wakes
+        // it with its files.
+        let listed = host_b.list(uid);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            (
+                listed[0].id.as_str(),
+                listed[0].name.as_str(),
+                listed[0].state
+            ),
+            ("reconciler", "Reconciler", ComputerState::Asleep)
+        );
+        assert_eq!(listed[0].created_at, made.created_at);
+        let spec = task("glass-0013", Some("reconciler"));
+        host_b.create(&spec).unwrap();
+        let out = host_b
+            .command(&spec, &shell("wc -l < /work/ledger.csv"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "300\n");
+        host_b.destroy(&spec).unwrap();
+
+        // Two computers by one id never share versions: each has a key.
+        let (_dir_c, host_c) = sandbox();
+        let host_c = host_c.with_store(store.clone(), "S3");
+        let other = ComputerNew {
+            id: "scratch".into(),
+            ..reconciler()
+        };
+        host_c.make(uid, gid, &other).unwrap();
+        host_c.sleep(uid, "scratch").unwrap();
+        let owner = format!("u{uid}-");
+        let keys: Vec<String> = store
+            .records(&owner)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert!(keys.iter().all(|k| k.len() == owner.len() + 16), "{keys:?}");
+        for key in &keys {
+            assert_eq!(store.versions(key).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
     fn adr0065_a_computer_sleeps_to_the_store_and_a_task_wakes_it() {
         if let Err(why) = NamespaceHypervisor::available() {
             eprintln!("skipped: {why}");
@@ -1191,10 +1431,9 @@ mod tests {
             sandbox.sleep(uid, "reconciler").unwrap();
             sandbox.wake(uid, gid, "reconciler").unwrap();
         }
-        assert_eq!(
-            store.versions(&format!("u{uid}-reconciler")).unwrap().len(),
-            3
-        );
+        let records = store.records(&format!("u{uid}-")).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(store.versions(&records[0].0).unwrap().len(), 3);
     }
 
     #[test]

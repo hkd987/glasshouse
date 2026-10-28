@@ -22,7 +22,7 @@ Resources > Network > Enable host networking*.
 | Port | Stands in for | What the host does with it |
 |---|---|---|
 | 7610 | S3, KMS, Secrets Manager ([moto](https://github.com/getmoto/moto) 5.1.20, Apache-2.0) | Sleeping computers' chunks and versions, each object under the stack's KMS key (`store = "s3"` with `endpoint`) |
-| 7611 | The instance metadata service (IMDSv2) | The instance role's temporary keys, which sign every S3 and metering call (`AWS_EC2_METADATA_SERVICE_ENDPOINT`) |
+| 7611 | The instance metadata service (IMDSv2) | The instance role's temporary keys, which sign every S3 and metering call, and its Auto Scaling lifecycle state (`AWS_EC2_METADATA_SERVICE_ENDPOINT`). A path that starts with a name (`/host-a/latest/...`) is that host's own, so each host has its own lifecycle state. |
 | 7612 | AWS Marketplace metering (`MeterUsage`) | Agent computer hours, hourly (`[metering] endpoint`). It checks each SigV4 signature against the role's keys and keeps records as the service does |
 | 7613 | The load balancer with OIDC sign-in | A sign-in page stands in for Entra ID. Requests go on to the front (`GLASS_LOCAL_AWS_FRONT`, default `127.0.0.1:7500`) with `x-amzn-oidc-data` signed ES256, as ADR 0067 verifies. Teams' path and `/api/v1/` with a bearer token skip sign-in, as the stack's rules do |
 | 7614 | `public-keys.auth.elb.<region>.amazonaws.com` | The load balancer's public key, by key id |
@@ -36,8 +36,10 @@ and the load balancer's ARN as `GLASS_LOCAL_*`. `tools/dev/host-run.sh`
 reads it for `GLASS_DEV_STORE=s3`. It never uses AWS keys from the
 environment then: glassd gets only the stand-in metadata service, as an
 agent host gets only its instance role. The stand-in's
-`/_fake/s3?prefix=` reports what the bucket holds and under which key,
-`/_fake/records` what was metered.
+`/_fake/s3?prefix=` reports what the bucket holds and under which key
+(`DELETE` removes it), and `/_fake/records` what was metered. `POST
+/_fake/lifecycle?host=host-a&state=Terminated` tells a host it's being
+replaced, as the Auto Scaling group's lifecycle hook does.
 
 ## What it proves, and what it doesn't
 
@@ -48,6 +50,8 @@ agent host gets only its instance role. The stand-in's
     keys refused);
   - then `tests/local-aws/agents-s3.sh`: glassd sleeps an agent's computer
     with a few hundred MB on it to S3 and wakes it the same, byte for byte.
+    Its host is then told it's being replaced, and puts the computer to
+    sleep by itself. A second host, which never had it, wakes it.
 - moto keeps objects in memory and doesn't enforce bucket policies or KMS
   key policies. Its speed says nothing about S3's, so time sleeps and wakes
   on AWS.
