@@ -50,11 +50,14 @@ esac
 
 "$repo/tools/dev/host-run.sh" >"$dev/glassd.log" 2>&1 &
 glassd=$!
+front=""
 cleanup() {
-	kill "$glassd" 2>/dev/null || true
+	kill "$glassd" $front 2>/dev/null || true
 	rm -f "$dev/model-secrets.toml"
 }
 trap cleanup EXIT
+# Stopped (Ctrl-C, kill): glassd and the front stop too, and the key goes.
+trap 'exit 143' TERM INT HUP
 for _ in $(seq 1 300); do
 	[ -S "$run/control.sock" ] && break
 	kill -0 "$glassd" 2>/dev/null || {
@@ -70,4 +73,6 @@ if [ -n "${GLASS_AGENTS_TOKEN_FILE:-}" ]; then
 	token_file=(--token-file "$GLASS_AGENTS_TOKEN_FILE")
 fi
 "$bin/glass-agents" --listen "$listen" --control-socket "$run/control.sock" \
-	--web "$repo/apps/agents/dist" --name "${GLASS_AGENTS_NAME:-Dana Alvarez}" "${token_file[@]}"
+	--web "$repo/apps/agents/dist" --name "${GLASS_AGENTS_NAME:-Dana Alvarez}" "${token_file[@]}" &
+front=$!
+wait "$front"
