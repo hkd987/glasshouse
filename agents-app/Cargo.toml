@@ -33,7 +33,8 @@ tray-icon = "=0.26.1"
 # keyring, which needs no Secret Service running).
 notify-rust = "=4.18.2"
 keyring-core = "=1.0.1"
-apple-native-keyring-store = "=1.0.2"
+# Its keychain feature: the login Keychain (a compile error on a Mac without it).
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
 windows-native-keyring-store = "=1.1.0"
 linux-keyutils-keyring-store = "=1.0.0"
 serde = { version = "1.0.229", features = ["derive"] }

@@ -127,6 +127,10 @@ said how it signs in.
     Windows build needs vcpkg's.
   - Moving the client to a crate without OpenSSL comes before the
     installers.
+- **CI doesn't build it.** `make ci` would need WebKitGTK on its hosts
+  (`make agents-app-deps`) before `agents-app-test agents-app-lint` can
+  join it. Until then, `make lint` checks the app wherever WebKitGTK is
+  installed.
 - **Installers, signing, notarization and updates.** Tauri's bundler and
   updater, when the app takes on the framework.
 - **IT's managed settings** for the address (a Mac profile, Group Policy).
