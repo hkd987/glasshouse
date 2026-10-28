@@ -151,9 +151,11 @@ apps-test: apps-build ## Apps: type check, unit tests, Playwright e2e (cold laun
 	cargo build -p glassd -p glassctl -p glass-app-bridge -p glass-desktop-agent
 	cd apps && PLAYWRIGHT_BROWSERS_PATH=$(APPS_BROWSERS) npx playwright test -c e2e/playwright.config.ts
 
-apps-lint: apps/node_modules ## Apps: types, manifests (DV-3), npm licenses
+apps-lint: apps/node_modules ## Apps: types, manifests (DV-3), npm licenses, and no base-system name in Glasshouse Agents (BR-1)
 	cd apps && npm run --silent lint
 	tools/legal/npm_licenses.py apps
+	@! grep -rIil freebsd apps/agents/src apps/agents/index.html crates/bin/glass-agents/src crates/bin/glass/src crates/lib/agents-api/src || \
+		{ echo "apps-lint: BR-1: the files above name the base system"; exit 1; }
 
 apps-dev: apps-build ## Serve the apps from make dev-host's glassd: http://mail.localhost:7300
 	cargo build -p glass-app-bridge
@@ -184,6 +186,18 @@ console-lint: apps/node_modules ## Admin console: clippy, types, and no base-sys
 	cd apps && npx tsc -p tsconfig.json
 	@! grep -rIil freebsd apps/console/src apps/console/index.html crates/bin/glass-console/src || \
 		{ echo "console-lint: BR-1: the files above name the base system"; exit 1; }
+
+# Glasshouse Agents (ADR 0066): each agent on a computer of its own, the
+# front (glass-agents) with the web app in apps/agents, and the glass CLI.
+.PHONY: agents-dev
+agents-dev: ## Glasshouse Agents here: glassd with agent computers (namespaces) and the front on http://127.0.0.1:7500 (GLASS_AGENTS_MODEL=anthropic for Claude)
+	tools/dev/agents-run.sh
+
+.PHONY: aws-lint
+aws-lint: ## The stack a buyer deploys on AWS (deploy/aws): cfn-lint, installed into build/tools/cfn-lint on first use
+	@test -x build/tools/cfn-lint/bin/cfn-lint || { python3 -m venv build/tools/cfn-lint && \
+		build/tools/cfn-lint/bin/pip install --quiet cfn-lint==1.58.0; }
+	build/tools/cfn-lint/bin/cfn-lint deploy/aws/glasshouse-agents.yaml
 
 tla: ## Model-check the TLA+ models of key workflows (specs/tla, ADR 0051) with TLC
 	tools/dev/tla.sh check

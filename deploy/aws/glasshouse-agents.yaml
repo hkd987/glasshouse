@@ -1,0 +1,1387 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Glasshouse Agents (ADR 0065 section 9, ADR 0066): agents that each work on a
+  computer of their own, inside this AWS account. A private network whose agent
+  hosts have no route to the internet, a load balancer that signs people in
+  with the organization's SSO, agent hosts that run computers as microVMs, an
+  allow-listing relay that is the hosts' only way out (to Microsoft Teams and
+  the load balancer's signing keys), and an S3 bucket, encrypted with this
+  stack's KMS key, where sleeping computers are kept. Deleting the stack keeps
+  the bucket and the key.
+
+# How a buyer deploys, updates and deletes this stack: deploy/aws/README.md.
+# Checked with cfn-lint: `make aws-lint`.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Address" }
+        Parameters: [DomainName, CertificateArn]
+      - Label: { default: "Sign-in (your identity provider, OIDC)" }
+        Parameters:
+          - OidcIssuer
+          - OidcAuthorizationEndpoint
+          - OidcTokenEndpoint
+          - OidcUserInfoEndpoint
+          - OidcClientId
+          - OidcClientSecretArn
+      - Label: { default: "Agent hosts" }
+        Parameters: [HostAmiId, HostInstanceType, MinHosts, MaxHosts, HostDiskGiB, IdleMinutesBeforeSleep]
+      - Label: { default: "Microsoft Teams (optional)" }
+        Parameters: [TeamsAppId, TeamsAppSecretArn]
+      - Label: { default: "Network and billing" }
+        Parameters: [VpcCidr, RelayImage, MarketplaceProductCode]
+    ParameterLabels:
+      DomainName: { default: "Address people use (agents.example.com)" }
+      CertificateArn: { default: "ACM certificate for that address" }
+      OidcIssuer: { default: "Issuer" }
+      OidcAuthorizationEndpoint: { default: "Authorization endpoint" }
+      OidcTokenEndpoint: { default: "Token endpoint" }
+      OidcUserInfoEndpoint: { default: "User info endpoint" }
+      OidcClientId: { default: "Client (application) id" }
+      OidcClientSecretArn: { default: "Client secret (Secrets Manager ARN)" }
+      HostAmiId: { default: "Agent host image (AMI id)" }
+      HostInstanceType: { default: "Agent host instance type" }
+      MinHosts: { default: "Fewest agent hosts" }
+      MaxHosts: { default: "Most agent hosts" }
+      HostDiskGiB: { default: "Agent host disk (GiB)" }
+      IdleMinutesBeforeSleep: { default: "Idle minutes before a computer sleeps" }
+      TeamsAppId: { default: "Teams app (bot) id, or empty" }
+      TeamsAppSecretArn: { default: "Teams app secret (Secrets Manager ARN), or empty" }
+      VpcCidr: { default: "Address range for the new VPC" }
+      RelayImage: { default: "Egress relay image (SSM parameter)" }
+      MarketplaceProductCode: { default: "AWS Marketplace product code, or empty" }
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: The address people open, in your domain. Point it at the load balancer (output LoadBalancerDnsName) after the stack is created.
+    AllowedPattern: "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+    ConstraintDescription: a lowercase DNS name, such as agents.example.com
+  CertificateArn:
+    Type: String
+    Description: An ACM certificate in this Region that covers DomainName.
+    AllowedPattern: "^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/[0-9a-f-]+$"
+    ConstraintDescription: an ACM certificate ARN
+  OidcIssuer:
+    Type: String
+    Description: The OIDC issuer, such as https://login.microsoftonline.com/<tenant id>/v2.0 for Entra ID.
+    AllowedPattern: "^https://.+"
+  OidcAuthorizationEndpoint:
+    Type: String
+    Description: The OIDC authorization endpoint (full https URL).
+    AllowedPattern: "^https://.+"
+  OidcTokenEndpoint:
+    Type: String
+    Description: The OIDC token endpoint (full https URL). The load balancer calls it.
+    AllowedPattern: "^https://.+"
+  OidcUserInfoEndpoint:
+    Type: String
+    Description: The OIDC user info endpoint (full https URL). The load balancer calls it.
+    AllowedPattern: "^https://.+"
+  OidcClientId:
+    Type: String
+    Description: The client (application) id of the sign-in app you registered with your identity provider.
+    MinLength: 1
+  OidcClientSecretArn:
+    Type: String
+    Description: The Secrets Manager secret holding that app's client secret, as plain text. Only the load balancer uses it.
+    AllowedPattern: "^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$"
+    ConstraintDescription: a Secrets Manager secret ARN
+  HostAmiId:
+    Type: AWS::EC2::Image::Id
+    Description: The Glasshouse Agents host image for this Region.
+  HostInstanceType:
+    Type: String
+    Description: >-
+      Agent hosts run computers as microVMs under KVM, so they need nested
+      virtualization: 8th-generation Intel C8i, M8i or R8i. More memory per
+      host means more computers awake at once.
+    Default: m8i.xlarge
+    AllowedValues:
+      - c8i.large
+      - c8i.xlarge
+      - c8i.2xlarge
+      - c8i.4xlarge
+      - c8i.8xlarge
+      - c8i.12xlarge
+      - c8i.16xlarge
+      - c8i.24xlarge
+      - c8i.32xlarge
+      - c8i.48xlarge
+      - c8i.96xlarge
+      - m8i.large
+      - m8i.xlarge
+      - m8i.2xlarge
+      - m8i.4xlarge
+      - m8i.8xlarge
+      - m8i.12xlarge
+      - m8i.16xlarge
+      - m8i.24xlarge
+      - m8i.32xlarge
+      - m8i.48xlarge
+      - m8i.96xlarge
+      - r8i.large
+      - r8i.xlarge
+      - r8i.2xlarge
+      - r8i.4xlarge
+      - r8i.8xlarge
+      - r8i.12xlarge
+      - r8i.16xlarge
+      - r8i.24xlarge
+      - r8i.32xlarge
+      - r8i.48xlarge
+      - r8i.96xlarge
+  MinHosts:
+    Type: Number
+    Description: Agent hosts kept running. Two keep the service up when one Availability Zone is down.
+    Default: 1
+    MinValue: 1
+    MaxValue: 100
+  MaxHosts:
+    Type: Number
+    Description: The most agent hosts the group grows to under load. At least MinHosts.
+    Default: 4
+    MinValue: 1
+    MaxValue: 100
+  HostDiskGiB:
+    Type: Number
+    Description: Each host's disk. It only caches computers that are awake; asleep, they are in S3.
+    Default: 200
+    MinValue: 50
+    MaxValue: 16384
+  IdleMinutesBeforeSleep:
+    Type: Number
+    Description: An agent computer idle this long is saved to S3 and stops costing anything but storage.
+    Default: 15
+    MinValue: 1
+    MaxValue: 1440
+  TeamsAppId:
+    Type: String
+    Description: The Microsoft App ID of your Glasshouse Agents Teams app. Empty for no Teams.
+    Default: ""
+    AllowedPattern: "^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    ConstraintDescription: empty, or a GUID
+  TeamsAppSecretArn:
+    Type: String
+    Description: The Secrets Manager secret holding the Teams app's client secret. Empty for no Teams.
+    Default: ""
+    AllowedPattern: "^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$"
+    ConstraintDescription: empty, or a Secrets Manager secret ARN
+  VpcCidr:
+    Type: String
+    Description: The new VPC's address range, /16 to /18. Pick one that doesn't overlap networks you will connect it to.
+    Default: 10.80.0.0/16
+    AllowedPattern: "^(10|172|192)\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}/(1[6-8])$"
+    ConstraintDescription: a private IPv4 range from /16 to /18
+  RelayImage:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: >-
+      The egress relay's image: Amazon Linux 2023 (x86_64), with squid from
+      its repository. CloudFormation resolves it when the stack is created or
+      updated, and AL2023 locks packages to the image's release, so the relay
+      changes only with a stack update. Name your own SSM parameter here to
+      pin a specific image.
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  MarketplaceProductCode:
+    Type: String
+    Description: Set by the AWS Marketplace listing. Empty when deployed outside Marketplace (no metering).
+    Default: ""
+    AllowedPattern: "^[-a-zA-Z0-9/=:_.@]*$"
+    MaxLength: 255
+
+Rules:
+  TeamsNeedsBoth:
+    Assertions:
+      - Assert: !Or
+          - !And
+            - !Equals [!Ref TeamsAppId, ""]
+            - !Equals [!Ref TeamsAppSecretArn, ""]
+          - !And
+            - !Not [!Equals [!Ref TeamsAppId, ""]]
+            - !Not [!Equals [!Ref TeamsAppSecretArn, ""]]
+        AssertDescription: Give both the Teams app id and its secret, or neither.
+
+Conditions:
+  # Both are set or neither (TeamsNeedsBoth); naming both here lets tools
+  # see the secret's ARN is never empty where it's used.
+  HasTeams: !And
+    - !Not [!Equals [!Ref TeamsAppId, ""]]
+    - !Not [!Equals [!Ref TeamsAppSecretArn, ""]]
+  HasProductCode: !Not [!Equals [!Ref MarketplaceProductCode, ""]]
+
+Resources:
+  # ---------------------------------------------------------------- network
+  # Two Availability Zones. Public subnets hold the load balancer and the
+  # egress relay; the agent hosts are in private subnets whose route table
+  # has no route to the internet (no internet gateway, no NAT). They reach
+  # AWS through the VPC endpoints below, and a few named addresses outside
+  # through the relay (EgressRelay), and nothing else.
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-load-balancer" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-hosts-a" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-hosts-b" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-load-balancer-a" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-load-balancer-b" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-load-balancer" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  # The hosts' route table: the VPC itself and the S3 gateway endpoint's
+  # route, which S3GatewayEndpoint adds. Nothing else, ever.
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-hosts-no-internet" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  PrivateSubnetARoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ---------------------------------------------------------- security groups
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Glasshouse Agents load balancer - HTTPS from anywhere, 80 only to redirect
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: Redirected to HTTPS }
+      # Replaces the default allow-all. The load balancer itself calls the
+      # identity provider's token and user info endpoints, which are on the
+      # internet; the rule to the hosts is LoadBalancerToHosts.
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: Identity provider token and user info endpoints }
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-load-balancer" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  HostSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Glasshouse Agents hosts - only the load balancer may connect
+      VpcId: !Ref Vpc
+      # Replaces the default allow-all. HTTPS is all a host speaks, and the
+      # route table bounds where it can go: the VPC endpoints and the S3
+      # gateway endpoint. (A security group can't name the S3 prefix list
+      # without looking its id up per Region, so the route table does it.)
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: AWS through the VPC endpoints only (no internet route) }
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-hosts" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  LoadBalancerToHosts:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LoadBalancerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8443
+      ToPort: 8443
+      DestinationSecurityGroupId: !Ref HostSecurityGroup
+      Description: To the agent hosts' front
+
+  HostsFromLoadBalancer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref HostSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8443
+      ToPort: 8443
+      SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+      Description: From the load balancer only
+
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Glasshouse Agents VPC endpoints - HTTPS from the agent hosts and the relay
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref HostSecurityGroup
+          Description: From the agent hosts
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-endpoints" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  # The endpoints' private DNS answers for the whole VPC, so the relay's own
+  # Systems Manager agent and log shipping reach AWS through them too.
+  EndpointsFromRelay:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EndpointSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref RelaySecurityGroup
+      Description: From the egress relay (Systems Manager, its logs)
+
+  HostsToRelay:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref HostSecurityGroup
+      IpProtocol: tcp
+      FromPort: 3128
+      ToPort: 3128
+      DestinationSecurityGroupId: !Ref RelayAddressSecurityGroup
+      Description: To the egress relay's address
+
+  # ------------------------------------------------------------ egress relay
+  # The stack's only door out to the internet (ADR 0065 section 13): an
+  # HTTPS CONNECT proxy (squid) in a public subnet that tunnels only to the
+  # few addresses below and refuses everything else, logging both to
+  # HostLogGroup. Only the hosts reach it, through RelayAddress, and they use
+  # it only for those calls (egress_proxy in the front's config; no
+  # system-wide proxy). The hosts' own route table never gets an internet
+  # route.
+  #
+  # Allowed (CONNECT to port 443, exact host names):
+  #   login.botframework.com      Bot Framework OpenID metadata and keys, to
+  #                               check Teams' signed requests
+  #   login.microsoftonline.com   Entra ID tokens for the Teams app
+  #   smba.trafficmanager.net     the Bot Connector service (Teams' serviceUrl)
+  #   public-keys.auth.elb.<region>.amazonaws.com
+  #                               the load balancer's keys, to check who
+  #                               signed in (x-amzn-oidc-data)
+  # Teams in Microsoft's government clouds (GCC, GCC High, DoD) uses other
+  # hosts, which aren't here.
+  #
+  # A stable address: an internal Network Load Balancer in front of a group
+  # of one. The group replaces a relay that fails its health check, and an
+  # update starts the new relay before the old one goes, while the hosts keep
+  # one DNS name. (A fixed IP or network interface can't pass from an old
+  # relay to a new one that starts first, and a DNS record the relay updates
+  # itself would need a private hosted zone and Route 53 permissions.)
+  RelayAddressSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Glasshouse Agents egress relay address - the agent hosts only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3128
+          ToPort: 3128
+          SourceSecurityGroupId: !Ref HostSecurityGroup
+          Description: From the agent hosts
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 3128
+          ToPort: 3128
+          DestinationSecurityGroupId: !Ref RelaySecurityGroup
+          Description: To the relay, and its health checks
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-relay-address" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  RelaySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Glasshouse Agents egress relay - reached only through its address
+      VpcId: !Ref Vpc
+      # Replaces the default allow-all: HTTPS out, to the allowed addresses
+      # (squid decides which) and to install its packages.
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS to the allowed addresses and the package repository }
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-relay" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  RelayFromAddress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RelaySecurityGroup
+      IpProtocol: tcp
+      FromPort: 3128
+      ToPort: 3128
+      SourceSecurityGroupId: !Ref RelayAddressSecurityGroup
+      Description: From the relay's address only (hosts' connections and health checks)
+
+  # ------------------------------------------------------------ VPC endpoints
+  # S3, where computers sleep. The endpoint policy lets hosts write only to
+  # this stack's bucket; reading other buckets stays possible for the host
+  # image's own package repositories and the SSM agent.
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Gateway
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      RouteTableIds: [!Ref PrivateRouteTable]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ThisStacksBucket
+            Effect: Allow
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ChunkBucket.Arn
+              - !Sub "${ChunkBucket.Arn}/*"
+          - Sid: ReadElsewhere
+            Effect: Allow
+            Principal: "*"
+            Action: "s3:GetObject"
+            Resource: "*"
+
+  BedrockRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-runtime"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-bedrock-runtime" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  KmsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.kms"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-kms" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.secretsmanager"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-secretsmanager" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  # Systems Manager: hosts are managed (Session Manager, patching, Run
+  # Command) without SSH and without an inbound port.
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-ssm" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  SsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-ssmmessages" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  Ec2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ec2messages"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-ec2messages" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  StsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sts"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-sts" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.logs"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-logs" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  # AWS Marketplace Metering Service, for agent computer hours (MeterUsage).
+  # AWS's PrivateLink list names this service
+  # (com.amazonaws.<region>.metering-marketplace); Marketplace's own seller
+  # guide still says metered AMI software needs an internet gateway. Whether
+  # MeterUsage through this endpoint is accepted, and whether its private DNS
+  # answers for metering.marketplace.<region>.amazonaws.com, is checked in a
+  # real account (README, "What only AWS can confirm").
+  MeteringEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: HasProductCode
+    Properties:
+      VpcId: !Ref Vpc
+      VpcEndpointType: Interface
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.metering-marketplace"
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-metering-marketplace" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  # ------------------------------------------------------------------ storage
+  # The organization's key for everything this stack keeps. Kept when the
+  # stack is deleted, so sleeping computers stay readable.
+  DataKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "Glasshouse Agents (${AWS::StackName}) - agent computers and host logs"
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # IAM policies in this account decide who may use the key (the
+          # hosts' role, below), as with any customer managed key.
+          - Sid: AccountAdministers
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: CloudWatchLogsEncryptsHostLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: "*"
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+      Tags:
+        - { Key: Application, Value: Glasshouse Agents }
+
+  DataKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/glasshouse-agents/${AWS::StackName}"
+      TargetKeyId: !Ref DataKey
+
+  # Where each computer lives while it sleeps: content-addressed chunks of
+  # its disk and its snapshots (ADR 0065 section 11). Kept when the stack is
+  # deleted: deleting the stack never deletes people's computers.
+  ChunkBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt DataKey.Arn
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - { Key: Application, Value: Glasshouse Agents }
+
+  ChunkBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ChunkBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ChunkBucket.Arn
+              - !Sub "${ChunkBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+          - Sid: OnlyThisStacksKey
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:PutObject"
+            Resource: !Sub "${ChunkBucket.Arn}/*"
+            Condition:
+              StringNotEqualsIfExists:
+                s3:x-amz-server-side-encryption-aws-kms-key-id: !GetAtt DataKey.Arn
+
+  HostLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RetentionInDays: 365
+      KmsKeyId: !GetAtt DataKey.Arn
+      Tags:
+        - { Key: Application, Value: Glasshouse Agents }
+
+  # ---------------------------------------------------------------- the hosts
+  HostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Glasshouse Agents hosts - this stack's bucket and key, Bedrock models, metering, the Teams secret
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Session Manager and Run Command instead of SSH.
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyName: glasshouse-agents-host
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ComputersBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                Resource: !GetAtt ChunkBucket.Arn
+              - Sid: ComputersChunks
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                Resource: !Sub "${ChunkBucket.Arn}/*"
+              - Sid: TheStacksKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:GenerateDataKey
+                  - kms:DescribeKey
+                Resource: !GetAtt DataKey.Arn
+              - Sid: BedrockModels
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  # Cross-Region inference profiles call the model in other
+                  # Regions, so the foundation models are named in any Region.
+                  - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/*"
+                  - !Sub "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*"
+                  - !Sub "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:application-inference-profile/*"
+              - Sid: HostLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub "${HostLogGroup.Arn}"
+              - !If
+                - HasProductCode
+                - Sid: MeterAgentComputerHours
+                  Effect: Allow
+                  # MeterUsage has no resource-level permissions.
+                  Action: aws-marketplace:MeterUsage
+                  Resource: "*"
+                - !Ref AWS::NoValue
+              - !If
+                - HasTeams
+                - Sid: TeamsAppSecret
+                  Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !Ref TeamsAppSecretArn
+                - !Ref AWS::NoValue
+      Tags:
+        - { Key: Application, Value: Glasshouse Agents }
+
+  HostInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref HostRole]
+
+  HostLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref HostAmiId
+        InstanceType: !Ref HostInstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt HostInstanceProfile.Arn
+        SecurityGroupIds: [!Ref HostSecurityGroup]
+        # KVM inside the host, for Firecracker (ADR 0065 section 10). EC2
+        # added nested virtualization on virtual C8i, M8i and R8i instances
+        # in February 2026; CloudFormation's launch template takes it as
+        # CpuOptions.NestedVirtualization (enabled | disabled).
+        CpuOptions:
+          NestedVirtualization: enabled
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          # Nothing on a host runs in a container that needs instance
+          # metadata, and microVMs have no network at all.
+          HttpPutResponseHopLimit: 1
+          InstanceMetadataTags: disabled
+        BlockDeviceMappings:
+          # The host image's root device. Encrypted with the account's EBS
+          # key (aws/ebs, or the account's default key if it set one).
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: !Ref HostDiskGiB
+              Encrypted: true
+              DeleteOnTermination: true
+        Monitoring:
+          Enabled: false
+        TagSpecifications:
+          - ResourceType: volume
+            Tags:
+              - { Key: Name, Value: !Sub "${AWS::StackName}-host" }
+              - { Key: Application, Value: Glasshouse Agents }
+        # The stack's side of the host image's contract (README, "What the
+        # hosts are told"): the front's settings and glassd's, from this
+        # stack's values, then both started. Changing any of them is a stack
+        # update, which replaces the hosts (UpdatePolicy below).
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash
+              # Glasshouse Agents host: this stack's settings for the front
+              # (glass-agents) and glassd, written on the host's first boot.
+              # A host is never changed in place: an update replaces it.
+              set -euo pipefail
+              umask 022
+              install -d -m 0755 /etc/glasshouse
+              install -d -m 0700 /etc/glasshouse/tls
+
+              cat > /etc/glasshouse/glass-agents.toml <<'EOF'
+              # Written by the ${AWS::StackName} stack. Change it by updating the stack.
+
+              # The egress relay: use it only for the calls it allows (Teams'
+              # Microsoft hosts and the load balancer's public keys). It
+              # refuses anything else, and nothing here sets a system-wide
+              # proxy.
+              egress_proxy = "http://${RelayAddress.DNSName}:3128"
+
+              [front]
+              url = "https://${DomainName}"
+              listen = "0.0.0.0:8443"
+              tls_cert = "/etc/glasshouse/tls/host.crt"
+              tls_key = "/etc/glasshouse/tls/host.key"
+              health_path = "/healthz"
+
+              [sign_in]
+              # The load balancer signs people in and passes their claims,
+              # signed (ES256), in x-amzn-oidc-data. Check the signature and
+              # that the header's signer is this load balancer.
+              kind = "alb-oidc"
+              load_balancer_arn = "${LoadBalancer}"
+              issuer = "${OidcIssuer}"
+              client_id = "${OidcClientId}"
+              public_keys = "https://public-keys.auth.elb.${AWS::Region}.amazonaws.com/"
+
+              [teams]
+              enabled = ${TeamsEnabled}
+              app_id = "${TeamsAppId}"
+              secret_arn = "${TeamsAppSecretArn}"
+              messages_path = "/api/teams/messages"
+
+              [aws]
+              region = "${AWS::Region}"
+              stack = "${AWS::StackName}"
+              EOF
+
+              # glassd's own config keys (crates/bin/glassd/src/config.rs);
+              # the image's glassd.toml has the rest (sockets, the catalog,
+              # the Firecracker binaries and guest images). Models come from
+              # policy, Bedrock among them; logs go to ${HostLogGroup}
+              # through the CloudWatch agent.
+              cat > /etc/glasshouse/glassd.stack.toml <<'EOF'
+              # Written by the ${AWS::StackName} stack. Change it by updating the stack.
+              [sandbox.computers]
+              hypervisor = "firecracker"
+              store = "s3"
+              bucket = "${ChunkBucket}"
+              kms_key_arn = "${DataKey.Arn}"
+              region = "${AWS::Region}"
+              sleep_after_idle_minutes = ${IdleMinutesBeforeSleep}
+
+              [metering]
+              enabled = ${MeteringEnabled}
+              product_code = "${MarketplaceProductCode}"
+              dimension = "agent_computer_hours"
+              region = "${AWS::Region}"
+              EOF
+
+              # The load balancer speaks HTTPS to the hosts so people's
+              # claims are encrypted inside the VPC too. It doesn't check the
+              # host's certificate, so each host makes its own.
+              if [ ! -s /etc/glasshouse/tls/host.key ]; then
+                openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+                  -days 3650 -subj "/CN=glasshouse-agents-host" \
+                  -keyout /etc/glasshouse/tls/host.key -out /etc/glasshouse/tls/host.crt
+                chmod 0600 /etc/glasshouse/tls/host.key
+              fi
+
+              systemctl enable glassd.service glass-agents.service
+              systemctl restart glassd.service glass-agents.service
+            - TeamsEnabled: !If [HasTeams, "true", "false"]
+              MeteringEnabled: !If [HasProductCode, "true", "false"]
+      TagSpecifications:
+        - ResourceType: launch-template
+          Tags:
+            - { Key: Application, Value: Glasshouse Agents }
+
+  HostGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    # Replacing hosts (a new image, an instance type, new settings) starts
+    # each new host before its old one goes, so one host is never down for
+    # an update; an old host's computers are put to sleep in S3 first
+    # (SleepBeforeTermination).
+    UpdatePolicy:
+      AutoScalingInstanceRefresh:
+        Strategy: Rolling
+        Preferences:
+          MinHealthyPercentage: 100
+          MaxHealthyPercentage: 200
+          InstanceWarmup: 300
+          SkipMatching: true
+    Properties:
+      VPCZoneIdentifier: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref HostLaunchTemplate
+        Version: !GetAtt HostLaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinHosts
+      MaxSize: !Ref MaxHosts
+      TargetGroupARNs: [!Ref HostTargetGroup]
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      DefaultInstanceWarmup: 300
+      LifecycleHookSpecificationList:
+        # A host leaving (scale-in, an update, a replacement) gets up to 15
+        # minutes to put its awake computers to sleep in S3 before it's
+        # terminated. glassd sees it in instance metadata
+        # (autoscaling/target-lifecycle-state) and needs no extra permission.
+        - LifecycleHookName: SleepBeforeTermination
+          LifecycleTransition: autoscaling:EC2_INSTANCE_TERMINATING
+          HeartbeatTimeout: 900
+          DefaultResult: CONTINUE
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-host", PropagateAtLaunch: true }
+        - { Key: Application, Value: Glasshouse Agents, PropagateAtLaunch: true }
+
+  # More hosts as the work grows. CPU is a stand-in until glassd reports
+  # awake computers and memory as a metric of its own.
+  HostScaling:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref HostGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 60
+
+  # -------------------------------------------- egress relay (see its groups)
+  RelayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Glasshouse Agents egress relay - Systems Manager, and writing its log to the stack's log group
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyName: glasshouse-agents-relay
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: RelayLog
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub "${HostLogGroup.Arn}"
+      Tags:
+        - { Key: Application, Value: Glasshouse Agents }
+
+  RelayInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref RelayRole]
+
+  RelayLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref RelayImage
+        # A few small TLS tunnels at a time; the smallest current x86 size.
+        InstanceType: t3.micro
+        IamInstanceProfile:
+          Arn: !GetAtt RelayInstanceProfile.Arn
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: true
+            DeleteOnTermination: true
+            Groups: [!Ref RelaySecurityGroup]
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+          InstanceMetadataTags: disabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: volume
+            Tags:
+              - { Key: Name, Value: !Sub "${AWS::StackName}-relay" }
+              - { Key: Application, Value: Glasshouse Agents }
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # Glasshouse Agents egress relay: an allow-listing HTTPS CONNECT
+            # proxy, the stack's only door out to the internet. Set up on the
+            # relay's first boot; an update replaces the relay.
+            set -euo pipefail
+            # AL2023 installs from the repository release locked to this
+            # image, so the versions change only with the image.
+            dnf install -y squid amazon-cloudwatch-agent
+
+            cat > /etc/squid/squid.conf <<'EOF'
+            # Written by the ${AWS::StackName} stack. Change it by updating the stack.
+            http_port 3128
+
+            # Only the agent hosts (through the relay's address), only
+            # CONNECT, only to port 443, only to these exact names. Anything
+            # else is refused (TCP_DENIED/403) and logged.
+            acl agent_hosts src ${VpcCidr}
+            acl CONNECT method CONNECT
+            acl tls_port port 443
+            acl allowed dstdomain -n login.botframework.com
+            acl allowed dstdomain -n login.microsoftonline.com
+            acl allowed dstdomain -n smba.trafficmanager.net
+            acl allowed dstdomain -n public-keys.auth.elb.${AWS::Region}.amazonaws.com
+            http_access deny !agent_hosts
+            http_access deny !CONNECT
+            http_access deny !tls_port
+            http_access allow allowed
+            http_access deny all
+
+            # A tunnel, not a cache, and it doesn't announce itself.
+            cache deny all
+            cache_mem 8 MB
+            forwarded_for delete
+            httpd_suppress_version_string on
+            access_log stdio:/var/log/squid/access.log squid
+            cache_log /var/log/squid/cache.log
+            shutdown_lifetime 5 seconds
+            EOF
+            squid -k parse
+            systemctl enable squid
+            systemctl restart squid
+
+            # Every request, allowed or refused, goes to the stack's log group.
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'EOF'
+            {
+              "agent": { "run_as_user": "root" },
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/var/log/squid/access.log",
+                        "log_group_name": "${HostLogGroup}",
+                        "log_stream_name": "egress-relay/{instance_id}",
+                        "timezone": "UTC"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            EOF
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s \
+              -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+      TagSpecifications:
+        - ResourceType: launch-template
+          Tags:
+            - { Key: Application, Value: Glasshouse Agents }
+
+  RelayGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    # In the public subnets: they must route to the internet first.
+    DependsOn: [PublicDefaultRoute, PublicSubnetARoutes, PublicSubnetBRoutes]
+    # A new relay (a new image, a new allow-list) is in service before the
+    # old one goes, so the hosts' calls out never stop for an update.
+    UpdatePolicy:
+      AutoScalingInstanceRefresh:
+        Strategy: Rolling
+        Preferences:
+          MinHealthyPercentage: 100
+          MaxHealthyPercentage: 200
+          InstanceWarmup: 120
+          SkipMatching: true
+    Properties:
+      VPCZoneIdentifier: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref RelayLaunchTemplate
+        Version: !GetAtt RelayLaunchTemplate.LatestVersionNumber
+      # One relay; room for its replacement to start first.
+      MinSize: "1"
+      DesiredCapacity: "1"
+      MaxSize: "2"
+      TargetGroupARNs: [!Ref RelayTargetGroup]
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 180
+      DefaultInstanceWarmup: 120
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-relay", PropagateAtLaunch: true }
+        - { Key: Application, Value: Glasshouse Agents, PropagateAtLaunch: true }
+
+  # The relay's stable address for the hosts, inside the VPC only.
+  RelayAddress:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: network
+      Scheme: internal
+      IpAddressType: ipv4
+      Subnets: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroups: [!Ref RelayAddressSecurityGroup]
+      LoadBalancerAttributes:
+        # One relay serves hosts in both zones.
+        - Key: load_balancing.cross_zone.enabled
+          Value: "true"
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-relay" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  RelayTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      TargetType: instance
+      Protocol: TCP
+      Port: 3128
+      HealthCheckProtocol: TCP
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+      Tags:
+        - { Key: Application, Value: Glasshouse Agents }
+
+  RelayListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref RelayAddress
+      Port: 3128
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref RelayTargetGroup
+
+  # ----------------------------------------------------------- load balancer
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: PublicDefaultRoute
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      SecurityGroups: [!Ref LoadBalancerSecurityGroup]
+      LoadBalancerAttributes:
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}" }
+        - { Key: Application, Value: Glasshouse Agents }
+
+  HostTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      TargetType: instance
+      Protocol: HTTPS
+      Port: 8443
+      HealthCheckProtocol: HTTPS
+      HealthCheckPath: /healthz
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "60"
+      Tags:
+        - { Key: Application, Value: Glasshouse Agents }
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-Res-PQ-2025-09
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      # People sign in with the organization's SSO before reaching a host.
+      # Only the two rules below skip it, for requests that carry a token the
+      # front checks itself (Teams, and the CLI and API).
+      DefaultActions:
+        - Type: authenticate-oidc
+          Order: 1
+          AuthenticateOidcConfig:
+            Issuer: !Ref OidcIssuer
+            AuthorizationEndpoint: !Ref OidcAuthorizationEndpoint
+            TokenEndpoint: !Ref OidcTokenEndpoint
+            UserInfoEndpoint: !Ref OidcUserInfoEndpoint
+            ClientId: !Ref OidcClientId
+            # Resolved by CloudFormation when the listener is created or
+            # changed; neither it nor the hosts keep the value.
+            ClientSecret: !Sub "{{resolve:secretsmanager:${OidcClientSecretArn}:SecretString}}"
+            Scope: openid email profile
+            OnUnauthenticatedRequest: authenticate
+            SessionTimeout: "43200"
+        - Type: forward
+          Order: 2
+          TargetGroupArn: !Ref HostTargetGroup
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  # Microsoft's Bot Framework posts Teams activity here, so no SSO: the front
+  # checks the Bot Framework's signed token itself and passes on only
+  # messages and answers (ADR 0065 section 13). POST to this one path only.
+  TeamsMessagesRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasTeams
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: [/api/teams/messages]
+        - Field: http-request-method
+          HttpRequestMethodConfig:
+            Values: [POST]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref HostTargetGroup
+
+  # The `glass` CLI and tools call the API with a token the front issued to a
+  # signed-in person (`glass login` opens the browser, which signs in through
+  # SSO above, and the front hands the CLI a short-lived token). Those calls
+  # carry `Authorization: Bearer ...`, which the load balancer's SSO can't
+  # take, so they skip it here and the front checks the token itself. The
+  # same paths without the header (a browser) still sign in through SSO.
+  # The load balancer matches the header case-insensitively, after
+  # normalizing the path.
+  ApiBearerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: [/api/v1/*]
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: Authorization
+            Values: ["Bearer *"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref HostTargetGroup
+
+Outputs:
+  Url:
+    Description: Where people open Glasshouse Agents.
+    Value: !Sub "https://${DomainName}"
+  LoadBalancerDnsName:
+    Description: Point DomainName here (a CNAME, or a Route 53 alias record).
+    Value: !GetAtt LoadBalancer.DNSName
+  SignInRedirectUrl:
+    Description: Add this as a redirect (reply) URL in your identity provider's app registration.
+    Value: !Sub "https://${DomainName}/oauth2/idpresponse"
+  ComputersBucket:
+    Description: The S3 bucket where agent computers sleep. Kept when the stack is deleted.
+    Value: !Ref ChunkBucket
+  DataKeyArn:
+    Description: The KMS key that encrypts the bucket and the host logs. Kept when the stack is deleted.
+    Value: !GetAtt DataKey.Arn
+  HostLogGroupName:
+    Description: The agent hosts' logs, and the egress relay's log of every request (streams egress-relay/...).
+    Value: !Ref HostLogGroup
+  EgressRelayAddress:
+    Description: The egress relay's address inside the VPC (port 3128). Only the agent hosts can reach it.
+    Value: !GetAtt RelayAddress.DNSName
+  TeamsMessagingEndpoint:
+    Condition: HasTeams
+    Description: The messaging endpoint to set on your Teams app's Azure Bot.
+    Value: !Sub "https://${DomainName}/api/teams/messages"
