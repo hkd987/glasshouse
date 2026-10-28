@@ -17,11 +17,13 @@ export class AgentScreen {
   private readonly head = h("div", { class: "convo-head" });
   private readonly banner = h("div", { class: "convo-banner" });
   private readonly list = h("ol", { class: "messages", "aria-label": "Conversation" });
-  private readonly side = h("aside", { class: "side", "aria-label": "Its computer and what it can reach" });
+  private readonly side = h("aside", { class: "side", "aria-label": "Your computer and what it can reach" });
   private readonly input = h("input", { id: "ask", type: "text", autocomplete: "off", maxlength: "4000", enterkeyhint: "send" });
   private readonly label = h("label", { for: "ask", class: "visually-hidden" }, "Ask it something");
   private readonly send = h("button", { type: "submit", class: "btn primary big" }, "Send");
   private readonly formError = h("div", { class: "form-error" });
+  /** The status last drawn: a refusal answers the agent as it was then. */
+  private drawnStatus: AgentView["status"] | null = null;
   private seen: Set<string> | null = null;
   private focusAfter: string | null = null;
 
@@ -82,6 +84,9 @@ export class AgentScreen {
       h("p", { class: "doing" }, agent.doing),
     );
     show(this.banner, agent.status === "taken_over" ? this.takenOver(agent) : null);
+    // Handed back, asleep, woken: an ask refused before no longer applies.
+    if (this.drawnStatus !== null && this.drawnStatus !== agent.status) show(this.formError);
+    this.drawnStatus = agent.status;
     this.drawMessages(detail);
     keepFocus(this.side, () => show(this.side, ...this.sidePanel(detail)));
   }
@@ -94,7 +99,7 @@ export class AgentScreen {
     return h(
       "div",
       { class: "banner-yours", role: "status" },
-      h("span", {}, `You have ${agent.name}’s computer. ${agent.name} waits until you hand it back.`),
+      h("span", {}, "You have your computer. Your agents wait until you hand it back."),
       h(
         "span",
         { class: "row" },
@@ -261,7 +266,7 @@ export class AgentScreen {
       h(
         "div",
         { class: "panel-body" },
-        h("h2", { id: "computer-title" }, "Its computer"),
+        h("h2", { id: "computer-title" }, "Your computer"),
         h("p", { class: "muted" }, words.line),
         h(
           "div",

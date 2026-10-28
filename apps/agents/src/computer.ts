@@ -57,7 +57,7 @@ export class ComputerScreen {
         { class: "screen-wrap" },
         h("div", { class: "screen-frame" }, this.frameHead, h("div", { class: "screen-body" }, this.term, this.cover), this.inputBox, this.lineError),
       ),
-      h("p", { class: "sleep-line" }, "Its computer sleeps after a while with nothing to do: saved to your company’s storage, nothing left running."),
+      h("p", { class: "sleep-line" }, "Your computer sleeps after a while with nothing to do: saved to your company’s storage, nothing left running."),
     );
     show(main, this.root);
     this.term.textContent = "Connecting to its screen…";
@@ -84,7 +84,7 @@ export class ComputerScreen {
     const yours = this.yours(view);
     const state = this.screen?.state ?? view.computer.state;
     const words = computerWords({ ...view.computer, state });
-    document.title = `${view.name}’s computer · Glasshouse Agents`;
+    document.title = "Your computer · Glasshouse Agents";
     const detail = app.details.get(this.id);
     const target = detail ? undoable(detail.messages) : null;
     keepFocus(this.bar, () =>
@@ -94,7 +94,7 @@ export class ComputerScreen {
         h(
           "div",
           { class: "ctitle" },
-          h("h1", {}, `${view.name}’s computer`),
+          h("h1", {}, "Your computer"),
           h("span", { class: `chip ${yours ? "yours" : "watching"}` }, yours ? "You’re in control" : "Watching"),
         ),
         h(
@@ -115,7 +115,7 @@ export class ComputerScreen {
         ? h(
             "p",
             { class: "control-note", role: "status" },
-            `Your agents wait for you: what you ask them starts once you hand your computer back. It's yours: type below. What you do here is on the record.`,
+            "Your agents wait for you: asking them is refused until you hand your computer back. It's yours: type below. What you do here is on the record.",
           )
         : null,
     );

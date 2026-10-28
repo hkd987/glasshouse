@@ -625,11 +625,25 @@ async fn adr0067_behind_the_load_balancer_each_request_is_its_own_persons() {
             .iter()
             .any(|(k, v)| *k == "Content-Security-Policy" && v.contains("http://127.0.0.1:53111"))
     );
+    // A browser posts the form with its origin, not "null" (which every
+    // response's no-referrer would give it, and check_origin refuses).
+    assert!(
+        page.contains(r#"<meta name="referrer" content="same-origin">"#),
+        "{page}"
+    );
+    // As a browser posts it: from the front's own origin.
     let allow = front
         .handle(&glass_http::Request {
             method: "POST".into(),
             body: b"port=53111&state=0123456789abcdef&host=dana-laptop".to_vec(),
-            ..get("/login/cli", &[("x-amzn-oidc-data", "signed-for-dana")])
+            ..get(
+                "/login/cli",
+                &[
+                    ("x-amzn-oidc-data", "signed-for-dana"),
+                    ("origin", "http://agents.acme.example"),
+                    ("host", "agents.acme.example"),
+                ],
+            )
         })
         .await;
     assert_eq!(allow.status, 303);

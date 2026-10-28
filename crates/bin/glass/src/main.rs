@@ -77,19 +77,20 @@ enum Command {
     /// Takes your computer's keyboard: asks are refused until you hand it
     /// back.
     TakeOver { agent: String },
-    /// Gives an agent its keyboard back.
+    /// Gives your computer's keyboard back to your agents.
     HandBack { agent: String },
-    /// Runs a line on an agent's computer while you have its keyboard.
+    /// Runs a line on your computer while you have its keyboard.
     Type {
         agent: String,
-        #[arg(required = true)]
+        /// The line as typed, its own options included (`ls -la`).
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         line: Vec<String>,
     },
     /// Puts back what an agent's latest task changed.
     Undo { agent: String },
-    /// Saves an agent's computer to storage and frees this host of it.
+    /// Saves your computer, and so all your agents, to storage.
     Sleep { agent: String },
-    /// Brings an agent's computer back from storage.
+    /// Brings your computer back from storage.
     Wake { agent: String },
     /// Your schedules: your agents, directed on a schedule (ADR 0069).
     Schedules,
@@ -150,12 +151,12 @@ fn client() -> anyhow::Result<AgentsClient> {
         (Ok(url), Ok(token)) => (url, token),
         _ => {
             let path = config_path()?;
-            let text = std::fs::read_to_string(&path).with_context(|| {
-                format!(
-                    "not signed in: run glass login <address> ({} is missing)",
-                    path.display()
-                )
-            })?;
+            let text = match std::fs::read_to_string(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    bail!("not signed in: glass login <address> signs you in")
+                }
+                read => read.with_context(|| format!("reading {}", path.display()))?,
+            };
             let config: Value = serde_json::from_str(&text)
                 .with_context(|| format!("{} isn't what glass login writes", path.display()))?;
             (
@@ -173,6 +174,10 @@ impl Api {
     fn read<T: DeserializeOwned>(
         answer: glass_gateway_providers::agents::Answer,
     ) -> anyhow::Result<T> {
+        // Signed out everywhere, expired, or never this host's.
+        if answer.status == 401 {
+            bail!("you're signed out, or your sign-in ran out: glass login <address> signs you in");
+        }
         if !(200..300).contains(&answer.status) {
             let said = serde_json::from_str::<api::ApiError>(&answer.body)
                 .map(|e| e.error)
@@ -249,7 +254,18 @@ fn message_lines(message: &api::Message) -> Vec<String> {
             changed,
             undoable,
         } => {
-            let mut lines: Vec<String> = text.lines().map(|l| format!("Agent: {l}")).collect();
+            // "Agent:" once; its later lines under its first, its blank
+            // lines blank.
+            let mut lines: Vec<String> = text
+                .trim()
+                .lines()
+                .enumerate()
+                .map(|(i, l)| match i {
+                    0 => format!("Agent: {l}"),
+                    _ if l.trim().is_empty() => String::new(),
+                    _ => format!("       {l}"),
+                })
+                .collect();
             if !changed.is_empty() {
                 lines.push(format!("  Changed: {}", changed.join(", ")));
             }
@@ -357,7 +373,12 @@ fn wait_for(api: &Api, agent: &str, task: &str, mut offset: u64) -> anyhow::Resu
                 return Ok(());
             }
             said_waiting = true;
-            println!("It waits for your answer.");
+            // This terminal keeps showing the task: the answer comes from
+            // another, the web app or Teams.
+            println!(
+                "It waits for your answer: glass approve or deny in another terminal, or on the \
+                 web. Ctrl-C stops showing this, not the task."
+            );
         }
         if started.elapsed() > Duration::from_secs(30 * 60) {
             bail!("still working after 30 minutes; glass show {agent} has the rest");
@@ -464,15 +485,16 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::TakeOver { agent } => {
             let id = agent_id(&api, &agent)?;
             let _: api::AgentView = api.post(&format!("agents/{id}/take-over"), json!({}))?;
+            // One computer for all of the person's agents (ADR 0068).
             println!(
-                "You have {id}'s keyboard: glass type {id} <command> runs a line on its computer; \
-                 asks are refused until glass hand-back {id}."
+                "You have your computer's keyboard: glass type {id} <command> runs a line on it; \
+                 your agents' asks are refused until glass hand-back {id}."
             );
         }
         Command::HandBack { agent } => {
             let id = agent_id(&api, &agent)?;
             let _: api::AgentView = api.post(&format!("agents/{id}/hand-back"), json!({}))?;
-            println!("Handed {id} back its keyboard.");
+            println!("Handed your computer's keyboard back to your agents.");
         }
         Command::Type { agent, line } => {
             let id = agent_id(&api, &agent)?;
@@ -508,9 +530,9 @@ fn run(command: Command) -> anyhow::Result<()> {
         Command::Sleep { agent } => {
             let id = agent_id(&api, &agent)?;
             let view: api::AgentView = api.post(&format!("agents/{id}/sleep"), json!({}))?;
+            // The computer all of the person's agents share (ADR 0068).
             println!(
-                "{} is asleep: {}",
-                view.name,
+                "Your computer is {}: asking any of your agents wakes it.",
                 computer_word(view.computer.state)
             );
         }
@@ -518,8 +540,7 @@ fn run(command: Command) -> anyhow::Result<()> {
             let id = agent_id(&api, &agent)?;
             let view: api::AgentView = api.post(&format!("agents/{id}/wake"), json!({}))?;
             println!(
-                "{} is awake: its computer is {}",
-                view.name,
+                "Your computer is awake and {}.",
                 computer_word(view.computer.state)
             );
         }
@@ -781,4 +802,37 @@ fn keep_token(url: &str, token: &str) -> anyhow::Result<()> {
     file.write_all(json!({ "url": url, "token": token }).to_string().as_bytes())?;
     println!("Signed in as {} at {}", session.person.name, session.org);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_answer_in_paragraphs_says_agent_once() {
+        let message = api::Message {
+            id: "1".into(),
+            at: String::new(),
+            from: api::From::Agent,
+            task: "t".into(),
+            body: api::Body::Done {
+                text: "First.\n\nSecond,\nand third.\n".into(),
+                changed: vec![],
+                undoable: false,
+            },
+        };
+        assert_eq!(
+            message_lines(&message),
+            ["Agent: First.", "", "       Second,", "       and third."]
+        );
+    }
+
+    #[test]
+    fn a_typed_line_keeps_its_own_options() {
+        let cli =
+            Cli::try_parse_from(["glass", "type", "reconciler", "ls", "-la", "/work"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Command::Type { ref line, .. }) if line == &["ls", "-la", "/work"])
+        );
+    }
 }

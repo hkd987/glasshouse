@@ -985,10 +985,12 @@ impl Runtime {
                     RuntimeError::NotFound(format!("you have no computer {computer}"))
                 })?;
                 if view.taken_over {
-                    return Err(RuntimeError::Conflict(format!(
-                        "you have {}'s keyboard: hand it back for it to work",
-                        view.name
-                    )));
+                    // The person's own computer: every agent on it waits
+                    // (ADR 0068).
+                    return Err(RuntimeError::Conflict(
+                        "you have your computer's keyboard: hand it back for your agents to work"
+                            .into(),
+                    ));
                 }
                 // One of the person's agents on it, running what it runs
                 // (ADR 0068).

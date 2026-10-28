@@ -391,22 +391,33 @@ impl Front {
             .unwrap_or("your computer");
         if request.method == "GET" {
             let me: api::Person = self.as_person(request, async { self.person() }).await?;
+            // The referrer policy is the page's own: every response says
+            // no-referrer, with which a browser's form post says its origin
+            // is "null", and changes from anywhere but this page are refused
+            // (check_origin). Same-origin gives this page its origin, and
+            // glass on 127.0.0.1 still no referrer. Styled as the web app.
             let page = format!(
-                "<!doctype html><meta charset=\"utf-8\"><title>Sign in glass</title>\
-                 <h1>Let glass on {host} use your agents?</h1>\
-                 <p>Signed in as {name}. glass will reach your agents and your computer as you, \
-                 for 30 days or until you sign it out.</p>\
+                "<!doctype html><meta charset=\"utf-8\">\
+                 <meta name=\"referrer\" content=\"same-origin\">\
+                 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+                 <title>Sign in glass</title><link rel=\"stylesheet\" href=\"/app.css\">\
+                 <main class=\"page\"><h1>Let glass on {host} use your agents?</h1>\
+                 <p class=\"sub\">Signed in as {name}. glass will reach your agents and your \
+                 computer as you, for 30 days or until you sign it out.</p>\
                  <form method=\"post\" action=\"/login/cli\">\
                  <input type=\"hidden\" name=\"port\" value=\"{port}\">\
                  <input type=\"hidden\" name=\"state\" value=\"{state}\">\
                  <input type=\"hidden\" name=\"host\" value=\"{host}\">\
-                 <button>Allow</button></form>",
+                 <button class=\"btn primary big\">Allow</button></form></main>",
                 name = html_text(&me.name),
             );
             return Ok(Response::new(200, "text/html; charset=utf-8", page)
                 .with(
                     "Content-Security-Policy",
-                    format!("default-src 'none'; form-action 'self' http://127.0.0.1:{port}; frame-ancestors 'none'"),
+                    format!(
+                        "default-src 'none'; style-src 'self'; \
+                         form-action 'self' http://127.0.0.1:{port}; frame-ancestors 'none'"
+                    ),
                 )
                 .with("X-Content-Type-Options", "nosniff")
                 .with("Cache-Control", "no-store"));

@@ -179,7 +179,11 @@ login() { # <person>: runs glass login as the browser would, prints status
 	done
 	curl -s -o /dev/null -b "$work/$1.jar" "$page"
 	local form=${page#*\?}
-	code=$(curl -s -o /dev/null -w '%{redirect_url}' -b "$work/$1.jar" -d "$form" "$lb/login/cli")
+	# As a browser posts it: with the page's origin, which its referrer
+	# policy lets it send.
+	grep -q 'name="referrer" content="same-origin"' <(curl -s -b "$work/$1.jar" "$page") ||
+		fail "$1: the glass login page would post with the origin null"
+	code=$(curl -s -o /dev/null -w '%{redirect_url}' -b "$work/$1.jar" -H "Origin: $lb" -d "$form" "$lb/login/cli")
 	curl -s -o /dev/null "$code"
 	wait "$glass"
 	echo "${code#*code=}" | cut -d'&' -f1 >"$work/code-$1"

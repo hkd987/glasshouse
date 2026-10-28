@@ -116,6 +116,7 @@ expect "  nor see it" 0 "$(json 'len(d)')"
 expect "Dana says no" 200 "$(as dana POST "approvals/$approval" '{"yes":false}')"
 got=$(as dana POST "approvals/$approval" '{"yes":true}')
 if [ "$got" = 409 ] || [ "$got" = 404 ]; then pass "  an approval is answered once ($got)"; else fail "  a second answer gave $got"; fi
+expect "  answered, Sam still can't tell it was, or how" 404 "$(as sam POST "approvals/$approval" '{"yes":true}')"
 if grep -q '"mail.send".*"completed"' "$host/state/audit/audit.log" 2>/dev/null; then fail "a mail went out"; else pass "  no mail went out"; fi
 
 # --- another's events ------------------------------------------------------

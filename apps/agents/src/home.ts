@@ -126,7 +126,7 @@ function card(a: AgentView, now: Date): HTMLElement {
         whenLine(a, now),
         a.pending > 0 ? h("span", { class: "pending" }, ` · ${a.pending === 1 ? "1 question" : `${a.pending} questions`} for you`) : null,
       ),
-      h("span", { class: "visually-hidden" }, `Its computer: ${words.short}.`),
+      h("span", { class: "visually-hidden" }, `Your computer: ${words.short}.`),
     ),
   );
 }

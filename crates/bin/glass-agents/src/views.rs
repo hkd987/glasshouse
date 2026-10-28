@@ -326,16 +326,20 @@ pub fn record(details: &[TaskDetail], most: usize) -> Vec<api::RecordLine> {
 pub fn reach(computer: &ComputerView, card: Option<&glass_api::HandoffCard>) -> Vec<api::Reach> {
     let mut out = vec![
         api::Reach {
-            text: "A computer of its own".into(),
+            // The person's, which all their agents share (ADR 0068).
+            text: "A computer of your own".into(),
             sub: if computer.contained {
-                format!("Root there, nothing else: {}", computer.kind)
+                format!(
+                    "Shared by your agents: root there, nothing else: {}",
+                    computer.kind
+                )
             } else {
                 "Development only: not contained".into()
             },
             ok: computer.contained,
         },
         api::Reach {
-            text: "No internet from its computer".into(),
+            text: "No internet from your computer".into(),
             sub: "Anything leaving goes through the rules below".into(),
             ok: true,
         },

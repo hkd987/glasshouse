@@ -43,7 +43,9 @@ struct DeskState {
     pending: HashMap<ApprovalId, Pending>,
     /// Actions approved "for the rest of this task" (DA-11).
     task_grants: HashMap<TaskId, HashSet<ActionName>>,
-    history: VecDeque<ApprovalView>,
+    /// Answered asks, newest last, with their owners' uids: only an
+    /// owner hears how one was answered (ADR 0067).
+    history: VecDeque<(u32, ApprovalView)>,
     /// Tasks ended here, oldest first (ENDED_KEPT of them).
     ended: HashSet<TaskId>,
     ended_order: VecDeque<TaskId>,
@@ -120,8 +122,8 @@ impl ApprovalDesk {
             Some(p) if p.owner_uid == caller_uid => {}
             Some(_) => return Err(DeskError::NotFound),
             None => {
-                return match state.history.iter().find(|v| v.id == id) {
-                    Some(v) if state_is_final(&v.state) => {
+                return match state.history.iter().find(|(_, v)| v.id == id) {
+                    Some((owner, v)) if *owner == caller_uid && state_is_final(&v.state) => {
                         Err(DeskError::AlreadyAnswered(describe(&v.state)))
                     }
                     _ => Err(DeskError::NotFound),
@@ -227,7 +229,7 @@ impl ApprovalDesk {
         view.state = new_state;
         // The waiting call may be gone (task stopped); that's fine.
         let _ = pending.reply.send(outcome);
-        state.history.push_back(view.clone());
+        state.history.push_back((pending.owner_uid, view.clone()));
         while state.history.len() > HISTORY {
             state.history.pop_front();
         }
@@ -389,6 +391,12 @@ mod tests {
             desk.answer(v.id, ApprovalAnswer::Deny, 1001),
             Err(DeskError::AlreadyAnswered(_))
         ));
+        // Answered, it's still no one else's: they don't hear it was, or how
+        // (ADR 0067).
+        assert_eq!(
+            desk.answer(v.id, ApprovalAnswer::Deny, 1002),
+            Err(DeskError::NotFound)
+        );
     }
 
     #[tokio::test]

@@ -111,9 +111,9 @@ export function computerWords(computer: ComputerView): { short: string; line: st
     case "starting":
       return { short: "Starting", line: "Starting your computer. It's ready in a few seconds." };
     case "ready":
-      return { short: "On", line: "On, with nothing running. Its own, kept between tasks." };
+      return { short: "On", line: "On, with nothing running. Your agents share it, kept between tasks." };
     case "running":
-      return { short: "Running", line: "Running. Its own, kept between tasks." };
+      return { short: "Running", line: "Running. Your agents share it, kept between tasks." };
     case "saving":
       return { short: "Going to sleep", line: "Going to sleep: saving your computer to your company's storage." };
     case "asleep":

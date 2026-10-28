@@ -112,7 +112,7 @@ export function failed(error: unknown): void {
 export async function answer(agentId: string, agentName: string, approval: ApprovalView, yes: boolean): Promise<boolean> {
   try {
     await api<ApprovalView>("POST", `/approvals/${encodeURIComponent(approval.id)}`, { yes, via: "web" });
-    toast(yes ? `Approved: ${approval.yes_label}. ${agentName} carries on.` : `Not done. ${agentName} won't do it, and it's on the record.`);
+    toast(yes ? `Approved: ${approval.summary}. ${agentName} carries on.` : `Not done. ${agentName} won't do it, and it's on the record.`);
     await refetch(agentId);
     return true;
   } catch (error) {
@@ -132,10 +132,11 @@ export async function refetch(agentId?: string): Promise<void> {
 export type Control = "take-over" | "hand-back" | "wake" | "sleep";
 
 const CONTROL_DONE: Record<Control, (name: string) => string> = {
-  "take-over": (name) => `You have ${name}'s computer. ${name} waits until you hand it back.`,
-  "hand-back": (name) => `Handed back. ${name} carries on.`,
-  wake: (name) => `${name} is waking up. It picks up where it left off.`,
-  sleep: (name) => `${name} is going to sleep. Its computer is saved to storage.`,
+  // One computer, which all the person's agents share (ADR 0068).
+  "take-over": () => "You have your computer. Your agents wait until you hand it back.",
+  "hand-back": () => "Handed back. Your agents carry on.",
+  wake: () => "Your computer is waking up. It picks up where it left off.",
+  sleep: () => "Your computer is going to sleep, saved to storage. Asking an agent wakes it.",
 };
 
 /** Takes over, hands back, wakes or puts to sleep. */
