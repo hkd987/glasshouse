@@ -18,6 +18,7 @@ mod approval;
 mod apps;
 mod computer;
 mod hardware;
+mod session;
 pub mod settings;
 mod tailoring;
 mod task;
@@ -41,6 +42,9 @@ pub use computer::{
     StoredView,
 };
 pub use hardware::{PatchApply, PatchStatus, PatchTrial, TrialState};
+pub use session::{
+    CODE_PREFIX, IssuedToken, LoginCode, PersonView, SessionAs, TOKEN_PREFIX, TokenExchange,
+};
 pub use tailoring::{
     CheckResult, CustomizationPoint, LayerChange, LayerCheck, LayerLine, LayerRef, LayerRevert,
     LayerStatus, LayerVersion, LayerView, PointKind,
@@ -83,6 +87,21 @@ pub mod methods {
     pub const COMPUTER_LIST: &str = "computer.list";
     /// [`crate::ComputerNew`] → [`crate::ComputerView`]
     pub const COMPUTER_MAKE: &str = "computer.make";
+    /// [`crate::SessionAs`] → [`crate::PersonView`]: this connection acts
+    /// for the person the proof names, until it closes. The front's
+    /// account only, once per connection (ADR 0067).
+    pub const SESSION_AS: &str = "session.as";
+    /// `()` → [`crate::PersonView`]: who this connection acts for.
+    pub const SESSION_WHO: &str = "session.who";
+    /// `()` → [`crate::LoginCode`]: a one-time code for `glass login`, for
+    /// a person signed in at the load balancer.
+    pub const TOKEN_CODE: &str = "token.code";
+    /// [`crate::TokenExchange`] → [`crate::IssuedToken`]: the front trades a
+    /// code `glass` brought, once, for a token for its person.
+    pub const TOKEN_EXCHANGE: &str = "token.exchange";
+    /// `()` → `u32`: every token of the person's goes; `glass` signs in
+    /// again.
+    pub const TOKEN_REVOKE: &str = "token.revoke";
     /// [`crate::PersonaNew`] → [`crate::ComputerView`]: a new agent on the
     /// caller's computer, made first if they have none (ADR 0068).
     pub const PERSONA_MAKE: &str = "persona.make";

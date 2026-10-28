@@ -1,11 +1,15 @@
-//! glassd's control socket, as the front uses it: one connection, made
-//! again when glassd restarts. glassd decides who the caller is by the
-//! connection's uid, so the front acts as the account it runs as (ADR 0066,
-//! "Identity on a host").
+//! glassd's control socket, as the front uses it.
+//!
+//! - On a laptop or a development host the front acts as the account it
+//!   runs as: one connection, made again when glassd restarts.
+//! - On an agent host each request has a connection of its own that acts
+//!   for the person it proves (ADR 0067). glassd checks the proof itself,
+//!   and refuses the front's own account anything else.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use glass_api::{IssuedToken, PersonView, SessionAs, TokenExchange, methods};
 use glass_rpc::{Client, ClientError, codes};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -51,6 +55,11 @@ impl From<ClientError> for Failure {
     }
 }
 
+tokio::task_local! {
+    /// This request's own connection, acting for its person (ADR 0067).
+    static SESSION: Arc<Client>;
+}
+
 #[derive(Debug)]
 pub struct Glassd {
     socket: PathBuf,
@@ -75,7 +84,56 @@ impl Glassd {
         Ok(client)
     }
 
-    /// Calls `method`, connecting again once if glassd went away.
+    /// A connection of its own that acts for the person `proof` proves.
+    /// A proof glassd refuses is 401: sign in again.
+    pub async fn session(&self, proof: &SessionAs) -> Result<(Arc<Client>, PersonView), Failure> {
+        let client = Client::connect(&self.socket).await.map_err(Failure::from)?;
+        let person: PersonView = client.call(methods::SESSION_AS, proof).await.map_err(|e| {
+            let failure = Failure::from(e);
+            if failure.status == 403 {
+                Failure::new(401, failure.message)
+            } else {
+                failure
+            }
+        })?;
+        Ok((Arc::new(client), person))
+    }
+
+    /// Runs `work` with every call through `session`.
+    pub async fn scoped<F: std::future::Future>(session: Arc<Client>, work: F) -> F::Output {
+        SESSION.scope(session, work).await
+    }
+
+    /// This request's session, if it has one.
+    pub fn session_client() -> Option<Arc<Client>> {
+        SESSION.try_with(Arc::clone).ok()
+    }
+
+    /// Trades a code `glass login` brought for a token: the front's own
+    /// call, for no one yet.
+    pub async fn exchange(&self, code: &str) -> Result<IssuedToken, Failure> {
+        let client = Client::connect(&self.socket).await.map_err(Failure::from)?;
+        client
+            .call(
+                methods::TOKEN_EXCHANGE,
+                TokenExchange {
+                    code: code.to_owned(),
+                },
+            )
+            .await
+            .map_err(|e| {
+                let failure = Failure::from(e);
+                if failure.status == 403 {
+                    Failure::new(401, failure.message)
+                } else {
+                    failure
+                }
+            })
+    }
+
+    /// Calls `method`: through this request's session if it has one, or
+    /// else the front's own connection, made again once if glassd went
+    /// away.
     pub async fn call<R: DeserializeOwned>(
         &self,
         method: &str,
@@ -83,6 +141,9 @@ impl Glassd {
     ) -> Result<R, Failure> {
         let params = serde_json::to_value(params)
             .map_err(|e| Failure::new(500, format!("a request we couldn't write: {e}")))?;
+        if let Some(session) = Self::session_client() {
+            return session.call(method, params).await.map_err(Failure::from);
+        }
         for attempt in 0..2 {
             let client = self.client().await?;
             match client.call(method, params.clone()).await {

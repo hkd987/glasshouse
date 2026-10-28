@@ -14,8 +14,10 @@ Each listens on this machine's loopback address, from FAKE_AWS_PORT_BASE
       service does (one record per product, dimension and hour). Also
       /_fake/ready, /_fake/config, /_fake/records (DELETE forgets them),
       /_fake/s3?prefix= (what the bucket holds, and under which key;
-      DELETE removes it) and POST /_fake/lifecycle?host=&state= (Terminated
-      starts a host's replacement)
+      DELETE removes it), POST /_fake/lifecycle?host=&state= (Terminated
+      starts a host's replacement) and /_fake/assertion?email=&exp_in=
+      &signer=&stranger=1 (claims for tests: expired, another signer's,
+      signed by a key AWS never published)
   +3  the load balancer: people sign in (a stand-in for the identity
       provider), and requests go on to the front with the claims the
       load balancer adds (x-amzn-oidc-data, signed ES256). Teams' path and
@@ -86,6 +88,8 @@ IMDS_TOKENS = {}
 LIFECYCLE = {}
 # The load balancer's signing key: AWS's, for this run.
 SIGNING_KEY = ec.generate_private_key(ec.SECP256R1())
+# A key AWS never published, for tests of forged claims.
+STRANGER_KEY = ec.generate_private_key(ec.SECP256R1())
 KID = str(uuid.uuid4())
 STATE = {"ready": False, "kms_key_arn": None, "why": "starting"}
 RECORDS = {}
@@ -262,6 +266,16 @@ class Metering(Handler):
                     return self.reply(400, "a prefix, please")
                 s3_remove(prefix)
             return self.json(200, s3_report(prefix))
+        if self.command == "GET" and path == "/_fake/assertion":
+            # Tests' own assertions: expired, another signer, a stranger's key.
+            email = (query.get("email") or ["dana@example.com"])[0]
+            person = {"sub": sub_for(email), "email": email, "name": (query.get("name") or [email])[0]}
+            return self.reply(200, assertion(
+                person,
+                exp_in=int((query.get("exp_in") or ["120"])[0]),
+                signer=(query.get("signer") or [SIGNER])[0],
+                key=STRANGER_KEY if query.get("stranger") else SIGNING_KEY,
+            ))
         if self.command == "POST" and path == "/_fake/lifecycle":
             self.body()
             host = (query.get("host") or ["default"])[0]
@@ -322,12 +336,14 @@ def sub_for(email):
     return "sub-" + str(uuid.uuid5(uuid.NAMESPACE_URL, "mailto:" + email.lower()))
 
 
-def assertion(person):
+def assertion(person, exp_in=120, signer=None, key=None):
     """x-amzn-oidc-data: the load balancer's signed claims."""
-    exp = int(time.time()) + 120
+    signer = signer or SIGNER
+    key = key or SIGNING_KEY
+    exp = int(time.time()) + exp_in
     header = {
         "typ": "JWT", "kid": KID, "alg": "ES256", "iss": ISSUER,
-        "client": CLIENT_ID, "signer": SIGNER, "exp": exp,
+        "client": CLIENT_ID, "signer": signer, "exp": exp,
     }
     claims = {**person, "exp": exp, "iss": ISSUER}
     signed = (
@@ -335,7 +351,7 @@ def assertion(person):
         + "."
         + b64url(json.dumps(claims, separators=(",", ":")).encode())
     )
-    r, s = decode_dss_signature(SIGNING_KEY.sign(signed.encode(), ec.ECDSA(hashes.SHA256())))
+    r, s = decode_dss_signature(key.sign(signed.encode(), ec.ECDSA(hashes.SHA256())))
     return signed + "." + b64url(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
 
 

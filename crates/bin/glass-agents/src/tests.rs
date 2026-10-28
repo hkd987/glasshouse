@@ -239,6 +239,7 @@ async fn world() -> World {
     .unwrap();
     let front = Front::new(
         Glassd::new(socket),
+        crate::server::Mode::Local,
         dir.path().join("web"),
         "token".into(),
         glass_agents_api::Person {
@@ -416,4 +417,264 @@ async fn adr0065_an_agent_asks_in_teams_and_the_answer_comes_back() {
             .any(|t| t == "Reconciler: Seven of 214 don't match."),
         "{texts:?}"
     );
+}
+
+/// glassd on an agent host, as the front sees it (ADR 0067): a connection
+/// acts for whoever its proof names, and sees only that person's computer.
+#[derive(Default)]
+struct PeopleGlassd {
+    sessions: Mutex<std::collections::HashMap<u64, String>>,
+    codes: Mutex<Vec<String>>,
+}
+
+impl Handler for PeopleGlassd {
+    async fn call(
+        &self,
+        conn: Arc<Connection>,
+        method: String,
+        params: Value,
+    ) -> Result<Value, RpcError> {
+        use glass_api::methods as m;
+        let who = self.sessions.lock().unwrap().get(&conn.id()).cloned();
+        match method.as_str() {
+            m::SESSION_AS => {
+                // The real glassd checks ES256 against AWS's key; here the
+                // stand-in load balancer's claims are just a name.
+                let person = match (
+                    params["proof"].as_str(),
+                    params["assertion"].as_str(),
+                    params["token"].as_str(),
+                ) {
+                    (Some("load_balancer"), Some(a), _) if a.starts_with("signed-for-") => {
+                        a["signed-for-".len()..].to_owned()
+                    }
+                    (Some("token"), _, Some("gat_sams-token")) => "sam".into(),
+                    _ => return Err(RpcError::permission_denied("not acting for anyone: forged")),
+                };
+                self.sessions
+                    .lock()
+                    .unwrap()
+                    .insert(conn.id(), person.clone());
+                Ok(
+                    json!({"key": person, "name": person, "email": format!("{person}@example.com"), "proven_by": "load_balancer"}),
+                )
+            }
+            m::TOKEN_EXCHANGE => {
+                let code = params["code"].as_str().unwrap_or_default().to_owned();
+                let mut codes = self.codes.lock().unwrap();
+                match codes.iter().position(|c| *c == code) {
+                    Some(at) => {
+                        codes.remove(at);
+                        Ok(json!({"token": "gat_issued", "expires_at": Timestamp::now()}))
+                    }
+                    None => Err(RpcError::permission_denied(
+                        "that sign-in code isn't one this host gave, or it was used",
+                    )),
+                }
+            }
+            _ if who.is_none() => Err(RpcError::permission_denied(
+                "say who you act for first (session.as)",
+            )),
+            m::TOKEN_CODE => {
+                let code = format!("gac_for-{}", who.unwrap());
+                self.codes.lock().unwrap().push(code.clone());
+                Ok(json!({"code": code, "expires_at": Timestamp::now()}))
+            }
+            m::COMPUTER_LIST => {
+                let who = who.unwrap();
+                Ok(json!([ComputerView {
+                    id: glass_api::PERSON_COMPUTER.into(),
+                    name: format!("{who}'s computer"),
+                    role: String::new(),
+                    agent: "desktop-agent".parse().unwrap(),
+                    state: ComputerState::Ready,
+                    kind: "Firecracker microVM".into(),
+                    contained: true,
+                    disk_bytes: 0,
+                    live_tasks: Vec::new(),
+                    taken_over: false,
+                    stored: None,
+                    created_at: Timestamp::now(),
+                    personas: vec![glass_api::PersonaView {
+                        id: format!("{who}-helper"),
+                        name: format!("{who}'s helper"),
+                        role: String::new(),
+                        agent: "desktop-agent".parse().unwrap(),
+                        created_at: Timestamp::now(),
+                    }],
+                }]))
+            }
+            m::TASK_LIST => Ok(json!([])),
+            other => Err(RpcError::method_not_found(other)),
+        }
+    }
+
+    fn disconnected(&self, conn: &Connection) {
+        self.sessions.lock().unwrap().remove(&conn.id());
+    }
+}
+
+fn get(path: &str, headers: &[(&str, &str)]) -> glass_http::Request {
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    glass_http::Request {
+        method: "GET".into(),
+        path: path.into(),
+        query: query.into(),
+        headers: headers
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect(),
+        body: Vec::new(),
+    }
+}
+
+fn json_of(response: &glass_http::Response) -> Value {
+    serde_json::from_slice(&response.body).unwrap()
+}
+
+#[tokio::test]
+async fn adr0067_behind_the_load_balancer_each_request_is_its_own_persons() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("control.sock");
+    let glassd = Arc::new(PeopleGlassd::default());
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    tokio::spawn(glass_rpc::serve(listener, Arc::clone(&glassd)));
+    let front = Front::new(
+        Glassd::new(socket),
+        crate::server::Mode::LoadBalancer,
+        dir.path().join("web"),
+        "never-used".into(),
+        glass_agents_api::Person {
+            id: "front".into(),
+            name: "The front".into(),
+            email: String::new(),
+        },
+        "Acme Corp".into(),
+        None,
+    );
+
+    // Each person sees only their own agents.
+    let dana = front
+        .handle(&get(
+            "/api/v1/agents",
+            &[("x-amzn-oidc-data", "signed-for-dana")],
+        ))
+        .await;
+    assert_eq!(dana.status, 200);
+    assert_eq!(json_of(&dana)[0]["id"], "dana-helper");
+    let sam = front
+        .handle(&get(
+            "/api/v1/agents",
+            &[("x-amzn-oidc-data", "signed-for-sam")],
+        ))
+        .await;
+    assert_eq!(json_of(&sam)[0]["id"], "sam-helper");
+    let session = front
+        .handle(&get(
+            "/api/v1/session",
+            &[("x-amzn-oidc-data", "signed-for-sam")],
+        ))
+        .await;
+    assert_eq!(json_of(&session)["person"]["name"], "sam");
+    // Sam's token is Sam's; a forged assertion, a made-up token or none
+    // gets nothing, and neither does the front's own token.
+    let token = front
+        .handle(&get(
+            "/api/v1/agents",
+            &[("authorization", "Bearer gat_sams-token")],
+        ))
+        .await;
+    assert_eq!(json_of(&token)[0]["id"], "sam-helper");
+    for headers in [
+        vec![("x-amzn-oidc-data", "forged-for-dana")],
+        vec![("authorization", "Bearer gat_made-up")],
+        vec![("authorization", "Bearer never-used")],
+        vec![("cookie", "glass_agents=never-used")],
+        vec![],
+    ] {
+        let refused = front.handle(&get("/api/v1/agents", &headers)).await;
+        assert_eq!(refused.status, 401, "{headers:?}");
+    }
+    // The page too: nothing for no one.
+    assert_eq!(front.handle(&get("/", &[])).await.status, 401);
+    // Teams isn't tied to people yet: refused, not served as the front.
+    let teams = front
+        .handle(&glass_http::Request {
+            method: "POST".into(),
+            ..get("/api/teams/messages", &[])
+        })
+        .await;
+    assert_eq!(teams.status, 503);
+
+    // glass login: the page asks, the POST sends a one-time code to glass
+    // on the person's own computer, and the code buys a token once.
+    let ask = front
+        .handle(&get(
+            "/login/cli?port=53111&state=0123456789abcdef&host=dana-laptop",
+            &[("x-amzn-oidc-data", "signed-for-dana")],
+        ))
+        .await;
+    assert_eq!(ask.status, 200);
+    let page = String::from_utf8_lossy(&ask.body);
+    assert!(
+        page.contains("Let glass on dana-laptop use your agents?"),
+        "{page}"
+    );
+    assert!(
+        ask.headers
+            .iter()
+            .any(|(k, v)| *k == "Content-Security-Policy" && v.contains("http://127.0.0.1:53111"))
+    );
+    let allow = front
+        .handle(&glass_http::Request {
+            method: "POST".into(),
+            body: b"port=53111&state=0123456789abcdef&host=dana-laptop".to_vec(),
+            ..get("/login/cli", &[("x-amzn-oidc-data", "signed-for-dana")])
+        })
+        .await;
+    assert_eq!(allow.status, 303);
+    let location = allow
+        .headers
+        .iter()
+        .find(|(k, _)| *k == "Location")
+        .map(|(_, v)| v.clone())
+        .unwrap();
+    assert_eq!(
+        location,
+        "http://127.0.0.1:53111/callback?code=gac_for-dana&state=0123456789abcdef"
+    );
+    let exchange = |code: &str| glass_http::Request {
+        method: "POST".into(),
+        ..get(
+            "/api/v1/tokens",
+            &[("authorization", &format!("Bearer {code}"))],
+        )
+    };
+    let token = front.handle(&exchange("gac_for-dana")).await;
+    assert_eq!(json_of(&token)["token"], "gat_issued");
+    assert_eq!(
+        front.handle(&exchange("gac_for-dana")).await.status,
+        401,
+        "once"
+    );
+    assert_eq!(front.handle(&exchange("gat_sams-token")).await.status, 401);
+    // Login's own checks: a port below 1024, or no state, is refused.
+    for bad in [
+        "port=80&state=0123456789abcdef",
+        "port=53111&state=short",
+        "port=53111",
+    ] {
+        let refused = front
+            .handle(&get(
+                &format!("/login/cli?{bad}"),
+                &[("x-amzn-oidc-data", "signed-for-dana")],
+            ))
+            .await;
+        assert_eq!(refused.status, 400, "{bad}");
+    }
+    // Not signed in, no page.
+    let anonymous = front
+        .handle(&get("/login/cli?port=53111&state=0123456789abcdef", &[]))
+        .await;
+    assert_eq!(anonymous.status, 401);
 }

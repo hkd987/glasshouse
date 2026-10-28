@@ -173,6 +173,27 @@ impl ComputerSandbox {
         // Each owner's folder is theirs; this one only lets them through.
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o711))
             .map_err(|e| fail(format!("chmod {}", dir.display()), e))?;
+        // A computer runs as its owner, who must get through every folder
+        // above it to reach its disk: one closed to them (glassd's own
+        // state, 0700) would stop every computer but root's.
+        let dir = dir
+            .canonicalize()
+            .map_err(|e| fail(format!("reading {}", dir.display()), e))?;
+        for above in dir.ancestors().skip(1) {
+            let mode = fs::metadata(above)
+                .map_err(|e| fail(format!("reading {}", above.display()), e))?
+                .permissions()
+                .mode();
+            if mode & 0o001 == 0 {
+                return Err(refuse(format!(
+                    "computers can't live in {}: {} is closed to their owners (mode {:o}); \
+                     put them where every folder above lets others through",
+                    dir.display(),
+                    above.display(),
+                    mode & 0o7777
+                )));
+            }
+        }
         Ok(Self {
             dir,
             hypervisor,

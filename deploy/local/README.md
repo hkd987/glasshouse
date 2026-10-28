@@ -52,6 +52,11 @@ replaced, as the Auto Scaling group's lifecycle hook does.
     with a few hundred MB on it to S3 and wakes it the same, byte for byte.
     Its host is then told it's being replaced, and puts the computer to
     sleep by itself. A second host, which never had it, wakes it.
+  - then `tests/local-aws/people.sh`: two people behind the stand-in load
+    balancer, each reaching only their own agents and computer, and every
+    forged, expired or foreign proof refused (ADR 0067). It makes the
+    front's account, `glass-agents`, as the stack does, so it runs as
+    root.
 - moto keeps objects in memory and doesn't enforce bucket policies or KMS
   key policies. Its speed says nothing about S3's, so time sleeps and wakes
   on AWS.

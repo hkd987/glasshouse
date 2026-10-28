@@ -2,10 +2,15 @@
 //! the web app, the `glass` CLI and Teams use, each call made to glassd
 //! as the person the front acts for.
 //!
-//! Who may call: here, whoever holds the front's token, as a cookie the
-//! sign-in link sets or as `Authorization: Bearer` (the CLI reads it from
-//! the file the front writes). Behind AWS's load balancer, its signed-in
-//! person (ADR 0066, "Identity on a host").
+//! Who may call ([`Mode`]):
+//! - On a laptop or a development host, whoever holds the front's token,
+//!   as a cookie the sign-in link sets or as `Authorization: Bearer` (the
+//!   CLI reads it from the file the front writes). The front acts for the
+//!   account it runs as.
+//! - Behind AWS's load balancer, each request is its signed-in person's
+//!   (ADR 0067): the load balancer's signed claims, or a `glass` token
+//!   glassd issued. The front opens a glassd session for that person for
+//!   the request and nothing else, and glassd checks the proof itself.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -25,6 +30,21 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
 use crate::glassd::{Failure, Glassd};
+
+tokio::task_local! {
+    /// Who this request is for, behind the load balancer (ADR 0067).
+    static PERSON: api::Person;
+}
+
+/// Who the front may act for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// The account it runs as, for whoever holds its token: a laptop or a
+    /// development host. Never off this machine's loopback address.
+    Local,
+    /// Each request's signed-in person, proven to glassd (ADR 0067).
+    LoadBalancer,
+}
 use crate::views::{self, Answered};
 
 /// The cookie the sign-in link sets.
@@ -43,6 +63,7 @@ type Reply<T> = Result<T, Failure>;
 
 pub struct Front {
     pub glassd: Glassd,
+    pub mode: Mode,
     /// The built web app (`apps/agents/dist`).
     pub web: PathBuf,
     /// Whoever holds it may use the API as [`Self::person`].
@@ -67,6 +88,7 @@ struct Changes {
 impl Front {
     pub fn new(
         glassd: Glassd,
+        mode: Mode,
         web: PathBuf,
         token: String,
         person: api::Person,
@@ -76,6 +98,7 @@ impl Front {
         let (cursor, _) = watch::channel(0);
         Arc::new(Self {
             glassd,
+            mode,
             web,
             token,
             person,
@@ -171,8 +194,12 @@ impl Front {
 
     /// Serves until the listener fails.
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
-        tokio::spawn(Arc::clone(&self).follow());
-        tokio::spawn(Arc::clone(&self).teams_loop());
+        // Behind the load balancer each request follows its own person's
+        // events; the front itself sees no one's.
+        if self.mode == Mode::Local {
+            tokio::spawn(Arc::clone(&self).follow());
+            tokio::spawn(Arc::clone(&self).teams_loop());
+        }
         loop {
             let (stream, _) = listener.accept().await?;
             let front = Arc::clone(&self);
@@ -189,11 +216,27 @@ impl Front {
         let _ = glass_http::write_response(&mut stream, response, head_only).await;
     }
 
+    /// The person this request is for: its own, behind the load balancer.
+    pub fn person(&self) -> api::Person {
+        PERSON
+            .try_with(Clone::clone)
+            .unwrap_or_else(|_| self.person.clone())
+    }
+
     pub async fn handle(&self, request: &Request) -> Response {
         let path = request.path.as_str();
         // Microsoft's Bot Framework: its own signed token, never ours.
         if path == "/api/teams/messages" {
+            if self.mode == Mode::LoadBalancer {
+                return error(
+                    503,
+                    "Teams isn't linked to people on this host yet (ADR 0067)",
+                );
+            }
             return self.teams_messages(request).await;
+        }
+        if self.mode == Mode::LoadBalancer {
+            return self.handle_signed_in(request).await;
         }
         if let Some(rest) = path.strip_prefix(api::PREFIX) {
             if let Err(response) = check_origin(request) {
@@ -228,6 +271,229 @@ impl Front {
                 );
         }
         self.file(path).await
+    }
+
+    /// Behind the load balancer: every page and call is its signed-in
+    /// person's, or a `glass` token's. Nothing is served to no one.
+    async fn handle_signed_in(&self, request: &Request) -> Response {
+        let path = request.path.as_str();
+        if let Some(rest) = path.strip_prefix(api::PREFIX) {
+            if let Err(response) = check_origin(request) {
+                return response;
+            }
+            let rest = rest.trim_start_matches('/');
+            // `glass login`'s code, traded once for a token: for no one yet.
+            if rest == "tokens" && request.method == "POST" {
+                return match self.exchange(request).await {
+                    Ok(response) => response,
+                    Err(failure) => error(failure.status, &failure.message),
+                };
+            }
+            let work = self.api(rest, request);
+            return match self.as_person(request, work).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(failure)) | Err(failure) => error(failure.status, &failure.message),
+            };
+        }
+        if path == "/login/cli" {
+            return match self.login_cli(request).await {
+                Ok(response) => response,
+                Err(failure) => error(failure.status, &failure.message),
+            };
+        }
+        if request.method != "GET" && request.method != "HEAD" {
+            return error(405, "method not allowed");
+        }
+        // The page itself: the load balancer has signed its person in.
+        if request.header("x-amzn-oidc-data").is_none() {
+            return error(401, "Sign in through your organization's sign-in");
+        }
+        self.file(path).await
+    }
+
+    /// What proves who this request is for: the load balancer's signed
+    /// claims, or a `glass` token.
+    fn proof(request: &Request) -> Option<glass_api::SessionAs> {
+        if let Some(assertion) = request.header("x-amzn-oidc-data") {
+            return Some(glass_api::SessionAs::LoadBalancer {
+                assertion: assertion.to_owned(),
+            });
+        }
+        let bearer = request
+            .header("authorization")?
+            .strip_prefix("Bearer ")?
+            .trim();
+        bearer
+            .starts_with(glass_api::TOKEN_PREFIX)
+            .then(|| glass_api::SessionAs::Token {
+                token: bearer.to_owned(),
+            })
+    }
+
+    /// Runs `work` as this request's person, through a glassd session of
+    /// its own that glassd opened only after checking the proof.
+    async fn as_person<T>(
+        &self,
+        request: &Request,
+        work: impl std::future::Future<Output = T>,
+    ) -> Reply<T> {
+        let proof = Self::proof(request)
+            .ok_or_else(|| Failure::new(401, "Sign in through your organization's sign-in"))?;
+        let (session, person) = self.glassd.session(&proof).await?;
+        let person = api::Person {
+            id: person.key,
+            name: person.name,
+            email: person.email,
+        };
+        Ok(PERSON.scope(person, Glassd::scoped(session, work)).await)
+    }
+
+    /// `POST /api/v1/tokens` with `Authorization: Bearer gac_…`: the code
+    /// the browser handed `glass login`, traded once for a token.
+    async fn exchange(&self, request: &Request) -> Reply<Response> {
+        let code = request
+            .header("authorization")
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .map(str::trim)
+            .filter(|c| c.starts_with(glass_api::CODE_PREFIX))
+            .ok_or_else(|| Failure::new(401, "Run glass login to sign in"))?;
+        ok(&self.glassd.exchange(code).await?)
+    }
+
+    /// `glass login` (ADR 0067): its browser page, signed in at the load
+    /// balancer. `GET` asks the person; their `POST` gets a one-time code
+    /// from glassd and sends it to `glass` on their own computer, on its
+    /// loopback address. The token itself never passes through the browser.
+    async fn login_cli(&self, request: &Request) -> Reply<Response> {
+        let form = if request.method == "POST" {
+            if let Err(response) = check_origin(request) {
+                return Ok(response);
+            }
+            String::from_utf8_lossy(&request.body).into_owned()
+        } else {
+            request.query.clone()
+        };
+        let port: u16 = query(&form, "port")
+            .and_then(|p| p.parse().ok())
+            .filter(|p| *p >= 1024)
+            .ok_or_else(|| Failure::new(400, "glass login didn't say where it waits"))?;
+        let state = query(&form, "state")
+            .filter(|s| {
+                (16..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric())
+            })
+            .ok_or_else(|| Failure::new(400, "glass login didn't say which login this is"))?;
+        let host = query(&form, "host")
+            .filter(|h| {
+                h.len() <= 64
+                    && h.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
+            })
+            .unwrap_or("your computer");
+        if request.method == "GET" {
+            let me: api::Person = self.as_person(request, async { self.person() }).await?;
+            let page = format!(
+                "<!doctype html><meta charset=\"utf-8\"><title>Sign in glass</title>\
+                 <h1>Let glass on {host} use your agents?</h1>\
+                 <p>Signed in as {name}. glass will reach your agents and your computer as you, \
+                 for 30 days or until you sign it out.</p>\
+                 <form method=\"post\" action=\"/login/cli\">\
+                 <input type=\"hidden\" name=\"port\" value=\"{port}\">\
+                 <input type=\"hidden\" name=\"state\" value=\"{state}\">\
+                 <input type=\"hidden\" name=\"host\" value=\"{host}\">\
+                 <button>Allow</button></form>",
+                name = html_text(&me.name),
+            );
+            return Ok(Response::new(200, "text/html; charset=utf-8", page)
+                .with(
+                    "Content-Security-Policy",
+                    format!("default-src 'none'; form-action 'self' http://127.0.0.1:{port}; frame-ancestors 'none'"),
+                )
+                .with("X-Content-Type-Options", "nosniff")
+                .with("Cache-Control", "no-store"));
+        }
+        let code: glass_api::LoginCode = self
+            .as_person(request, self.glassd.call(methods::TOKEN_CODE, ()))
+            .await??;
+        Ok(
+            Response::new(303, "text/plain; charset=utf-8", "Back to glass")
+                .with(
+                    "Location",
+                    format!(
+                        "http://127.0.0.1:{port}/callback?code={}&state={state}",
+                        code.code
+                    ),
+                )
+                .with("Cache-Control", "no-store"),
+        )
+    }
+
+    /// Live updates behind the load balancer: this request's person's
+    /// events, from a subscription of their own. The cursor is a time in
+    /// milliseconds; anything of theirs that changed after it answers at
+    /// once.
+    async fn events_signed_in(&self, since: u64) -> Reply<api::Events> {
+        let session = Glassd::session_client()
+            .ok_or_else(|| Failure::new(401, "Sign in through your organization's sign-in"))?;
+        // Subscribe first, so nothing between the look and the wait is lost.
+        let _: serde_json::Value = session
+            .call(methods::EVENTS_SUBSCRIBE, serde_json::Value::Null)
+            .await
+            .map_err(Failure::from)?;
+        let now = || u64::try_from(glass_types::Timestamp::now().unix_millis()).unwrap_or(0);
+        let cursor = now();
+        if since == 0 {
+            return Ok(api::Events {
+                cursor,
+                agents: Vec::new(),
+            });
+        }
+        let changed: Vec<String> = self
+            .tasks()
+            .await?
+            .into_iter()
+            .filter(|t| u64::try_from(t.updated_at.unix_millis()).unwrap_or(0) > since)
+            .filter_map(|t| t.persona)
+            .collect();
+        if !changed.is_empty() {
+            return Ok(api::Events {
+                cursor,
+                agents: changed,
+            });
+        }
+        let wait = async {
+            while let Some(note) = session.next_notification().await {
+                if note.method != methods::EVENT {
+                    continue;
+                }
+                match note.params.and_then(|p| serde_json::from_value(p).ok()) {
+                    Some(glass_api::Event::TaskUpdated { task }) => {
+                        if let Some(persona) = task.persona {
+                            return api::Events {
+                                cursor: now(),
+                                agents: vec![persona],
+                            };
+                        }
+                    }
+                    Some(glass_api::Event::TaskRemoved { .. }) => {
+                        return api::Events {
+                            cursor: now(),
+                            agents: Vec::new(),
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            api::Events {
+                cursor: now(),
+                agents: Vec::new(),
+            }
+        };
+        Ok(tokio::time::timeout(EVENTS_WAIT, wait)
+            .await
+            .unwrap_or(api::Events {
+                cursor: since,
+                agents: Vec::new(),
+            }))
     }
 
     fn authorized(&self, request: &Request) -> bool {
@@ -270,7 +536,7 @@ impl Front {
         let parts: Vec<&str> = rest.split('/').collect();
         match (request.method.as_str(), parts.as_slice()) {
             ("GET", ["session"]) => ok(&api::Session {
-                person: self.person.clone(),
+                person: self.person(),
                 org: self.org.clone(),
             }),
             ("GET", ["agents"]) => ok(&self.agents().await?),
@@ -304,7 +570,16 @@ impl Front {
                 let since = query(&request.query, "since")
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
-                ok(&self.events(since).await)
+                if self.mode == Mode::LoadBalancer {
+                    ok(&self.events_signed_in(since).await?)
+                } else {
+                    ok(&self.events(since).await)
+                }
+            }
+            // Signs `glass` out everywhere: every token of the person's goes.
+            ("DELETE", ["tokens"]) if self.mode == Mode::LoadBalancer => {
+                let gone: u32 = self.glassd.call(methods::TOKEN_REVOKE, ()).await?;
+                ok(&serde_json::json!({ "revoked": gone }))
             }
             (
                 _,
@@ -630,7 +905,7 @@ impl Front {
             .await?;
         let record = Answered {
             yes: answer.yes,
-            by: self.person.name.clone(),
+            by: self.person().name,
             at: views::time(&glass_types::Timestamp::now()),
             via: answer.via,
         };
@@ -725,6 +1000,14 @@ fn ok(value: &impl Serialize) -> Reply<Response> {
     let value = serde_json::to_value(value)
         .map_err(|e| Failure::new(500, format!("an answer we couldn't write: {e}")))?;
     Ok(Response::json(200, &value))
+}
+
+/// Text for an HTML page, escaped.
+fn html_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn error(status: u16, message: &str) -> Response {

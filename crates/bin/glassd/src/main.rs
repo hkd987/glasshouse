@@ -482,6 +482,13 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
 
+    // Who signed in on an agent host (ADR 0067): kept beside glassd's state.
+    let people = config.people.as_ref().map(|p| {
+        Arc::new(glass_runtime::people::People::open(
+            config.state_dir.join("people.json"),
+            p.uid_base,
+        ))
+    });
     let mut computers = None;
     let sandbox: Arc<dyn Sandbox> = match config.sandbox.backend {
         SandboxBackend::Jail => {
@@ -557,7 +564,7 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
                 settings
                     .dir
                     .clone()
-                    .unwrap_or_else(|| config.state_dir.join("computers")),
+                    .unwrap_or_else(|| computers_dir(&config.state_dir)),
                 hypervisor,
                 settings.memory_mib,
                 settings.vcpus,
@@ -565,6 +572,16 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             if let Some((store, place)) = computer_store(settings)? {
                 tracing::info!(%place, "agent computers sleep in the store");
                 made = made.with_store(Arc::new(store), place);
+            }
+            // People's computers are theirs in the store by their sign-in,
+            // the same on every host (ADR 0067, ADR 0068).
+            if let Some(people) = &people {
+                let people = Arc::clone(people);
+                made = made.with_owner_keys(glass_computers::sandbox::OwnerKeys::new(move |uid| {
+                    people
+                        .by_uid(uid)
+                        .map_or_else(|| format!("u{uid}"), |p| p.owner_key())
+                }));
             }
             let made = Arc::new(made);
             computers = Some(Arc::clone(&made));
@@ -691,6 +708,16 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // the clock set back, daylight saving ending) doesn't run twice: the
     // runtime claims each minute on disk (ADR 0051).
     runtime.set_routines(org.routines.clone());
+
+    // On an agent host the front acts for people who signed in (ADR 0067).
+    if let (Some(settings), Some(people)) = (&config.people, &people) {
+        runtime.set_identity(identity(settings, Arc::clone(people), &config.state_dir)?);
+        tracing::info!(
+            front = %settings.front_user,
+            dev_people = settings.dev_people,
+            "acting for people the front proves"
+        );
+    }
     {
         let runtime = Arc::clone(&runtime);
         tokio::spawn(async move {
@@ -1157,6 +1184,64 @@ fn metering_event(summary: String, hour: i64, quantity: u32) -> glass_audit::Aud
         "quantity": quantity,
     });
     event
+}
+
+/// Who the front may act for on an agent host, and how glassd checks
+/// it (ADR 0067). AWS's keys for the load balancer's claims are fetched
+/// once per key id, through the egress relay.
+fn identity(
+    settings: &crate::config::PeopleConfig,
+    people: Arc<glass_runtime::people::People>,
+    state_dir: &std::path::Path,
+) -> anyhow::Result<glass_runtime::Identity> {
+    let front = glass_platform::users::by_name(&settings.front_user).with_context(|| {
+        format!(
+            "[people] front_user: there's no account {} on this host",
+            settings.front_user
+        )
+    })?;
+    if settings.load_balancer.is_empty() && !settings.dev_people {
+        anyhow::bail!("[people] needs load_balancer (the stack's load balancer's ARN)");
+    }
+    let base = settings
+        .public_keys_url
+        .clone()
+        .unwrap_or_else(|| glass_gateway_providers::elb::keys_url(&settings.region));
+    let proxy = settings.keys_proxy.clone();
+    let cache: Arc<std::sync::Mutex<std::collections::HashMap<String, glass_crypto::PublicKey>>> =
+        Arc::default();
+    let keys: Arc<glass_runtime::KeyFetch> = Arc::new(move |kid: &str| {
+        if let Some(key) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(kid) {
+            return Ok(key.clone());
+        }
+        let pem = glass_gateway_providers::elb::load_balancer_key(&base, kid, proxy.as_deref())?;
+        let key = glass_crypto::PublicKey::from_pem(&pem)
+            .map_err(|_| format!("the load balancer's key {kid} isn't a P-256 key"))?;
+        cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(kid.to_owned(), key.clone());
+        Ok(key)
+    });
+    Ok(glass_runtime::Identity::new(
+        people,
+        front.uid,
+        settings.load_balancer.clone(),
+        keys,
+        settings.dev_people,
+        state_dir.join("people"),
+    ))
+}
+
+/// Where agent computers live by default: beside glassd's state, not in
+/// it. Each runs as its owner, who must get through every folder above
+/// it, and glassd's state is closed to everyone but root.
+fn computers_dir(state_dir: &std::path::Path) -> PathBuf {
+    let name = state_dir
+        .file_name()
+        .map(|n| format!("{}-computers", n.to_string_lossy()))
+        .unwrap_or_else(|| "glasshouse-computers".into());
+    state_dir.with_file_name(name)
 }
 
 /// Where agent computers sleep (ADR 0065 §11), and its name for people.

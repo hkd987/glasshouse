@@ -90,8 +90,16 @@ enum Command {
     Sleep { agent: String },
     /// Brings an agent's computer back from storage.
     Wake { agent: String },
-    /// Signs this computer in: the address, then the token pasted.
-    Login { url: String },
+    /// Signs this computer in through your organization's sign-in, in your
+    /// browser (ADR 0067). `--paste` takes a token pasted from a
+    /// development front instead.
+    Login {
+        url: String,
+        #[arg(long)]
+        paste: bool,
+    },
+    /// Signs `glass` out everywhere: every token of yours stops working.
+    Logout,
 }
 
 fn main() -> ExitCode {
@@ -161,6 +169,10 @@ impl Api {
                 .post(path, &body)
                 .map_err(|e| anyhow::anyhow!("{e}"))?,
         )
+    }
+
+    fn delete<T: DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
+        Self::read(self.0.delete(path).map_err(|e| anyhow::anyhow!("{e}"))?)
     }
 }
 
@@ -332,8 +344,12 @@ fn wait_for(api: &Api, agent: &str, task: &str, mut offset: u64) -> anyhow::Resu
 }
 
 fn run(command: Command) -> anyhow::Result<()> {
-    if let Command::Login { url } = &command {
-        return login(url);
+    if let Command::Login { url, paste } = &command {
+        return if *paste {
+            login_pasted(url)
+        } else {
+            login(url)
+        };
     }
     let api = Api(client()?);
     match command {
@@ -485,6 +501,14 @@ fn run(command: Command) -> anyhow::Result<()> {
             );
         }
         Command::Login { .. } => unreachable!("handled above"),
+        Command::Logout => {
+            let gone: Value = api.delete("tokens")?;
+            let _ = std::fs::remove_file(config_path()?);
+            println!(
+                "Signed out: {} token(s) of yours stopped working, this one too",
+                gone["revoked"]
+            );
+        }
     }
     Ok(())
 }
@@ -502,10 +526,121 @@ fn answer(api: &Api, approval: &str, yes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Keeps the address and a token pasted from the web app, readable only
-/// by the person.
+/// How long `glass login` waits for the browser.
+const LOGIN_WAIT: Duration = Duration::from_secs(300);
+/// What a one-time login code starts with (glassd's `token.code`).
+const CODE_PREFIX: &str = "gac_";
+
+/// Signs in through the organization's sign-in (ADR 0067): the browser
+/// opens the front's page, behind the load balancer's sign-in; the person
+/// allows `glass`; the front sends a one-time code to this computer's
+/// loopback address, where `glass` waits; `glass` trades the code for a
+/// token. The token itself never passes through the browser.
 fn login(url: &str) -> anyhow::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::io::Read;
+    let url = url.trim_end_matches('/');
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").context("waiting for the browser")?;
+    let port = listener.local_addr()?.port();
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .context("reading /dev/urandom")?;
+    let state: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let host: String = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "-._".contains(*c))
+        .take(64)
+        .collect();
+    let page = format!(
+        "{url}/login/cli?port={port}&state={state}&host={}",
+        if host.is_empty() {
+            "this-computer"
+        } else {
+            &host
+        }
+    );
+    eprintln!("Sign in in your browser: {page}");
+    for opener in ["xdg-open", "open"] {
+        if std::process::Command::new(opener)
+            .arg(&page)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            break;
+        }
+    }
+    let code = wait_for_code(&listener, &state)?;
+    let exchange = AgentsClient::new(url, &code).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let issued: Value = Api(exchange).post("tokens", json!({}))?;
+    let token = issued["token"]
+        .as_str()
+        .context("the front answered without a token")?;
+    keep_token(url, token)
+}
+
+/// The code the browser brings to this computer's loopback address.
+fn wait_for_code(listener: &std::net::TcpListener, state: &str) -> anyhow::Result<String> {
+    use std::io::Read;
+    listener.set_nonblocking(true)?;
+    let started = Instant::now();
+    loop {
+        if started.elapsed() > LOGIN_WAIT {
+            bail!("the browser didn't come back within 5 minutes: run glass login again");
+        }
+        let mut stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        let mut request = vec![0u8; 8192];
+        let n = stream.read(&mut request).unwrap_or(0);
+        let request = String::from_utf8_lossy(&request[..n]);
+        let target = request
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("GET "))
+            .and_then(|rest| rest.split(' ').next())
+            .unwrap_or_default();
+        let field = |name: &str| {
+            target
+                .split_once('?')
+                .map(|(_, q)| q)
+                .unwrap_or_default()
+                .split('&')
+                .filter_map(|pair| pair.split_once('='))
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.to_owned())
+        };
+        let ours = target.starts_with("/callback?") && field("state").as_deref() == Some(state);
+        let code = field("code").filter(|c| ours && c.starts_with(CODE_PREFIX));
+        let said = if code.is_some() {
+            "Signed in. You can close this tab and go back to glass."
+        } else {
+            "That isn't the sign-in glass is waiting for."
+        };
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{said}",
+            said.len()
+        );
+        if let Some(code) = code {
+            return Ok(code);
+        }
+    }
+}
+
+/// Keeps the address and a token pasted from a development front.
+fn login_pasted(url: &str) -> anyhow::Result<()> {
     let url = url.trim_end_matches('/');
     eprint!("Paste the token from {url} (Settings, Command line): ");
     let _ = std::io::stderr().flush();
@@ -515,6 +650,13 @@ fn login(url: &str) -> anyhow::Result<()> {
     if token.is_empty() {
         bail!("no token");
     }
+    keep_token(url, token)
+}
+
+/// Checks the token, then keeps it with the address, readable only by the
+/// person.
+fn keep_token(url: &str, token: &str) -> anyhow::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
     let check = Api(AgentsClient::new(url, token).map_err(|e| anyhow::anyhow!("{e}"))?);
     let session: api::Session = check.get("session")?;
     let path = config_path()?;

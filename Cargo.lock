@@ -1711,6 +1711,7 @@ dependencies = [
  "glass-app-system",
  "glass-audit",
  "glass-computers",
+ "glass-crypto",
  "glass-first-party",
  "glass-gateway",
  "glass-gateway-providers",

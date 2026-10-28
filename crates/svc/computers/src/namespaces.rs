@@ -82,6 +82,10 @@ const ETC: &[&str] = &[
 const ENTER: &str = r#"set -eu
 root=$1 name=$2 sock=$3 work=$4
 shift 4
+if [ ! -d "$root" ]; then
+  echo "its computer's disk can't be reached as its owner: a folder above $root is closed to them" >&2
+  exit 1
+fi
 # The agent owns its disk: a mount point it made a link is refused, never
 # followed.
 for d in proc dev run run/glasshouse; do

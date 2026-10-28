@@ -137,6 +137,9 @@ pub enum EventKind {
     /// A person's agent computer was made, taken over, typed on, handed
     /// back, put to sleep or woken (ADR 0065, ADR 0066).
     Computer,
+    /// The front acted for a signed-in person, was refused, or a token for
+    /// `glass` was issued or revoked (ADR 0067).
+    Session,
 }
 
 /// The policy decision behind an action (AU-1, principle 8).

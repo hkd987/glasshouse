@@ -107,6 +107,13 @@ impl Http {
         Self::build(true, proxy)
     }
 
+    /// HTTPS only, through `proxy` (`http://host:port`) whatever the
+    /// environment says: one call that must take the stack's egress relay,
+    /// as a host's others don't (ADR 0067).
+    pub fn via(proxy: &str) -> Option<Self> {
+        Some(Self::build(true, Some(Proxy::parse(proxy, "")?)))
+    }
+
     /// Plain HTTP too and no proxy, for tests against a local fake server.
     #[cfg(test)]
     pub fn insecure_for_tests() -> Self {

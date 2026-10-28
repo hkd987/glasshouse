@@ -15,6 +15,10 @@
 # ~/.config/glasshouse/agents.json) put things elsewhere;
 # GLASS_DEV_SKIP_BUILD=1 runs what is built. GLASS_DEV_STORE=s3 keeps
 # computers in S3 on this machine (make aws-local, tools/dev/host-run.sh).
+# GLASS_AGENTS_IDENTITY=load-balancer runs it as an agent host for many
+# people (ADR 0067): the front as the account glass-agents (made if
+# missing; root only), behind the stand-in load balancer at
+# $GLASS_LOCAL_LOAD_BALANCER, which sends people to GLASS_AGENTS_LISTEN.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -30,6 +34,17 @@ fi
 
 mkdir -p "$dev" "$run"
 export GLASS_DEV_DIR=$dev GLASS_DEV_RUN=$run GLASS_DEV_COMPUTERS=1
+identity=${GLASS_AGENTS_IDENTITY:-local}
+as_front=()
+if [ "$identity" = load-balancer ]; then
+	# The front's own account, as the stack makes it: the one that may say
+	# who a request is for.
+	if ! id glass-agents >/dev/null 2>&1; then
+		useradd --system --no-create-home --shell /usr/sbin/nologin glass-agents
+	fi
+	export GLASS_DEV_PEOPLE=1
+	as_front=(setpriv --reuid=glass-agents --regid=glass-agents --init-groups)
+fi
 case "${GLASS_AGENTS_MODEL:-scripted}" in
 anthropic)
 	key=${GLASS_ANTHROPIC_API_KEY:-}
@@ -72,7 +87,8 @@ token_file=()
 if [ -n "${GLASS_AGENTS_TOKEN_FILE:-}" ]; then
 	token_file=(--token-file "$GLASS_AGENTS_TOKEN_FILE")
 fi
-"$bin/glass-agents" --listen "$listen" --control-socket "$run/control.sock" \
-	--web "$repo/apps/agents/dist" --name "${GLASS_AGENTS_NAME:-Dana Alvarez}" "${token_file[@]}" &
+"${as_front[@]}" "$bin/glass-agents" --listen "$listen" --control-socket "$run/control.sock" \
+	--web "$repo/apps/agents/dist" --name "${GLASS_AGENTS_NAME:-Dana Alvarez}" \
+	--identity "$identity" "${token_file[@]}" &
 front=$!
 wait "$front"

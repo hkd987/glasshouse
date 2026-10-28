@@ -3,9 +3,14 @@
 //! glassd on its host. Everything an agent does still goes through glassd:
 //! the front only asks it, as the person it acts for.
 //!
-//! As it starts it writes where it listens and its token to the person's
-//! `~/.config/glasshouse/agents.json` (0600), which `glass` reads, and
-//! prints the link that signs a browser in.
+//! Two ways to run (`--identity`):
+//! - `local` (a laptop, development): it acts for the account that runs
+//!   it. As it starts it writes where it listens and its token to the
+//!   person's `~/.config/glasshouse/agents.json` (0600), which `glass`
+//!   reads, and prints the link that signs a browser in. It won't listen
+//!   anywhere but this machine's loopback address.
+//! - `load-balancer` (an agent host, ADR 0067): each request is its
+//!   signed-in person's, proven to glassd; `glass login` gets a token.
 
 mod glassd;
 mod server;
@@ -51,6 +56,16 @@ struct Args {
     /// the person's Entra object id and where to keep their chat.
     #[arg(long)]
     teams: Option<PathBuf>,
+    /// Who it acts for: `local` (the account that runs it) or
+    /// `load-balancer` (each request's signed-in person, ADR 0067).
+    #[arg(long, value_enum, default_value = "local")]
+    identity: Identity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Identity {
+    Local,
+    LoadBalancer,
 }
 
 fn main() -> ExitCode {
@@ -112,6 +127,17 @@ fn write_token_file(path: &std::path::Path, url: &str, token: &str) -> anyhow::R
 }
 
 async fn run(args: Args) -> anyhow::Result<()> {
+    // Acting for whoever runs it is for this machine only: anywhere else,
+    // each request must be its own signed-in person's.
+    if args.identity == Identity::Local && !args.listen.ip().is_loopback() {
+        anyhow::bail!(
+            "--identity local listens on this machine's loopback address only; behind a load \
+             balancer, use --identity load-balancer"
+        );
+    }
+    if args.identity == Identity::LoadBalancer && args.teams.is_some() {
+        anyhow::bail!("Teams isn't linked to people on a shared host yet (ADR 0067)");
+    }
     let login = glass_platform::users::by_uid(glass_platform::users::effective_uid())
         .map(|u| u.name)
         .or_else(|| std::env::var("USER").ok())
@@ -126,19 +152,25 @@ async fn run(args: Args) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("listening on {}", args.listen))?;
     let url = format!("http://{}", listener.local_addr()?);
-    let token_file = match args.token_file {
-        Some(path) => path,
-        None => {
-            let home = std::env::var("HOME").context("HOME isn't set")?;
-            PathBuf::from(home).join(".config/glasshouse/agents.json")
-        }
-    };
-    write_token_file(&token_file, &url, &token)?;
-    tracing::info!(
-        "Glasshouse Agents for {} at {url}/?token={token} (glass reads {})",
-        person.name,
-        token_file.display()
-    );
+    if args.identity == Identity::Local {
+        let token_file = match &args.token_file {
+            Some(path) => path.clone(),
+            None => {
+                let home = std::env::var("HOME").context("HOME isn't set")?;
+                PathBuf::from(home).join(".config/glasshouse/agents.json")
+            }
+        };
+        write_token_file(&token_file, &url, &token)?;
+        tracing::info!(
+            "Glasshouse Agents for {} at {url}/?token={token} (glass reads {})",
+            person.name,
+            token_file.display()
+        );
+    } else {
+        tracing::info!(
+            "Glasshouse Agents at {url}, for each request's signed-in person (glass login {url})"
+        );
+    }
     let teams = match &args.teams {
         Some(path) => {
             let text = std::fs::read_to_string(path)
@@ -150,8 +182,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
         }
         None => None,
     };
+    let mode = match args.identity {
+        Identity::Local => server::Mode::Local,
+        Identity::LoadBalancer => server::Mode::LoadBalancer,
+    };
     let front = server::Front::new(
         glassd::Glassd::new(args.control_socket),
+        mode,
         args.web,
         token,
         person,

@@ -28,6 +28,10 @@
 # stand-ins: any AWS keys in the environment are kept from glassd.
 # GLASS_DEV_HOST names this host to the stand-in metadata service (default
 # dev), for tests of a host being replaced.
+# GLASS_DEV_PEOPLE=1 makes it an agent host for many people (ADR 0067): the
+# front, as the account glass-agents, acts for whoever the stand-in load
+# balancer signed in (make aws-local), and glassd checks its signed claims
+# with the stand-in's public key.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -57,6 +61,23 @@ fi
 backend=host-insecure
 if [ -n "${GLASS_DEV_COMPUTERS:-}" ]; then
 	backend=computers
+fi
+
+people=""
+if [ -n "${GLASS_DEV_PEOPLE:-}" ]; then
+	[ -s "$repo/build/local-aws/env" ] || {
+		echo "host-run: GLASS_DEV_PEOPLE=1 needs the stand-in load balancer: make aws-local" >&2
+		exit 1
+	}
+	# shellcheck source=/dev/null
+	. "$repo/build/local-aws/env"
+	people="
+# The front acts for people the load balancer signed in (ADR 0067).
+[people]
+front_user = \"glass-agents\"
+load_balancer = \"$GLASS_LOCAL_SIGNER\"
+region = \"$GLASS_LOCAL_REGION\"
+public_keys_url = \"$GLASS_LOCAL_PUBLIC_KEYS\""
 fi
 
 store="store = \"folder\"
@@ -119,6 +140,7 @@ agent_dirs = ["$bin"]
 $store
 sleep_after_idle_minutes = ${GLASS_DEV_IDLE_MINUTES:-30}
 $metering
+$people
 
 [snapshots]
 backend = "copy"

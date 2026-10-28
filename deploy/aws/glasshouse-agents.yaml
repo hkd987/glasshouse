@@ -909,6 +909,8 @@ Resources:
 
               [front]
               url = "https://${DomainName}"
+              # Each request's signed-in person, proven to glassd (ADR 0067).
+              identity = "load-balancer"
               listen = "0.0.0.0:8443"
               tls_cert = "/etc/glasshouse/tls/host.crt"
               tls_key = "/etc/glasshouse/tls/host.key"
@@ -955,6 +957,15 @@ Resources:
               product_code = "${MarketplaceProductCode}"
               dimension = "agent_computer_hours"
               region = "${AWS::Region}"
+
+              # The front (as glass-agents) acts for each request's signed-in
+              # person; glassd checks the load balancer's signed claims itself
+              # (ADR 0067), with AWS's keys fetched through the egress relay.
+              [people]
+              front_user = "glass-agents"
+              load_balancer = "${LoadBalancer}"
+              region = "${AWS::Region}"
+              keys_proxy = "http://${RelayAddress.DNSName}:3128"
               EOF
 
               # The load balancer speaks HTTPS to the hosts so people's

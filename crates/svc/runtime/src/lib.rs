@@ -33,9 +33,11 @@ pub mod hwpatch;
 mod labels;
 mod model;
 pub mod osupdate;
+pub mod people;
 mod routines;
 mod runtime;
 mod seat;
+mod sessions;
 mod studio;
 mod supervise;
 pub mod system;
@@ -58,6 +60,7 @@ pub use control_api::ControlApi;
 pub use error::RuntimeError;
 pub use runtime::{RunningAgent, Runtime, RuntimeParts, SettingsHandle};
 pub use seat::WAKE_WAIT;
+pub use sessions::{Identity, KeyFetch};
 pub use studio::StudioSurroundings;
 
 /// The built-in tool every agent has for keeping its tile caption and

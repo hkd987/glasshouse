@@ -54,6 +54,10 @@ impl AgentsClient {
         self.call("POST", path, body.to_string().as_bytes())
     }
 
+    pub fn delete(&self, path: &str) -> Result<Answer, ProviderError> {
+        self.call("DELETE", path, b"")
+    }
+
     fn call(&self, method: &str, path: &str, body: &[u8]) -> Result<Answer, ProviderError> {
         let url = format!("{}/api/v1/{}", self.url, path.trim_start_matches('/'));
         let auth = format!("Bearer {}", self.token);

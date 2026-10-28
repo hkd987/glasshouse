@@ -92,6 +92,10 @@ pub struct Config {
     /// (ADR 0066), on hosts the stack made.
     #[serde(default)]
     pub metering: Option<crate::metering::MeteringConfig>,
+    /// `[people]`: on an agent host, the front acts for people who signed
+    /// in, each with an account of their own here (ADR 0067).
+    #[serde(default)]
+    pub people: Option<PeopleConfig>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<CatalogEntry>,
 }
@@ -375,6 +379,41 @@ impl Default for SandboxConfig {
             computers: ComputersConfig::default(),
         }
     }
+}
+
+/// `[people]`: who the front may act for on an agent host (ADR 0067). The
+/// stack writes it; a laptop has none.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeopleConfig {
+    /// The front's account (`glass-agents`): the one that may say who a
+    /// connection is for.
+    pub front_user: String,
+    /// This stack's load balancer's ARN: its signed claims' `signer`.
+    #[serde(default)]
+    pub load_balancer: String,
+    /// The load balancer's Region, for AWS's keys.
+    #[serde(default)]
+    pub region: String,
+    /// Another place for AWS's keys: a stand-in on this machine
+    /// (deploy/local).
+    #[serde(default)]
+    pub public_keys_url: Option<String>,
+    /// The stack's egress relay, `http://host:3128`: AWS's keys come
+    /// through it, and nothing else of glassd's does.
+    #[serde(default)]
+    pub keys_proxy: Option<String>,
+    /// Development only: the front may name anyone. Never in a shipped
+    /// config.
+    #[serde(default)]
+    pub dev_people: bool,
+    /// The first uid people get on this host.
+    #[serde(default = "people_uid_base")]
+    pub uid_base: u32,
+}
+
+fn people_uid_base() -> u32 {
+    200_000
 }
 
 /// `[sandbox.computers]`: agents keep computers of their own between tasks

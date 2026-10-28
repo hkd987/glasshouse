@@ -1,6 +1,6 @@
 # 0067. Each person reaches only their own agents' computers
 
-Status: **Accepted, being built** (2026-10-28). The owner: "We also need
+Status: **Accepted, built** (2026-10-28), but for Teams (below). The owner: "We also need
 to make sure people can only access their computers and not others
 security and auth is important." Settles ADR 0066's open "Identity on a
 host".
@@ -80,7 +80,52 @@ host".
      assertions. glassd accepts those only when its config says
      `dev_people = true`, which a shipped config never sets.
 
+## As built
+- glassd's `[people]` names the front's account (`glass-agents`), the
+  load balancer's ARN and the egress relay. The registry
+  (`people.json`, 0600) keeps people, the hashes of their tokens, and
+  one-time login codes. People's uids start at 200000.
+- `session.as` comes from the front's uid only. Any other account is
+  refused, with good claims too, and the refusal is recorded. The
+  front's own account gets nothing without a session.
+- The front opens one glassd session per request, as that request's
+  person (a task-local connection). Its live updates follow that
+  person's events only, with a time cursor, so nothing of anyone else's
+  reaches them.
+- One record line per person and kind of proof every ten minutes, since
+  sessions are per request. Every refusal is recorded, every token
+  issued, every revocation.
+- A computer's key in the store is its owner's sign-in subject, hashed
+  (`p` + 24 hex), so any host wakes it for them (ADR 0068).
+- **`glass login`** (the owner asked how the CLI and desktop get a token):
+  1. `glass` waits on this computer's loopback address and opens the
+     browser at the front's `/login/cli`, which the load balancer signs
+     the person into.
+  2. The page asks "Let glass on <computer> use your agents?".
+  3. Allowing it gets glassd to issue a one-time code (2 minutes). The
+     browser takes it to `glass` on `127.0.0.1`.
+  4. `glass` trades it once (`POST /api/v1/tokens`, the code as the
+     bearer, which the stack's API rule lets through) for a token. The
+     token is kept in `~/.config/glasshouse/agents.json` (0600) for 30
+     days.
+
+  The token itself never passes through the browser. `glass logout`
+  revokes all of the person's tokens. The Glasshouse desktop signs in the
+  same way, keeping its token in the person's keyring. Trading the
+  desktop's own sign-in token for one is a later refinement.
+- Tested: `tests/local-aws/people.sh` (37 checks, two people behind the
+  stand-in load balancer), runtime `people::tests` and front
+  `adr0067_*`.
+- Found by testing two people: computers lived inside glassd's state
+  folder, which is closed to everyone but root. Every computer whose
+  owner wasn't root, a laptop user's too, couldn't reach its own disk.
+  Computers now live beside the state folder, and the sandbox refuses to
+  start where a folder above them is closed to their owners.
+
 ## What it doesn't do yet
+- **Teams on a shared host.** The front refuses Teams' calls in
+  load-balancer mode until glassd checks the Bot Connector's token itself
+  and the one-time link (decision 4) ties an Entra id to a person.
 - **Delegates** (a manager's assistant answering for them) and IT's view
   of everyone's agents (as root sees all on a laptop) are later, each with
   its own record.

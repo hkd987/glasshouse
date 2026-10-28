@@ -211,6 +211,7 @@ aws-local-test: aws-local apps-build ## Agent computers to S3 and back, and mete
 		GLASS_LOCAL_PRODUCT_CODE="$$GLASS_LOCAL_PRODUCT_CODE" \
 		cargo test -p glass-gateway-providers -p glass-computers --lib -- --ignored local_aws
 	tests/local-aws/agents-s3.sh
+	tests/local-aws/people.sh
 
 .PHONY: aws-lint
 aws-lint: ## The stack a buyer deploys on AWS (deploy/aws): cfn-lint, installed into build/tools/cfn-lint on first use

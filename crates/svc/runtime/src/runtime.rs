@@ -105,6 +105,8 @@ pub struct Runtime {
     pub(crate) seat_user: tokio::sync::watch::Sender<Option<String>>,
     /// People's routines (DA-4), set once at startup. Unset, nobody has any.
     pub(crate) routines: std::sync::OnceLock<glass_app_routines::Routines>,
+    /// Who the front may act for, on an agent host (ADR 0067).
+    pub(crate) identity: std::sync::OnceLock<crate::Identity>,
     /// Kernel patches tried in boot environments of their own (ADR 0057):
     /// one at a time, under this lock.
     hardware: Mutex<crate::hwpatch::Store>,
@@ -209,6 +211,7 @@ impl Runtime {
             wakes: tokio::sync::watch::Sender::new(0),
             seat_file: std::sync::OnceLock::new(),
             routines: std::sync::OnceLock::new(),
+            identity: std::sync::OnceLock::new(),
             seat_user: tokio::sync::watch::Sender::new(None),
         });
         // Settings that list apps by id (DK-1) show them by the names the

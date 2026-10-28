@@ -18,6 +18,7 @@ glass-app-routines.workspace = true
 glass-app-system.workspace = true
 glass-first-party.workspace = true
 glass-gateway.workspace = true
+glass-crypto.workspace = true
 glass-gateway-providers.workspace = true
 glass-managed.workspace = true
 hex.workspace = true

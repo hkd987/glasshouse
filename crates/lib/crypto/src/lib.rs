@@ -201,6 +201,22 @@ impl PublicKey {
         self.bytes
     }
 
+    /// From a PEM `PUBLIC KEY` (SubjectPublicKeyInfo), as AWS publishes its
+    /// load balancers' keys: P-256 only, checked to be on the curve.
+    pub fn from_pem(pem: &str) -> Result<Self> {
+        let key = EcKey::public_key_from_pem(pem.as_bytes()).map_err(|_| CryptoError::BadKey)?;
+        if key.group().curve_name() != Some(Nid::X9_62_PRIME256V1) {
+            return Err(CryptoError::BadKey);
+        }
+        let group = group()?;
+        let mut ctx = BigNumContext::new()?;
+        let bytes = key
+            .public_key()
+            .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+            .map_err(|_| CryptoError::BadKey)?;
+        Self::from_bytes(&bytes)
+    }
+
     /// Whether `signature` is this key's over `message`.
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
         if signature.len() != SIGNATURE_LEN {
@@ -485,5 +501,36 @@ pub mod testing {
         pt: &[u8],
     ) -> Result<Sealed> {
         seal_with(ephemeral, to, info, aad, pt)
+    }
+}
+
+#[cfg(test)]
+mod pem_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn pem_of(public: &PublicKey) -> String {
+        String::from_utf8(public.key.public_key_to_pem().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn adr0067_a_load_balancers_pem_key_verifies_its_signatures() {
+        let secret = SecretKey::generate().unwrap();
+        let public = secret.public().unwrap();
+        let read = PublicKey::from_pem(&pem_of(&public)).unwrap();
+        assert_eq!(read, public);
+        let signature = secret.sign(b"header.claims").unwrap();
+        assert!(read.verify(b"header.claims", &signature));
+        assert!(!read.verify(b"header.other", &signature));
+    }
+
+    #[test]
+    fn adr0067_only_a_p256_public_key_is_taken() {
+        let p384 = EcKey::generate(&EcGroup::from_curve_name(Nid::SECP384R1).unwrap()).unwrap();
+        let pem = String::from_utf8(p384.public_key_to_pem().unwrap()).unwrap();
+        assert!(PublicKey::from_pem(&pem).is_err());
+        assert!(PublicKey::from_pem("not a key").is_err());
+        assert!(PublicKey::from_pem("").is_err());
     }
 }

@@ -19,11 +19,25 @@ use crate::{Caller, Runtime};
 
 pub struct ControlApi {
     rt: Arc<Runtime>,
+    /// Connections the front said who they're for (ADR 0067): by
+    /// connection, the person as a caller and how they were proven.
+    sessions: std::sync::Mutex<std::collections::HashMap<u64, (Caller, glass_api::PersonView)>>,
 }
 
 impl ControlApi {
     pub fn new(rt: Arc<Runtime>) -> Self {
-        Self { rt }
+        Self {
+            rt,
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn session(&self, conn: &Connection) -> Option<(Caller, glass_api::PersonView)> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&conn.id())
+            .cloned()
     }
 }
 
@@ -34,11 +48,47 @@ impl Handler for ControlApi {
         method: String,
         params: Value,
     ) -> Result<Value, RpcError> {
-        let caller = self
-            .rt
-            .caller(conn.peer().uid)
-            .ok_or_else(|| RpcError::permission_denied("unknown user"))?;
         let rt = &self.rt;
+        let peer = conn.peer().uid;
+        // Who this connection is for: a person the front proved (ADR 0067),
+        // or the account the kernel says is calling.
+        let session = self.session(&conn);
+        match method.as_str() {
+            methods::SESSION_AS => {
+                if session.is_some() {
+                    return Err(RpcError::permission_denied(
+                        "this connection already acts for someone",
+                    ));
+                }
+                let proof: glass_api::SessionAs = parse_params(params)?;
+                let (caller, person) = blocking(|| rt.act_as(peer, &proof))?;
+                self.sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(conn.id(), (caller, person.clone()));
+                return to_result(&person);
+            }
+            methods::TOKEN_EXCHANGE => {
+                let exchange: glass_api::TokenExchange = parse_params(params)?;
+                return to_result(&blocking(|| rt.token_exchange(peer, &exchange.code))?);
+            }
+            _ => {}
+        }
+        let caller = match &session {
+            Some((caller, _)) => caller.clone(),
+            None => {
+                // On an agent host the front's own account has nothing of
+                // its own: it says who it acts for, or it's refused.
+                if rt.identity().is_some_and(|i| i.front_uid == peer) {
+                    return Err(RpcError::permission_denied(
+                        "say who you act for first (session.as)",
+                    ));
+                }
+                self.rt
+                    .caller(peer)
+                    .ok_or_else(|| RpcError::permission_denied("unknown user"))?
+            }
+        };
         // Reads stay in memory (task.list, task.get); calls that read or
         // write files run off the async workers that answer everyone else
         // (`blocking`).
@@ -186,8 +236,28 @@ impl Handler for ControlApi {
                 self.forward_events(caller, conn);
                 Ok(Value::Null)
             }
+            methods::SESSION_WHO => match &session {
+                Some((_, person)) => to_result(person),
+                None => Err(RpcError::not_found("this connection acts for no one")),
+            },
+            methods::TOKEN_CODE => {
+                let proven_by = session
+                    .as_ref()
+                    .map(|(_, p)| p.proven_by.clone())
+                    .unwrap_or_default();
+                to_result(&blocking(|| rt.login_code(&caller, &proven_by))?)
+            }
+            methods::TOKEN_REVOKE => to_result(&blocking(|| rt.token_revoke(&caller))?),
             other => Err(RpcError::method_not_found(other)),
         }
+    }
+
+    /// A session ends with its connection.
+    fn disconnected(&self, conn: &Connection) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&conn.id());
     }
 }
 

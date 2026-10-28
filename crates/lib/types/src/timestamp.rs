@@ -22,6 +22,11 @@ impl Timestamp {
         self.0.unix_timestamp()
     }
 
+    /// Milliseconds since the epoch: a cursor finer than a second.
+    pub fn unix_millis(&self) -> i64 {
+        i64::try_from(self.0.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
+    }
+
     /// Wall-clock time of day, `HH:MM:SS`, for tile feeds and timelines.
     pub fn clock(&self) -> String {
         format!(

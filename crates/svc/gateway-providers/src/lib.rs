@@ -22,6 +22,7 @@ mod bedrock;
 pub mod billing;
 mod console;
 mod credits;
+pub mod elb;
 mod http;
 mod kbuild;
 pub mod mail;
