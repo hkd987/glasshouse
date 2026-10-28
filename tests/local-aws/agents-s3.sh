@@ -124,7 +124,12 @@ else
 	fail "woken, but the files differ: before $before; after $after"
 fi
 
+kill -TERM -- "-$stack" 2>/dev/null || true
+wait "$stack" 2>/dev/null || true
+trap - EXIT
 if [ "$failed" = 0 ]; then
+	# Its computer's few hundred MB; the bucket's go with moto.
+	rm -rf "$host"
 	echo "agents-s3: passed"
 else
 	echo "agents-s3: FAILED; logs in $host" >&2
