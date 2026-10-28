@@ -1057,6 +1057,7 @@ impl Live {
                     prompt: query,
                     scope: ScopeRequest::default(),
                     title: None,
+                    computer: None,
                 }))
             }
             Message::CloseCommandBar => {
