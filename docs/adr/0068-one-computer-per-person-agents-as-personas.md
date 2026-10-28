@@ -4,6 +4,8 @@ Status: **Accepted, built** (2026-10-28). The owner: "Each user gets their
 own computer they can send directions into, maybe they have multiple
 agents personas in their desktop UI but each one routes to the human's
 computer." This replaces ADR 0066's "each agent has a computer of its own".
+Since ADR 0073, a person's computer is their session and their home on a
+pooled host, and `/work/<persona>` moves into their home.
 
 ## Context
 - ADR 0066 gave every agent a computer of its own. A person with a

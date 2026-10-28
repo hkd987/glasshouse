@@ -3,7 +3,9 @@
 Status: **Accepted, slice 1 built** (2026-10-28). The owner: "When I click
 in from the agent desktop app to the agent OS to take over, I don't want to
 just click into the CLI I want to take over the full glasshouse OS with the
-visuals".
+visuals". Since ADR 0073, this is the dedicated-machine path: pooled
+people's desktops are sessions on shared hosts, agents run as the person,
+and take-over moves to agents' own screens.
 
 ## Context
 - Each person has one computer that their agents share (ADR 0065, 0066,

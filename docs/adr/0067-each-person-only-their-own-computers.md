@@ -3,7 +3,9 @@
 Status: **Accepted, built** (2026-10-28), but for Teams (below). The owner: "We also need
 to make sure people can only access their computers and not others
 security and auth is important." Settles ADR 0066's open "Identity on a
-host".
+host". ADR 0073 changes two things: a person's uid becomes the same on
+every host (allocated once, in the stack's shared table), and agents run
+as the person, not root inside.
 
 ## Context
 - On a laptop, glassd knows who is calling by the uid the kernel reports

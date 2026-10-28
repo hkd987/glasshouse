@@ -2,6 +2,8 @@
 
 Status: **Accepted, being built**. Each agent's own computer is replaced
 by one computer per person with their agents as personas on it (ADR 0068).
+Agent hosts become Glasshouse OS machines shared by many people, and
+agents run as the person, not root (ADR 0073).
 Earlier status: (2026-10-27; first slice built 2026-10-28). The owner: "let's build it
 out here and see how it all works together. Really think about this as an
 entire product that we can sell through AWS and get spend that large

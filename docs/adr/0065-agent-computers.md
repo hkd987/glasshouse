@@ -1,7 +1,10 @@
 # 0065. Agent computers
 
 Status: **Proposed** (2026-10-27): the direction is the owner's, the open
-questions below are theirs to settle. The owner: "thinking this is the way
+questions below are theirs to settle. Since 2026-10-28, agents run as the
+person, not root (§1), and pooled people use Glasshouse OS hosts on EC2
+with their home as what's kept (§10, §11; open question 3): ADR 0073.
+Open question 5 is answered by ADR 0075. The owner: "thinking this is the way
 forward with sandboxed VMs for agents moving forward to give them this
 level of OS", and "its own service ... you can handle your agents and then
 you can click into the VM ... this is the big difference from the other
