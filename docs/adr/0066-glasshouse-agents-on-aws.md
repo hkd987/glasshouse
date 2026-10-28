@@ -122,7 +122,9 @@ tenant). `make agents-dev` runs it all on one machine.
       is saved and before the host forgets it.
     - A host that never had it finds the owner's records the first time
       they list their agents, or when a task names a computer it lacks.
-      It shows them asleep, and a task wakes them from the store.
+      It shows them asleep, and a task wakes them from the store. A task
+      that names a computer the host lacks costs an S3 listing of its
+      owner's computers and one read for each of their records.
   - **A host being replaced hands its computers on.** glassd reads the
     instance's Auto Scaling lifecycle state from its metadata every 10
     seconds. On `Terminated` (the stack's `SleepBeforeTermination` hook,
@@ -133,6 +135,10 @@ tenant). `make agents-dev` runs it all on one machine.
       minutes;
     - whatever is still awake then is recorded as losing its work since
       it last slept.
+
+    Once leaving, a host stays leaving until glassd restarts. On AWS the
+    host is terminated anyway; a development host set back to `InService`
+    needs a restart.
   - `specs/tla/AgentComputers.tla` checks the lifecycle through glassd
     dying at any step. It found two bugs, both fixed:
     - a wake after a crash failed forever on what the crash left;
@@ -230,7 +236,9 @@ and a host with KVM: run each against the real thing.
   - parallel transfers, so a computer wakes fast on S3;
   - a lock against GC deleting a chunk a save reused but hasn't recorded
     yet;
-  - manifests signed by the host, so a bucket writer can't change one.
+  - manifests and computers' records signed by the host, so a bucket
+    writer can't change one. Today both are trusted as the bucket is, and
+    only hosts' roles may write it.
 - **Firecracker**: a root-owned socket folder, against the check-then-
   connect race on the jail's sockets.
 - **The template**: it's over CloudFormation's inline size, so it's
