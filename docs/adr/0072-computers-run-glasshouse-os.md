@@ -52,8 +52,14 @@ visuals".
      Watching, the picture is all there is.
    - While they have it, asks to their agents are refused, as for typed
      lines (ADR 0065).
-   - Taking over and handing back are on the record. The pictures and
-     each key are not, as typed lines' keystrokes aren't.
+   - Taking over and handing back are on the record, around everything
+     the person does on the desktop. The pictures and each key or click
+     are not.
+     - This differs from typed lines (ADR 0065). Each typed line runs as
+       root, so it is recorded with its text and refused if the record
+       can't take it.
+     - On the desktop, the person works as their own account, as on a
+       laptop.
 6. **Opening the display turns the computer on**, as opening a laptop
    does. Until it's up, the page says "Your computer is starting".
 7. **The person's desktop is signed in as the sign-in screen does it.**
@@ -151,5 +157,12 @@ visuals".
   use it.
 - **Not yet:** sound, the clipboard, dropping files, a screen sized to the
   window, and a live thumbnail on the agent's card.
+- **What the person does on the desktop** isn't on the host's record,
+  beyond taking over and handing back.
+  - That holds only while the desktop's account can't become root. The
+    development image's `demo` can't: it isn't in wheel, and there's no
+    sudo or doas.
+  - Production keeps it so, or carries the computer's own audit log to
+    the host's.
 - **Not in CI**, and no containment probe run inside one yet: both need
   the image and KVM.
