@@ -1,0 +1,104 @@
+{
+  "title": "Glasshouse: agents that work in the open",
+  "note": "Each scene: what's said, the title on screen, where its picture came from (tag), and the pictures, from the shots folder. tools/video/make.py builds the video.",
+  "scenes": [
+    {
+      "id": "open",
+      "kind": "card",
+      "title": "Glasshouse",
+      "subtitle": "Agents that work in the open",
+      "say": "This is Glasshouse: a desktop operating system, and a cloud service, where AI agents do real work for people, and the company stays in control of every step."
+    },
+    {
+      "id": "problem",
+      "kind": "card",
+      "title": "Agents today get the keys to everything",
+      "bullets": ["Your mail, your files, your company's systems", "IT can't see what they do, or set rules", "Nothing they do can be taken back"],
+      "say": "Most AI agents today run with everything their person can reach: mail, files, the company's systems. IT can't see what they do, can't set rules for them, and nothing they do can be taken back. So most enterprises keep agents at arm's length."
+    },
+    {
+      "id": "desktop",
+      "title": "Agents work beside you, in plain sight",
+      "tag": "The desktop, sample data",
+      "shots": ["desktop.png"],
+      "say": "On a Glasshouse computer, agents work beside you as live tiles. You see what each one is doing right now, in plain words: what it's reading, which system it's calling, how far along it is."
+    },
+    {
+      "id": "ask",
+      "title": "Ask in plain words; it gets only what you give it",
+      "tag": "The desktop, sample data",
+      "shots": ["command-bar.png"],
+      "say": "You ask for work from the command bar, the way you'd ask a colleague. The agent gets a sandbox of its own, with only the folders you hand it, and nothing else on your computer."
+    },
+    {
+      "id": "approve",
+      "title": "It asks before anything that matters",
+      "tag": "The desktop, sample data",
+      "shots": ["expanded-email.png"],
+      "say": "When an agent wants to do something that matters, like sending an email, it stops and asks. You see exactly what will go out, word for word, and approve or decline. Which actions ask, which just let you know, and which are never allowed, IT sets for each team, and you can always make your own stricter."
+    },
+    {
+      "id": "undo",
+      "title": "Every change can be undone",
+      "tag": "The desktop, sample data · live, the computer",
+      "shots": ["expanded-rollback.png", "undo.png"],
+      "say": "Before an agent changes a file, Glasshouse takes a snapshot. If you don't like the result, one step puts everything back, and it tells you plainly what it can't recall, like an email that already left."
+    },
+    {
+      "id": "record",
+      "title": "A record nobody can quietly edit",
+      "tag": "Live, the computer",
+      "shots": ["audit.png"],
+      "say": "Every action, every approval and every refusal goes into an audit record that's chained, so it can't be quietly edited. Security teams check it with one command, and see who asked for what, which agent did it, and under which rule."
+    },
+    {
+      "id": "tiers",
+      "title": "IT sets the rules, team by team",
+      "tag": "Live, the admin console",
+      "shots": ["console-tiers.png"],
+      "say": "IT runs all of this from the admin console. For each team, they choose how each kind of action is handled: automatic, notify, ask, or never. They decide which agents a team may use, and which AI models may see which kinds of data."
+    },
+    {
+      "id": "apps-off",
+      "title": "Turn apps off, for their agents too",
+      "tag": "Live, the admin console",
+      "shots": ["console-apps-off.png", "console-impact.png"],
+      "say": "IT can switch whole apps off. Say Calendar, for the whole company, or Mail, for contractors. It's gone from their desktop, the store can't bring it back, and no agent can use it on their behalf. IT sees who's affected before publishing, sends it to a pilot group first, and it's in force on those computers within seconds."
+    },
+    {
+      "id": "agents",
+      "title": "In the cloud: a computer of their own for each person",
+      "tag": "Live, Glasshouse Agents",
+      "shots": ["agents-list.png", "agents-detail.png"],
+      "say": "The same rules run in the cloud. Glasshouse Agents deploys into your own AWS account, and gives each person a computer of their own for their agents. Their agents are personas on it, a reconciler, a researcher, and people direct them from the web, the command line, or Teams."
+    },
+    {
+      "id": "sleep",
+      "title": "Asleep when idle; schedules still run",
+      "tag": "Live, glass and AWS on this machine",
+      "shots": ["schedules.png"],
+      "say": "When nobody's using it, the computer sleeps in your S3 bucket, encrypted with your key. Schedules live in your database, not on the computer, so every weekday at nine still happens: whichever host is up wakes the computer and does the work, once."
+    },
+    {
+      "id": "own",
+      "title": "Everyone reaches only their own",
+      "tag": "Live, the test suites",
+      "shots": ["negative.png"],
+      "say": "People sign in through your company's single sign-on, and the command line gets its token the same way, through the browser. Each person reaches only their own computer. We test it the hard way: forged sign-ins, someone else's agents, approvals and schedules. More than a hundred checks that must fail, do."
+    },
+    {
+      "id": "why",
+      "kind": "card",
+      "title": "Why enterprises say yes",
+      "bullets": ["Control: rules per team, apps switched off, agents IT approves", "Visibility: live tiles, and a record that can't be edited", "Safety: sandboxes, approvals, and undo", "Your cloud: your account, your data, your keys"],
+      "say": "So: control, with rules for each team and apps you can switch off. Visibility, with live tiles and a record that can't be edited. Safety, with sandboxes, approvals and undo. And it runs in your own cloud account, with your data and your keys. That's how an enterprise says yes to agents."
+    },
+    {
+      "id": "close",
+      "kind": "card",
+      "title": "Glasshouse",
+      "subtitle": "Agents: contained, visible, undoable",
+      "say": "Glasshouse. Agents: contained, visible, and undoable."
+    }
+  ]
+}

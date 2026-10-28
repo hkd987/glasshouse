@@ -113,7 +113,7 @@ other, under the same tiers, audit and undo.
 - **Against DynamoDB in moto** (`make aws-local-test`):
   - `adr0069_local_aws_one_claim_holds`: an id is taken once, the second
     claim fails, and a schedule turned off leaves the index;
-  - `tests/local-aws/schedules.sh`, 33 checks on two hosts sharing the
+  - `tests/local-aws/schedules.sh`, 31 checks on two hosts sharing the
     table. Dana's first schedule runs once with both hosts looking. Host
     A is told it's being replaced and sleeps her computer to S3. Her next
     schedule, in London's time, runs on host B, which never had her
