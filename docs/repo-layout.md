@@ -23,16 +23,18 @@ apps/                first-party web apps (ADR 0009, 0024): a TypeScript workspa
                      SDK (apps/sdk) and one folder per app with its manifest.json; their OS
                      actions stay in crates/apps (apps/README.md). apps/console is the
                      admin console's web app, a site glass-console serves (ADR 0023)
+deploy/aws/          the CloudFormation stack a buyer deploys for Glasshouse Agents (ADR 0065 §9,
+                     0066; deploy/aws/README.md), linted by make aws-lint
+deploy/local/        that stack's AWS, simulated on this machine for tests (make aws-local)
 specs/tla/           TLA+ models of key workflows, model-checked by TLC (make tla, ADR 0051)
 tools/               developer tooling (checks, dev runners, screenshots, legal notices)
 docs/                architecture, decisions (adr/), developer guides (dev/)
 ```
 
-Future top-level areas, when they start: the compositor (M2, next to the
-shell in `shell/`), `agents/` (agent
-harness bundles, ADR 0010), `gateway/` if the
-model gateway outgrows its crates (`crates/svc/gateway`,
-`crates/svc/gateway-providers`, ADR 0018).
+Future top-level areas, when they start: `agents/` (agent harness
+bundles, ADR 0010), and `gateway/` if the model gateway outgrows its
+crates (`crates/svc/gateway`, `crates/svc/gateway-providers`, ADR 0018).
+The compositor is in `shell/`, beside the shell.
 
 ## Layering
 

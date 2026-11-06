@@ -293,6 +293,58 @@ pipeline refuses further side effects (fail closed).
   origin of its own under a CSP sandbox with no network, never
   downloaded.
 
+## Glasshouse Agents (ADR 0065 to 0072)
+
+The same glassd, on agent hosts in the buyer's own AWS account
+([deploy/aws/README.md](../deploy/aws/README.md)). Built and tested against
+local stand-ins for AWS and Teams (`make aws-local`), not yet in a real
+account.
+
+```text
+ web app / desktop app / glass CLI / Teams
+        │  HTTPS: the load balancer's SSO, or a person's token
+        ▼
+ glass-agents (the front)  ── session.as, with the person's proof ──►  glassd
+   web app, API, Teams endpoint, metering                               │ computers backend
+                                                                        ▼
+                                              a computer per person (glass-computers):
+                                              namespaces, Firecracker or QEMU; asleep, in S3
+```
+
+- **The front** (`glass-agents`) serves the web app and the API the CLI
+  and the desktop app use, receives Teams' calls, and meters computer
+  hours. It acts only through glassd, and only as the person a request
+  proves it is for (ADR 0067). glassd checks that proof itself:
+  - the load balancer's signed assertion;
+  - a token glassd issued;
+  - for Teams, Microsoft's signed activity (designed in ADR 0067, not
+    built yet).
+- **People are kept apart.** Each person gets an account of their own on
+  the host. Their tasks, approvals, events and computers are theirs alone,
+  as on a laptop, and another person's look as if they don't exist.
+- **One computer per person, kept between tasks** (ADR 0068). Their
+  agents are personas on it.
+  - A task runs in it with its own task socket, so the rules at its edge
+    are the same actions, tiers and audit as in a jail.
+  - The backends behind `glass_computers::hypervisor::Hypervisor`:
+    - Linux namespaces, for development;
+    - Firecracker, through `glass-vmexec` and `glass-vmguest`, tested
+      against a stand-in API;
+    - QEMU running the whole Glasshouse OS, whose desktop the person
+      watches and takes over (ADR 0072).
+- **Sleep and wake.** An idle computer is saved to a content-addressed
+  chunk store (S3, encrypted with the org's KMS key) and removed from the
+  host. Any host wakes it on the next task. A host being replaced puts its
+  computers to sleep first.
+- **Schedules** live in a table every host shares, so they run while a
+  computer sleeps (ADR 0069). IT can turn apps off for agents too (ADR
+  0070).
+- **Designed next:**
+  - shared Glasshouse OS hosts, where agents run as the person in jails
+    and each person's encrypted home is what's kept (ADR 0073);
+  - files moved in and out under IT's rules (ADR 0074);
+  - Microsoft 365 (ADR 0075).
+
 ## Code map
 
 | Crate | Layer | What it owns |
@@ -307,19 +359,34 @@ pipeline refuses further side effects (fail closed).
 | `glass-actions` | lib | The action contract: providers, previews, task context, registry |
 | `glass-managed` | lib | Managed settings between the admin console and devices: signed releases, catalog items and the store rule, catalog-first search, sync and reports (ADR 0023) |
 | `glass-http` | lib | Just enough HTTP/1.1 for our small servers: the bridge's dev mode and the console |
+| `glass-crypto` | lib | Sealing for chat and meetings (ADR 0030), on the base system's OpenSSL only |
+| `glass-script` | lib | Scripts agents run, and routines that run with no model: JavaScript on Boa, every import refused (ADR 0044) |
+| `glass-replay` | lib | A task's tool calls compiled into a script that does the same with no model (ADR 0046) |
+| `glass-agents-api` | lib | The Glasshouse Agents API: what the web app, the `glass` CLI and the desktop app send to the front and read from it (ADR 0066) |
 | `glass-app-files`, `-mail`, `-calendar`, `-system`, `-helpdesk`, `-catalog`, `-artifacts`, `-skills`, `-docs` | apps | Each app's actions (ADR 0013); `catalog.search` is catalog first (GA-2); artifacts, skills and docs live in the shared space (ADR 0033, 0034, 0035); Docs also edits live (`glass_actions::Live`, `app.live`) |
+| `glass-app-chat`, `-meet`, `-people`, `-settings`, `-routines`, `-studio`, `-hardware` | apps | Chat and meetings, sealed (ADR 0030); the org's directory; device settings (ADR 0029); routines (ADR 0047); remixing and making apps (ADR 0032, 0049); hardware fixes as kernel patches (ADR 0057) |
 | `glass-first-party` | svc | The apps the OS ships, as one registry |
 | `glass-broker` | svc | Decisions and the approval desk |
 | `glass-gateway` | svc | The model gateway: the `model.complete` action, redaction, routing over providers with failover, the call record, the secrets stand-in (ADR 0018) |
 | `glass-gateway-providers` | svc | Everything that leaves the machine: Anthropic Messages, Amazon Bedrock and OpenRouter over HTTPS, the device's client for its admin console, Stripe, and the billing relay's two connections (ADR 0040); the only crate with an outbound HTTP and TLS stack |
 | `glass-tailoring` | svc | Personal layers on agents: customization points, versions, re-checks (ADR 0014) |
 | `glass-runtime` | svc | Tasks, pipeline, supervision, undo, both APIs |
-| `glassd`, `glassctl`, `glass-mcp`, `glass-app-bridge`, `glass-demo-agent`, `glass-it-agent`, `glass-desktop-agent`, `glass-claude-runner`, `glass-skill-evals`, `glass-probe` | bin | Executables |
+| `glass-computers` | svc | Glasshouse Agents' computers: one per person, kept between tasks, slept to the chunk store; namespaces, Firecracker and QEMU backends (ADR 0065, 0066, 0072) |
+| `glass-teams` | svc | The Teams relay's logic: Bot Framework tokens checked, approval cards made; no network of its own (ADR 0065 §13) |
+| `glassd`, `glassctl`, `glass-mcp`, `glass-app-bridge`, `glass-demo-agent`, `glass-it-agent`, `glass-desktop-agent`, `glass-hardware-agent`, `glass-claude-runner`, `glass-skill-evals`, `glass-probe`, `glass-app-try` | bin | Executables |
+| `glass-agents`, `glass` | bin | Glasshouse Agents' front (the web app, the API, the Teams endpoint, metering) and its CLI (ADR 0066, 0067) |
+| `glass-vmexec`, `glass-vmguest` | bin | A task's process run in a Firecracker computer, over vsock: the host side and the guest's exec service (ADR 0065 §10) |
+| `glass-release`, `glass-kpatch`, `glass-kbuild` | bin | Release tools and services: signing OS updates (ADR 0061), and building and signing kernel patches (ADR 0057). Never ship in the image |
 | `glass-console` | bin | The org's admin console server (AD-6, ADR 0023): policy, catalog, fleet, signing. Runs on our web servers, never ships in the image |
 | `glass-media-relay` | svc | The meetings relay (CF-21, ADR 0030): rooms the console admits participants to, RTP forwarded unchanged over str0m, its private API. The only crate that may use str0m |
 | `glass-sfu` | bin | The relay's daemon: one UDP port for media, the private API on loopback. Runs on our servers, never ships in the image |
 | `glass-billing` | bin | The billing relay (ADR 0040): Stripe's one webhook endpoint for every org; queues each payment on disk and pushes it to its org's console, signed with its own key; makes checkouts for consoles. Runs on our servers, never ships in the image |
 | `glass-e2e` | tests | End-to-end scenarios |
-| `@glasshouse/sdk`, Mail, Calendar | apps/ (TypeScript) | The first-party web apps and the SDK they share: bridge client, manifests, attribution, offline reads (ADR 0024, `apps/README.md`) |
+| `@glasshouse/sdk`, Mail, Calendar, Chat, Meet, Docs, Artifacts, Routines, Settings, Store | apps/ (TypeScript) | The first-party web apps and the SDK they share: bridge client, manifests, attribution, offline reads (ADR 0024, `apps/README.md`) |
+| Agents | apps/agents (TypeScript) | Glasshouse Agents' web app, served by `glass-agents` and built into the desktop app (ADR 0066, 0071, 0072) |
 | Admin console | apps/console (TypeScript) | The admin console's web app, served by `glass-console` (ADR 0023) |
 | `glass-shell`, `glass-shell-preview`, `glass-shell-fb` | shell/ (own workspace) | The desktop shell's screens (iced, software rendering), their headless renderer, and the desktop on the console framebuffer with live tiles; a control-API client (ADR 0009, 0016) |
+| `glass-greeter` | shell/ | The sign-in screen: PAM, then `su` for the session (ADR 0019) |
+| `glass-compositor`, `glass-window` | shell/ | The Wayland compositor apps' windows open on, and a native app's window drawn with the shell's renderer (ADR 0009, 0025) |
+| `glass-terminal`, `glass-activity` | shell/ | Terminal and Activity Monitor, native apps (ADR 0025) |
+| `glass-agents-app` | agents-app/ (own workspace) | Glasshouse Agents' desktop app: the web app in a native window, the sign-in in the system's keychain, the tray (ADR 0071) |
