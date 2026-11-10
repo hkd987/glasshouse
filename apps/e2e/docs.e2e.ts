@@ -200,6 +200,52 @@ test("dc3 what one page types shows on the other within the budget, with no audi
   await b.close();
 });
 
+test("dc3 a doc left while the system is away still sends what was typed in it", async ({ browser }) => {
+  const a = await openApp(browser, DOCS_URL);
+  const b = await openApp(browser, `${DOCS_URL}#${docId}`);
+  await opened(b.page);
+  // Another doc to go to: opening it is what closes the first on a page.
+  await a.page.locator("[data-test=new-doc]").click();
+  const dialog = a.page.locator("[data-test=create-dialog]");
+  await dialog.locator("[name=title]").fill("Scratch");
+  await dialog.locator("[data-test=dialog-submit]").click();
+  await expect(dialog).toHaveCount(0);
+  await expect(a.page.locator("[data-test=title]")).toHaveText("Scratch");
+  const other = (await a.page.locator("[data-test=doc]").getAttribute("data-open")) ?? "";
+  await a.page.locator(`[data-test=mine] [data-doc="${docId}"]`).click();
+  await opened(a.page);
+
+  // The system away, for this page: every call it makes fails as it would
+  // with the network gone. (Cutting the context's network also fails the
+  // wait under way, which pauses the editor before a key can be typed.)
+  let away = false;
+  await a.page.route("**/_bridge/**", (route) => (away ? route.abort("internetdisconnected") : route.continue()));
+  await a.page.locator("[data-test=editor] p").last().click();
+  await a.page.waitForTimeout(50);
+  await a.page.keyboard.press("End");
+  await a.page.keyboard.press("Enter");
+  await expect(a.page.locator("[data-test=sync]")).toHaveText("Saved", { timeout: 5000 });
+
+  // A line typed as the system goes away: in the doc on this page, and
+  // not sent.
+  away = true;
+  const line = "Typed as the system went away.";
+  await a.page.keyboard.insertText(line);
+  await expect(a.page.locator("[data-test=editor]")).toContainText(line);
+  await expect(a.page.locator("[data-test=sync]")).toContainText("Offline", { timeout: 20_000 });
+  // The person goes to the other doc; the first is closed on this page
+  // with that line not sent. It used to be thrown out with the doc.
+  await a.page.locator(`[data-test=mine] [data-doc="${other}"]`).click();
+  await expect(a.page.locator("[data-test=title]")).toHaveText("Scratch");
+  await expect(b.page.locator("[data-test=editor]")).not.toContainText(line);
+
+  // The system is back: the line arrives on the other page.
+  away = false;
+  await expect(b.page.locator("[data-test=editor]")).toContainText(line, { timeout: 30_000 });
+  await a.close();
+  await b.close();
+});
+
 test("dc6 the person's agent reads the doc as Markdown", async () => {
   const work = await agent("Read the Q3 launch plan");
   const read = ok(await work.call("doc_read", { doc: docId }))
