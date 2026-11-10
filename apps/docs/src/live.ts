@@ -127,6 +127,25 @@ export class LiveSync {
     return this.#pending.length > 0 || this.#sending;
   }
 
+  /**
+   * For a doc being closed: sends what's unsent, then stops. With the
+   * system away that isn't now: it keeps trying, as it does while the doc
+   * is open, for as long as the page is. Closing used to send once and
+   * stop, so what was typed just before the system went away was thrown
+   * out with the doc. Whether it all went (not, if the system refused it).
+   */
+  async finish(): Promise<boolean> {
+    for (;;) {
+      if (this.#stopped) return this.health !== "refused" && !this.unsent;
+      if (!this.unsent) {
+        this.stop();
+        return true;
+      }
+      await this.flush();
+      if (this.unsent && !this.#stopped) await new Promise((resolve) => setTimeout(resolve, this.#retry));
+    }
+  }
+
   /** Stops pushing and pulling; a pull still waiting is ignored when it answers. */
   stop(): void {
     this.#stopped = true;

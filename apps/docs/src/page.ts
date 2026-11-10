@@ -263,14 +263,16 @@ function hooks(open: Open): Hooks {
 function closeDoc(): void {
   const open = state.open;
   if (!open) return;
-  // Whatever is still unsent goes now, before the session stops.
-  if (open.live) {
-    void open.live.flush();
-    open.live.stop();
-  }
   open.editor?.destroy();
-  open.ydoc?.destroy();
+  open.editor = null;
   state.open = null;
+  // Whatever is still unsent goes before the session stops, and the doc
+  // is kept until it has: with the system away that takes as long as it
+  // is away. (It was sent once and the doc destroyed, so closing a doc,
+  // or opening another, while offline threw away what hadn't gone.)
+  const { live, ydoc } = open;
+  if (live) void live.finish().then(() => ydoc?.destroy());
+  else ydoc?.destroy();
 }
 
 async function openDoc(id: string): Promise<void> {

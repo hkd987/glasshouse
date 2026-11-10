@@ -881,3 +881,48 @@ fn dc1_opening_a_doc_with_10000_updates() {
         b.call("priya", AGENT, READ, json!({ "doc": id })).unwrap();
     });
 }
+
+#[test]
+fn dc3_the_page_knows_the_words_a_closed_session_is_told() {
+    // The Docs page tells "not open, open it again" from a refusal by the
+    // wording (apps/docs/src/live.ts, failureKind). Reworded here so that
+    // it no longer matches, the page would stop sending a doc's edits
+    // where it should open the doc again; its unit test pinned words
+    // glassd doesn't say.
+    let page = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/docs/src/live.ts"),
+    )
+    .unwrap();
+    let line = page
+        .lines()
+        .find(|l| l.contains("return \"not-open\"") && l.contains(".test(message)"))
+        .expect("failureKind's line for a session that isn't open");
+    let pattern = line
+        .split_once("(/")
+        .unwrap()
+        .1
+        .split_once("/i.test")
+        .unwrap()
+        .0;
+    let words: Vec<String> = pattern
+        .split('|')
+        .map(|w| w.trim_start_matches("\\b").to_lowercase())
+        .collect();
+    assert!(words.len() > 2, "{words:?}");
+    let said = crate::NOT_OPEN.to_lowercase();
+    assert!(
+        words.iter().any(|w| said.contains(w.as_str())),
+        "the page looks for one of {words:?}; glassd says {said:?}"
+    );
+    // And the page's own test pins what glassd says, word for word.
+    let pinned = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/docs/test/live.test.ts"),
+    )
+    .unwrap();
+    assert!(
+        pinned.contains(crate::NOT_OPEN),
+        "live.test.ts no longer pins {:?}",
+        crate::NOT_OPEN
+    );
+}

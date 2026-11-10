@@ -237,6 +237,53 @@ test("dc3 an unreachable system keeps what's unsent and sends it when back", asy
   computer.close();
 });
 
+test("dc3 a doc closed while the system is away keeps trying until its edits have gone", async () => {
+  const computer = new Computer();
+  const doc = new Y.Doc();
+  // Away for the next eight tries.
+  const live = new LiveSync({ doc, channel: computer.channel("priya", { offline: 8 }), cursor: 0, intervalMs: 10, waitSecs: 2, retryMs: 20 }).start();
+  const sam = session(computer, "sam");
+  paragraph(doc, "Typed just before the system went away");
+  await until(() => live.health === "offline");
+  // The page closes the doc (or opens another): what's unsent isn't sent
+  // once and thrown away, as it was.
+  let finished: boolean | null = null;
+  void live.finish().then((sent) => (finished = sent));
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(finished, null, "still trying while the system is away");
+  assert.equal(live.stopped, false);
+  // Back: it goes, the other page has it, and only then does the session stop.
+  await until(() => texts(sam.doc)[0] === "Typed just before the system went away");
+  await until(() => finished !== null);
+  assert.equal(finished, true);
+  assert.equal(live.stopped, true);
+  assert.equal(live.unsent, false);
+  // With nothing unsent, closing stops at once.
+  const idle = session(computer, "dana");
+  assert.equal(await idle.live.finish(), true);
+  assert.equal(idle.live.stopped, true);
+  sam.live.stop();
+  computer.close();
+});
+
+test("dc3 a doc whose edits the system refuses stops when closed, and says they didn't go", async () => {
+  const doc = new Y.Doc();
+  const channel: Channel = {
+    push: async () => {
+      throw new BridgeError(403, "You can view this doc, not edit it.");
+    },
+    pull: () => new Promise<Pulled>(() => undefined),
+    reopen: async () => null,
+  };
+  const live = new LiveSync({ doc, channel, cursor: 0, intervalMs: 5_000, retryMs: 10 }).start();
+  paragraph(doc, "no");
+  // Refused at the close's own try: it doesn't try for good, and doesn't
+  // say they went.
+  assert.equal(await live.finish(), false);
+  assert.equal(live.stopped, true);
+  assert.equal(live.health, "refused");
+});
+
 test("dc3 a refused push stops sending and says why", async () => {
   const doc = new Y.Doc();
   const said: string[] = [];
@@ -258,6 +305,9 @@ test("dc3 failures are told apart by name, so the page needs no DOM", () => {
   assert.equal(failureKind(new Offline()), "offline");
   assert.equal(failureKind(new BridgeError(409, "x")), "not-open");
   assert.equal(failureKind(new BridgeError(400, "docs: cv-1 isn't open in this session")), "not-open");
+  // What glassd says today, word for word (crates/apps/docs/src/lib.rs
+  // has a test that it still says it: this page reopens on these words).
+  assert.equal(failureKind(new BridgeError(400, "this doc isn't open in this window; open it again")), "not-open");
   assert.equal(failureKind(new BridgeError(403, "Viewers can't edit")), "refused");
   assert.equal(failureKind(new TypeError("network")), "offline");
 });

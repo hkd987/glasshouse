@@ -80,6 +80,13 @@ fn failed(why: impl std::fmt::Display) -> ActionError {
     ActionError::Failed(why.to_string())
 }
 
+/// What a push or a pull from a window that doesn't have the doc open is
+/// told. The Docs page opens the doc again when it reads these words
+/// (`failureKind` in `apps/docs/src/live.ts`, which goes by the wording),
+/// and loses nothing; reworded so that it doesn't recognize them, it would
+/// take them for a refusal and stop sending. A test keeps the two together.
+pub(crate) const NOT_OPEN: &str = "this doc isn't open in this window; open it again";
+
 fn invalid(why: impl Into<String>) -> ActionError {
     ActionError::InvalidInput(why.into())
 }
@@ -1568,7 +1575,7 @@ impl Live for DocsProvider {
             .get(&session)
             .and_then(|s| s.get(item))
             .map(|o| o.role)
-            .ok_or_else(|| invalid("this doc isn't open in this window; open it again"))?;
+            .ok_or_else(|| invalid(NOT_OPEN))?;
         if !role.edits() {
             return Err(invalid("you can view this doc but not edit it"));
         }
@@ -1621,7 +1628,7 @@ impl Live for DocsProvider {
                     .map(|(_, id)| id.clone())
                     .collect()
             })
-            .ok_or_else(|| invalid("this doc isn't open in this window; open it again"))?;
+            .ok_or_else(|| invalid(NOT_OPEN))?;
         // The cache brought up to date first: what came after the cursor,
         // each update as the cache judged it when it was posted. The
         // cursor moves only as far as nothing earlier can still arrive.
