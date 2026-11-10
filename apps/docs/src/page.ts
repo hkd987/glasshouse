@@ -13,7 +13,7 @@
 // `mount` takes the bridge, so a page with a stand-in bridge can show the
 // app without a system.
 
-import { attributionChip, type Bridge, BridgeError, h, type LivePulled, type LivePushed, Offline, parseAttribution, ready, show, showAttribution } from "@glasshouse/sdk";
+import { attributionChip, type Bridge, BridgeError, h, type LivePulled, type LivePushed, Offline, parseAttribution, ready, show, showAttribution, watch } from "@glasshouse/sdk";
 import * as Y from "yjs";
 
 import {
@@ -62,6 +62,8 @@ interface Open {
   why: string | null;
   /** When someone else last changed it, while open. */
   touched: { by_name: string; at: number } | null;
+  /** Asked for while the system wasn't answering: opened when it does. */
+  waiting?: boolean;
 }
 
 /** This page, to glassd's live session: its own pushes don't come back to it, others' windows' do. */
@@ -295,6 +297,7 @@ async function openDoc(id: string): Promise<void> {
     result = await bridge.call<Opened>("doc.open", { doc: id });
   } catch (error) {
     if (state.open !== open) return;
+    open.waiting = error instanceof Offline;
     state.notice = { text: failure(error, "Opening it"), tone: "bad" };
     render();
     return;
@@ -1351,22 +1354,39 @@ function render(): void {
 }
 
 /** Waits for news and reads it: the list, and the open doc's comments and versions. */
-async function news(): Promise<void> {
-  for (;;) {
-    try {
-      const status = await bridge.status({ waitSecs: 25, since: state.cursor });
-      state.cursor = status.cursor;
-      if (status.changed.includes("docs")) soon();
-      if (state.offline) {
-        state.offline = false;
-        render();
-      }
-    } catch {
-      state.offline = true;
+/**
+ * News of the person's docs (a share, a rename, a comment), and of the
+ * system going away and coming back: the SDK's one wait, which asks a
+ * system that is down less and less often and hears at once that it is
+ * back. (Docs had its own copy, asking every three seconds for as long as
+ * the system was away.)
+ */
+function news(): void {
+  watch(bridge, "docs", state.cursor, () => soon(), {
+    onOffline: (offline) => {
+      state.offline = offline;
+      if (offline || !openWaiting()) render();
+    },
+    // A list that couldn't be loaded says the system is away too
+    // (loadList); any answer says it is there.
+    onAnswer: () => {
+      if (openWaiting() || !state.offline) return;
+      state.offline = false;
       render();
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-    }
-  }
+    },
+  });
+}
+
+/**
+ * Opens the doc the person asked for while the system wasn't answering,
+ * now that it is. It used to say "Opening…" until they clicked it again.
+ */
+function openWaiting(): boolean {
+  const open = state.open;
+  if (!open?.waiting) return false;
+  state.offline = false;
+  void openDoc(open.id);
+  return true;
 }
 
 export async function mount(into: HTMLElement, with_: Bridge): Promise<void> {
@@ -1396,5 +1416,5 @@ export async function mount(into: HTMLElement, with_: Bridge): Promise<void> {
   if (linked) await openDoc(linked);
   else render();
   ready();
-  void news();
+  news();
 }
