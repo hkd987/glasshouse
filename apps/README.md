@@ -174,8 +174,19 @@ session cookie.
   else from outside goes into the page with `h()` and `show()` from the SDK,
   which only create text nodes. Pages are served with a CSP that allows
   nothing but the app's own files and its bridge.
+- **A redraw leaves the person what they were doing.** A page that draws
+  itself whole and can be redrawn while someone is using it (new mail, a
+  timer) draws with `redraw()` (or `patch()`), which changes what is on the
+  page instead of replacing it: the field being typed in keeps its text,
+  caret and the keyboard, a list stays where it was scrolled. Elements are
+  matched by what they are (tag, `type`, `id`, `name`, `data-` attributes),
+  so give rows that come and go a `data-key` (or another `data-` id);
+  `lasting()` marks an element the page keeps and draws as itself. The rules
+  are tested one by one in `e2e/dom.spec.ts`. `show()` replaces.
 - **Refusals are results.** `bridge.call()` returns `{ok, text, data}`; show
-  the text. Only an unreachable system throws (`Offline`).
+  the text. Only an unreachable system throws (`Offline`), and a wait for
+  news (`bridge.status({waitSecs})`) that nobody answers ends as one,
+  instead of leaving the page waiting for good.
 - **Offline is read-only.** Use `bridge.read()` for side-effect-free actions:
   what it loaded is shown when the system can't be reached. Never queue a
   change.

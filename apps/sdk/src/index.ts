@@ -17,7 +17,7 @@ export {
   type Transport,
 } from "./bridge.ts";
 export { Cache, MAX_ENTRIES, memoryStore, type Store } from "./cache.ts";
-export { append, type Attrs, attributionChip, type Child, h, ready, show } from "./dom.ts";
+export { append, type Attrs, attributionChip, type Child, h, lasting, patch, ready, redraw, show } from "./dom.ts";
 export {
   type AppAction,
   type AppCallResult,

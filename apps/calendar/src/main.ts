@@ -111,12 +111,14 @@ async function loadMeetings(): Promise<void> {
 }
 
 function goTo(weekStart: Date): void {
+  state.notice = null;
   state.weekStart = weekStart;
   state.selected = null;
   void loadWeek();
 }
 
 function newEvent(day = dayKey(new Date()), start = "10:00"): void {
+  state.notice = null;
   const [hh = 10, mm = 0] = start.split(":").map(Number);
   const end = `${String(Math.min(hh + 1, 23)).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
   state.draft = { title: "", day, start, end, location: "", notes: "", attendees: "", attendeesField: null, meeting: false, errors: [] };
@@ -242,6 +244,7 @@ function grid(): HTMLElement {
               onclick: () => {
                 state.selected = p.event.id;
                 state.draft = null;
+                state.notice = null;
                 render();
               },
             },
@@ -311,8 +314,10 @@ function offlineBanner(): HTMLElement {
 }
 
 function side(): HTMLElement {
+  // Shown until the person goes somewhere else (another week, an event, a
+  // new one). It was cleared as it was drawn, so the next drawing took it
+  // away, sometimes before it had been on screen at all.
   const notice = state.notice ? h("div", { class: "notice", "data-test": "notice" }, state.notice) : null;
-  state.notice = null;
   const event = state.events.find((e) => e.id === state.selected);
   return h(
     "aside",
@@ -403,7 +408,7 @@ function upcoming(): HTMLElement {
       const attribution = parseAttribution(hold.attribution);
       return h(
         "button",
-        { class: "hold-row", onclick: () => { state.selected = hold.id; render(); } },
+        { class: "hold-row", onclick: () => { state.selected = hold.id; state.notice = null; render(); } },
         h("strong", {}, hold.title),
         h("span", { class: "muted" }, `${longDay(hold.start)} · ${timeRange(hold.start, hold.end)}`),
         showAttribution(attribution, "calendar") && attribution ? attributionChip(attribution.text) : null,

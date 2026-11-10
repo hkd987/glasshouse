@@ -7,7 +7,7 @@
 // glassd says which the person may change. Every change goes through the
 // bridge and the audit log like any action.
 
-import { Bridge, BridgeError, Offline, h, ready, show } from "@glasshouse/sdk";
+import { Bridge, BridgeError, Offline, h, ready, redraw } from "@glasshouse/sdk";
 
 type Value = boolean | number | string | string[];
 
@@ -874,12 +874,17 @@ function row(setting: Setting): HTMLElement {
   );
 }
 
+/**
+ * Draws the page from the state, changing what is on screen to match
+ * instead of replacing it: the page stays where the person scrolled it,
+ * and a field they are typing in keeps what they typed, its caret and the
+ * keyboard. The page redraws itself on a timer (the networks around
+ * change), and replaced whole, a home page or a key being typed when the
+ * timer came was thrown away or saved half-typed.
+ */
 function render(): void {
   const sections = [...new Set(state.settings.map((s) => s.section))];
-  // A change redraws the page: it stays where the person was.
-  const scrolled = root.querySelector(".page")?.scrollTop ?? 0;
-  show(
-    root,
+  redraw(root, () => [
     h("header", { class: "titlebar" }, h("h1", {}, "Settings")),
     h(
       "main",
@@ -904,17 +909,23 @@ function render(): void {
       ),
       state.models ? models(state.models) : null,
     ),
-  );
-  const page = root.querySelector(".page");
-  if (page) page.scrollTop = scrolled;
+  ]);
 }
 
 void load();
-// The networks around change as the person moves: looked at again every
-// few seconds while Settings is open, unless they're typing a password.
+// The networks and devices around change as the person moves: looked at
+// again every few seconds while Settings is open and showing, unless
+// they're in the middle of joining one. What changes only when someone
+// changes it (the screen's brightness, the computer's own state) is looked
+// at a quarter as often: every look is a read the audit log records, and
+// four of them every eight seconds was 1,800 records an hour for a window
+// left open.
+let looks = 0;
 setInterval(() => {
   if (state.busy || state.joining || document.hidden) return;
   // The slider being dragged isn't redrawn under the pointer.
   if (document.activeElement?.getAttribute("name") === "brightness") return;
-  void Promise.all([loadWifi(), loadBrightness(), loadComputer(), loadBluetooth()]).then(render);
+  looks += 1;
+  const seldom = looks % 4 === 0 ? [loadBrightness(), loadComputer()] : [];
+  void Promise.all([loadWifi(), loadBluetooth(), ...seldom]).then(render);
 }, 8000);

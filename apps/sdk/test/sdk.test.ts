@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { parseAttribution, showAttribution } from "../src/attribution.ts";
-import { Bridge, BridgeError, Offline, type Transport } from "../src/bridge.ts";
+import { ANSWER_LIMIT_MS, Bridge, BridgeError, Offline, type Transport } from "../src/bridge.ts";
 import { Cache, MAX_ENTRIES, memoryStore } from "../src/cache.ts";
 import { manifestProblems } from "../src/manifest.ts";
 
@@ -41,12 +41,18 @@ test("ui5 the cache keeps the newest entries per app", () => {
 });
 
 /** A bridge that answers from a script, or is down. */
-function fake(answers: Record<string, { status: number; body: unknown }>): Transport & { down: boolean; calls: string[] } {
+function fake(
+  answers: Record<string, { status: number; body: unknown }>,
+): Transport & { down: boolean; calls: string[]; limits: Record<string, number | undefined> } {
   const transport = {
     down: false,
     calls: [] as string[],
-    async post(endpoint: string, body: unknown) {
+    /** How long each kind of request was given to be answered. */
+    limits: {} as Record<string, number | undefined>,
+    async post(endpoint: string, body: unknown, limitMs?: number) {
       transport.calls.push(`${endpoint} ${JSON.stringify(body)}`);
+      const wait = (body as { wait_secs?: number } | null)?.wait_secs;
+      transport.limits[endpoint === "call" || wait === undefined ? endpoint : `${endpoint} waiting`] = limitMs;
       if (transport.down) throw new TypeError("Failed to fetch");
       const key = endpoint === "call" ? `call ${(body as { action: string }).action}` : endpoint;
       return answers[key] ?? { status: 404, body: { error: "no" } };
@@ -119,6 +125,44 @@ test("ui5 reads show what was loaded when the system can't be reached", async ()
   // Nothing loaded before: nothing to show. And sends never queue.
   await assert.rejects(again.read("mail.list", { folder: "sent" }), Offline);
   await assert.rejects(again.call("mail.send", {}), Offline);
+});
+
+test("ui5 a wait for news ends by itself; a call that may wait for a person doesn't", async () => {
+  const transport = fake({
+    session: { status: 200, body: session },
+    status: { status: 200, body: { open: true, pending: [], cursor: 7 } },
+    live: { status: 200, body: { updates: [], cursor: 0 } },
+    "call mail.send": { status: 200, body: { ok: true, text: "Sent", data: null } },
+  });
+  const bridge = new Bridge({ app: "mail", transport, store: memoryStore() });
+  await bridge.open();
+  await bridge.status();
+  await bridge.status({ waitSecs: 25, since: 7 });
+  await bridge.live({ op: "pull", doc: "d", since: 0, wait_secs: 20 });
+  await bridge.live({ op: "push", doc: "d", update: "AA==" });
+  await bridge.call("mail.send", { to: ["ana@example.com"] });
+  assert.deepEqual(transport.limits, {
+    session: ANSWER_LIMIT_MS,
+    status: ANSWER_LIMIT_MS,
+    // As long as it asked the bridge to wait, and then as long as any answer.
+    "status waiting": 25_000 + ANSWER_LIMIT_MS,
+    "live waiting": 20_000 + ANSWER_LIMIT_MS,
+    live: ANSWER_LIMIT_MS,
+    // Approval can take minutes: nothing gives up on it.
+    call: undefined,
+  });
+
+  // Given up on, a wait is the system not being reached: the page says so
+  // and asks again, where it used to wait for good and hear nothing.
+  const silent: Transport = {
+    post: (_endpoint, _body, limitMs) =>
+      new Promise((_, reject) => {
+        if (limitMs !== undefined) setTimeout(() => reject(new DOMException("timed out", "TimeoutError")), 1);
+      }),
+  };
+  const waiting = new Bridge({ app: "mail", transport: silent, store: memoryStore() });
+  await assert.rejects(waiting.status({ waitSecs: 25, since: 7 }), Offline);
+  assert.equal(waiting.offline, true);
 });
 
 test("ui5 a bridge that answers 503 is offline too", async () => {

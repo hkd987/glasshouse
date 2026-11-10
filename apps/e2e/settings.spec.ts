@@ -5,6 +5,7 @@
 // own settings too, for everyone on it.
 
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { userInfo } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 
@@ -52,6 +53,42 @@ test("dk1 an app hidden from search is listed in Settings and shown again from t
   await expect(row).toContainText("None");
   await expect(page.locator(".banner")).toHaveText("Every app shows in search.");
   expect(await hidden()).toEqual([]);
+});
+
+test("ux1 the page looking at the networks again leaves a field being typed in alone", async ({ page }) => {
+  // The page's own clock, so its eight-second look can be made to come now.
+  await page.clock.install();
+  await page.goto(appUrl("settings"));
+  await expect(page.locator("html[data-ready=true]")).toHaveCount(1);
+  const field = page.locator(`[data-setting="${HOME_PAGE}"] input.text`);
+  await field.click();
+  await page.keyboard.type("https://intranet.exam");
+  await field.evaluate((el) => {
+    (el as HTMLInputElement & { mine?: boolean }).mine = true;
+  });
+
+  // The timer comes: the page reads the networks again and draws itself.
+  // Replaced whole, the field lost the keyboard and what was typed was
+  // thrown away, or saved as it stood.
+  const looked = page.waitForResponse(
+    (response) => response.url().includes("/_bridge/") && (response.request().postData() ?? "").includes("wifi"),
+  );
+  await page.clock.fastForward(8100);
+  await looked;
+  await page.clock.fastForward(50);
+  await page.evaluate(() => new Promise((drawn) => requestAnimationFrame(() => requestAnimationFrame(drawn))));
+
+  const now = await page.evaluate((id) => {
+    const el = document.querySelector(`[data-setting="${id}"] input.text`) as HTMLInputElement & { mine?: boolean };
+    return { same: el.mine === true, typing: document.activeElement === el, value: el.value };
+  }, HOME_PAGE);
+  expect(now).toEqual({ same: true, typing: true, value: "https://intranet.exam" });
+  // Nothing was saved half-typed, and the rest goes where the caret is.
+  expect(await value(HOME_PAGE)).not.toBe("https://intranet.exam");
+  await page.keyboard.type("ple");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".banner")).toHaveText("Home page is https://intranet.example.");
+  expect(await value(HOME_PAGE)).toBe("https://intranet.example");
 });
 
 test("adr0038 the owner of a computer no organization manages turns its own settings on and off", async ({ page }) => {
@@ -125,26 +162,44 @@ test("adr0039 the owner connects their own AI models in Settings, and the key st
 });
 
 test("adr0060 the person sets the screen's brightness in Settings, as the keys do, never dark", async ({ page }) => {
-  // The suite's screen is a stand-in file (tools/dev/host-run.sh).
-  await control("display.brightness", { percent: 70 });
+  // The suite's screen is a stand-in file (tools/dev/host-run.sh): what it
+  // holds is how bright the screen is.
+  const file = join(DEV, "backlight");
+  const screen = () => (existsSync(file) ? Number(readFileSync(file, "utf8").trim()) : 100); // 100 until set
   await page.goto(appUrl("settings"));
   await expect(page.locator("html[data-ready=true]")).toHaveCount(1);
   const row = page.locator("[data-setting=brightness]");
-  await expect(row.locator("[data-test=brightness-percent]")).toHaveText("70%");
   const slider = row.locator("input[name=brightness]");
+  await slider.fill("70");
+  await expect(row.locator("[data-test=brightness-percent]")).toHaveText("70%");
+  await expect.poll(screen).toBe(70);
   await slider.fill("35");
   await expect(row.locator("[data-test=brightness-percent]")).toHaveText("35%");
-  await expect.poll(async () => (await control<{ percent: number }>("display.brightness", {})).percent).toBe(35);
+  await expect.poll(screen).toBe(35);
   // The page redraws once glassd answers, which may be mid-scroll.
   await expect(async () => await row.scrollIntoViewIfNeeded({ timeout: 1000 })).toPass();
   await page.screenshot({ path: join(SHOTS, "settings-brightness.png") });
-
-  // A brightness key, as the desktop sends it; never off, whatever is asked.
-  expect((await control<{ percent: number }>("display.brightness", { step: "up" })).percent).toBe(40);
-  expect((await control<{ percent: number }>("display.brightness", { percent: 0 })).percent).toBe(5);
   // On the record from Settings.
   expect(audit().some((r) => r.event.kind === "action" && r.event.action === "settings.brightness_set")).toBe(true);
-  await control("display.brightness", { percent: 100 });
+
+  // The brightness keys are the desktop's of whoever signed in at the
+  // screen, or root's (ADR 0060). Nobody signed in at the suite's: run as
+  // root, the suite presses them; run as anyone else, it is refused, as a
+  // person at another screen is.
+  const key = (change: object) => control<{ percent: number }>("display.brightness", change);
+  if (userInfo().uid === 0) {
+    // A step, as the desktop sends it; never off, whatever is asked.
+    expect((await key({ step: "up" })).percent).toBe(40);
+    expect((await key({ percent: 0 })).percent).toBe(5);
+    expect(screen()).toBe(5);
+  } else {
+    await expect(key({ step: "up" })).rejects.toThrow("only the person at the screen sets its brightness");
+    expect(screen()).toBe(35);
+  }
+  // Bright again for what follows. (The slider itself stops at 5%.)
+  expect(await slider.getAttribute("min")).toBe("5");
+  await slider.fill("100");
+  await expect.poll(screen).toBe(100);
 });
 
 test("adr0061 this computer's version, its updates and its kernel patches are in Settings, the owner's to check", async ({ page }) => {

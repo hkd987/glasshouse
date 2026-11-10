@@ -24,7 +24,7 @@ import {
   keepFilesOffline,
   ready,
   recentPeople,
-  show,
+  redraw,
   showAttribution,
 } from "@glasshouse/sdk";
 import {
@@ -130,6 +130,7 @@ function noteOffline(offline: boolean, loadedAt?: number): void {
 async function open(id: string): Promise<void> {
   state.selected = id;
   state.compose = null;
+  state.notice = null;
   render();
   try {
     const read = await bridge.read<{ message: Message }>("mail.read", { id });
@@ -201,6 +202,7 @@ async function moveTo(message: Message, to: Destination, label: string): Promise
 
 function startConnect(): void {
   state.compose = null;
+  state.notice = null;
   state.connect = { user: state.account?.address ?? "", password: "", error: null, busy: false };
   render();
   root.querySelector<HTMLInputElement>("input[name=password]")?.focus();
@@ -246,6 +248,7 @@ async function live(): Promise<void> {
 }
 
 function startCompose(from?: Outgoing, draft: string | null = null): void {
+  state.notice = null;
   state.compose = {
     to: from?.to.join(", ") ?? "",
     toField: null,
@@ -346,8 +349,15 @@ async function send(message: Outgoing): Promise<void> {
 
 // ---- rendering ------------------------------------------------------------
 
+/**
+ * Draws the page from the state, changing what is on screen to match
+ * instead of replacing it. New mail can arrive while someone writes a
+ * message or reads down a long list: replaced whole, the page took the
+ * keyboard from them mid-sentence, sent the list back to its top, and
+ * loaded an HTML message's frame again (each load an audited mail.read).
+ */
 function render(): void {
-  show(root, titlebar(), h("div", { class: "body" }, sidebar(), list(), pane()));
+  redraw(root, () => [titlebar(), h("div", { class: "body" }, sidebar(), list(), pane())]);
 }
 
 function titlebar(): HTMLElement {
@@ -382,6 +392,7 @@ function sidebar(): HTMLElement {
           class: `folder${state.folder === f.id ? " active" : ""}`,
           onclick: () => {
             state.folder = f.id;
+            state.notice = null;
             state.selected = null;
             state.message = null;
             state.compose = null;
@@ -526,8 +537,11 @@ function pane(): HTMLElement {
     last && (last.state === "declined" || last.state === "refused" || last.state === "offline")
       ? h("div", { class: "banner refused", "data-test": "refused" }, outcome(last))
       : null;
-  const notice = state.notice ? h("div", { class: "notice" }, state.notice) : null;
-  state.notice = null;
+  // Shown until the person goes somewhere else (`open`, a folder, a new
+  // message). It was cleared as it was drawn, so whatever drew the page
+  // next (the account loading, mail arriving) took it away: at a first
+  // start with the system not answering, the reason never showed at all.
+  const notice = state.notice ? h("div", { class: "notice", "data-test": "notice" }, state.notice) : null;
   return h(
     "main",
     { class: "pane" },

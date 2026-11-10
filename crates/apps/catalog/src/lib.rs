@@ -673,10 +673,14 @@ mod tests {
         action: &str,
         input: Value,
     ) -> Result<ActionOutput, ActionError> {
+        // Whoever runs the tests: root, or a person who can give a folder
+        // to nobody but themselves.
+        use std::os::unix::fs::MetadataExt;
         let mut ctx = context(home);
+        let meta = std::fs::metadata(home).unwrap();
         ctx.owner = glass_platform::fs::Owner {
-            uid: glass_platform::users::effective_uid(),
-            gid: 0,
+            uid: meta.uid(),
+            gid: meta.gid(),
         };
         ctx.groups = groups.iter().map(|g| (*g).to_owned()).collect();
         let action: ActionName = action.parse().unwrap();

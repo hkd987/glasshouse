@@ -10,7 +10,7 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 import { type Page, expect, test } from "@playwright/test";
 
-import { type ApprovalView, DEV, SHOTS, appUrl, audit, glassctl, glassctlJson, outcome } from "./env.ts";
+import { type ApprovalView, DEV, SHOTS, appUrl, audit, glassctl, glassctlJson, mcp, outcome } from "./env.ts";
 
 async function openMail(page: Page): Promise<void> {
   await page.goto(appUrl("mail"));
@@ -69,6 +69,53 @@ test("ui5 ad1 people from recent mail are suggested as you type, and any address
   await page.getByRole("button", { name: "Save draft" }).click();
   await page.click("[data-folder=drafts]");
   await expect(page.locator(".row", { hasText: "Renewal" }).first()).toContainText("Renewal");
+});
+
+test("ui5 mail that changes while someone writes leaves them their message, their caret and the keyboard", async ({ page }) => {
+  await openMail(page);
+  await page.click("[data-test=compose]");
+  await page.fill("input[name=subject]", "Notes from today");
+  const body = page.locator("textarea[name=body]");
+  await body.click();
+  await page.keyboard.type("First line and the second");
+  // Back to after "First line", as someone goes back to add a few words.
+  for (let i = 0; i < " and the second".length; i++) await page.keyboard.press("ArrowLeft");
+  // Something only this very element has, to tell it from one made anew.
+  await body.evaluate((el) => {
+    (el as HTMLTextAreaElement & { mine?: boolean }).mine = true;
+  });
+
+  // Meanwhile their agent drafts a reply. Mail changed, so the page hears
+  // of it, reads its folders again and draws itself. It used to replace
+  // everything it showed, the field being typed in included: the keyboard
+  // went nowhere mid-sentence.
+  const reread = page.waitForResponse(
+    (response) => response.url().includes("/_bridge/") && (response.request().postData() ?? "").includes('"drafts"'),
+  );
+  const task = glassctlJson<{ id: string; driver_socket: string }>("run", "claude-code", "Draft a reply", "--yes");
+  const [drafted] = (await mcp(task.driver_socket, [
+    { name: "mail_draft", arguments: { to: ["ana@example.com"], subject: "While you were typing", body: "A draft." } },
+  ])) as { isError?: boolean }[];
+  expect(drafted?.isError ?? false).toBe(false);
+  await reread;
+  // Drawn: after the answers, a frame.
+  await page.evaluate(() => new Promise((drawn) => requestAnimationFrame(() => requestAnimationFrame(drawn))));
+
+  // The person is where they were: the same field, with the keyboard, the
+  // caret mid-line, and all they wrote.
+  const now = await page.evaluate(() => {
+    const el = document.querySelector("textarea[name=body]") as HTMLTextAreaElement & { mine?: boolean };
+    return { same: el.mine === true, typing: document.activeElement === el, caret: el.selectionStart, value: el.value };
+  });
+  expect(now).toEqual({ same: true, typing: true, caret: "First line".length, value: "First line and the second" });
+  await page.keyboard.type(", a third");
+  await expect(body).toHaveValue("First line, a third and the second");
+  await expect(page.locator("input[name=subject]")).toHaveValue("Notes from today");
+  await page.screenshot({ path: join(SHOTS, "mail-writing-while-mail-changes.png") });
+  // And the page did take the change in: the draft is in Drafts.
+  await page.click("[data-folder=drafts]");
+  await expect(page.locator(".row", { hasText: "While you were typing" })).toHaveCount(1);
+  glassctl("stop", task.id);
 });
 
 test("ui5 a send outside the team waits for approval on the desktop, then goes", async ({ page }) => {

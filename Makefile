@@ -174,7 +174,7 @@ apps-build: apps/node_modules ## Build the web apps into apps/<app>/dist (esbuil
 apps-test: apps-build ## Apps: type check, unit tests, Playwright e2e (cold launch and memory budgets) on dev-host glassd
 	cd apps && npm run --silent typecheck
 	cd apps && npm run --silent test:unit
-	cargo build -p glassd -p glassctl -p glass-app-bridge -p glass-desktop-agent
+	tools/dev/host-run.sh --build
 	cd apps && PLAYWRIGHT_BROWSERS_PATH=$(APPS_BROWSERS) npx playwright test -c e2e/playwright.config.ts
 
 apps-lint: apps/node_modules ## Apps: types, manifests (DV-3), npm licenses, and no base-system name in Glasshouse Agents (BR-1)
@@ -190,7 +190,8 @@ apps-dev: apps-build ## Serve the apps from make dev-host's glassd: http://mail.
 # The org's admin console (ADR 0023): glass-console serves the web app in
 # apps/console and the API devices sync signed policy and catalog from. It
 # runs on our web servers, never on a device. See apps/README.md.
-CONSOLE_BINS := -p glass-console -p glass-billing -p glassd -p glassctl -p glass-app-bridge -p glass-demo-agent -p glass-probe -p glass-mcp -p glass-sfu -p glass-it-agent -p glass-desktop-agent
+# Beside what the dev host runs (tools/dev/host-run.sh --build).
+CONSOLE_BINS := -p glass-console -p glass-billing -p glass-sfu
 
 console-dev: apps-build ## The admin console on http://127.0.0.1:7400 (FIXTURE=500,50 fills it); enroll make dev-host with GLASS_DEV_ENROLL=build/console/enrollment.json
 	cargo build -p glass-console
@@ -198,6 +199,7 @@ console-dev: apps-build ## The admin console on http://127.0.0.1:7400 (FIXTURE=5
 
 console-test: apps-build ## Admin console: Rust tests, then Playwright on a 500-device fixture and an enrolled dev-host glassd (page and propagation budgets)
 	cargo test -p glass-console -p glass-managed -p glass-app-catalog
+	tools/dev/host-run.sh --build
 	cargo build $(CONSOLE_BINS)
 	cargo build -p glass-app-chat --example colleague
 	cargo build -p glass-app-meet --example attendee

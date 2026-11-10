@@ -8,10 +8,26 @@
 import { Cache, type Store, memoryStore } from "./cache.ts";
 import type { AppCallResult, AppSession, AppStatus, Tier } from "./manifest.ts";
 
-/** How the client reaches its bridge: same-origin fetch in a page. */
+/**
+ * How the client reaches its bridge: same-origin fetch in a page. With
+ * `limitMs`, a request not answered by then is given up on and rejects, as
+ * one that couldn't be sent does.
+ */
 export interface Transport {
-  post(endpoint: string, body: unknown): Promise<{ status: number; body: unknown }>;
+  post(endpoint: string, body: unknown, limitMs?: number): Promise<{ status: number; body: unknown }>;
 }
+
+/**
+ * How long a request that asks nothing of a person may take: opening the
+ * session, a status. One that waits (for news, for others' edits) gets
+ * this long past its wait. A bridge that takes the request and never
+ * answers (glassd stopped mid-call, a connection that died without saying
+ * so) otherwise leaves the page waiting for news for good, looking fine
+ * and hearing nothing; given up on, it is offline, says so, and asks again.
+ *
+ * An action's call has no limit: it may wait for the person's approval.
+ */
+export const ANSWER_LIMIT_MS = 15_000;
 
 /** The bridge, or the system behind it, can't be reached right now. */
 export class Offline extends Error {
@@ -32,12 +48,13 @@ export class BridgeError extends Error {
 }
 
 export const fetchTransport: Transport = {
-  async post(endpoint, body) {
+  async post(endpoint, body, limitMs) {
     const response = await fetch(`/_bridge/${endpoint}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body ?? {}),
       cache: "no-store",
+      ...(limitMs === undefined ? {} : { signal: AbortSignal.timeout(limitMs) }),
     });
     let parsed: unknown = null;
     try {
@@ -91,10 +108,10 @@ export class Bridge {
     return this.#session;
   }
 
-  async #post<T>(endpoint: string, body: unknown): Promise<T> {
+  async #post<T>(endpoint: string, body: unknown, limitMs?: number): Promise<T> {
     let reply: { status: number; body: unknown };
     try {
-      reply = await this.#transport.post(endpoint, body);
+      reply = await this.#transport.post(endpoint, body, limitMs);
     } catch {
       this.offline = true;
       throw new Offline();
@@ -117,7 +134,7 @@ export class Bridge {
    */
   async open(): Promise<AppSession> {
     try {
-      this.#session = await this.#post<AppSession>("session", {});
+      this.#session = await this.#post<AppSession>("session", {}, ANSWER_LIMIT_MS);
       this.#cache.put("session", this.#session);
     } catch (error) {
       const cached = error instanceof Offline ? this.#cache.get<AppSession>("session") : null;
@@ -170,7 +187,11 @@ export class Bridge {
    * ADR 0051). A cursor from before glassd restarted, or none, is news.
    */
   async status(wait?: { waitSecs: number; since: number }): Promise<AppStatus> {
-    const status = await this.#post<AppStatus>("status", wait ? { wait_secs: wait.waitSecs, since: wait.since } : {});
+    const status = await this.#post<AppStatus>(
+      "status",
+      wait ? { wait_secs: wait.waitSecs, since: wait.since } : {},
+      (wait ? wait.waitSecs * 1000 : 0) + ANSWER_LIMIT_MS,
+    );
     // A new policy reaches open apps: `tier` and `asks` answer by it.
     if (this.#session && status.actions) {
       this.#session = { ...this.#session, actions: status.actions };
@@ -187,7 +208,9 @@ export class Bridge {
    * it otherwise (a `BridgeError`). Throws `Offline` like any request.
    */
   async live<T = LivePulled>(body: LiveRequest): Promise<T> {
-    return this.#post<T>("live", body);
+    // A pull waits for others' edits, for as long as it asked to.
+    const waits = body.op === "pull" ? body.wait_secs * 1000 : 0;
+    return this.#post<T>("live", body, waits + ANSWER_LIMIT_MS);
   }
 }
 

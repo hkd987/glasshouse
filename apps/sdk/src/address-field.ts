@@ -7,7 +7,7 @@
 // The field keeps its own element and state; an app that redraws its page
 // puts the same element back (`addressField` is called once per form).
 
-import { h } from "./dom.ts";
+import { h, lasting } from "./dom.ts";
 import {
   addressesIn,
   currentToken,
@@ -157,5 +157,7 @@ export function addressField(o: AddressFieldOptions): HTMLElement {
   });
   input.addEventListener("blur", () => close());
 
-  return h("label", { class: "field address-field" }, h("span", {}, o.label), input, list, status);
+  // The page keeps this element and draws it again as itself: what it
+  // suggests and highlights is in here, not in the page's state.
+  return lasting(h("label", { class: "field address-field" }, h("span", {}, o.label), input, list, status));
 }

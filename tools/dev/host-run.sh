@@ -5,12 +5,15 @@
 # containment in the FreeBSD VM (`make vm-deploy e2e-vm`).
 #
 # usage: tools/dev/host-run.sh            # build, seed, run in the foreground
+#        tools/dev/host-run.sh --build    # build what it runs, and stop there
 #        GLASS_CONTROL_SOCKET=build/dev/run/control.sock glassctl ...
 #        make apps-dev                     # the apps, on http://<app>.localhost:7300
 #
 # GLASS_DEV_DIR puts the state elsewhere (the apps' e2e suite uses its own),
 # GLASS_DEV_RUN the sockets (a Unix socket's path must stay under 104 bytes);
-# GLASS_DEV_SKIP_BUILD=1 runs what is already built.
+# GLASS_DEV_SKIP_BUILD=1 runs what is already built: what `--build` built.
+# The test suites that start it that way (make apps-test, console-test)
+# build with `--build` first, so this file's list is the only one.
 # GLASS_DEV_ENROLL=build/console/enrollment.json enrolls this glassd with a
 # development admin console (make console-dev, ADR 0023) as device
 # GLASS_DEV_DEVICE (default dev-host).
@@ -47,11 +50,19 @@ dev="${GLASS_DEV_DIR:-$repo/build/dev}"
 run="${GLASS_DEV_RUN:-$dev/run}"
 bin="${CARGO_TARGET_DIR:-$repo/target}/debug"
 
-if [ -z "${GLASS_DEV_SKIP_BUILD:-}" ]; then
+# Everything this script starts or names in the configuration it writes.
+build() {
 	cargo build --manifest-path "$repo/Cargo.toml" -p glassd -p glassctl -p glass-demo-agent -p glass-probe \
 		-p glass-mcp -p glass-app-bridge -p glass-skill-evals -p glass-it-agent -p glass-hardware-agent -p glass-desktop-agent \
 		-p glass-claude-runner -p glass-app-try
 	cargo build --manifest-path "$repo/Cargo.toml" -p glass-e2e --bin glass-fake-wpa
+}
+if [ "${1:-}" = "--build" ]; then
+	build
+	exit 0
+fi
+if [ -z "${GLASS_DEV_SKIP_BUILD:-}" ]; then
+	build
 fi
 
 mkdir -p "$dev/home" "$dev/state" "$run"
