@@ -434,6 +434,32 @@ test("cf21 after someone leaves the others switch to the new media key and still
   for (const i of [0, 1]) expect(after[i]!.framesDecoded - before[i]!.framesDecoded).toBeGreaterThan(15);
 });
 
+test("cf21 someone whose connection to the meeting is lost is told, and gets back in", async ({ browser }) => {
+  // The relay closes Bo's connection (the seat ended at the console, the
+  // relay started again): nothing on Bo's page listened, and it stayed on
+  // the last frame it had for as long as it was open.
+  const mediaKey = key();
+  const ana = await person(browser, { room: "dropped", participant: 0, mediaKey });
+  const bo = await person(browser, { room: "dropped", participant: 1, mediaKey });
+  for (const page of [ana, bo]) await page.click("[data-test=join]");
+  for (const page of [ana, bo]) await expect.poll(async () => (await decoding(page)).videos, { timeout: 10_000 }).toBe(1);
+
+  const ended = await fetch(`${api}/rooms/dropped/participants/1`, { method: "DELETE" });
+  expect(ended.status).toBe(204);
+  await expect(bo.locator("[data-test=message]")).toContainText("The connection to the meeting was lost", { timeout: 10_000 });
+  await bo.screenshot({ path: join(SHOTS, "connection-lost.png") });
+  // Ana's page is told by the relay that Bo is gone, as before.
+  await expect(ana.locator("video[data-test=other]")).toHaveCount(0);
+
+  // The way back is on the page.
+  await bo.click("[data-test=rejoin]");
+  for (const page of [ana, bo]) {
+    const before = (await received(page)).framesDecoded;
+    await expect.poll(async () => (await received(page)).framesDecoded - before, { timeout: 15_000 }).toBeGreaterThan(15);
+    await expect(page.locator("video[data-test=other]")).toBeVisible();
+  }
+});
+
 test("adr0045 t2 what I say is transcribed on this computer, Hey Glass asks my agent at once, and muted isn't transcribed", async () => {
   test.skip(!existsSync(join(DIST, "speech/encoder.onnx")), "no speech model in Meet (tools/fetch-speech-model.sh, then make apps-build)");
   // The engine's microphone plays the recording, over and over: "I'll send

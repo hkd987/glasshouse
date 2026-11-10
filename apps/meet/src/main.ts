@@ -265,6 +265,18 @@ async function join(): Promise<void> {
   } as RTCConfiguration);
   pc = connection;
   channel = connection.createDataChannel("glass");
+  // The way to the relay gone for good: it closed the connection (the
+  // meeting ended, the seat was given up, the relay started again), or
+  // nothing gets through any more. Nothing listened for either: the page
+  // stayed on the last frame it had for as long as it was open.
+  // "disconnected" isn't that: it may come back by itself.
+  const mine = channel;
+  mine.onclose = () => {
+    if (channel === mine && state.phase === "in") void lost();
+  };
+  connection.onconnectionstatechange = () => {
+    if (pc === connection && state.phase === "in" && connection.connectionState === "failed") void lost();
+  };
   channel.onmessage = ({ data }) => {
     for (const text of String(data).split("\n")) {
       if (!text.trim()) continue;
@@ -456,6 +468,20 @@ function fail(message: string): void {
   draw();
 }
 
+/**
+ * The connection to the meeting is gone and the person didn't leave:
+ * says so, with the way back, and gives up the seat if the system can
+ * still be told.
+ */
+async function lost(): Promise<void> {
+  fail("The connection to the meeting was lost.");
+  try {
+    await bridge.call("meet.leave", { meeting });
+  } catch {
+    // Not reachable either: the relay gives the seat up on its own.
+  }
+}
+
 function stop(): void {
   pc?.close();
   pc = null;
@@ -623,7 +649,13 @@ function draw(): void {
     show(
       root,
       head,
-      h("main", { class: "lobby" }, h("p", { "data-test": "message" }, state.phase === "left" ? "You left the meeting." : state.error)),
+      h(
+        "main",
+        { class: "lobby" },
+        h("p", { "data-test": "message" }, state.phase === "left" ? "You left the meeting." : state.error),
+        // A way back that isn't closing the window and opening it again.
+        h("button", { class: "primary", "data-test": "rejoin", onclick: () => void join() }, state.phase === "left" ? "Join again" : "Try again"),
+      ),
     );
     return;
   }
