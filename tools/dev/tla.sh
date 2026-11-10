@@ -41,7 +41,14 @@ fetch() {
 
 tlc() {
 	# Java's own proxy settings (JAVA_TOOL_OPTIONS) would print on every run.
-	env -u JAVA_TOOL_OPTIONS java -XX:+UseParallelGC -cp "$jar" tlc2.TLC "$@"
+	# TLA_TMP: a temporary folder of this run's own. TLC writes the standard
+	# modules a spec extends (Integers.tla, FiniteSets.tla) into Java's
+	# temporary folder and deletes them as it exits. With every run in /tmp,
+	# one run's exit took the files another had just written and was about
+	# to read: "Parsing or semantic analysis failed", once in a few dozen
+	# runs of `make tla`, for a model nothing had changed.
+	env -u JAVA_TOOL_OPTIONS java -XX:+UseParallelGC ${TLA_TMP:+"-Djava.io.tmpdir=$TLA_TMP"} \
+		-cp "$jar" tlc2.TLC "$@"
 }
 
 check() {
@@ -87,12 +94,20 @@ check_one() {
 	local spec=$specs/${name%%_*}.tla
 	[[ -f $spec ]] || spec=$specs/$name.tla
 	local log=$out/$name.log started=$SECONDS
-	if (cd "$specs" && tlc -workers "${TLA_WORKERS:-1}" -metadir "$out/$name.states" -config "$cfg" "$spec") >"$log" 2>&1; then
+	mkdir -p "$out/$name.tmp"
+	if (cd "$specs" && TLA_TMP=$out/$name.tmp tlc -workers "${TLA_WORKERS:-1}" \
+		-metadir "$out/$name.states" -config "$cfg" "$spec") >"$log" 2>&1; then
 		printf '  ok    %-28s %5ss  %s\n' "$name" "$((SECONDS - started))" \
 			"$(grep -oE '[0-9,]+ distinct states found' "$log" | tail -1)"
 	else
 		printf '  FAIL  %-28s %5ss\n' "$name" "$((SECONDS - started))"
-		sed -n '/^Error:/,$p' "$log" | head -80
+		# From the error on; and, when it is one of parsing, what was said
+		# before it, which is where the reason is.
+		if grep -q '^Error: Parsing or semantic analysis failed' "$log"; then
+			tail -40 "$log"
+		else
+			sed -n '/^Error:/,$p' "$log" | head -80
+		fi
 	fi
 }
 

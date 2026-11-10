@@ -10,7 +10,7 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 
 import { BILLING_PORT, BILLING_STATE, CONSOLE_PORT, CONSOLE_STATE, DEVICE, FIXTURE, RELAY_API, STORE_PORT } from "./console-env.ts";
-import { BIN, DEV, REPO, RUN, glassctlJson, sleep } from "./env.ts";
+import { BIN, DEV, REPO, RUN, glassctlJson, sleep, takesTasks } from "./env.ts";
 
 const LOGS = join(DEV, "..");
 
@@ -110,6 +110,7 @@ export default async function consoleSetup(): Promise<() => Promise<void>> {
       }),
     );
     await until("glassd", () => existsSync(join(RUN, "control.sock")));
+    await until("glassd's check of its system files", takesTasks);
     await until("the org's policy on the device", () =>
       glassctlJson<{ policy: string }>("status").policy.startsWith("managed v"),
     );

@@ -23,6 +23,24 @@ export const SHOTS = process.env.SHOTS_DIR ?? join(REPO, "apps/e2e/results/shots
 
 export const appUrl = (app: string) => `http://${app}.localhost:${PORT}/`;
 
+/**
+ * Whether the suite's glassd starts agents yet. At every start it checks
+ * its system files (ADR 0064), and until that's done it refuses to start
+ * one: "this computer is checking its system files … start it again in a
+ * moment". The check begins before glassd's sockets do, so "not checking"
+ * is "done". A suite whose first act is a task waits for this: with only
+ * the sockets waited for, that task was refused whenever the check took
+ * longer than the suite did to ask (once in CI, and the whole suite with
+ * it).
+ */
+export function takesTasks(): boolean {
+  try {
+    return glassctlJson<{ system_files?: { state: string } }>("status").system_files?.state !== "checking";
+  } catch {
+    return false;
+  }
+}
+
 /** Runs glassctl against the suite's glassd, as the desktop would. */
 export function glassctl(...args: string[]): string {
   return execFileSync(join(BIN, "glassctl"), args, {

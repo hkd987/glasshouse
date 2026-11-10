@@ -10,7 +10,7 @@ import { createConnection } from "node:net";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
-import { BIN, DEV, PORT, REPO, RUN, glassctl, glassctlJson, mcp, sleep } from "./env.ts";
+import { BIN, DEV, PORT, REPO, RUN, glassctl, glassctlJson, mcp, sleep, takesTasks } from "./env.ts";
 
 async function until(what: string, check: () => boolean | Promise<boolean>, ms = 20_000): Promise<void> {
   const deadline = Date.now() + ms;
@@ -132,6 +132,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   const started: ChildProcess[] = [glassd];
   try {
     await until("glassd", () => existsSync(join(RUN, "apps.sock")) && existsSync(join(RUN, "control.sock")));
+    await until("glassd's check of its system files", takesTasks);
     started.push(await prepare());
   } catch (error) {
     for (const child of started.reverse()) await stop(child);
