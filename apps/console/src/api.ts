@@ -22,12 +22,18 @@ export class SignedOut extends Error {
 
 export class Refused extends Error {}
 
+/** The console's servers didn't answer at all: restarting, or the network is away. */
+export class Unreachable extends Error {}
+
 export async function api<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, {
     method,
     headers: body === undefined ? {} : { "content-type": "application/json" },
     body: body === undefined ? null : JSON.stringify(body),
     credentials: "same-origin",
+  }).catch(() => {
+    // The browser's own words for this are "Failed to fetch".
+    throw new Unreachable("The console isn't answering. Check your connection and try again.");
   });
   const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (response.status === 401) {

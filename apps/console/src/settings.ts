@@ -9,7 +9,7 @@
 import { h, show } from "@glasshouse/sdk";
 
 import { type Impact, type Managed, type SettingRow, type SettingValue, type SettingsPage, api } from "./api.ts";
-import { card, chip, mono, notice, plural } from "./ui.ts";
+import { card, carryOut, chip, mono, notice, plural, SIGNED_OUT } from "./ui.ts";
 
 /** Time zones IT picks from most; any other name of the zone database works too. */
 const ZONES = [
@@ -53,14 +53,12 @@ export async function settingsPage(root: HTMLElement, group: string): Promise<vo
   load();
 
   async function act(work: () => Promise<string | null>): Promise<void> {
-    try {
-      const text = await work();
-      message = text ? { text, tone: "ok" } : null;
-    } catch (error) {
-      message = { text: (error as Error).message, tone: "bad" };
-    }
-    page = await api<SettingsPage>("GET", `/api/settings?group=${encodeURIComponent(group)}`);
-    load();
+    const said = await carryOut(work, async () => {
+      page = await api<SettingsPage>("GET", `/api/settings?group=${encodeURIComponent(group)}`);
+      load();
+    });
+    if (said === SIGNED_OUT) return;
+    message = said;
     draw();
   }
 

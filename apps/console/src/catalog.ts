@@ -19,7 +19,7 @@
 import { h, show } from "@glasshouse/sdk";
 
 import { type AgentReview, type CatalogPage, type FileChange, type Hardware, type Item, type Mode, type Shared, type Titled, api } from "./api.ts";
-import { ago, capital, card, chip, mono, notice, plural } from "./ui.ts";
+import { ago, capital, card, carryOut, chip, mono, notice, plural, SIGNED_OUT } from "./ui.ts";
 
 const REVIEW: Record<Item["review"], [string, "ok" | "wait" | "bad"]> = {
   waiting: ["Waiting for review", "wait"],
@@ -92,16 +92,17 @@ export async function itemPage(root: HTMLElement, id: string): Promise<void> {
     api<Item>("GET", `/api/catalog/${encodeURIComponent(id)}`),
   ]);
   let message: { text: string; tone: "ok" | "bad" } | null = null;
-  const draw = (it: Item) => show(root, render(page, it, message, act));
+  let shown = item;
+  const draw = () => show(root, render(page, shown, message, act));
   async function act(work: () => Promise<string>): Promise<void> {
-    try {
-      message = { text: await work(), tone: "ok" };
-    } catch (error) {
-      message = { text: (error as Error).message, tone: "bad" };
-    }
-    draw(await api<Item>("GET", `/api/catalog/${encodeURIComponent(id)}`));
+    const said = await carryOut(work, async () => {
+      shown = await api<Item>("GET", `/api/catalog/${encodeURIComponent(id)}`);
+    });
+    if (said === SIGNED_OUT) return;
+    message = said;
+    draw();
   }
-  draw(item);
+  draw();
 }
 
 function render(

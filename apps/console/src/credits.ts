@@ -10,7 +10,7 @@
 import { h, show } from "@glasshouse/sdk";
 
 import { type CreditsPage, type Impact, api } from "./api.ts";
-import { card, chip, notice, stat } from "./ui.ts";
+import { card, carryOut, chip, notice, SIGNED_OUT, stat } from "./ui.ts";
 
 const dollars = (n: number | null): string => (n === null ? "–" : `$${n.toFixed(2)}`);
 
@@ -74,13 +74,11 @@ export async function creditsPage(root: HTMLElement, returned?: string): Promise
   }
 
   async function act(work: () => Promise<string | null>): Promise<void> {
-    try {
-      const text = await work();
-      message = text ? { text, tone: "ok" } : null;
-    } catch (error) {
-      message = { text: (error as Error).message, tone: "bad" };
-    }
-    page = await api<CreditsPage>("GET", "/api/credits");
+    const said = await carryOut(work, async () => {
+      page = await api<CreditsPage>("GET", "/api/credits");
+    });
+    if (said === SIGNED_OUT) return;
+    message = said;
     draw();
   }
 

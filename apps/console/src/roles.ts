@@ -7,7 +7,7 @@
 import { h, show } from "@glasshouse/sdk";
 
 import { type Impact, type RolesPage, type SupportRole, type SupportTool, api } from "./api.ts";
-import { card, chip, duration, mono, notice, plural } from "./ui.ts";
+import { card, carryOut, chip, duration, mono, notice, plural, SIGNED_OUT } from "./ui.ts";
 
 /** What policy carries of a role: the page's extras left out. */
 function plain(r: SupportRole): SupportRole {
@@ -37,14 +37,12 @@ export async function rolesPage(root: HTMLElement): Promise<void> {
   const fresh = { id: "", name: "" };
 
   async function act(work: () => Promise<string | null>): Promise<void> {
-    try {
-      const text = await work();
-      message = text ? { text, tone: "ok" } : null;
-    } catch (error) {
-      message = { text: (error as Error).message, tone: "bad" };
-    }
-    page = await api<RolesPage>("GET", "/api/roles");
-    forms = page.roles.map(plain);
+    const said = await carryOut(work, async () => {
+      page = await api<RolesPage>("GET", "/api/roles");
+      forms = page.roles.map(plain);
+    });
+    if (said === SIGNED_OUT) return;
+    message = said;
     draw();
   }
 

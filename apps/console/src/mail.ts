@@ -7,7 +7,7 @@
 import { h, show } from "@glasshouse/sdk";
 
 import { type Impact, type MailPage, type MailServer, type MailSettings, api } from "./api.ts";
-import { capital, card, mono, notice } from "./ui.ts";
+import { capital, card, carryOut, mono, notice, SIGNED_OUT } from "./ui.ts";
 
 const SERVICES: [MailSettings["service"], string][] = [
   ["microsoft-365", "Microsoft 365"],
@@ -44,13 +44,11 @@ export async function mailPage(root: HTMLElement): Promise<void> {
   let message: { text: string; tone: "ok" | "bad" } | null = null;
 
   async function act(work: () => Promise<string | null>): Promise<void> {
-    try {
-      const text = await work();
-      message = text ? { text, tone: "ok" } : null;
-    } catch (error) {
-      message = { text: (error as Error).message, tone: "bad" };
-    }
-    page = await api<MailPage>("GET", "/api/mail");
+    const said = await carryOut(work, async () => {
+      page = await api<MailPage>("GET", "/api/mail");
+    });
+    if (said === SIGNED_OUT) return;
+    message = said;
     draw();
   }
 

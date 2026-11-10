@@ -5,7 +5,7 @@
 import { h, show } from "@glasshouse/sdk";
 
 import { type DeviceRow, type FleetPage, type Ring, api } from "./api.ts";
-import { ago, capital, card, chip, mono, notice, plural, stat } from "./ui.ts";
+import { ago, capital, card, carryOut, chip, mono, notice, plural, SIGNED_OUT, stat } from "./ui.ts";
 
 const RINGS: Ring[] = ["pilot", "early", "broad"];
 
@@ -18,14 +18,21 @@ export async function devicesPage(root: HTMLElement): Promise<void> {
     last = page;
     show(root, render(page, message, setRing, setKind, { confirming, ask, remove, forget }, hold));
   };
-  async function change(device: string, what: "ring" | "kind", value: string | null): Promise<void> {
-    try {
+  // An action, then the fleet read again and drawn (ui.ts, carryOut).
+  async function after(work: () => Promise<string>): Promise<void> {
+    let fleet = last;
+    const said = await carryOut(work, async () => {
+      fleet = await api<FleetPage>("GET", "/api/fleet");
+    });
+    if (said === SIGNED_OUT) return;
+    message = said?.text ?? null;
+    if (fleet) draw(fleet);
+  }
+  function change(device: string, what: "ring" | "kind", value: string | null): Promise<void> {
+    return after(async () => {
       await api("POST", `/api/fleet/${encodeURIComponent(device)}/${what}`, { [what]: value });
-      message = what === "ring" ? `${device} is in the ${value} ring now.` : value ? `${device} is a ${value} now.` : `${device} has no kind now.`;
-    } catch (error) {
-      message = (error as Error).message;
-    }
-    draw(await api<FleetPage>("GET", "/api/fleet"));
+      return what === "ring" ? `${device} is in the ${value} ring now.` : value ? `${device} is a ${value} now.` : `${device} has no kind now.`;
+    });
   }
   const setRing = (device: string, ring: Ring) => change(device, "ring", ring);
   const setKind = (device: string, kind: string | null) => change(device, "kind", kind);
@@ -34,30 +41,23 @@ export async function devicesPage(root: HTMLElement): Promise<void> {
     confirming = device;
     if (last) draw(last);
   };
-  async function act(device: string, name: string, what: "revoke" | "forget"): Promise<void> {
+  function act(device: string, name: string, what: "revoke" | "forget"): Promise<void> {
     confirming = null;
-    try {
+    return after(async () => {
       await api("POST", `/api/fleet/${encodeURIComponent(device)}/${what}`, {});
-      message =
-        what === "revoke"
-          ? `${name} was removed from the organization. It can't reach the console until it enrolls again.`
-          : `${name} is forgotten. Set up again, it can enroll under the same name.`;
-    } catch (error) {
-      message = (error as Error).message;
-    }
-    draw(await api<FleetPage>("GET", "/api/fleet"));
+      return what === "revoke"
+        ? `${name} was removed from the organization. It can't reach the console until it enrolls again.`
+        : `${name} is forgotten. Set up again, it can enroll under the same name.`;
+    });
   }
   // IT holds OS updates back from a ring, or lets them go to it again (ADR 0061).
-  async function hold(ring: Ring, held: boolean): Promise<void> {
-    try {
+  function hold(ring: Ring, held: boolean): Promise<void> {
+    return after(async () => {
       await api("POST", "/api/updates/hold", { ring, hold: held });
-      message = held
+      return held
         ? `OS updates are held back from the ${ring} ring. Its computers hear of no release and download none until you resume.`
         : `OS updates go to the ${ring} ring again.`;
-    } catch (error) {
-      message = (error as Error).message;
-    }
-    draw(await api<FleetPage>("GET", "/api/fleet"));
+    });
   }
   const remove = (device: string, name: string) => act(device, name, "revoke");
   const forget = (device: string, name: string) => act(device, name, "forget");

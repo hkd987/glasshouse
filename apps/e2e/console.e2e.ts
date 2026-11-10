@@ -643,6 +643,54 @@ test("adr0061 IT holds OS updates back from a ring, then resumes them", async ({
   await close();
 });
 
+test("ad4 a page that can't be read again after an action says so and keeps its buttons", async ({ browser }) => {
+  const { page, close } = await session(browser);
+  await open(page, "#/policy/it-admins", "policy");
+  // The console stops answering between the action and the page being
+  // read again (it restarts, the network drops): the action's own call
+  // gets through, the read after it doesn't.
+  await page.route(
+    (url) => url.pathname === "/api/policy",
+    (route) => route.abort("connectionrefused"),
+  );
+  await page.click("button[data-test=preview]");
+  const notice = page.locator(".notice");
+  await expect(notice).toContainText("couldn't be read again");
+  await expect(notice).toContainText("The console isn't answering.");
+  // What the action found is shown, and nothing is left disabled from
+  // before it: every button stayed disabled for good.
+  await expect(page.locator("[data-test=impact]")).toBeVisible();
+  await expect(page.locator("button[data-test=preview]")).toBeEnabled();
+  await shot(page, "policy-not-read-again");
+  // Answering again, the same button works and the notice goes.
+  await page.unroute((url) => url.pathname === "/api/policy");
+  await page.unrouteAll({ behavior: "wait" });
+  await page.click("button[data-test=preview]");
+  await expect(notice).toHaveCount(0);
+  await expect(page.locator("[data-test=impact]")).toBeVisible();
+  await expect(page.locator("button[data-test=preview]")).toBeEnabled();
+  await close();
+});
+
+test("ad4 an action after the session ended shows the sign-in page", async ({ browser }) => {
+  const { page, close } = await session(browser);
+  await open(page, "#/devices", "devices");
+  const pilot = page.locator('[data-test="os-updates"] [data-ring="pilot"]');
+  await expect(pilot.locator('[data-test="hold-updates"]')).toBeVisible();
+  // The session ends (it timed out, or was signed out elsewhere). It
+  // showed as a notice on a page that could do nothing more.
+  await page.context().clearCookies();
+  await pilot.locator('[data-test="hold-updates"]').click();
+  await expect(page.locator(`button[data-user="${ADMIN}"]`)).toBeVisible();
+  await expect(page.locator(".signin")).toContainText("Sign in");
+  // Signing in comes back to the page, with nothing held.
+  await page.click(`button[data-user="${ADMIN}"]`);
+  await page.waitForSelector("html[data-ready=true][data-page=devices]", { state: "attached" });
+  await expect(pilot.locator('[data-test="hold-updates"]')).toBeVisible();
+  await expect(pilot).not.toContainText("Held");
+  await close();
+});
+
 test("adr0030 IT removes a computer from the organization, then forgets it", async ({ browser }) => {
   const { page, close } = await session(browser);
   await open(page, "#/devices", "devices");

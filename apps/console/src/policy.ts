@@ -6,7 +6,7 @@
 import { h, show } from "@glasshouse/sdk";
 
 import { type Impact, type PolicyPage, type Ring, type Tier, api } from "./api.ts";
-import { capital, card, chip, mono, notice, plural, stat } from "./ui.ts";
+import { capital, card, carryOut, chip, mono, notice, plural, SIGNED_OUT, stat } from "./ui.ts";
 
 const TIERS: Tier[] = ["auto", "notify", "ask", "never"];
 /** The action an agent needs to ask a model (ADR 0018). */
@@ -42,15 +42,13 @@ export async function policyPage(root: HTMLElement, group: string | null): Promi
     view.busy = true;
     // Until this lands, a click would be dropped: say so instead of losing it.
     for (const button of root.querySelectorAll<HTMLButtonElement>("button")) button.disabled = true;
-    try {
-      const text = await work();
-      view.message = text ? { text, tone: "ok" } : null;
-    } catch (error) {
-      view.message = { text: (error as Error).message, tone: "bad" };
-    }
-    view.page = await load(view.page.group.name);
-    if (!keepImpact) view.impact = null;
+    const said = await carryOut(work, async () => {
+      view.page = await load(view.page.group.name);
+    });
     view.busy = false;
+    if (said === SIGNED_OUT) return;
+    view.message = said;
+    if (!keepImpact) view.impact = null;
     draw();
   }
   draw();
