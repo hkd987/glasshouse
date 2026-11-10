@@ -183,6 +183,11 @@ session cookie.
   so give rows that come and go a `data-key` (or another `data-` id);
   `lasting()` marks an element the page keeps and draws as itself. The rules
   are tested one by one in `e2e/dom.spec.ts`. `show()` replaces.
+- **Hearing of changes.** A page that should show what changes while it is
+  open (an agent's hold, new mail) takes `firstCursor(bridge)` before its
+  first load and then `watch(bridge, "<app>", cursor, reload)`: one loop in
+  the SDK, which asks a system that is down less and less often. glassd
+  tells an app's open windows whenever an action changed that app's data.
 - **Refusals are results.** `bridge.call()` returns `{ok, text, data}`; show
   the text. Only an unreachable system throws (`Offline`), and a wait for
   news (`bridge.status({waitSecs})`) that nobody answers ends as one,

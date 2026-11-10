@@ -202,3 +202,65 @@ test("cf21 only a meeting app has the camera and microphone; Chat never does", (
   assert.match(manifestProblems({ ...meet, permissions: ["media", "speech"] }).join("; "), /only an app that declares meet\.transcribe/);
   assert.deepEqual(manifestProblems({ ...meet, actions: [...meet.actions, "meet.transcribe"], permissions: ["media", "speech"] }), []);
 });
+
+test("nv3 a page hears of its app's changes, and asks a system that is down less and less often", async () => {
+  const { pauseAfter, watch } = await import("../src/live.ts");
+  // 1 s doubling to half a minute, give or take a fifth.
+  assert.deepEqual(
+    [1, 2, 3, 6, 20].map((n) => pauseAfter(n, 0.5)),
+    [1000, 2000, 4000, 30_000, 30_000],
+  );
+  assert.equal(pauseAfter(1, 0), 800);
+  assert.equal(pauseAfter(1, 1), 1200);
+
+  // A system that is down twice, then has news of another app, then of ours.
+  const answers: (() => { status: number; body: unknown })[] = [
+    () => {
+      throw new TypeError("Failed to fetch");
+    },
+    () => {
+      throw new TypeError("Failed to fetch");
+    },
+    () => ({ status: 200, body: { open: true, pending: [], cursor: 8, changed: ["mail"] } }),
+    () => ({ status: 200, body: { open: true, pending: [], cursor: 9, changed: ["calendar"] } }),
+  ];
+  const asked: number[] = [];
+  let done: () => void = () => {};
+  const finished = new Promise<void>((resolve) => (done = resolve));
+  const transport: Transport = {
+    async post(_endpoint, body) {
+      asked.push((body as { since: number }).since);
+      const next = answers.shift();
+      if (!next) return new Promise(() => {}); // nothing more: the wait stays open
+      return next();
+    },
+  };
+  const bridge = new Bridge({ app: "calendar", transport, store: memoryStore() });
+  const heard: string[] = [];
+  const pauses: number[] = [];
+  const watching = watch(
+    bridge,
+    "calendar",
+    7,
+    () => {
+      heard.push("changed");
+      done();
+    },
+    {
+      onOffline: (offline) => heard.push(offline ? "offline" : "back"),
+      pauseMs: (failures) => {
+        pauses.push(failures);
+        return 1;
+      },
+    },
+  );
+  await finished;
+  watching.stop();
+  // Told once it was down and once it was back; our change, not Mail's.
+  assert.deepEqual(heard, ["offline", "back", "changed"]);
+  // The pause grew with each failure in a row.
+  assert.deepEqual(pauses, [1, 2]);
+  // Each wait from the cursor the last answer gave.
+  assert.deepEqual(asked.slice(0, 4), [7, 7, 7, 8]);
+});
+

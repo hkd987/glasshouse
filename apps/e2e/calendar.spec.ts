@@ -7,7 +7,16 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { type Page, expect, test } from "@playwright/test";
 
-import { type ApprovalView, SHOTS, appUrl, audit, glassctl, glassctlJson, outcome } from "./env.ts";
+import { type ApprovalView, SHOTS, appUrl, audit, glassctl, glassctlJson, mcp, outcome } from "./env.ts";
+
+const pad = (n: number) => String(n).padStart(2, "0");
+/** This week's day `day` (0 = Monday) at `hh:mm`, local time, as the calendar's actions take it. */
+function weekday(day: number, hh: number, mm = 0): string {
+  const now = new Date();
+  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7));
+  const d = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + day, hh, mm);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 async function openCalendar(page: Page): Promise<void> {
   await page.goto(appUrl("calendar"));
@@ -27,6 +36,43 @@ test("au10 the week shows the hold an agent made, by claude-code for the user", 
   await expect(detail).toContainText("Hold · tentative");
   await expect(detail.locator(".attribution")).toHaveText(/^by claude-code for \S+$/);
   await page.screenshot({ path: join(SHOTS, "calendar-week-agent-hold.png") });
+});
+
+test("nv3 a hold an agent makes shows in the open week when it's made, and leaves an event being written alone", async ({ page }) => {
+  await openCalendar(page);
+  // The person is writing an event of their own.
+  await page.click("[data-test=new-event]");
+  const title = page.locator("input[name=title]");
+  await title.click();
+  await page.keyboard.type("Contract revi");
+  await title.evaluate((el) => {
+    (el as HTMLInputElement & { mine?: boolean }).mine = true;
+  });
+
+  // Their agent holds time this week, on the task's socket (ADR 0004).
+  const task = glassctlJson<{ id: string; driver_socket: string }>("run", "claude-code", "Hold time to read the contract", "--yes");
+  const text = `Read the contract ${Date.now()}`;
+  const [held] = (await mcp(task.driver_socket, [
+    { name: "calendar_hold", arguments: { title: text, start: weekday(3, 14), end: weekday(3, 15) } },
+  ])) as { isError?: boolean }[];
+  expect(held?.isError ?? false).toBe(false);
+
+  // The week shows it without being asked: it used to wait for the week
+  // to be changed, or for Calendar to be opened again.
+  const hold = page.locator(".event.hold", { hasText: text });
+  await expect(hold).toHaveCount(1);
+  await expect(hold).toContainText("by claude-code");
+  // And what was being written is as it was: the same field, with the
+  // keyboard, and the rest goes where the caret is.
+  const now = await page.evaluate(() => {
+    const el = document.querySelector("input[name=title]") as HTMLInputElement & { mine?: boolean };
+    return { same: el.mine === true, typing: document.activeElement === el, value: el.value };
+  });
+  expect(now).toEqual({ same: true, typing: true, value: "Contract revi" });
+  await page.keyboard.type("ew");
+  await expect(title).toHaveValue("Contract review");
+  await page.screenshot({ path: join(SHOTS, "calendar-live-hold.png") });
+  glassctl("stop", task.id);
 });
 
 test("ui5 a new event on the user's own calendar runs at notify", async ({ page }) => {

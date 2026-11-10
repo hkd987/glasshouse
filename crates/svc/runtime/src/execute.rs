@@ -582,6 +582,15 @@ impl Runtime {
                     state.written.note_changes(&ids, seen);
                 }
                 self.publish(task);
+                // The app whose data this was hears, if a window of it is
+                // open: Calendar shows the hold an agent just made, where
+                // it showed it at the next change of week. (Mail and Chat
+                // tell their own news as well; twice is one more look.)
+                if def.side_effect != SideEffect::None
+                    && let Some((app, _)) = def.name.as_str().split_once('.')
+                {
+                    self.app_changed(&task.user.name, app);
+                }
                 Ok(CallToolResult::ok(output.text, output.data))
             }
             Err(e) => {

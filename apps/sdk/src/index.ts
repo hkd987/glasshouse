@@ -18,6 +18,7 @@ export {
 } from "./bridge.ts";
 export { Cache, MAX_ENTRIES, memoryStore, type Store } from "./cache.ts";
 export { append, type Attrs, attributionChip, type Child, h, lasting, patch, ready, redraw, show } from "./dom.ts";
+export { firstCursor, pauseAfter, watch, type Watching, type WatchOptions } from "./live.ts";
 export {
   type AppAction,
   type AppCallResult,

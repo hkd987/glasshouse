@@ -18,13 +18,15 @@ import {
   Offline,
   type Person,
   attributionChip,
+  firstCursor,
   h,
   keepFilesOffline,
   parseAddresses,
   parseAttribution,
   ready,
-  show,
+  redraw,
   showAttribution,
+  watch,
 } from "@glasshouse/sdk";
 import {
   type CalendarEvent,
@@ -197,7 +199,9 @@ async function invite(event: CalendarEvent, to: string[]): Promise<void> {
 // ---- rendering ------------------------------------------------------------
 
 function render(): void {
-  show(root, titlebar(), h("div", { class: "body" }, grid(), side()));
+  // In place: the week reloads when an agent adds to it, and whoever is
+  // writing an event keeps their field, their caret and the keyboard.
+  redraw(root, () => [titlebar(), h("div", { class: "body" }, grid(), side())]);
 }
 
 function titlebar(): HTMLElement {
@@ -514,10 +518,19 @@ async function start(): Promise<void> {
   } catch (error) {
     state.notice = error instanceof Offline ? "Calendar hasn't been loaded on this device yet." : String(error);
   }
+  // The cursor before the first load, so a change in between is news
+  // (NV-3, ADR 0051).
+  const cursor = await firstCursor(bridge);
   await Promise.all([loadWeek(), loadMeetings()]);
   // Start the day's hours in view.
   root.querySelector(".week-scroll")?.scrollTo({ top: 1 * HOUR_PX });
   ready();
+  // An event an agent adds, a hold it makes, an invitation that arrives:
+  // the week shows it when it happens. It used to show at the next change
+  // of week, or never if the person didn't leave this one.
+  watch(bridge, "calendar", cursor, async () => {
+    await Promise.all([loadWeek(), loadMeetings()]);
+  });
 }
 
 void start();
