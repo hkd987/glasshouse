@@ -153,6 +153,10 @@ jobs:
       - run: make apps-test
       - run: make console-test
         if: success() || failure()
+      # Meetings' media through the relay. Left out of what CI ran, one of
+      # its tests failed every run and nobody saw.
+      - run: make meet-test
+        if: success() || failure()
       # A suite that fails here and nowhere else: what glassd, the bridge and
       # the page said, since nobody can go and look.
       - name: What the dev host logged

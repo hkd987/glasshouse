@@ -38,6 +38,11 @@ struct Harness {
 }
 
 fn relay() -> Harness {
+    relay_with(glass_media_relay::CONNECT_WITHIN)
+}
+
+/// A relay that gives someone admitted `connect_within` to connect.
+fn relay_with(connect_within: Duration) -> Harness {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -47,6 +52,7 @@ fn relay() -> Harness {
         udp: "127.0.0.1:0".parse().unwrap(),
         public: "127.0.0.1".parse().unwrap(),
         api: "127.0.0.1:0".parse().unwrap(),
+        connect_within,
     };
     let relay = runtime.block_on(Relay::start(config)).unwrap();
     Harness {
@@ -929,6 +935,52 @@ fn cf21_a_shared_screen_reaches_everyone_marked_as_a_screen() {
     run_for(&mut pages, Duration::from_millis(300));
     assert!(pages[1].from("a", "screen") <= seen + 2);
     assert!(pages[1].from("a", "video") > 0);
+}
+
+#[test]
+fn cf21_someone_admitted_who_never_connects_gives_up_their_seat() {
+    // The page asked to join and then closed, or can't reach the relay's
+    // port: nothing ever said they'd gone, so they kept one of the room's
+    // seats and the console kept showing them in the meeting.
+    let harness = relay_with(Duration::from_millis(400));
+    let api = harness.relay.api_addr();
+    let seats = || http(api, "GET", "/rooms/r", None).1["participants"].clone();
+
+    // One connects and stays; one is admitted and never heard from.
+    let mut here = Page::new("here", Numbering::Default);
+    assert_eq!(admit(api, "r", 0, &mut here), 200);
+    // Connected: its media is going out.
+    assert!(run_until(&mut [&mut here], PATIENCE, |pages| pages[0].sent >= 25));
+    let absent = Page::new("absent", Numbering::Default).offer;
+    let body = json!({"participant": 1, "offer": absent});
+    assert_eq!(
+        http(api, "POST", "/rooms/r/participants", Some(body)).0,
+        200
+    );
+    assert_eq!(seats(), json!([0, 1]));
+
+    // Past the time to connect (the relay looks every second at most),
+    // the one who never connected is gone and the one who did is not.
+    let deadline = Instant::now() + PATIENCE;
+    while seats() != json!([0]) {
+        assert!(Instant::now() < deadline, "still seated: {}", seats());
+        run_for(&mut [&mut here], Duration::from_millis(100));
+    }
+    run_for(&mut [&mut here], Duration::from_millis(1500));
+    assert_eq!(seats(), json!([0]));
+    assert_eq!(
+        http(api, "GET", "/health", None),
+        (200, json!({"rooms": 1, "participants": 1}))
+    );
+    // The seat is free for them to come back to.
+    let mut back = Page::new("back", Numbering::Default);
+    assert_eq!(admit(api, "r", 1, &mut back), 200);
+    assert!(run_until(
+        &mut [&mut here, &mut back],
+        PATIENCE,
+        |pages| pages[1].sent >= 25
+    ));
+    assert_eq!(seats(), json!([0, 1]));
 }
 
 #[test]

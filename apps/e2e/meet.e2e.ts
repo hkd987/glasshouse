@@ -84,6 +84,9 @@ const keyId = (key: Uint8Array) => `md-${Buffer.from(key.subarray(0, 8)).toStrin
 
 /** Each room's media keys, current first, as `meet.keys` answers. */
 const roomKeys = new Map<string, Uint8Array[]>();
+/** Rooms whose test makes a new key after someone leaves, and those where one is due and not made yet. */
+const rekeyed = new Set<string>();
+const keyDue = new Set<string>();
 /** The current key id each person's last `meet.keys` got, by `room/participant`. */
 const served = new Map<string, string>();
 
@@ -167,12 +170,24 @@ async function person(browser: Browser, seat: Seat): Promise<Page> {
         const keys = roomKeys.get(seat.room) ?? [seat.mediaKey];
         served.set(`${seat.room}/${seat.participant}`, keyId(keys[0]!));
         return route.fulfill({
-          // As glassd answers: no new key due (the page asks until none is, ADR 0052).
-          json: { ok: true, text: "Keys", data: { meeting: seat.room, media_keys: keys.map((k) => ({ id: keyId(k), key: base64(k) })), due: false } },
+          // As glassd answers: whether a new key is still due. The page
+          // asks until there is one or none is (ADR 0052).
+          json: {
+            ok: true,
+            text: "Keys",
+            data: { meeting: seat.room, media_keys: keys.map((k) => ({ id: keyId(k), key: base64(k) })), due: keyDue.has(seat.room) },
+          },
         });
       }
       if (action === "meet.leave") {
         await fetch(`${api}/rooms/${seat.room}/participants/${seat.participant}`, { method: "DELETE" });
+        // Someone who left mustn't read what follows: in a room whose
+        // keys a test hands out, a new one is due from here until the
+        // test has made it. (This said "none is due" always: the others,
+        // who ask a quarter of a second after hearing someone left, were
+        // told so before the test made the key 300 ms on, stopped asking,
+        // and the test waited out its 15 s. It failed every run.)
+        if (rekeyed.has(seat.room)) keyDue.add(seat.room);
         return route.fulfill({ json: { ok: true, text: "Left", data: null } });
       }
       return route.fulfill({ json: { ok: false, text: `not in this test: ${action}`, data: null } });
@@ -389,6 +404,7 @@ test("cf21 a shared screen reaches the others and is shown large", async ({ brow
 });
 
 test("cf21 after someone leaves the others switch to the new media key and still see each other", async ({ browser }) => {
+  rekeyed.add("rekey");
   const first = key();
   const ana = await person(browser, { room: "rekey", participant: 0, mediaKey: first });
   const bo = await person(browser, { room: "rekey", participant: 1, mediaKey: first });
@@ -403,6 +419,7 @@ test("cf21 after someone leaves the others switch to the new media key and still
   await ana.waitForTimeout(300);
   const second = key();
   roomKeys.set("rekey", [second, first]);
+  keyDue.delete("rekey");
   await expect
     .poll(() => [served.get("rekey/0"), served.get("rekey/1")], { timeout: 15_000 })
     .toEqual([keyId(second), keyId(second)]);

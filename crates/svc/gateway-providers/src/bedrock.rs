@@ -135,13 +135,23 @@ impl BedrockProvider {
     }
 
     fn with_http(http: Http, region: &str, base: &str, credentials: AwsCredentials) -> Self {
-        let host = base
-            .split_once("://")
-            .map_or(base, |(_, rest)| rest)
-            .split('/')
-            .next()
-            .unwrap_or_default()
-            .to_owned();
+        // The host as the request's Host header will carry it, which is
+        // what AWS checks the signature against: without the port where
+        // it's the scheme's own. Cut out of the address by hand, an
+        // endpoint written `https://…:443` was signed with the port and
+        // sent without it, and every call was refused.
+        let host = crate::http::Target::parse(&format!("{}/", base.trim_end_matches('/')))
+            .map_or_else(
+                || {
+                    base.split_once("://")
+                        .map_or(base, |(_, rest)| rest)
+                        .split('/')
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned()
+                },
+                |target| target.authority(),
+            );
         Self {
             http,
             region: region.to_owned(),
@@ -376,6 +386,34 @@ mod tests {
             assert_eq!(err.fails_over(), fails_over, "{status}: {err}");
             assert!(err.to_string().contains("nope"));
         }
+    }
+
+    #[test]
+    fn mp2_the_signed_host_is_the_one_the_request_carries() {
+        // AWS checks the signature against the Host header as sent, which
+        // has no port where it's the scheme's own. An endpoint written
+        // with `:443` (a PrivateLink address pasted with it) was signed
+        // with the port, and every call was refused.
+        let host = |endpoint: &str| {
+            BedrockProvider::with_http(
+                Http::insecure_for_tests(),
+                "us-east-1",
+                endpoint,
+                temporary(),
+            )
+            .host
+        };
+        let plain = "bedrock-runtime.us-east-1.amazonaws.com";
+        assert_eq!(host(&format!("https://{plain}")), plain);
+        assert_eq!(host(&format!("https://{plain}:443")), plain);
+        assert_eq!(host(&format!("https://{plain}:443/")), plain);
+        // Any other port is in the header, and so in the signature.
+        assert_eq!(
+            host(&format!("https://{plain}:8443")),
+            format!("{plain}:8443")
+        );
+        assert_eq!(host("http://127.0.0.1:4566"), "127.0.0.1:4566");
+        assert_eq!(host("http://127.0.0.1:80"), "127.0.0.1");
     }
 
     #[test]

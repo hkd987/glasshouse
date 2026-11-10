@@ -74,7 +74,16 @@ pub struct Config {
     /// The private API for the admin console. Loopback only: it has no
     /// authentication yet.
     pub api: SocketAddr,
+    /// How long someone admitted has to connect ([`CONNECT_WITHIN`]).
+    pub connect_within: std::time::Duration,
 }
+
+/// How long someone admitted has to connect before their seat is given up.
+/// A page that asked to join and then closed, lost its network or couldn't
+/// reach the relay's port never connected and was never removed: it kept
+/// one of the room's seats, and the console kept showing them in the
+/// meeting.
+pub const CONNECT_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -135,7 +144,8 @@ impl Relay {
         // DTLS and SRTP on OpenSSL, like the rest of the system.
         let crypto = Arc::new(str0m::crypto::from_feature_flags());
         let (commands, inbox) = mpsc::channel(64);
-        let media = tokio::spawn(media::Media::new(socket, host, crypto).run(inbox));
+        let media =
+            tokio::spawn(media::Media::new(socket, host, crypto, config.connect_within).run(inbox));
         let api = tokio::spawn(api::serve(listener, commands));
         tracing::info!(media = %media_addr, socket = %bound, api = %api_addr, "relay listening");
         Ok(Relay {
@@ -209,6 +219,7 @@ mod tests {
             udp: "127.0.0.1:0".parse().unwrap(),
             public: "127.0.0.1".parse().unwrap(),
             api: "0.0.0.0:0".parse().unwrap(),
+            connect_within: CONNECT_WITHIN,
         };
         assert!(matches!(
             Relay::start(config).await,
@@ -218,6 +229,7 @@ mod tests {
             udp: "127.0.0.1:0".parse().unwrap(),
             public: "0.0.0.0".parse().unwrap(),
             api: "127.0.0.1:0".parse().unwrap(),
+            connect_within: CONNECT_WITHIN,
         };
         assert!(matches!(Relay::start(config).await, Err(Error::Public(..))));
     }

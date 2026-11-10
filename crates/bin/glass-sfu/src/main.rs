@@ -84,6 +84,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         udp: args.udp,
         public,
         api: args.api,
+        connect_within: glass_media_relay::CONNECT_WITHIN,
     };
     let mut relay = Relay::start(config).await?;
     ready(&relay)?;

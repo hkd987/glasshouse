@@ -258,7 +258,7 @@ tla: ## Model-check the TLA+ models of key workflows (specs/tla, ADR 0051) with 
 # they aren't named again here. .github/workflows/ci.yml runs these same
 # targets as three jobs side by side; the Agents desktop app's (agents-app-lint,
 # agents-app-test) need WebKitGTK and aren't among them yet.
-ci: lint-all test tla shell-lint shell-test apps-test console-test ## What CI runs on every change (.github/workflows/ci.yml)
+ci: lint-all test tla shell-lint shell-test apps-test console-test meet-test ## What CI runs on every change (.github/workflows/ci.yml)
 
 clean: ## Remove build outputs (keeps downloaded FreeBSD images in build/cache)
 	cargo clean

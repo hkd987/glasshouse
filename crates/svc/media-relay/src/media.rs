@@ -220,6 +220,9 @@ struct Peer {
     /// The last `peers` line sent, so an unchanged one isn't sent again.
     told: Option<String>,
     timeout: Instant,
+    /// When the console admitted it: connected by [`Media::connect_within`]
+    /// of this, or its seat is given up.
+    joined: Instant,
 }
 
 /// What one participant's output asks of the others.
@@ -270,6 +273,8 @@ pub(crate) struct Media {
     work: VecDeque<Work>,
     /// When the loop last looked for slots waiting for a key frame.
     checked: Instant,
+    /// How long someone admitted has to connect.
+    connect_within: Duration,
 }
 
 enum Wake {
@@ -279,8 +284,14 @@ enum Wake {
 }
 
 impl Media {
-    pub(crate) fn new(socket: UdpSocket, host: Candidate, crypto: Arc<CryptoProvider>) -> Self {
+    pub(crate) fn new(
+        socket: UdpSocket,
+        host: Candidate,
+        crypto: Arc<CryptoProvider>,
+        connect_within: Duration,
+    ) -> Self {
         Media {
+            connect_within,
             socket,
             host,
             crypto,
@@ -396,6 +407,7 @@ impl Media {
                 asked: [None; 2],
                 told: None,
                 timeout,
+                joined: Instant::now(),
             },
         );
         self.rooms
@@ -525,6 +537,27 @@ impl Media {
         if now.saturating_duration_since(self.checked) >= KEYFRAME_CHECK {
             self.checked = now;
             self.ask_again(now);
+        }
+        // Admitted and never connected (the page closed, or can't reach
+        // this port): nothing ever said they'd gone, so they kept a seat
+        // for as long as the room lasted.
+        let never: Vec<PeerId> = self
+            .peers
+            .iter()
+            .filter(|(_, p)| {
+                !p.connected && now.saturating_duration_since(p.joined) >= self.connect_within
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        for id in never {
+            if let Some(peer) = self.remove(id) {
+                info!(
+                    room = peer.room,
+                    participant = peer.participant,
+                    "left: admitted and never connected"
+                );
+                self.changed(&peer.room);
+            }
         }
         self.process();
     }
