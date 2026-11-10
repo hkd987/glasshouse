@@ -442,8 +442,15 @@ impl Front {
             .map(|(t, a)| (t.clone(), a.clone()))
             .collect();
         for (task, asked) in asked {
-            let Some(text) = self.task_answer(&task).await else {
-                continue;
+            let text = match self.task_answer(&task).await {
+                crate::server::TaskAnswer::NotYet => continue,
+                crate::server::TaskAnswer::Ended(text) => text,
+                // Said once, where the person is waiting for an answer.
+                crate::server::TaskAnswer::Gone => {
+                    "I lost track of that before it was done (the computer it ran on started \
+                     again). Ask me again."
+                        .into()
+                }
             };
             teams.send(
                 &asked.conversation,

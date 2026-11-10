@@ -62,6 +62,41 @@ const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-
 
 type Reply<T> = Result<T, Failure>;
 
+/// What became of a task someone asked for from elsewhere (Teams).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskAnswer {
+    /// Still at it, or glassd isn't answering: look again.
+    NotYet,
+    /// Done, failed or stopped: what to say.
+    Ended(String),
+    /// glassd has no such task any more. Nothing will ever be said of it:
+    /// taken for "not yet", it was asked about every three seconds for
+    /// as long as the front ran.
+    Gone,
+}
+
+/// The most answers the front keeps the who and where of. Kept without a
+/// limit, the map grew with every answer anyone gave.
+const ANSWERS_KEPT: usize = 1000;
+
+/// Keeps how approval `id` was answered, and lets go of the oldest answers
+/// beyond [`ANSWERS_KEPT`] (an approval that old shows as answered,
+/// without by whom and from where, as one answered at the desktop does).
+pub(crate) fn remember(answered: &mut BTreeMap<String, Answered>, id: &str, record: Answered) {
+    answered.insert(id.to_owned(), record);
+    while answered.len() > ANSWERS_KEPT {
+        // Times are RFC 3339 in UTC, which sort as they read.
+        let Some(oldest) = answered
+            .iter()
+            .min_by(|a, b| a.1.at.cmp(&b.1.at))
+            .map(|(id, _)| id.clone())
+        else {
+            return;
+        };
+        answered.remove(&oldest);
+    }
+}
+
 pub struct Front {
     pub glassd: Glassd,
     pub mode: Mode,
@@ -821,11 +856,8 @@ impl Front {
             )
             .await
             .ok();
-        let answered = self
-            .answered
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        // Read where it is: every page copied the whole map.
+        let answered = self.answered.lock().unwrap_or_else(|e| e.into_inner());
         Ok(api::AgentDetail {
             agent: views::agent(&computer, &persona, &tasks.iter().collect::<Vec<_>>()),
             reach: views::reach(&computer, card.as_ref()),
@@ -1061,10 +1093,11 @@ impl Front {
             at: views::time(&glass_types::Timestamp::now()),
             via: answer.via,
         };
-        self.answered
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id.to_owned(), record.clone());
+        remember(
+            &mut self.answered.lock().unwrap_or_else(|e| e.into_inner()),
+            id,
+            record.clone(),
+        );
         self.changed(None);
         Ok(views::approval(&answered, Some(&record)))
     }
@@ -1088,29 +1121,32 @@ impl Front {
         })
     }
 
-    /// What a task ended with, for people, once it has.
-    pub async fn task_answer(&self, task: &str) -> Option<String> {
-        let task: glass_types::TaskId = task.parse().ok()?;
-        let detail: TaskDetail = self
-            .glassd
-            .call(methods::TASK_GET, TaskRef { task })
-            .await
-            .ok()?;
+    /// What a task ended with, for people, once it has; or that glassd no
+    /// longer has it.
+    pub async fn task_answer(&self, task: &str) -> TaskAnswer {
+        let Ok(task) = task.parse::<glass_types::TaskId>() else {
+            return TaskAnswer::Gone;
+        };
+        let detail: TaskDetail = match self.glassd.call(methods::TASK_GET, TaskRef { task }).await {
+            Ok(detail) => detail,
+            // No such task: glassd started again, or cleared it away.
+            Err(e) if e.status == 404 => return TaskAnswer::Gone,
+            // glassd isn't answering just now: asked again at the next look.
+            Err(_) => return TaskAnswer::NotYet,
+        };
         let view = &detail.view;
-        match view.state {
-            glass_api::TileState::Done => Some(
-                detail
-                    .answer
-                    .filter(|a| !a.trim().is_empty())
-                    .unwrap_or_else(|| view.caption.clone()),
-            ),
-            glass_api::TileState::Failed => Some(format!(
+        TaskAnswer::Ended(match view.state {
+            glass_api::TileState::Done => detail
+                .answer
+                .filter(|a| !a.trim().is_empty())
+                .unwrap_or_else(|| view.caption.clone()),
+            glass_api::TileState::Failed => format!(
                 "I couldn't finish: {}",
                 view.failure.as_deref().unwrap_or("it stopped")
-            )),
-            glass_api::TileState::Stopped => Some("Stopped.".into()),
-            _ => None,
-        }
+            ),
+            glass_api::TileState::Stopped => "Stopped.".into(),
+            _ => return TaskAnswer::NotYet,
+        })
     }
 
     async fn templates(&self) -> Reply<Vec<api::Template>> {

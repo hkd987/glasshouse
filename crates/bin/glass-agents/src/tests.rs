@@ -31,6 +31,10 @@ struct StandInGlassd {
     task: TaskId,
     asked: Mutex<Vec<Value>>,
     answered: Mutex<Option<bool>>,
+    /// glassd has no tasks any more (it started again), and how often
+    /// one was asked about.
+    forgot: Mutex<bool>,
+    looked_up: Mutex<u32>,
 }
 
 impl StandInGlassd {
@@ -136,6 +140,10 @@ impl Handler for StandInGlassd {
                 json!(self.task(TaskId::new(), TileState::Starting))
             }
             m::TASK_GET => {
+                *self.looked_up.lock().unwrap() += 1;
+                if *self.forgot.lock().unwrap() {
+                    return Err(RpcError::not_found("no such task"));
+                }
                 let id: TaskId = serde_json::from_value(params["task"].clone()).unwrap();
                 json!(TaskDetail {
                     view: self.task(id, TileState::Done),
@@ -216,6 +224,8 @@ async fn world() -> World {
         task: TaskId::new(),
         asked: Mutex::new(Vec::new()),
         answered: Mutex::new(None),
+        forgot: Mutex::new(false),
+        looked_up: Mutex::new(0),
     });
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     tokio::spawn(glass_rpc::serve(listener, Arc::clone(&glassd)));
@@ -418,6 +428,82 @@ async fn adr0065_an_agent_asks_in_teams_and_the_answer_comes_back() {
             .any(|t| t == "Reconciler: Seven of 214 don't match."),
         "{texts:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0065_an_ask_from_teams_whose_task_is_gone_is_said_once() {
+    // glassd started again and has no tasks: the task asked from Teams
+    // will never end. Taken for "not done yet", it was asked about at
+    // every look, every three seconds, for as long as the front ran, and
+    // the person waiting in the chat was told nothing.
+    let w = world().await;
+    let installed = w
+        .signed(&w.activity("installationUpdate", DANA_AAD, json!({"action": "add"})))
+        .await;
+    assert_eq!(installed.status, 200);
+    let asked = w
+        .signed(&w.activity(
+            "message",
+            DANA_AAD,
+            json!({"text": "Reconciler, which invoices don't match?"}),
+        ))
+        .await;
+    assert_eq!(asked.status, 200);
+    *w.glassd.forgot.lock().unwrap() = true;
+
+    let lost = |w: &World| {
+        w.sent()
+            .iter()
+            .filter(|(_, _, a)| {
+                a["text"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("Reconciler: I lost track of that"))
+            })
+            .count()
+    };
+    w.front.teams_look_once().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(lost(&w), 1, "{:?}", w.sent());
+    // And it's let go of: later looks neither ask glassd about it nor say
+    // it again.
+    let looked_up = *w.glassd.looked_up.lock().unwrap();
+    for _ in 0..3 {
+        w.front.teams_look_once().await.unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(*w.glassd.looked_up.lock().unwrap(), looked_up);
+    assert_eq!(lost(&w), 1);
+}
+
+#[test]
+fn the_front_keeps_how_the_newest_thousand_approvals_were_answered() {
+    let mut answered = std::collections::BTreeMap::new();
+    let record = |n: u32| crate::views::Answered {
+        yes: true,
+        by: "Dana".into(),
+        at: format!(
+            "2026-11-10T{:02}:{:02}:{:02}Z",
+            n / 3600,
+            n / 60 % 60,
+            n % 60
+        ),
+        via: glass_agents_api::Channel::Web,
+    };
+    // Ids don't sort by time: the oldest answers go, whatever their ids.
+    for n in 0..1200u32 {
+        crate::server::remember(
+            &mut answered,
+            &format!("{:04}", (n * 7919) % 10_000),
+            record(n),
+        );
+    }
+    assert_eq!(answered.len(), 1000);
+    let oldest = answered.values().map(|a| a.at.clone()).min().unwrap();
+    assert_eq!(oldest, record(200).at);
+    // Answered again (it can't be, but the map takes it): no second entry.
+    let id = answered.keys().next().unwrap().clone();
+    crate::server::remember(&mut answered, &id, record(5000));
+    assert_eq!(answered.len(), 1000);
 }
 
 /// glassd on an agent host, as the front sees it (ADR 0067): a connection
