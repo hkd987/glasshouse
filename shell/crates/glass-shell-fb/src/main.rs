@@ -298,6 +298,20 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                         });
                     }
                 }
+                // The computer slept and glassd didn't say so (it does:
+                // `Event::Sleeping`): this key or move locks the screen
+                // and does nothing else.
+                if shell.live.slept(std::time::SystemTime::now(), now)
+                    && !shell.live.is_locked()
+                {
+                    eprintln!("lock: the computer slept");
+                    let effects = Vec::from_iter(shell.live.update(Message::LockScreen));
+                    shell.send(&calls, client.as_ref(), effects);
+                    shell.live.wake();
+                    shell.display.show_pointer();
+                    shell.draw(true);
+                    continue;
+                }
                 // A blank screen comes back; that key or move does nothing else.
                 if shell.live.wake() {
                     eprintln!("blank: woke");
@@ -391,7 +405,9 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 if shell.now().minute() == 0 {
                     shell.send(&calls, client.as_ref(), vec![Effect::LoadSettings]);
                 }
-                if shell.live.idle_too_long(Instant::now()) {
+                if shell.live.idle_too_long(Instant::now())
+                    | shell.live.slept(std::time::SystemTime::now(), Instant::now())
+                {
                     let effects = Vec::from_iter(shell.live.update(Message::LockScreen));
                     shell.send(&calls, client.as_ref(), effects);
                 }
@@ -1055,7 +1071,14 @@ impl Shell {
             .params
             .filter(|_| note.method == methods::EVENT)
             .and_then(|params| serde_json::from_value::<Event>(params).ok());
-        event.and_then(|event| self.live.apply(event))
+        let event = event?;
+        let sleeping = event == glass_api::Event::Sleeping;
+        let was_locked = self.live.is_locked();
+        let effect = self.live.apply(event);
+        if sleeping && !was_locked && self.live.is_locked() {
+            eprintln!("lock: the computer is going to sleep");
+        }
+        effect
     }
 
     /// Handles a batch of input: the pointer moves at once; where it went,

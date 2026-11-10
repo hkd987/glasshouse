@@ -70,6 +70,47 @@ members = [MEMBERS]
 "lock.after_minutes" = { value = 2, locked = true }
 "#;
 
+/// PM-1, UX-1: the computer going to sleep is said to every desktop, which
+/// locks, so that what wakes is a locked screen. Nothing told the desktop:
+/// a laptop closed and opened again showed the desktop as it was left.
+#[tokio::test(flavor = "multi_thread")]
+async fn pm1_a_desktop_hears_that_the_computer_is_going_to_sleep() {
+    let h = harness();
+    let desktop = Client::connect(h.serve_control()).await.unwrap();
+    let () = desktop
+        .call(methods::EVENTS_SUBSCRIBE, json!(null))
+        .await
+        .unwrap();
+    let system = glass_runtime::Caller {
+        uid: 0,
+        ..h.me.clone()
+    };
+    // Not anyone's to say: a person can't lock every desktop by asking.
+    let person = glass_runtime::Caller {
+        uid: 4242,
+        ..h.me.clone()
+    };
+    assert!(h.rt.suspend(&person).await.is_err());
+    h.rt.suspend(&system).await.unwrap();
+    let heard = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let note = desktop.next_notification().await.unwrap();
+            let event = serde_json::from_value::<Event>(note.params.unwrap()).unwrap();
+            if event == Event::Sleeping {
+                return;
+            }
+            assert_ne!(event, Event::SettingsChanged, "nothing else was said");
+        }
+    })
+    .await;
+    assert!(heard.is_ok(), "the desktop wasn't told");
+    // On the wire as the desktop reads it.
+    assert_eq!(
+        serde_json::to_value(Event::Sleeping).unwrap(),
+        json!({ "kind": "sleeping" })
+    );
+}
+
 /// The SettingsLayers model (ADR 0052): a release that only moves the
 /// person into a group, the group's settings the same, reaches their
 /// desktop with the group's lock.

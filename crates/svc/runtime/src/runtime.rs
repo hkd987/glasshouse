@@ -1602,6 +1602,11 @@ impl Runtime {
         // First, so that a resume landing while this goes round the tasks
         // waits for the wake too.
         self.going_to_sleep.store(true, Ordering::SeqCst);
+        // Every desktop locks: a laptop closed and opened again showed the
+        // desktop as it was left, to whoever opened it. Said before the
+        // tasks are gone round, which gives the lock screen that long to
+        // be drawn.
+        let _ = self.events.send((EVERYONE_UID, Event::Sleeping));
         let tasks: Vec<Arc<Task>> = self.tasks().values().cloned().collect();
         let mut paused = Vec::new();
         for task in tasks {

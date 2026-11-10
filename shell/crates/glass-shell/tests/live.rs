@@ -1187,6 +1187,59 @@ fn ui5_the_docks_mail_opens_mail_and_once_open_brings_it_forward() {
 }
 
 #[test]
+fn pm1_the_screen_locks_as_the_computer_goes_to_sleep() {
+    // A laptop closed and opened again showed the desktop as it was left,
+    // to whoever opened it: nothing told the desktop about sleep, and the
+    // wait of `lock.after_minutes` is on a clock that stands still
+    // through it.
+    let mut live = Live::new(fixtures::tasks()).lockable();
+    assert!(!live.is_locked());
+    // glassd says the computer is going to sleep: locked, the password
+    // field ready, whatever was open put away.
+    live.update(Message::OpenCommandBar);
+    assert!(live.command_bar().is_some());
+    assert_eq!(
+        live.apply(glass_api::Event::Sleeping),
+        Some(Effect::Focus(login::PASSWORD))
+    );
+    assert!(live.is_locked());
+    assert!(live.command_bar().is_none());
+    // Said again (a second sleep while locked), nothing changes: a
+    // password half typed stays.
+    live.update(Message::PasswordChanged("half".into()));
+    assert_eq!(live.apply(glass_api::Event::Sleeping), None);
+    assert!(live.is_locked());
+
+    // A desktop with no sign-in screen behind it has nothing to unlock
+    // with: it doesn't lock.
+    let mut plain = Live::new(fixtures::tasks());
+    assert_eq!(plain.apply(glass_api::Event::Sleeping), None);
+    assert!(!plain.is_locked());
+}
+
+#[test]
+fn pm1_a_computer_that_slept_unheard_is_noticed_by_its_clocks() {
+    // glassd away, or its word lost: the time of day moved on and the
+    // running clock didn't.
+    use std::time::{Duration, Instant, SystemTime};
+    let mut live = Live::new(fixtures::tasks()).lockable();
+    let (wall, at) = (SystemTime::now(), Instant::now());
+    let secs = Duration::from_secs;
+    // The first look has nothing to compare with.
+    assert!(!live.slept(wall, at));
+    // Awake: both clocks moved together, a minute and then an hour.
+    assert!(!live.slept(wall + secs(60), at + secs(60)));
+    assert!(!live.slept(wall + secs(3660), at + secs(3660)));
+    // Asleep for eight hours between two looks a minute apart.
+    assert!(live.slept(wall + secs(3720 + 8 * 3600), at + secs(3720)));
+    // And awake again from there: not noticed twice.
+    assert!(!live.slept(wall + secs(3780 + 8 * 3600), at + secs(3780)));
+    // The clock set forward a few seconds, or back, isn't sleep.
+    assert!(!live.slept(wall + secs(3800 + 8 * 3600), at + secs(3790)));
+    assert!(!live.slept(wall + secs(1000), at + secs(3800)));
+}
+
+#[test]
 fn ux1_the_clock_and_the_lock_follow_the_persons_settings() {
     use glass_api::settings::{SettingFrom, SettingView, SettingsView};
     use std::time::{Duration, Instant};

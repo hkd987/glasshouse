@@ -368,11 +368,19 @@ async fn forward<S, F>(
 /// Adds `event` to what is waiting, replacing an earlier one for the same
 /// task (keeping its place in line).
 fn merge(pending: &mut Vec<Event>, event: Event) {
-    // Per task; settings changes are one, whoever's they were.
+    // Per task; settings changes are one, whoever's they were, and so is
+    // going to sleep.
+    #[derive(PartialEq)]
+    enum Key {
+        Task(glass_types::TaskId),
+        Settings,
+        Sleeping,
+    }
     let key = |e: &Event| match e {
-        Event::TaskUpdated { task } => Some(task.id),
-        Event::TaskRemoved { task } => Some(*task),
-        Event::SettingsChanged => None,
+        Event::TaskUpdated { task } => Key::Task(task.id),
+        Event::TaskRemoved { task } => Key::Task(*task),
+        Event::SettingsChanged => Key::Settings,
+        Event::Sleeping => Key::Sleeping,
     };
     let id = key(&event);
     match pending.iter_mut().find(|e| key(e) == id) {
@@ -462,14 +470,18 @@ mod tests {
         }
         merge(&mut pending, Event::SettingsChanged);
         merge(&mut pending, Event::SettingsChanged);
+        // Going to sleep is its own, not a settings change's replacement.
+        merge(&mut pending, Event::Sleeping);
+        merge(&mut pending, Event::SettingsChanged);
         let ids: Vec<Option<TaskId>> = pending
             .iter()
             .map(|e| match e {
                 Event::TaskRemoved { task } => Some(*task),
                 Event::TaskUpdated { task } => Some(task.id),
-                Event::SettingsChanged => None,
+                Event::SettingsChanged | Event::Sleeping => None,
             })
             .collect();
-        assert_eq!(ids, [Some(a), Some(b), None], "one settings change");
+        assert_eq!(ids, [Some(a), Some(b), None, None], "one settings change");
+        assert_eq!(pending[2..], [Event::SettingsChanged, Event::Sleeping]);
     }
 }

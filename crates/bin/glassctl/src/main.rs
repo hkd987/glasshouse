@@ -1055,7 +1055,7 @@ async fn watch(ctl: &Ctl) -> anyhow::Result<()> {
                 tiles.remove(&task);
             }
             // The desktop's business, not a tile's.
-            Event::SettingsChanged => continue,
+            Event::SettingsChanged | Event::Sleeping => continue,
         }
         if interactive {
             redraw(&tiles);

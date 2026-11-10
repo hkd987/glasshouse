@@ -90,6 +90,9 @@ pub struct Live {
     /// When the person last pressed a key or moved the pointer, for
     /// locking after `lock.after_minutes` without use.
     last_input: Instant,
+    /// The time of day and the running clock when both were last looked
+    /// at ([`Live::slept`]).
+    clocks: Option<(std::time::SystemTime, Instant)>,
     /// The screen is blank for going unused (`display.blank_after_minutes`,
     /// ADR 0031): black until the next key or move, which only wakes it.
     blank: bool,
@@ -105,6 +108,9 @@ const LEVEL_FOR: Duration = Duration::from_millis(1500);
 const LOCK_AFTER_MINUTES: i64 = 10;
 /// And blanks after this long (`display.blank_after_minutes`); 0 is never.
 const BLANK_AFTER_MINUTES: i64 = 5;
+/// The time of day moving on this much further than the running clock is
+/// the computer having slept ([`Live::slept`]), not the clock being set.
+pub const SLEPT: Duration = Duration::from_secs(30);
 
 /// The person's setting that names the apps hidden from search (DK-1).
 const HIDDEN_FROM_SEARCH: &str = "search.hidden_apps";
@@ -311,6 +317,7 @@ impl Live {
             selected: None,
             settings: SettingsView::default(),
             last_input: Instant::now(),
+            clocks: None,
             blank: false,
             level: None,
         };
@@ -408,6 +415,23 @@ impl Live {
     /// The person used the keyboard or pointer at `at`.
     pub fn touched(&mut self, at: Instant) {
         self.last_input = at;
+    }
+
+    /// Whether the computer slept since this was last asked: the time of
+    /// day (`wall`) moved on by more than the running clock (`at`), which
+    /// stands still while the computer sleeps, and by more than
+    /// [`SLEPT`]. For when glassd didn't say it was going to sleep (it
+    /// was away, or its word didn't arrive): asked at each key or move
+    /// and each minute, so the first thing done to a computer that woke
+    /// unlocked locks it. The running clock standing still is also why
+    /// the wait of `lock.after_minutes` never ran out across a sleep.
+    pub fn slept(&mut self, wall: std::time::SystemTime, at: Instant) -> bool {
+        let Some((wall_before, at_before)) = self.clocks.replace((wall, at)) else {
+            return false;
+        };
+        let passed = wall.duration_since(wall_before).unwrap_or_default();
+        let awake = at.saturating_duration_since(at_before);
+        passed > awake + SLEPT
     }
 
     /// Whether the screen should lock at `at` for going unused as long as
@@ -635,6 +659,15 @@ impl Live {
                 None
             }
             Event::SettingsChanged => Some(Effect::LoadSettings),
+            // The computer is going to sleep: what wakes is the lock
+            // screen (where there is one to unlock: a session that came
+            // from the sign-in screen).
+            Event::Sleeping => {
+                if self.locked.is_some() {
+                    return None;
+                }
+                self.update(Message::LockScreen)
+            }
         }
     }
 

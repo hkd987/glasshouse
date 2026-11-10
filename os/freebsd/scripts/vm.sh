@@ -406,12 +406,17 @@ cmd_power_cut() {
 # (debug.acpi.suspend_bounce): rc.suspend runs, every device suspends and resumes, rc.resume runs,
 # as a laptop's wake does, without the firmware's sleep.
 cmd_sleep_wake() {
+	# How many times it has resumed, by its log. `grep -c` prints 0 and
+	# fails when there are none: with `|| echo 0` after it that was two
+	# zeros, which no count is ever "more than", so the first sleep after
+	# the log was rotated waited its two minutes and was called a failure.
+	local resumes='grep -c "resumed at" /var/log/messages || true'
 	local before
-	before=$(vm_ssh 'grep -c "resumed at" /var/log/messages' || echo 0)
+	before=$(vm_ssh "$resumes")
 	vm_ssh 'sysctl -q debug.acpi.suspend_bounce=1 && acpiconf -s 3' ||
 		die "the guest didn't suspend (acpiconf -s 3)"
 	local start=$SECONDS
-	until (($(vm_ssh 'grep -c "resumed at" /var/log/messages' || echo 0) > before)); do
+	until (($(vm_ssh "$resumes") > ${before:-0})); do
 		((SECONDS - start < 120)) || die "the guest suspended and didn't resume; see $VM_CONSOLE"
 		sleep 2
 	done

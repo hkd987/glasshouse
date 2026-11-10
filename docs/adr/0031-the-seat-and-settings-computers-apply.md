@@ -134,3 +134,18 @@ Extends ADR 0029.
 - A release that only moves people between groups counts as a change, so
   USB drives, the browser and the desktop follow it
   (`specs/tla/SettingsLayers.tla`).
+
+## Amended 2026-11-10 (audit 6.6): the screen locks for sleep
+A computer that slept woke showing the desktop as it was left: nothing
+told the desktop about sleep, and the wait of `lock.after_minutes` is
+counted on a clock that stands still while the computer sleeps.
+
+- glassd tells every desktop when the computer is about to sleep
+  (`Event::Sleeping`, from `system.suspend`, which only the system may
+  call), before it goes round the tasks. A desktop with a sign-in screen
+  behind it locks; what wakes is the lock screen.
+- For a sleep glassd didn't say (it was away, or its word didn't arrive),
+  the desktop compares the time of day with its running clock at each key
+  or move and each minute: the time of day half a minute or more further
+  on is the computer having slept, and that key or move locks the screen
+  and does nothing else.

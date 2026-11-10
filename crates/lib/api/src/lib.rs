@@ -382,4 +382,7 @@ pub enum Event {
     /// The subscriber's device settings changed: a new policy, or their
     /// own choice. Ask `settings.get` again (UX-1).
     SettingsChanged,
+    /// The computer is about to sleep: a closed lid, the sleep timer. A
+    /// desktop locks, so that what wakes is a locked screen.
+    Sleeping,
 }
