@@ -118,6 +118,17 @@ if [ "$left" = 0 ]; then
 else
 	fail "asleep, but $left entries are left in $computer"
 fi
+# A budget (audit 7.1, docs/dev/performance.md): a host being replaced has
+# twelve minutes for all its computers, so one computer's first save, all
+# of it new to the store, gets a second for every 10 MB and thirty at
+# least. It took 14.8 s for 300 MB when chunks went one at a time, each
+# asked about first; about 4 s since.
+budget=$((on_host / 10 > 30 ? on_host / 10 : 30))
+if python3 -c 'import sys; sys.exit(0 if float(sys.argv[1].split()[0]) < float(sys.argv[2]) else 1)' "$slept" "$budget"; then
+	pass "  within its budget of $budget s"
+else
+	fail "asleep in $slept, over its budget of $budget s for ${on_host} MB"
+fi
 all=$(s3 "")
 if [ "$(field encryption <<<"$all")" = "{'aws:kms $GLASS_LOCAL_KMS_KEY': $(field objects <<<"$all")}" ]; then
 	pass "all $(field objects <<<"$all") objects in the bucket are under the stack's KMS key, its own as $key"

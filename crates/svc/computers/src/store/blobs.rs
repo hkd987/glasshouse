@@ -23,6 +23,13 @@ pub struct Listed {
 /// reads half of one.
 pub trait Blobs: Send + Sync + fmt::Debug {
     fn put(&self, key: &str, bytes: &[u8]) -> Result<(), String>;
+    /// [`Blobs::put`] for bytes whose SHA-256 (`sha256`, in hex) the caller
+    /// has already: a chunk is named by it, and S3 wants it with every
+    /// upload. A store with no use for it takes the bytes as `put` does.
+    fn put_hashed(&self, key: &str, bytes: &[u8], sha256: &str) -> Result<(), String> {
+        let _ = sha256;
+        self.put(key, bytes)
+    }
     /// The object at `key`, or `None` if there's none.
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
     fn exists(&self, key: &str) -> Result<bool, String>;
@@ -224,6 +231,10 @@ impl S3Blobs {
 impl Blobs for S3Blobs {
     fn put(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
         self.client.put(&self.key(key), bytes)
+    }
+
+    fn put_hashed(&self, key: &str, bytes: &[u8], sha256: &str) -> Result<(), String> {
+        self.client.put_hashed(&self.key(key), bytes, sha256)
     }
 
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {

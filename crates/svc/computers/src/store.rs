@@ -39,8 +39,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -88,17 +88,146 @@ pub struct Collected {
     pub freed: u64,
 }
 
-/// One save's uploads: a chunk it meets twice is looked for once.
-struct Upload<'a> {
-    blobs: &'a dyn Blobs,
+/// Chunks of one save on their way to the store at once, at most. A host
+/// being replaced has minutes for all its computers (audit 7.1), and a
+/// chunk is a question and an upload to S3, one after the other: a few at
+/// a time is a few times as fast, without holding more than this many
+/// chunks in memory twice over.
+pub const CHUNKS_AT_ONCE: usize = 4;
+
+/// One save's uploads: a chunk it meets twice is looked for once, and one
+/// its computer's last version has isn't looked for at all.
+struct Upload {
     stored: HashSet<String>,
+    sending: Arc<Sending>,
     buf: Vec<u8>,
     files: u64,
     bytes: u64,
+}
+
+/// Chunks going to the store, [`CHUNKS_AT_ONCE`] at a time.
+#[derive(Debug)]
+struct Sending {
+    blobs: Arc<dyn Blobs>,
+    state: Mutex<SendState>,
+    /// Told when a chunk has gone, or failed to.
+    turn: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct SendState {
+    /// Chunks being stored now.
+    flying: usize,
+    /// The first failure: nothing more is sent, and the save fails.
+    failed: Option<String>,
+    /// Bytes stored: chunks the store didn't have.
     uploaded: u64,
 }
 
-impl Upload<'_> {
+impl Sending {
+    fn state(&self) -> std::sync::MutexGuard<'_, SendState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Stores the chunk `name` unless the store has it, beside the others
+    /// on their way; waits for room among them first. An error is an
+    /// earlier chunk's: the save has failed.
+    fn send(self: &Arc<Self>, name: String, bytes: Vec<u8>) -> Result<(), String> {
+        let mut state = self.state();
+        loop {
+            if let Some(failed) = &state.failed {
+                return Err(failed.clone());
+            }
+            if state.flying < CHUNKS_AT_ONCE {
+                break;
+            }
+            state = self
+                .turn
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        state.flying += 1;
+        drop(state);
+        let sending = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("glass-chunk".to_owned())
+            .spawn(move || {
+                // Counted as landed whatever happens in here, or the save
+                // would wait on it for good.
+                let landing = Landing {
+                    sending: &sending,
+                    result: Some(Err("storing a chunk stopped unexpectedly".to_owned())),
+                };
+                let key = chunk_key(&name);
+                let stored = sending.blobs.exists(&key).and_then(|there| {
+                    if there {
+                        Ok(0)
+                    } else {
+                        sending
+                            .blobs
+                            .put_hashed(&key, &bytes, &name)
+                            .map(|()| bytes.len() as u64)
+                    }
+                });
+                landing.with(stored);
+            });
+        if let Err(e) = spawned {
+            let mut state = self.state();
+            state.flying -= 1;
+            let failed = format!("can't start storing a chunk: {e}");
+            state.failed.get_or_insert_with(|| failed.clone());
+            self.turn.notify_all();
+            return Err(failed);
+        }
+        Ok(())
+    }
+
+    /// Waits for every chunk sent: the bytes stored, or the first failure.
+    fn finish(&self) -> Result<u64, String> {
+        let mut state = self.state();
+        while state.flying > 0 {
+            state = self
+                .turn
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        match &state.failed {
+            Some(failed) => Err(failed.clone()),
+            None => Ok(state.uploaded),
+        }
+    }
+}
+
+/// One chunk being stored, counted as done when this goes.
+struct Landing<'a> {
+    sending: &'a Sending,
+    result: Option<Result<u64, String>>,
+}
+
+impl Landing<'_> {
+    fn with(mut self, result: Result<u64, String>) {
+        self.result = Some(result);
+    }
+}
+
+impl Drop for Landing<'_> {
+    fn drop(&mut self) {
+        let mut state = self.sending.state();
+        match self.result.take() {
+            Some(Ok(bytes)) => state.uploaded += bytes,
+            Some(Err(e)) => {
+                state.failed.get_or_insert(e);
+            }
+            None => {}
+        }
+        state.flying -= 1;
+        self.sending.turn.notify_all();
+    }
+}
+
+impl Upload {
     /// Splits `file` into chunks, storing those the store lacks: its size
     /// and its chunks.
     fn file(&mut self, file: &mut File, path: &str) -> Result<(u64, Vec<Option<String>>), String> {
@@ -131,18 +260,15 @@ impl Upload<'_> {
     }
 
     /// Zeros are `None` and stored nowhere; anything else is stored under
-    /// its SHA-256 unless it is already.
+    /// its SHA-256 unless it is already, on its way beside the chunks
+    /// before it.
     fn chunk(&mut self, bytes: &[u8]) -> Result<Option<String>, String> {
         if bytes.iter().all(|&b| b == 0) {
             return Ok(None);
         }
         let name = hex::encode(Sha256::digest(bytes));
         if self.stored.insert(name.clone()) {
-            let key = chunk_key(&name);
-            if !self.blobs.exists(&key)? {
-                self.blobs.put(&key, bytes)?;
-                self.uploaded += bytes.len() as u64;
-            }
+            self.sending.send(name.clone(), bytes.to_vec())?;
         }
         Ok(Some(name))
     }
@@ -183,8 +309,12 @@ impl Store {
         check_computer(computer)?;
         let started = Instant::now();
         let version = self.next_version(computer)?;
-        let mut upload = self.upload();
-        let tree = tree::read(dir, &mut |file, path| upload.file(file, path))?;
+        let mut upload = self.upload(computer);
+        let tree = tree::read(dir, &mut |file, path| upload.file(file, path));
+        // Every chunk is in the store before the manifest that names it,
+        // and none is still on its way when this returns, failed or not.
+        let uploaded = upload.sending.finish();
+        let (tree, uploaded) = (tree?, uploaded?);
         let manifest = Manifest {
             format: FORMAT,
             computer: computer.to_owned(),
@@ -199,7 +329,7 @@ impl Store {
             version,
             files: upload.files,
             bytes: upload.bytes,
-            uploaded: upload.uploaded,
+            uploaded,
             skipped: tree.skipped,
         })
     }
@@ -228,8 +358,10 @@ impl Store {
             ));
         }
         let version = self.next_version(computer)?;
-        let mut upload = self.upload();
-        let (size, chunks) = upload.file(&mut opened, &shown.to_string())?;
+        let mut upload = self.upload(computer);
+        let read = upload.file(&mut opened, &shown.to_string());
+        let uploaded = upload.sending.finish();
+        let ((size, chunks), uploaded) = (read?, uploaded?);
         let manifest = Manifest {
             format: FORMAT,
             computer: computer.to_owned(),
@@ -248,7 +380,7 @@ impl Store {
             version,
             files: upload.files,
             bytes: upload.bytes,
-            uploaded: upload.uploaded,
+            uploaded,
             skipped: Vec::new(),
         })
     }
@@ -422,14 +554,30 @@ impl Store {
         Ok(collected)
     }
 
-    fn upload(&self) -> Upload<'_> {
+    /// A save of `computer` about to start. The chunks its latest version
+    /// has are in the store, so they aren't asked about again: most of a
+    /// computer is as it last slept, and each chunk asked about was a
+    /// request to S3 that said "yes". (That version is still there, so GC
+    /// keeps what it names. If it can't be read, every chunk is asked
+    /// about, as before.)
+    fn upload(&self, computer: &str) -> Upload {
+        let stored = self
+            .latest(computer)
+            .ok()
+            .flatten()
+            .and_then(|version| self.manifest(computer, &version).ok())
+            .map(|manifest| manifest.chunk_names().map(str::to_owned).collect())
+            .unwrap_or_default();
         Upload {
-            blobs: &*self.blobs,
-            stored: HashSet::new(),
+            stored,
+            sending: Arc::new(Sending {
+                blobs: Arc::clone(&self.blobs),
+                state: Mutex::new(SendState::default()),
+                turn: Condvar::new(),
+            }),
             buf: Vec::new(),
             files: 0,
             bytes: 0,
-            uploaded: 0,
         }
     }
 

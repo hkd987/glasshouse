@@ -83,6 +83,138 @@ fn on_computers_with_store(h: &Harness) -> Option<Arc<glass_runtime::Runtime>> {
     ))
 }
 
+/// A store in which a computer's save ends (its version is written) only
+/// once `together` saves have got that far at the same time: computers
+/// saved one after another never get there, and each gives up waiting
+/// after ten seconds.
+#[derive(Debug)]
+struct MeetingStore {
+    inner: FolderBlobs,
+    together: usize,
+    waiting: std::sync::Mutex<usize>,
+    arrived: std::sync::Condvar,
+    met: std::sync::atomic::AtomicBool,
+    most: std::sync::atomic::AtomicUsize,
+}
+
+impl glass_computers::store::Blobs for MeetingStore {
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let version = key.starts_with("computers/") && key.contains("/versions/");
+        if version && !self.met.load(SeqCst) {
+            let mut waiting = self.waiting.lock().unwrap();
+            *waiting += 1;
+            self.most.fetch_max(*waiting, SeqCst);
+            if *waiting >= self.together {
+                self.met.store(true, SeqCst);
+                self.arrived.notify_all();
+            } else {
+                let (back, _) = self
+                    .arrived
+                    .wait_timeout_while(waiting, std::time::Duration::from_secs(10), |_| {
+                        !self.met.load(SeqCst)
+                    })
+                    .unwrap();
+                waiting = back;
+            }
+            *waiting -= 1;
+        }
+        self.inner.put(key, bytes)
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.inner.get(key)
+    }
+    fn exists(&self, key: &str) -> Result<bool, String> {
+        self.inner.exists(key)
+    }
+    fn delete(&self, key: &str) -> Result<(), String> {
+        self.inner.delete(key)
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<glass_computers::store::Listed>, String> {
+        self.inner.list(prefix)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0066_a_host_being_replaced_sleeps_several_computers_at_once() {
+    // Audit 7.1: one after another, about ten computers' saves overran the
+    // time the group waits for a host, and the rest lost their work.
+    let h = harness();
+    if let Err(why) = NamespaceHypervisor::available() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let dir = h.dir.path().join("computers");
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(h.dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    let blobs = Arc::new(MeetingStore {
+        inner: FolderBlobs::new(h.dir.path().join("store")).unwrap(),
+        together: glass_runtime::SLEEPS_AT_ONCE,
+        waiting: std::sync::Mutex::new(0),
+        arrived: std::sync::Condvar::new(),
+        met: std::sync::atomic::AtomicBool::new(false),
+        most: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let computers = Arc::new(
+        ComputerSandbox::new(dir, Arc::new(NamespaceHypervisor::new(Vec::new())), 1024, 1)
+            .unwrap()
+            .with_store(Arc::new(Store::new(blobs.clone())), "S3: acme-agents"),
+    );
+    let rt = common::rebuild_on(
+        &h,
+        glass_policy::DEFAULT_POLICY,
+        vec![reconciler()],
+        computers.clone(),
+        Some(computers),
+    );
+    let names = ["one", "two", "three", "four", "five", "six"];
+    for name in names {
+        rt.computer_make(
+            &h.me,
+            ComputerNew {
+                id: name.into(),
+                name: format!("Computer {name}"),
+                role: "Matches invoices to payments".into(),
+                agent: "invoice-demo".parse().unwrap(),
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(rt.computers_awake(), names.len() as u32);
+
+    let started = std::time::Instant::now();
+    rt.leave_host(std::time::Duration::from_secs(120)).await;
+    use std::sync::atomic::Ordering::SeqCst;
+    assert!(
+        blobs.met.load(SeqCst),
+        "at the most {} computers were being saved at once",
+        blobs.most.load(SeqCst)
+    );
+    assert!(blobs.most.load(SeqCst) <= glass_runtime::SLEEPS_AT_ONCE);
+    assert_eq!(rt.computers_awake(), 0);
+    // Nowhere near the ten seconds each save would have waited alone.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    let asleep = rt
+        .computer_list(&h.me)
+        .unwrap()
+        .iter()
+        .filter(|c| c.state == ComputerState::Asleep)
+        .count();
+    assert_eq!(asleep, names.len());
+    let audit = fs::read_to_string(h.audit_path()).unwrap();
+    assert_eq!(
+        audit
+            .matches("computer to sleep: this host is being replaced")
+            .count(),
+        names.len(),
+        "each on the record"
+    );
+}
+
 fn ask(prompt: &str) -> glass_api::TaskRequest {
     glass_api::TaskRequest {
         persona: None,

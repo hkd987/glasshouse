@@ -237,7 +237,9 @@ and a host with KVM: run each against the real thing.
     from its last sleep on the new one, and one of the two copies' work is
     lost.
 - **The store**:
-  - parallel transfers, so a computer wakes fast on S3;
+  - parallel transfers when a computer wakes (saving has them, see the
+    amendment below), and connections kept open between requests: each
+    chunk is still a new TLS connection;
   - a lock against GC deleting a chunk a save reused but hasn't recorded
     yet;
   - manifests and computers' records signed by the host, so a bucket
@@ -276,3 +278,38 @@ their account (the desktop's own model: the greeter starts one), or the
 front named as the one caller allowed to say who a request is for. The
 first reuses what's tested; the second is lighter. Decided before slice 4
 of ADR 0065.
+
+## Amended 2026-11-10 (audit 7.1): a host being replaced saves its computers in time
+
+A leaving host put its computers to sleep one after another, and each save
+asked S3 about every chunk and then uploaded the new ones, one request at a
+time. With about ten computers awake the saves overran the twelve minutes,
+and the rest went with their work since they last slept.
+
+- **A save doesn't ask about chunks its computer's last version has.** Most
+  of a computer is as it last slept, and each of those chunks was a request
+  that said "yes". The last version is still in the store while the save
+  runs, so what it names is there. A chunk someone deleted from the bucket
+  by hand is the one thing this no longer finds: the new version names it
+  as the last one did, and waking says which chunk is missing.
+- **New chunks go up four at a time** (`store::CHUNKS_AT_ONCE`), and the
+  version is written only once every one of them is in. One that fails
+  fails the save, which waits for those on their way and writes no version.
+- **A chunk is hashed once.** It was hashed for its name, again for S3's
+  header and a third time for the signature, the last two for every
+  attempt. Its name is that hash, and S3 checks it against what arrives.
+- **Four computers sleep at once** as a host leaves
+  (`runtime::SLEEPS_AT_ONCE`), and none is begun once the time is up.
+
+Measured with `make aws-local-test` (moto): the 300 MB computer's first
+save took 4.1 s where it took 14.8 s, and its wake on another host 2.2 s
+where it took 5.3 s. That test now holds the first save to a budget (a
+second per 10 MB, thirty at least). A runtime test puts six computers on a
+host that is told to leave, with a store in which a save ends only once
+four are under way together: one at a time, it fails.
+
+Not done: connections kept open between requests, and anything measured
+against S3 itself or on a host with real computers on it. `AgentComputers.tla`
+is one computer and one glassd, and nothing in it changes: a save is still
+all in the store before its version is, or not there at all.
+

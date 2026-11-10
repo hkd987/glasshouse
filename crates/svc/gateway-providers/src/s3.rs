@@ -186,6 +186,14 @@ impl S3Client {
 
     /// Puts `body` at `key`, replacing whatever is there.
     pub fn put(&self, key: &str, body: &[u8]) -> Result<(), String> {
+        self.put_hashed(key, body, &hex::encode(Sha256::digest(body)))
+    }
+
+    /// [`S3Client::put`] for a body whose SHA-256 (`sha256`, in hex) the
+    /// caller has already, as a computer's chunk does in its name: the
+    /// body isn't hashed again here, for the header or for the signature,
+    /// nor again for each attempt. S3 checks it against what arrives.
+    pub fn put_hashed(&self, key: &str, body: &[u8], sha256: &str) -> Result<(), String> {
         check_key(key)?;
         let mut extra: Vec<(&str, &str)> = Vec::new();
         if let Some(kms) = &self.kms_key_id {
@@ -198,7 +206,7 @@ impl S3Client {
             ]);
         }
         self.retrying(&format!("put {key}"), || {
-            let signed = self.signed("PUT", Some(key), &[], &extra, body)?;
+            let signed = self.signed_hashed("PUT", Some(key), &[], &extra, body, sha256)?;
             let headers = signed.headers();
             let ask = Ask {
                 method: "PUT",
@@ -338,6 +346,21 @@ impl S3Client {
         extra: &[(&str, &str)],
         body: &[u8],
     ) -> Result<Signed, Try> {
+        let payload = hex::encode(Sha256::digest(body));
+        self.signed_hashed(method, key, query, extra, body, &payload)
+    }
+
+    /// [`S3Client::signed`] with the body's SHA-256 (`payload`, in hex)
+    /// given.
+    fn signed_hashed(
+        &self,
+        method: &str,
+        key: Option<&str>,
+        query: &[(&str, &str)],
+        extra: &[(&str, &str)],
+        body: &[u8],
+        payload: &str,
+    ) -> Result<Signed, Try> {
         let now = OffsetDateTime::now_utc();
         let keys = self.credentials.keys(now).map_err(Try::Stop)?;
         // S3's canonical path is the path as sent: each segment encoded
@@ -364,10 +387,9 @@ impl S3Client {
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join("&");
-        let payload = hex::encode(Sha256::digest(body));
         let mut headers = extra.to_vec();
-        headers.push(("x-amz-content-sha256", &payload));
-        let added = sigv4::sign(
+        headers.push(("x-amz-content-sha256", payload));
+        let added = sigv4::sign_hashed(
             &sigv4::Request {
                 method,
                 host: &self.host,
@@ -376,6 +398,7 @@ impl S3Client {
                 headers: &headers,
                 body,
             },
+            payload,
             &sigv4::Credentials {
                 access_key_id: keys.access_key_id.expose(),
                 secret_access_key: keys.secret_access_key.expose(),

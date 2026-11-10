@@ -444,6 +444,17 @@ cycle the person doesn't (each wrote 16 to 29 MB/s instead of 32 to 42).
 The rest is the emulated VM: two CPUs shared by the shell, glassd and four
 spinning threads.
 
+### Agent computers going to sleep
+
+A host being replaced has twelve minutes for every computer on it (ADR
+0066), so a save has a budget: a second for every 10 MB and thirty at
+least for a computer's first save, all of it new to the store, held in
+`make aws-local-test`. Against moto a 300 MB computer takes about 4 s.
+What keeps it there: a save asks S3 only about chunks its computer's last
+version doesn't name, sends new chunks four at a time, hashes each once,
+and a leaving host sleeps four computers at once. Each chunk is still its
+own TLS connection.
+
 ### glassd under a burst
 
 - **Audit records were written on the async workers.** Each record is

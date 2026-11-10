@@ -55,6 +55,7 @@ mod written;
 pub use app_api::AppApi;
 pub use apps::MAX_OPEN_APPS_PER_USER;
 pub use caller::Caller;
+pub use computers::SLEEPS_AT_ONCE;
 pub use config::{
     CatalogEntry, CatalogGate, NoOrgApps, NoPersonalApps, OpenCatalog, OrgApps, PersonalApp,
     PersonalApps, RuntimeConfig,

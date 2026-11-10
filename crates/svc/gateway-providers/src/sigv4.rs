@@ -35,6 +35,22 @@ pub(crate) fn sign(
     service: &str,
     now: OffsetDateTime,
 ) -> Vec<(&'static str, String)> {
+    let payload = hex::encode(Sha256::digest(request.body));
+    sign_hashed(request, &payload, credentials, region, service, now)
+}
+
+/// [`sign`] for a body whose SHA-256 (`payload`, in hex) the caller has
+/// already: S3 sends it as a header too, and a computer's chunk is named
+/// by it, so a 4 MiB chunk needn't be hashed three times to be stored.
+/// A hash that isn't the body's makes a request the service refuses.
+pub(crate) fn sign_hashed(
+    request: &Request<'_>,
+    payload: &str,
+    credentials: &Credentials<'_>,
+    region: &str,
+    service: &str,
+    now: OffsetDateTime,
+) -> Vec<(&'static str, String)> {
     let amz_date = now
         .to_offset(time::UtcOffset::UTC)
         .format(format_description!(
@@ -64,7 +80,7 @@ pub(crate) fn sign(
             .iter()
             .map(|(k, v)| format!("{k}:{v}\n"))
             .collect::<String>(),
-        hex::encode(Sha256::digest(request.body)),
+        payload,
     );
     let scope = format!("{date}/{region}/{service}/aws4_request");
     let to_sign = format!(

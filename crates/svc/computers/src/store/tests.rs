@@ -732,3 +732,164 @@ fn adr0065_a_computers_record_is_kept_beside_it_and_listed_by_its_owner() {
     assert_eq!(store.records("u7-aaaa").unwrap(), []);
     writable(&tree);
 }
+
+/// A folder store that takes its time, as S3 does: what it was asked about,
+/// how many chunks were being put at once at the most, and, if told to,
+/// one chunk it refuses.
+#[derive(Debug, Default)]
+struct Slow {
+    inner: Option<FolderBlobs>,
+    put_takes: std::time::Duration,
+    asked: Mutex<Vec<String>>,
+    flying: std::sync::atomic::AtomicUsize,
+    most: std::sync::atomic::AtomicUsize,
+    /// Puts of chunks refused from this one on (counting from 1); 0 for none.
+    refuse_from: usize,
+    chunk_puts: std::sync::atomic::AtomicUsize,
+}
+
+impl Slow {
+    fn new(dir: &Path, put_takes_ms: u64) -> Self {
+        Self {
+            inner: Some(FolderBlobs::new(dir.join("store")).unwrap()),
+            put_takes: std::time::Duration::from_millis(put_takes_ms),
+            ..Self::default()
+        }
+    }
+    fn inner(&self) -> &FolderBlobs {
+        self.inner.as_ref().unwrap()
+    }
+    fn asked(&self) -> Vec<String> {
+        std::mem::take(&mut *self.asked.lock().unwrap())
+    }
+}
+
+impl Blobs for Slow {
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if !key.starts_with("chunks/") {
+            return self.inner().put(key, bytes);
+        }
+        let now = self.flying.fetch_add(1, SeqCst) + 1;
+        self.most.fetch_max(now, SeqCst);
+        std::thread::sleep(self.put_takes);
+        let nth = self.chunk_puts.fetch_add(1, SeqCst) + 1;
+        let result = if self.refuse_from > 0 && nth >= self.refuse_from {
+            Err("the store refused it (a test's)".to_owned())
+        } else {
+            self.inner().put(key, bytes)
+        };
+        self.flying.fetch_sub(1, SeqCst);
+        result
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.inner().get(key)
+    }
+    fn exists(&self, key: &str) -> Result<bool, String> {
+        self.asked.lock().unwrap().push(key.to_owned());
+        self.inner().exists(key)
+    }
+    fn delete(&self, key: &str) -> Result<(), String> {
+        self.inner().delete(key)
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<Listed>, String> {
+        self.inner().list(prefix)
+    }
+}
+
+/// A file of `chunks` chunks, each unlike the others and none of zeros.
+fn many_chunks(path: &Path, chunks: usize) {
+    use std::io::Write;
+    let mut file = fs::File::create(path).unwrap();
+    for i in 0..chunks {
+        let mut chunk = vec![(i % 250) as u8 + 1; CHUNK_SIZE];
+        chunk[..8].copy_from_slice(&(i as u64).to_le_bytes());
+        file.write_all(&chunk).unwrap();
+    }
+}
+
+#[test]
+fn adr0066_a_save_doesnt_ask_about_chunks_its_last_version_has() {
+    // Audit 7.1: most of a computer is as it last slept, and every chunk
+    // of it was a question to S3 that said "yes".
+    let tmp = tempfile::tempdir().unwrap();
+    let image = tmp.path().join("disk.img");
+    many_chunks(&image, 6);
+    let blobs = Arc::new(Slow::new(tmp.path(), 0));
+    let store = Store::new(blobs.clone());
+    let first = store.save_file("dana", &image).unwrap();
+    assert_eq!(first.uploaded, 6 * CHUNK_SIZE as u64);
+    // Asked about once each the first time: nothing says they're there.
+    assert_eq!(blobs.asked().len(), 6);
+
+    // One chunk changes.
+    let mut bytes = fs::read(&image).unwrap();
+    bytes[2 * CHUNK_SIZE + 100] ^= 0xff;
+    fs::write(&image, &bytes).unwrap();
+    let second = store.save_file("dana", &image).unwrap();
+    assert_eq!(second.uploaded, CHUNK_SIZE as u64);
+    let asked = blobs.asked();
+    assert_eq!(
+        asked.len(),
+        1,
+        "only the changed chunk is asked about: {asked:?}"
+    );
+
+    // Nothing changes: nothing is asked or stored but the manifest.
+    let third = store.save_file("dana", &image).unwrap();
+    assert_eq!(third.uploaded, 0);
+    assert!(blobs.asked().is_empty());
+
+    // And it comes back as it was saved.
+    let back = tmp.path().join("back.img");
+    store.restore_file("dana", &third.version, &back).unwrap();
+    assert_eq!(fs::read(&back).unwrap(), bytes);
+    // Another computer's save knows nothing of dana's chunks' being there
+    // until it asks: its own last version is what it goes by.
+    let other = store.save_file("eli", &image).unwrap();
+    assert_eq!(other.uploaded, 0, "the store has them all");
+    assert_eq!(blobs.asked().len(), 6);
+}
+
+#[test]
+fn adr0066_a_saves_chunks_go_up_a_few_at_a_time_and_never_more() {
+    let tmp = tempfile::tempdir().unwrap();
+    let image = tmp.path().join("disk.img");
+    many_chunks(&image, 10);
+    let blobs = Arc::new(Slow::new(tmp.path(), 40));
+    let store = Store::new(blobs.clone());
+    let saved = store.save_file("dana", &image).unwrap();
+    assert_eq!(saved.uploaded, 10 * CHUNK_SIZE as u64);
+    use std::sync::atomic::Ordering::SeqCst;
+    let most = blobs.most.load(SeqCst);
+    assert!(
+        most > 1 && most <= CHUNKS_AT_ONCE,
+        "{most} chunks were being stored at once at the most"
+    );
+    // None is still on its way once the save has returned.
+    assert_eq!(blobs.flying.load(SeqCst), 0);
+    let back = tmp.path().join("back.img");
+    store.restore_file("dana", &saved.version, &back).unwrap();
+    assert_eq!(fs::read(&back).unwrap(), fs::read(&image).unwrap());
+}
+
+#[test]
+fn adr0066_a_chunk_the_store_refuses_fails_the_save_and_leaves_no_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let image = tmp.path().join("disk.img");
+    many_chunks(&image, 10);
+    let blobs = Arc::new(Slow {
+        refuse_from: 3,
+        ..Slow::new(tmp.path(), 10)
+    });
+    let store = Store::new(blobs.clone());
+    let failed = store.save_file("dana", &image).unwrap_err();
+    assert!(failed.contains("refused"), "{failed}");
+    use std::sync::atomic::Ordering::SeqCst;
+    // The save stopped sending once a chunk failed, waited for those on
+    // their way, and wrote no manifest: there is no version to wake to
+    // that names a chunk the store doesn't have.
+    assert_eq!(blobs.flying.load(SeqCst), 0);
+    assert!(blobs.chunk_puts.load(SeqCst) < 10);
+    assert!(store.versions("dana").unwrap().is_empty());
+}

@@ -30,6 +30,13 @@ fn refused(e: glass_platform::PlatformError) -> RuntimeError {
     }
 }
 
+/// Computers put to sleep at once as their host leaves. Each save sends
+/// [`glass_computers::store::CHUNKS_AT_ONCE`] chunks at a time, so this many
+/// computers is a dozen or so uploads at once: several times one computer
+/// after another, without the host's disk and network being all there is
+/// to wait on.
+pub const SLEEPS_AT_ONCE: usize = 4;
+
 impl Runtime {
     pub(crate) fn computers(&self) -> Result<&Arc<ComputerSandbox>> {
         self.computers
@@ -247,23 +254,50 @@ impl Runtime {
                     .await
                     .unwrap_or_default()
             };
-            for (uid, id) in sleepy {
-                let computers = Arc::clone(&computers);
-                let owned = id.clone();
-                let slept = tokio::task::spawn_blocking(move || computers.sleep(uid, &owned)).await;
-                let summary = match &slept {
-                    Ok(Ok(view)) => format!(
-                        "Put {}'s computer to sleep: this host is being replaced",
-                        view.name
-                    ),
-                    Ok(Err(e)) => {
-                        format!("Couldn't put a computer to sleep as this host goes: {e}")
-                    }
-                    Err(e) => format!("Couldn't put a computer to sleep as this host goes: {e}"),
+            // A few at a time (audit 7.1): one after another, about ten
+            // computers' saves overran the time the group waits, and the
+            // rest went with their work since they last slept. None is
+            // begun once the time is up: it would be cut off half saved.
+            let mut sleepy = sleepy.into_iter();
+            let mut sleeping = tokio::task::JoinSet::new();
+            loop {
+                while sleeping.len() < SLEEPS_AT_ONCE && started.elapsed() < within {
+                    let Some((uid, id)) = sleepy.next() else {
+                        break;
+                    };
+                    let computers = Arc::clone(&computers);
+                    sleeping.spawn_blocking(move || {
+                        let slept = computers.sleep(uid, &id);
+                        (uid, id, slept)
+                    });
+                }
+                let Some(done) = sleeping.join_next().await else {
+                    break;
                 };
-                let mut event = AuditEvent::new(EventKind::Computer, summary);
-                event.user = glass_platform::users::by_uid(uid).map(|u| u.name);
-                event.detail = serde_json::json!({ "computer": id, "leaving": true });
+                let mut event = match done {
+                    Ok((uid, id, slept)) => {
+                        let summary = match slept {
+                            Ok(view) => format!(
+                                "Put {}'s computer to sleep: this host is being replaced",
+                                view.name
+                            ),
+                            Err(e) => {
+                                format!("Couldn't put a computer to sleep as this host goes: {e}")
+                            }
+                        };
+                        let mut event = AuditEvent::new(EventKind::Computer, summary);
+                        event.user = glass_platform::users::by_uid(uid).map(|u| u.name);
+                        event.detail = serde_json::json!({ "computer": id, "leaving": true });
+                        event
+                    }
+                    Err(e) => AuditEvent::new(
+                        EventKind::Computer,
+                        format!("Couldn't put a computer to sleep as this host goes: {e}"),
+                    ),
+                };
+                if event.detail.is_null() {
+                    event.detail = serde_json::json!({ "leaving": true });
+                }
                 self.audit(event);
             }
             let awake = self.computers_awake();
