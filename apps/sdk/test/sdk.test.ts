@@ -40,6 +40,38 @@ test("ui5 the cache keeps the newest entries per app", () => {
   assert.equal(mail.get(`k${MAX_ENTRIES + 4}`)?.value, MAX_ENTRIES + 4);
 });
 
+test("ui5 a write to the cache reads nothing it kept, until there is too much", () => {
+  // Finding the oldest entries parsed every one whole (a folder of mail
+  // each), at every write.
+  const inner = memoryStore();
+  let reads = 0;
+  const store = {
+    getItem: (key: string) => {
+      reads += 1;
+      return inner.getItem(key);
+    },
+    setItem: (key: string, value: string) => inner.setItem(key, value),
+    removeItem: (key: string) => inner.removeItem(key),
+    get length() {
+      return inner.length;
+    },
+    key: (index: number) => inner.key(index),
+  };
+  const mail = new Cache(store, "mail");
+  for (let i = 0; i < MAX_ENTRIES; i++) mail.put(`k${i}`, { big: "x".repeat(1000) }, 100 + i);
+  assert.equal(reads, 0, "within the limit a write reads no entry");
+  // One too many: the entries' times are read, and the oldest goes.
+  mail.put("one-more", 1, 5000);
+  assert.equal(mail.get("k0"), null);
+  assert.equal(mail.get("k1")?.at, 101);
+  assert.equal(mail.keys().length, MAX_ENTRIES);
+  // An entry not written by put (hand-edited, or older) still has its time found.
+  inner.setItem("glass:mail:odd", JSON.stringify({ value: 1, at: 1 }));
+  assert.equal(mail.keys()[0], "odd");
+  inner.setItem("glass:mail:broken", "{");
+  assert.equal(mail.keys()[0], "broken", "what can't be read counts as oldest");
+});
+
 /** A bridge that answers from a script, or is down. */
 function fake(
   answers: Record<string, { status: number; body: unknown }>,
