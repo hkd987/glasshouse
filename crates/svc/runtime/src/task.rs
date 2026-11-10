@@ -22,6 +22,12 @@ use crate::{Caller, CatalogEntry};
 
 /// Lines a tile's feed shows (AW-3).
 const FEED_LINES: usize = 3;
+/// The longest line of a task's activity, in characters: a few lines of a
+/// tile's expanded view. Most are a sentence.
+pub(crate) const ACTIVITY_LINE: usize = 500;
+/// The lines of activity a task keeps: ten times what the expanded view
+/// shows (its lists stop at 200).
+pub(crate) const ACTIVITY_LINES: usize = 2000;
 
 /// Whether the agent may act right now. Calls wait at the gate, which makes
 /// every action boundary a safe point to pause at (AW-20).
@@ -444,22 +450,34 @@ impl TaskState {
     /// Adds a line to the activity log (AW-13). Lines are kept as display
     /// text, since most carry something the agent wrote, and the log also
     /// tells a harness that takes over what the task did.
+    ///
+    /// The log is in memory for as long as the task is, so it has a size
+    /// whatever the agent does: a line is cut to [`ACTIVITY_LINE`]
+    /// characters, and past [`ACTIVITY_LINES`] the oldest go (the audit
+    /// log has every step, for good).
     pub fn note(&mut self, kind: ActivityKind, text: impl Into<String>) {
         let at = Timestamp::now();
-        let mut text = text.into();
+        let text = text.into();
+        let mut text = glass_api::clip(&text, ACTIVITY_LINE).into_owned();
         text.make_display_safe();
         self.activity.push(ActivityEntry { at, kind, text });
+        // In one go every so often, not a shift of the whole log per line.
+        if self.activity.len() > ACTIVITY_LINES + ACTIVITY_LINES / 8 {
+            let gone = self.activity.len() - ACTIVITY_LINES;
+            self.activity.drain(..gone);
+        }
         self.updated_at = at;
     }
 
     /// Adds a completed action to the feed and the activity log.
     pub fn record_action(&mut self, verb: &str, target: &str, text: &str) {
         let at = Timestamp::now();
+        let line = |text: &str| display_line(&glass_api::clip(text, ACTIVITY_LINE)).into_owned();
         self.feed.push_back(FeedLine {
             at,
-            text: display_line(text).into_owned(),
-            verb: display_line(verb).into_owned(),
-            target: display_line(target).into_owned(),
+            text: line(text),
+            verb: line(verb),
+            target: line(target),
         });
         while self.feed.len() > FEED_LINES {
             self.feed.pop_front();

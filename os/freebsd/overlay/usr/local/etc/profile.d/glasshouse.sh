@@ -7,7 +7,9 @@ case $- in
 *) return 0 ;;
 esac
 if [ -S /var/run/glasshouse/control.sock ] && [ -x /usr/local/bin/glassctl ]; then
-	# Captured output isn't a terminal; keep the colors if ours is.
+	# Captured output isn't a terminal; keep the colors if ours is. It
+	# gives up on a glassd that doesn't answer in three seconds, so a
+	# login never waits on one.
 	if [ -t 1 ]; then
 		_glass_summary=$(CLICOLOR_FORCE=1 /usr/local/bin/glassctl tasks --summary 2>/dev/null)
 	else

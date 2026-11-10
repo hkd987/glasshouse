@@ -328,7 +328,10 @@ impl ActionProvider for FilesProvider {
                 let r = ctx.resolve_writable(&path)?;
                 let dir = open(&r)?;
                 if let Some(parent) = r.rel.parent().filter(|p| !p.as_os_str().is_empty()) {
-                    dir.create_dir_all(parent)
+                    // The person's, like the file: made as root's, they
+                    // couldn't add to, rename or delete what an agent
+                    // filed for them.
+                    dir.create_dir_all_as(parent, ctx.owner)
                         .map_err(|e| ActionError::io(&r.display, e))?;
                 }
                 // What the task read decides the label of what it writes
@@ -391,7 +394,7 @@ impl ActionProvider for FilesProvider {
                 }
                 let dir = open(&src)?;
                 if let Some(parent) = dst.rel.parent().filter(|p| !p.as_os_str().is_empty()) {
-                    dir.create_dir_all(parent)
+                    dir.create_dir_all_as(parent, ctx.owner)
                         .map_err(|e| ActionError::io(&dst.display, e))?;
                 }
                 dir.rename(&src.rel, &dst.rel)
@@ -522,6 +525,64 @@ mod tests {
             .invoke(&ctx, &name("files.list"), &json!({"path": "Invoices"}))
             .unwrap();
         assert_eq!(out.text, "inv-1.txt (11 bytes)");
+    }
+
+    /// The person the task works for where the tests are root, as glassd
+    /// is, so that "theirs, not root's" can be told apart; else whoever
+    /// runs them.
+    fn someone_else(ctx: &mut TaskContext, dir: &std::path::Path) {
+        use std::os::unix::fs::MetadataExt;
+        if fs::metadata(dir).unwrap().uid() == 0 {
+            ctx.owner = glass_platform::fs::Owner {
+                uid: 1001,
+                gid: 1001,
+            };
+        }
+    }
+
+    #[test]
+    fn folders_a_write_makes_are_the_persons_and_a_rewrite_keeps_the_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let (dir, mut ctx) = setup();
+        someone_else(&mut ctx, dir.path());
+        let p = FilesProvider;
+        // Two folders that aren't there yet: root's, the person couldn't
+        // add to, rename or delete what was filed for them.
+        let input = json!({"path": "Reports/2026/q4/summary.csv", "content": "total,100"});
+        p.invoke(&ctx, &name("files.write"), &input).unwrap();
+        for made in [
+            "Reports/2026",
+            "Reports/2026/q4",
+            "Reports/2026/q4/summary.csv",
+        ] {
+            let meta = fs::metadata(dir.path().join(made)).unwrap();
+            assert_eq!(
+                (meta.uid(), meta.gid()),
+                (ctx.owner.uid, ctx.owner.gid),
+                "{made}"
+            );
+        }
+        // A move into a folder that isn't there makes it theirs too.
+        let moved = json!({"from": "Reports/2026/q4/summary.csv", "to": "Reports/archive/2026/summary.csv"});
+        p.invoke(&ctx, &name("files.move"), &moved).unwrap();
+        for made in ["Reports/archive", "Reports/archive/2026"] {
+            assert_eq!(
+                fs::metadata(dir.path().join(made)).unwrap().uid(),
+                ctx.owner.uid,
+                "{made}"
+            );
+        }
+        // A private file stays private when an agent rewrites it.
+        let private = dir.path().join("Reports/private.txt");
+        fs::write(&private, "mine").unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o600)).unwrap();
+        let rewrite = json!({"path": "Reports/private.txt", "content": "still mine"});
+        p.invoke(&ctx, &name("files.write"), &rewrite).unwrap();
+        assert_eq!(fs::read_to_string(&private).unwrap(), "still mine");
+        assert_eq!(
+            fs::metadata(&private).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
     }
 
     #[test]

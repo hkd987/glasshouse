@@ -452,7 +452,19 @@ impl Runtime {
     /// `specs/tla/AuditLog.tla`). The append waits for the disk (fsync),
     /// which takes long while agents write a lot, so it runs off the async
     /// workers that answer the shell.
-    pub(crate) fn audit(&self, event: AuditEvent) -> bool {
+    pub(crate) fn audit(&self, mut event: AuditEvent) -> bool {
+        // A record's one line and what it names are cut to a size: both
+        // often quote what an agent sent, and the log is kept for good, on
+        // the disk whose filling stops every agent. (A path is no longer
+        // than `MAX_PATH_BYTES` where it arrives.)
+        if let std::borrow::Cow::Owned(cut) = glass_api::clip(&event.summary, AUDIT_SUMMARY) {
+            event.summary = cut;
+        }
+        for target in &mut event.targets {
+            if let std::borrow::Cow::Owned(cut) = glass_api::clip(target, AUDIT_TARGET) {
+                *target = cut;
+            }
+        }
         self.write_audit(Some(event))
     }
 
@@ -1433,10 +1445,50 @@ impl Runtime {
             ));
         }
         self.tasks().remove(&id);
+        // What its agent printed goes with it: nothing shows it now.
+        let _ = std::fs::remove_dir_all(self.task_logs().join(id.to_string()));
         let _ = self
             .events
             .send((task.user.uid, Event::TaskRemoved { task: id }));
         Ok(())
+    }
+
+    /// Where each task's folder is, its agent's output in it.
+    fn task_logs(&self) -> std::path::PathBuf {
+        self.config.state_dir.join("tasks")
+    }
+
+    /// Removes the output of tasks no longer in memory that ended more than
+    /// `max_age` ago: how many. A task's log is for looking at while its
+    /// tile is there, and for a while after glassd restarted without it
+    /// (tasks don't outlive a restart, ADR 0055; what went wrong before one
+    /// is often in these). Nothing removed them before. Blocking.
+    pub fn prune_task_logs(&self, max_age: std::time::Duration) -> usize {
+        let before = std::time::SystemTime::now()
+            .checked_sub(max_age)
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let Ok(entries) = std::fs::read_dir(self.task_logs()) else {
+            return 0;
+        };
+        let live: std::collections::BTreeSet<String> =
+            self.tasks().keys().map(ToString::to_string).collect();
+        let mut gone = 0;
+        for entry in entries.flatten() {
+            let named_live = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| live.contains(name));
+            let old = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|at| at < before);
+            // Ours to shape (a log, in a folder glassd made), so removing
+            // it is a call or two deep.
+            if !named_live && old && std::fs::remove_dir_all(entry.path()).is_ok() {
+                gone += 1;
+            }
+        }
+        gone
     }
 
     // ---- snapshots (AU-20) -------------------------------------------------
@@ -2103,6 +2155,11 @@ struct AuditWaiting {
 /// Records kept waiting for the log at most: agents' calls are refused
 /// meanwhile, so only the computer's own events and people's add to them.
 const AUDIT_WAITING_MAX: usize = 10_000;
+/// The longest summary line of an audit record, in characters.
+const AUDIT_SUMMARY: usize = 1000;
+/// The longest name of something a record is about, in characters: a path
+/// as long as a path may be.
+const AUDIT_TARGET: usize = glass_actions::MAX_PATH_BYTES;
 
 pub(crate) fn blocking<R>(work: impl FnOnce() -> R) -> R {
     use tokio::runtime::{Handle, RuntimeFlavor};

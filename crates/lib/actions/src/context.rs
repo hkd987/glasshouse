@@ -48,10 +48,30 @@ pub struct Resolved<'a> {
     pub display: String,
 }
 
+/// The longest path an agent may name, in bytes: what a path may be on the
+/// file systems underneath.
+pub const MAX_PATH_BYTES: usize = 4096;
+/// The most folders deep a path an agent names may go. Deeper than anyone
+/// files things, and shallow enough that walking a tree made through
+/// actions (to remove it, or to bring it back) is never a stack's worth of
+/// calls.
+pub const MAX_PATH_DEPTH: usize = 64;
+/// How much of what an agent sent an error quotes back. The error is kept
+/// in the task's activity and the audit log, so it has a size whatever the
+/// input's was.
+const QUOTED: usize = 200;
+
 impl TaskContext {
-    /// Resolves `<grant>/<path>`. Rejects absolute host paths, `..` and
-    /// unknown grants before any I/O happens.
+    /// Resolves `<grant>/<path>`. Rejects absolute host paths, `..`,
+    /// unknown grants, and paths longer or deeper than a path may be,
+    /// before any I/O happens.
     pub fn resolve(&self, agent_path: &str) -> Result<Resolved<'_>, ActionError> {
+        if agent_path.len() > MAX_PATH_BYTES {
+            return Err(ActionError::InvalidInput(format!(
+                "a path of {} bytes is longer than a path may be ({MAX_PATH_BYTES})",
+                agent_path.len()
+            )));
+        }
         let trimmed = agent_path.trim().trim_start_matches('/');
         let path = Path::new(trimmed);
         let mut parts = Vec::new();
@@ -61,10 +81,18 @@ impl TaskContext {
                 Component::CurDir => {}
                 _ => {
                     return Err(ActionError::OutOfScope(format!(
-                        "{agent_path:?} is not a path inside a granted folder"
+                        "{:?} is not a path inside a granted folder",
+                        glass_api::clip(agent_path, QUOTED)
                     )));
                 }
             }
+        }
+        // The granted folder's name, then what is in it.
+        if parts.len() > MAX_PATH_DEPTH + 1 {
+            return Err(ActionError::InvalidInput(format!(
+                "a path {} folders deep is deeper than a path may be ({MAX_PATH_DEPTH})",
+                parts.len() - 1
+            )));
         }
         let Some((grant_name, rest)) = parts.split_first() else {
             return Err(ActionError::InvalidInput(
@@ -77,7 +105,8 @@ impl TaskContext {
             .find(|g| &g.name == grant_name)
             .ok_or_else(|| {
                 ActionError::OutOfScope(format!(
-                    "{grant_name:?} is not a folder this task was given (granted: {})",
+                    "{:?} is not a folder this task was given (granted: {})",
+                    glass_api::clip(grant_name, QUOTED),
                     self.grant_names()
                 ))
             })?;
@@ -151,6 +180,34 @@ mod tests {
             Err(ActionError::OutOfScope(_))
         ));
         assert!(matches!(ctx.resolve(""), Err(ActionError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn a_path_has_a_length_and_a_depth_and_an_error_quotes_little_of_it() {
+        let ctx = context(Path::new("/home/demo"));
+        // As deep as a path may go, and one deeper.
+        let deepest = format!("Reports/{}x.txt", "d/".repeat(MAX_PATH_DEPTH - 1));
+        assert!(ctx.resolve(&deepest).is_ok());
+        let deeper = format!("Reports/{}x.txt", "d/".repeat(MAX_PATH_DEPTH));
+        assert!(
+            matches!(ctx.resolve(&deeper), Err(ActionError::InvalidInput(why)) if why.contains("deeper")),
+        );
+        // Longer than a path may be: refused before it is read.
+        let long = format!("Reports/{}", "x".repeat(MAX_PATH_BYTES));
+        assert!(
+            matches!(ctx.resolve(&long), Err(ActionError::InvalidInput(why)) if why.contains("longer")),
+        );
+        // What an agent sent megabytes of comes back as a line: the error
+        // is kept in the task's activity and the audit log.
+        for sent in [
+            format!("../{}", "A".repeat(3000)),
+            format!("{}/x", "B".repeat(3000)),
+        ] {
+            let Err(ActionError::OutOfScope(why)) = ctx.resolve(&sent) else {
+                panic!("resolved");
+            };
+            assert!(why.len() < 400 && why.contains("more characters"), "{why}");
+        }
     }
 
     #[test]

@@ -1291,7 +1291,7 @@ impl Shell {
 fn plain(error: &ClientError) -> String {
     match error {
         ClientError::Rpc(e) => e.message.clone(),
-        ClientError::Closed | ClientError::Connect { .. } => {
+        ClientError::Closed | ClientError::Connect { .. } | ClientError::TimedOut { .. } => {
             "Lost touch with the system. Try again in a moment.".to_owned()
         }
         ClientError::Decode(_) => "Got an answer this desktop doesn't understand.".to_owned(),

@@ -741,14 +741,28 @@ fn restore(
     file: &Path,
     seen: &mut Seen,
 ) -> io::Result<()> {
-    let data = copy.read(rel, u64::MAX - 1)?;
     if let Some(parent) = rel.parent().filter(|p| !p.as_os_str().is_empty()) {
         // Folders the rollback brings back belong to the user, not root.
         live.create_dir_all_as(parent, owner)?;
     }
-    live.write_as(rel, &data, Some(owner), Some(mode))?;
-    if let Some(stat) = live.stat(rel)? {
-        seen.restored(file.to_path_buf(), stat, &data);
+    let mut from = copy.open_file(rel)?;
+    // A file whose content is kept track of is small enough to hold; any
+    // other is copied as it is read. A deleted video or disk image comes
+    // back however large it is: read whole first, as every file was, one
+    // the size of the computer's memory ended glassd mid-rollback, and the
+    // undo with it (tasks don't outlive a restart, ADR 0055).
+    if from.metadata()?.len() <= crate::written::DIGEST_LIMIT {
+        let mut data = Vec::new();
+        io::Read::read_to_end(&mut from, &mut data)?;
+        live.write_as(rel, &data, Some(owner), Some(mode))?;
+        if let Some(stat) = live.stat(rel)? {
+            seen.restored(file.to_path_buf(), stat, &data);
+        }
+    } else {
+        live.write_from(rel, &mut from, Some(owner), Some(mode))?;
+        if let Some(stat) = live.stat(rel)? {
+            seen.restored_large(file.to_path_buf(), stat);
+        }
     }
     Ok(())
 }

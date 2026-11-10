@@ -72,6 +72,9 @@ static READY: AtomicBool = AtomicBool::new(false);
 /// How long snapshots are kept (AU-20), and how often that is checked.
 const SNAPSHOTS_KEPT: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
 const SNAPSHOT_CHECK: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+/// How long what an ended task's agent printed is kept once no task shows
+/// it: long enough to look into what happened before a restart.
+const TASK_LOGS_KEPT: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
 
 fn main() -> ExitCode {
     // GLASS_LOG is `level` or `target=level,...`, e.g. `glass_runtime=debug,info`.
@@ -959,14 +962,25 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             let mut tick = tokio::time::interval(SNAPSHOT_CHECK);
             loop {
                 tick.tick().await;
-                let runtime = Arc::clone(&runtime);
-                match tokio::task::spawn_blocking(move || runtime.prune_snapshots(SNAPSHOTS_KEPT))
+                let pruning = Arc::clone(&runtime);
+                match tokio::task::spawn_blocking(move || pruning.prune_snapshots(SNAPSHOTS_KEPT))
                     .await
                 {
                     Ok(Ok(0)) => {}
                     Ok(Ok(gone)) => tracing::info!(gone, "removed snapshots older than 30 days"),
                     Ok(Err(e)) => tracing::warn!("removing old snapshots: {e}"),
                     Err(e) => tracing::warn!("removing old snapshots: {e}"),
+                }
+                // And what ended tasks' agents printed, with the same tick.
+                let pruning = Arc::clone(&runtime);
+                match tokio::task::spawn_blocking(move || pruning.prune_task_logs(TASK_LOGS_KEPT))
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(gone) => {
+                        tracing::info!(gone, "removed the output of tasks ended over a week ago")
+                    }
+                    Err(e) => tracing::warn!("removing old task output: {e}"),
                 }
             }
         });

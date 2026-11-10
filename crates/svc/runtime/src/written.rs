@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 /// files, and files under a folder a change covered (a moved folder can be
 /// big), are compared by metadata alone, which only errs towards leaving a
 /// file alone.
-const DIGEST_LIMIT: u64 = 1 << 20;
+pub(crate) const DIGEST_LIMIT: u64 = 1 << 20;
 
 /// Undo's record of one task's writes.
 #[derive(Debug, Default, Clone)]
@@ -156,6 +156,13 @@ impl Seen {
     pub fn restored(&mut self, file: PathBuf, stat: Stat, data: &[u8]) {
         let digest = (data.len() as u64 <= DIGEST_LIMIT).then(|| Sha256::digest(data).into());
         self.0.push(Saw::File(file, Left { stat, digest }));
+    }
+
+    /// `file` was brought back as `stat`, too large for its content to be
+    /// kept track of (over [`DIGEST_LIMIT`]): its size and times say
+    /// whether someone changed it since.
+    pub fn restored_large(&mut self, file: PathBuf, stat: Stat) {
+        self.0.push(Saw::File(file, Left { stat, digest: None }));
     }
 
     /// `file` was removed.

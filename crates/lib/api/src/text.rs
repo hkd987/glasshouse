@@ -43,6 +43,23 @@ pub fn display_line(text: &str) -> Cow<'_, str> {
     }
 }
 
+/// `text` cut to its first `most` characters, saying how many more there
+/// were; unchanged (and not copied) when it has no more than that.
+///
+/// What an agent writes is kept: in a task's activity while glassd runs,
+/// and in the audit log for good. Its captions and answers have limits
+/// where they arrive; this is for text that reaches the record another
+/// way, such as an error that quotes what the agent sent. Without it one
+/// call could put megabytes in both, and a loop of them fills the disk the
+/// audit log is on.
+pub fn clip(text: &str, most: usize) -> Cow<'_, str> {
+    let Some((cut, _)) = text.char_indices().nth(most) else {
+        return Cow::Borrowed(text);
+    };
+    let more = text[cut..].chars().count();
+    Cow::Owned(format!("{}… ({more} more characters)", &text[..cut]))
+}
+
 /// What a display line shows for `c`: a space, [`STAND_IN`], or `c` itself.
 pub fn display_char(c: char) -> char {
     match c {
@@ -323,6 +340,17 @@ mod tests {
 
     use super::*;
     use crate::{AgentMode, FeedLine, TaskView, TileState};
+
+    #[test]
+    fn text_is_cut_at_a_character_and_says_how_much_went() {
+        assert!(matches!(clip("short", 5), Cow::Borrowed("short")));
+        assert_eq!(clip("abcdef", 4), "abcd… (2 more characters)");
+        // Characters, not bytes: never cut inside one.
+        assert_eq!(clip("añ€😀xyz", 4), "añ€😀… (3 more characters)");
+        assert_eq!(clip("", 0), "");
+        let long = "x".repeat(8 * 1024 * 1024);
+        assert!(clip(&long, 300).len() < 400);
+    }
 
     fn owned(text: &str) -> String {
         match display_line(text) {

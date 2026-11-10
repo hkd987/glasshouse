@@ -66,19 +66,31 @@ glassd_stop_precmd()
 	# kernel patch on probation is started again by the next start, once. A
 	# crash never gets here, so the start after one goes back (ADR 0057,
 	# HardwarePatch.tla). Never hold up shutdown on an error.
-	[ -n "${rc_fast}" ] && /usr/local/bin/glassctl system shutdown >/dev/null 2>&1
+	[ -n "${rc_fast}" ] && glassd_ctl system shutdown >/dev/null 2>&1
 	return 0
+}
+
+# glassctl for the hooks the computer's sleep, wake and shutdown wait on.
+# glassd holds agents within two seconds, and glassctl gives up on an
+# answer after ten; timeout(1) is for what neither covers, such as a glassd
+# too stuck to take the connection. Nothing here may hold those up.
+glassd_ctl()
+{
+	if [ -x /usr/bin/timeout ]; then
+		/usr/bin/timeout 15 /usr/local/bin/glassctl "$@"
+	else
+		/usr/local/bin/glassctl "$@"
+	fi
 }
 
 glassd_suspend()
 {
-	# Bounded inside glassd; never hold up sleep on an error.
-	/usr/local/bin/glassctl system suspend || true
+	glassd_ctl system suspend || true
 }
 
 glassd_resume()
 {
-	/usr/local/bin/glassctl system resume || true
+	glassd_ctl system resume || true
 }
 
 run_rc_command "$1"

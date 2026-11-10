@@ -131,7 +131,7 @@ the containment probe is expected to fail there.
 | `glassctl: is glassd running?` | `make vm-run CMD="service glassd status; tail /var/log/glassd.log"` |
 | `glassd` refuses to start | It validates config and policy as it starts and says why in `/var/log/glassd.log` (and on the console at boot); `make vm-run CMD="glassd --check"` prints it too. A policy file that doesn't validate doesn't stop it: it enforces the last good policy and `glassctl status` says so (ADR 0021). |
 | Containment probe fails only "limits: below the person's priority, memory capped" right after a deploy | The VM hasn't restarted since the deploy turned resource accounting on (`kern.racct.enable`, read at boot): `vm.sh down && vm.sh up && vm.sh wait`. `check-boot.sh` in the e2e suite says the same. |
-| Containment probe fails in the VM | That's a real finding. Look at the `FAIL` lines in `/var/db/glasshouse/tasks/<id>/agent.log` before anything else. |
+| Containment probe fails in the VM | That's a real finding. Look at the `FAIL` lines in `/var/db/glasshouse/tasks/<id>/agent.log` before anything else (the log is there until the task is dismissed, and for a week after a restart). |
 | Out of disk | `make vm-run CMD="zpool trim zroot"` gives the space ZFS freed back to the host (the VM's disk is sparse; deploys turn `autotrim` on so it stays small). Then `make clean`, or `make vm-reset` (the VM disk grows to 20 GB). If the host disk filled while the VM was writing, QEMU pauses it: `info status` on its monitor says `paused (io-error)`; free space, then `cont`. |
 
 ## In Claude Code (web or cloud)

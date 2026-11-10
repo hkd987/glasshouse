@@ -9,6 +9,7 @@ mod agent_folders;
 mod apps;
 mod artifacts;
 mod audit;
+mod bounds;
 mod catalog;
 mod chat;
 mod computers;

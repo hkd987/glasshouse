@@ -61,7 +61,7 @@ pub use task::{
     RoutineView, ScopeLine, ScopeRequest, SnapshotMarker, TITLE_MAX_CHARS, TaskDetail, TaskRef,
     TaskRequest, TaskView, TileState, UndoReport, UndoRequest,
 };
-pub use text::{DisplaySafe, STAND_IN, display_char, display_line, invisible};
+pub use text::{DisplaySafe, STAND_IN, clip, display_char, display_line, invisible};
 pub use update::{
     OsUpdate, RestartWhen, UpdateApply, UpdateAvailable, UpdateRestart, UpdateStatus,
 };

@@ -20,6 +20,7 @@ use tokio::sync::oneshot;
 
 use crate::Runtime;
 use crate::agent_api::AgentApi;
+use crate::output::{Output, Sink};
 use crate::task::{Gate, Task};
 
 enum Exit {
@@ -35,7 +36,8 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
         .join(task.id.to_string())
         .join("agent.log");
     let mut server = None;
-    let result = setup_and_wait(&rt, &task, &log, &mut server, stop).await;
+    let mut output = None;
+    let result = setup_and_wait(&rt, &task, &log, &mut server, &mut output, stop).await;
 
     // Teardown, whatever happened above.
     if let Some(server) = server {
@@ -64,6 +66,11 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
     if let Some(e) = &teardown_error {
         tracing::error!(task = %task.id, error = %e, "sandbox teardown failed");
     }
+    // The last of what the agent printed, now that nothing of it runs.
+    let last_line = match output {
+        Some(output) => output.close().await,
+        None => None,
+    };
 
     // An ended task's calls, compiled and let go; a finished one's code is
     // kept, and compared with the last time the same request was done (ADR
@@ -98,7 +105,7 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
             }
             (Ok(Exit::Finished(status)), _) => {
                 state.tile = TileState::Failed;
-                state.failure = Some(failure_reason(*status, &log));
+                state.failure = Some(failure_reason(*status, last_line.as_deref()));
             }
             (Ok(Exit::Stopped), _) => state.tile = TileState::Stopped,
             (Err(e), _) => {
@@ -149,6 +156,7 @@ async fn setup_and_wait(
     task: &Arc<Task>,
     log: &Path,
     server: &mut Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    output: &mut Option<Output>,
     stop: oneshot::Receiver<()>,
 ) -> Result<Exit, String> {
     // An app session was prepared as it opened, so its first call finds
@@ -239,26 +247,24 @@ async fn setup_and_wait(
         ),
         None => None,
     };
-    command.stdin(Stdio::null()).kill_on_drop(true);
-    if screen.is_some() {
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    } else {
-        command
-            .stdout(log_file.try_clone().map_err(|e| e.to_string())?)
-            .stderr(log_file.try_clone().map_err(|e| e.to_string())?);
-    }
+    // What it prints comes through glassd, which keeps the log to a size
+    // (`output`). One pipe for both streams, so their lines stay in the
+    // order the agent wrote them.
+    let (printed, prints) = std::io::pipe().map_err(|e| format!("task log: {e}"))?;
+    command
+        .stdin(Stdio::null())
+        .stdout(prints.try_clone().map_err(|e| format!("task log: {e}"))?)
+        .stderr(prints)
+        .kill_on_drop(true);
     let mut child = command
         .spawn()
         .map_err(|e| format!("starting {}: {e}", task.entry.program.display()))?;
-    if let Some(screen) = screen {
-        let files = Arc::new(std::sync::Mutex::new([log_file, screen]));
-        if let Some(out) = child.stdout.take() {
-            tee(out, Arc::clone(&files));
-        }
-        if let Some(err) = child.stderr.take() {
-            tee(err, files);
-        }
-    }
+    // glassd's own ends of the pipe go with the command: the output ends
+    // when the agent's do.
+    drop(command);
+    let printed = tokio::net::unix::pipe::Receiver::from_owned_fd(printed.into())
+        .map_err(|e| format!("task log: {e}"))?;
+    *output = Some(Output::copy(printed, Sink::new(log_file, screen)));
 
     {
         let mut state = task.lock();
@@ -373,26 +379,6 @@ fn bind_task_socket(path: &Path, task: &Task) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// Copies what an agent prints to its log and its computer's screen, until
-/// it closes its end.
-fn tee(
-    mut from: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-    files: Arc<std::sync::Mutex<[fs::File; 2]>>,
-) {
-    use std::io::Write;
-    use tokio::io::AsyncReadExt;
-
-    tokio::spawn(async move {
-        let mut buf = vec![0; 8192];
-        while let Ok(n @ 1..) = from.read(&mut buf).await {
-            let mut files = files.lock().unwrap_or_else(|e| e.into_inner());
-            for file in files.iter_mut() {
-                let _ = file.write_all(&buf[..n]);
-            }
-        }
-    });
-}
-
 /// The agent's whole environment. Nothing leaks in from the daemon.
 fn agent_env(rt: &Runtime, task: &Task) -> Vec<(String, String)> {
     let inside = |p: &str| {
@@ -443,14 +429,10 @@ fn agent_env(rt: &Runtime, task: &Task) -> Vec<(String, String)> {
     ]
 }
 
-fn failure_reason(status: ExitStatus, log: &Path) -> String {
-    let last = fs::read_to_string(log).ok().and_then(|text| {
-        text.lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .map(str::to_owned)
-    });
-    match last {
+/// Why a task failed: how its agent exited and the last line it printed
+/// (`output` keeps that line, at a line's length).
+fn failure_reason(status: ExitStatus, last_line: Option<&str>) -> String {
+    match last_line {
         Some(line) => format!("the agent exited ({status}): {line}"),
         None => format!("the agent exited ({status})"),
     }

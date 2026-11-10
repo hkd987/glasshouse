@@ -70,6 +70,17 @@ async fn au1_a_read_the_log_cant_record_is_withheld_and_calls_wait_for_room() {
         "{}",
         again.text()
     );
+    // Nor is a call that would only be refused looked at: its refusal
+    // would be one more record waiting, and an agent can make these
+    // without end.
+    for _ in 0..3 {
+        let outside = tool(&agent, "files_read", json!({"path": "../etc/passwd"})).await;
+        assert!(
+            outside.text().contains("can't take records"),
+            "{}",
+            outside.text()
+        );
+    }
 
     // There's room again: the record waiting goes first, then the call.
     h.audit.fail_writes_for_tests(0, 0);
@@ -104,6 +115,13 @@ async fn au1_a_read_the_log_cant_record_is_withheld_and_calls_wait_for_room() {
             .as_ref()
             .is_some_and(|a| a.as_str() == "files.write")
     }));
+    // And the calls refused unseen while the log was down left none.
+    assert!(
+        !records
+            .iter()
+            .any(|r| r.event.summary.starts_with("Out of scope")),
+        "{records:?}"
+    );
     // The chain holds, with the part of a line the full disk left cut off
     // and noted.
     let report = glass_audit::verify(&h.audit_path()).unwrap();

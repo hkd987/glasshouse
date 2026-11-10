@@ -699,18 +699,21 @@ fn round_between(lo: f64, hi: f64, lo_in: bool, hi_in: bool) -> Option<f64> {
     };
     for step in (-2..=15).rev().map(|k| 10f64.powi(k)) {
         let (first, last) = ((lo / step).ceil(), (hi / step).floor());
-        if last - first > 100.0 {
+        if last - first > 100.0 || last < first {
             continue;
         }
         let mut best: Option<f64> = None;
-        let mut m = first;
-        while m <= last {
+        // A count of steps, not `m += 1.0` until it passes `last`: past
+        // 2^53 adding one to a float leaves it where it was, and the loop
+        // never ended (numbers of 9e30 and up in a list did that).
+        let steps = (last - first) as u32;
+        for n in 0..=steps {
+            let m = first + f64::from(n);
             // Whole cents at most, without float dust.
             let x = (m * step * 100.0).round() / 100.0;
             if inside(x) && best.is_none_or(|b| (x - middle).abs() < (b - middle).abs()) {
                 best = Some(x);
             }
-            m += 1.0;
         }
         if best.is_some() {
             return best;

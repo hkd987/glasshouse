@@ -28,6 +28,8 @@ pub enum ClientError {
     },
     #[error("connection closed")]
     Closed,
+    #[error("no answer to {method} in {secs} s")]
+    TimedOut { method: String, secs: u64 },
     #[error(transparent)]
     Rpc(#[from] RpcError),
     #[error("unexpected response: {0}")]
@@ -35,6 +37,21 @@ pub enum ClientError {
 }
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Response>>>>;
+
+/// A call's place among those waiting for an answer, given up when the
+/// call is: answered, or dropped by a caller that stopped waiting.
+struct Waiting<'a> {
+    pending: &'a Pending,
+    id: i64,
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.id);
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Client {
@@ -112,7 +129,11 @@ impl Client {
         }
     }
 
-    /// Calls `method` and decodes its result.
+    /// Calls `method` and decodes its result. It waits for as long as the
+    /// answer takes: a call can be one that waits for a person. Where the
+    /// caller must not wait on a server that has stopped answering (a hook
+    /// the computer's sleep waits for, a screen someone is looking at),
+    /// use [`call_within`](Self::call_within).
     pub async fn call<R: DeserializeOwned>(
         &self,
         method: &str,
@@ -124,6 +145,24 @@ impl Client {
         serde_json::from_value(value).map_err(|e| ClientError::Decode(e.to_string()))
     }
 
+    /// [`call`](Self::call), given up on after `limit`
+    /// ([`ClientError::TimedOut`]). The server may still carry the call
+    /// out; its answer, if one comes, is dropped.
+    pub async fn call_within<R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: impl Serialize,
+        limit: std::time::Duration,
+    ) -> Result<R, ClientError> {
+        match tokio::time::timeout(limit, self.call(method, params)).await {
+            Ok(answer) => answer,
+            Err(_) => Err(ClientError::TimedOut {
+                method: method.to_owned(),
+                secs: limit.as_secs(),
+            }),
+        }
+    }
+
     pub async fn call_value(&self, method: &str, params: Value) -> Result<Value, ClientError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -131,6 +170,10 @@ impl Client {
             .lock()
             .map_err(|_| ClientError::Closed)?
             .insert(id, tx);
+        let _waiting = Waiting {
+            pending: &self.pending,
+            id,
+        };
         if !self.alive.load(Ordering::SeqCst) {
             return Err(ClientError::Closed);
         }

@@ -6,7 +6,7 @@
 //! refuses to escape, the same model Capsicum enforces in the kernel), so a
 //! path can never reach outside the grant.
 
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::os::unix::fs::{PermissionsExt, fchown};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,7 +46,9 @@ pub fn remove_tree(path: &Path) -> crate::Result<()> {
             path.display()
         )));
     };
-    crate::cmd::run("rm", &["-rf", "--", text]).map(drop)
+    // Longer than other commands get: a tree is as large as it is.
+    let limit = std::time::Duration::from_secs(30 * 60);
+    crate::cmd::run_within("rm", &["-rf", "--", text], limit).map(drop)
 }
 
 /// Who should own files the broker creates for a user.
@@ -194,19 +196,49 @@ impl ConfinedDir {
         mode: Option<u32>,
         at_least: Option<glass_types::Label>,
     ) -> io::Result<bool> {
+        self.put(rel, &mut &*data, owner, mode, at_least)
+    }
+
+    /// Like [`write_as`](Self::write_as), the content read from `from` as
+    /// it is written: a file of any size, never whole in memory. Undo
+    /// brings back what was deleted this way, whatever its size.
+    pub fn write_from(
+        &self,
+        rel: &Path,
+        from: &mut dyn Read,
+        owner: Option<Owner>,
+        mode: Option<u32>,
+    ) -> io::Result<bool> {
+        self.put(rel, from, owner, mode, None)
+    }
+
+    /// A file put in place of whatever `rel` named, atomically: what every
+    /// write here comes to.
+    fn put(
+        &self,
+        rel: &Path,
+        from: &mut dyn Read,
+        owner: Option<Owner>,
+        mode: Option<u32>,
+        at_least: Option<glass_types::Label>,
+    ) -> io::Result<bool> {
         let rel = relative(rel)?;
         let meta = self.dir.symlink_metadata(rel).ok();
         let existed = meta.is_some();
-        // The rename puts a new file in the old one's place, so a label
-        // stored on the old one goes on the new one first (DP-10, ADR 0052).
-        let kept = match meta {
-            Some(meta) if meta.is_file() => {
-                crate::xattr::read_label_of(&self.open_regular(rel)?.into_std())?
-            }
-            _ => None,
+        // The rename puts a new file in the old one's place, so what was
+        // stored on the old one goes on the new one first: its label
+        // (DP-10, ADR 0052), and, unless the caller names one, its mode. A
+        // rewrite of a private file (0600) or a script (0755) left it
+        // 0644: readable by everyone on the computer, or not runnable.
+        let (kept, was) = match &meta {
+            Some(meta) if meta.is_file() => (
+                crate::xattr::read_label_of(&self.open_regular(rel)?.into_std())?,
+                Some(meta.mode() & 0o7777),
+            ),
+            _ => (None, None),
         };
         let label = kept.max(at_least.filter(|l| *l > glass_types::Label::Public));
-        let tmp = self.stage(rel, data, owner, mode, label)?;
+        let tmp = self.stage(rel, from, owner, mode.or(was), label)?;
         let result = self.dir.rename(&tmp, &self.dir, rel);
         if result.is_err() {
             let _ = self.dir.remove_file(&tmp);
@@ -220,18 +252,19 @@ impl ConfinedDir {
     /// fails if the name is taken.
     pub fn write_new(&self, rel: &Path, data: &[u8], owner: Option<Owner>) -> io::Result<()> {
         let rel = relative(rel)?;
-        let tmp = self.stage(rel, data, owner, None, None)?;
+        let tmp = self.stage(rel, &mut &*data, owner, None, None)?;
         let result = self.dir.hard_link(&tmp, &self.dir, rel);
         let _ = self.dir.remove_file(&tmp);
         result
     }
 
-    /// A temporary file beside `rel` holding `data`, synced, with its owner,
-    /// mode and label set. Its name is unique within this process.
+    /// A temporary file beside `rel` holding what `from` gives, synced,
+    /// with its owner, mode and label set. Its name is unique within this
+    /// process.
     fn stage(
         &self,
         rel: &Path,
-        data: &[u8],
+        from: &mut dyn Read,
         owner: Option<Owner>,
         mode: Option<u32>,
         label: Option<glass_types::Label>,
@@ -255,7 +288,7 @@ impl ConfinedDir {
         options.write(true).create_new(true);
         let mut file = self.dir.open_with(&tmp, &options)?;
         let result = (|| {
-            file.write_all(data)?;
+            io::copy(from, &mut file)?;
             file.sync_all()?;
             let std_file = file.into_std();
             if let Some(owner) = owner {
@@ -308,7 +341,11 @@ impl ConfinedDir {
         self.dir.rename(relative(from)?, &self.dir, relative(to)?)
     }
 
-    pub fn create_dir_all(&self, rel: &Path) -> io::Result<()> {
+    /// Folders made as whoever this process is. For this crate's tests:
+    /// a broker is root, and what it makes for a person is theirs
+    /// ([`create_dir_all_as`](Self::create_dir_all_as)).
+    #[cfg(test)]
+    fn create_dir_all(&self, rel: &Path) -> io::Result<()> {
         self.dir.create_dir_all(relative(rel)?)
     }
 
@@ -724,6 +761,61 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[test]
+    fn a_rewrite_keeps_the_files_mode_unless_one_is_named() {
+        use std::os::unix::fs::PermissionsExt;
+        let (outer, dir) = setup();
+        let grant = outer.path().join("grant");
+        // A private file and a script, as a person keeps them.
+        for (name, mode) in [("private.txt", 0o600), ("run.sh", 0o755)] {
+            std::fs::write(grant.join(name), "before").unwrap();
+            std::fs::set_permissions(grant.join(name), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+            // Rewritten as an agent's files.write does: no mode named. It
+            // came out 0644, readable by everyone and not runnable.
+            assert!(!dir.write(Path::new(name), b"after", None).unwrap());
+            assert_eq!(std::fs::read(grant.join(name)).unwrap(), b"after");
+            assert_eq!(mode_of(&grant.join(name)), mode, "{name}");
+        }
+        // A mode that is named wins, as when undo puts a file back.
+        dir.write_as(Path::new("private.txt"), b"x", None, Some(0o640))
+            .unwrap();
+        assert_eq!(mode_of(&grant.join("private.txt")), 0o640);
+    }
+
+    #[test]
+    fn a_file_is_written_from_a_reader_without_holding_it_whole() {
+        let (outer, dir) = setup();
+        // Larger than any buffer on the way, and not all the same.
+        let content: Vec<u8> = (0..3_000_000u32).map(|n| (n % 251) as u8).collect();
+        let created = dir
+            .write_from(Path::new("big.bin"), &mut &content[..], None, Some(0o600))
+            .unwrap();
+        assert!(created);
+        let path = outer.path().join("grant/big.bin");
+        assert_eq!(std::fs::read(&path).unwrap(), content);
+        assert_eq!(mode_of(&path), 0o600);
+        // In place of what was there, and nothing left beside it.
+        assert!(
+            !dir.write_from(Path::new("big.bin"), &mut &b"small"[..], None, None)
+                .unwrap()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"small");
+        assert_eq!(mode_of(&path), 0o600, "its mode stays");
+        let names: Vec<String> = dir
+            .list(Path::new(""))
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, ["big.bin"]);
     }
 
     #[test]

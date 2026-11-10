@@ -197,6 +197,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_call_can_be_given_up_on_and_the_connection_carries_on() {
+        let (_dir, client) = start().await;
+        // "slow" answers in 200 ms.
+        let err = client
+            .call_within::<Value>("slow", Value::Null, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ClientError::TimedOut { method, .. } if method == "slow"),
+            "{err:?}"
+        );
+        assert_eq!(err.to_string(), "no answer to slow in 0 s");
+        // Its late answer is dropped, and the next call gets its own.
+        let v: Value = client
+            .call_within("echo", json!("next"), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(v, json!("next"));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let v: Value = client.call("echo", json!("after")).await.unwrap();
+        assert_eq!(v, json!("after"));
+    }
+
+    #[tokio::test]
     async fn notifications_reach_the_client() {
         let (_dir, client) = start().await;
         let _: Value = client.call("subscribe", Value::Null).await.unwrap();

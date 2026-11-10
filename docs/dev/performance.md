@@ -481,9 +481,11 @@ spinning threads.
 
 ## Known gaps
 
-- **Snapshot retention (AU-20, 30 days).** Snapshots are never destroyed
-  yet. They cost nothing until data diverges, but they will hold disk space
-  on a busy machine.
+- **Snapshot retention (AU-20, 30 days).** glassd removes undo snapshots
+  older than 30 days at its start and daily, a hundred of a dataset at a
+  time, and keeps those a task in memory could still undo from. A task
+  stays in memory until it is dismissed, so on a computer nobody dismisses
+  tasks on, snapshots still gather while glassd is up.
 - **Hand back still runs `zfs diff`** (above). Hand back has no budget yet;
   give it one before it grows.
 - **GUI budgets** (cold launch under 1 s, UI-7; resume under 2 s, PM-1)

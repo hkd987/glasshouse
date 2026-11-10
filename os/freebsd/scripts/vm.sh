@@ -364,12 +364,15 @@ cmd_exec() {
 
 cmd_clear_snapshots() {
 	# One `zfs destroy` per 100 snapshots of a dataset (`fs@a,b,c`): one a
-	# snapshot took 5 minutes for 942.
+	# snapshot took 5 minutes for 942. Undo snapshots only (glass-<8 hex>,
+	# as glassd's own prune takes them): an OS image's @glass-image is what
+	# the next delta update is received onto.
 	vm_ssh "set -e
+ours='@glass-[0-9a-f]\{8\}\$'
 service glassd stop >/dev/null 2>&1 || true
-n=\$(zfs list -H -t snapshot -o name | grep -c '@glass-' || true)
-for ds in \$(zfs list -H -t snapshot -o name | grep '@glass-' | sed 's/@.*//' | sort -u); do
-	zfs list -H -t snapshot -o name -d 1 \"\$ds\" | grep '@glass-' | sed 's/.*@//' | xargs -n 100 echo | tr ' ' ',' |
+n=\$(zfs list -H -t snapshot -o name | grep -c \"\$ours\" || true)
+for ds in \$(zfs list -H -t snapshot -o name | grep \"\$ours\" | sed 's/@.*//' | sort -u); do
+	zfs list -H -t snapshot -o name -d 1 \"\$ds\" | grep \"\$ours\" | sed 's/.*@//' | xargs -n 100 echo | tr ' ' ',' |
 		while read -r names; do zfs destroy \"\$ds@\$names\"; done
 done
 service glassd start </dev/null >/dev/null 2>&1

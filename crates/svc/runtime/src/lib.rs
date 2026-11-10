@@ -33,6 +33,7 @@ pub mod hwpatch;
 mod labels;
 mod model;
 pub mod osupdate;
+mod output;
 pub mod people;
 mod routines;
 mod runtime;

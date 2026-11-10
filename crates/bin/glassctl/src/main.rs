@@ -360,6 +360,13 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
+/// How long glassd has to answer that the computer is about to sleep, has
+/// woken, or is shutting down. It holds agents within two seconds
+/// (PM-5); past this, the hook that asked carries on without it.
+const POWER_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a login shell waits for its line about the person's agents.
+const SUMMARY_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 struct Ctl {
     client: Client,
     json: bool,
@@ -373,6 +380,22 @@ impl Ctl {
     ) -> anyhow::Result<R> {
         self.client
             .call(method, params)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// [`call`](Self::call) for what something else waits on: the
+    /// computer going to sleep, waking or shutting down (rc.d/glassd), a
+    /// login shell's first line. A glassd that is up but not answering
+    /// must not hold those up, so this gives up after `limit`.
+    async fn call_within<R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: impl Serialize,
+        limit: std::time::Duration,
+    ) -> anyhow::Result<R> {
+        self.client
+            .call_within(method, params, limit)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
@@ -574,7 +597,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             })
         }
         Command::Tasks { summary } => {
-            let tasks: Vec<TaskView> = ctl.call(methods::TASK_LIST, Value::Null).await?;
+            // The summary is a login shell's first line (profile.d): a
+            // glassd that doesn't answer doesn't keep anyone from a prompt.
+            let tasks: Vec<TaskView> = if summary {
+                ctl.call_within(methods::TASK_LIST, Value::Null, SUMMARY_LIMIT)
+                    .await?
+            } else {
+                ctl.call(methods::TASK_LIST, Value::Null).await?
+            };
             if summary {
                 ctl.show(&tasks, |t| render::summary(t))
             } else {
@@ -833,7 +863,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             })
         }
         Command::System(SystemCommand::Shutdown) => {
-            let _: Value = ctl.call(methods::SYSTEM_SHUTDOWN, Value::Null).await?;
+            let _: Value = ctl
+                .call_within(methods::SYSTEM_SHUTDOWN, Value::Null, POWER_LIMIT)
+                .await?;
             Ok(())
         }
         Command::System(cmd) => {
@@ -844,7 +876,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     unreachable!("handled above")
                 }
             };
-            let result: PowerResult = ctl.call(method, Value::Null).await?;
+            let result: PowerResult = ctl.call_within(method, Value::Null, POWER_LIMIT).await?;
             ctl.show(&result, |r| {
                 let noun = if r.tasks == 1 { "agent" } else { "agents" };
                 format!("{verb} {} {noun}\n", r.tasks)

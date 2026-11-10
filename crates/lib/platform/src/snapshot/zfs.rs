@@ -18,6 +18,25 @@ use crate::{PlatformError, Result, cmd};
 
 /// Prefix of every snapshot name the daemon creates.
 pub const SNAPSHOT_PREFIX: &str = "glass-";
+/// Snapshots of one dataset removed by one `zfs destroy` (`fs@a,b,c`). One
+/// each took five minutes for 942 on the dev VM, with writes waiting on
+/// `zfs snapshot` meanwhile.
+const DESTROY_AT_ONCE: usize = 100;
+
+/// Whether `snap` is an undo snapshot's name: the prefix and the eight hex
+/// digits of its id (`SnapshotId::short`), nothing else. Other names start
+/// the same way and are not ours to prune: an OS image's `glass-image`,
+/// which every later delta update is received onto (ADR 0061), and a boot
+/// environment's `glass-image-of-…`. Pruned at 30 days old with the rest,
+/// the first ended delta updates for good.
+fn is_undo_snapshot(snap: &str) -> bool {
+    snap.strip_prefix(SNAPSHOT_PREFIX).is_some_and(|id| {
+        id.len() == 8
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
 
 #[derive(Debug, Default)]
 pub struct ZfsSnapshotter {
@@ -178,21 +197,48 @@ impl Snapshotter for ZfsSnapshotter {
             &["list", "-H", "-p", "-t", "snapshot", "-o", "name,creation"],
         )?;
         let mut gone = 0;
-        for (name, created) in ours(&out) {
-            let snap = name.split_once('@').map_or("", |(_, s)| s);
-            if created < cutoff && !kept.contains(snap) {
-                // One that can't go (held, busy) doesn't keep the rest, day
-                // after day (ADR 0053).
-                match cmd::run("zfs", &["destroy", name]) {
-                    Ok(_) => gone += 1,
-                    Err(e) => {
-                        tracing::warn!(snapshot = name, error = %e, "couldn't remove an old snapshot");
+        for (dataset, snaps) in to_prune(&out, cutoff, &kept) {
+            for batch in snaps.chunks(DESTROY_AT_ONCE) {
+                let together = format!("{dataset}@{}", batch.join(","));
+                if batch.len() > 1 && cmd::run("zfs", &["destroy", &together]).is_ok() {
+                    gone += batch.len();
+                    continue;
+                }
+                // One that can't go (held, busy) fails its batch whole: one
+                // at a time then, so it doesn't keep the rest, day after
+                // day (ADR 0053).
+                for snap in batch {
+                    let name = format!("{dataset}@{snap}");
+                    match cmd::run("zfs", &["destroy", &name]) {
+                        Ok(_) => gone += 1,
+                        Err(e) => {
+                            tracing::warn!(snapshot = name, error = %e, "couldn't remove an old snapshot");
+                        }
                     }
                 }
             }
         }
         Ok(gone)
     }
+}
+
+/// The undo snapshots in `list` taken before `cutoff` and not in `kept`,
+/// by the dataset they are of.
+fn to_prune<'a>(
+    list: &'a str,
+    cutoff: u64,
+    kept: &BTreeSet<String>,
+) -> BTreeMap<&'a str, Vec<&'a str>> {
+    let mut old: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (name, created) in ours(list) {
+        if let Some((dataset, snap)) = name.split_once('@')
+            && created < cutoff
+            && !kept.contains(snap)
+        {
+            old.entry(dataset).or_default().push(snap);
+        }
+    }
+    old
 }
 
 /// Our snapshots in `zfs list -H -p -t snapshot -o name,creation` output:
@@ -202,8 +248,7 @@ fn ours(list: &str) -> Vec<(&str, u64)> {
         .filter_map(|line| {
             let (name, created) = line.split_once('\t')?;
             let snap = name.split_once('@')?.1;
-            (snap.starts_with(SNAPSHOT_PREFIX) && !name.contains(char::is_whitespace))
-                .then_some(())?;
+            (is_undo_snapshot(snap) && !name.contains(char::is_whitespace)).then_some(())?;
             Some((name, created.trim().parse().ok()?))
         })
         .collect()
@@ -288,7 +333,12 @@ mod tests {
                    zroot/home/demo@nightly\t1700000000\n\
                    zroot/home@glass-5d70ab28\t1700000001\n\
                    garbage line\n\
-                   zroot/home/demo@glass-x\tnot-a-number\n";
+                   zroot/home/demo@glass-x\tnot-a-number\n\
+                   zroot/home/demo@glass-0ea6688b\tnot-a-number\n\
+                   zroot/ROOT/default@glass-image\t1700000002\n\
+                   zroot/ROOT/default@glass-image-of-17.2\t1700000003\n\
+                   zroot/home/demo@glass-0EA6688A\t1700000004\n\
+                   zroot/home/demo@glass-0ea6688a1\t1700000005\n";
         assert_eq!(
             ours(out),
             [
@@ -296,6 +346,33 @@ mod tests {
                 ("zroot/home@glass-5d70ab28", 1_700_000_001)
             ]
         );
+    }
+
+    /// ADR 0061: the image's snapshot is what the next delta update is
+    /// received onto. It is named like ours and is not ours: 30 days after
+    /// an update, pruning it ended delta updates on that computer for good.
+    #[test]
+    fn au20_an_os_images_snapshot_is_never_pruned_and_old_ones_go_by_dataset() {
+        let out = "zroot/ROOT/17.1@glass-image\t100\n\
+                   zroot/ROOT/17.1@glass-image-of-17.2\t100\n\
+                   zroot/home/demo@glass-00000001\t100\n\
+                   zroot/home/demo@glass-00000002\t100\n\
+                   zroot/home/demo@glass-00000003\t900\n\
+                   zroot/home/sam@glass-00000004\t100\n\
+                   zroot/home/sam@glass-00000005\t100\n";
+        let kept = BTreeSet::from(["glass-00000005".to_owned()]);
+        let old = to_prune(out, 500, &kept);
+        assert_eq!(
+            old,
+            BTreeMap::from([
+                ("zroot/home/demo", vec!["glass-00000001", "glass-00000002"]),
+                ("zroot/home/sam", vec!["glass-00000004"]),
+            ])
+        );
+        assert!(is_undo_snapshot("glass-0ea6688a"));
+        for not_ours in ["glass-image", "glass-", "glass-0ea6688", "nightly", ""] {
+            assert!(!is_undo_snapshot(not_ours), "{not_ours:?}");
+        }
     }
 
     #[test]

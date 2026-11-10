@@ -24,7 +24,7 @@ pub mod testing;
 
 use std::path::Path;
 
-pub use context::{Grant, Resolved, TaskContext};
+pub use context::{Grant, MAX_PATH_BYTES, MAX_PATH_DEPTH, Resolved, TaskContext};
 pub use def::{ActionDef, ActionError, ActionOutput, ActionProvider, Change, Preview, parse_input};
 pub use live::{Live, Pulled};
 pub use registry::{Registry, RegistryError};

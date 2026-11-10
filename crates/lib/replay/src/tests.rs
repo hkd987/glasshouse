@@ -697,3 +697,20 @@ fn adr0046_reminders_for_overdue_invoices_run_on_a_later_day_by_that_day() {
     // The same calls on another day compile the same.
     assert_eq!(compile(&calls).unwrap(), replay);
 }
+
+#[test]
+fn a_round_number_between_two_huge_ones_is_found_or_not_but_always_ends() {
+    // Sentinels such as the largest number a program has, in a list's
+    // field: stepping a float by one never got past them.
+    assert_eq!(round_between(1e31, 1e31, true, true), Some(1e31));
+    assert_eq!(round_between(1e31, 1e31, false, true), None);
+    assert!(round_between(9.1e15, 9.3e15, true, true).is_some());
+    // Whatever it finds for the largest there is, it comes back.
+    let _ = round_between(f64::MAX, f64::MAX, true, true);
+    let _ = round_between(-f64::MAX, f64::MAX, true, true);
+    // And the ordinary case is what it was.
+    assert_eq!(round_between(5.0, 5.0, true, true), Some(5.0));
+    assert_eq!(round_between(5.0, 5.0, false, true), None);
+    let between = round_between(30.0, 1137.0, false, true).unwrap();
+    assert!(between > 30.0 && between <= 1137.0, "{between}");
+}

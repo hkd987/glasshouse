@@ -44,10 +44,12 @@ impl From<ClientError> for Failure {
                 };
                 Self::new(status, e.message)
             }
-            ClientError::Connect { .. } | ClientError::Closed => Self::new(
-                503,
-                "Glasshouse isn't answering on this host; try again in a moment",
-            ),
+            ClientError::Connect { .. } | ClientError::Closed | ClientError::TimedOut { .. } => {
+                Self::new(
+                    503,
+                    "Glasshouse isn't answering on this host; try again in a moment",
+                )
+            }
             ClientError::Decode(why) => {
                 Self::new(502, format!("an answer we couldn't read: {why}"))
             }

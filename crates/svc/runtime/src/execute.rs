@@ -76,6 +76,17 @@ impl Runtime {
         if task.wait_runnable().await.is_err() {
             return Ok(CallToolResult::error("This task has ended."));
         }
+        // Nothing an agent asks is looked at while the log is down (AU-1,
+        // `specs/tla/AuditLog.tla`: Call). Before the preview, not only
+        // before the call runs: a call that would be refused as out of
+        // scope, blocked, or put to the person would otherwise add its
+        // record to the ones waiting, and an agent making such calls in a
+        // loop filled that queue until records of what people and the
+        // computer did were counted as lost. And nobody is asked to approve
+        // what then can't run.
+        if !self.audit_healthy() {
+            return Ok(CallToolResult::error(LOG_DOWN));
+        }
         // A routine saved from what this task did: this computer writes its
         // script from the task's calls, so what the person approves is that
         // code, the same every time (ADR 0046).
@@ -759,7 +770,11 @@ impl Runtime {
                 tier: Tier::Never,
                 rule: "task scope".into(),
             });
-            event.detail = serde_json::json!({ "reason": detail });
+            // Why, at a line's length: a provider's own words may quote
+            // what the agent sent, of any size.
+            event.detail = serde_json::json!({
+                "reason": glass_api::clip(detail, crate::task::ACTIVITY_LINE),
+            });
             self.audit(event);
             task.lock().note(
                 ActivityKind::Blocked,
