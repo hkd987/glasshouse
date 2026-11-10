@@ -251,9 +251,34 @@ async function handle(message: FromRelay): Promise<void> {
   }
 }
 
+/** This try at joining was given a seat (`meet.join` answered). */
+let seated = false;
+
+/**
+ * Joins the meeting. Whatever goes wrong on the way ends as a message
+ * with a way to try again. A step that threw once the camera was on (the
+ * relay's answer not taken, say) was nobody's to catch: the page said
+ * "Joining…" for good, holding its seat if it had been given one.
+ */
 async function join(): Promise<void> {
   state.phase = "joining";
+  seated = false;
   draw();
+  try {
+    await connect();
+  } catch (error) {
+    if (state.phase !== "joining") return;
+    fail(`Joining the meeting didn't work (${error instanceof Error ? error.message : String(error)}).`);
+    if (!seated) return;
+    try {
+      await bridge.call("meet.leave", { meeting });
+    } catch {
+      // Not reachable: the relay gives the seat up on its own.
+    }
+  }
+}
+
+async function connect(): Promise<void> {
   try {
     media = await navigator.mediaDevices.getUserMedia({ audio: true, video: { width: 640, height: 360 } });
   } catch {
@@ -307,6 +332,7 @@ async function join(): Promise<void> {
     const result = await bridge.call<Joined>("meet.join", { meeting, offer: connection.localDescription?.sdp ?? "" });
     if (!result.ok) return fail(result.text);
     joined = result.data;
+    seated = true;
   } catch (error) {
     return fail(error instanceof Offline ? "The meeting can't be reached right now." : error instanceof BridgeError ? error.message : String(error));
   }

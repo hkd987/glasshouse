@@ -434,6 +434,33 @@ test("cf21 after someone leaves the others switch to the new media key and still
   for (const i of [0, 1]) expect(after[i]!.framesDecoded - before[i]!.framesDecoded).toBeGreaterThan(15);
 });
 
+test("cf21 a join that fails partway says so, gives up its seat and can be tried again", async ({ browser }) => {
+  // The camera is on, the seat is given, and then a step fails (here the
+  // page can't take the relay's answer). Nobody caught it: the page said
+  // "Joining…" for good and kept the seat.
+  const page = await person(browser, { room: "halfway", participant: 0, mediaKey: key() });
+  await page.evaluate(() => {
+    const native = RTCPeerConnection.prototype.setRemoteDescription as (this: RTCPeerConnection, description: RTCSessionDescriptionInit) => Promise<void>;
+    let failed = false;
+    RTCPeerConnection.prototype.setRemoteDescription = function (description: RTCSessionDescriptionInit) {
+      if (!failed) {
+        failed = true;
+        return Promise.reject(new Error("the answer has a line the page can't read"));
+      }
+      return native.call(this, description);
+    };
+  });
+  const seats = async () => ((await (await fetch(`${api}/rooms/halfway`)).json()) as { participants: number[] }).participants;
+  await page.click("[data-test=join]");
+  await expect(page.locator("[data-test=message]")).toContainText("Joining the meeting didn't work");
+  await expect(page.locator("[data-test=message]")).toContainText("the answer has a line the page can't read");
+  await expect.poll(seats).toEqual([]);
+  // The same button gets in once the step works.
+  await page.click("[data-test=rejoin]");
+  await expect(page.locator("[data-test=waiting]")).toBeVisible();
+  await expect.poll(seats).toEqual([0]);
+});
+
 test("cf21 someone whose connection to the meeting is lost is told, and gets back in", async ({ browser }) => {
   // The relay closes Bo's connection (the seat ended at the console, the
   // relay started again): nothing on Bo's page listened, and it stayed on
