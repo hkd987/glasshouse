@@ -101,6 +101,8 @@ jobs:
       - name: The FreeBSD sysroot, with the desktop's libraries
         run: |
           make freebsd-sysroot
+          # No VM here to install them in first: fetched, then unpacked.
+          os/freebsd/scripts/ports.sh fetch libxkbcommon pixman
           os/freebsd/scripts/ports.sh sysroot libxkbcommon pixman
       - run: make shell-lint
       - run: make shell-test

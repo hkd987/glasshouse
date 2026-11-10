@@ -197,6 +197,10 @@ struct Prepared {
 /// force.
 #[derive(Debug, Clone)]
 pub(crate) struct OrgData {
+    /// The app providers that keep something in memory (open docs, the
+    /// transcript lines taken), made once: each registry built for a new
+    /// policy uses these, not new ones.
+    pub(crate) kept: glass_first_party::Kept,
     pub(crate) catalog: CatalogHandle,
     pub(crate) directory: glass_managed::DirectoryHandle,
     /// Device settings: policy's, and each person's choices, kept in the
@@ -238,6 +242,7 @@ impl OrgData {
         let state_dir = &config.state_dir;
         let catalog = CatalogHandle::new();
         Self {
+            kept: glass_first_party::Kept::default(),
             org_apps: org_apps::OrgAppStore::new(state_dir.join("apps/.org"), catalog.clone()),
             catalog,
             directory: glass_managed::DirectoryHandle::new(),
@@ -422,6 +427,9 @@ fn registry(config: &Config, policy: &Policy, org: &OrgData) -> anyhow::Result<R
     // The link and the actions come from the same policy.
     connect_mail(&org.mail, policy);
     Ok(glass_first_party::registry(glass_first_party::Setup {
+        // The providers with something in memory: the same ones in every
+        // registry, so a policy release doesn't empty them.
+        kept: org.kept.clone(),
         // IT's fix list decides what the IT agent may restart (AE-4).
         restartable_services: policy.fixes().services.clone(),
         helpdesk_outbox: config.state_dir.join("helpdesk/outbox"),

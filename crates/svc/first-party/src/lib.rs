@@ -5,7 +5,7 @@
 //! and `tools/list` treat it like any action (ADR 0018).
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use glass_actions::{Registry, RegistryError};
 use glass_app_artifacts::ArtifactsProvider;
@@ -40,9 +40,43 @@ use glass_managed::DirectoryHandle;
 use glass_managed::meet::{Meetings, TranscriptRule};
 use glass_managed::shared::Shared;
 
+/// The providers that keep something in memory between calls, made once
+/// and used by every registry built with the same `Kept`.
+///
+/// glassd builds a new registry whenever policy changes (ADR 0023), and a
+/// provider made anew starts empty. For these four that lost something:
+/// Docs forgot which windows had a doc open, so the next push was refused,
+/// the page opened again, and the close record (the only audit record of
+/// live edits, ADR 0035) counted only what came after; Meet forgot which
+/// batches of transcript lines it had taken, so one sent twice was added
+/// twice; and Artifacts' and Skills' one-at-a-time locks were two locks
+/// while calls on the old registry finished. None of the four is made from
+/// anything policy says, so the same one serves every registry.
+#[derive(Clone, Default)]
+pub struct Kept(Arc<KeptProviders>);
+
+#[derive(Default)]
+struct KeptProviders {
+    artifacts: OnceLock<Arc<ArtifactsProvider>>,
+    skills: OnceLock<Arc<SkillsProvider>>,
+    docs: OnceLock<Arc<DocsProvider>>,
+    meet: OnceLock<Arc<MeetProvider>>,
+}
+
+impl std::fmt::Debug for Kept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Kept")
+            .field("made", &self.0.docs.get().is_some())
+            .finish()
+    }
+}
+
 /// What the apps need from the machine's configuration and policy.
 #[derive(Debug, Clone)]
 pub struct Setup {
+    /// The providers with something in memory, the same ones in every
+    /// registry glassd builds ([`Kept`]).
+    pub kept: Kept,
     /// Services the IT agent may restart (policy `[fixes] services`).
     pub restartable_services: Vec<String>,
     /// Where help desk tickets wait until an adapter delivers them.
@@ -88,6 +122,7 @@ impl Setup {
     /// A setup that touches nothing, for listing actions (policy checks).
     pub fn offline() -> Self {
         Self {
+            kept: Kept::default(),
             restartable_services: Vec::new(),
             helpdesk_outbox: PathBuf::from("/nonexistent"),
             system: Arc::new(HostSystem),
@@ -122,17 +157,27 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
     let meetings: Arc<dyn Meetings> = Arc::new(chat.clone());
     // So are artifacts (ADR 0033), in the shared space chat's store keeps.
     let shared: Arc<dyn Shared> = Arc::new(chat.clone());
-    registry.register(Arc::new(ArtifactsProvider::new(
-        shared.clone(),
-        setup.directory.clone(),
-    )))?;
-    registry.register(Arc::new(SkillsProvider::new(
-        shared.clone(),
-        setup.directory.clone(),
-        setup.skills,
-    )))?;
+    // The four below are made once and kept ([`Kept`]): every registry
+    // registers the same one.
+    let kept = setup.kept.0.clone();
+    let directory = setup.directory.clone();
+    let artifacts = kept
+        .artifacts
+        .get_or_init(|| Arc::new(ArtifactsProvider::new(shared.clone(), directory.clone())));
+    registry.register(artifacts.clone())?;
+    let skills = kept.skills.get_or_init(|| {
+        Arc::new(SkillsProvider::new(
+            shared.clone(),
+            directory.clone(),
+            setup.skills,
+        ))
+    });
+    registry.register(skills.clone())?;
     // And docs (ADR 0035), which pages also edit live.
-    let docs = Arc::new(DocsProvider::new(shared.clone(), setup.directory.clone()));
+    let docs = kept
+        .docs
+        .get_or_init(|| Arc::new(DocsProvider::new(shared.clone(), directory.clone())))
+        .clone();
     registry.register(docs.clone())?;
     registry.register_live(docs);
     // A meeting is transcribed where IT turned transcripts on for its
@@ -160,9 +205,10 @@ pub fn registry(setup: Setup) -> Result<Registry, RegistryError> {
     ))?;
     registry.register(Arc::new(SettingsProvider::new(setup.settings)))?;
     // And transcripts, in the meetings' own conversations (ADR 0045).
-    registry.register(Arc::new(
-        MeetProvider::new(meetings, setup.meet, setup.directory).shared(shared),
-    ))?;
+    let meet = kept.meet.get_or_init(|| {
+        Arc::new(MeetProvider::new(meetings, setup.meet, setup.directory).shared(shared))
+    });
+    registry.register(meet.clone())?;
     registry.register(Arc::new(chat))?;
     registry.register(Arc::new(StudioProvider::new(setup.studio)))?;
     registry.register(Arc::new(RoutinesProvider::new(setup.routines)))?;
@@ -209,5 +255,45 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == expected), "{expected}");
         }
+    }
+
+    /// The provider of `action` in `registry`: which one it is.
+    fn provider_of(registry: &Registry, action: &str) -> *const () {
+        let (_, provider) = registry.get(&action.parse().unwrap()).unwrap();
+        Arc::as_ptr(provider).cast()
+    }
+
+    #[test]
+    fn adr0023_a_registry_built_again_has_the_same_providers_where_they_hold_something() {
+        // What glassd does at every policy release: the same setup, a new
+        // registry. Docs' open sessions, Meet's batches, and Artifacts' and
+        // Skills' locks are in memory, in their providers: made anew, each
+        // release dropped them (and with Docs' sessions, the audit record
+        // of the edits made before it).
+        let setup = Setup::offline();
+        let first = registry(setup.clone()).unwrap();
+        let second = registry(setup.clone()).unwrap();
+        for action in ["doc.open", "meet.join", "artifact.share", "skill.propose"] {
+            assert_eq!(
+                provider_of(&first, action),
+                provider_of(&second, action),
+                "{action}'s provider was made again"
+            );
+        }
+        // Pages edit a doc through the same one, too.
+        let live = |r: &Registry| r.live("docs").map(|l| Arc::as_ptr(&l).cast::<()>());
+        assert!(live(&first).is_some());
+        assert_eq!(live(&first), live(&second));
+        // What policy shapes is made from the new policy each time.
+        assert_ne!(
+            provider_of(&first, "system.network.check"),
+            provider_of(&second, "system.network.check")
+        );
+        // And another setup has providers of its own.
+        let other = registry(Setup::offline()).unwrap();
+        assert_ne!(
+            provider_of(&first, "doc.open"),
+            provider_of(&other, "doc.open")
+        );
     }
 }

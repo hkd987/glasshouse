@@ -25,14 +25,29 @@ pub struct Gateway {
 
 /// The key the gateway seals replays with (ADR 0043): random, and this
 /// process's only. After a restart, replays sealed before it aren't sent.
+///
+/// One key for the process, whichever [`Gateway`] value seals with it:
+/// glassd makes a new one at every policy release and whenever a person
+/// changes their own model keys. With a key drawn per value, each of
+/// those dropped the replays of every task still running (no thinking
+/// sent back, the provider's cache missed) and marked their calls
+/// `replays_dropped`, which reads as tampering.
 #[derive(Clone)]
 struct SealKey(Arc<[u8; 32]>);
 
-impl Default for SealKey {
-    fn default() -> Self {
+impl SealKey {
+    /// A key of its own, as a process that just started has.
+    fn drawn() -> Self {
         Self(Arc::new(
             glass_crypto::random().expect("the system's random numbers"),
         ))
+    }
+}
+
+impl Default for SealKey {
+    fn default() -> Self {
+        static OURS: std::sync::OnceLock<SealKey> = std::sync::OnceLock::new();
+        OURS.get_or_init(Self::drawn).clone()
     }
 }
 
@@ -755,17 +770,26 @@ mod tests {
             assert!(!changed.text.contains("came back"), "{}", changed.text);
         }
 
-        // Another gateway, as after a restart, has another key.
-        let other = Gateway::new().with("scripted", scripted.clone());
-        let after = other
-            .complete(Call {
-                input: &answered(&first, &done, |_| {}),
-                route: &route,
-                redactor: &redactor,
-                log_prompts: false,
-            })
-            .unwrap();
-        assert!(after.record.replays_dropped);
+        // Another gateway in the same run, as glassd makes at every policy
+        // release, seals with the same key: a running task's replays still
+        // go back.
+        let rebuilt = Gateway::new().with("scripted", scripted.clone());
+        let unchanged = answered(&first, &done, |_| {});
+        let call = |gateway: &Gateway| {
+            gateway
+                .complete(Call {
+                    input: &unchanged,
+                    route: &route,
+                    redactor: &redactor,
+                    log_prompts: false,
+                })
+                .unwrap()
+        };
+        assert!(!call(&rebuilt).record.replays_dropped);
+        // After a restart the key is another, and they don't.
+        let mut restarted = Gateway::new().with("scripted", scripted.clone());
+        restarted.seal = SealKey::drawn();
+        assert!(call(&restarted).record.replays_dropped);
     }
 
     #[test]
