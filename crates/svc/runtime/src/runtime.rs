@@ -57,6 +57,31 @@ pub(crate) type OwnedEvent = (u32, Event);
 /// The owner of an event for everyone, such as new device settings.
 pub(crate) const EVERYONE_UID: u32 = u32::MAX;
 
+/// How long glassd's exit waits for every task's sandbox to be torn down,
+/// all of them together. Each had 20 s of its own, one after another: with
+/// a dozen tasks whose teardown hung, `service glassd restart` and a deploy
+/// waited four minutes. What isn't down by then is removed at the next
+/// start, as after a crash (PA-2).
+pub const SHUTDOWN_WITHIN: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Waits for `handles` to end, `within` at most for all of them. Returns
+/// how many hadn't.
+async fn finished_within(
+    handles: Vec<tokio::task::JoinHandle<()>>,
+    within: std::time::Duration,
+) -> usize {
+    let deadline = tokio::time::Instant::now() + within;
+    let mut left = 0;
+    for handle in handles {
+        // They run whether or not they're waited on: waiting for one is
+        // time the others have too.
+        if tokio::time::timeout_at(deadline, handle).await.is_err() {
+            left += 1;
+        }
+    }
+    left
+}
+
 pub struct Runtime {
     pub(crate) config: RuntimeConfig,
     /// Swapped whole when managed settings apply a new policy.
@@ -255,13 +280,12 @@ impl Runtime {
         }
         let handles: Vec<_> =
             std::mem::take(&mut *self.supervisors.lock().unwrap_or_else(|p| p.into_inner()));
-        for handle in handles {
-            if tokio::time::timeout(std::time::Duration::from_secs(20), handle)
-                .await
-                .is_err()
-            {
-                tracing::warn!("a task did not finish tearing down in time");
-            }
+        let left = finished_within(handles, SHUTDOWN_WITHIN).await;
+        if left > 0 {
+            tracing::warn!(
+                tasks = left,
+                "tasks did not finish tearing down in time: what they left is removed at the next start"
+            );
         }
     }
 
@@ -2321,5 +2345,38 @@ pub(crate) fn display_path(home: &Path, path: &Path) -> String {
     match path.strip_prefix(home) {
         Ok(rel) => format!("~/{}", rel.display()),
         Err(_) => path.display().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::finished_within;
+
+    #[tokio::test]
+    async fn glassds_exit_waits_once_for_all_the_tasks_not_once_for_each() {
+        let slow = || tokio::spawn(tokio::time::sleep(Duration::from_secs(30)));
+        let quick = || tokio::spawn(tokio::time::sleep(Duration::from_millis(20)));
+        let started = Instant::now();
+        let left = finished_within(
+            vec![slow(), quick(), slow(), slow(), quick()],
+            Duration::from_millis(300),
+        )
+        .await;
+        // The three that hang are counted; the two that ended aren't, though
+        // they were looked at after the time was up.
+        assert_eq!(left, 3);
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(300), "{took:?}");
+        // Each had the time to itself before: three times as long.
+        assert!(took < Duration::from_millis(800), "{took:?}");
+        // With nothing hanging there is nothing to wait out.
+        let started = Instant::now();
+        assert_eq!(
+            finished_within(vec![quick(), quick()], Duration::from_secs(20)).await,
+            0
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

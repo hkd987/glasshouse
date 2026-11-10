@@ -81,6 +81,10 @@ const TASK_LOGS_KEPT: std::time::Duration = std::time::Duration::from_secs(7 * 2
 /// task before last.
 const ENDED_TASKS_KEPT: usize = 200;
 
+/// How long the process waits, after everything is stopped, for blocking
+/// calls still under way before it ends anyway.
+const EXIT_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn main() -> ExitCode {
     // GLASS_LOG is `level` or `target=level,...`, e.g. `glass_runtime=debug,info`.
     let filter = std::env::var("GLASS_LOG")
@@ -102,11 +106,16 @@ fn main() -> ExitCode {
             );
             return Ok(());
         }
-        tokio::runtime::Builder::new_multi_thread()
+        let tokio = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .context("starting the async runtime")?
-            .block_on(run(prepared))
+            .context("starting the async runtime")?;
+        let ran = tokio.block_on(run(prepared));
+        // Dropped, the runtime waits for every blocking call under way: a
+        // base-system command, a call to a server that isn't answering.
+        // glassd has stopped its tasks by now; the process ends.
+        tokio.shutdown_timeout(EXIT_WITHIN);
+        ran
     });
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -1263,7 +1272,14 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         _ = interrupt.recv() => Ok(()),
     };
     tracing::info!("shutting down: stopping running agents");
-    runtime.shutdown().await;
+    tokio::select! {
+        () = runtime.shutdown() => {}
+        // Asked a second time, whoever asks isn't waiting any longer (a
+        // second signal did nothing). What the tasks leave is removed at
+        // the next start, as after a crash.
+        _ = terminate.recv() => tracing::warn!("asked to stop again: not waiting for agents' sandboxes"),
+        _ = interrupt.recv() => tracing::warn!("asked to stop again: not waiting for agents' sandboxes"),
+    }
     let _ = std::fs::remove_file(&config.control_socket);
     let _ = std::fs::remove_file(&config.app_socket);
     served
