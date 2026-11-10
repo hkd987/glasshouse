@@ -86,6 +86,11 @@ struct ReadInput {
     /// A thread's root: the root and its replies (CF-92).
     #[serde(default)]
     thread: Option<String>,
+    /// Read without marking read: Chat's own window when the person isn't
+    /// looking at it (hidden, or another window has the keyboard). An
+    /// agent's read never marks anything, with or without it.
+    #[serde(default)]
+    peek: bool,
 }
 
 #[derive(Deserialize)]
@@ -720,11 +725,16 @@ impl ChatProvider {
         let views: Vec<Value> = shown.iter().map(|m| self.view(&folded, m, me)).collect();
         let lines: Vec<String> = shown.iter().map(|m| self.line(m)).collect();
         // What the person reads in Chat is read; an agent reading for
-        // them leaves it unread. The newest view marks everything read,
-        // edits and reactions included, up to what this computer has
-        // fetched: a message from before the person's own post that
+        // them leaves it unread, and so does Chat refreshing a window
+        // nobody is looking at (`peek`). The newest view marks everything
+        // read, edits and reactions included, up to what this computer
+        // has fetched: a message from before the person's own post that
         // arrives after it wasn't shown (ChatSync.tla).
-        if ctx.principal.agent.as_str() == APP && input.before.is_none() && input.thread.is_none() {
+        if ctx.principal.agent.as_str() == APP
+            && input.before.is_none()
+            && input.thread.is_none()
+            && !input.peek
+        {
             let _write = self.handle.lock();
             let mut store = self.handle.load(me);
             let seen = store.seen.entry(conversation.id.clone()).or_insert(0);
@@ -1259,7 +1269,8 @@ impl ActionProvider for ChatProvider {
                         "before": { "type": "string", "description": "A message id: messages before it" },
                         "after": { "type": "string", "description": "A message id: messages after it" },
                         "limit": { "type": "integer", "minimum": 1, "maximum": READ_MAX },
-                        "thread": { "type": "string", "description": "A message id: that thread's messages" }
+                        "thread": { "type": "string", "description": "A message id: that thread's messages" },
+                        "peek": { "type": "boolean", "description": "Chat's own window, with nobody looking at it: what is read stays unread" }
                     },
                     "required": ["conversation"],
                     "additionalProperties": false
@@ -2857,6 +2868,41 @@ mod tests {
             .unwrap();
         b.handle.sync_once(0).unwrap();
         assert_eq!(unread(&b), 1, "Dana's second message wasn't shown");
+        b.call("priya", READ, json!({ "conversation": id }))
+            .unwrap();
+        assert_eq!(unread(&b), 0);
+    }
+
+    // Chat reads the open conversation again at every change, looking or
+    // not: behind another window that read marked everything read, and the
+    // person came back to no unread count for what they never saw.
+    #[test]
+    fn cf92_a_conversation_read_with_nobody_looking_stays_unread() {
+        let org = org();
+        let (a, b) = (org.computer("dev-a"), org.computer("dev-b"));
+        b.call("priya", LIST, json!({})).unwrap();
+        a.call(
+            "dana",
+            POST,
+            json!({ "posts": [{ "to": ["priya"], "text": "Are you there?" }] }),
+        )
+        .unwrap();
+        b.handle.sync_once(0).unwrap();
+        let unread = |c: &Computer| {
+            c.call("priya", LIST, json!({})).unwrap().data["conversations"][0]["unread"].clone()
+        };
+        let id = b.call("priya", LIST, json!({})).unwrap().data["conversations"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // Her Chat has it open behind another window: it reads the same
+        // messages, and they stay unread.
+        let peeked = b
+            .call("priya", READ, json!({ "conversation": id, "peek": true }))
+            .unwrap();
+        assert_eq!(peeked.data["messages"][0]["text"], "Are you there?");
+        assert_eq!(unread(&b), 1);
+        // She comes back to it.
         b.call("priya", READ, json!({ "conversation": id }))
             .unwrap();
         assert_eq!(unread(&b), 0);

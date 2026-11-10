@@ -439,6 +439,9 @@ class Text extends Node {
   get nodeValue() {
     return this.data;
   }
+  set nodeValue(text) {
+    this.data = String(text);
+  }
   get textContent() {
     return this.data;
   }
@@ -632,6 +635,11 @@ class Element extends Node {
   }
   getAttributeNames() {
     return [...this._attributes.keys()];
+  }
+  // As a list of { name, value }: what code that walks an element's
+  // attributes reads (a redraw in place compares them).
+  get attributes() {
+    return [...this._attributes].map(([name, value]) => ({ name, value }));
   }
   querySelector(s) {
     return query(this, s, true)[0] ?? null;

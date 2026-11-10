@@ -586,6 +586,101 @@ test.describe("C4a: like Slack, inside the seal", { tag: "@c4a" }, () => {
     await again.close();
   });
 
+  test("cf92 a conversation open behind another window stays unread until the person is back", async ({ browser }) => {
+    // The person's messages with Priya (the channel is muted by now).
+    const dm = priya("conversation", me);
+    const { page, close } = await openChat(browser);
+    const row = page.locator(".sidebar .row", { hasText: "Priya Shah" });
+    await row.click();
+    await expect(row).toHaveClass(/active/);
+    await expect(page.locator("[data-test=messages]")).toContainText(HELLO);
+    await expect(row.locator("[data-test=unread-badge]")).toHaveCount(0);
+
+    // Another window has the keyboard: Chat is on screen, or under it, and
+    // nobody is reading it.
+    await page.evaluate(() => {
+      document.hasFocus = () => false;
+    });
+    const text = `Did anyone see this? ${Date.now()}`;
+    priyaPost(dm, text);
+    // Chat shows it all the same, and counts it: it used to be marked read
+    // the moment it arrived, so the person came back to nothing new.
+    await expect(inTimeline(page, { text })).toBeVisible();
+    await expect(row.locator("[data-test=unread-badge]")).toHaveText("1");
+
+    // They click back into Chat: read, and the count goes.
+    await page.evaluate(() => {
+      document.hasFocus = () => true;
+      window.dispatchEvent(new Event("focus"));
+    });
+    await expect(row.locator("[data-test=unread-badge]")).toHaveCount(0);
+    // Still gone at the next change, which reads the list again.
+    const next = `And this one ${Date.now()}`;
+    priyaPost(dm, next);
+    await expect(inTimeline(page, { text: next })).toBeVisible();
+    await expect(row.locator("[data-test=unread-badge]")).toHaveCount(0);
+    await close();
+  });
+
+  test("cf92 earlier messages the person went back to stay when a new one arrives", async ({ browser }) => {
+    // A channel of its own, longer than what Chat reads at first (the
+    // newest 50).
+    const { page, close } = await openChat(browser);
+    await page.getByRole("button", { name: "New channel" }).click();
+    await page.locator("[name=channel]").fill("long-history");
+    await page.locator("[name=people]").fill("Pri");
+    await page.locator("[data-login=priya]").click();
+    await page.getByRole("button", { name: "Make channel" }).click();
+    await expect(page.locator(".pane-head h1")).toHaveText("#long-history");
+    await page.locator("[name=message]").fill("Where the history begins");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => priya("read", "#long-history"), { timeout: 5000 }).toContain("Where the history begins");
+    const channel = priya("conversation", "#long-history");
+    const stamp = Date.now();
+    for (let batch = 0; batch < 3; batch++) {
+      priyaCall("chat.post", {
+        posts: Array.from({ length: 20 }, (_, i) => ({ conversation: channel, text: `Line ${stamp}-${batch * 20 + i + 1}` })),
+      });
+    }
+    const messages = page.locator("[data-test=messages] .message[data-message]");
+    await expect(inTimeline(page, { text: `Line ${stamp}-60` })).toBeVisible();
+    // Open again, as on any other day: the newest 50.
+    await page.reload();
+    await page.waitForSelector("html[data-ready=true]", { state: "attached" });
+    const row = page.locator(".sidebar .row", { hasText: "long-history" });
+    if (!((await row.getAttribute("class")) ?? "").includes("active")) await row.click();
+    await expect(inTimeline(page, { text: `Line ${stamp}-60` })).toBeVisible();
+    await expect(messages).toHaveCount(50);
+    const first = messages.filter({ hasText: new RegExp(`Line ${stamp}-1(?!\\d)`) });
+    await expect(first).toHaveCount(0);
+
+    // Back through the history, to where the lines began.
+    const earlier = page.locator("[data-test=messages] button.earlier");
+    while ((await first.count()) === 0) {
+      const had = await messages.count();
+      await earlier.click();
+      await expect.poll(() => messages.count()).toBeGreaterThan(had);
+    }
+    await expect(inTimeline(page, { text: "Where the history begins" })).toHaveCount(1);
+    const shown = await messages.count();
+    expect(shown).toBe(61);
+
+    // Something new arrives. Chat reads the newest again, and what the
+    // person went back to is still above it: it used to be cut back to
+    // the newest 200 at most, and the place they were reading with it.
+    const text = `One more ${stamp}`;
+    priyaPost(channel, text);
+    await expect(inTimeline(page, { text })).toBeVisible();
+    await expect(first).toHaveCount(1);
+    await expect(messages).toHaveCount(shown + 1);
+    // In order, with nothing twice.
+    const ids = await messages.evaluateAll((els) => els.map((el) => el.getAttribute("data-message")));
+    expect(new Set(ids).size).toBe(ids.length);
+    const lines = (await messages.allInnerTexts()).filter((t) => t.includes(`Line ${stamp}-`)).map((t) => Number(/Line \d+-(\d+)/.exec(t)?.[1]));
+    expect(lines).toEqual(Array.from({ length: 60 }, (_, i) => i + 1));
+    await close();
+  });
+
   test("cf92 people added to a channel read its whole history on their computer", async ({ browser }) => {
     // Sam has Chat open on his computer; the person makes #q4-budget with him alone.
     colleague("sam", "open");

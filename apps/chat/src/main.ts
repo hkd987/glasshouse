@@ -98,6 +98,8 @@ const state = {
   /** The open conversation's timeline: thread roots, oldest first. */
   messages: [] as Message[],
   moreBefore: false,
+  /** The open conversation was last read with nobody looking, so it isn't marked read. */
+  peeked: false,
   /** `chat.read`'s view of the open conversation: topic, pins, level, draft. */
   view: null as ConversationView | null,
   /** The first unread message when the conversation opened, for "New messages". */
@@ -458,24 +460,64 @@ interface Read {
   thread?: { root: string; draft: string | null };
 }
 
-/** The open conversation's timeline: as many roots as shown now (50 at least), which marks it read. */
-async function loadMessages(): Promise<void> {
+/** Whether the person can be reading Chat: its window showing, and the one with the keyboard. */
+const looking = (): boolean => !document.hidden && document.hasFocus();
+
+/** Counts the reads of the open conversation, so only the newest one's answer is shown. */
+let reads = 0;
+/** The newest read, done when its answer is shown. */
+let newest: Promise<void> = Promise.resolve();
+
+/**
+ * The open conversation's timeline: its newest roots, as many as shown now
+ * (50 at least, 200 at most). Reading it marks it read when the person is
+ * looking; behind another window it is read without that (`peek`), and
+ * marked when they come back ([`lookedAgain`]). Done once the newest read
+ * asked for is: a read overtaken by a later one waits for that one.
+ */
+function loadMessages(): Promise<void> {
+  const read = ++reads;
+  const mine = readOpen(read).then(() => (read === reads ? undefined : newest));
+  newest = mine;
+  return mine;
+}
+
+async function readOpen(read: number): Promise<void> {
   const id = openId();
   if (!id) return;
+  const peek = !looking();
   try {
     const limit = Math.min(200, Math.max(50, state.messages.length));
-    const result = await bridge.call<Read>("chat.read", { conversation: id, limit });
-    if (openId() !== id) return;
+    const result = await bridge.call<Read>("chat.read", { conversation: id, limit, ...(peek ? { peek: true } : {}) });
+    // Another conversation was opened meanwhile, or a later read of this
+    // one was asked for: its answer is the one to show, whichever comes
+    // first. An earlier answer drawn over a later one showed the
+    // conversation as it had been.
+    if (openId() !== id || read !== reads) return;
     if (result.ok) {
-      state.messages = result.data.messages;
-      state.moreBefore = result.data.more_before ?? false;
+      const fresh = result.data.messages;
+      // Earlier messages the person asked for (Show earlier messages, a
+      // jump from search) stay above the newest, which is all this read:
+      // they used to go at the next change anywhere, and the person's
+      // place in the conversation with them. They stay only when they
+      // still join up, and are as they were when read.
+      const joins = fresh[0] ? state.messages.findIndex((m) => m.id === fresh[0]?.id) : -1;
+      if (joins > 0) {
+        state.messages = [...state.messages.slice(0, joins), ...fresh];
+      } else {
+        state.messages = fresh;
+        state.moreBefore = result.data.more_before ?? false;
+      }
       state.view = result.data.conversation ?? null;
-      remember(state.messages);
-      // Reading it in Chat marked it read.
+      remember(fresh);
+      state.peeked = peek;
       const row = state.conversations.find((c) => c.id === id);
       if (row) {
-        row.unread = 0;
-        row.mentions = 0;
+        // Reading it in Chat, looking, marked it read.
+        if (!peek) {
+          row.unread = 0;
+          row.mentions = 0;
+        }
         if (state.view?.topic !== undefined) row.topic = state.view.topic;
         if (state.view?.notify) row.notify = state.view.notify;
       }
@@ -483,6 +525,13 @@ async function loadMessages(): Promise<void> {
   } catch (error) {
     state.notice = { text: failure(error, "Reading"), tone: "bad" };
   }
+}
+
+/** The person is back at Chat: what came while they were away is read now. */
+async function lookedAgain(): Promise<void> {
+  if (!state.peeked || !looking() || !openId()) return;
+  await loadMessages();
+  render();
 }
 
 /** Older roots, before the oldest shown. */
@@ -2395,10 +2444,13 @@ async function start(): Promise<void> {
   document.addEventListener("mousedown", (e) => {
     if (popover && !popover.el.contains(e.target as Node)) closePopover(false);
   });
-  // Leaving the page keeps what's typed as a draft.
+  // Leaving the page keeps what's typed as a draft; coming back to it
+  // reads what arrived meanwhile.
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") flushAll();
+    else void lookedAgain();
   });
+  window.addEventListener("focus", () => void lookedAgain());
   window.addEventListener("pagehide", flushAll);
   try {
     await bridge.open();

@@ -180,8 +180,17 @@ def run(steps: list[tuple[str, list[str]]]) -> int:
                               stderr=subprocess.STDOUT, text=True)
         return label, time.monotonic() - began, done
 
-    with ThreadPoolExecutor(max_workers=len(steps)) as pool:
-        results = list(pool.map(one, steps))
+    # The apps' and the console's checks both need the apps' packages, and
+    # each would install them: at once, in a fresh checkout, the two
+    # installs collide (npm: EEXIST) and both checks fail. Once, first.
+    results = []
+    if any(label in ("apps", "console") for label, _ in steps):
+        first = one(("apps' packages", ["make", "--no-print-directory", "apps/node_modules"]))
+        if first[2].returncode != 0:
+            results.append(first)
+            steps = [step for step in steps if step[0] not in ("apps", "console")]
+    with ThreadPoolExecutor(max_workers=max(1, len(steps))) as pool:
+        results += list(pool.map(one, steps))
     failed = 0
     for label, took, done in results:
         if done.returncode == 0:
@@ -189,7 +198,7 @@ def run(steps: list[tuple[str, list[str]]]) -> int:
         else:
             failed += 1
             print(f"  FAIL  {label:<23} {took:5.1f}s\n{done.stdout.rstrip()}\n")
-    print(f"lint: {len(steps) - failed} of {len(steps)} checks passed "
+    print(f"lint: {len(results) - failed} of {len(results)} checks passed "
           f"in {time.monotonic() - started:.1f}s")
     return 1 if failed else 0
 

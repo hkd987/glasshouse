@@ -92,8 +92,8 @@ export function lasting<T extends Node>(el: T): T {
 function identity(node: Node): string {
   if (!(node instanceof Element)) return `#${node.nodeType}`;
   const parts: string[] = [];
-  for (const { name, value } of Array.from(node.attributes)) {
-    if (name === "type" || name === "id" || name === "name" || name.startsWith("data-")) parts.push(`${name}=${value}`);
+  for (const name of node.getAttributeNames()) {
+    if (name === "type" || name === "id" || name === "name" || name.startsWith("data-")) parts.push(`${name}=${node.getAttribute(name)}`);
   }
   return parts.length === 0 ? node.tagName : `${node.tagName} ${parts.sort().join(" ")}`;
 }
@@ -133,10 +133,11 @@ function become(old: Node, next: Node): void {
     const redrawn = old.defaultValue !== next.defaultValue;
     if ((redrawn || answered) && old.value !== next.value) old.value = next.value;
   }
-  for (const { name } of Array.from(old.attributes)) {
+  for (const name of old.getAttributeNames()) {
     if (!next.hasAttribute(name)) old.removeAttribute(name);
   }
-  for (const { name, value } of Array.from(next.attributes)) {
+  for (const name of next.getAttributeNames()) {
+    const value = next.getAttribute(name) ?? "";
     if (old.getAttribute(name) !== value) old.setAttribute(name, value);
   }
   // The new drawing's handlers, on the element that stays.

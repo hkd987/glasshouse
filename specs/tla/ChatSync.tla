@@ -13,7 +13,12 @@
 (*   crates/apps/chat/src/lib.rs     send_body (a post kept here with the  *)
 (*                                   console's sequence number), read (the *)
 (*                                   newest view marks the conversation    *)
-(*                                   seen), list (unread)                  *)
+(*                                   seen, unless it is a `peek`: Chat     *)
+(*                                   reading again in a window nobody is   *)
+(*                                   looking at), list (unread)            *)
+(*   apps/chat/src/main.ts           loadMessages (a peek when the window  *)
+(*                                   is hidden or hasn't the keyboard),    *)
+(*                                   lookedAgain (a view when it has)      *)
 (*   crates/bin/glass-console/src/chat.rs  Chat::post, Chat::sync: every   *)
 (*                                   message after `since`, and the        *)
 (*                                   console's newest number as the place  *)
@@ -46,7 +51,10 @@ CONSTANTS
                    \*   reading the place just after the reset);
                    \* "seenAtNewest": the newest view marked seen up to the
                    \*   newest message here, the person's own post included,
-                   \*   even past what had been fetched
+                   \*   even past what had been fetched;
+                   \* "seenUnlooked": Chat reading the open conversation
+                   \*   again at a change marked it seen though its window
+                   \*   was behind another, and showed the person nothing
 
 People    == {"dana", "sam", "priya"}
 Here      == {"dana", "sam"}         \* x's people
@@ -135,6 +143,17 @@ View(p) ==
        /\ seen' = [seen EXCEPT ![p] = Max(@, mark)]
        /\ UNCHANGED <<log, registered, cursor, resets, store, sync, fails>>
 
+\* chat.read with `peek`: Chat reads the open conversation again at a
+\* change, in a window that is hidden or hasn't the keyboard. It draws the
+\* messages and shows them to nobody, so nothing is seen; when the person
+\* is back, Chat reads again and that is a View.
+Peek(p) ==
+    /\ p \in registered
+    /\ seen' = IF "seenUnlooked" \in Old
+               THEN [seen EXCEPT ![p] = Max(@, Min(MaxOf(store[p]), cursor))]
+               ELSE seen
+    /\ UNCHANGED <<log, registered, cursor, resets, store, shown, sync, fails>>
+
 -----------------------------------------------------------------------------
 \* sync_once on x, as thread t.
 
@@ -187,7 +206,7 @@ SyncAbsorb(t) ==
 -----------------------------------------------------------------------------
 Next ==
     \/ PostElsewhere
-    \/ \E p \in Here : PostHere(p) \/ Register(p) \/ View(p)
+    \/ \E p \in Here : PostHere(p) \/ Register(p) \/ View(p) \/ Peek(p)
     \/ \E t \in Threads :
          SyncStart(t) \/ SyncAsk(t) \/ SyncAnswer(t) \/ SyncAbsorb(t)
 

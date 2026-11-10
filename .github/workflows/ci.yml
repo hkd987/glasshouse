@@ -138,3 +138,20 @@ jobs:
           cd apps && PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers npx playwright install --with-deps chromium
       - run: make apps-test
       - run: make console-test
+      # A suite that fails here and nowhere else: what glassd, the bridge and
+      # the page said, since nobody can go and look.
+      - name: What the dev host logged
+        if: failure()
+        run: |
+          for log in build/apps-e2e/*.log build/console-e2e/*.log build/console-e2e/*/*.log; do
+            [ -f "$log" ] || continue
+            echo "::group::$log"
+            tail -n 200 "$log"
+            echo "::endgroup::"
+          done
+          for page in apps/e2e/results/artifacts/*/error-context.md apps/e2e/results/console-artifacts/*/error-context.md; do
+            [ -f "$page" ] || continue
+            echo "::group::$page"
+            head -c 20000 "$page"
+            echo "::endgroup::"
+          done

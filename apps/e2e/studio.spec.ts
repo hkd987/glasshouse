@@ -84,6 +84,14 @@ test("tl5 ga3 ga4 claude code remixes mail into the person's own, checked, versi
   expect(saved.isError ?? false, text(saved)).toBe(false);
   expect(saved.structuredContent?.app).toBe("my-mail");
   expect(text(saved)).toContain("Saved My Mail version 1, your version of Mail");
+  // ADR 0049: tried before the agent is told it's saved, in a stand-in
+  // page with sample data. Mail as it ships must open there: it draws with
+  // the SDK, and what the SDK needs of a page the stand-in has to have.
+  expect(text(saved)).toContain("Tried here, with sample data");
+  expect(text(saved)).not.toContain("couldn't be tried");
+  expect(text(saved)).not.toContain("Problems to fix");
+  expect(text(saved)).toContain("Opening it showed:");
+  expect(text(saved)).toContain("[Write]");
   // Notify: saving their own version asks nothing, and it's on the record.
   const save = audit().find((r) => r.event.kind === "action" && r.event.action === "apps.save" && outcome(r) === "completed");
   expect(save?.event.decision?.tier).toBe("notify");

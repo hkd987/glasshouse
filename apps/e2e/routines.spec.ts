@@ -16,7 +16,10 @@ const PROMPT = `Draft it. Use mail_draft {"to": ["ana@example.com"], "subject": 
 /** The desktop agent does the request, and is done. */
 function draftIt(): string {
   const task = glassctlJson<{ id: string }>("run", "desktop-agent", PROMPT, "--yes").id;
-  glassctl("wait", task, "--timeout", "60");
+  const ended = glassctlJson<{ state: string; failure?: string; feed?: unknown[] }>("wait", task, "--timeout", "60");
+  // Only a task that finished is one to do again: one that failed says why
+  // here, where the page would only show nothing to keep.
+  expect(ended.state, `the desktop agent's task: ${JSON.stringify({ failure: ended.failure, feed: ended.feed })}`).toBe("done");
   return task;
 }
 

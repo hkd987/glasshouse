@@ -332,6 +332,115 @@ fn ga1_the_template_bundled_with_the_sdk_opens_and_searches() {
     let _ = std::fs::remove_dir_all(out);
 }
 
+/// Bundles `source` (TypeScript) as an app in the apps folder would be,
+/// with the SDK; `None` without esbuild.
+fn bundled(source: &str) -> Option<String> {
+    use std::io::Write;
+    let esbuild = esbuild()?;
+    let apps = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps");
+    // From standard input, so imports resolve from the apps folder.
+    let mut build = std::process::Command::new(esbuild)
+        .current_dir(&apps)
+        .args([
+            "--bundle",
+            "--format=esm",
+            "--target=chrome120",
+            "--loader=ts",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    build
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(source.as_bytes())
+        .unwrap();
+    let built = build.wait_with_output().unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    Some(String::from_utf8(built.stdout).unwrap())
+}
+
+// Mail and Settings draw with the SDK's redraw in place, and a remix of
+// either is tried here before it's saved. The stand-in page lacked what a
+// redraw reads (an element's attributes) and writes (a text node's value):
+// every remix of Mail "showed nothing when it opened".
+#[test]
+fn ga1_an_app_that_redraws_in_place_with_the_sdk_opens_and_takes_a_press() {
+    let Some(bundle) = bundled(
+        r#"
+        import { h, lasting, ready, redraw } from "@glasshouse/sdk";
+        const root = document.getElementById("app") as HTMLElement;
+        const state = { pressed: 0, notice: null as string | null };
+        const kept = lasting(h("label", { class: "field" }, h("input", { name: "to", "aria-label": "To" })));
+        function draw(): void {
+          redraw(root, () => [
+            h("h1", {}, "Counter"),
+            state.notice && h("div", { class: "banner", role: "status" }, state.notice),
+            h(
+              "main",
+              { "data-pressed": String(state.pressed > 0) },
+              h("p", { "data-test": "count" }, `Pressed ${state.pressed} times`),
+              kept,
+              h("button", { onclick: () => { state.pressed += 1; state.notice = `That makes ${state.pressed}`; draw(); } }, "Press"),
+            ),
+          ]);
+        }
+        draw();
+        draw();
+        ready();
+        "#,
+    ) else {
+        eprintln!("skipped: no esbuild in apps/node_modules (make apps-build)");
+        return;
+    };
+    let report = try_app(&bundle, &setup()).unwrap();
+    assert_eq!(report.errors, Vec::<String>::new());
+    assert_eq!(
+        report.screen,
+        "Counter\nPressed 0 times\n[input: To]\n[Press]"
+    );
+    let press = report
+        .presses
+        .iter()
+        .find(|p| p.button == "Press")
+        .unwrap_or_else(|| panic!("no press of the button: {:?}", report.presses));
+    assert_eq!(press.errors, Vec::<String>::new());
+    assert!(
+        press.appeared.iter().any(|l| l == "That makes 1")
+            && press.appeared.iter().any(|l| l.contains("Pressed 1 times")),
+        "{:?}",
+        press.appeared
+    );
+}
+
+#[test]
+fn the_stand_in_page_has_what_a_redraw_reads_and_writes() {
+    let bundle = r#"
+        const root = document.getElementById("app");
+        const p = document.createElement("p");
+        p.setAttribute("data-key", "a");
+        p.setAttribute("class", "row");
+        p.append("before");
+        root.append(p);
+        const names = Array.from(p.attributes).map(({ name, value }) => `${name}=${value}`).join(" ");
+        p.firstChild.nodeValue = `after: ${names} / ${p.getAttributeNames().join(",")}`;
+        document.documentElement.dataset.ready = "true";
+    "#;
+    let report = try_app(bundle, &setup()).unwrap();
+    assert_eq!(report.errors, Vec::<String>::new());
+    assert_eq!(
+        report.screen,
+        "after: data-key=a class=row / data-key,class"
+    );
+}
+
 fn tempfile_dir() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("glass-app-try-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

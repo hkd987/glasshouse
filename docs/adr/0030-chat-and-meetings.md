@@ -177,7 +177,7 @@ A new app crate, `glass-app-chat` (`crates/apps/chat`), is registered in `glass-
 | Action | What it does | Side effect | Org tier | In the Chat app |
 |---|---|---|---|---|
 | `chat.list` | The person's conversations: name, kind, people, unread, last activity | none | auto | auto |
-| `chat.read` | One conversation's messages: the newest 50 (up to 200), or before or after a message. Each comes with sender, time, text and by-line | none | auto | auto |
+| `chat.read` | One conversation's messages: the newest 50 (up to 200), or before or after a message. Each comes with sender, time, text and by-line. From Chat itself the newest view marks the conversation read, unless it says `peek`: its window is hidden or hasn't the keyboard, and what it reads stays unread until the person is back | none | auto | auto |
 | `chat.search` | Text across the person's conversations, up to 50 hits (slice C4) | none | auto | auto |
 | `chat.post` | One to 20 messages, each to a conversation or to people (opening the DM or group) | irreversible | ask | auto, with presence |
 | `chat.create` | A named channel with people | irreversible | ask | auto, with presence |
