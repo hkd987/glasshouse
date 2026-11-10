@@ -528,9 +528,13 @@ async function start(): Promise<void> {
   // An event an agent adds, a hold it makes, an invitation that arrives:
   // the week shows it when it happens. It used to show at the next change
   // of week, or never if the person didn't leave this one.
-  watch(bridge, "calendar", cursor, async () => {
+  const reload = async (): Promise<void> => {
     await Promise.all([loadWeek(), loadMeetings()]);
-  });
+  };
+  // The system going away under an open week is said when it happens and
+  // taken back when it answers again (the week read again says which): it
+  // used to show at the next change of week.
+  watch(bridge, "calendar", cursor, reload, { onOffline: () => void reload() });
 }
 
 void start();

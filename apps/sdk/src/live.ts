@@ -4,7 +4,9 @@
 // Each app had its own copy of this loop, with a fixed three-second pause
 // after a failure: against a system that is down, every open window asked
 // again every three seconds for as long as it was. Here the pause grows to
-// half a minute, with some chance in it so windows don't ask together.
+// half a minute, with some chance in it so windows don't ask together, and
+// the first ask after a failure is one that doesn't wait, so the page hears
+// the system is back as soon as it is.
 //
 // The rules a page has to keep (ADR 0051) are in how this is called: take
 // the cursor with [`firstCursor`] BEFORE the first load, so a change that
@@ -60,7 +62,11 @@ export function watch(bridge: Bridge, app: string, cursor: number, changed: () =
   void (async () => {
     while (!stopped) {
       try {
-        const status = await bridge.status({ waitSecs, since: cursor });
+        // After a failure the next ask doesn't wait for news: an answer to
+        // it is the system being back, which the page is told now. With a
+        // wait, "back" came when the wait ended: up to 25 s of a page
+        // saying "offline" over a system that was answering.
+        const status = await bridge.status({ waitSecs: failures > 0 ? 0 : waitSecs, since: cursor });
         cursor = status.cursor;
         if (failures > 0) options.onOffline?.(false);
         failures = 0;

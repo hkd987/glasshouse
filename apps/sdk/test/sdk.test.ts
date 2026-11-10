@@ -257,11 +257,13 @@ test("nv3 a page hears of its app's changes, and asks a system that is down less
     () => ({ status: 200, body: { open: true, pending: [], cursor: 9, changed: ["calendar"] } }),
   ];
   const asked: number[] = [];
+  const waits: number[] = [];
   let done: () => void = () => {};
   const finished = new Promise<void>((resolve) => (done = resolve));
   const transport: Transport = {
     async post(_endpoint, body) {
       asked.push((body as { since: number }).since);
+      waits.push((body as { wait_secs: number }).wait_secs);
       const next = answers.shift();
       if (!next) return new Promise(() => {}); // nothing more: the wait stays open
       return next();
@@ -297,5 +299,8 @@ test("nv3 a page hears of its app's changes, and asks a system that is down less
   assert.deepEqual(pauses, [1, 2]);
   // Each wait from the cursor the last answer gave.
   assert.deepEqual(asked.slice(0, 4), [7, 7, 7, 8]);
+  // An ask after a failure doesn't wait for news, so "back" is said when
+  // the system answers and not 25 s on; then the waits are long again.
+  assert.deepEqual(waits.slice(0, 4), [25, 0, 0, 25]);
 });
 

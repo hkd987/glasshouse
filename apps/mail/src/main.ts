@@ -238,7 +238,11 @@ async function connect(form: Connect): Promise<void> {
 
 /** New mail, from app.status waits (ids only): the folders on screen reload. */
 function live(): void {
-  watch(bridge, "mail", state.cursor, refresh);
+  // The system going away under an open page is said when it happens, and
+  // taken back when it answers again: both by reading the folders again,
+  // which is where "offline" and "loaded at" come from. It used to show at
+  // the person's next click, so a page left open looked up to date.
+  watch(bridge, "mail", state.cursor, refresh, { onOffline: () => void refresh() });
 }
 
 function startCompose(from?: Outgoing, draft: string | null = null): void {

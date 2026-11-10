@@ -201,6 +201,33 @@ test("ui5 what was loaded reads offline", async ({ page, context }) => {
   await context.setOffline(false);
 });
 
+test("ui5 open Mail and Calendar say when the system goes away, and when it is back, with nobody clicking", async ({ page, context }) => {
+  // One going-away for both: each page's wait for news is what notices,
+  // and a wait under way ends only when the system would have answered it
+  // (25 s at most), so the two are watched side by side.
+  await openMail(page);
+  const calendar = await context.newPage();
+  await calendar.goto(appUrl("calendar"));
+  await expect(calendar.locator("html[data-ready=true]")).toHaveCount(1);
+  for (const open of [page, calendar]) {
+    await open.evaluate(() => navigator.serviceWorker.ready);
+    await expect(open.locator("[data-test=offline]")).toHaveCount(0);
+  }
+
+  // Nothing is clicked or reloaded.
+  await context.setOffline(true);
+  await Promise.all([page, calendar].map((open) => expect(open.locator("[data-test=offline]")).toContainText("Offline", { timeout: 40_000 })));
+  await expect(page.locator("[data-test=compose]")).toBeDisabled();
+  await expect(calendar.locator("[data-test=new-event]")).toBeDisabled();
+
+  // Back: said within the pause between asks, not at the end of a wait.
+  await context.setOffline(false);
+  await Promise.all([page, calendar].map((open) => expect(open.locator("[data-test=offline]")).toHaveCount(0, { timeout: 20_000 })));
+  await expect(page.locator("[data-test=compose]")).toBeEnabled();
+  await expect(calendar.locator("[data-test=new-event]")).toBeEnabled();
+  await calendar.close();
+});
+
 test("em0 mail is archived and rescued from junk, each a move the app makes", async ({ page }) => {
   await openMail(page);
   await page.locator(".row", { hasText: "Laptop updates tonight" }).click();
