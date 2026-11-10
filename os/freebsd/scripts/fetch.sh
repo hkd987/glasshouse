@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Usage: fetch.sh [--print-pins | src]
+# Usage: fetch.sh [--print-pins | src | base]
 # Downloads the pinned FreeBSD VM image and base.txz into build/cache/freebsd/<release>/,
-# or with `src` only src.txz (for the base system's notices, `make legal-base`),
-# verifies their SHA256 against release.env, and decompresses the VM image once.
+# or with `src` only src.txz (for the base system's notices, `make legal-base`), or with `base`
+# only base.txz (157 MB: all the cross-compile sysroot needs, so linting a fresh checkout doesn't
+# wait for the 635 MB VM image). Verifies their SHA256 against release.env, and decompresses the
+# VM image once.
 # Idempotent: verified files are stamped and skipped on later runs.
 # --print-pins prints upstream SHA256s for the configured release (for bumping release.env),
 # including the base package catalog's (bake-pkgbase.sh).
@@ -50,6 +52,9 @@ if [[ ${1:-} == src ]]; then
 	exit 0
 fi
 fetch "$FREEBSD_BASE_URL/$FREEBSD_BASE_TXZ" "$CACHE_DIR/$FREEBSD_BASE_TXZ" "$FREEBSD_BASE_TXZ_SHA256"
+if [[ ${1:-} == base ]]; then
+	exit 0
+fi
 
 # Pristine base disk for VM overlays; read-only so nothing writes to it by accident. Its stamp says
 # which download it was made from; once it matches the pin, the download isn't needed (cleanup.sh

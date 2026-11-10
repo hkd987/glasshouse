@@ -13,7 +13,8 @@ if [[ -f $stamp && $(cat "$stamp") == "$FREEBSD_BASE_TXZ_SHA256" ]]; then
 	exit 0
 fi
 
-"$FREEBSD_SCRIPTS_DIR/fetch.sh"
+# Only the base set: the VM image is `make freebsd-fetch`'s, for those who run the VM.
+"$FREEBSD_SCRIPTS_DIR/fetch.sh" base
 log "extracting sysroot from $FREEBSD_BASE_TXZ"
 rm -rf "$SYSROOT_DIR"
 mkdir -p "$SYSROOT_DIR"

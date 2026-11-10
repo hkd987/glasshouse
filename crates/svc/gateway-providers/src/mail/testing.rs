@@ -71,12 +71,18 @@ fn fresh_ip() -> Ipv4Addr {
 }
 
 impl Mox {
-    /// Starts one, or says why not and returns `None` (no binary).
+    /// Starts one, or says why not and returns `None` (no binary). Where
+    /// `GLASS_REQUIRE_TOOLS` is set, as in CI, no binary is a failure: a
+    /// test that returned early counts as passed, and so did the whole
+    /// mail suite on a machine that had never built mox.
     pub fn start() -> Option<Mox> {
         let Some(bin) = binary() else {
-            eprintln!(
-                "skipped: mox {MOX_VERSION} isn't built; run tools/dev/mox.sh build (or set MOX)"
-            );
+            let why =
+                format!("mox {MOX_VERSION} isn't built; run tools/dev/mox.sh build (or set MOX)");
+            if std::env::var_os("GLASS_REQUIRE_TOOLS").is_some_and(|v| !v.is_empty()) {
+                panic!("{why}");
+            }
+            eprintln!("skipped: {why}");
             return None;
         };
         let dir = tempfile::tempdir().expect("a temporary folder for mox");

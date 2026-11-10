@@ -155,6 +155,19 @@ def plan(files: set[str], everything: bool) -> list[tuple[str, list[str]]]:
     return steps
 
 
+def missing_sysroot() -> str | None:
+    """Why the FreeBSD checks can't run here, if they can't: they link the
+    base system's OpenSSL from the cross-compile sysroot, and without it
+    fail deep in a build script with nothing that says so."""
+    common = git("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+    # A worktree uses the main checkout's.
+    for root in (REPO, Path(common).parent):
+        if (root / "build/freebsd/sysroot/usr/include/openssl").is_dir():
+            return None
+    return ("no FreeBSD sysroot at build/freebsd/sysroot: run `make freebsd-sysroot` "
+            "(fetches the 157 MB base set once)")
+
+
 def run(steps: list[tuple[str, list[str]]]) -> int:
     """Runs every step at once (cargo serializes on its own lock where it
     must) and reports each with its own time. Output is shown for failures."""
@@ -198,6 +211,11 @@ def main() -> int:
     if not steps:
         print("lint: nothing to check for these files")
         return 0
+    if any(FREEBSD in argv for _, argv in steps):
+        why = missing_sysroot()
+        if why:
+            print(f"lint: {why}")
+            return 1
     return run(steps)
 
 

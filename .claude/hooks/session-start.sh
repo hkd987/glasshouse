@@ -2,8 +2,9 @@
 # SessionStart hook for Claude Code cloud sessions: installs what `make test
 # lint` needs, plus the FreeBSD VM tooling, so a fresh container is ready to
 # work. Idempotent and quick when everything is already there (the container
-# is cached after the first run). The FreeBSD images themselves (~4 GB) are
-# fetched on demand by `make test-env`, not here.
+# is cached after the first run). The cross-compile sysroot (157 MB to fetch,
+# about 25 s) is built here, because `make lint` checks the FreeBSD build
+# too; the VM's own image (~4 GB) is fetched on demand by `make test-env`.
 set -euo pipefail
 
 if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
@@ -36,5 +37,10 @@ rustup target list --installed | grep -qx x86_64-unknown-freebsd || rustup targe
 
 # Crates, so the first build doesn't wait on the network.
 cargo fetch --locked >/dev/null
+
+# The FreeBSD sysroot, which `make lint`'s FreeBSD clippy links against. A
+# session without the network for it still starts: lint says what's missing.
+os/freebsd/scripts/sysroot.sh >/dev/null 2>&1 ||
+	echo "session-start: no FreeBSD sysroot (make freebsd-sysroot); make lint needs it"
 
 echo "session-start: ready (make test lint; make test-env for the FreeBSD VM)"

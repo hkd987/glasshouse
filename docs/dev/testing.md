@@ -16,6 +16,11 @@ mox (0.0.17, MIT) is a build-time test tool, never in the image:
 checkout's `build/tools/mox-0.0.17/` (`MOX` names another binary), and the
 tests skip, saying so, without it.
 
+A test that skips counts as passed, so a machine that never built mox has
+never run them. With `GLASS_REQUIRE_TOOLS=1`, which CI sets, a missing tool
+is a failure instead: mox for these, Java for `make tla`. Set it yourself
+before a change to mail or to a modelled workflow.
+
 ## The FreeBSD VM
 
 Set it up with `make test-env`; see [test-environment.md](test-environment.md).

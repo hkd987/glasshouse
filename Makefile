@@ -26,7 +26,7 @@ FREEBSD_PROFILE ?= vm
 export FREEBSD_PROFILE
 export DIST_PROFILE := $(FREEBSD_PROFILE)
 
-.PHONY: help build check test lint lint-all fmt check-layers deny sbom timings freebsd dev-host e2e-vm \
+.PHONY: help build check test lint lint-all fmt check-layers deny advisories sbom timings freebsd dev-host e2e-vm \
 	test-env image-release legal-base ci clean shell shell-test shell-lint shell-preview shell-vm greeter-vm \
 	apps-build apps-test apps-lint apps-dev freebsd-ports agents-app agents-app-test agents-app-lint agents-app-deps \
 	console-dev console-test console-lint meet-test tla
@@ -56,10 +56,16 @@ fmt: ## Format all Rust code
 check-layers: ## Enforce crate layering and manifest conventions
 	tools/check-layers.py
 
-deny: ## Check dependency licenses and advisories, both workspaces (needs cargo-deny)
+deny: ## Check dependency licenses, bans and sources, all three workspaces (needs cargo-deny)
 	cargo deny check licenses bans sources
 	cd shell && cargo deny check licenses bans sources
 	cd agents-app && cargo deny check licenses bans sources
+
+advisories: apps/node_modules ## Known vulnerabilities in what we depend on: RustSec for the three workspaces, npm's for the web apps (needs cargo-deny and the network)
+	cargo deny check advisories
+	cd shell && cargo deny check advisories
+	cd agents-app && cargo deny check advisories
+	cd apps && npm audit --omit=dev
 
 legal-base: ## Regenerate the base system's notices and source offer from its src.txz (BR-2, BR-3)
 	os/freebsd/scripts/fetch.sh src
@@ -246,7 +252,11 @@ aws-lint: ## The stack a buyer deploys on AWS (deploy/aws): cfn-lint, installed 
 tla: ## Model-check the TLA+ models of key workflows (specs/tla, ADR 0051) with TLC
 	tools/dev/tla.sh check
 
-ci: lint-all test tla shell-lint shell-test apps-lint apps-test console-lint console-test ## What CI runs on every change
+# lint-all runs apps-lint and console-lint itself (tools/lint.py --all), so
+# they aren't named again here. .github/workflows/ci.yml runs these same
+# targets as three jobs side by side; the Agents desktop app's (agents-app-lint,
+# agents-app-test) need WebKitGTK and aren't among them yet.
+ci: lint-all test tla shell-lint shell-test apps-test console-test ## What CI runs on every change (.github/workflows/ci.yml)
 
 clean: ## Remove build outputs (keeps downloaded FreeBSD images in build/cache)
 	cargo clean

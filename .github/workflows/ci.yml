@@ -1,0 +1,138 @@
+# What runs on every change: `make ci`, split into jobs that share nothing so
+# they run side by side. Each job is the same make targets a person runs on
+# their own machine (CLAUDE.md, docs/dev/testing.md); nothing is checked here
+# that can't be checked there.
+#
+# Not here, because hosted runners have no KVM: the FreeBSD VM suite
+# (`make e2e-vm`), the hardware matrix and the soak. Run those before a
+# change to containment, the broker, undo or the audit log is merged.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Nothing is rebuilt after an edit here, and the caches are gigabytes.
+  CARGO_INCREMENTAL: "0"
+  # A check whose tool is missing fails; on a laptop it says so and passes
+  # (mox for the mail tests, Java for the models).
+  GLASS_REQUIRE_TOOLS: "1"
+
+jobs:
+  core:
+    name: lint, tests, models
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Room on the disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Host packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            clang lld shellcheck python3 python3-pil xz-utils zstd curl \
+            libssl-dev pkg-config libxkbcommon-dev libpixman-1-dev default-jre-headless
+      - name: The pinned Rust toolchain
+        run: rustup show
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: core
+      - name: FreeBSD downloads and test tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/cache
+            build/tools
+          key: tools-${{ hashFiles('os/freebsd/release.env', 'tools/dev/mox.sh', 'tools/dev/tla.sh') }}
+      - name: The FreeBSD sysroot (the FreeBSD clippy links against it)
+        run: make freebsd-sysroot
+      - name: mox, for the mail tests
+        run: tools/dev/mox.sh build
+      - name: Licenses, bans and sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+      - run: make lint-all
+      - run: make test
+      - run: make tla
+
+  shell:
+    name: desktop shell
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            clang lld xz-utils zstd curl libssl-dev pkg-config libxkbcommon-dev libpixman-1-dev
+      - name: The pinned Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: shell
+          workspaces: shell
+      - name: FreeBSD downloads
+        uses: actions/cache@v4
+        with:
+          path: build/cache
+          key: freebsd-${{ hashFiles('os/freebsd/release.env') }}
+      - name: The FreeBSD sysroot, with the desktop's libraries
+        run: |
+          make freebsd-sysroot
+          os/freebsd/scripts/ports.sh sysroot libxkbcommon pixman
+      - run: make shell-lint
+      - run: make shell-test
+
+  web:
+    name: web apps and admin console
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Room on the disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Host packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            clang lld python3 xz-utils curl libssl-dev pkg-config
+      - name: The pinned Rust toolchain
+        run: rustup show
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web
+      - name: The browser the suites drive, where they look for it
+        run: |
+          sudo mkdir -p /opt/pw-browsers
+          sudo chown "$USER" /opt/pw-browsers
+          make apps/node_modules
+          cd apps && PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers npx playwright install --with-deps chromium
+      - run: make apps-test
+      - run: make console-test

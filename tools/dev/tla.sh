@@ -7,7 +7,7 @@
 #   path         print where it is (or would be)
 #   check [S..]  model-check every spec in specs/tla (or those named) against its .cfg; fails on any
 #                violated invariant, property or deadlock. Without Java it says so and passes, as the
-#                mail tests do without mox.
+#                mail tests do without mox; with GLASS_REQUIRE_TOOLS set (CI) both fail instead.
 #   tlc ARGS     run TLC with ARGS (exploring a model by hand)
 # TLA_WORKERS sets each TLC's worker threads (default 1) and TLA_JOBS how many models are checked at
 # once (default: the cores over TLA_WORKERS). TLC gains less from a second worker than from a
@@ -46,6 +46,10 @@ tlc() {
 
 check() {
 	if ! command -v java >/dev/null; then
+		if [[ -n ${GLASS_REQUIRE_TOOLS:-} ]]; then
+			echo "tla: no java, and GLASS_REQUIRE_TOOLS is set (the models need TLC, which runs on Java 11 or later)" >&2
+			exit 1
+		fi
 		echo "tla: skipped, no java (the models need TLC, which runs on Java 11 or later)"
 		return
 	fi

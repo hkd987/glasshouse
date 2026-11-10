@@ -1,0 +1,45 @@
+# Known vulnerabilities in what we depend on (`make advisories`): the RustSec
+# database for the three Cargo workspaces, npm's for the web apps. Daily and
+# when a lockfile changes, apart from ci.yml: a new advisory is news about
+# yesterday's code, and mustn't fail a change that has nothing to do with it.
+name: advisories
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.lock"
+      - "apps/package-lock.json"
+      - "deny.toml"
+      - ".github/workflows/advisories.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo:
+    name: RustSec (${{ matrix.workspace }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: [".", "shell", "agents-app"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+          manifest-path: ${{ matrix.workspace }}/Cargo.toml
+
+  npm:
+    name: npm
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cd apps && npm audit --omit=dev

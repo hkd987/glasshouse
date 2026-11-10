@@ -359,7 +359,9 @@ test("ar5 Chat shows the share as a card that opens the artifact, and the consol
   await expect(page.locator("[data-test=messages]")).not.toContainText("Shared Q3 forecast");
   await shot(page, "chat-artifact-card");
   const [opened] = await Promise.all([context.waitForEvent("page"), card.getByRole("link", { name: "Open" }).click()]);
-  expect(opened.url()).toBe(`${ARTIFACTS_URL}#${q3Id}`);
+  // Once it has gone there: a window just opened has no address yet, and
+  // how soon it gets one is the browser's business.
+  await opened.waitForURL(`${ARTIFACTS_URL}#${q3Id}`);
   await opened.waitForSelector("html[data-ready=true]", { state: "attached" });
   await expect(opened.locator("[data-test=title]")).toHaveText("Q3 forecast");
   await frameOf(opened).locator("#q3-title").waitFor();
