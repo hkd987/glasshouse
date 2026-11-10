@@ -207,6 +207,52 @@ Two more ways the log's end can be wrong, neither of which stops it now:
   what a person can do (`glassctl verify`, then move the log aside).
 
 Still open: the log is one file for as long as the computer is used
-(segments chained by hash, with a retention rule), and each record waits
-for its own fsync under the runtime's lock (a writer with group commit).
+(segments chained by hash, with a retention rule). How long records are
+kept is a rule for whoever answers for compliance to set, not the code.
+
+## Amended 2026-11-10 (audit 9.1): records share disk syncs
+
+Each record was synced on its own, one after another under the runtime's
+queue lock, whoever asked: with several agents at work the log was where
+they all waited, on a lock the async workers weren't told they were
+waiting on. Now:
+
+- **`AuditLog::append_all` writes a run of records as one write and one
+  sync.** A run is all in the log or, after a failure, none of it is: the
+  writer cuts back to the last record it acknowledged when it opens the
+  file again, whole lines of the failed run included, as it did for one
+  record.
+- **The runtime writes everything waiting as one run**
+  (`Runtime::write_waiting`). Whoever finds nobody writing writes the
+  queue, with its lock let go while the disk works; those who ask meanwhile
+  wait for the next run, which carries all of theirs. Each caller still
+  returns only once its own record is synced, and the waiting is where the
+  runtime allows it (`blocking`).
+- **Nothing about what waits and what is refused changes.** One queue, in
+  the order asked: records the log couldn't take go first, in the same run
+  as what follows them. A run that fails leaves every record of it
+  waiting, stamped with when it happened, and the log down. A change
+  whose start record was in a failed run doesn't run, and that it was
+  refused waits in the start record's place (ADR 0054).
+
+While a run lands, its earlier lines are whole in the file before any is
+acknowledged, so `glassctl verify` and the console's count can see lines of
+a run that then fails and is cut back. That was so for one record whose
+fsync failed; it is so for a run's lines now. A task's records
+(`task_records`) come from the index, which only ever has acknowledged
+ones.
+
+`specs/tla/AuditLog.tla` has runs: several calls' records landing in
+order, acknowledged together or failed together, readers beside them, and
+a crash with any part of a run on disk. Its promises hold; with the old
+"whole line kept" behaviour switched on it finds a record written twice,
+as it should.
+
+Measured: 200 records from eight writers on a disk whose sync takes 5 ms
+took 49 syncs and 0.27 s; one sync each is 200 and over a second. In the
+VM the action budgets are as before (`glass-e2e perf`: a write with a
+snapshot 167 ms median, 216 ms p95, against 750). A person's own changing
+actions still take turns from snapshot to record (ADR 0051), so it is
+reads, asks, state changes, apps' sessions and other people's tasks that
+share syncs with them.
 

@@ -454,6 +454,11 @@ spinning threads.
   to another thread while it waits (`tokio::task::block_in_place`), and so
   do the control calls that read or write files (`task.plan`, `task.start`,
   layers, the audit log reads). `task.list` and `task.get` stay in memory.
+  Since the audit of 2026-11 (9.1) records also share syncs: whoever finds
+  nobody writing writes everything waiting as one run with one fsync, and
+  the wait for the queue is inside that hand-off too (it was a plain lock
+  taken before it, which parked the worker unannounced). Eight writers'
+  200 records took 49 syncs where they took 200 (ADR 0053, amended).
 - **Every tile update went to the shell as its own message.** An agent
   calling actions quickly, many tasks updating at once, or new settings
   applied to all of them, sent one notification per change, each a whole

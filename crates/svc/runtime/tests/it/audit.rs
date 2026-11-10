@@ -360,3 +360,155 @@ async fn au1_a_change_refused_for_a_full_log_keeps_it_down_and_is_recorded_once_
     assert!(writes[1].event.detail.get("happened_at").is_some());
     assert_eq!(kind(&h, EventKind::ActionStarted).len(), 1);
 }
+
+fn note(text: &str) -> glass_audit::AuditEvent {
+    glass_audit::AuditEvent::new(EventKind::TaskStateChanged, text)
+}
+
+#[test]
+fn au1_records_asked_for_at_once_share_runs_and_each_is_there_once_in_its_order() {
+    // Audit 9.1: eight writers, 25 records each, on a disk whose sync
+    // takes 5 ms. One sync a record, one after another, is 200 runs and a
+    // second; sharing them is a few dozen.
+    let h = harness();
+    h.audit.slow_syncs_for_tests(5);
+    let before = h.audit.runs_for_tests();
+    let writers: Vec<_> = (0..8)
+        .map(|w| {
+            let rt = std::sync::Arc::clone(&h.rt);
+            std::thread::spawn(move || {
+                for n in 0..25 {
+                    // Back only once the record is in the log.
+                    rt.append_audit(note(&format!("writer {w} record {n}")));
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+    h.audit.slow_syncs_for_tests(0);
+    let runs = h.audit.runs_for_tests() - before;
+    assert!(
+        runs < 100,
+        "200 records took {runs} runs: they don't share them"
+    );
+    assert_eq!(h.rt.audit_waiting_for_tests(), 0);
+
+    let said: Vec<String> = kind(&h, EventKind::TaskStateChanged)
+        .into_iter()
+        .map(|r| r.event.summary)
+        .filter(|s| s.starts_with("writer "))
+        .collect();
+    assert_eq!(said.len(), 200, "every record once");
+    for w in 0..8 {
+        let theirs: Vec<&String> = said
+            .iter()
+            .filter(|s| s.starts_with(&format!("writer {w} ")))
+            .collect();
+        let expected: Vec<String> = (0..25).map(|n| format!("writer {w} record {n}")).collect();
+        assert_eq!(
+            theirs,
+            expected.iter().collect::<Vec<_>>(),
+            "writer {w}'s, in its order"
+        );
+    }
+    assert_eq!(glass_audit::verify(&h.audit_path()).unwrap().unfinished, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn au1_a_run_that_fails_refuses_the_change_in_it_and_every_record_is_there_once_after() {
+    let h = harness();
+    let task =
+        h.rt.start(&h.me, h.request(&["Invoices"], &["Reports"]))
+            .unwrap()
+            .id;
+    let agent = h.agent(task).await;
+    let wait_for = |what: &dyn Fn() -> bool| {
+        for _ in 0..3000 {
+            if what() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("never happened");
+    };
+
+    // One record is at the disk, which is slow to answer.
+    h.audit.hold_syncs_for_tests(true);
+    let runs = h.audit.runs_for_tests();
+    let first = {
+        let rt = std::sync::Arc::clone(&h.rt);
+        std::thread::spawn(move || rt.append_audit(note("first")))
+    };
+    wait_for(&|| h.audit.runs_for_tests() == runs + 1);
+    // Meanwhile a change is asked for: its start record waits behind it.
+    // And another record after that.
+    let change = tokio::spawn(async move {
+        tool(
+            &agent,
+            "files_write",
+            json!({"path": "Reports/summary.csv", "content": "total\n"}),
+        )
+        .await
+    });
+    wait_for(&|| h.rt.audit_waiting_for_tests() == 2);
+    let second = {
+        let rt = std::sync::Arc::clone(&h.rt);
+        std::thread::spawn(move || rt.append_audit(note("second")))
+    };
+    wait_for(&|| h.rt.audit_waiting_for_tests() == 3);
+    // The disk fills before the next run, and then answers.
+    h.audit.fail_writes_for_tests(0, u32::MAX);
+    h.audit.hold_syncs_for_tests(false);
+    first.join().unwrap();
+    second.join().unwrap();
+
+    // The change's run failed, so the change didn't run.
+    let refused = change.await.unwrap();
+    assert!(
+        refused.text().contains("can't take records"),
+        "{}",
+        refused.text()
+    );
+    assert!(!h.home().join("Reports/summary.csv").exists());
+    // "first" is in the log; nothing of the failed run is.
+    assert_eq!(
+        kind(&h, EventKind::TaskStateChanged)
+            .iter()
+            .filter(|r| r.event.summary == "first" || r.event.summary == "second")
+            .map(|r| r.event.summary.as_str())
+            .collect::<Vec<_>>(),
+        ["first"]
+    );
+    assert!(kind(&h, EventKind::ActionStarted).is_empty());
+
+    // Room again: what waited is written, in the order it was asked, the
+    // change as one that wasn't done.
+    h.audit.fail_writes_for_tests(0, 0);
+    h.rt.append_audit(note("third"));
+    let all = glass_audit::read(&h.audit_path(), |r| {
+        matches!(
+            r.event.kind,
+            EventKind::TaskStateChanged | EventKind::Action | EventKind::ActionStarted
+        ) && (r.event.task == Some(task)
+            || ["first", "second", "third"].contains(&r.event.summary.as_str()))
+    })
+    .unwrap();
+    let said: Vec<(EventKind, &str)> = all
+        .iter()
+        .map(|r| (r.event.kind, r.event.summary.as_str()))
+        .filter(|(kind, summary)| {
+            *kind != EventKind::TaskStateChanged || ["first", "second", "third"].contains(summary)
+        })
+        .collect();
+    assert_eq!(said.len(), 4, "{said:?}");
+    assert_eq!(said[0], (EventKind::TaskStateChanged, "first"));
+    assert_eq!(said[1].0, EventKind::Action);
+    assert!(said[1].1.starts_with("Not done: "), "{said:?}");
+    assert_eq!(said[2], (EventKind::TaskStateChanged, "second"));
+    assert_eq!(said[3], (EventKind::TaskStateChanged, "third"));
+    assert!(all[1].event.detail.get("happened_at").is_some());
+    let report = glass_audit::verify(&h.audit_path()).unwrap();
+    assert_eq!(report.unfinished, 0);
+}

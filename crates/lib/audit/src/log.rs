@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
 
 use glass_types::{TaskId, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -100,10 +101,27 @@ pub enum Durability {
 /// start, built by one pass the first time they're asked for and kept up
 /// by every append after: reading one task's records no longer reads the
 /// whole log, which grows for as long as the computer is used.
+///
+/// Records can share a disk sync: [`AuditLog::append_all`] writes a run of
+/// them as one run of lines with one sync. A run is one write: it is all in
+/// the log, or, after a failure, none of it is (cut back as one record is).
+/// The runtime writes whatever is waiting as a run (`Runtime::audit`), so
+/// records asked for while a sync is under way share the next one; each
+/// used to have a sync of its own, one after another whoever asked.
 #[derive(Debug)]
 pub struct AuditLog {
     path: PathBuf,
     durability: Durability,
+    /// How many runs the log has written, each with one sync where it
+    /// syncs at all (for tests and measurements).
+    runs: AtomicU64,
+    /// Tests only: milliseconds each run takes at least to reach the disk,
+    /// as a busy disk's does.
+    slow: AtomicU64,
+    /// Tests only: runs wait at the disk while this is set, so a test can
+    /// have records arrive during one.
+    held: Mutex<bool>,
+    let_go: Condvar,
     state: Mutex<Option<WriterState>>,
     /// After a failed write: where the last acknowledged record ends.
     /// Whatever the file holds past it was never acknowledged, and the
@@ -174,6 +192,10 @@ impl AuditLog {
         let log = Self {
             path,
             durability,
+            runs: AtomicU64::new(0),
+            slow: AtomicU64::new(0),
+            held: Mutex::new(false),
+            let_go: Condvar::new(),
             state: Mutex::new(Some(state)),
             cut_to: Mutex::new(None),
             set_aside: recovery.set_aside.clone(),
@@ -226,9 +248,46 @@ impl AuditLog {
         self.set_aside.as_deref()
     }
 
-    /// Appends one event and returns the stored record. After a failed
-    /// write, the file is opened again first, as at a start.
+    /// How many runs the log has written since it was opened: one write and
+    /// (where it syncs) one sync each.
+    #[doc(hidden)]
+    pub fn runs_for_tests(&self) -> u64 {
+        self.runs.load(Ordering::SeqCst)
+    }
+
+    /// Tests only: every run from now on takes at least `millis` to reach
+    /// the disk, as on a disk busy with something else.
+    #[doc(hidden)]
+    pub fn slow_syncs_for_tests(&self, millis: u64) {
+        self.slow.store(millis, Ordering::SeqCst);
+    }
+
+    /// Tests only: runs wait at the disk from now until this is called
+    /// with `false`.
+    #[doc(hidden)]
+    pub fn hold_syncs_for_tests(&self, hold: bool) {
+        *self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hold;
+        self.let_go.notify_all();
+    }
+
+    /// Appends one event and returns the stored record, once it is synced.
+    /// After a failed write, the file is opened again first, as at a start.
     pub fn append(&self, event: AuditEvent) -> Result<AuditRecord, AuditError> {
+        let mut records = self.append_all(vec![event])?;
+        records.pop().ok_or(AuditError::Poisoned)
+    }
+
+    /// Appends `events` in order as one run: one write and one sync for all
+    /// of them. All are in the log when this returns `Ok`, each with its
+    /// record; after an `Err` none is, and the caller writes them again.
+    /// After a failed write, the file is opened again first, as at a start.
+    ///
+    /// Waits for the disk, and for a run being written: call it where
+    /// waiting is allowed (the runtime's `blocking`).
+    pub fn append_all(&self, events: Vec<AuditEvent>) -> Result<Vec<AuditRecord>, AuditError> {
         let mut guard = self.state.lock().map_err(|_| AuditError::Poisoned)?;
         if guard.is_none() {
             let cut_to = *self
@@ -238,91 +297,116 @@ impl AuditLog {
             let (state, recovery) = open_writer(&self.path, cut_to)?;
             *guard = Some(state);
             if recovery.anything() {
-                self.write(&mut guard, recovered(&recovery))?;
+                self.write(&mut guard, vec![recovered(&recovery)])?;
             }
         }
-        self.write(&mut guard, event)
+        self.write(&mut guard, events)
     }
 
-    /// One record onto the writer in `guard`, which a failed write leaves
-    /// empty: the file may now end in part of a line, and the next append
-    /// opens it again rather than chain onto that.
+    /// A run of records onto the writer in `guard`, as one write and one
+    /// sync: all of them are in the log, or none is. A failed write leaves
+    /// `guard` empty: the file may now end in part of the run, and the
+    /// next append opens it again rather than chain onto that.
     fn write(
         &self,
         guard: &mut Option<WriterState>,
-        event: AuditEvent,
-    ) -> Result<AuditRecord, AuditError> {
+        events: Vec<AuditEvent>,
+    ) -> Result<Vec<AuditRecord>, AuditError> {
         let state = guard.as_mut().ok_or(AuditError::Poisoned)?;
-        let record = AuditRecord {
-            seq: state.next_seq,
-            ts: Timestamp::now(),
-            prev: state.last_hash.clone(),
-            event,
+        let unwritable = |e: serde_json::Error| AuditError::Io {
+            path: self.path.clone(),
+            source: io::Error::other(e),
         };
-        let body = serde_json::to_string(&record).map_err(|e| AuditError::Io {
-            path: self.path.clone(),
-            source: io::Error::other(e),
-        })?;
-        let hash = hash_body(&body);
-        let raw = RawValue::from_string(body).map_err(|e| AuditError::Io {
-            path: self.path.clone(),
-            source: io::Error::other(e),
-        })?;
-        let mut line = serde_json::to_string(&LineOut {
-            hash: &hash,
-            body: &raw,
-        })
-        .map_err(|e| AuditError::Io {
-            path: self.path.clone(),
-            source: io::Error::other(e),
-        })?;
-        line.push('\n');
-
-        // Tests only: how much of this line lands before the write fails.
-        let failing = {
-            let mut failing = self
-                .failing
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match *failing {
-                Failing { writes: 0, .. } => None,
-                Failing {
-                    skip: 0,
-                    writes,
-                    whole,
-                } => {
-                    failing.writes = writes - 1;
-                    Some(if whole { line.len() } else { line.len() / 2 })
-                }
-                Failing { skip, .. } => {
-                    failing.skip = skip - 1;
-                    None
+        let mut seq = state.next_seq;
+        let mut prev = state.last_hash.clone();
+        let mut lines = String::new();
+        // Each record with how long its line is.
+        let mut records: Vec<(AuditRecord, usize)> = Vec::with_capacity(events.len());
+        // Tests only: how much of the run lands before the write fails.
+        let mut landed: Option<usize> = None;
+        for event in events {
+            let record = AuditRecord {
+                seq,
+                ts: Timestamp::now(),
+                prev,
+                event,
+            };
+            let body = serde_json::to_string(&record).map_err(unwritable)?;
+            let hash = hash_body(&body);
+            let raw = RawValue::from_string(body).map_err(unwritable)?;
+            let mut line = serde_json::to_string(&LineOut {
+                hash: &hash,
+                body: &raw,
+            })
+            .map_err(unwritable)?;
+            line.push('\n');
+            if landed.is_none() {
+                let mut failing = self
+                    .failing
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match *failing {
+                    Failing { writes: 0, .. } => {}
+                    Failing {
+                        skip: 0,
+                        writes,
+                        whole,
+                    } => {
+                        failing.writes = writes - 1;
+                        let of_this = if whole { line.len() } else { line.len() / 2 };
+                        landed = Some(lines.len() + of_this);
+                    }
+                    Failing { skip, .. } => failing.skip = skip - 1,
                 }
             }
-        };
-        let written = match failing {
+            lines.push_str(&line);
+            records.push((record, line.len()));
+            seq += 1;
+            prev = hash;
+        }
+        let written = match landed {
             Some(landed) => state
                 .file
-                .write_all(&line.as_bytes()[..landed])
+                .write_all(&lines.as_bytes()[..landed])
                 .and_then(|()| {
                     Err(io::Error::new(
                         io::ErrorKind::StorageFull,
                         "no space left on device (a test's)",
                     ))
                 }),
-            None => state.file.write_all(line.as_bytes()),
+            None => state.file.write_all(lines.as_bytes()),
         }
-        .and_then(|()| match self.durability {
-            Durability::Sync => state.file.sync_data(),
-            Durability::Buffered => Ok(()),
+        .and_then(|()| {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            // Tests only: a disk that is slow, or that waits to be let go.
+            let slow = self.slow.load(Ordering::SeqCst);
+            if slow > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(slow));
+            }
+            let mut held = self
+                .held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while *held {
+                held = self
+                    .let_go
+                    .wait(held)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            drop(held);
+            match self.durability {
+                Durability::Sync => state.file.sync_data(),
+                Durability::Buffered => Ok(()),
+            }
         });
         if let Err(source) = written {
-            // Part of the line may be in the file, or all of it (the fsync
-            // failed): none of it was acknowledged, and the caller is told
-            // it failed and writes it again. Where the last acknowledged
-            // record ends is kept, and the next opening cuts back to it; a
-            // whole line left there was chained onto, and stood in the log
-            // beside the second writing of the same record.
+            // Part of the run may be in the file, or all of it (the fsync
+            // failed): none of it was acknowledged, and each caller is told
+            // it failed and writes its record again. Where the last
+            // acknowledged record ends is kept, and the next opening cuts
+            // back to it; a whole line left there was chained onto, and
+            // stood in the log beside the second writing of the same
+            // record.
             *self
                 .cut_to
                 .lock()
@@ -333,20 +417,24 @@ impl AuditLog {
                 source,
             });
         }
-        let at = state.len;
-        state.len += line.len() as u64;
-        state.next_seq += 1;
-        state.last_hash = hash;
         // Kept up while the writer is held, so it never misses a record.
-        if let Ok(mut index) = self.index.lock()
-            && let Some(index) = index.as_mut()
-        {
-            if let Some(task) = record.event.task {
-                index.by_task.entry(task).or_default().push(at);
+        let mut index = self.index.lock().ok();
+        let mut index = index.as_mut().and_then(|index| index.as_mut());
+        let mut stored = Vec::with_capacity(records.len());
+        for (record, len) in records {
+            let at = state.len;
+            state.len += len as u64;
+            if let Some(index) = index.as_mut() {
+                if let Some(task) = record.event.task {
+                    index.by_task.entry(task).or_default().push(at);
+                }
+                index.to = state.len;
             }
-            index.to = state.len;
+            stored.push(record);
         }
-        Ok(record)
+        state.next_seq = seq;
+        state.last_hash = prev;
+        Ok(stored)
     }
 
     /// `task`'s records, oldest first, each checked against its own hash.
@@ -935,6 +1023,97 @@ mod tests {
             .map(|r| r.event.summary)
             .collect();
         assert_eq!(summaries, ["one", "two"]);
+    }
+
+    #[test]
+    fn au1_a_run_of_records_is_one_write_chained_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let log = AuditLog::open(&path, Durability::Sync).unwrap();
+        let task = TaskId::new();
+        log.append(action("before", Some(task))).unwrap();
+        let before = log.runs_for_tests();
+        let run = log
+            .append_all(vec![
+                action("one", Some(task)),
+                action("two", None),
+                action("three", Some(task)),
+            ])
+            .unwrap();
+        // One write and one sync for the three.
+        assert_eq!(log.runs_for_tests(), before + 1);
+        assert_eq!(run.iter().map(|r| r.seq).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(
+            run.iter()
+                .map(|r| r.event.summary.as_str())
+                .collect::<Vec<_>>(),
+            ["one", "two", "three"]
+        );
+        // What was handed back is what the log holds, its chain whole.
+        let all = read(&path, |_| true).unwrap();
+        assert_eq!(&all[1..], &run[..]);
+        let report = verify(&path).unwrap();
+        assert_eq!((report.records, report.unfinished), (4, 0));
+        // The task's records are found, in order, through the index.
+        log.append(action("after", Some(task))).unwrap();
+        let theirs: Vec<String> = log
+            .task_records(task)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event.summary)
+            .collect();
+        assert_eq!(theirs, ["before", "one", "three", "after"]);
+        // An empty run writes nothing.
+        assert!(log.append_all(Vec::new()).unwrap().is_empty());
+        assert_eq!(verify(&path).unwrap().records, 5);
+    }
+
+    #[test]
+    fn au1_a_run_of_records_that_fails_fails_as_one_and_none_of_it_stays() {
+        // The run's second record fails, as a failed fsync does (its lines
+        // landed) and as a full disk does (half a line): either way the
+        // whole run is an error, none of it is left in the log, and each
+        // record is there once when the run is written again.
+        for whole in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("audit.log");
+            let log = AuditLog::open(&path, Durability::Buffered).unwrap();
+            let task = TaskId::new();
+            log.append(action("before", Some(task))).unwrap();
+            let run = || {
+                vec![
+                    action("one", Some(task)),
+                    action("two", Some(task)),
+                    action("three", Some(task)),
+                ]
+            };
+            if whole {
+                log.fail_syncs_for_tests(1, 1);
+            } else {
+                log.fail_writes_for_tests(1, 1);
+            }
+            assert!(log.append_all(run()).is_err(), "whole: {whole}");
+            // The caller writes the run again (Runtime::audit).
+            log.append_all(run()).unwrap();
+
+            let said: Vec<String> = read(&path, |_| true)
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.event.kind == EventKind::Action)
+                .map(|r| r.event.summary)
+                .collect();
+            assert_eq!(said, ["before", "one", "two", "three"], "whole: {whole}");
+            let report = verify(&path).unwrap();
+            // The four, and the note that the log was cut back.
+            assert_eq!((report.records, report.unfinished), (5, 0));
+            let theirs: Vec<String> = log
+                .task_records(task)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.event.summary)
+                .collect();
+            assert_eq!(theirs, ["before", "one", "two", "three"]);
+        }
     }
 
     /// Changes one byte of the log's last line, inside its body.

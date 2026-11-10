@@ -104,6 +104,8 @@ pub struct Runtime {
     audit_ok: AtomicBool,
     /// Records the log couldn't take yet (a full disk), in order.
     audit_waiting: Mutex<AuditWaiting>,
+    /// Told when a run of audit records has been written, or has failed.
+    audit_turn: std::sync::Condvar,
     /// From pause_for_sleep to the wake (PM-5): a resume or hand back that
     /// lands meanwhile carries on after the wake, with the rest.
     going_to_sleep: AtomicBool,
@@ -230,6 +232,7 @@ impl Runtime {
             audit: parts.audit,
             audit_ok: AtomicBool::new(true),
             audit_waiting: Mutex::new(AuditWaiting::default()),
+            audit_turn: std::sync::Condvar::new(),
             going_to_sleep: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             events,
@@ -451,6 +454,12 @@ impl Runtime {
         self.audit(event);
     }
 
+    /// Tests only: how many audit records are waiting or being written.
+    #[doc(hidden)]
+    pub fn audit_waiting_for_tests(&self) -> usize {
+        self.audit_queue().events.len()
+    }
+
     pub(crate) fn tasks(&self) -> std::sync::MutexGuard<'_, BTreeMap<TaskId, Arc<Task>>> {
         self.tasks.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -505,51 +514,95 @@ impl Runtime {
     /// written, glassd stopping can't leave it off the record (AU-1, ADR
     /// 0054, `specs/tla/AuditLog.tla`).
     pub(crate) fn audit_ahead(&self, event: AuditEvent) -> Option<u64> {
-        let mut waiting = self
-            .audit_waiting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !self.flush_audit(&mut waiting) {
-            return None;
-        }
-        let mut refused = event.clone();
-        match blocking(|| self.audit.append(event)) {
-            Ok(record) => Some(record.seq),
-            Err(e) => {
-                self.audit_failed(&e);
-                refused.kind = match refused.kind {
-                    EventKind::RollbackStarted => EventKind::Rollback,
-                    _ => EventKind::Action,
-                };
-                refused.summary = format!("Not done: {}", refused.summary);
-                refused.outcome = Some(glass_audit::Outcome::Failed {
-                    error: "the audit log couldn't take its record, so it didn't run".into(),
-                });
-                refused.detail = serde_json::json!({ "happened_at": Timestamp::now().to_string() });
-                if waiting.events.len() < AUDIT_WAITING_MAX {
-                    waiting.events.push_back(refused);
-                } else {
-                    waiting.lost += 1;
+        blocking(|| {
+            let mut waiting = self.audit_queue();
+            // A log that is down takes what waits first, or this isn't
+            // started at all.
+            if !self.audit_ok.load(Ordering::SeqCst) {
+                let (ok, back) = self.flush_audit(waiting, None);
+                if !ok {
+                    return None;
                 }
-                None
+                waiting = back;
             }
-        }
+            if waiting.events.len() >= AUDIT_WAITING_MAX {
+                waiting.lost += 1;
+                return None;
+            }
+            let mine = waiting.next;
+            waiting.next += 1;
+            waiting.events.push_back((mine, event));
+            waiting.ahead.insert(mine);
+            let failures = waiting.failures;
+            loop {
+                if let Some(seq) = waiting.started.remove(&mine) {
+                    return Some(seq);
+                }
+                if waiting.writing {
+                    waiting = self
+                        .audit_turn
+                        .wait(waiting)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    continue;
+                }
+                // Nobody is writing, and it isn't in the log: either no
+                // run has had it yet, or the one that did failed.
+                if waiting.failures == failures {
+                    waiting = self.write_waiting(waiting).1;
+                    continue;
+                }
+                // Its run failed: what it records doesn't happen, and that
+                // it was refused waits in its place.
+                waiting.ahead.remove(&mine);
+                if let Some((_, refused)) = waiting.events.iter_mut().find(|(n, _)| *n == mine) {
+                    refused.kind = match refused.kind {
+                        EventKind::RollbackStarted => EventKind::Rollback,
+                        _ => EventKind::Action,
+                    };
+                    refused.summary = format!("Not done: {}", refused.summary);
+                    refused.outcome = Some(glass_audit::Outcome::Failed {
+                        error: "the audit log couldn't take its record, so it didn't run".into(),
+                    });
+                    refused.detail =
+                        serde_json::json!({ "happened_at": Timestamp::now().to_string() });
+                }
+                return None;
+            }
+        })
+    }
+
+    fn audit_queue(&self) -> std::sync::MutexGuard<'_, AuditWaiting> {
+        self.audit_waiting
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The records waiting, then `event`, in order: whether all were written.
+    ///
+    /// Records share disk syncs (group commit, audit 9.1): whoever finds
+    /// nobody writing writes everything that is waiting as one run
+    /// (`AuditLog::append_all`), with the queue's lock let go, and those
+    /// who asked meanwhile wait for the next run, which has all of theirs.
+    /// Each still returns only once its own record is synced. Every record
+    /// used to be synced on its own, one after another under this queue's
+    /// lock, whoever asked: with several agents at work, this was where
+    /// they all waited, on a lock the async workers weren't told about.
     fn write_audit(&self, event: Option<AuditEvent>) -> bool {
-        let mut waiting = self
-            .audit_waiting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(event) = event {
-            if waiting.events.len() < AUDIT_WAITING_MAX {
-                waiting.events.push_back(event);
-            } else {
-                waiting.lost += 1;
-            }
-        }
-        self.flush_audit(&mut waiting)
+        blocking(|| {
+            let mut waiting = self.audit_queue();
+            let mine = event.and_then(|event| {
+                if waiting.events.len() < AUDIT_WAITING_MAX {
+                    let mine = waiting.next;
+                    waiting.next += 1;
+                    waiting.events.push_back((mine, event));
+                    Some(mine)
+                } else {
+                    waiting.lost += 1;
+                    None
+                }
+            });
+            self.flush_audit(waiting, mine).0
+        })
     }
 
     fn audit_failed(&self, e: &glass_audit::AuditError) {
@@ -561,8 +614,44 @@ impl Runtime {
         }
     }
 
-    /// Writes the records waiting, in order: whether none are left.
-    fn flush_audit(&self, waiting: &mut AuditWaiting) -> bool {
+    /// Sees the records waiting written, in order: up to the one numbered
+    /// `mine`, or all of them. Whether they were; `false` once a run fails,
+    /// with the records still waiting.
+    fn flush_audit<'a>(
+        &'a self,
+        mut waiting: std::sync::MutexGuard<'a, AuditWaiting>,
+        mine: Option<u64>,
+    ) -> (bool, std::sync::MutexGuard<'a, AuditWaiting>) {
+        let failures = waiting.failures;
+        loop {
+            let written = match mine {
+                // Numbers go up along the queue: past the front, it's in.
+                Some(mine) => waiting.events.front().is_none_or(|(n, _)| *n > mine),
+                None => waiting.events.is_empty() && waiting.lost == 0,
+            };
+            if written {
+                return (true, waiting);
+            }
+            if waiting.failures != failures {
+                return (false, waiting);
+            }
+            if waiting.writing {
+                waiting = self
+                    .audit_turn
+                    .wait(waiting)
+                    .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            }
+            waiting = self.write_waiting(waiting).1;
+        }
+    }
+
+    /// Writes everything waiting as one run, with the queue's lock let go
+    /// while it is written, and tells whoever waits. Whether it was written.
+    fn write_waiting<'a>(
+        &'a self,
+        mut waiting: std::sync::MutexGuard<'a, AuditWaiting>,
+    ) -> (bool, std::sync::MutexGuard<'a, AuditWaiting>) {
         if waiting.lost > 0 && waiting.events.is_empty() {
             let mut note = AuditEvent::new(
                 EventKind::LogRecovered,
@@ -572,16 +661,44 @@ impl Runtime {
                 ),
             );
             note.detail = serde_json::json!({ "lost_records": waiting.lost });
-            waiting.events.push_back(note);
+            let n = waiting.next;
+            waiting.next += 1;
+            waiting.events.push_back((n, note));
             waiting.lost = 0;
         }
-        while let Some(next) = waiting.events.front() {
-            let next = next.clone();
-            if let Err(e) = blocking(|| self.audit.append(next)) {
+        let run: Vec<AuditEvent> = waiting.events.iter().map(|(_, e)| e.clone()).collect();
+        waiting.writing = true;
+        drop(waiting);
+        // Whatever happens while it is written, the queue is given back as
+        // not being written, or everything after would wait for good.
+        let writing = AuditRun(self);
+        let result = self.audit.append_all(run);
+        std::mem::forget(writing);
+        let mut waiting = self.audit_queue();
+        waiting.writing = false;
+        let ok = match result {
+            Ok(records) => {
+                // They were the front of the queue: what came meanwhile is
+                // behind them.
+                for record in records {
+                    let Some((n, _)) = waiting.events.pop_front() else {
+                        break;
+                    };
+                    if waiting.ahead.remove(&n) {
+                        waiting.started.insert(n, record.seq);
+                    }
+                }
+                if !self.audit_ok.swap(true, Ordering::SeqCst) {
+                    tracing::warn!("the audit log takes records again");
+                }
+                true
+            }
+            Err(e) => {
                 self.audit_failed(&e);
+                waiting.failures += 1;
                 // When each happened, for the record written later.
                 let now = Timestamp::now().to_string();
-                for event in &mut waiting.events {
+                for (_, event) in &mut waiting.events {
                     if event.detail.is_null() {
                         event.detail = serde_json::json!({});
                     }
@@ -591,14 +708,11 @@ impl Runtime {
                             .or_insert_with(|| now.clone().into());
                     }
                 }
-                return false;
+                false
             }
-            waiting.events.pop_front();
-        }
-        if !self.audit_ok.swap(true, Ordering::SeqCst) {
-            tracing::warn!("the audit log takes records again");
-        }
-        true
+        };
+        self.audit_turn.notify_all();
+        (ok, waiting)
     }
 
     /// An audit event pre-filled with the task's principal.
@@ -2238,12 +2352,38 @@ fn you_drive() -> RuntimeError {
     RuntimeError::Conflict("you have control; hand back to let the agent go on, or stop it".into())
 }
 
-/// Records the audit log couldn't take yet.
+/// Records on their way to the audit log, and those it couldn't take yet.
 #[derive(Debug, Default)]
 struct AuditWaiting {
-    events: std::collections::VecDeque<AuditEvent>,
+    /// Not in the log yet, oldest first, each under the number its caller
+    /// waits on. Numbers go up along the queue.
+    events: std::collections::VecDeque<(u64, AuditEvent)>,
     /// Records past [`AUDIT_WAITING_MAX`], noted once the log takes records.
     lost: u64,
+    /// A run of them is being written (`Runtime::write_waiting`).
+    writing: bool,
+    /// Runs that failed: a caller that waited sees its run's failure here.
+    failures: u64,
+    /// The start records among `events` (`Runtime::audit_ahead`), and the
+    /// `seq` each was given once written, until its caller takes it.
+    ahead: std::collections::BTreeSet<u64>,
+    started: std::collections::BTreeMap<u64, u64>,
+    next: u64,
+}
+
+/// A run of audit records being written. Dropped while it still is (a
+/// panic in the write), it counts as a failed run, so nobody waits on it
+/// for good.
+struct AuditRun<'a>(&'a Runtime);
+
+impl Drop for AuditRun<'_> {
+    fn drop(&mut self) {
+        let mut waiting = self.0.audit_queue();
+        waiting.writing = false;
+        waiting.failures += 1;
+        self.0.audit_ok.store(false, Ordering::SeqCst);
+        self.0.audit_turn.notify_all();
+    }
 }
 
 /// Records kept waiting for the log at most: agents' calls are refused
