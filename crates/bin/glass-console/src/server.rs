@@ -275,6 +275,7 @@ fn refused(r: Refused) -> Response {
         ),
         Refused::NotFound(m) => Response::json(404, &json!({ "error": m })),
         Refused::Rule(m) => Response::json(409, &json!({ "error": m })),
+        Refused::Unavailable(m) => Response::json(503, &json!({ "error": m })),
     }
 }
 
@@ -2553,6 +2554,75 @@ mod tests {
             assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
             serde_json::from_slice(&r.body).unwrap()
         }
+    }
+
+    #[test]
+    fn ad3_a_change_the_console_cant_save_isnt_made_and_its_number_isnt_used() {
+        // The console changed its memory, then saved. A save that failed
+        // was reported, and the change stayed: the next computer to sync
+        // was served a version no file held, and after a restart that
+        // number went out again with other content.
+        let dir = tempfile::tempdir().unwrap();
+        let directory = LocalDirectory::starter("root");
+        let mut state = State::open(dir.path(), "acme", "Acme Corp", &directory).unwrap();
+        let send = |tier: &str| {
+            let edit =
+                format!(r#"{{"edit":"tier","group":"ap-ops","class":"send","tier":"{tier}"}}"#);
+            serde_json::from_str::<crate::edits::Edit>(&edit).unwrap()
+        };
+        state.edit_draft(send("never")).unwrap();
+        let previewed = state.draft_digest();
+        let first = state
+            .publish(&directory, "Sends never", "root", &previewed)
+            .unwrap();
+        state.edit_draft(send("ask")).unwrap();
+        let previewed = state.draft_digest();
+
+        // The disk stops taking the policy's file (a folder is where its
+        // new copy would go, which fails for root as for anyone).
+        let file = dir.path().join("policy.json");
+        let on_disk = std::fs::read(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        std::fs::write(file.join("in-the-way"), "").unwrap();
+
+        let failed = state.publish(&directory, "Sends ask", "root", &previewed);
+        assert!(
+            matches!(&failed, Err(Refused::Unavailable(why)) if why.contains("nothing was changed")),
+            "{failed:?}"
+        );
+        // Not a refusal of what was asked: worth asking again.
+        assert_eq!(refused(failed.unwrap_err()).status, 503);
+        // Nothing of it is the console's: no new version, the pilot ring
+        // on the one before, the draft as IT left it.
+        assert_eq!(state.latest_version(), first);
+        assert_eq!(state.in_force(Ring::Pilot).map(|v| v.version), Some(first));
+        assert_eq!(state.draft_digest(), previewed);
+        // An edit that can't be saved isn't made either.
+        assert!(matches!(
+            state.edit_draft(send("notify")),
+            Err(Refused::Unavailable(_))
+        ));
+        assert_eq!(state.draft_digest(), previewed);
+        // Nor a move between rings.
+        assert!(matches!(
+            state.promote(Ring::Early, first),
+            Err(Refused::Unavailable(_))
+        ));
+        assert_ne!(state.in_force(Ring::Early).map(|v| v.version), Some(first));
+
+        // The disk is back: the same publish goes out, as the next
+        // number, and a console started again has the same version.
+        std::fs::remove_dir_all(&file).unwrap();
+        std::fs::write(&file, on_disk).unwrap();
+        let second = state
+            .publish(&directory, "Sends ask", "root", &previewed)
+            .unwrap();
+        assert_eq!(second, first + 1);
+        let sent = state.in_force(Ring::Pilot).unwrap().text.clone();
+        let reopened = State::open(dir.path(), "acme", "Acme Corp", &directory).unwrap();
+        assert_eq!(reopened.latest_version(), second);
+        assert_eq!(reopened.in_force(Ring::Pilot).unwrap().text, sent);
     }
 
     #[tokio::test]

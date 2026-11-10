@@ -273,6 +273,10 @@ pub enum Refused {
     NotFound(String),
     /// A rule says no: 409.
     Rule(String),
+    /// The console couldn't do it just now, through nothing the caller
+    /// did: 503. A change it couldn't write down, above all. That was a
+    /// 400, which a computer takes for a refusal and doesn't ask again.
+    Unavailable(String),
 }
 
 impl From<StoreRefusal> for Refused {
@@ -405,13 +409,17 @@ impl State {
 
     /// Replaces the draft, if it validates as devices will check it.
     pub fn save_draft(&mut self, doc: &PolicyDocument) -> Result<(), Refused> {
-        if let Err(e) = Policy::from_document(doc.clone()) {
-            return Err(Refused::Invalid(errors(&e)));
-        }
-        self.policy.draft =
-            toml::to_string(doc).map_err(|e| Refused::Invalid(vec![e.to_string()]))?;
-        self.save_policy().map_err(internal)?;
-        Ok(())
+        let before = self.before();
+        let done = (|| -> Result<(), Refused> {
+            if let Err(e) = Policy::from_document(doc.clone()) {
+                return Err(Refused::Invalid(errors(&e)));
+            }
+            self.policy.draft =
+                toml::to_string(doc).map_err(|e| Refused::Invalid(vec![e.to_string()]))?;
+            self.save_policy().map_err(unsaved)?;
+            Ok(())
+        })();
+        self.kept(before, done)
     }
 
     /// Applies one of IT's edits to the draft, if the result validates.
@@ -563,61 +571,69 @@ impl State {
         by: &str,
         previewed: &str,
     ) -> Result<u64, Refused> {
-        if previewed != self.draft_digest() {
-            return Err(Refused::Rule(
-                "The draft changed since you previewed it, by another admin or by you: \
-                 preview it again, then publish."
-                    .into(),
-            ));
-        }
-        let draft = self.draft_for_devices(directory).map_err(internal)?;
-        if self.in_force(Ring::Pilot).is_some_and(|v| v.text == draft) {
-            return Err(Refused::Rule(
-                "Nothing to publish: the draft is what the pilot ring runs.".into(),
-            ));
-        }
-        let version = self
-            .release_policy(directory, note, by, None)
-            .map_err(|e| Refused::Invalid(vec![format!("{e:#}")]))?;
-        self.policy.rings.insert(Ring::Pilot, version);
-        self.save_policy().map_err(internal)?;
-        Ok(version)
+        let before = self.before();
+        let done = (|| -> Result<u64, Refused> {
+            if previewed != self.draft_digest() {
+                return Err(Refused::Rule(
+                    "The draft changed since you previewed it, by another admin or by you: \
+                     preview it again, then publish."
+                        .into(),
+                ));
+            }
+            let draft = self.draft_for_devices(directory).map_err(internal)?;
+            if self.in_force(Ring::Pilot).is_some_and(|v| v.text == draft) {
+                return Err(Refused::Rule(
+                    "Nothing to publish: the draft is what the pilot ring runs.".into(),
+                ));
+            }
+            let version = self
+                .release_policy(directory, note, by, None)
+                .map_err(|e| Refused::Invalid(vec![format!("{e:#}")]))?;
+            self.policy.rings.insert(Ring::Pilot, version);
+            self.save_policy().map_err(unsaved)?;
+            Ok(version)
+        })();
+        self.kept(before, done)
     }
 
     /// Moves the next ring up to the one before it: pilot → early → broad.
     /// `seen` is the version IT saw the ring before run: one published or
     /// promoted since goes on only once IT has seen it (DV-12, ADR 0053).
     pub fn promote(&mut self, to: Ring, seen: u64) -> Result<u64, Refused> {
-        let from = match to {
-            Ring::Early => Ring::Pilot,
-            Ring::Broad => Ring::Early,
-            Ring::Pilot => {
-                return Err(Refused::Rule(
-                    "Publishing is what reaches the pilot ring.".into(),
-                ));
+        let before = self.before();
+        let done = (|| -> Result<u64, Refused> {
+            let from = match to {
+                Ring::Early => Ring::Pilot,
+                Ring::Broad => Ring::Early,
+                Ring::Pilot => {
+                    return Err(Refused::Rule(
+                        "Publishing is what reaches the pilot ring.".into(),
+                    ));
+                }
+            };
+            let version = *self
+                .policy
+                .rings
+                .get(&from)
+                .ok_or_else(|| Refused::Rule("Nothing to promote.".into()))?;
+            if version != seen {
+                return Err(Refused::Rule(format!(
+                    "The {} ring runs v{version} now, not the v{seen} you saw: see how it runs, \
+                     then promote it.",
+                    from.as_str()
+                )));
             }
-        };
-        let version = *self
-            .policy
-            .rings
-            .get(&from)
-            .ok_or_else(|| Refused::Rule("Nothing to promote.".into()))?;
-        if version != seen {
-            return Err(Refused::Rule(format!(
-                "The {} ring runs v{version} now, not the v{seen} you saw: see how it runs, \
-                 then promote it.",
-                from.as_str()
-            )));
-        }
-        if self.policy.rings.get(&to) == Some(&version) {
-            return Err(Refused::Rule(format!(
-                "The {} ring already runs v{version}.",
-                to.as_str()
-            )));
-        }
-        self.policy.rings.insert(to, version);
-        self.save_policy().map_err(internal)?;
-        Ok(version)
+            if self.policy.rings.get(&to) == Some(&version) {
+                return Err(Refused::Rule(format!(
+                    "The {} ring already runs v{version}.",
+                    to.as_str()
+                )));
+            }
+            self.policy.rings.insert(to, version);
+            self.save_policy().map_err(unsaved)?;
+            Ok(version)
+        })();
+        self.kept(before, done)
     }
 
     /// Puts an earlier version's content back everywhere at once, as a new
@@ -630,32 +646,60 @@ impl State {
         to: u64,
         by: &str,
     ) -> Result<(u64, bool), Refused> {
-        let earlier = self
-            .policy
-            .versions
-            .iter()
-            .find(|v| v.version == to)
-            .ok_or_else(|| Refused::NotFound(format!("There is no v{to}.")))?;
-        let release: PolicyRelease =
-            serde_json::from_str(&earlier.signed.payload).map_err(internal)?;
-        let draft: PolicyDocument = toml::from_str(&release.policy).map_err(internal)?;
-        let unpublished = self.draft_for_devices(directory).map_err(internal)?;
-        let discarded = self
-            .in_force(Ring::Pilot)
-            .is_none_or(|v| v.text != unpublished);
-        self.policy.draft = toml::to_string(&draft).map_err(internal)?;
-        let version = self
-            .release_policy(directory, &format!("Rolled back to v{to}"), by, Some(to))
-            .map_err(|e| Refused::Invalid(vec![format!("{e:#}")]))?;
-        for ring in Ring::ALL {
-            self.policy.rings.insert(ring, version);
-        }
-        self.save_policy().map_err(internal)?;
-        Ok((version, discarded))
+        let before = self.before();
+        let done = (|| -> Result<(u64, bool), Refused> {
+            let earlier = self
+                .policy
+                .versions
+                .iter()
+                .find(|v| v.version == to)
+                .ok_or_else(|| Refused::NotFound(format!("There is no v{to}.")))?;
+            let release: PolicyRelease =
+                serde_json::from_str(&earlier.signed.payload).map_err(internal)?;
+            let draft: PolicyDocument = toml::from_str(&release.policy).map_err(internal)?;
+            let unpublished = self.draft_for_devices(directory).map_err(internal)?;
+            let discarded = self
+                .in_force(Ring::Pilot)
+                .is_none_or(|v| v.text != unpublished);
+            self.policy.draft = toml::to_string(&draft).map_err(internal)?;
+            let version = self
+                .release_policy(directory, &format!("Rolled back to v{to}"), by, Some(to))
+                .map_err(|e| Refused::Invalid(vec![format!("{e:#}")]))?;
+            for ring in Ring::ALL {
+                self.policy.rings.insert(ring, version);
+            }
+            self.save_policy().map_err(unsaved)?;
+            Ok((version, discarded))
+        })();
+        self.kept(before, done)
     }
 
     fn save_policy(&self) -> anyhow::Result<()> {
         write_json(&self.dir.join("policy.json"), &self.policy)
+    }
+
+    /// What a change may touch, as it is before the change.
+    fn before(&self) -> (PolicyState, CatalogState) {
+        (self.policy.clone(), self.catalog.clone())
+    }
+
+    /// The end of every change to the policy or the catalog: what it did
+    /// is kept if it's done, and put back as it was if it isn't.
+    ///
+    /// A change is made here and then saved. One that changed things and
+    /// then failed, at the save or at a check before it, used to stay:
+    /// IT was told it failed, the next computer to sync was served it,
+    /// and after a restart the same version number went out again with
+    /// other content, which computers that had the first never took.
+    fn kept<T>(
+        &mut self,
+        before: (PolicyState, CatalogState),
+        done: Result<T, Refused>,
+    ) -> Result<T, Refused> {
+        if done.is_err() {
+            (self.policy, self.catalog) = before;
+        }
+        done
     }
 
     // ---- catalog (AD-5, DV-10, DV-11) -----------------------------------
@@ -679,14 +723,18 @@ impl State {
     /// Adds an item waiting for review. Its id may not be another item's,
     /// whatever the kind: apps and agents share one namespace.
     pub fn submit(&mut self, item: ConsoleItem) -> Result<(), Refused> {
-        if self.catalog.items.iter().any(|i| i.item.id == item.item.id) {
-            return Err(Refused::Rule(format!(
-                "{} is already an item's id; apps, agents and flows share one namespace.",
-                item.item.id
-            )));
-        }
-        self.catalog.items.push(item);
-        self.save_catalog().map_err(internal)
+        let before = self.before();
+        let done = (|| -> Result<(), Refused> {
+            if self.catalog.items.iter().any(|i| i.item.id == item.item.id) {
+                return Err(Refused::Rule(format!(
+                    "{} is already an item's id; apps, agents and flows share one namespace.",
+                    item.item.id
+                )));
+            }
+            self.catalog.items.push(item);
+            self.save_catalog().map_err(unsaved)
+        })();
+        self.kept(before, done)
     }
 
     /// IT approves an item for a group with an install mode (DV-11), and a
@@ -700,29 +748,33 @@ impl State {
         pin: bool,
         by: &str,
     ) -> Result<u64, Refused> {
-        let entry = self.item_mut(id)?;
-        // GA-13: IT approves the version it reviewed. One shared while IT
-        // read the last never goes out unseen (specs/tla/StoreShare.tla).
-        if entry.item.version != version {
-            return Err(Refused::Rule(format!(
-                "Version {} of {} came in while you were reviewing version {version}; review it \
-                 before you approve it.",
-                entry.item.version, entry.item.name
-            )));
-        }
-        if entry.hardware.is_some() {
-            let item = entry.item.clone();
-            let patch = self.sign_patch(&item, mode, by)?;
+        let before = self.before();
+        let done = (|| -> Result<u64, Refused> {
             let entry = self.item_mut(id)?;
-            entry.item.patch = Some(patch);
-        }
-        let entry = self.item_mut(id)?;
-        entry.review = Review::Approved;
-        entry.approved = None;
-        entry.item.groups.insert(group.to_owned(), mode);
-        entry.item.pinned = pin;
-        entry.decided_by = Some(by.to_owned());
-        self.release_catalog()
+            // GA-13: IT approves the version it reviewed. One shared while IT
+            // read the last never goes out unseen (specs/tla/StoreShare.tla).
+            if entry.item.version != version {
+                return Err(Refused::Rule(format!(
+                    "Version {} of {} came in while you were reviewing version {version}; review it \
+                     before you approve it.",
+                    entry.item.version, entry.item.name
+                )));
+            }
+            if entry.hardware.is_some() {
+                let item = entry.item.clone();
+                let patch = self.sign_patch(&item, mode, by)?;
+                let entry = self.item_mut(id)?;
+                entry.item.patch = Some(patch);
+            }
+            let entry = self.item_mut(id)?;
+            entry.review = Review::Approved;
+            entry.approved = None;
+            entry.item.groups.insert(group.to_owned(), mode);
+            entry.item.pinned = pin;
+            entry.decided_by = Some(by.to_owned());
+            self.release_catalog()
+        })();
+        self.kept(before, done)
     }
 
     // ---- kernel patches sent for review (ADR 0057, slice 3) -------------
@@ -741,103 +793,107 @@ impl State {
         device: &str,
         directory: &dyn Directory,
     ) -> Result<PatchSubmitted, Refused> {
-        submission.check().map_err(|e| Refused::Invalid(vec![e]))?;
-        let request = &submission.request;
-        let id: AgentId = request.id.parse().map_err(|_| {
-            Refused::Invalid(vec![format!("{} can't be a catalog item's id", request.id)])
-        })?;
-        let current = self.catalog.items.iter().find(|i| i.item.id == id);
-        if current.is_some_and(|i| i.hardware.is_none()) {
-            return Err(Refused::Rule(format!(
-                "{id} is already an app's or agent's id; the patch needs its own."
-            )));
-        }
-        // One build of a patch at a time, and a bounded queue: a computer
-        // can't keep the build service busy for everyone else.
-        let building = |i: &ConsoleItem| {
-            i.hardware
-                .as_ref()
-                .is_some_and(|h| h.build == PatchBuild::Building)
-        };
-        if current.is_some_and(building) {
-            return Err(Refused::Rule(format!(
-                "{id} is still being built here; send it again once it's built."
-            )));
-        }
-        if self.catalog.items.iter().filter(|i| building(i)).count() >= MAX_PATCH_BUILDS {
-            return Err(Refused::Rule(
-                "The console is building as many patches as it takes at once; send it again \
-                 later."
-                    .into(),
-            ));
-        }
-        let version = current
-            .map_or(1, |i| i.item.version.parse::<u32>().unwrap_or(0) + 1)
-            .to_string();
-        let dir = self.patch_dir(&id, &version);
-        std::fs::create_dir_all(&dir).map_err(internal)?;
-        write_json(&dir.join("request.json"), request).map_err(internal)?;
-        let person = directory.display_name(&submission.person);
-        let item = CatalogItem {
-            id: id.clone(),
-            kind: glass_managed::ItemKind::HardwarePatch,
-            name: request.summary.clone(),
-            version: version.clone(),
-            publisher: format!("An agent, for {person}"),
-            publisher_verified: false,
-            internal: true,
-            summary: request.summary.clone(),
-            keywords: request.targets.clone(),
-            declares: glass_managed::Declared::default(),
-            groups: BTreeMap::new(),
-            pinned: false,
-            provenance: Default::default(),
-            app: None,
-            patch: None,
-        };
-        let shared = PatchShared {
-            person: submission.person.clone(),
-            device: device.to_owned(),
-            computer: submission.computer.clone(),
-            asked: submission.asked.clone(),
-            request: request.clone(),
-            build: PatchBuild::Building,
-            submitted_at: Timestamp::now(),
-            agent_review: None,
-        };
-        match self.catalog.items.iter_mut().find(|i| i.item.id == id) {
-            Some(entry) => {
-                if entry.review == Review::Approved {
-                    entry.approved = Some(entry.item.clone());
-                }
-                let groups = entry.item.groups.clone();
-                entry.item = CatalogItem { groups, ..item };
-                entry.review = Review::Waiting;
-                entry.requested_by = person.clone();
-                entry.decided_by = None;
-                entry.hardware = Some(shared);
+        let before = self.before();
+        let done = (|| -> Result<PatchSubmitted, Refused> {
+            submission.check().map_err(|e| Refused::Invalid(vec![e]))?;
+            let request = &submission.request;
+            let id: AgentId = request.id.parse().map_err(|_| {
+                Refused::Invalid(vec![format!("{} can't be a catalog item's id", request.id)])
+            })?;
+            let current = self.catalog.items.iter().find(|i| i.item.id == id);
+            if current.is_some_and(|i| i.hardware.is_none()) {
+                return Err(Refused::Rule(format!(
+                    "{id} is already an app's or agent's id; the patch needs its own."
+                )));
             }
-            None => self.catalog.items.push(ConsoleItem {
-                item,
-                review: Review::Waiting,
-                requested_by: person.clone(),
-                checks: Vec::new(),
-                decided_by: None,
-                shared: None,
-                approved: None,
-                hardware: Some(shared),
-            }),
-        }
-        self.save_catalog().map_err(internal)?;
-        Ok(PatchSubmitted {
-            id: id.to_string(),
-            version,
-            text: format!(
-                "Sent \"{}\" to IT for review. Once they approve it, it's in the Store's \
-                 Hardware category for computers like this one.",
-                request.summary
-            ),
-        })
+            // One build of a patch at a time, and a bounded queue: a computer
+            // can't keep the build service busy for everyone else.
+            let building = |i: &ConsoleItem| {
+                i.hardware
+                    .as_ref()
+                    .is_some_and(|h| h.build == PatchBuild::Building)
+            };
+            if current.is_some_and(building) {
+                return Err(Refused::Rule(format!(
+                    "{id} is still being built here; send it again once it's built."
+                )));
+            }
+            if self.catalog.items.iter().filter(|i| building(i)).count() >= MAX_PATCH_BUILDS {
+                return Err(Refused::Rule(
+                    "The console is building as many patches as it takes at once; send it again \
+                     later."
+                        .into(),
+                ));
+            }
+            let version = current
+                .map_or(1, |i| i.item.version.parse::<u32>().unwrap_or(0) + 1)
+                .to_string();
+            let dir = self.patch_dir(&id, &version);
+            std::fs::create_dir_all(&dir).map_err(internal)?;
+            write_json(&dir.join("request.json"), request).map_err(internal)?;
+            let person = directory.display_name(&submission.person);
+            let item = CatalogItem {
+                id: id.clone(),
+                kind: glass_managed::ItemKind::HardwarePatch,
+                name: request.summary.clone(),
+                version: version.clone(),
+                publisher: format!("An agent, for {person}"),
+                publisher_verified: false,
+                internal: true,
+                summary: request.summary.clone(),
+                keywords: request.targets.clone(),
+                declares: glass_managed::Declared::default(),
+                groups: BTreeMap::new(),
+                pinned: false,
+                provenance: Default::default(),
+                app: None,
+                patch: None,
+            };
+            let shared = PatchShared {
+                person: submission.person.clone(),
+                device: device.to_owned(),
+                computer: submission.computer.clone(),
+                asked: submission.asked.clone(),
+                request: request.clone(),
+                build: PatchBuild::Building,
+                submitted_at: Timestamp::now(),
+                agent_review: None,
+            };
+            match self.catalog.items.iter_mut().find(|i| i.item.id == id) {
+                Some(entry) => {
+                    if entry.review == Review::Approved {
+                        entry.approved = Some(entry.item.clone());
+                    }
+                    let groups = entry.item.groups.clone();
+                    entry.item = CatalogItem { groups, ..item };
+                    entry.review = Review::Waiting;
+                    entry.requested_by = person.clone();
+                    entry.decided_by = None;
+                    entry.hardware = Some(shared);
+                }
+                None => self.catalog.items.push(ConsoleItem {
+                    item,
+                    review: Review::Waiting,
+                    requested_by: person.clone(),
+                    checks: Vec::new(),
+                    decided_by: None,
+                    shared: None,
+                    approved: None,
+                    hardware: Some(shared),
+                }),
+            }
+            self.save_catalog().map_err(unsaved)?;
+            Ok(PatchSubmitted {
+                id: id.to_string(),
+                version,
+                text: format!(
+                    "Sent \"{}\" to IT for review. Once they approve it, it's in the Store's \
+                     Hardware category for computers like this one.",
+                    request.summary
+                ),
+            })
+        })();
+        self.kept(before, done)
     }
 
     /// The patches waiting to be built: after a restart, those a build was
@@ -864,37 +920,44 @@ impl State {
         result: Result<glass_managed::kbuild::BuildResult, String>,
         key: &glass_managed::PublicKey,
     ) -> Result<(), Refused> {
-        let dir = self.patch_dir(id, version);
-        let Some(entry) = self
-            .catalog
-            .items
-            .iter_mut()
-            .find(|i| i.item.id == *id && i.item.version == version)
-        else {
-            return Ok(());
-        };
-        let Some(shared) = entry.hardware.as_mut() else {
-            return Ok(());
-        };
-        shared.build = match result {
-            Err(why) => PatchBuild::Failed {
-                log: format!("The build service couldn't build it: {why}"),
-            },
-            Ok(built) => match built.bundle.filter(|_| built.ok) {
-                None => PatchBuild::Failed { log: built.log },
-                Some(bundle) => match crate::hardware::check_build(&shared.request, &bundle, key) {
-                    Err(why) => PatchBuild::Failed { log: why },
-                    Ok(()) => {
-                        write_json(&dir.join("built.json"), &bundle).map_err(internal)?;
-                        PatchBuild::Built {
-                            log: built.log,
-                            bytes: serde_json::to_vec(&bundle).map_or(0, |b| b.len() as u64),
+        let before = self.before();
+        let done = (|| -> Result<(), Refused> {
+            let dir = self.patch_dir(id, version);
+            let Some(entry) = self
+                .catalog
+                .items
+                .iter_mut()
+                .find(|i| i.item.id == *id && i.item.version == version)
+            else {
+                return Ok(());
+            };
+            let Some(shared) = entry.hardware.as_mut() else {
+                return Ok(());
+            };
+            shared.build = match result {
+                Err(why) => PatchBuild::Failed {
+                    log: format!("The build service couldn't build it: {why}"),
+                },
+                Ok(built) => match built.bundle.filter(|_| built.ok) {
+                    None => PatchBuild::Failed { log: built.log },
+                    Some(bundle) => {
+                        match crate::hardware::check_build(&shared.request, &bundle, key) {
+                            Err(why) => PatchBuild::Failed { log: why },
+                            Ok(()) => {
+                                write_json(&dir.join("built.json"), &bundle).map_err(internal)?;
+                                PatchBuild::Built {
+                                    log: built.log,
+                                    bytes: serde_json::to_vec(&bundle)
+                                        .map_or(0, |b| b.len() as u64),
+                                }
+                            }
                         }
                     }
                 },
-            },
-        };
-        self.save_catalog().map_err(internal)
+            };
+            self.save_catalog().map_err(unsaved)
+        })();
+        self.kept(before, done)
     }
 
     /// IT approves a patch: its build, signed again with the org's key as
@@ -972,18 +1035,22 @@ impl State {
         version: &str,
         review: crate::hardware::AgentReview,
     ) -> Result<(), Refused> {
-        let entry = self.item_mut(id)?;
-        if entry.item.version != version {
-            return Err(Refused::Rule(format!(
-                "Version {} came in while the agent read version {version}: review that one.",
-                entry.item.version
-            )));
-        }
-        let Some(shared) = entry.hardware.as_mut() else {
-            return Err(Refused::Rule(format!("{id} isn't a kernel patch")));
-        };
-        shared.agent_review = Some(review);
-        self.save_catalog().map_err(internal)
+        let before = self.before();
+        let done = (|| -> Result<(), Refused> {
+            let entry = self.item_mut(id)?;
+            if entry.item.version != version {
+                return Err(Refused::Rule(format!(
+                    "Version {} came in while the agent read version {version}: review that one.",
+                    entry.item.version
+                )));
+            }
+            let Some(shared) = entry.hardware.as_mut() else {
+                return Err(Refused::Rule(format!("{id} isn't a kernel patch")));
+            };
+            shared.agent_review = Some(review);
+            self.save_catalog().map_err(unsaved)
+        })();
+        self.kept(before, done)
     }
 
     /// A reviewed patch's bundle, for a computer, only at the revision the
@@ -1019,11 +1086,15 @@ impl State {
 
     /// IT blocks an item: it leaves the catalog devices get.
     pub fn block(&mut self, id: &str, by: &str) -> Result<u64, Refused> {
-        let entry = self.item_mut(id)?;
-        entry.review = Review::Blocked;
-        entry.approved = None;
-        entry.decided_by = Some(by.to_owned());
-        self.release_catalog()
+        let before = self.before();
+        let done = (|| -> Result<u64, Refused> {
+            let entry = self.item_mut(id)?;
+            entry.review = Review::Blocked;
+            entry.approved = None;
+            entry.decided_by = Some(by.to_owned());
+            self.release_catalog()
+        })();
+        self.kept(before, done)
     }
 
     /// The store rule: an org's items never go to the public store.
@@ -1036,25 +1107,29 @@ impl State {
 
     /// Signs the approved items as the next catalog version.
     pub fn release_catalog(&mut self) -> Result<u64, Refused> {
-        let release = CatalogRelease {
-            items: self
-                .catalog
-                .items
-                .iter()
-                .filter_map(ConsoleItem::live)
-                .cloned()
-                .collect(),
-        };
-        release.check().map_err(Refused::Rule)?;
-        let version = self.catalog.released.as_ref().map_or(0, |s| s.version) + 1;
-        let payload = serde_json::to_string(&release).map_err(internal)?;
-        self.catalog.released =
-            Some(
-                self.key
-                    .sign(DocKind::Catalog, &self.org.id, version, payload),
-            );
-        self.save_catalog().map_err(internal)?;
-        Ok(version)
+        let before = self.before();
+        let done = (|| -> Result<u64, Refused> {
+            let release = CatalogRelease {
+                items: self
+                    .catalog
+                    .items
+                    .iter()
+                    .filter_map(ConsoleItem::live)
+                    .cloned()
+                    .collect(),
+            };
+            release.check().map_err(Refused::Rule)?;
+            let version = self.catalog.released.as_ref().map_or(0, |s| s.version) + 1;
+            let payload = serde_json::to_string(&release).map_err(internal)?;
+            self.catalog.released =
+                Some(
+                    self.key
+                        .sign(DocKind::Catalog, &self.org.id, version, payload),
+                );
+            self.save_catalog().map_err(unsaved)?;
+            Ok(version)
+        })();
+        self.kept(before, done)
     }
 
     pub fn save_catalog(&self) -> anyhow::Result<()> {
@@ -1207,131 +1282,135 @@ impl State {
         checked: Checked,
         directory: &dyn Directory,
     ) -> Result<Submitted, Refused> {
-        let Some(bundle) = checked.bundle.clone().filter(|_| checked.passed()) else {
-            return Err(Refused::Invalid(checked.failures()));
-        };
-        // Another submission of it may have come in while this one built.
-        let current = self.catalog.items.iter().find(|i| i.item.id == plan.id);
-        let expected = current.map_or(1, |i| i.item.version.parse::<u32>().unwrap_or(0) + 1);
-        let same_maker = current.is_none_or(|i| {
-            i.shared
-                .as_ref()
-                .is_some_and(|s| s.maker == submission.maker && s.maker_app == submission.app)
-        });
-        if expected != plan.version || !same_maker {
-            return Err(Refused::Rule(
-                "It changed while the console checked it; share it again.".into(),
-            ));
-        }
-        let version = plan.version.to_string();
-        let dir = self.shared_dir(&plan.id, &version);
-        let keep = || -> anyhow::Result<()> {
-            std::fs::create_dir_all(&dir)?;
-            write_json(&dir.join("source.json"), &submission.files)?;
-            write_json(&dir.join("changes.json"), &checked.changes)?;
-            write_json(
-                &dir.join("bundle.json"),
-                &Bundle {
-                    app: plan.id.clone(),
-                    version: version.clone(),
-                    files: bundle.clone(),
-                },
-            )
-        };
-        keep().map_err(internal)?;
-        let app = OrgApp {
-            manifest: plan.manifest.clone(),
-            bundle_sha256: glass_managed::studio::digest(&bundle),
-            source_sha256: glass_managed::studio::digest(&submission.files),
-            made_by: submission.maker.clone(),
-            based_on: submission
-                .based_on
-                .as_ref()
-                .map(|b| format!("{}@{}", b.id, b.version)),
-        };
-        let maker = directory.display_name(&submission.maker);
-        let shared = Shared {
-            maker: submission.maker.clone(),
-            maker_app: submission.app.clone(),
-            maker_version: submission.version,
-            device: submission.device.clone(),
-            share: submission.share.clone(),
-            note: submission.note.trim().to_owned(),
-            based_on: submission.based_on.clone(),
-            device_notes: submission.notes.clone(),
-            checks: checked.checks.clone(),
-            beyond_base: checked.beyond_base.clone(),
-            irreversible: checked.irreversible.clone(),
-            submitted_at: Timestamp::now(),
-        };
-        let item = CatalogItem {
-            id: plan.id.clone(),
-            kind: glass_managed::ItemKind::App,
-            name: plan.manifest.name.clone(),
-            version: version.clone(),
-            publisher: maker.clone(),
-            publisher_verified: false,
-            internal: true,
-            summary: shared.note.clone(),
-            keywords: Vec::new(),
-            declares: glass_managed::Declared {
-                actions: plan
-                    .manifest
-                    .actions
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect(),
-                default_tiers: BTreeMap::new(),
-                max_label: plan.manifest.max_label(),
-                egress: Vec::new(),
-            },
-            groups: BTreeMap::new(),
-            pinned: false,
-            provenance: Default::default(),
-            app: Some(app),
-            patch: None,
-        };
-        match self.catalog.items.iter_mut().find(|i| i.item.id == plan.id) {
-            Some(entry) => {
-                if entry.review == Review::Approved {
-                    entry.approved = Some(entry.item.clone());
-                }
-                // Who it reaches carries over; IT may change it on approval.
-                let (groups, pinned) = (entry.item.groups.clone(), entry.item.pinned);
-                entry.item = CatalogItem {
-                    groups,
-                    pinned,
-                    ..item
-                };
-                entry.review = Review::Waiting;
-                entry.requested_by = maker.clone();
-                entry.decided_by = None;
-                entry.shared = Some(shared);
+        let before = self.before();
+        let done = (|| -> Result<Submitted, Refused> {
+            let Some(bundle) = checked.bundle.clone().filter(|_| checked.passed()) else {
+                return Err(Refused::Invalid(checked.failures()));
+            };
+            // Another submission of it may have come in while this one built.
+            let current = self.catalog.items.iter().find(|i| i.item.id == plan.id);
+            let expected = current.map_or(1, |i| i.item.version.parse::<u32>().unwrap_or(0) + 1);
+            let same_maker = current.is_none_or(|i| {
+                i.shared
+                    .as_ref()
+                    .is_some_and(|s| s.maker == submission.maker && s.maker_app == submission.app)
+            });
+            if expected != plan.version || !same_maker {
+                return Err(Refused::Rule(
+                    "It changed while the console checked it; share it again.".into(),
+                ));
             }
-            None => self.catalog.items.push(ConsoleItem {
-                item,
-                review: Review::Waiting,
-                requested_by: maker.clone(),
-                checks: Vec::new(),
-                decided_by: None,
-                shared: Some(shared),
-                hardware: None,
-                approved: None,
-            }),
-        }
-        self.save_catalog().map_err(internal)?;
-        let audience = match &submission.share {
-            ShareTo::Team { group } => format!("the {} team", directory.group_display(group)),
-            ShareTo::Org => "everyone in the organization".into(),
-        };
-        Ok(Submitted {
-            id: plan.id,
-            text: format!(
-                "Sent {} to IT for review as version {version}. Once they approve it, {audience} \
-                 can install it from the Store.",
-                plan.manifest.name
-            ),
-        })
+            let version = plan.version.to_string();
+            let dir = self.shared_dir(&plan.id, &version);
+            let keep = || -> anyhow::Result<()> {
+                std::fs::create_dir_all(&dir)?;
+                write_json(&dir.join("source.json"), &submission.files)?;
+                write_json(&dir.join("changes.json"), &checked.changes)?;
+                write_json(
+                    &dir.join("bundle.json"),
+                    &Bundle {
+                        app: plan.id.clone(),
+                        version: version.clone(),
+                        files: bundle.clone(),
+                    },
+                )
+            };
+            keep().map_err(internal)?;
+            let app = OrgApp {
+                manifest: plan.manifest.clone(),
+                bundle_sha256: glass_managed::studio::digest(&bundle),
+                source_sha256: glass_managed::studio::digest(&submission.files),
+                made_by: submission.maker.clone(),
+                based_on: submission
+                    .based_on
+                    .as_ref()
+                    .map(|b| format!("{}@{}", b.id, b.version)),
+            };
+            let maker = directory.display_name(&submission.maker);
+            let shared = Shared {
+                maker: submission.maker.clone(),
+                maker_app: submission.app.clone(),
+                maker_version: submission.version,
+                device: submission.device.clone(),
+                share: submission.share.clone(),
+                note: submission.note.trim().to_owned(),
+                based_on: submission.based_on.clone(),
+                device_notes: submission.notes.clone(),
+                checks: checked.checks.clone(),
+                beyond_base: checked.beyond_base.clone(),
+                irreversible: checked.irreversible.clone(),
+                submitted_at: Timestamp::now(),
+            };
+            let item = CatalogItem {
+                id: plan.id.clone(),
+                kind: glass_managed::ItemKind::App,
+                name: plan.manifest.name.clone(),
+                version: version.clone(),
+                publisher: maker.clone(),
+                publisher_verified: false,
+                internal: true,
+                summary: shared.note.clone(),
+                keywords: Vec::new(),
+                declares: glass_managed::Declared {
+                    actions: plan
+                        .manifest
+                        .actions
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    default_tiers: BTreeMap::new(),
+                    max_label: plan.manifest.max_label(),
+                    egress: Vec::new(),
+                },
+                groups: BTreeMap::new(),
+                pinned: false,
+                provenance: Default::default(),
+                app: Some(app),
+                patch: None,
+            };
+            match self.catalog.items.iter_mut().find(|i| i.item.id == plan.id) {
+                Some(entry) => {
+                    if entry.review == Review::Approved {
+                        entry.approved = Some(entry.item.clone());
+                    }
+                    // Who it reaches carries over; IT may change it on approval.
+                    let (groups, pinned) = (entry.item.groups.clone(), entry.item.pinned);
+                    entry.item = CatalogItem {
+                        groups,
+                        pinned,
+                        ..item
+                    };
+                    entry.review = Review::Waiting;
+                    entry.requested_by = maker.clone();
+                    entry.decided_by = None;
+                    entry.shared = Some(shared);
+                }
+                None => self.catalog.items.push(ConsoleItem {
+                    item,
+                    review: Review::Waiting,
+                    requested_by: maker.clone(),
+                    checks: Vec::new(),
+                    decided_by: None,
+                    shared: Some(shared),
+                    hardware: None,
+                    approved: None,
+                }),
+            }
+            self.save_catalog().map_err(unsaved)?;
+            let audience = match &submission.share {
+                ShareTo::Team { group } => format!("the {} team", directory.group_display(group)),
+                ShareTo::Org => "everyone in the organization".into(),
+            };
+            Ok(Submitted {
+                id: plan.id,
+                text: format!(
+                    "Sent {} to IT for review as version {version}. Once they approve it, {audience} \
+                     can install it from the Store.",
+                    plan.manifest.name
+                ),
+            })
+        })();
+        self.kept(before, done)
     }
 
     /// The change a shared app's waiting version makes, file by file.
@@ -1736,6 +1815,13 @@ impl State {
 
 fn internal(e: impl std::fmt::Display) -> Refused {
     Refused::Invalid(vec![e.to_string()])
+}
+
+/// A change that couldn't be written down, and so wasn't made.
+fn unsaved(e: impl std::fmt::Display) -> Refused {
+    Refused::Unavailable(format!(
+        "The console couldn't save that, so nothing was changed ({e:#}). Try again in a moment."
+    ))
 }
 
 fn errors(e: &glass_policy::PolicyError) -> Vec<String> {
