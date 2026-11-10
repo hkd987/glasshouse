@@ -184,3 +184,29 @@ Both items it left open are closed:
 glassd is started again after a crash, by `daemon -R` in rc.d/glassd; the
 Boot model's restart step is the supervisor's, and
 `ADR0055_GlassdComesBackAfterACrash` checks it.
+
+## Amended 2026-11-10 (audit 4.7)
+Two more ways the log's end can be wrong, neither of which stops it now:
+- **A write that failed after its whole line landed** (the fsync failed).
+  The caller was told the record failed and wrote it again; the first
+  writing stayed in the file and was chained onto, so the record stood in
+  the log twice, once never acknowledged. The writer now remembers where
+  its last acknowledged record ends and, when it opens the file again,
+  cuts back to there and notes it, as for a line cut short
+  (`AU1_NoRecordTwice`; the model's `wholeLineKept` is the old behaviour).
+- **A last record that doesn't match its own hash** (damage: the writer
+  never leaves one). `open` was an error, so glassd refused to start at
+  every restart with no way back but editing the file by hand. The
+  damaged record is now set aside in a file beside the log
+  (`audit.log.damaged-<time>`, root's alone), a `log_recovered` record
+  says so with the file's name, and the chain goes on from the record
+  before it; glassd logs a warning. This gives up nothing the chain
+  protected: whoever can write the file can cut its end off without a
+  trace, and here what was there is kept. Two damaged records at the end
+  are more than a damaged end: glassd still refuses to start, and says
+  what a person can do (`glassctl verify`, then move the log aside).
+
+Still open: the log is one file for as long as the computer is used
+(segments chained by hash, with a retention rule), and each record waits
+for its own fsync under the runtime's lock (a writer with group commit).
+

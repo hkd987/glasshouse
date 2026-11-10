@@ -11,7 +11,9 @@
 (*                                   torn tail, log_recovered), append     *)
 (*                                   (one write and an fsync under the     *)
 (*                                   writer's lock; a failed write leaves  *)
-(*                                   the writer unusable, or reopens it),  *)
+(*                                   the writer unusable, or reopens it,   *)
+(*                                   cutting back to the last record it    *)
+(*                                   acknowledged: cut_to),                *)
 (*                                   offsets (the index: a pass without    *)
 (*                                   the writer, then the rest with it),   *)
 (*                                   task_records, verify/read             *)
@@ -33,7 +35,16 @@
 (* reader can fall                                                         *)
 (* between: its bytes start to land (the line is unfinished), then the     *)
 (* rest and the fsync. Positions stand for byte offsets. Complete lines    *)
-(* are never altered: tampering is verify's unit tests' (AU-2).            *)
+(* are never altered: tampering is verify's unit tests' (AU-2), and a last *)
+(* record that doesn't match its hash being set aside by open is log.rs's  *)
+(* (au2_a_damaged_last_record_...).                                        *)
+(*                                                                         *)
+(* A write that fails may have landed whole (its fsync failed): the line   *)
+(* is complete in the file though the append was an error. The writer cuts *)
+(* back to the last record it acknowledged when it opens the file again,   *)
+(* so that line goes like an unfinished one: here both are the unfinished  *)
+(* last line. (Across a crash the writer's memory of where that was is     *)
+(* gone, and such a line stays: Crash.)                                    *)
 (*                                                                         *)
 (* The calls are an agent's: Reads are reads (no side effect), the rest    *)
 (* change something or send data off the computer. Each call runs once:    *)
@@ -50,6 +61,11 @@
 (*   "readsWhileDown"    reads ran while the log was down                  *)
 (*   "readGiven"         a read whose record couldn't be written still     *)
 (*                       gave the agent what it read                       *)
+(* before the audit of 2026-11 (4.7):                                      *)
+(*   "wholeLineKept"     a write that failed after its whole line landed   *)
+(*                       left the line in the file, and the writer chained *)
+(*                       onto it; the runtime wrote the record again, so   *)
+(*                       it stood in the log twice                         *)
 (* and before ADR 0054:                                                    *)
 (*   "noWriteAhead"      a change ran before anything of it was on the     *)
 (*                       record, so glassd stopping before its outcome     *)
@@ -217,12 +233,18 @@ End(c) ==
                    full, fulls, crashes>>
 
 \* The disk fills under the write: the line stays unfinished, and the
-\* writer won't chain onto it.
+\* writer won't chain onto it. Or the whole line lands and its fsync fails:
+\* the writer remembers where its last acknowledged record ends and cuts
+\* back to it when it opens the file again, which is the same here. It used
+\* to leave the line and chain onto it ("wholeLineKept").
 Cut(c) ==
     /\ up /\ call[c] = "landing" /\ full
     /\ wok' = FALSE /\ lock' = None
     /\ call' = [call EXCEPT ![c] = "failed"]
-    /\ UNCHANGED <<ahead, file, up, wlen, ran, saw, acked, lost, healthy, pending, index,
+    /\ file' \in IF "wholeLineKept" \in Old
+                 THEN {file, [file EXCEPT ![Len(file)].done = TRUE]}
+                 ELSE {file}
+    /\ UNCHANGED <<ahead, up, wlen, ran, saw, acked, lost, healthy, pending, index,
                    view, vfy, rep, full, fulls, crashes>>
 
 \* What the agent gets once the record is written.
@@ -471,6 +493,13 @@ AU1_AnOutcomeFollowsItsStart ==
         (file[i].kind = "end" /\ file[i].id \notin Reads) =>
             \E j \in 1..(i - 1) :
                 file[j].id = file[i].id /\ file[j].kind = "start" /\ file[j].done
+
+\* AU-1: a record is in the log once. A record whose append failed is
+\* written again by the runtime, so none of the failed writing may stay.
+AU1_NoRecordTwice ==
+    \A i, j \in DOMAIN file :
+        (i < j /\ file[i].done /\ file[j].done /\ file[i].id # "lr") =>
+            ~(file[i].id = file[j].id /\ file[i].kind = file[j].kind)
 
 \* Without a restart, the log takes records again once the disk has room.
 AU1_TheLogRecovers == (up /\ ~healthy) ~> (healthy \/ ~up)

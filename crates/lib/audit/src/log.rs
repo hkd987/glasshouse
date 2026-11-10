@@ -81,10 +81,20 @@ pub enum Durability {
 /// `write` call and, by default, fsynced before `append` returns. A record is
 /// acknowledged only once `append` returns `Ok`.
 ///
-/// A write that fails (a full disk) may leave part of its line behind. The
-/// writer never chains onto it: the next append opens the file again as a
-/// start does, cutting the unfinished line off and noting it, so the log
-/// takes records again once there's room (ADR 0053, `specs/tla/AuditLog.tla`).
+/// A write that fails (a full disk) may leave part of its line behind, and
+/// one whose fsync fails leaves all of it. The writer never chains onto
+/// either: the next append opens the file again as a start does, cutting
+/// off everything past the last record it acknowledged and noting it, so
+/// the log takes records again once there's room and holds no record whose
+/// append failed (ADR 0053, `specs/tla/AuditLog.tla`).
+///
+/// A last record that doesn't match its own hash (damage: the writer never
+/// leaves one) is set aside in a file beside the log and noted, and the
+/// chain goes on from the record before it, where glassd used to refuse to
+/// start for good. Nothing is lost that the chain protected: the end of a
+/// hash chain can be cut off without a trace by whoever can write the
+/// file, and what was there is kept. Two damaged records at the end are
+/// more than a damaged end, and still refused.
 ///
 /// A task's records are found through an index of where each task's lines
 /// start, built by one pass the first time they're asked for and kept up
@@ -95,10 +105,42 @@ pub struct AuditLog {
     path: PathBuf,
     durability: Durability,
     state: Mutex<Option<WriterState>>,
+    /// After a failed write: where the last acknowledged record ends.
+    /// Whatever the file holds past it was never acknowledged, and the
+    /// next opening cuts it off.
+    cut_to: Mutex<Option<u64>>,
+    /// The file a damaged last record was set aside in when this log was
+    /// opened, for whoever opened it to say so.
+    set_aside: Option<String>,
     index: Mutex<Option<TaskIndex>>,
-    /// Tests only: writes to let through, then writes to fail as on a full
-    /// disk.
-    failing: Mutex<(u32, u32)>,
+    /// Tests only: writes to fail, and how.
+    failing: Mutex<Failing>,
+}
+
+/// Tests only: after `skip` more writes, the next `writes` fail.
+#[derive(Debug, Default, Clone, Copy)]
+struct Failing {
+    skip: u32,
+    writes: u32,
+    /// As a failed fsync does, with the whole line written; else as a full
+    /// disk does, with half of it.
+    whole: bool,
+}
+
+/// What opening the log had to put right.
+#[derive(Debug, Default)]
+struct Recovered {
+    /// Bytes past the last good record, cut off: a write cut short, or one
+    /// never acknowledged.
+    dropped: u64,
+    /// The file a damaged last record was kept in, beside the log.
+    set_aside: Option<String>,
+}
+
+impl Recovered {
+    fn anything(&self) -> bool {
+        self.dropped > 0 || self.set_aside.is_some()
+    }
 }
 
 #[derive(Debug)]
@@ -123,19 +165,23 @@ impl AuditLog {
     ///
     /// If the file ends in a partial line, that write was never acknowledged
     /// (it was cut short by a crash). It is truncated and a `log_recovered`
-    /// record notes how many bytes were dropped.
+    /// record notes how many bytes were dropped. A complete last record
+    /// that doesn't match its hash is set aside beside the log and noted
+    /// the same way.
     pub fn open(path: impl Into<PathBuf>, durability: Durability) -> Result<Self, AuditError> {
         let path = path.into();
-        let (state, dropped) = open_writer(&path)?;
+        let (state, recovery) = open_writer(&path, None)?;
         let log = Self {
             path,
             durability,
             state: Mutex::new(Some(state)),
+            cut_to: Mutex::new(None),
+            set_aside: recovery.set_aside.clone(),
             index: Mutex::new(None),
-            failing: Mutex::new((0, 0)),
+            failing: Mutex::new(Failing::default()),
         };
-        if dropped > 0 {
-            log.append(recovered(dropped))?;
+        if recovery.anything() {
+            log.append(recovered(&recovery))?;
         }
         Ok(log)
     }
@@ -147,11 +193,37 @@ impl AuditLog {
         *self
             .failing
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = (skip, writes);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Failing {
+            skip,
+            writes,
+            whole: false,
+        };
+    }
+
+    /// Tests only: after `skip` more writes, the next `writes` fail as a
+    /// failed fsync does: the whole line is in the file, and the append is
+    /// an error.
+    #[doc(hidden)]
+    pub fn fail_syncs_for_tests(&self, skip: u32, writes: u32) {
+        *self
+            .failing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Failing {
+            skip,
+            writes,
+            whole: true,
+        };
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The name of the file, beside the log, that a damaged last record
+    /// was set aside in when this log was opened; `None` if it wasn't
+    /// damaged. The log's own `log_recovered` record says the same.
+    pub fn set_aside_at_open(&self) -> Option<&str> {
+        self.set_aside.as_deref()
     }
 
     /// Appends one event and returns the stored record. After a failed
@@ -159,10 +231,14 @@ impl AuditLog {
     pub fn append(&self, event: AuditEvent) -> Result<AuditRecord, AuditError> {
         let mut guard = self.state.lock().map_err(|_| AuditError::Poisoned)?;
         if guard.is_none() {
-            let (state, dropped) = open_writer(&self.path)?;
+            let cut_to = *self
+                .cut_to
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (state, recovery) = open_writer(&self.path, cut_to)?;
             *guard = Some(state);
-            if dropped > 0 {
-                self.write(&mut guard, recovered(dropped))?;
+            if recovery.anything() {
+                self.write(&mut guard, recovered(&recovery))?;
             }
         }
         self.write(&mut guard, event)
@@ -202,41 +278,55 @@ impl AuditLog {
         })?;
         line.push('\n');
 
+        // Tests only: how much of this line lands before the write fails.
         let failing = {
             let mut failing = self
                 .failing
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             match *failing {
-                (0, 0) => false,
-                (0, writes) => {
-                    failing.1 = writes - 1;
-                    true
+                Failing { writes: 0, .. } => None,
+                Failing {
+                    skip: 0,
+                    writes,
+                    whole,
+                } => {
+                    failing.writes = writes - 1;
+                    Some(if whole { line.len() } else { line.len() / 2 })
                 }
-                (skip, _) => {
-                    failing.0 = skip - 1;
-                    false
+                Failing { skip, .. } => {
+                    failing.skip = skip - 1;
+                    None
                 }
             }
         };
-        let written = if failing {
-            state
+        let written = match failing {
+            Some(landed) => state
                 .file
-                .write_all(&line.as_bytes()[..line.len() / 2])
+                .write_all(&line.as_bytes()[..landed])
                 .and_then(|()| {
                     Err(io::Error::new(
                         io::ErrorKind::StorageFull,
                         "no space left on device (a test's)",
                     ))
-                })
-        } else {
-            state.file.write_all(line.as_bytes())
+                }),
+            None => state.file.write_all(line.as_bytes()),
         }
         .and_then(|()| match self.durability {
             Durability::Sync => state.file.sync_data(),
             Durability::Buffered => Ok(()),
         });
         if let Err(source) = written {
+            // Part of the line may be in the file, or all of it (the fsync
+            // failed): none of it was acknowledged, and the caller is told
+            // it failed and writes it again. Where the last acknowledged
+            // record ends is kept, and the next opening cuts back to it; a
+            // whole line left there was chained onto, and stood in the log
+            // beside the second writing of the same record.
+            *self
+                .cut_to
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state.len);
             *guard = None;
             return Err(AuditError::Io {
                 path: self.path.clone(),
@@ -363,7 +453,7 @@ impl AuditLog {
 /// Opens the log's file for appending, after its last complete line: a
 /// line that ends without its newline was cut short (a crash, or a full
 /// disk) and never acknowledged, so it's cut off. How many bytes were.
-fn open_writer(path: &Path) -> Result<(WriterState, u64), AuditError> {
+fn open_writer(path: &Path, cut_to: Option<u64>) -> Result<(WriterState, Recovered), AuditError> {
     let io_err = |source| AuditError::Io {
         path: path.to_owned(),
         source,
@@ -374,21 +464,51 @@ fn open_writer(path: &Path) -> Result<(WriterState, u64), AuditError> {
         .create(true)
         .open(path)
         .map_err(io_err)?;
-    let (tail, dropped) = read_tail(&mut file).map_err(io_err)?;
-    let (next_seq, last_hash) = match tail {
+    let mut recovery = Recovered::default();
+    let mut len = file.metadata().map_err(io_err)?.len();
+    // Past the last record this writer acknowledged: a write that failed.
+    if let Some(at) = cut_to.filter(|&at| at < len) {
+        file.set_len(at).map_err(io_err)?;
+        recovery.dropped += len - at;
+        len = at;
+    }
+    let (last, torn) = read_tail(&mut file, len).map_err(io_err)?;
+    let (next_seq, last_hash) = match last {
         None => (0, GENESIS.to_owned()),
-        Some(line) => {
-            let (hash, record) = parse_line(&line).map_err(|reason| AuditError::Corrupt {
-                path: path.to_owned(),
-                line: 0,
-                reason: format!("last record: {reason}"),
-            })?;
-            (record.seq + 1, hash)
-        }
+        Some((line, start)) => match parse_line(&line) {
+            Ok((hash, record)) => (record.seq + 1, hash),
+            // Damage at the very end. The record before it says where the
+            // chain stands; if that one is damaged too, this isn't a
+            // damaged end, and it is for a person to look at.
+            Err(reason) => {
+                let (before, _) = read_tail(&mut file, start).map_err(io_err)?;
+                let chain = match before {
+                    None => (0, GENESIS.to_owned()),
+                    Some((line, _)) => {
+                        let (hash, record) =
+                            parse_line(&line).map_err(|second| AuditError::Corrupt {
+                                path: path.to_owned(),
+                                line: 0,
+                                reason: format!(
+                                    "last record: {reason}; and the one before it: {second}"
+                                ),
+                            })?;
+                        (record.seq + 1, hash)
+                    }
+                };
+                // Kept before it is cut: never the one without the other.
+                recovery.set_aside = Some(set_aside(path, &mut file, start, len)?);
+                file.set_len(start).map_err(io_err)?;
+                recovery.dropped += len - start;
+                len = start;
+                chain
+            }
+        },
     };
-    if dropped > 0 {
-        let keep = file.metadata().map_err(io_err)?.len() - dropped;
-        file.set_len(keep).map_err(io_err)?;
+    // A line without its newline: a write cut short, never acknowledged.
+    if torn > 0 && recovery.set_aside.is_none() {
+        file.set_len(len - torn).map_err(io_err)?;
+        recovery.dropped += torn;
     }
     let len = file.metadata().map_err(io_err)?.len();
     Ok((
@@ -398,18 +518,75 @@ fn open_writer(path: &Path) -> Result<(WriterState, u64), AuditError> {
             last_hash,
             len,
         },
-        dropped,
+        recovery,
     ))
 }
 
-/// The note of a line cut short and dropped.
-fn recovered(dropped: u64) -> AuditEvent {
-    let mut event = AuditEvent::new(
-        EventKind::LogRecovered,
-        format!("dropped {dropped} bytes of an unacknowledged partial record"),
-    );
-    event.detail = serde_json::json!({ "dropped_bytes": dropped });
-    event
+/// Copies the log's bytes from `start` to `end` (a damaged last record,
+/// and anything after it) into a new file beside it, for root alone, and
+/// returns its name: `<log>.damaged-<unix seconds>`.
+fn set_aside(path: &Path, file: &mut File, start: u64, end: u64) -> Result<String, AuditError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let io_err = |source| AuditError::Io {
+        path: path.to_owned(),
+        source,
+    };
+    let log_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "audit.log".to_owned());
+    let stamp = Timestamp::now().unix_seconds();
+    let mut tries = 0u32;
+    let (name, mut kept) = loop {
+        let name = if tries == 0 {
+            format!("{log_name}.damaged-{stamp}")
+        } else {
+            format!("{log_name}.damaged-{stamp}-{tries}")
+        };
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path.with_file_name(&name))
+        {
+            Ok(kept) => break (name, kept),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && tries < 100 => tries += 1,
+            Err(e) => return Err(io_err(e)),
+        }
+    };
+    file.seek(SeekFrom::Start(start)).map_err(io_err)?;
+    io::copy(&mut Read::by_ref(file).take(end - start), &mut kept).map_err(io_err)?;
+    kept.sync_all().map_err(io_err)?;
+    Ok(name)
+}
+
+/// The note of what opening the log put right.
+fn recovered(recovery: &Recovered) -> AuditEvent {
+    let dropped = recovery.dropped;
+    match &recovery.set_aside {
+        None => {
+            let mut event = AuditEvent::new(
+                EventKind::LogRecovered,
+                format!("dropped {dropped} bytes of an unacknowledged partial record"),
+            );
+            event.detail = serde_json::json!({ "dropped_bytes": dropped });
+            event
+        }
+        Some(name) => {
+            let mut event = AuditEvent::new(
+                EventKind::LogRecovered,
+                format!(
+                    "set aside {dropped} bytes: the last record didn't match its hash (kept in {name})"
+                ),
+            );
+            event.detail = serde_json::json!({
+                "dropped_bytes": dropped,
+                "damaged": true,
+                "kept_in": name,
+            });
+            event
+        }
+    }
 }
 
 /// Result of checking a whole log.
@@ -619,12 +796,11 @@ fn hash_body(body: &str) -> String {
     hex::encode(Sha256::digest(body.as_bytes()))
 }
 
-/// Finds the last complete line, and how many trailing bytes follow it
-/// without a newline (a torn write). Reads backwards in chunks so opening a
-/// large log stays cheap.
-fn read_tail(file: &mut File) -> io::Result<(Option<String>, u64)> {
+/// Finds the last complete line in the file's first `len` bytes, with
+/// where it starts, and how many bytes follow it without a newline (a torn
+/// write). Reads backwards in chunks so opening a large log stays cheap.
+fn read_tail(file: &mut File, len: u64) -> io::Result<(Option<(String, u64)>, u64)> {
     const CHUNK: u64 = 64 * 1024;
-    let len = file.metadata()?.len();
     let mut end = len;
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -647,13 +823,16 @@ fn read_tail(file: &mut File) -> io::Result<(Option<String>, u64)> {
         match complete.iter().rposition(|&b| b == b'\n') {
             Some(j) => {
                 return Ok((
-                    Some(String::from_utf8_lossy(&complete[j + 1..]).into_owned()),
+                    Some((
+                        String::from_utf8_lossy(&complete[j + 1..]).into_owned(),
+                        start + j as u64 + 1,
+                    )),
                     dropped,
                 ));
             }
             None if start == 0 => {
                 return Ok((
-                    Some(String::from_utf8_lossy(complete).into_owned()),
+                    Some((String::from_utf8_lossy(complete).into_owned(), 0)),
                     dropped,
                 ));
             }
@@ -716,6 +895,191 @@ mod tests {
             .map(|r| r.event.summary)
             .collect();
         assert_eq!(summaries, ["one", "two"]);
+    }
+
+    // The fsync failed after the whole line was written: the caller was
+    // told the record failed and wrote it again, and the first writing
+    // stayed in the file, chained onto: the same record twice, one of them
+    // never acknowledged.
+    #[test]
+    fn au1_a_record_whose_fsync_failed_isnt_left_in_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let log = AuditLog::open(&path, Durability::Buffered).unwrap();
+        let task = TaskId::new();
+        log.append(action("one", Some(task))).unwrap();
+        log.fail_syncs_for_tests(0, 1);
+        assert!(log.append(action("two", Some(task))).is_err());
+        // It's in the file, whole, until the writer opens it again.
+        assert_eq!(verify(&path).unwrap().records, 2);
+        // The runtime writes what failed again (Runtime::audit).
+        log.append(action("two", Some(task))).unwrap();
+
+        let all = read(&path, |_| true).unwrap();
+        let said: Vec<(EventKind, &str)> = all
+            .iter()
+            .map(|r| (r.event.kind, r.event.summary.as_str()))
+            .collect();
+        assert_eq!(said[0], (EventKind::Action, "one"));
+        assert_eq!(said[1].0, EventKind::LogRecovered);
+        assert_eq!(said[2], (EventKind::Action, "two"));
+        assert_eq!(said.len(), 3, "two is there once");
+        assert!(all[1].event.detail["dropped_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(all[1].event.detail.get("damaged"), None);
+        let report = verify(&path).unwrap();
+        assert_eq!((report.records, report.unfinished), (3, 0));
+        let summaries: Vec<String> = log
+            .task_records(task)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event.summary)
+            .collect();
+        assert_eq!(summaries, ["one", "two"]);
+    }
+
+    /// Changes one byte of the log's last line, inside its body.
+    fn damage_last_record(path: &Path) {
+        let mut bytes = std::fs::read(path).unwrap();
+        let end = bytes.len() - 1;
+        let start = bytes[..end]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |i| i + 1);
+        let at = start + (end - start) / 2;
+        bytes[at] = if bytes[at] == b'x' { b'y' } else { b'x' };
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn set_aside_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_string_lossy().contains(".damaged-"))
+            .collect();
+        files.sort();
+        files
+    }
+
+    // A last record that didn't match its hash made `open` an error, so
+    // glassd refused to start at every restart, with nothing to do about
+    // it but edit the file by hand.
+    #[test]
+    fn au2_a_damaged_last_record_is_set_aside_and_the_chain_goes_on() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let task = TaskId::new();
+        {
+            let log = AuditLog::open(&path, Durability::Buffered).unwrap();
+            for summary in ["one", "two", "three"] {
+                log.append(action(summary, Some(task))).unwrap();
+            }
+        }
+        let whole = std::fs::read(&path).unwrap();
+        damage_last_record(&path);
+        assert!(verify(&path).is_err(), "it is damaged");
+        let damaged = std::fs::read(&path).unwrap();
+
+        let log = AuditLog::open(&path, Durability::Buffered).unwrap();
+        log.append(action("four", Some(task))).unwrap();
+        // One and two, the note, four: a chain that checks out.
+        let report = verify(&path).unwrap();
+        assert_eq!((report.records, report.unfinished), (4, 0));
+        let all = read(&path, |_| true).unwrap();
+        let seqs: Vec<u64> = all.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, [0, 1, 2, 3]);
+        let note = &all[2];
+        assert_eq!(note.event.kind, EventKind::LogRecovered);
+        assert_eq!(note.event.detail["damaged"], true);
+        // The damaged record is kept, whole, for root alone, where the note says.
+        let kept = set_aside_files(dir.path());
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            note.event.detail["kept_in"],
+            kept[0].file_name().unwrap().to_string_lossy().as_ref()
+        );
+        let third_line = &damaged[damaged.len() - (whole.len() - whole_len_before_last(&whole))..];
+        assert_eq!(std::fs::read(&kept[0]).unwrap(), third_line);
+        assert_eq!(
+            std::fs::metadata(&kept[0]).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(note.event.detail["dropped_bytes"], third_line.len() as u64);
+        let summaries: Vec<String> = log
+            .task_records(task)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event.summary)
+            .collect();
+        assert_eq!(summaries, ["one", "two", "four"]);
+    }
+
+    /// Where the last line of a log's bytes starts.
+    fn whole_len_before_last(bytes: &[u8]) -> usize {
+        bytes[..bytes.len() - 1]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |i| i + 1)
+    }
+
+    #[test]
+    fn au2_a_log_whose_only_record_is_damaged_starts_again_and_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        {
+            let log = AuditLog::open(&path, Durability::Buffered).unwrap();
+            log.append(action("one", None)).unwrap();
+        }
+        damage_last_record(&path);
+        // With a write cut short after it, too: all of it is set aside.
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#"{"hash":"0f1e","body":{"seq":"#).unwrap();
+        drop(file);
+        let before = std::fs::read(&path).unwrap();
+
+        let log = AuditLog::open(&path, Durability::Buffered).unwrap();
+        log.append(action("two", None)).unwrap();
+        let all = read(&path, |_| true).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            (all[0].seq, all[0].event.kind),
+            (0, EventKind::LogRecovered)
+        );
+        assert_eq!(all[0].prev, GENESIS);
+        assert_eq!(all[0].event.detail["dropped_bytes"], before.len() as u64);
+        let kept = set_aside_files(dir.path());
+        assert_eq!(std::fs::read(&kept[0]).unwrap(), before);
+        assert_eq!(verify(&path).unwrap().records, 2);
+    }
+
+    // More than a damaged end: that is for a person to look at, and the
+    // file is left exactly as it was.
+    #[test]
+    fn au2_two_damaged_records_at_the_end_are_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        {
+            let log = AuditLog::open(&path, Durability::Buffered).unwrap();
+            for summary in ["one", "two", "three"] {
+                log.append(action(summary, None)).unwrap();
+            }
+        }
+        // The last two lines, each changed.
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = whole_len_before_last(&bytes);
+        let second = whole_len_before_last(&bytes[..last]);
+        for at in [second + 20, last + 20] {
+            bytes[at] = if bytes[at] == b'x' { b'y' } else { b'x' };
+        }
+        std::fs::write(&path, &bytes).unwrap();
+
+        let refused = AuditLog::open(&path, Durability::Buffered).unwrap_err();
+        assert!(
+            matches!(&refused, AuditError::Corrupt { reason, .. } if reason.contains("and the one before it")),
+            "{refused}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "untouched");
+        assert!(set_aside_files(dir.path()).is_empty());
     }
 
     // The test seam the runtime's tests use: a full disk for a number of

@@ -652,7 +652,27 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir)?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    let audit = Arc::new(AuditLog::open(&audit_path, Durability::Sync)?);
+    // A damaged last record is set aside and the log goes on (it says so
+    // itself). More damage than that stops glassd here, fail closed: with
+    // what a person can do about it, which the error alone didn't say.
+    let audit = Arc::new(
+        AuditLog::open(&audit_path, Durability::Sync).map_err(|e| match e {
+            glass_audit::AuditError::Corrupt { .. } => anyhow::anyhow!(
+                "{e}\nglassd doesn't start on an audit log it can't continue. \
+                 `glassctl verify` says where it stops checking out. To start a new log, \
+                 move {} aside (keep it: it is the record up to now) and start glassd again.",
+                audit_path.display()
+            ),
+            other => other.into(),
+        })?,
+    );
+    if let Some(kept) = audit.set_aside_at_open() {
+        tracing::warn!(
+            kept_in = %kept,
+            "the audit log's last record didn't match its hash: it is set aside beside the \
+             log, which goes on from the record before it"
+        );
+    }
     std::fs::set_permissions(&audit_path, std::fs::Permissions::from_mode(0o600))?;
 
     // Attended tasks' sockets from an earlier run have no tasks behind them.
