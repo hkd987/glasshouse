@@ -347,3 +347,19 @@ async fn adr0040_a_console_gets_checkouts_for_its_own_org_back_to_its_own_addres
         assert_eq!(r.status, status, "{}", String::from_utf8_lossy(&r.body));
     }
 }
+
+// A delivery whose outcome can't be written down stays due, so the next
+// round came at once: on a full disk the relay pushed without a pause.
+#[test]
+fn a_round_that_couldnt_be_recorded_isnt_tried_again_at_once() {
+    use crate::relay::wait_secs;
+    // Nothing waiting: a minute.
+    assert_eq!(wait_secs(None, 1_000, true), 60);
+    // The next is due in 20 s, or was due already.
+    assert_eq!(wait_secs(Some(1_020), 1_000, true), 20);
+    assert_eq!(wait_secs(Some(990), 1_000, true), 0);
+    assert_eq!(wait_secs(Some(5_000), 1_000, true), 60);
+    // Due already because its outcome wasn't recorded: not at once.
+    assert_eq!(wait_secs(Some(990), 1_000, false), 30);
+    assert_eq!(wait_secs(Some(1_045), 1_000, false), 45);
+}

@@ -45,7 +45,8 @@ const CALENDAR_DIR: &str = "Calendar";
 const EVENTS: &str = "Events";
 const SENT: &str = "Sent";
 const MAX_EVENT_BYTES: u64 = 64 * 1024;
-/// Most event files one listing reads.
+/// Most event files one listing reads: those changed most lately, with
+/// how many were left said in the answer.
 const MAX_EVENTS: usize = 5000;
 /// Longest range one listing covers.
 const MAX_RANGE_DAYS: i64 = 62;
@@ -273,16 +274,32 @@ impl CalendarProvider {
         Ok(event)
     }
 
-    /// Every readable event, in start order. Files that aren't events are
-    /// skipped: the store is the user's folder, not ours alone.
-    fn load_all(cal: &ConfinedDir) -> Result<Vec<Event>, ActionError> {
+    /// Every readable event, in start order, and how many event files
+    /// weren't read. Files that aren't events are skipped: the store is the
+    /// user's folder, not ours alone.
+    ///
+    /// Past `most` files, the ones read are those changed most lately:
+    /// what was made or moved lately is what is coming up. They were the
+    /// first by name, and a name ends in random digits: an arbitrary part
+    /// of the calendar, tomorrow's meeting as likely as one from two years
+    /// ago, was gone from every listing with nothing said.
+    fn load_all(cal: &ConfinedDir, most: usize) -> Result<(Vec<Event>, usize), ActionError> {
         let entries = match cal.list(Path::new(EVENTS)) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
             Err(e) => return Err(ActionError::io("calendar store", e)),
         };
+        let mut files: Vec<_> = entries
+            .iter()
+            .filter(|e| !e.is_dir && e.name.ends_with(".json"))
+            .collect();
+        let left = files.len().saturating_sub(most);
+        if left > 0 {
+            files.sort_by(|a, b| b.modified.cmp(&a.modified).then(a.name.cmp(&b.name)));
+            files.truncate(most);
+        }
         let mut events = Vec::new();
-        for entry in entries.iter().filter(|e| !e.is_dir).take(MAX_EVENTS) {
+        for entry in files {
             let Some(id) = entry.name.strip_suffix(".json") else {
                 continue;
             };
@@ -300,7 +317,7 @@ impl CalendarProvider {
             }
         }
         events.sort_by(|a, b| a.start.cmp(&b.start).then(a.id.cmp(&b.id)));
-        Ok(events)
+        Ok((events, left))
     }
 
     /// Refuses events the user doesn't organize: others' invitations are
@@ -960,18 +977,27 @@ impl ActionProvider for CalendarProvider {
                 let Range { from, to } = parse_input(input)?;
                 let (from, to) = range(&from, &to)?;
                 let (from_text, to_text) = (from.text(), to.text());
-                let events: Vec<Event> = Self::load_all(&cal)?
+                let (all, left) = Self::load_all(&cal, MAX_EVENTS)?;
+                let events: Vec<Event> = all
                     .into_iter()
                     .filter(|e| e.start < to_text && e.end > from_text)
                     .collect();
                 let n = events.len();
+                let mut text = format!(
+                    "{n} event{} {}",
+                    if n == 1 { "" } else { "s" },
+                    span_text(from, to)
+                );
+                if left > 0 {
+                    text.push_str(&format!(
+                        ". This calendar has more events than one listing looks at: the \
+                         {left} changed longest ago weren't looked at, so an old event may \
+                         be missing here"
+                    ));
+                }
                 Ok(ActionOutput {
-                    text: format!(
-                        "{n} event{} {}",
-                        if n == 1 { "" } else { "s" },
-                        span_text(from, to)
-                    ),
-                    data: json!({ "from": from_text, "to": to_text, "events": events }),
+                    text,
+                    data: json!({ "from": from_text, "to": to_text, "events": events, "not_looked_at": left }),
                     changes: Vec::new(),
                 })
             }
@@ -1214,7 +1240,8 @@ impl ActionProvider for CalendarProvider {
                 "properties": {
                     "from": { "type": "string", "description": "the range asked for, local time" },
                     "to": { "type": "string" },
-                    "events": { "type": "array", "items": event, "description": "those overlapping the range, in no set order" }
+                    "events": { "type": "array", "items": event, "description": "those overlapping the range, in no set order" },
+                    "not_looked_at": { "type": "integer", "description": "0, unless the calendar has more events than one listing reads: then how many, those changed longest ago, weren't looked at" }
                 },
                 "required": ["from", "to", "events"],
                 "additionalProperties": false
@@ -1547,6 +1574,71 @@ mod tests {
         assert_eq!(saved.organizer, "demo");
         // AU-10: "by [agent] for [user]" travels with the event.
         assert_eq!(saved.attribution, "by invoice-demo for demo");
+    }
+
+    // Past the most one listing reads, the files read were the first by
+    // name, and a name ends in random digits: any event, next week's as
+    // likely as one from years ago, was missing from every listing with
+    // nothing said.
+    #[test]
+    fn nv3_a_calendar_too_long_to_read_whole_keeps_what_changed_lately_and_says_so() {
+        let (dir, ctx) = setup();
+        let events = dir.path().join("Calendar/Events");
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(400 * 86_400);
+        // Five from long ago, written with names that sort first.
+        for n in 0..5 {
+            let id = format!("ev-00000000000{n}");
+            let event = json!({
+                "title": format!("Old {n}"), "start": "2025-06-02T09:00", "end": "2025-06-02T10:00",
+                "kind": "event", "organizer": ctx.principal.on_behalf_of.name, "attendees": [], "notes": "",
+            });
+            let path = events.join(format!("{id}.json"));
+            fs::create_dir_all(&events).unwrap();
+            fs::write(&path, event.to_string()).unwrap();
+            fs::File::open(&path)
+                .unwrap()
+                .set_modified(long_ago)
+                .unwrap();
+        }
+        // And next week's, made just now, with a name that sorts last.
+        let coming = CalendarProvider::default()
+            .invoke(
+                &ctx,
+                &name("calendar.create"),
+                &json!({ "title": "Board review", "start": "2026-10-27T09:00", "end": "2026-10-27T10:00" }),
+            )
+            .unwrap();
+        let id = coming.data["event"]["id"].as_str().unwrap().to_owned();
+        fs::rename(
+            events.join(format!("{id}.json")),
+            events.join("ev-ffffffffffff.json"),
+        )
+        .unwrap();
+
+        let cal = CalendarProvider::open(&ctx).unwrap();
+        // Room for all six: all six, none left.
+        let (all, left) = CalendarProvider::load_all(&cal, 10).unwrap();
+        assert_eq!((all.len(), left), (6, 0));
+        // Room for three: next week's is among them, and three are said
+        // to be left. (The first three by name are all from long ago.)
+        let (some, left) = CalendarProvider::load_all(&cal, 3).unwrap();
+        assert_eq!((some.len(), left), (3, 3));
+        assert!(
+            some.iter().any(|e| e.title == "Board review"),
+            "{:?}",
+            some.iter().map(|e| &e.title).collect::<Vec<_>>()
+        );
+        // A listing of a calendar that fits says nothing of it.
+        let out = CalendarProvider::default()
+            .invoke(
+                &ctx,
+                &name("calendar.list"),
+                &json!({ "from": "2026-10-26", "to": "2026-11-02" }),
+            )
+            .unwrap();
+        assert_eq!(out.data["not_looked_at"], 0);
+        assert_eq!(out.data["events"].as_array().unwrap().len(), 1);
+        assert!(!out.text.contains("weren't looked at"), "{}", out.text);
     }
 
     #[test]

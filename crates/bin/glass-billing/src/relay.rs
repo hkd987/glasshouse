@@ -364,12 +364,16 @@ impl Relay {
             for delivery in due {
                 pushing.spawn(Arc::clone(&self).deliver_one(delivery));
             }
-            while pushing.join_next().await.is_some() {}
+            // Whether every push's outcome was written down.
+            let mut recorded = true;
+            while let Some(pushed) = pushing.join_next().await {
+                recorded &= pushed.unwrap_or(false);
+            }
             let next = self.outbox().next_due().ok().flatten();
-            let wait = next.map_or(60, |at| (at - now()).clamp(0, 60));
+            let wait = wait_secs(next, now(), recorded);
             tokio::select! {
                 () = self.wake.notified() => {}
-                () = tokio::time::sleep(Duration::from_secs(wait.unsigned_abs())) => {}
+                () = tokio::time::sleep(Duration::from_secs(wait)) => {}
             }
         }
     }
@@ -384,12 +388,14 @@ impl Relay {
         Ok(push)
     }
 
-    async fn deliver_one(self: Arc<Self>, delivery: Delivery) {
+    /// Pushes one delivery to its console and writes down how it went:
+    /// whether that was written.
+    async fn deliver_one(self: Arc<Self>, delivery: Delivery) -> bool {
         let body = match serde_json::to_vec(&delivery.event) {
             Ok(b) => b,
             Err(e) => {
                 tracing::error!("encoding a delivery: {e}");
-                return;
+                return false;
             }
         };
         let key = Arc::clone(&self.key);
@@ -413,21 +419,52 @@ impl Relay {
         );
         match pushed {
             Ok(()) => match self.outbox().delivered(delivery) {
-                Ok(()) => tracing::info!(%org, %session, attempt, "delivered to its console"),
-                Err(e) => tracing::error!(%org, %session, "delivered, but not recorded: {e:#}"),
+                Ok(()) => {
+                    tracing::info!(%org, %session, attempt, "delivered to its console");
+                    true
+                }
+                Err(e) => {
+                    tracing::error!(%org, %session, "delivered, but not recorded: {e:#}");
+                    false
+                }
             },
             Err(why) => match self.outbox().failed(delivery, &why, now()) {
-                Ok(Some(next)) => tracing::warn!(
-                    %org, %session, attempt,
-                    "its console didn't take it ({why}); trying again in {}s",
-                    next - now()
-                ),
-                Ok(None) => tracing::error!(
-                    %org, %session, attempt,
-                    "its console didn't take it ({why}); given up, see /ops/deliveries"
-                ),
-                Err(e) => tracing::error!(%org, %session, "recording a failed delivery: {e:#}"),
+                Ok(Some(next)) => {
+                    tracing::warn!(
+                        %org, %session, attempt,
+                        "its console didn't take it ({why}); trying again in {}s",
+                        next - now()
+                    );
+                    true
+                }
+                Ok(None) => {
+                    tracing::error!(
+                        %org, %session, attempt,
+                        "its console didn't take it ({why}); given up, see /ops/deliveries"
+                    );
+                    true
+                }
+                Err(e) => {
+                    tracing::error!(%org, %session, "recording a failed delivery: {e:#}");
+                    false
+                }
             },
         }
     }
+}
+
+/// When a round's outcome couldn't all be written down, how long before
+/// the next round at the least.
+const UNRECORDED_WAIT_SECS: i64 = 30;
+
+/// How long the delivery loop sleeps: until the next delivery is due, a
+/// minute at most. A delivery whose outcome couldn't be recorded (the disk
+/// is full) is still due as it was, which is now: the loop then pushed the
+/// same deliveries without a pause for as long as the disk stayed full. It
+/// waits [`UNRECORDED_WAIT_SECS`] before trying those again.
+pub(crate) fn wait_secs(next_due: Option<i64>, now: i64, recorded: bool) -> u64 {
+    let least = if recorded { 0 } else { UNRECORDED_WAIT_SECS };
+    next_due
+        .map_or(60, |at| (at - now).clamp(least, 60))
+        .unsigned_abs()
 }

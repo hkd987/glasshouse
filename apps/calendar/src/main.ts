@@ -83,14 +83,21 @@ const root = document.getElementById("app") as HTMLElement;
 
 async function loadWeek(): Promise<void> {
   try {
-    const read = await bridge.read<{ events: CalendarEvent[] }>("calendar.list", {
+    const read = await bridge.read<{ events: CalendarEvent[]; not_looked_at?: number }>("calendar.list", {
       from: wall(state.weekStart),
       to: wall(addDays(state.weekStart, 7)),
     });
     state.offline = read.offline;
     state.loadedAt = read.loadedAt ?? null;
-    if (read.result.ok) state.events = read.result.data.events;
-    else state.notice = read.result.text;
+    if (read.result.ok) {
+      state.events = read.result.data.events;
+      // A calendar with more events than one listing reads: said, where an
+      // event missing from the week used to be the only sign.
+      const left = read.result.data.not_looked_at ?? 0;
+      if (left > 0) {
+        state.notice = `This calendar has more events than Calendar looks at at once. The ${left} changed longest ago aren't shown, so an old event may be missing.`;
+      }
+    } else state.notice = read.result.text;
   } catch (error) {
     state.events = [];
     state.offline = error instanceof Offline;
