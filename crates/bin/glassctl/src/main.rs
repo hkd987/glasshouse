@@ -366,10 +366,51 @@ async fn main() -> std::process::ExitCode {
 const POWER_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long a login shell waits for its line about the person's agents.
 const SUMMARY_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long glassd has to answer a question it answers from what it
+/// holds: its status, the tiles, one task, what's waiting, the agents and
+/// apps. A glassd that was up and not answering left `glassctl tasks`
+/// waiting for as long as it was, with nothing said (found by freezing
+/// one by hand).
+const QUESTION_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether `method` is such a question. Not what may take as long as it
+/// takes: starting a task, a roll back, reading the whole audit log, an
+/// update.
+fn is_question(method: &str) -> bool {
+    matches!(
+        method,
+        methods::SYSTEM_STATUS
+            | methods::AGENTS_LIST
+            | methods::APPS_LIST
+            | methods::TASK_PLAN
+            | methods::TASK_LIST
+            | methods::TASK_GET
+            | methods::APPROVAL_LIST
+            | methods::ROUTINE_LIST
+            | methods::LAYER_GET
+            | methods::SETTINGS_GET
+            | methods::SYSTEM_UPDATE_STATUS
+            | methods::HARDWARE_PATCH_STATUS
+    )
+}
+
+/// What to say when a call fails: glassd not answering in time is said
+/// as that, with where to look.
+fn explain(e: &glass_rpc::ClientError) -> anyhow::Error {
+    match e {
+        glass_rpc::ClientError::TimedOut { .. } => anyhow::anyhow!(
+            "the system service is running and isn't answering ({e}). It may be starting or \
+             stuck: try again in a moment, and see `service glassd status` and its log"
+        ),
+        other => anyhow::anyhow!("{other}"),
+    }
+}
 
 struct Ctl {
     client: Client,
     json: bool,
+    /// [`QUESTION_LIMIT`], or a test's.
+    question_limit: std::time::Duration,
 }
 
 impl Ctl {
@@ -378,10 +419,14 @@ impl Ctl {
         method: &str,
         params: impl Serialize,
     ) -> anyhow::Result<R> {
-        self.client
-            .call(method, params)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))
+        let answer = if is_question(method) {
+            self.client
+                .call_within(method, params, self.question_limit)
+                .await
+        } else {
+            self.client.call(method, params).await
+        };
+        answer.map_err(|e| explain(&e))
     }
 
     /// [`call`](Self::call) for what something else waits on: the
@@ -397,7 +442,7 @@ impl Ctl {
         self.client
             .call_within(method, params, limit)
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))
+            .map_err(|e| explain(&e))
     }
 
     /// Prints `value` as JSON, or as `text` otherwise. Either way nothing
@@ -507,6 +552,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let ctl = Ctl {
         client,
         json: cli.json,
+        question_limit: QUESTION_LIMIT,
     };
 
     match cli.command {
@@ -1119,6 +1165,78 @@ fn policy(cmd: &PolicyCommand) -> anyhow::Result<()> {
                 println!("  warning: {warning}");
             }
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_question_to_a_glassd_that_doesnt_answer_is_given_up_on_and_says_so() {
+        // glassd up, taking connections and answering nothing (stuck, or
+        // stopped under a debugger): `glassctl tasks` waited for as long
+        // as it was, with nothing said.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let ctl = Ctl {
+            client: Client::connect(&socket).await.unwrap(),
+            json: false,
+            question_limit: Duration::from_millis(200),
+        };
+        let started = std::time::Instant::now();
+        let asked: anyhow::Result<Vec<TaskView>> = ctl.call(methods::TASK_LIST, Value::Null).await;
+        let said = asked.unwrap_err().to_string();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(said.contains("isn't answering"), "{said}");
+        assert!(said.contains("task.list"), "{said}");
+        // Never the base system's name in what people read (BR-1).
+        assert!(!said.to_lowercase().contains("freebsd"), "{said}");
+
+        // What may take as long as it takes isn't cut short: a roll back
+        // is still waited for after the question's limit.
+        let rolling_back = ctl.call::<Value>(methods::TASK_UNDO, Value::Null);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(600), rolling_back)
+                .await
+                .is_err(),
+            "a roll back was given up on"
+        );
+    }
+
+    #[test]
+    fn what_glassd_answers_from_memory_is_a_question_and_what_does_work_isnt() {
+        for method in [
+            methods::SYSTEM_STATUS,
+            methods::TASK_LIST,
+            methods::TASK_GET,
+            methods::APPROVAL_LIST,
+            methods::AGENTS_LIST,
+        ] {
+            assert!(is_question(method), "{method}");
+        }
+        for method in [
+            methods::TASK_START,
+            methods::TASK_UNDO,
+            methods::AUDIT_VERIFY,
+            methods::SYSTEM_UPDATE_APPLY,
+            methods::EVENTS_SUBSCRIBE,
+        ] {
+            assert!(!is_question(method), "{method}");
         }
     }
 }
