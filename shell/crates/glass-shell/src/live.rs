@@ -1588,7 +1588,11 @@ impl Live {
             state.menus = expanded::MENUS.map(String::from).to_vec();
             overlays.push(expanded::overlay(theme, expanded));
         }
-        overlays.extend(bar.map(|bar| command_bar::overlay(theme, bar)));
+        let clock = command_bar::Clock {
+            offset: now.offset(),
+            hour24: self.hour24(),
+        };
+        overlays.extend(bar.map(|bar| command_bar::overlay(theme, bar, clock)));
         match self.window {
             Some(SystemWindow::About) => overlays.push(system::about_overlay(theme, &self.about)),
             Some(SystemWindow::Shortcuts) => overlays.push(system::shortcuts_overlay(theme)),

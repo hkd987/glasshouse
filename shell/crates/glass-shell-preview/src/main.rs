@@ -323,7 +323,11 @@ fn main() -> anyhow::Result<()> {
         &calm,
         behind,
         |_| None,
-        Some(command_bar::overlay(&theme, &bar)),
+        Some(command_bar::overlay(
+            &theme,
+            &bar,
+            command_bar::Clock::default(),
+        )),
         (w, h),
     );
     write("command-bar.png", view)?;

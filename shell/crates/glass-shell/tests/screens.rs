@@ -214,7 +214,8 @@ fn render_command_bar() -> Frame {
         tiles: desktop::Tiles::Hidden,
         ..fixtures::desktop(&tasks)
     };
-    let overlay: glass_shell::Element<'_, Message> = command_bar::overlay(&theme, &bar);
+    let overlay: glass_shell::Element<'_, Message> =
+        command_bar::overlay(&theme, &bar, command_bar::Clock::default());
     frame(
         desktop::view(&theme, &state, Vec::new(), |_| None, Some(overlay), SCREEN),
         size(),
@@ -243,7 +244,8 @@ fn render_command_bar_apps() -> Frame {
         tiles: desktop::Tiles::Hidden,
         ..fixtures::desktop(&tasks)
     };
-    let overlay: glass_shell::Element<'_, Message> = command_bar::overlay(&theme, &bar);
+    let overlay: glass_shell::Element<'_, Message> =
+        command_bar::overlay(&theme, &bar, command_bar::Clock::default());
     frame(
         desktop::view(&theme, &state, Vec::new(), |_| None, Some(overlay), SCREEN),
         size(),

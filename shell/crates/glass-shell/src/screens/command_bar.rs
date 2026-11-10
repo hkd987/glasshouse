@@ -7,6 +7,7 @@
 //! answer in the bar itself is the artboard's, which callers pass in.
 
 use glass_api::{TaskView, TileState, display_line};
+use glass_types::Timestamp;
 use iced_core::alignment::Vertical;
 use iced_core::{Color, Length, Padding};
 use iced_widget::text::Span;
@@ -16,6 +17,25 @@ use crate::apps::AppEntry;
 use crate::screens::launcher::{self, Look};
 use crate::theme::{hex, hexa};
 use crate::{Element, Message, Theme, fonts, icons, style};
+use time::macros::format_description;
+use time::{OffsetDateTime, UtcOffset};
+
+/// How a time of day is shown: where the person is, and the clock they
+/// chose (UX-1's `clock.hour24`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Clock {
+    pub offset: UtcOffset,
+    pub hour24: bool,
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self {
+            offset: UtcOffset::UTC,
+            hour24: false,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandBar<'a> {
@@ -142,7 +162,7 @@ const INK: Color = hex(0xF3F5F7);
 
 /// The command bar with its scrim, for the desktop's overlay layer (above
 /// windows and tiles, below the menu bar and dock).
-pub fn overlay<'a>(theme: &Theme, bar: &'a CommandBar<'a>) -> Element<'a, Message> {
+pub fn overlay<'a>(theme: &Theme, bar: &'a CommandBar<'a>, clock: Clock) -> Element<'a, Message> {
     iced_widget::stack![
         column![
             iced_widget::space().height(Length::Fixed(32.0)),
@@ -151,14 +171,14 @@ pub fn overlay<'a>(theme: &Theme, bar: &'a CommandBar<'a>) -> Element<'a, Messag
                 .height(Length::Fill)
                 .style(|_| style::panel(hexa(0x0E1626, 0.3), 0.0)),
         ],
-        pin(view(theme, bar)).x(240.0).y(150.0),
+        pin(view(theme, bar, clock)).x(240.0).y(150.0),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
 
-pub fn view<'a>(theme: &Theme, bar: &'a CommandBar<'a>) -> Element<'a, Message> {
+pub fn view<'a>(theme: &Theme, bar: &'a CommandBar<'a>, clock: Clock) -> Element<'a, Message> {
     let accent = theme.accent;
     let esc = container(text("Esc").size(11).font(fonts::MONO).color(LABEL))
         .padding(Padding::from([3.0, 7.0]))
@@ -216,7 +236,7 @@ pub fn view<'a>(theme: &Theme, bar: &'a CommandBar<'a>) -> Element<'a, Message> 
         let newest = &bar.recent[bar.recent.len().saturating_sub(RECENT_MOST)..];
         side = side.push(
             column![section("Recent")]
-                .extend(newest.iter().map(recent_row))
+                .extend(newest.iter().map(|task| recent_row(task, clock)))
                 .spacing(8),
         );
     }
@@ -421,11 +441,11 @@ fn answer<'a>(bar: &'a CommandBar<'a>) -> Element<'a, Message> {
 /// How many tasks the command bar's Recent shows: the newest.
 pub const RECENT_MOST: usize = 6;
 
-fn recent_row(task: &TaskView) -> Element<'_, Message> {
+fn recent_row(task: &TaskView, clock: Clock) -> Element<'_, Message> {
     let (status, color) = match task.state {
         TileState::NeedsYou => ("Needs you".to_owned(), hex(0xF5A65B)),
         TileState::Done => (
-            format!("Done {}", twelve_hour(&task.updated_at.clock())),
+            format!("Done {}", time_of_day(task.updated_at, clock)),
             hex(0x6FD39A),
         ),
         TileState::Failed => ("Failed".to_owned(), hex(0xF07B7E)),
@@ -449,16 +469,21 @@ fn recent_row(task: &TaskView) -> Element<'_, Message> {
     .into()
 }
 
-/// "08:56:10" as "8:56 AM".
-fn twelve_hour(clock: &str) -> String {
-    let hour: u32 = clock.get(..2).and_then(|h| h.parse().ok()).unwrap_or(0);
-    let minute = clock.get(3..5).unwrap_or("00");
-    let suffix = if hour < 12 { "AM" } else { "PM" };
-    let hour = match hour % 12 {
-        0 => 12,
-        h => h,
-    };
-    format!("{hour}:{minute} {suffix}")
+/// When a task was done, as the menu bar's clock would say it: "2:12 PM"
+/// where the person is, or "14:12" on a 24-hour clock. It was the time in
+/// UTC on a 12-hour clock, whatever the time zone and the setting.
+fn time_of_day(at: Timestamp, clock: Clock) -> String {
+    let local = OffsetDateTime::from_unix_timestamp(at.unix_seconds())
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .to_offset(clock.offset);
+    if clock.hour24 {
+        local.format(format_description!("[hour]:[minute]"))
+    } else {
+        local.format(format_description!(
+            "[hour repr:12 padding:none]:[minute] [period]"
+        ))
+    }
+    .unwrap_or_default()
 }
 
 fn section<'a>(label: &'a str) -> Element<'a, Message> {
@@ -487,7 +512,7 @@ fn rule_v<'a>() -> Element<'a, Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_apps, twelve_hour};
+    use super::{Clock, find_apps, time_of_day};
     use crate::apps::{AppEntry, Start};
 
     fn apps(names: &[&str]) -> Vec<AppEntry> {
@@ -547,10 +572,27 @@ mod tests {
     }
 
     #[test]
-    fn done_times_read_on_a_twelve_hour_clock() {
-        assert_eq!(twelve_hour("08:56:10"), "8:56 AM");
-        assert_eq!(twelve_hour("00:05:00"), "12:05 AM");
-        assert_eq!(twelve_hour("12:00:00"), "12:00 PM");
-        assert_eq!(twelve_hour("21:12:59"), "9:12 PM");
+    fn ux1_done_times_are_the_persons_time_on_the_clock_they_chose() {
+        // 21:12:59 UTC on 2026-11-10.
+        let at: glass_types::Timestamp =
+            serde_json::from_value(serde_json::json!("2026-11-10T21:12:59Z")).unwrap();
+        let twelve = |hours: i8| Clock {
+            offset: time::UtcOffset::from_hms(hours, 0, 0).unwrap(),
+            hour24: false,
+        };
+        assert_eq!(time_of_day(at, Clock::default()), "9:12 PM");
+        // In Los Angeles it's the afternoon, and in Tokyo tomorrow morning.
+        assert_eq!(time_of_day(at, twelve(-8)), "1:12 PM");
+        assert_eq!(time_of_day(at, twelve(9)), "6:12 AM");
+        let twenty_four = Clock {
+            hour24: true,
+            ..twelve(-8)
+        };
+        assert_eq!(time_of_day(at, twenty_four), "13:12");
+        // Midnight and noon read as 12, not 0.
+        let midnight: glass_types::Timestamp =
+            serde_json::from_value(serde_json::json!("2026-11-10T00:05:00Z")).unwrap();
+        assert_eq!(time_of_day(midnight, Clock::default()), "12:05 AM");
+        assert_eq!(time_of_day(midnight, twelve(12)), "12:05 PM");
     }
 }
