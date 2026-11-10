@@ -59,24 +59,18 @@ impl Sandbox for HostSandbox {
 
     fn destroy(&self, spec: &SandboxSpec) -> Result<()> {
         check_name(&spec.name)?;
-        // remove_dir_all removes symlinks themselves and never follows them,
-        // so granted paths are untouched.
-        match fs::remove_dir_all(&spec.root) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(PlatformError::io(
-                format!("removing {}", spec.root.display()),
-                e,
-            )),
-        }
+        // Symlinks are removed themselves and never followed, so granted
+        // paths are untouched; and the tree may be as deep as the agent
+        // made it.
+        crate::fs::remove_tree(&spec.root)
     }
 
     fn agent_path(&self, spec: &SandboxSpec, inside: &Path) -> PathBuf {
         self.host_path(spec, inside)
     }
 
-    fn cleanup_stale(&self) -> Result<Vec<String>> {
-        Ok(Vec::new())
+    fn cleanup_stale(&self) -> Result<super::Swept> {
+        Ok(super::Swept::default())
     }
 }
 

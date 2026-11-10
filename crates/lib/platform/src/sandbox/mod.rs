@@ -158,6 +158,17 @@ pub trait ToolRunner: Send + Sync + fmt::Debug {
     }
 }
 
+/// What a start's sweep of an earlier run's sandboxes did
+/// ([`Sandbox::cleanup_stale`]).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Swept {
+    /// Removed whole.
+    pub removed: Vec<String>,
+    /// Still on disk, each with why. Nothing of theirs runs; their files
+    /// couldn't be removed.
+    pub left: Vec<(String, String)>,
+}
+
 pub trait Sandbox: ToolRunner + Send + Sync + fmt::Debug {
     /// A short name for status output and audit records.
     fn kind(&self) -> &'static str;
@@ -184,8 +195,12 @@ pub trait Sandbox: ToolRunner + Send + Sync + fmt::Debug {
         spec.root.join(inside.strip_prefix("/").unwrap_or(inside))
     }
 
-    /// Destroys sandboxes left behind by an earlier daemon run.
-    fn cleanup_stale(&self) -> Result<Vec<String>>;
+    /// Destroys sandboxes left behind by an earlier daemon run: every one,
+    /// whatever happens to the others. One whose files can't be removed is
+    /// in [`Swept::left`] and is tried again at the next start. An error is
+    /// for what must stop the daemon starting: something of an earlier
+    /// run's still running.
+    fn cleanup_stale(&self) -> Result<Swept>;
 
     /// A file the task's output is also appended to, as it comes: an agent
     /// computer's screen, which its person watches (ADR 0065).

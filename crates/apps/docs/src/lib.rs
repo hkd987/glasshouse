@@ -60,6 +60,21 @@ const SNAPSHOT_EVERY: usize = 200;
 /// The longest version name and anchor.
 const MAX_NAME: usize = 100;
 const MAX_ANCHOR: usize = 512;
+/// The most Markdown one call writes: a long report several times over.
+/// What an agent sends is read whole in the preview, before anyone is
+/// asked, so it has a size.
+const MAX_MARKDOWN: usize = 1024 * 1024;
+
+/// Refuses Markdown too long to write in one call.
+fn check_markdown(markdown: &str) -> Result<(), ActionError> {
+    if markdown.len() > MAX_MARKDOWN {
+        return Err(ActionError::InvalidInput(format!(
+            "markdown is {} bytes; one call writes at most {MAX_MARKDOWN}. Write it in parts",
+            markdown.len()
+        )));
+    }
+    Ok(())
+}
 
 fn failed(why: impl std::fmt::Display) -> ActionError {
     ActionError::Failed(why.to_string())
@@ -825,6 +840,9 @@ impl DocsProvider {
             .label
             .unwrap_or(Label::Internal)
             .max(ctx.data_label.unwrap_or(Label::Public));
+        if let Some(md) = &input.markdown {
+            check_markdown(md)?;
+        }
         let start = input
             .markdown
             .as_deref()
@@ -872,6 +890,7 @@ impl DocsProvider {
         if input.markdown.trim().is_empty() {
             return Err(invalid("say what to write, as Markdown"));
         }
+        check_markdown(&input.markdown)?;
         let at = match input.at {
             None => At::End,
             Some(WhereInput::Named(s)) if s == "end" => At::End,
@@ -1439,14 +1458,11 @@ impl ActionProvider for DocsProvider {
                     items.push("Only you can see it".into());
                 }
                 if let Some(md) = &input.markdown {
+                    check_markdown(md)?;
+                    let blocks = markdown::parse(md).len();
                     items.push(format!(
-                        "Starts with {} block{}",
-                        markdown::parse(md).len(),
-                        if markdown::parse(md).len() == 1 {
-                            ""
-                        } else {
-                            "s"
-                        }
+                        "Starts with {blocks} block{}",
+                        if blocks == 1 { "" } else { "s" }
                     ));
                 }
                 Ok(Preview {
@@ -1458,6 +1474,7 @@ impl ActionProvider for DocsProvider {
             }
             WRITE => {
                 let parsed: WriteInput = parse_input(input)?;
+                check_markdown(&parsed.markdown)?;
                 let mut preview = titled("Write in", &parsed.doc, false);
                 preview.items = parsed
                     .markdown

@@ -16,7 +16,7 @@ cd "${CLAUDE_PROJECT_DIR:-$(dirname "$0")/../..}"
 # and python3 for `make lint`, QEMU and friends for the dev VM (ovmf for its
 # UEFI mode), Pillow for screenshots and the boot art, and OpenSSL's headers
 # for glassd's model gateway on the host (ADR 0018).
-packages=(clang lld shellcheck python3 python3-pil qemu-system-x86 qemu-utils ovmf xorriso openssh-client xz-utils curl libssl-dev pkg-config libxkbcommon-dev libpixman-1-dev)
+packages=(clang lld shellcheck python3 python3-pil qemu-system-x86 qemu-utils ovmf xorriso openssh-client xz-utils zstd curl libssl-dev pkg-config libxkbcommon-dev libpixman-1-dev)
 missing=()
 for pkg in "${packages[@]}"; do
 	dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed" || missing+=("$pkg")

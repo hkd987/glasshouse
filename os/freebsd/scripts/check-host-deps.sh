@@ -10,7 +10,7 @@ set -euo pipefail
 declare -A pkg=(
 	[qemu-system-x86_64]=qemu-system-x86 [qemu-img]=qemu-utils
 	[ssh]=openssh-client [scp]=openssh-client [ssh-keygen]=openssh-client
-	[xorriso]=xorriso [xz]=xz-utils [curl]=curl [tar]=tar
+	[xorriso]=xorriso [xz]=xz-utils [zstd]=zstd [curl]=curl [tar]=tar
 	[clang]=clang [ld.lld]=lld [shellcheck]=shellcheck [pkg-config]=pkg-config
 	[swtpm]=swtpm # the emulated TPM in tests/hardware/matrix.sh
 )

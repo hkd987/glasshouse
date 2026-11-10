@@ -43,7 +43,7 @@ use glass_api::{
     ScreenView, StoredView,
 };
 use glass_platform::sandbox::{
-    AGENT_SOCKET_PATH, ProcessSpec, Sandbox, SandboxSpec, ToolOutput, ToolRun, ToolRunner,
+    AGENT_SOCKET_PATH, ProcessSpec, Sandbox, SandboxSpec, Swept, ToolOutput, ToolRun, ToolRunner,
     UnshareTools, valid_computer_id,
 };
 use glass_platform::{PlatformError, Result};
@@ -848,7 +848,7 @@ impl ComputerSandbox {
             state.used.insert((uid, id.to_owned()), Instant::now());
         }
         let computer = self.spec(uid, id);
-        let _ = fs::remove_dir_all(computer.dir.join("tasks").join(name));
+        let _ = glass_platform::fs::remove_tree(&computer.dir.join("tasks").join(name));
     }
 
     /// Marks it asleep with where it was kept, once its disk is in the
@@ -947,7 +947,7 @@ impl ComputerSandbox {
             }
             let path = entry.path();
             if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                fs::remove_dir_all(&path)?;
+                glass_platform::fs::remove_tree(&path).map_err(std::io::Error::other)?;
             } else {
                 fs::remove_file(&path)?;
             }
@@ -1223,22 +1223,14 @@ impl Sandbox for ComputerSandbox {
                 .insert((spec.uid, computer.id.clone()), Instant::now());
         }
         let task = Self::task_dir(&computer, spec);
-        match fs::remove_dir_all(&task) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                return Err(fail(format!("removing {}", task.display()), e));
-            }
-            _ => {}
-        }
+        // What a task's processes left is theirs to shape: removed however
+        // deep it goes (`remove_tree`); nothing there is fine.
+        glass_platform::fs::remove_tree(&task)?;
         if fresh {
             self.hypervisor
                 .suspend(&computer)
                 .map_err(|e| fail(format!("stopping {}", computer.id), e))?;
-            match fs::remove_dir_all(&computer.dir) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(fail(format!("removing {}", computer.dir.display()), e));
-                }
-                _ => {}
-            }
+            glass_platform::fs::remove_tree(&computer.dir)?;
         }
         Ok(())
     }
@@ -1262,11 +1254,14 @@ impl Sandbox for ComputerSandbox {
         Some(self.run_of(spec).0.screen())
     }
 
-    fn cleanup_stale(&self) -> Result<Vec<String>> {
+    fn cleanup_stale(&self) -> Result<Swept> {
         // Before anything: no process of an earlier glassd's runs is left.
         let mut cleaned = self.hypervisor.stop_leftovers(&self.dir);
         let Ok(owners) = fs::read_dir(&self.dir) else {
-            return Ok(cleaned);
+            return Ok(Swept {
+                removed: cleaned,
+                left: Vec::new(),
+            });
         };
         for owner in owners.flatten() {
             let Ok(computers) = fs::read_dir(owner.path()) else {
@@ -1284,7 +1279,7 @@ impl Sandbox for ComputerSandbox {
                 };
                 if let Ok(tasks) = fs::read_dir(computer.dir.join("tasks")) {
                     for task in tasks.flatten() {
-                        if fs::remove_dir_all(task.path()).is_ok() {
+                        if glass_platform::fs::remove_tree(&task.path()).is_ok() {
                             cleaned.push(task.file_name().to_string_lossy().into_owned());
                         }
                     }
@@ -1292,7 +1287,7 @@ impl Sandbox for ComputerSandbox {
                 match Self::read_meta(&computer) {
                     Some(meta) if meta.fresh => {
                         let _ = self.hypervisor.suspend(&computer);
-                        if fs::remove_dir_all(&computer.dir).is_ok() {
+                        if glass_platform::fs::remove_tree(&computer.dir).is_ok() {
                             cleaned.push(id);
                         }
                     }
@@ -1310,7 +1305,10 @@ impl Sandbox for ComputerSandbox {
                 }
             }
         }
-        Ok(cleaned)
+        Ok(Swept {
+            removed: cleaned,
+            left: Vec::new(),
+        })
     }
 }
 
@@ -1953,6 +1951,7 @@ mod tests {
             sandbox
                 .cleanup_stale()
                 .unwrap()
+                .removed
                 .iter()
                 .any(|c| c.contains("leftovers"))
         );

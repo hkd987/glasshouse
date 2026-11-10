@@ -735,7 +735,11 @@ fn parse_response(bytes: &[u8]) -> Option<Response> {
     if let Some(rest) = bytes.strip_prefix(b"+") {
         return Some(Response::Continue(tidy(rest)));
     }
-    let mut p = Parser { bytes, at: 0 };
+    let mut p = Parser {
+        bytes,
+        at: 0,
+        depth: 0,
+    };
     let tag = p.atom_text()?;
     p.space();
     if tag == "*" {
@@ -772,9 +776,18 @@ fn parse_response(bytes: &[u8]) -> Option<Response> {
     })
 }
 
+/// How deep lists nest in a response. A message's structure nests a level
+/// per MIME part inside a part; real mail stays in single digits. Each
+/// level is a call deep and the server chooses how many there are, so a
+/// line of `(((…` past this is garbled, not read: unbounded, it overflows
+/// the stack, which ends glassd.
+const MAX_LIST_DEPTH: usize = 32;
+
 struct Parser<'a> {
     bytes: &'a [u8],
     at: usize,
+    /// How many lists deep the parser is.
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -838,8 +851,14 @@ impl Parser<'_> {
                     return Some(out);
                 }
                 Some(b'(') => {
+                    if self.depth >= MAX_LIST_DEPTH {
+                        return None;
+                    }
                     self.at += 1;
-                    out.push(Value::List(self.values(Some(b')'))?));
+                    self.depth += 1;
+                    let list = self.values(Some(b')'));
+                    self.depth -= 1;
+                    out.push(Value::List(list?));
                 }
                 Some(b'"') => out.push(Value::Str(self.quoted()?)),
                 Some(b'{') => out.push(Value::Str(self.literal()?)),
@@ -910,6 +929,26 @@ mod tests {
         assert_eq!(pairs[0], Value::Atom("UID".into()));
         assert_eq!(pairs[4], Value::Atom("BODY[]".into()));
         assert_eq!(pairs[5], Value::Str(b"Hello\r\nyou!".to_vec()));
+    }
+
+    #[test]
+    fn lists_nested_past_the_limit_are_garbled_not_a_stack_overflow() {
+        // What a hostile or broken server can send in one 8 MiB line: a
+        // call per "(" overflowed the stack and ended the whole daemon.
+        let mut deep = b"* 1 FETCH ".to_vec();
+        deep.extend(std::iter::repeat_n(b'(', 2_000_000));
+        assert!(parse_response(&deep).is_none());
+        deep.extend(std::iter::repeat_n(b')', 2_000_000));
+        assert!(parse_response(&deep).is_none());
+        // As deep as mail goes still reads.
+        let mut fine = b"* 1 FETCH ".to_vec();
+        fine.extend(std::iter::repeat_n(b'(', MAX_LIST_DEPTH));
+        fine.extend_from_slice(b"UID 7");
+        fine.extend(std::iter::repeat_n(b')', MAX_LIST_DEPTH));
+        assert!(matches!(parse_response(&fine), Some(Response::Untagged(_))));
+        fine.insert(10, b'(');
+        fine.push(b')');
+        assert!(parse_response(&fine).is_none());
     }
 
     #[test]

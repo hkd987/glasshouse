@@ -115,5 +115,11 @@ of a sequence of commands (host or VM, as any user) as a PNG. The
   the probe where its sockets are (an agent environment variable). "Reach
   the app bridge" connects to the person's bridge port (ADR 0027); on the
   host backend it passes unless a bridge is listening there.
+- What an agent can shape, glassd must survive. The probe's `litter` mode
+  (`glassctl run containment-probe "litter 20000"`, e2e `teardown`) leaves
+  its sandbox nested 20,000 folders deep; a parser or a tree walk that is
+  a call deep per level of something an agent, a mail server or another
+  computer chose needs a depth limit and a test at a depth that used to
+  overflow the stack (an overflow ends glassd, not one action).
 - No test may depend on wall-clock luck: poll with a deadline, never sleep
   and hope.

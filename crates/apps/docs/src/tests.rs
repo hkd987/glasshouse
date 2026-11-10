@@ -596,6 +596,50 @@ fn adr0034_a_doc_is_labeled_and_takes_nothing_from_a_task_that_read_more() {
 }
 
 #[test]
+fn dc6_what_an_agent_sends_as_markdown_has_a_depth_and_a_size() {
+    let org = org();
+    let (a, _b, _c, id) = planned(&org);
+    let ctx = a.ctx("dana", AGENT);
+    // Nested far past what a 2 MiB stack took: the preview, which runs
+    // before anyone is asked, reads it as one block.
+    let nested = format!("{}x", "> ".repeat(50_000));
+    let preview = a
+        .docs
+        .preview(
+            &ctx,
+            &CREATE.parse().unwrap(),
+            &json!({ "title": "Deep", "markdown": nested }),
+        )
+        .unwrap();
+    assert!(
+        preview.items.iter().any(|i| i == "Starts with 1 block"),
+        "{:?}",
+        preview.items
+    );
+    a.with(&ctx, WRITE, json!({ "doc": id, "markdown": nested }))
+        .unwrap();
+    assert!(a.markdown("dana", &id).contains('x'));
+    // More than one call writes is refused before it is read, in the
+    // preview and in the call.
+    let long = "word ".repeat(MAX_MARKDOWN / 5 + 1);
+    for (action, input) in [
+        (CREATE, json!({ "title": "Long", "markdown": long })),
+        (WRITE, json!({ "doc": id, "markdown": long })),
+    ] {
+        let previewed = a.docs.preview(&ctx, &action.parse().unwrap(), &input);
+        assert!(
+            matches!(&previewed, Err(ActionError::InvalidInput(why)) if why.contains("in parts")),
+            "{action}: {previewed:?}"
+        );
+        let called = a.with(&ctx, action, input);
+        assert!(
+            matches!(&called, Err(ActionError::InvalidInput(_))),
+            "{action}: {called:?}"
+        );
+    }
+}
+
+#[test]
 fn dc_others_see_nothing_until_the_person_says_yes() {
     let org = org();
     let a = org.computer("dev-a");

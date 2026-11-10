@@ -151,10 +151,15 @@ async fn run(args: Args) -> anyhow::Result<()> {
         own: Mutex::new(BTreeMap::new()),
     });
     let only = args.session.then_some(uid);
+    // An accept that fails is tried again, and connections have a bound
+    // (glass_http::Accept): the bridge ending took every open app's
+    // backend with it until the desktop next started one.
+    let mut accept = glass_http::Accept::new(listener);
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer, place) = accept.next().await;
         let bridge = Arc::clone(&bridge);
         tokio::spawn(async move {
+            let _place = place;
             if let Some(uid) = only
                 && !owned_by(&stream, peer, uid).await
             {

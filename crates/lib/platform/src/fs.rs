@@ -14,6 +14,41 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, Metadata, MetadataExt, OpenOptions, OpenOptionsExt};
 
+/// Removes `path` and everything under it, however deep it goes. Nothing
+/// there is fine; a symlink at `path` is removed, never followed.
+///
+/// What this removes is often what an agent left behind (a sandbox's root,
+/// a computer's folders), so its shape is the agent's to choose. The
+/// standard library's `remove_dir_all` is a call deep per folder: a tree of
+/// 30,000 nested folders overflows a 2 MiB stack, and a stack overflow ends
+/// the whole process, glassd at teardown and again at every start that
+/// finds the tree. rm(1) walks without a call per folder (ADR 0007: a
+/// base-system command where one does the job).
+pub fn remove_tree(path: &Path) -> crate::Result<()> {
+    use crate::PlatformError;
+
+    if !path.is_absolute() || path.parent().is_none() {
+        return Err(PlatformError::Unsafe(format!(
+            "{} is not a folder of ours to remove",
+            path.display()
+        )));
+    }
+    match path.symlink_metadata() {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(PlatformError::io(format!("removing {}", path.display()), e));
+        }
+        Ok(_) => {}
+    }
+    let Some(text) = path.to_str() else {
+        return Err(PlatformError::Unsupported(format!(
+            "removing {}: a path that isn't UTF-8",
+            path.display()
+        )));
+    };
+    crate::cmd::run("rm", &["-rf", "--", text]).map(drop)
+}
+
 /// Who should own files the broker creates for a user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Owner {
@@ -413,6 +448,63 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
+
+    /// `depth` folders, each inside the last, under `top`: made a handle at
+    /// a time, since the whole path is longer than a path may be.
+    fn nest(top: &Path, depth: usize) {
+        std::fs::create_dir(top).unwrap();
+        let mut dir = Dir::open_ambient_dir(top, ambient_authority()).unwrap();
+        for _ in 0..depth {
+            dir.create_dir("d").unwrap();
+            dir = dir.open_dir("d").unwrap();
+        }
+        dir.write("at-the-bottom", b"x").unwrap();
+    }
+
+    #[test]
+    fn pa2_a_tree_as_deep_as_an_agent_can_make_it_is_removed() {
+        // What an agent leaves in /work with mkdir and cd in a loop. The
+        // standard library removes a folder a call deep: 30,000 of them
+        // overflowed this thread's 2 MiB stack, which ends the process.
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("sandbox");
+        nest(&root, 30_000);
+        remove_tree(&root).unwrap();
+        assert!(!root.exists());
+        // Nothing there is fine, as at a second teardown.
+        remove_tree(&root).unwrap();
+    }
+
+    #[test]
+    fn pa2_removing_a_tree_never_follows_a_link_out_of_it() {
+        let outer = tempfile::tempdir().unwrap();
+        let kept = outer.path().join("kept");
+        std::fs::create_dir(&kept).unwrap();
+        std::fs::write(kept.join("file"), "stays").unwrap();
+        let root = outer.path().join("sandbox");
+        std::fs::create_dir_all(root.join("work")).unwrap();
+        symlink(&kept, root.join("work/out")).unwrap();
+        remove_tree(&root).unwrap();
+        assert!(!root.exists());
+        assert_eq!(std::fs::read_to_string(kept.join("file")).unwrap(), "stays");
+        // A link in the tree's own place is removed, not what it names.
+        let link = outer.path().join("link");
+        symlink(&kept, &link).unwrap();
+        remove_tree(&link).unwrap();
+        assert!(link.symlink_metadata().is_err());
+        assert!(kept.join("file").exists());
+        // Only a whole path of ours: never one that depends on where
+        // glassd happens to be, and never the root.
+        for refused in ["sandbox", "", "/"] {
+            assert!(
+                matches!(
+                    remove_tree(Path::new(refused)),
+                    Err(crate::PlatformError::Unsafe(_))
+                ),
+                "{refused:?}"
+            );
+        }
+    }
 
     fn setup() -> (tempfile::TempDir, ConfinedDir) {
         let outer = tempfile::tempdir().unwrap();

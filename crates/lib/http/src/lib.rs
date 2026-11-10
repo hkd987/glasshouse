@@ -4,9 +4,13 @@
 //! serve with it, on loopback in development; in production the console
 //! sits behind our web servers' TLS.
 
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Largest request head read.
 const MAX_HEAD: usize = 16 * 1024;
@@ -14,6 +18,89 @@ const MAX_HEAD: usize = 16 * 1024;
 pub const MAX_BODY: usize = 1024 * 1024;
 /// How long a client may take to send its request.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a client may take to read its answer: long enough for the
+/// largest thing a server here sends (a kernel patch's bundle) on a slow
+/// line, and an end for a client that stops reading.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(600);
+/// Connections a server has open at once unless it says otherwise. Each
+/// managed computer holds a waiting request or two, so this is a fleet of
+/// about two thousand: give the service an open-file limit above it.
+pub const MAX_CONNECTIONS: usize = 4096;
+
+/// A server's connections, taken one at a time for as long as it runs.
+///
+/// Taking one never fails. An accept that does (no descriptors left, a
+/// client already gone) is that connection's loss: it is logged and tried
+/// again after a pause, where returning the error ended the whole server.
+/// And no more than `most` are open at once: the next is taken when one of
+/// them ends, waiting in the kernel's queue meanwhile, so a server's
+/// descriptors and tasks have a bound whatever its clients do.
+#[derive(Debug)]
+pub struct Accept {
+    listener: TcpListener,
+    places: Arc<Semaphore>,
+    failures: u32,
+}
+
+/// One connection's place among a server's: kept while it is served, and
+/// given back when dropped.
+#[derive(Debug)]
+pub struct Place(#[allow(dead_code)] OwnedSemaphorePermit);
+
+impl Accept {
+    /// Up to [`MAX_CONNECTIONS`] at once.
+    pub fn new(listener: TcpListener) -> Self {
+        Self::at_most(listener, MAX_CONNECTIONS)
+    }
+
+    /// Up to `most` at once (at least one).
+    pub fn at_most(listener: TcpListener, most: usize) -> Self {
+        Self {
+            listener,
+            places: Arc::new(Semaphore::new(most.max(1))),
+            failures: 0,
+        }
+    }
+
+    /// The listener's own address.
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+
+    /// The next connection, who it is from, and its place: hold the place
+    /// for as long as the connection is served.
+    pub async fn next(&mut self) -> (TcpStream, SocketAddr, Place) {
+        let place = loop {
+            // Never closed: the semaphore is ours alone.
+            if let Ok(place) = Arc::clone(&self.places).acquire_owned().await {
+                break Place(place);
+            }
+        };
+        loop {
+            match self.listener.accept().await {
+                Ok((stream, peer)) => {
+                    self.failures = 0;
+                    return (stream, peer, place);
+                }
+                Err(e) => {
+                    self.failures = self.failures.saturating_add(1);
+                    // The first, then every so often: out of descriptors
+                    // this repeats until something closes.
+                    if self.failures.is_power_of_two() {
+                        tracing::warn!(error = %e, failures = self.failures, "couldn't accept a connection; still listening");
+                    }
+                    tokio::time::sleep(accept_backoff(self.failures)).await;
+                }
+            }
+        }
+    }
+}
+
+/// How long to wait before accepting again after `failures` in a row: 20 ms,
+/// doubling to a little over a second.
+fn accept_backoff(failures: u32) -> Duration {
+    Duration::from_millis(10 << failures.clamp(1, 7))
+}
 
 #[derive(Debug)]
 pub struct Request {
@@ -183,8 +270,23 @@ async fn read<S: AsyncRead + Unpin>(stream: &mut S, max_body: usize) -> Result<R
 }
 
 /// Writes `response` and closes. A HEAD request gets the head only; a 204
-/// has neither a body nor a Content-Length (RFC 9110).
+/// has neither a body nor a Content-Length (RFC 9110). A client that
+/// doesn't read it within [`WRITE_TIMEOUT`] is given up on.
 pub async fn write_response<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    response: Response,
+    head_only: bool,
+) -> std::io::Result<()> {
+    match tokio::time::timeout(WRITE_TIMEOUT, write_whole(stream, response, head_only)).await {
+        Ok(written) => written,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the client didn't read its answer",
+        )),
+    }
+}
+
+async fn write_whole<S: AsyncWrite + Unpin>(
     stream: &mut S,
     response: Response,
     head_only: bool,
@@ -222,6 +324,34 @@ mod tests {
     async fn parse(raw: &str) -> Result<Request, ReadError> {
         let mut stream = raw.as_bytes();
         read_request(&mut stream).await
+    }
+
+    #[tokio::test]
+    async fn a_server_takes_no_more_connections_than_it_has_places() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut accept = Accept::at_most(listener, 2);
+        let addr = accept.local_addr().unwrap();
+        // Three clients connect; the kernel queues them all.
+        let mut clients = Vec::new();
+        for _ in 0..3 {
+            clients.push(TcpStream::connect(addr).await.unwrap());
+        }
+        let (_s1, _, first) = accept.next().await;
+        let (_s2, _, second) = accept.next().await;
+        // The third isn't taken while both places are held.
+        let waiting = tokio::time::timeout(Duration::from_millis(100), accept.next()).await;
+        assert!(waiting.is_err(), "a third connection was taken");
+        drop(first);
+        let third = tokio::time::timeout(Duration::from_secs(5), accept.next()).await;
+        assert!(third.is_ok(), "a freed place wasn't used");
+        drop(second);
+    }
+
+    #[test]
+    fn the_pause_after_a_failed_accept_grows_and_has_a_ceiling() {
+        assert_eq!(accept_backoff(1), Duration::from_millis(20));
+        assert_eq!(accept_backoff(7), accept_backoff(u32::MAX));
+        assert!(accept_backoff(u32::MAX) < Duration::from_secs(2));
     }
 
     #[tokio::test]

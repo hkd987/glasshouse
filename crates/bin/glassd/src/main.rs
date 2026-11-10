@@ -646,13 +646,20 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // Attended tasks' sockets from an earlier run have no tasks behind them.
     let _ = std::fs::remove_dir_all(run_dir.join("attended"));
 
-    let cleaned = {
+    let swept = {
         let sandbox = Arc::clone(&sandbox);
         tokio::task::spawn_blocking(move || sandbox.cleanup_stale()).await??
     };
-    for name in &cleaned {
+    for name in &swept.removed {
         tracing::warn!(sandbox = %name, "removed a sandbox left behind by an earlier run");
     }
+    // The sweep already logged each of these with its reason; they are on
+    // the record below and tried again at the next start.
+    let left: Vec<serde_json::Value> = swept
+        .left
+        .iter()
+        .map(|(name, why)| serde_json::json!({ "sandbox": name, "why": why }))
+        .collect();
 
     let mut started = AuditEvent::new(
         EventKind::DaemonStarted,
@@ -661,7 +668,8 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     started.detail = serde_json::json!({
         "sandbox": sandbox.kind(),
         "snapshots": snapshots.kind(),
-        "stale_sandboxes_removed": cleaned,
+        "stale_sandboxes_removed": swept.removed,
+        "stale_sandboxes_left": left,
         "model_providers": models.gateway.providers().collect::<Vec<_>>(),
         "model_notes": models.notes,
     });

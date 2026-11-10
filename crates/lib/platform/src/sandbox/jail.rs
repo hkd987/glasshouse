@@ -26,7 +26,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ProcessSpec, ResourceLimits, Sandbox, SandboxSpec, check_name, create_layout};
+use super::{ProcessSpec, ResourceLimits, Sandbox, SandboxSpec, Swept, check_name, create_layout};
 use crate::{PlatformError, Result, cmd};
 
 /// Name prefix for every jail the daemon creates; stale-jail cleanup only
@@ -345,10 +345,10 @@ impl Sandbox for JailSandbox {
             )));
         }
 
-        if spec.root.exists() {
-            fs::remove_dir_all(&spec.root)
-                .map_err(|e| PlatformError::io(format!("removing {}", spec.root.display()), e))?;
-        }
+        // The root holds what the agent left in /work and /tmp, in any
+        // shape it chose: removed without a call per folder
+        // (`remove_tree`).
+        crate::fs::remove_tree(&spec.root)?;
         for ext in ["conf", "fstab", "spec.json"] {
             let _ = fs::remove_file(self.file(&spec.name, ext));
         }
@@ -359,11 +359,12 @@ impl Sandbox for JailSandbox {
         inside.to_path_buf()
     }
 
-    fn cleanup_stale(&self) -> Result<Vec<String>> {
-        let mut cleaned = Vec::new();
+    fn cleanup_stale(&self) -> Result<Swept> {
+        let mut swept = Swept::default();
         let Ok(entries) = fs::read_dir(&self.config.state_dir) else {
-            return Ok(cleaned);
+            return Ok(swept);
         };
+        let mut found = Vec::new();
         let entries: Vec<fs::DirEntry> = entries.flatten().collect();
         for entry in &entries {
             let path = entry.path();
@@ -386,23 +387,46 @@ impl Sandbox for JailSandbox {
                     continue;
                 }
             };
-            self.destroy(&spec)?;
-            cleaned.push(spec.name);
+            found.push(spec);
         }
-        for (name, root) in self.orphans(&entries, &cleaned) {
-            self.destroy(&SandboxSpec {
+        let with_specs: Vec<String> = found.iter().map(|spec| spec.name.clone()).collect();
+        for (name, root) in self.orphans(&entries, &with_specs) {
+            found.push(SandboxSpec {
                 persona: None,
-                name: name.clone(),
+                name,
                 root,
                 mounts: Vec::new(),
                 user: String::new(),
                 uid: 0,
                 gid: 0,
                 computer: None,
-            })?;
-            cleaned.push(name);
+            });
         }
-        Ok(cleaned)
+        // Every one is tried: one that can't go must not keep the rest, or
+        // keep glassd from starting at every start after (ADR 0053: a
+        // failing destroy is reported and retried at the next start).
+        for spec in found {
+            match self.destroy(&spec) {
+                Ok(()) => swept.removed.push(spec.name),
+                // Its agent may still run with nobody watching it: no
+                // start until that jail is gone.
+                Err(e) if Self::jail_exists(&spec.name) => {
+                    return Err(PlatformError::Unsafe(format!(
+                        "the jail {} from an earlier run is still up and couldn't be removed: {e}",
+                        spec.name
+                    )));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        sandbox = %spec.name,
+                        error = %e,
+                        "couldn't remove a sandbox an earlier run left; trying again at the next start"
+                    );
+                    swept.left.push((spec.name, e.to_string()));
+                }
+            }
+        }
+        Ok(swept)
     }
 }
 
@@ -495,6 +519,47 @@ mod tests {
             .collect();
         assert_eq!(found, ["glass-0193ab12"]);
         assert!(jails.orphans(&entries, &found).is_empty());
+    }
+
+    #[test]
+    fn pa2_a_sandbox_that_cant_be_removed_doesnt_keep_the_rest_or_the_start() {
+        // Off the image none of the jail tools are here, so every destroy
+        // fails: what the sweep does then is what this checks. It used to
+        // stop at the first, and glassd's start with it, at every start.
+        let dir = tempfile::tempdir().unwrap();
+        let jails = JailSandbox::new(JailConfig {
+            state_dir: dir.path().to_owned(),
+            ..JailConfig::default()
+        });
+        for name in ["glass-0193ab12", "glass-0193ab13"] {
+            let mut left = spec();
+            left.name = name.into();
+            left.root = dir.path().join(name);
+            fs::create_dir(&left.root).unwrap();
+            fs::write(
+                dir.path().join(format!("{name}.spec.json")),
+                serde_json::to_string(&left).unwrap(),
+            )
+            .unwrap();
+        }
+        // One with no spec beside it, found by its root.
+        fs::create_dir(dir.path().join("glass-0193ab14")).unwrap();
+        let swept = jails
+            .cleanup_stale()
+            .expect("no jail runs: the start goes on");
+        let mut seen: Vec<&str> = swept
+            .removed
+            .iter()
+            .map(String::as_str)
+            .chain(swept.left.iter().map(|(name, _)| name.as_str()))
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            ["glass-0193ab12", "glass-0193ab13", "glass-0193ab14"],
+            "every one is tried: {swept:?}"
+        );
+        assert!(swept.left.iter().all(|(_, why)| !why.is_empty()));
     }
 
     #[test]

@@ -201,10 +201,16 @@ impl Front {
             tokio::spawn(Arc::clone(&self).follow());
             tokio::spawn(Arc::clone(&self).teams_loop());
         }
+        // An accept that fails is tried again, and connections have a
+        // bound (glass_http::Accept).
+        let mut accept = glass_http::Accept::new(listener);
         loop {
-            let (stream, _) = listener.accept().await?;
+            let (stream, _, place) = accept.next().await;
             let front = Arc::clone(&self);
-            tokio::spawn(async move { front.connection(stream).await });
+            tokio::spawn(async move {
+                let _place = place;
+                front.connection(stream).await;
+            });
         }
     }
 

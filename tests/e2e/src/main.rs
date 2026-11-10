@@ -42,6 +42,7 @@ use crate::harness::Harness;
 const PARALLEL: &[&str] = &[
     "scope",
     "containment",
+    "teardown",
     "decline",
     "labels",
     "stop",
@@ -194,6 +195,7 @@ async fn scenario(name: &str, h: &Harness) -> anyhow::Result<()> {
     match name {
         "scope" => scenarios::scope(h).await,
         "containment" => scenarios::containment(h).await,
+        "teardown" => scenarios::teardown(h).await,
         "invoices" => scenarios::invoices(h).await,
         "decline" => scenarios::decline(h).await,
         "labels" => scenarios::labels(h).await,

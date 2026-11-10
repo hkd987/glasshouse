@@ -50,6 +50,42 @@ pub async fn containment(h: &Harness) -> anyhow::Result<()> {
     }
 }
 
+/// PA-2: what an agent leaves in its sandbox can't keep the sandbox from
+/// being removed, or end glassd as it tries. The probe leaves folders
+/// nested 20,000 deep: removed a call per level, 16,000 overflowed glassd's
+/// 2 MiB stacks, which ended every task. (Deeper proves no more and takes
+/// the emulated VM a minute longer to make.) The task ends, and glassd
+/// still answers; the suite's root checks then find no sandbox left behind.
+pub async fn teardown(h: &Harness) -> anyhow::Result<()> {
+    let status: SystemStatus = h.call(methods::SYSTEM_STATUS, Value::Null).await?;
+    let task = h
+        .start("containment-probe", "litter 20000", &[], &[])
+        .await?;
+    let detail = h
+        .wait_for(task, TileState::Done, LONG)
+        .await
+        .context("the littering task didn't end Done")?;
+    ensure!(
+        detail
+            .view
+            .caption
+            .starts_with("Left a tree 20000 folders deep"),
+        "unexpected result: {}",
+        detail.view.caption
+    );
+    // Done is said after the sandbox's teardown, which ran in glassd.
+    let after: SystemStatus = h
+        .call(methods::SYSTEM_STATUS, Value::Null)
+        .await
+        .context("glassd stopped answering after tearing the sandbox down")?;
+    ensure!(
+        after.sandbox == status.sandbox,
+        "glassd came back different"
+    );
+    println!("    {}", detail.view.caption);
+    Ok(())
+}
+
 /// The whole delegation loop: handoff, Auto reads, a Notify write with a
 /// snapshot, one batched Ask (DA-12), the receipt, the audit trail (AU-1,
 /// AU-3) and Undo all (AU-21).

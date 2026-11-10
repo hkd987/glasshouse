@@ -15,7 +15,7 @@ use yrs::{
     Xml, XmlElementPrelim, XmlElementRef, XmlFragment, XmlOut, XmlTextPrelim,
 };
 
-use crate::markdown::{Block, Inline, Mark, Span, TONES};
+use crate::markdown::{Block, Inline, MAX_DEPTH, Mark, Span, TONES};
 
 /// The fragment y-prosemirror binds.
 pub const FRAGMENT: &str = "prosemirror";
@@ -92,6 +92,13 @@ fn mark_of(name: &str, value: &Any) -> Option<Mark> {
 
 /// An element's text, with its marks; a hard break is a space.
 fn inline<T: ReadTxn>(txn: &T, el: &XmlElementRef) -> Inline {
+    inline_at(txn, el, 0)
+}
+
+/// [`inline`], `depth` elements down. The schema nests none in a run of
+/// text, but another computer's update can nest any number: past
+/// [`MAX_DEPTH`] they are left out, since each is a call deep.
+fn inline_at<T: ReadTxn>(txn: &T, el: &XmlElementRef, depth: usize) -> Inline {
     let mut spans = Vec::new();
     for child in el.children(txn) {
         match child {
@@ -117,7 +124,10 @@ fn inline<T: ReadTxn>(txn: &T, el: &XmlElementRef) -> Inline {
                 text: " ".into(),
                 marks: Vec::new(),
             }),
-            XmlOut::Element(e) => spans.extend(inline(txn, &e)),
+            XmlOut::Element(e) if depth < MAX_DEPTH => {
+                spans.extend(inline_at(txn, &e, depth + 1));
+            }
+            XmlOut::Element(_) => {}
             XmlOut::Fragment(_) => {}
         }
     }
@@ -141,10 +151,16 @@ fn elements<T: ReadTxn>(txn: &T, parent: &impl XmlFragment) -> Vec<XmlElementRef
         .collect()
 }
 
-fn children<T: ReadTxn>(txn: &T, parent: &impl XmlFragment) -> Vec<Block> {
+/// The blocks in `parent`, itself `depth` blocks down. A doc is what every
+/// member's computer posted, so its nesting is theirs to choose: blocks
+/// past [`MAX_DEPTH`] are left out instead of read a call deeper each.
+fn children<T: ReadTxn>(txn: &T, parent: &impl XmlFragment, depth: usize) -> Vec<Block> {
+    if depth >= MAX_DEPTH {
+        return Vec::new();
+    }
     elements(txn, parent)
         .iter()
-        .filter_map(|e| block(txn, e))
+        .filter_map(|e| block(txn, e, depth))
         .collect()
 }
 
@@ -156,25 +172,25 @@ fn first_text<T: ReadTxn>(txn: &T, el: &XmlElementRef) -> Inline {
         .map_or_else(|| inline(txn, el), |p| inline(txn, &p))
 }
 
-fn block<T: ReadTxn>(txn: &T, el: &XmlElementRef) -> Option<Block> {
+fn block<T: ReadTxn>(txn: &T, el: &XmlElementRef, depth: usize) -> Option<Block> {
     Some(match el.tag().as_ref() {
         "paragraph" => Block::Paragraph(inline(txn, el)),
         "heading" => Block::Heading {
             level: number_attr(el, txn, "level").unwrap_or(1).clamp(1, 3) as u8,
             text: inline(txn, el),
         },
-        "blockquote" => Block::Quote(children(txn, el)),
+        "blockquote" => Block::Quote(children(txn, el, depth + 1)),
         "bullet_list" => Block::Bullets(
             elements(txn, el)
                 .iter()
-                .map(|item| children(txn, item))
+                .map(|item| children(txn, item, depth + 1))
                 .collect(),
         ),
         "ordered_list" => Block::Ordered {
             start: number_attr(el, txn, "order").unwrap_or(1).max(1) as u32,
             items: elements(txn, el)
                 .iter()
-                .map(|item| children(txn, item))
+                .map(|item| children(txn, item, depth + 1))
                 .collect(),
         },
         "task_list" => Block::Tasks(
@@ -200,7 +216,7 @@ fn block<T: ReadTxn>(txn: &T, el: &XmlElementRef) -> Option<Block> {
             tone: text_attr(el, txn, "tone")
                 .filter(|t| TONES.contains(&t.as_str()))
                 .unwrap_or_else(|| "info".into()),
-            blocks: children(txn, el),
+            blocks: children(txn, el, depth + 1),
         },
         "horizontal_rule" => Block::Rule,
         "table" => Block::Table(
@@ -226,7 +242,7 @@ fn block<T: ReadTxn>(txn: &T, el: &XmlElementRef) -> Option<Block> {
 pub fn blocks(doc: &Doc) -> Vec<Block> {
     let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
     let txn = doc.transact();
-    children(&txn, &fragment)
+    children(&txn, &fragment, 0)
 }
 
 // ---- writing -------------------------------------------------------------
@@ -549,5 +565,37 @@ mod tests {
         apply(&a, &[ua]).unwrap();
         assert_eq!(render(&blocks(&a)), render(&blocks(&b)));
         assert!(!is_update(b"not yjs"));
+    }
+
+    #[test]
+    fn dc6_a_doc_nested_past_the_limit_reads_without_its_deepest_blocks() {
+        // What another member's computer can post: quotes nested far past
+        // anything the editor makes. Reading it was a call per level.
+        let doc = Doc::new();
+        let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+        {
+            let mut txn = doc.transact_mut();
+            let mut parent = element(&mut txn, &fragment, 0, "blockquote", &[]);
+            for _ in 0..2_000 {
+                parent = element(&mut txn, &parent, 0, "blockquote", &[]);
+            }
+            paragraph(&mut txn, &parent, 0, &parse_text("bottom"), None);
+            paragraph(&mut txn, &fragment, 1, &parse_text("top"), None);
+        }
+        // Read on another computer, from the update.
+        let read = blocks(&doc_from(&[state(&doc)]).unwrap());
+        let mut deep = 0;
+        let mut at = &read;
+        while let Some(Block::Quote(inner)) = at.first() {
+            deep += 1;
+            at = inner;
+        }
+        assert_eq!(deep, MAX_DEPTH);
+        let md = render(&read);
+        assert!(md.contains("top") && !md.contains("bottom"), "{md}");
+    }
+
+    fn parse_text(text: &str) -> Inline {
+        crate::markdown::parse_inline(text)
     }
 }

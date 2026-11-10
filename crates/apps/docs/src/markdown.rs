@@ -58,13 +58,23 @@ pub enum Block {
 
 pub const TONES: [&str; 3] = ["info", "warn", "success"];
 
+/// How deep blocks nest (a quote in a callout in a quote…), reading
+/// Markdown or a shared doc. Each level is a call deep, and what's read is
+/// written by agents and other computers: without a limit, a few kilobytes
+/// of `> > > …` overflow the stack, which ends glassd, not one action.
+/// Past it, Markdown is kept as the text it is and a doc's deeper blocks
+/// are left out.
+pub const MAX_DEPTH: usize = 16;
+/// How deep marks nest in a run of text, for the same reason.
+const MAX_INLINE_DEPTH: usize = 8;
+
 // ---- reading Markdown ---------------------------------------------------
 
 /// Inline Markdown: **strong**, *em* or _em_, `code`, ~~strike~~ and
 /// [text](href). Anything unclosed is text.
 pub fn parse_inline(text: &str) -> Inline {
     let mut out = Vec::new();
-    inline_into(text, &[], &mut out);
+    inline_into(text, &[], &mut out, 0);
     merge(out)
 }
 
@@ -106,7 +116,11 @@ fn closing(rest: &str, open: &str, close: &str) -> Option<(String, usize)> {
     None
 }
 
-fn inline_into(text: &str, marks: &[Mark], out: &mut Inline) {
+fn inline_into(text: &str, marks: &[Mark], out: &mut Inline, depth: usize) {
+    if depth >= MAX_INLINE_DEPTH {
+        push(out, text, marks);
+        return;
+    }
     let mut plain = String::new();
     let mut rest = text;
     let mut prev: Option<char> = None;
@@ -138,7 +152,7 @@ fn inline_into(text: &str, marks: &[Mark], out: &mut Inline) {
                 plain.clear();
                 match mark {
                     Some(Mark::Code) => push(out, &inner, &with(marks, Mark::Code)),
-                    Some(mark) => inline_into(&inner, &with(marks, mark), out),
+                    Some(mark) => inline_into(&inner, &with(marks, mark), out, depth + 1),
                     None => push(out, &inner, marks),
                 }
                 prev = rest[..used].chars().last();
@@ -212,6 +226,27 @@ fn is_rule_row(cells: &[String]) -> bool {
 
 /// Markdown blocks.
 pub fn parse(markdown: &str) -> Vec<Block> {
+    parse_at(markdown, 0)
+}
+
+/// What a quote or callout `depth` levels down holds: its blocks, or at
+/// the last level [`MAX_DEPTH`] allows, its text as one paragraph, read no
+/// further.
+fn nested(inner: &[&str], depth: usize) -> Vec<Block> {
+    if depth + 2 >= MAX_DEPTH {
+        let text = inner.join(" ");
+        return match text.trim() {
+            "" => Vec::new(),
+            text => vec![Block::Paragraph(vec![Span {
+                text: text.to_owned(),
+                marks: Vec::new(),
+            }])],
+        };
+    }
+    parse_at(&inner.join("\n"), depth + 1)
+}
+
+fn parse_at(markdown: &str, depth: usize) -> Vec<Block> {
     let lines: Vec<&str> = markdown.lines().collect();
     let mut blocks = Vec::new();
     let mut i = 0;
@@ -279,9 +314,9 @@ pub fn parse(markdown: &str) -> Vec<Block> {
             match tone {
                 Some(tone) => blocks.push(Block::Callout {
                     tone,
-                    blocks: parse(&inner[1..].join("\n")),
+                    blocks: nested(&inner[1..], depth),
                 }),
-                None => blocks.push(Block::Quote(parse(&inner.join("\n")))),
+                None => blocks.push(Block::Quote(nested(&inner, depth))),
             }
             continue;
         }
@@ -451,14 +486,24 @@ fn indent(text: &str, first: &str, rest: &str) -> String {
 
 /// Markdown for `blocks`, separated by blank lines.
 pub fn render(blocks: &[Block]) -> String {
+    render_at(blocks, 0)
+}
+
+/// Blocks [`MAX_DEPTH`] levels down or more aren't made by [`parse`] or
+/// read from a doc; any that are given render as nothing.
+fn render_at(blocks: &[Block], depth: usize) -> String {
+    if depth >= MAX_DEPTH {
+        return String::new();
+    }
     blocks
         .iter()
-        .map(render_block)
+        .map(|block| render_block(block, depth))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn render_block(block: &Block) -> String {
+fn render_block(block: &Block, depth: usize) -> String {
+    let render = |blocks: &[Block]| render_at(blocks, depth + 1);
     match block {
         Block::Paragraph(text) => format!("{}\n", render_inline(text)),
         Block::Heading { level, text } => {
@@ -588,5 +633,51 @@ mod tests {
         );
         assert!(spans.iter().any(|s| s.text.contains("2 * 3")));
         assert!(spans.iter().any(|s| s.text.contains("*f")));
+    }
+
+    /// How many quotes deep `blocks` go.
+    fn quotes_deep(blocks: &[Block]) -> usize {
+        match blocks.first() {
+            Some(Block::Quote(inner)) => 1 + quotes_deep(inner),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn dc6_quotes_nested_past_the_limit_stay_text_and_cost_no_stack() {
+        // What an agent can send: 200 KB of "> ". Each level was a call
+        // deep, and 5,000 of them overflowed a 2 MiB stack, which is an
+        // abort of the whole process, not a failed action.
+        let md = format!("{}the end", "> ".repeat(100_000));
+        let blocks = parse(&md);
+        assert_eq!(quotes_deep(&blocks), MAX_DEPTH - 1);
+        let rendered = render(&blocks);
+        assert!(rendered.contains("the end"), "the text is kept");
+        // Callouts nest the same way.
+        let callouts = "> [!warn]\n".to_owned() + &"> ".repeat(50_000) + "x";
+        assert!(matches!(&parse(&callouts)[0], Block::Callout { .. }));
+        // What nests less is read as before.
+        let three = parse("> > > deep");
+        assert_eq!(quotes_deep(&three), 3);
+        assert_eq!(parse(&render(&three)), three);
+    }
+
+    #[test]
+    fn dc6_marks_nested_past_the_limit_stay_text() {
+        // Every kind of mark, each inside the last, over and over.
+        let open = "**a ~~b *c [d ".repeat(2_000);
+        let close = "](x)*~~**".repeat(2_000);
+        let spans = parse_inline(&format!("{open}x{close}"));
+        assert!(!spans.is_empty());
+        assert!(spans.iter().all(|s| s.marks.len() <= MAX_INLINE_DEPTH));
+    }
+
+    #[test]
+    fn blocks_built_deeper_than_the_limit_render_as_nothing() {
+        let mut blocks = vec![Block::Paragraph(text("bottom"))];
+        for _ in 0..(MAX_DEPTH + 4) {
+            blocks = vec![Block::Quote(blocks)];
+        }
+        assert!(!render(&blocks).contains("bottom"));
     }
 }

@@ -11,8 +11,11 @@
 //! The exit code is 0 only when every check passed, so the task ends Done on
 //! a contained system and Failed on one that leaks.
 //!
-//! With a prompt starting `load` it is a busy agent instead ([`load`]).
+//! With a prompt starting `load` it is a busy agent instead ([`load`]), and
+//! with one starting `litter` an agent that leaves its sandbox hard to
+//! remove ([`litter`]).
 
+mod litter;
 mod load;
 
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
@@ -270,6 +273,17 @@ async fn main() -> ExitCode {
         let outcome = load::run(&agent).await;
         let (Ok(line) | Err(line)) = &outcome;
         // The last line is the tile's summary (or failure reason).
+        eprintln!("{line}");
+        let _ = agent.progress(line, None, None).await;
+        return if outcome.is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+    if agent.prompt.trim_start().starts_with("litter") {
+        let outcome = litter::run(&agent);
+        let (Ok(line) | Err(line)) = &outcome;
         eprintln!("{line}");
         let _ = agent.progress(line, None, None).await;
         return if outcome.is_ok() {

@@ -197,12 +197,15 @@ async fn setup_and_wait(
         .sandbox
         .host_path(&task.sandbox, Path::new(AGENT_SOCKET_PATH));
     let listener = bind_task_socket(&socket, task).map_err(|e| format!("task socket: {e}"))?;
-    *server = Some(tokio::spawn(glass_rpc::serve(
+    // One task's socket, its agent's alone: a handful of connections and
+    // 32 calls under way between them, however many it asks for.
+    *server = Some(tokio::spawn(glass_rpc::serve_within(
         listener,
         Arc::new(AgentApi {
             rt: Arc::clone(rt),
             task: task.id,
         }),
+        glass_rpc::Limits::ONE_TASK,
     )));
 
     if let Some(dir) = log.parent() {
@@ -298,12 +301,15 @@ async fn drive_attended(
             .map_err(|e| format!("task socket: {e}"))?;
     }
     let listener = bind_task_socket(socket, task).map_err(|e| format!("task socket: {e}"))?;
-    *server = Some(tokio::spawn(glass_rpc::serve(
+    // One task's socket, its agent's alone: a handful of connections and
+    // 32 calls under way between them, however many it asks for.
+    *server = Some(tokio::spawn(glass_rpc::serve_within(
         listener,
         Arc::new(AgentApi {
             rt: Arc::clone(rt),
             task: task.id,
         }),
+        glass_rpc::Limits::ONE_TASK,
     )));
     {
         let mut state = task.lock();

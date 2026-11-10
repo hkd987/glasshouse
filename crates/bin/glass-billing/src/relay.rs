@@ -121,13 +121,19 @@ impl Relay {
         self.outbox.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Serves until the listener fails, delivering in the background.
+    /// Serves for as long as the relay runs, delivering in the background.
+    /// An accept that fails is tried again, and connections have a bound
+    /// (`glass_http::Accept`).
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
         tokio::spawn(Arc::clone(&self).deliver());
+        let mut accept = glass_http::Accept::new(listener);
         loop {
-            let (stream, _) = listener.accept().await?;
+            let (stream, _, place) = accept.next().await;
             let relay = Arc::clone(&self);
-            tokio::spawn(async move { relay.connection(stream).await });
+            tokio::spawn(async move {
+                let _place = place;
+                relay.connection(stream).await;
+            });
         }
     }
 

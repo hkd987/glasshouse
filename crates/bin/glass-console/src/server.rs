@@ -1250,10 +1250,18 @@ impl Console {
                 sweeper.sweep_meetings().await;
             }
         });
+        // An accept that fails is tried again, and connections have a
+        // bound (glass_http::Accept): each managed computer holds one or
+        // two waiting requests, and running out of descriptors used to end
+        // the console.
+        let mut accept = glass_http::Accept::new(listener);
         loop {
-            let (stream, _) = listener.accept().await?;
+            let (stream, _, place) = accept.next().await;
             let console = Arc::clone(&self);
-            tokio::spawn(async move { console.connection(stream).await });
+            tokio::spawn(async move {
+                let _place = place;
+                console.connection(stream).await;
+            });
         }
     }
 
