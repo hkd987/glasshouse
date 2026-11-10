@@ -39,8 +39,9 @@ command="/usr/sbin/daemon"
 glassd_bin="/usr/local/sbin/glassd"
 # glassd checks its config and policy as it starts and, with
 # --console-errors, says on the console why if it won't run (BR-1: the
-# message names Glasshouse only).
-command_args="-f -R ${glassd_restart_delay} -C 100 -P ${pidfile} -p /var/run/${name}.pid -o ${glassd_log} ${glassd_bin} --config ${glassd_config} --console-errors"
+# message names Glasshouse only). -H: the supervisor opens the log again
+# when newsyslog has moved it aside (newsyslog.conf.d/glasshouse.conf).
+command_args="-f -H -R ${glassd_restart_delay} -C 100 -P ${pidfile} -p /var/run/${name}.pid -o ${glassd_log} ${glassd_bin} --config ${glassd_config} --console-errors"
 start_precmd="glassd_precmd"
 stop_precmd="glassd_stop_precmd"
 extra_commands="suspend resume"

@@ -1215,6 +1215,10 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
 
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
+    // Listened for so that it does nothing: a hangup's default is to end
+    // the process, and with it every task (one sent to glassd instead of
+    // its supervisor, as when a log is rotated by hand, did).
+    let _hangup = signal(SignalKind::hangup())?;
     let served = tokio::select! {
         result = glass_rpc::serve(listener, Arc::new(ControlApi::new(Arc::clone(&runtime)))) => result.map_err(anyhow::Error::from),
         result = glass_rpc::serve(app_listener, Arc::new(AppApi::new(Arc::clone(&runtime)))) => result.map_err(anyhow::Error::from),

@@ -13,20 +13,37 @@ set -eu
 # a dataset of its own, outside them, so that a change tried in a new one
 # (ADR 0057) or an update (EP-1) keeps every record. Moved there once, with
 # glassd stopped and nothing of a task mounted under it.
+#
+# Where the dataset is mounted says how far that got: nowhere yet (no
+# dataset), half way ($state.new: a run that was cut short, picked up here
+# where it used to be skipped for good, leaving the state inside the boot
+# environment for the next update to start without), or done ($state).
 state=/var/db/glasshouse
 root=$(zfs list -H -o name / 2>/dev/null || true)
 pool=${root%%/*}
-if [ -n "$pool" ] && ! zfs list -H "$pool/glasshouse" >/dev/null 2>&1; then
+at=$(zfs get -H -o value mountpoint "$pool/glasshouse" 2>/dev/null || true)
+if [ -n "$pool" ] && [ "$at" != "$state" ]; then
 	if [ -f /usr/local/etc/rc.d/glassd ]; then
 		service glassd onestop >/dev/null 2>&1 || true
 	fi
 	if mount -p | awk '{ print $2 }' | grep -q "^$state/"; then
 		echo "post-install: something is mounted under $state; its state stays where it is" >&2
 	else
-		zfs create -o mountpoint="$state.new" -o atime=off "$pool/glasshouse"
+		[ -n "$at" ] || zfs create -o mountpoint="$state.new" -o atime=off "$pool/glasshouse"
 		chmod 0700 "$state.new"
 		if [ -d "$state" ]; then
-			(cd "$state" && tar -cf - .) | (cd "$state.new" && tar -xpf -)
+			# Copied whole, or not switched over: each tar's result is
+			# looked at, where a copy that failed half way used to be
+			# followed by the old state's removal.
+			copied=$(mktemp)
+			{ (cd "$state" && tar -cf - .) || echo read >>"$copied"; } |
+				{ (cd "$state.new" && tar -xpf -) || echo write >>"$copied"; }
+			if [ -s "$copied" ]; then
+				rm -f "$copied"
+				echo "post-install: copying glassd's state to $pool/glasshouse failed; it stays in $state" >&2
+				exit 1
+			fi
+			rm -f "$copied"
 			mv "$state" "$state.old"
 		fi
 		zfs set mountpoint="$state" "$pool/glasshouse"
@@ -37,6 +54,35 @@ if [ -n "$pool" ] && ! zfs list -H "$pool/glasshouse" >/dev/null 2>&1; then
 fi
 install -d -o root -g wheel -m 0700 /var/db/glasshouse
 install -d -o root -g wheel -m 0755 /var/run/glasshouse
+
+# Room that is the audit log's whatever else fills the pool, and a size for
+# what agents fill. When the log can't be written nothing an agent or an
+# app asks runs (ADR 0053), and a task's scratch space had no limit: one
+# agent writing in a loop filled the pool in under an hour, and with it
+# stopped every other.
+# - The state dataset keeps 1 GB of its own (refreservation: for the log
+#   and glassd's records, not for the datasets under it).
+# - Sandboxes get a dataset under it with a quota: a quarter of the pool,
+#   and never less than 8 GB. A task that fills it has its own writes
+#   refused; the person's files and the log are elsewhere.
+# Each is set once and left alone after, so an owner's own choice stays.
+if [ -n "$pool" ] && [ "$(zfs get -H -o value mountpoint "$pool/glasshouse" 2>/dev/null)" = "$state" ]; then
+	if [ "$(zfs get -H -o value refreservation "$pool/glasshouse")" = none ]; then
+		zfs set refreservation=1G "$pool/glasshouse" ||
+			echo "post-install: no room to reserve for the audit log; nothing is reserved" >&2
+	fi
+	# Made while no sandbox is there to be hidden under it; a deploy with
+	# tasks running leaves it for the next.
+	if ! zfs list -H "$pool/glasshouse/sandboxes" >/dev/null 2>&1 &&
+		[ -z "$(ls -A "$state/sandboxes" 2>/dev/null)" ]; then
+		size=$(zpool list -Hp -o size "$pool")
+		quota=$((size / 4))
+		[ "$quota" -ge 8589934592 ] || quota=8589934592
+		zfs create -o quota="$quota" "$pool/glasshouse/sandboxes"
+		chmod 0700 "$state/sandboxes"
+		echo "post-install: sandboxes are on $pool/glasshouse/sandboxes, at most $((quota / 1073741824)) GB"
+	fi
+fi
 
 # setconf <file> <name>=<value>...: set what isn't set already. sysrc
 # takes about a second a variable on an emulated machine, so values it

@@ -17,15 +17,36 @@
 name="glasshouse_greeter"
 desc="The Glasshouse sign-in screen"
 rcvar="glasshouse_greeter_enable"
-pidfile="/var/run/${name}.pid"
-procname="/usr/local/bin/glass-greeter"
+# daemon(8) supervises the sign-in screen as it does glassd (ADR 0055): it
+# starts glass-greeter again two seconds after it stops without being
+# asked to. getty is off on this terminal, so a sign-in screen that died
+# and stayed dead left no way to sign in until the computer was restarted.
+# rc tracks the supervisor (-P): stopping it forwards SIGTERM to
+# glass-greeter, which ends the sign-in screen or desktop showing before it
+# exits, and nothing starts it again. glass-greeter's own pid stays in
+# glasshouse_greeter.pid. -H: the supervisor opens the log again when
+# newsyslog has moved it aside (newsyslog.conf.d/glasshouse.conf).
+pidfile="/var/run/${name}_supervisor.pid"
+procname="/usr/sbin/daemon"
 command="/usr/sbin/daemon"
-# -p records glass-greeter's pid, not daemon's: rc.subr stops it with
-# SIGTERM, and it ends the sign-in screen or desktop showing before it exits.
-command_args="-f -p ${pidfile} -o /var/log/glass-greeter.log ${procname}"
+greeter_bin="/usr/local/bin/glass-greeter"
+command_args="-f -H -R 2 -P ${pidfile} -p /var/run/${name}.pid -o /var/log/glass-greeter.log ${greeter_bin}"
 
-start_precmd="glasshouse_greeter_getty off"
+start_precmd="glasshouse_greeter_prestart"
 stop_postcmd="glasshouse_greeter_stopped"
+
+glasshouse_greeter_prestart()
+{
+	# A sign-in screen started before this script supervised it has its pid
+	# in glasshouse_greeter.pid and no supervisor, so stopping didn't find
+	# it (an update that replaced the script under it): ended here, or two
+	# would draw on the one screen.
+	if [ ! -f "${pidfile}" ] && [ -f "/var/run/${name}.pid" ]; then
+		pkill -F "/var/run/${name}.pid" glass-greeter 2>/dev/null && sleep 1
+		rm -f "/var/run/${name}.pid"
+	fi
+	glasshouse_greeter_getty off
+}
 
 # A restart, or a shutdown while the greeter is on, leaves getty off: one
 # started in between would draw its login prompt over the sign-in screen.

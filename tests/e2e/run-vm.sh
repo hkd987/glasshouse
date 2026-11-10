@@ -124,7 +124,8 @@ step "root checks"
 "$vm" run "glassctl verify
 test \$($glass_jails) -eq 0 || { echo 'FAIL jails left behind'; exit 1; }
 test \$($glass_limits) -eq 0 || { echo 'FAIL resource limits left behind'; exit 1; }
-if mount -p | grep -q /var/db/glasshouse/sandboxes; then echo 'FAIL mounts left behind'; exit 1; fi
+# Under it: the folder itself is a dataset of its own, with a quota.
+if mount -p | grep -q /var/db/glasshouse/sandboxes/; then echo 'FAIL mounts left behind'; exit 1; fi
 # Roots and their specs, which a power cut once left for good (ADR 0053).
 if ls -d /var/db/glasshouse/sandboxes/glass-* 2>/dev/null; then echo 'FAIL sandboxes left behind'; exit 1; fi
 echo 'PASS nothing left behind'"

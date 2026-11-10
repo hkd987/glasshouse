@@ -551,6 +551,8 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
     draw(&mut display, &greeter);
     let (mut inputs, _) = input::start(display.pixels());
     let mut terminate = signal(SignalKind::terminate())?;
+    let orphaned = orphaned();
+    tokio::pin!(orphaned);
     loop {
         tokio::select! {
             Some(first) = inputs.recv() => {
@@ -612,6 +614,7 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
                 display.draw(login::view(&theme, &sign_in, display.size()));
             }
             _ = terminate.recv() => bail!("stopped"),
+            () = &mut orphaned => bail!("the sign-in screen's own supervisor is gone"),
         }
     }
 }
@@ -679,6 +682,8 @@ async fn setup(tty: &Path) -> anyhow::Result<String> {
     eprintln!("glass-greeter: first-run setup");
     let (mut inputs, _) = input::start(display.pixels());
     let mut terminate = signal(SignalKind::terminate())?;
+    let orphaned = orphaned();
+    tokio::pin!(orphaned);
     loop {
         tokio::select! {
             Some(first) = inputs.recv() => {
@@ -738,6 +743,7 @@ async fn setup(tty: &Path) -> anyhow::Result<String> {
                 display.draw(setup::view(&theme, &setup.screen(), display.size()));
             }
             _ = terminate.recv() => bail!("stopped"),
+            () = &mut orphaned => bail!("the sign-in screen's own supervisor is gone"),
         }
     }
 }
@@ -846,6 +852,24 @@ fn sync_dir(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Waits until `at`, or forever without one.
+/// Resolves once the process that started this one is gone.
+///
+/// The screen is drawn by a process of its own, which hands who signed in
+/// back to the one that started it. If that one dies, this one would draw
+/// on with nobody to hand anything to: a sign-in that checks a password
+/// and goes nowhere. It would also keep the log's pipe open, which is what
+/// daemon(8) waits on before it starts the sign-in screen again
+/// (rc.d/glasshouse_greeter). So it ends itself.
+async fn orphaned() {
+    let started_by = std::os::unix::process::parent_id();
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if std::os::unix::process::parent_id() != started_by {
+            return;
+        }
+    }
+}
+
 async fn blink(at: Option<std::time::Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at.into()).await,
