@@ -1817,12 +1817,17 @@ fn internal(e: impl std::fmt::Display) -> Refused {
     Refused::Invalid(vec![e.to_string()])
 }
 
-/// A change that couldn't be written down, and so wasn't made.
+/// A change that couldn't be written down, and so wasn't made. Why (a
+/// path on this server and the system's error) goes to the console's log
+/// for whoever runs it, not to the browser of whoever clicked.
 fn unsaved(e: impl std::fmt::Display) -> Refused {
-    Refused::Unavailable(format!(
-        "The console couldn't save that, so nothing was changed ({e:#}). Try again in a moment."
-    ))
+    tracing::error!(error = %format!("{e:#}"), "a change couldn't be saved, so it wasn't made");
+    Refused::Unavailable(UNSAVED.to_owned())
 }
+
+/// What the page says for a change that couldn't be written down.
+const UNSAVED: &str = "The console couldn't save that, so nothing was changed. \
+     Try again in a moment; if it keeps happening, the console's log says why.";
 
 fn errors(e: &glass_policy::PolicyError) -> Vec<String> {
     match e {

@@ -2591,6 +2591,13 @@ mod tests {
             matches!(&failed, Err(Refused::Unavailable(why)) if why.contains("nothing was changed")),
             "{failed:?}"
         );
+        // The browser is told that, not where this server keeps its files
+        // or the system's error: those are in the console's log.
+        let said = format!("{failed:?}");
+        assert!(
+            !said.contains(&dir.path().display().to_string()) && !said.contains("os error"),
+            "{said}"
+        );
         // Not a refusal of what was asked: worth asking again.
         assert_eq!(refused(failed.unwrap_err()).status, 503);
         // Nothing of it is the console's: no new version, the pilot ring
