@@ -17,7 +17,7 @@ use glass_rpc::{Client, ClientError};
 use glass_types::{TaskId, Tier};
 use serde_json::{Value, json};
 
-use crate::common::{Harness, eventually, harness, harness_with};
+use crate::common::{Harness, eventually, harness, harness_with, tool};
 
 async fn open(client: &Client, app: &str) -> AppSession {
     client
@@ -244,6 +244,74 @@ async fn nv3_an_open_app_hears_what_changed_across_a_restart_of_glassd() {
         .await
         .unwrap();
     assert!(quiet.changed.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nv3_an_open_app_hears_what_an_agent_changed_and_not_what_it_did_itself() {
+    let h = harness();
+    let socket = h.serve_apps();
+    let apps = Client::connect(&socket).await.unwrap();
+    let calendar = open(&apps, "calendar").await;
+    let mail = open(&apps, "mail").await;
+    let start = status(&apps, calendar.session).await.cursor;
+    let news = async |since: u64| -> AppStatus {
+        apps.call(
+            app_methods::APP_STATUS,
+            json!({ "session": calendar.session, "wait_secs": 1, "since": since }),
+        )
+        .await
+        .unwrap()
+    };
+
+    // What Calendar's own window does is no news to it: it would read the
+    // week again after every event it added, and Chat its conversation
+    // after every draft it saved.
+    let standup =
+        json!({ "title": "Standup", "start": "2026-10-20T09:00", "end": "2026-10-20T09:15" });
+    let added = call(&apps, calendar.session, "calendar.create", standup).await;
+    assert!(added.ok, "{}", added.text);
+    let quiet = news(start).await;
+    assert!(quiet.changed.is_empty(), "{:?}", quiet.changed);
+
+    // A hold an agent makes is: the open week shows it now, where it
+    // showed at the next change of week.
+    let mut request = h.request(&[], &[]);
+    request.agent = "claude-code".parse().unwrap();
+    let driver = h.rt.start(&h.me, request).unwrap().driver_socket.unwrap();
+    eventually(|| driver.exists()).await;
+    let agent = Client::connect(&driver).await.unwrap();
+    let _: Value = agent
+        .call("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}))
+        .await
+        .unwrap();
+    let held = tool(
+        &agent,
+        "calendar_hold",
+        json!({ "title": "Prep for Northwind", "start": "2026-10-20T14:00", "end": "2026-10-20T15:00" }),
+    )
+    .await;
+    assert!(!held.is_error, "{}", held.text());
+    let woke = news(quiet.cursor).await;
+    assert_eq!(woke.changed, ["calendar"]);
+    // Calendar's news, nobody else's: Mail's window waits on.
+    let other: AppStatus = apps
+        .call(
+            app_methods::APP_STATUS,
+            json!({ "session": mail.session, "wait_secs": 0, "since": start }),
+        )
+        .await
+        .unwrap();
+    assert!(other.changed.is_empty(), "{:?}", other.changed);
+    // A look alone is no change: the agent reading the calendar wakes nobody.
+    let read = tool(
+        &agent,
+        "calendar_list",
+        json!({ "from": "2026-10-19", "to": "2026-10-26" }),
+    )
+    .await;
+    assert!(!read.is_error, "{}", read.text());
+    let after = news(woke.cursor).await;
+    assert!(after.changed.is_empty(), "{:?}", after.changed);
 }
 
 #[tokio::test(flavor = "multi_thread")]

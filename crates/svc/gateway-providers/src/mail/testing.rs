@@ -15,6 +15,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use glass_managed::mail::{Account, MailLink, Secret, Server, SyncLimits};
@@ -70,7 +71,50 @@ fn fresh_ip() -> Ipv4Addr {
     )
 }
 
+/// How long one may take to come up, once it is its turn to start.
+const START_WITHIN: Duration = Duration::from_secs(60);
+
+/// A turn to start a server; the next one's when dropped.
+struct Turn;
+
+/// How many are starting, and the wait for that to go down.
+static STARTING: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+impl Turn {
+    /// Waits for a turn: as many start at once as the machine has
+    /// processors. A start is a second or two of one (keys, a
+    /// certificate, a database), and a test binary's mail tests all start
+    /// theirs in its first moment: sixty at once on a two-processor CI
+    /// runner left one without its control socket after 20 s, and that
+    /// test failed with nothing wrong.
+    fn wait() -> Turn {
+        let most = std::thread::available_parallelism().map_or(2, usize::from);
+        let (count, freed) = &STARTING;
+        let mut starting = count.lock().unwrap_or_else(|e| e.into_inner());
+        while *starting >= most {
+            starting = freed.wait(starting).unwrap_or_else(|e| e.into_inner());
+        }
+        *starting += 1;
+        Turn
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let (count, freed) = &STARTING;
+        *count.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        freed.notify_one();
+    }
+}
+
 impl Mox {
+    /// The end of its log, for a failure to say what mox said.
+    fn log_tail(&self) -> String {
+        let log = std::fs::read_to_string(self.dir.path().join("mox.log")).unwrap_or_default();
+        let lines: Vec<&str> = log.lines().collect();
+        lines[lines.len().saturating_sub(20)..].join("\n")
+    }
+
     /// Starts one, or says why not and returns `None` (no binary). Where
     /// `GLASS_REQUIRE_TOOLS` is set, as in CI, no binary is a failure: a
     /// test that returned early counts as passed, and so did the whole
@@ -85,6 +129,7 @@ impl Mox {
             eprintln!("skipped: {why}");
             return None;
         };
+        let _turn = Turn::wait();
         let dir = tempfile::tempdir().expect("a temporary folder for mox");
         let ip = fresh_ip();
         let state = dir.path().join("mox");
@@ -112,14 +157,14 @@ impl Mox {
             ip,
             cert,
         };
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + START_WITHIN;
         for port in [IMAPS, SUBMISSIONS] {
             let addr = SocketAddr::new(IpAddr::V4(ip), port);
             while TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err() {
                 assert!(
                     Instant::now() < deadline,
-                    "mox didn't start listening on {addr}; its log is in {}",
-                    mox.dir.path().display()
+                    "mox didn't start listening on {addr}; its log ends:\n{}",
+                    mox.log_tail()
                 );
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -130,8 +175,9 @@ impl Mox {
         while !ctl.exists() {
             assert!(
                 Instant::now() < deadline,
-                "mox has no control socket at {}",
-                ctl.display()
+                "mox has no control socket at {}; its log ends:\n{}",
+                ctl.display(),
+                mox.log_tail()
             );
             std::thread::sleep(Duration::from_millis(50));
         }
