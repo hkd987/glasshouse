@@ -59,7 +59,7 @@ struct ErrorDetail {
 
 impl Stripe {
     pub fn new(endpoint: Option<&str>, secret_key: &str) -> Self {
-        Self::with_http(Http::new(), endpoint, Secret::new(secret_key))
+        Self::with_http(Http::new().quick(), endpoint, Secret::new(secret_key))
     }
 
     fn with_http(http: Http, endpoint: Option<&str>, key: Secret) -> Self {

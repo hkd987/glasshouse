@@ -79,7 +79,7 @@ impl DynamoDb {
             return Err(format!("the DynamoDB endpoint {base:?} must use HTTPS"));
         };
         Ok(Self {
-            http,
+            http: http.quick(),
             region: region.to_owned(),
             host: target.authority(),
             base,

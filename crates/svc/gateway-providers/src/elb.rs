@@ -40,6 +40,7 @@ pub fn load_balancer_key(base: &str, kid: &str, proxy: Option<&str>) -> Result<S
         return Err(format!("{base:?} must use HTTPS"));
     };
     let reply = http
+        .quick()
         .send("GET", &format!("{base}/{kid}"), &[], b"")
         .map_err(|e| format!("couldn't get the load balancer's key {kid}: {e}"))?;
     if reply.status != 200 {

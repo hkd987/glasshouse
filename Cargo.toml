@@ -94,6 +94,10 @@ openssl = "0.10.81"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 sha2 = "0.11.1"
+# TCP keepalive on the outbound HTTP client's connections (glass-gateway-
+# providers), which std's TcpStream has no way to set. tokio has it in the
+# tree already.
+socket2 = { version = "0.6.5", features = ["all"] }
 # The meetings relay (ADR 0030): WebRTC in Sans-IO style. Its DTLS and SRTP
 # run on OpenSSL; only glass-media-relay may use it (tools/check-layers.py).
 str0m = { version = "0.24.1", default-features = false, features = ["openssl"] }

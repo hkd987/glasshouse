@@ -221,7 +221,7 @@ pub struct OpenRouterKeys {
 
 impl OpenRouterKeys {
     pub fn new(endpoint: Option<&str>, management: &str) -> Self {
-        Self::with_http(Http::new(), endpoint, Secret::new(management))
+        Self::with_http(Http::new().quick(), endpoint, Secret::new(management))
     }
 
     fn with_http(http: Http, endpoint: Option<&str>, management: Secret) -> Self {

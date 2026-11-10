@@ -136,8 +136,8 @@ struct Client {
 impl Client {
     fn new(allow_loopback_http: bool) -> Self {
         Self {
-            tls: Http::new(),
-            plain: Http::loopback(),
+            tls: Http::new().quick(),
+            plain: Http::loopback().quick(),
             allow_loopback_http,
         }
     }
@@ -237,7 +237,18 @@ impl BotKeys {
         let missing = kid.is_some_and(|k| !keys.kids.iter().any(|have| have == k));
         if may_try && (stale || missing) {
             keys.tried = Some(now);
-            match self.fetch() {
+            // Fetched with the lock let go: every request with a token
+            // comes through here, and one fetch Microsoft didn't answer
+            // held them all for as long as it took to give up. Meanwhile
+            // they get the keys already here (`tried` keeps them from
+            // fetching too), or are told to come back if there are none.
+            drop(keys);
+            let fetched = self.fetch();
+            keys = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match fetched {
                 Ok((jwks, kids)) => {
                     keys.jwks = Some(jwks);
                     keys.kids = kids;
@@ -774,6 +785,55 @@ mod tests {
                 .unwrap(),
             second
         );
+    }
+
+    #[test]
+    fn adr0065_a_fetch_microsoft_is_slow_to_answer_holds_no_other_request() {
+        // The keys were fetched under the lock every request with a token
+        // takes: one fetch nobody answered held every Teams request for
+        // as long as it took to give up (ten minutes and more).
+        let (keys_url, _keys_got) = fake::serve_raw(vec![ok(&jwks(&["k1"]))]);
+        let metadata = json!({
+            "jwks_uri": format!("{keys_url}/v1/.well-known/keys"),
+            "id_token_signing_alg_values_supported": ["RS256"],
+        })
+        .to_string();
+        // The metadata is served once; the second fetch is taken by a
+        // server that says nothing for a second and a half.
+        let slow = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let (meta_url, _meta_got) = fake::serve_raw(vec![ok(&metadata)]);
+        let keys = BotKeys::new(&endpoints(&meta_url, "http://127.0.0.1:9")).unwrap();
+        let t0 = Instant::now();
+        let first = keys.signing_keys_at(Some("k1"), t0).unwrap();
+
+        // A day on, from a metadata address that takes the connection and
+        // doesn't answer.
+        let keys = BotKeys {
+            metadata: format!("http://{}/metadata", slow.local_addr().unwrap()),
+            ..keys
+        };
+        let silent = std::thread::spawn(move || {
+            let (stream, _) = slow.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(1500));
+            drop(stream);
+        });
+        let later = t0 + KEYS_MAX_AGE + Duration::from_secs(1);
+        std::thread::scope(|scope| {
+            let fetching = scope.spawn(|| keys.signing_keys_at(Some("k1"), later));
+            // Once that fetch is on its way, another request's keys.
+            std::thread::sleep(Duration::from_millis(300));
+            let started = Instant::now();
+            let meanwhile = keys.signing_keys_at(Some("k1"), later + Duration::from_secs(1));
+            assert!(
+                started.elapsed() < Duration::from_millis(500),
+                "{:?}",
+                started.elapsed()
+            );
+            // The keys already here, for both.
+            assert_eq!(meanwhile.unwrap(), first);
+            assert_eq!(fetching.join().unwrap().unwrap(), first);
+        });
+        silent.join().unwrap();
     }
 
     #[test]

@@ -885,13 +885,27 @@ mod tests {
         // A stand-in for Dana's QEMU: a process whose command line names
         // QEMU and her pid file, as QEMU's own does.
         let mut machine = Command::new("sh")
-            // Two commands, or the shell becomes `sleep` and its command
-            // line with it.
-            .args(["-c", "sleep 30; exit 0", "qemu-system-x86_64", "-pidfile"])
+            // The shell itself waits (on input that never comes): a
+            // command it ran would take its place, command line and all,
+            // or outlive it.
+            .args(["-c", "read line; exit 0", "qemu-system-x86_64", "-pidfile"])
             .arg(dana.dir.join(PID))
+            .stdin(Stdio::piped())
             .spawn()
             .unwrap();
         let pid = machine.id();
+        // A process just started has no command line to read for a
+        // moment (the kernel fills it in after the start returns here).
+        // QEMU writes its pid file once it runs; the stand-in's is
+        // written when it shows as running.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while fs::read(format!("/proc/{pid}/cmdline")).map_or(true, |c| c.is_empty()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stand-in never ran"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         fs::write(dana.dir.join(PID), format!("{pid}\n")).unwrap();
         assert_eq!(QemuHypervisor::pid(&dana), Some(pid));
         // Omar's file names the same process: it isn't his.

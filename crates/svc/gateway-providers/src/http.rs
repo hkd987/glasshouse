@@ -9,6 +9,13 @@
 //! connection (`Connection: close`), no redirects, no cookies, no
 //! compression. An HTTPS proxy in glassd's environment (`https_proxy`, set
 //! by its rc.d script, never by an agent) is used through CONNECT.
+//!
+//! Time: connecting, the proxy's tunnel and the TLS handshake each have
+//! [`CONNECT_TIMEOUT`]. After that a client waits as long as its kind of
+//! call needs: a model's reply (ten minutes, the default), a download, or
+//! one short answer ([`Http::quick`]). Every connection has TCP keepalive
+//! on, so the networks between (a NAT, a load balancer) don't drop one
+//! that is only waiting, and one whose far end is gone ends in minutes.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -30,6 +37,22 @@ const IDLE_TIMEOUT: Duration = CALL_TIMEOUT;
 /// as long as it takes in all (ADR 0061: an image is gigabytes).
 const DOWNLOAD_IDLE: Duration = Duration::from_secs(60);
 const DOWNLOAD_TOTAL: Duration = Duration::from_secs(24 * 3600);
+/// A call that is one question and one short answer (a key, a record, a
+/// meter reading, a charge): silent this long, or this long in all, the
+/// far end isn't answering. These waited the ten minutes a model's reply
+/// may take, and whatever called them waited with them.
+const QUICK_IDLE: Duration = Duration::from_secs(20);
+const QUICK_TOTAL: Duration = Duration::from_secs(60);
+/// How long a connection is silent before the kernel asks the far end
+/// whether it's there, and how long between asks. A reply that thinks
+/// first says nothing for minutes, and AWS's NAT gateways, load balancers
+/// and PrivateLink drop a flow silent for 350 s without telling either
+/// end: the reply was lost and the call waited out its ten minutes before
+/// failing over. An ask every 45 s keeps the flow.
+const KEEPALIVE: Duration = Duration::from_secs(45);
+/// Asks unanswered before the connection is given up on: a far end that
+/// is gone ends the call in three minutes, not ten.
+const KEEPALIVE_TRIES: u32 = 3;
 /// The most of a reply's head read, and of a refusal's body.
 const MAX_HEAD: usize = 64 * 1024;
 /// How much longer a hop in front of a provider waits than the provider's
@@ -43,6 +66,8 @@ pub(crate) struct Http {
     tls: Result<native_tls::TlsConnector, String>,
     pub(crate) https_only: bool,
     proxy: Option<Proxy>,
+    /// The longest connecting may take, and the tunnel, and the handshake.
+    pub(crate) connect: Duration,
     pub(crate) idle: Duration,
     pub(crate) total: Duration,
     /// The most of a reply read.
@@ -137,6 +162,7 @@ impl Http {
             tls,
             https_only,
             proxy,
+            connect: CONNECT_TIMEOUT,
             idle: IDLE_TIMEOUT,
             total: CALL_TIMEOUT,
             max_reply: MAX_REPLY,
@@ -157,6 +183,15 @@ impl Http {
     pub fn for_downloads(mut self) -> Self {
         self.idle = DOWNLOAD_IDLE;
         self.total = DOWNLOAD_TOTAL;
+        self
+    }
+
+    /// For calls that are one question and one short answer: a minute at
+    /// most, twenty seconds of silence. Not for a model's reply.
+    #[must_use]
+    pub fn quick(mut self) -> Self {
+        self.idle = QUICK_IDLE;
+        self.total = QUICK_TOTAL;
         self
     }
 
@@ -337,23 +372,40 @@ impl Http {
             .proxy
             .as_ref()
             .filter(|p| target.tls && !p.bypasses(&target.host));
+        // Reads and writes have `self.connect` until the connection is
+        // ready for the request: the tunnel and the handshake were under
+        // the call's own ten minutes, so a server that took the connection
+        // and said nothing held the call that long.
         let tcp = match via {
             Some(proxy) => {
-                let mut tcp = dial(&proxy.authority, self.idle)?;
+                let mut tcp = dial(&proxy.authority, self.connect)?;
                 tunnel(&mut tcp, target)?;
                 tcp
             }
-            None => dial(&target.address(), self.idle)?,
+            None => dial(&target.address(), self.connect)?,
+        };
+        let ready = |tcp: &TcpStream| {
+            tcp.set_read_timeout(Some(self.idle))
+                .and_then(|()| tcp.set_write_timeout(Some(self.idle)))
+                .map_err(|e| outage("connecting", &e))
         };
         if !target.tls {
+            ready(&tcp)?;
             return Ok(Box::new(tcp));
         }
         let connector = self.tls.as_ref().map_err(|e| {
             ProviderError::NotConfigured(format!("TLS isn't available on this computer: {e}"))
         })?;
-        let tls = connector
-            .connect(&target.host, tcp)
-            .map_err(|e| ProviderError::Unavailable(format!("TLS handshake failed: {e}")))?;
+        let tls = connector.connect(&target.host, tcp).map_err(|e| {
+            ProviderError::Unavailable(match e {
+                // The socket's timeout, as native-tls reports it.
+                native_tls::HandshakeError::WouldBlock(_) => {
+                    "timed out in the TLS handshake".into()
+                }
+                native_tls::HandshakeError::Failure(e) => format!("TLS handshake failed: {e}"),
+            })
+        })?;
+        ready(tls.get_ref())?;
         Ok(Box::new(tls))
     }
 }
@@ -378,16 +430,24 @@ fn broken(doing: &str, e: &std::io::Error) -> ProviderError {
     }
 }
 
-fn dial(authority: &str, idle: Duration) -> Result<TcpStream, ProviderError> {
+/// A connection to `authority` with keepalive on, its reads and writes
+/// given `within` each, as connecting is.
+fn dial(authority: &str, within: Duration) -> Result<TcpStream, ProviderError> {
     let addrs = authority
         .to_socket_addrs()
         .map_err(|_| ProviderError::Unavailable(format!("can't resolve {authority}")))?;
     let mut last = None;
     for addr in addrs {
-        match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+        match TcpStream::connect_timeout(&addr, within) {
             Ok(tcp) => {
-                tcp.set_read_timeout(Some(idle))
-                    .and_then(|()| tcp.set_write_timeout(Some(idle)))
+                let keep = socket2::TcpKeepalive::new()
+                    .with_time(KEEPALIVE)
+                    .with_interval(KEEPALIVE)
+                    .with_retries(KEEPALIVE_TRIES);
+                socket2::SockRef::from(&tcp)
+                    .set_tcp_keepalive(&keep)
+                    .and_then(|()| tcp.set_read_timeout(Some(within)))
+                    .and_then(|()| tcp.set_write_timeout(Some(within)))
                     .map_err(|e| outage("connecting", &e))?;
                 return Ok(tcp);
             }
@@ -838,6 +898,90 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("TLS handshake failed"), "{err}");
         assert!(err.fails_over());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_connection_asks_whether_the_far_end_is_there_while_it_waits() {
+        // What keeps a flow through a NAT or a load balancer that drops
+        // silent ones (350 s on AWS) while a model thinks, and ends a
+        // call whose far end is gone in minutes.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let tcp = dial(
+            &listener.local_addr().unwrap().to_string(),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        let socket = socket2::SockRef::from(&tcp);
+        assert!(socket.keepalive().unwrap());
+        assert_eq!(socket.tcp_keepalive_time().unwrap(), KEEPALIVE);
+        assert_eq!(socket.tcp_keepalive_interval().unwrap(), KEEPALIVE);
+        assert_eq!(socket.tcp_keepalive_retries().unwrap(), KEEPALIVE_TRIES);
+        assert!(KEEPALIVE < Duration::from_secs(350) / 2);
+        // Until it's ready for a request, reads have the connecting limit.
+        assert_eq!(tcp.read_timeout().unwrap(), Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn a_server_silent_in_the_handshake_is_given_up_on_as_connecting_is() {
+        // It takes the connection and says nothing. The handshake was
+        // under the call's ten minutes of silence, and so was whatever
+        // made the call.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        });
+        let mut http = Http::build(true, None);
+        http.connect = Duration::from_millis(300);
+        assert_eq!(http.idle, IDLE_TIMEOUT);
+        let started = Instant::now();
+        let err = http
+            .post(&format!("https://127.0.0.1:{port}/v1/messages"), &[], b"{}")
+            .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            err.to_string().contains("timed out in the TLS handshake"),
+            "{err}"
+        );
+        assert!(err.fails_over());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_short_answer_is_waited_for_a_minute_and_a_models_for_ten() {
+        let models = Http::build(true, None);
+        assert_eq!((models.idle, models.total), (IDLE_TIMEOUT, CALL_TIMEOUT));
+        let quick = Http::build(true, None).quick();
+        assert_eq!((quick.idle, quick.total), (QUICK_IDLE, QUICK_TOTAL));
+        assert!(quick.total <= Duration::from_secs(60));
+        // A request it never answers ends at the quick client's silence,
+        // not the ten minutes.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(2));
+            drop(stream);
+        });
+        let mut quick = Http::insecure_for_tests().quick();
+        quick.idle = Duration::from_millis(300);
+        let started = Instant::now();
+        let err = quick
+            .send("GET", &format!("http://127.0.0.1:{port}/key"), &[], b"")
+            .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(err.to_string().contains("timed out"), "{err}");
         server.join().unwrap();
     }
 

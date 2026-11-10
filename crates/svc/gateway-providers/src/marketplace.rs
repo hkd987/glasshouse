@@ -140,7 +140,7 @@ impl MarketplaceMetering {
         let local = crate::http::Target::parse(&format!("{base}/"))
             .is_some_and(|t| !t.tls && crate::console::is_loopback(&t.host));
         let http = if local { Http::loopback() } else { Http::new() };
-        Self::with_http(http, region, &base, credentials)
+        Self::with_http(http.quick(), region, &base, credentials)
     }
 
     fn with_http(http: Http, region: &str, base: &str, credentials: AwsCredentials) -> Self {

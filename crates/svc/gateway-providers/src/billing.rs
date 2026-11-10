@@ -27,7 +27,7 @@ fn client(url: &str, allow_insecure_http: bool, what: &str) -> Result<(Http, Str
              development)"
         ));
     };
-    Ok((http, base))
+    Ok((http.quick(), base))
 }
 
 /// What the console answered a push with, when it didn't take it.
