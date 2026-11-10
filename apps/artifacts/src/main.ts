@@ -14,7 +14,7 @@
 // Like Chat, it keeps nothing: every call is `bridge.call`, and news comes
 // from `app.status` waits, ids only.
 
-import { attributionChip, Bridge, BridgeError, h, Offline, parseAttribution, ready, show, showAttribution } from "@glasshouse/sdk";
+import { attributionChip, Bridge, BridgeError, firstCursor, h, Offline, parseAttribution, ready, show, showAttribution, watch } from "@glasshouse/sdk";
 
 import {
   type Artifact,
@@ -1146,30 +1146,33 @@ function render(): void {
 }
 
 /** Waits for news and reads it: the list, and the open artifact, per change. */
-async function live(): Promise<void> {
-  for (;;) {
-    try {
-      const status = await bridge.status({ waitSecs: 25, since: state.cursor });
-      state.cursor = status.cursor;
-      if (status.changed.includes("artifacts")) {
-        // A change while a comment is on its way is read once that ends,
-        // never dropped (NV-3, ADR 0051).
-        while (state.busy) await new Promise((resolve) => setTimeout(resolve, 200));
-        await loadList();
-        await loadArtifact();
+function live(): void {
+  watch(
+    bridge,
+    "artifacts",
+    state.cursor,
+    async () => {
+      // A change while a comment is on its way is read once that ends,
+      // never dropped (NV-3, ADR 0051).
+      while (state.busy) await new Promise((resolve) => setTimeout(resolve, 200));
+      await loadList();
+      await loadArtifact();
+      render();
+      askWhere();
+    },
+    {
+      onOffline: (offline) => {
+        if (!offline) return;
+        state.offline = true;
         render();
-        askWhere();
-      }
-      if (state.offline) {
+      },
+      onAnswer: () => {
+        if (!state.offline) return;
         state.offline = false;
         render();
-      }
-    } catch {
-      state.offline = true;
-      render();
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-    }
-  }
+      },
+    },
+  );
 }
 
 async function start(): Promise<void> {
@@ -1190,17 +1193,14 @@ async function start(): Promise<void> {
   }
   // The cursor before the first load, so a change in between is news
   // (NV-3, ADR 0051).
-  try {
-    state.cursor = (await bridge.status()).cursor;
-  } catch {
-    // live() says so.
-  }
+  // Offline, 0: live() says so.
+  state.cursor = await firstCursor(bridge);
   await loadList();
   const linked = deepLink(location.hash);
   if (linked) await openArtifact(linked);
   else render();
   ready();
-  void live();
+  live();
 }
 
 void start();

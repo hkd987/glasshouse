@@ -9,7 +9,7 @@
 // page keeps nothing. glassd wakes it when a run starts or ends, or a
 // routine changes anywhere (`app.status`).
 
-import { Bridge, BridgeError, Offline, h, ready, show } from "@glasshouse/sdk";
+import { Bridge, BridgeError, Offline, firstCursor, h, ready, show, watch } from "@glasshouse/sdk";
 
 import {
   type Choice,
@@ -71,8 +71,8 @@ async function load(): Promise<void> {
     // (NV-3, ADR 0051); offline, the first wait tries again.
     if (!state.listening) {
       state.listening = true;
-      state.cursor = await bridge.status().then((s) => s.cursor, () => 0);
-      void listen();
+      state.cursor = await firstCursor(bridge);
+      listen();
     }
     const [listed, repeats] = await Promise.all([
       bridge.call<{ routines: Routine[] }>("routines.list", {}),
@@ -129,17 +129,11 @@ function runNow(r: Routine): Promise<void> {
  * a run starting or ending, wherever it was started, or a routine saved,
  * paused or removed by their agent or another window. Then loads again.
  */
-async function listen(): Promise<void> {
-  for (;;) {
-    try {
-      const status = await bridge.status({ waitSecs: 25, since: state.cursor });
-      state.cursor = status.cursor;
-      // A change of the page's own reloads when it's done.
-      if (status.changed.includes("routines") && state.busy === null) await load();
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-    }
-  }
+function listen(): void {
+  watch(bridge, "routines", state.cursor, async () => {
+    // A change of the page's own reloads when it's done.
+    if (state.busy === null) await load();
+  });
 }
 
 /** Shows version `version` of the open routine against the one in use, or stops. */

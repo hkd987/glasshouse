@@ -23,6 +23,12 @@ export interface WatchOptions {
   waitSecs?: number;
   /** Told when the system stops being reached, and when it is again. */
   onOffline?: (offline: boolean) => void;
+  /**
+   * Told each time the system answers a wait, after `changed` if there
+   * was a change: for a page that marks itself offline elsewhere too (a
+   * load that failed) and takes any answer as being back.
+   */
+  onAnswer?: () => void;
   /** For tests: the pause after the nth failure in a row, in ms. */
   pauseMs?: (failures: number) => number;
 }
@@ -59,6 +65,7 @@ export function watch(bridge: Bridge, app: string, cursor: number, changed: () =
         if (failures > 0) options.onOffline?.(false);
         failures = 0;
         if (!stopped && status.changed.includes(app)) await changed();
+        if (!stopped) options.onAnswer?.();
       } catch {
         failures += 1;
         if (failures === 1) options.onOffline?.(true);

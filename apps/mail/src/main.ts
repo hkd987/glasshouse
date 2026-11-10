@@ -13,19 +13,21 @@
 // it never does.
 
 import {
-  type AppStatus,
   addressField,
+  type AppStatus,
+  attributionChip,
   Bridge,
   BridgeError,
-  Offline,
-  type Person,
-  attributionChip,
+  firstCursor,
   h,
   keepFilesOffline,
+  Offline,
+  type Person,
   ready,
   recentPeople,
   redraw,
   showAttribution,
+  watch,
 } from "@glasshouse/sdk";
 import {
   type Destination,
@@ -235,16 +237,8 @@ async function connect(form: Connect): Promise<void> {
 }
 
 /** New mail, from app.status waits (ids only): the folders on screen reload. */
-async function live(): Promise<void> {
-  for (;;) {
-    try {
-      const status = await bridge.status({ waitSecs: 25, since: state.cursor });
-      state.cursor = status.cursor;
-      if (status.changed.includes("mail")) await refresh();
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-    }
-  }
+function live(): void {
+  watch(bridge, "mail", state.cursor, refresh);
 }
 
 function startCompose(from?: Outgoing, draft: string | null = null): void {
@@ -820,18 +814,15 @@ async function start(): Promise<void> {
   }
   // The cursor before the first load, so mail that comes in between wakes
   // the page (NV-3, ADR 0051).
-  try {
-    state.cursor = (await bridge.status()).cursor;
-  } catch {
-    // Offline: what was kept is shown, and the first wait tries again.
-  }
+  // Offline, 0: what was kept is shown, and the first wait tries again.
+  state.cursor = await firstCursor(bridge);
   await Promise.all([refresh(), loadAccount()]);
   // The account may answer after the mail is drawn: draw it too.
   render();
   ready();
   // From here, new mail wakes the page (ADR 0037), once the system answers
   // if it doesn't yet.
-  void live();
+  live();
 }
 
 void start();

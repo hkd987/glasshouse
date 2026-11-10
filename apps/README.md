@@ -187,7 +187,9 @@ session cookie.
   open (an agent's hold, new mail) takes `firstCursor(bridge)` before its
   first load and then `watch(bridge, "<app>", cursor, reload)`: one loop in
   the SDK, which asks a system that is down less and less often. glassd
-  tells an app's open windows whenever an action changed that app's data.
+  tells an app's open windows whenever someone else's action (an agent's,
+  another app's) changed that app's data; a window isn't told of what it
+  did itself. `onOffline` and `onAnswer` are for a page's offline banner.
 - **Refusals are results.** `bridge.call()` returns `{ok, text, data}`; show
   the text. Only an unreachable system throws (`Offline`), and a wait for
   news (`bridge.status({waitSecs})`) that nobody answers ends as one,

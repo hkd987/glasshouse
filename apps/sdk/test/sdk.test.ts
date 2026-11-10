@@ -248,6 +248,7 @@ test("nv3 a page hears of its app's changes, and asks a system that is down less
     },
     {
       onOffline: (offline) => heard.push(offline ? "offline" : "back"),
+      onAnswer: () => heard.push("answered"),
       pauseMs: (failures) => {
         pauses.push(failures);
         return 1;
@@ -256,8 +257,10 @@ test("nv3 a page hears of its app's changes, and asks a system that is down less
   );
   await finished;
   watching.stop();
-  // Told once it was down and once it was back; our change, not Mail's.
-  assert.deepEqual(heard, ["offline", "back", "changed"]);
+  // Told once it was down and once it was back; our change, not Mail's;
+  // and of each answer, a change of ours or not (stopped before the last
+  // one's).
+  assert.deepEqual(heard, ["offline", "back", "answered", "changed"]);
   // The pause grew with each failure in a row.
   assert.deepEqual(pauses, [1, 2]);
   // Each wait from the cursor the last answer gave.
