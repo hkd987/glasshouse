@@ -116,6 +116,33 @@ jobs:
       - run: make shell-lint
       - run: make shell-test
 
+  # The Agents desktop app is a workspace of its own (agents-app/). Nothing
+  # built it here, so nothing noticed when a dependency added to a crate it
+  # shares with the main workspace left its lockfile stale, or would have
+  # noticed its code no longer compiling.
+  agents-app:
+    name: Agents desktop app
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends clang lld libssl-dev pkg-config
+          # WebKitGTK and the tray's libraries: its window on Linux.
+          sudo make agents-app-deps
+      - name: The pinned Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: agents-app
+          # It builds into the repository's target folder (--target-dir).
+          workspaces: "agents-app -> ../target"
+      - run: make agents-app-lint
+      - run: make agents-app-test
+        if: success() || failure()
+
   web:
     name: web apps and admin console
     runs-on: ubuntu-24.04

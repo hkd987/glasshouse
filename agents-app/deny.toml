@@ -46,9 +46,6 @@ yanked = "deny"
 # from the lockfile (cargo-deny warns of an entry that matches nothing).
 ignore = [
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error, retired: a build-time macro helper of glib-macros 0.18 (the GTK 3 bindings wry and tao use on Linux). Leaves when they move to GTK 4." },
-    { id = "RUSTSEC-2026-0370", reason = "zvariant, folded into zbus 6: from zbus 5, from notify-rust 4.18 (pinned). Leaves when notify-rust moves to zbus 6." },
-    { id = "RUSTSEC-2026-0371", reason = "zbus_names, folded into zbus 6: as zvariant above." },
-    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive, folded into zbus 6: as zvariant above." },
 ]
 
 [sources]

@@ -31,7 +31,7 @@ tray-icon = "=0.26.1"
 # The system's notifications, and its keychain: keyring-core with the one
 # store each system has (Keychain, Credential Manager; on Linux the kernel's
 # keyring, which needs no Secret Service running).
-notify-rust = "=4.18.2"
+notify-rust = "=4.19.0"
 keyring-core = "=1.0.1"
 # Its keychain feature: the login Keychain (a compile error on a Mac without it).
 apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }

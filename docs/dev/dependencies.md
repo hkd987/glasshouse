@@ -42,6 +42,16 @@ yesterday's dependencies doesn't fail an unrelated change. When it fails:
 A failing advisories run is someone's to look at the day it fails: it is
 not part of `ci`, so nothing else will stop for it.
 
+What is listed today, and why each is still here (2026-11-10): `smallstr`
+comes with yrs, which is Docs' live editing; `cgmath` and `paste` with
+smithay and its pixman renderer, which are the desktop's compositor;
+`ttf-parser` with cosmic-text, which draws all the desktop's text;
+`proc-macro-error` with the GTK 3 bindings the Agents app's window is made
+of on Linux (wry and tao). None can go without replacing the library that
+brings it: the newest release of each still does (yrs 0.28.1, smithay 0.7,
+iced 0.14 with its cosmic-text 0.15, wry 0.57). Three more went with
+notify-rust 4.19, which moved to zbus 6.
+
 The three workspaces each have a lockfile (`Cargo.lock`, `shell/Cargo.lock`,
 `agents-app/Cargo.lock`), and the shell and the Agents app build on the main
 workspace's crates: a dependency added there changes their lockfiles too.
