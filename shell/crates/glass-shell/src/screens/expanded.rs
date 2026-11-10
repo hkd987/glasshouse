@@ -894,10 +894,16 @@ fn rollback_card<'a>(
     let t = theme.tile;
     let offset = state.now.offset();
     let snapshots = state.detail.map_or(&[][..], |d| d.snapshots.as_slice());
-    let when = snapshots
-        .iter()
-        .find(|s| s.id == rollback.to())
-        .map_or_else(|| "the snapshot".to_owned(), |s| time_of_day(s.at, offset));
+    let marker = snapshots.iter().position(|s| s.id == rollback.to());
+    let when = marker.map_or_else(
+        || "the snapshot".to_owned(),
+        |i| time_of_day(snapshots[i].at, offset),
+    );
+    // Which marker, in words: a task's markers are often within one
+    // minute of each other, and "Roll back to 8:08 PM?" read the same for
+    // the one that undoes everything and the one that undoes the last
+    // step (found rolling one back by hand).
+    let which = marker.map(|i| marker_words(i == 0, &snapshots[i].reason));
     let quiet = |s: String| text(s).size(14).color(t.caption).line_height(1.4);
     let mut card = Column::new().spacing(14);
     let mut buttons = Row::new().spacing(8);
@@ -908,13 +914,15 @@ fn rollback_card<'a>(
                 .push(quiet("Checking what it would change…".to_owned()));
         }
         Rollback::Preview { report, .. } => {
-            card = card
-                .push(heading(t, format!("Roll back to {when}?")))
-                .push(quiet(if is_empty(report) {
-                    "Nothing has changed since then, so there's nothing to undo.".to_owned()
-                } else {
-                    "Nothing has changed yet. Rolling back:".to_owned()
-                }));
+            card = card.push(heading(t, format!("Roll back to {when}?")));
+            if let Some(which) = &which {
+                card = card.push(quiet(which.clone()));
+            }
+            card = card.push(quiet(if is_empty(report) {
+                "Nothing has changed since then, so there's nothing to undo.".to_owned()
+            } else {
+                "Nothing has changed yet. Rolling back:".to_owned()
+            }));
             card = report_lists(theme, card, report, false);
             if matches!(state.task.state, TileState::Working | TileState::NeedsYou) {
                 card = card.push(quiet(
@@ -932,6 +940,9 @@ fn rollback_card<'a>(
         }
         Rollback::Done { report, .. } => {
             card = card.push(heading(t, format!("Rolled back to {when}")));
+            if let Some(which) = &which {
+                card = card.push(quiet(which.clone()));
+            }
             if is_empty(report) {
                 card = card.push(quiet("Nothing needed undoing.".to_owned()));
             }
@@ -948,6 +959,20 @@ fn rollback_card<'a>(
     column![quiet_scroll(t, card.into()), buttons]
         .spacing(16)
         .into()
+}
+
+/// Where a roll back returns to, said by what the marker is: the task's
+/// start (its first marker), or the step it was taken before.
+fn marker_words(first: bool, reason: &str) -> String {
+    if first {
+        return "To the start of the task: everything it changed since is undone, where it can be."
+            .to_owned();
+    }
+    let step = reason.strip_prefix("Before: ").unwrap_or(reason);
+    format!(
+        "To just before \u{201c}{}\u{201d}. What the agent did before that stays.",
+        glass_api::display_line(step)
+    )
 }
 
 fn is_empty(report: &UndoReport) -> bool {
@@ -1532,6 +1557,28 @@ fn rule_v<'a>(t: TileColors) -> Element<'a, Message> {
 mod tests {
     use super::*;
     use crate::fixtures;
+
+    #[test]
+    fn aw15_a_roll_back_says_which_marker_it_returns_to() {
+        // Three markers in one minute each read "Roll back to 8:08 PM?":
+        // the one that undoes everything and the one that undoes only the
+        // last step looked the same until the lists under them were read.
+        let start = marker_words(true, "Task started");
+        assert!(start.contains("the start of the task"), "{start}");
+        assert!(start.contains("everything it changed"), "{start}");
+        let step = marker_words(false, "Before: Write Reports/reconciliation.csv");
+        assert_eq!(
+            step,
+            "To just before \u{201c}Write Reports/reconciliation.csv\u{201d}. What the agent did \
+             before that stays."
+        );
+        assert_ne!(start, step);
+        // A marker named another way is said as it is named, and what an
+        // agent chose to call something can't break out of its line.
+        let odd = marker_words(false, "Checkpoint\nRoll back everything?");
+        assert!(odd.contains("Checkpoint"), "{odd}");
+        assert!(!odd.contains('\n'), "{odd:?}");
+    }
 
     fn task(state: TileState) -> TaskView {
         TaskView {
