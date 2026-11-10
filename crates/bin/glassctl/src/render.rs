@@ -14,11 +14,19 @@ use glass_api::{
     TileState, UndoReport,
 };
 use glass_audit::AuditRecord;
-use glass_types::TaskId;
+use glass_types::{TaskId, Timestamp};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::style::{bold, dim, green, orange, red, state_label, state_marker};
+
+/// The time of day `at` was on this computer's clock, `HH:MM:SS`: what
+/// `date` and the desktop say, where the instant itself is UTC. The
+/// computer's offset is asked of the system once a run.
+pub fn clock(at: &Timestamp) -> String {
+    static OFFSET: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    at.clock_at(*OFFSET.get_or_init(|| glass_platform::system::utc_offset_secs().unwrap_or(0)))
+}
 
 /// A copy of `value` with every string in it passed through
 /// `glass_api::display_line`, for rendering as text.
@@ -375,7 +383,7 @@ pub fn detail(d: &TaskDetail) -> String {
             ActivityKind::Blocked => "⊘",
             ActivityKind::State => "»",
         };
-        let _ = writeln!(out, "  {} {mark} {}", dim(&entry.at.clock()), entry.text);
+        let _ = writeln!(out, "  {} {mark} {}", dim(&clock(&entry.at)), entry.text);
     }
     let _ = writeln!(out, "\n{}", bold("Changes"));
     if d.changes.is_empty() {
@@ -400,7 +408,7 @@ pub fn detail(d: &TaskDetail) -> String {
             out,
             "  {:>3} {} {:<9} {}{note}",
             dim(&format!("#{}", change.id)),
-            dim(&change.at.clock()),
+            dim(&clock(&change.at)),
             kind,
             change.target
         );
@@ -427,7 +435,7 @@ pub fn detail(d: &TaskDetail) -> String {
         let _ = writeln!(
             out,
             "  ◇ {}  {}  {}",
-            marker.at.clock(),
+            clock(&marker.at),
             marker.reason,
             dim(&format!(
                 "glassctl undo {} --to {}",
@@ -460,7 +468,7 @@ pub fn approvals(views: &[ApprovalView]) -> String {
             dim(&format!(
                 "{} · expires {}",
                 ask.rule,
-                ask.expires_at.clock()
+                clock(&ask.expires_at)
             ))
         );
         let _ = writeln!(out, "{}", answers(ask, None));
@@ -759,7 +767,7 @@ pub fn update_status(status: &glass_api::UpdateStatus) -> String {
             let _ = writeln!(out, "  Kernel patch {p}");
         }
         if let Some(at) = status.restart_at {
-            let _ = writeln!(out, "  Restarts into it at {at}");
+            let _ = writeln!(out, "  Restarts into it at {}", clock(&at));
         }
     }
     if let Some(a) = &status.available {

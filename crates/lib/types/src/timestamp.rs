@@ -27,13 +27,18 @@ impl Timestamp {
         i64::try_from(self.0.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
     }
 
-    /// Wall-clock time of day, `HH:MM:SS`, for tile feeds and timelines.
-    pub fn clock(&self) -> String {
+    /// Time of day, `HH:MM:SS`, on a clock `offset_secs` east of UTC: the
+    /// computer's own clock, given its offset. Anything a person reads says
+    /// the time their clock says, so there is no form of this without an
+    /// offset (an instant's UTC time of day is hours off for most people).
+    pub fn clock_at(&self, offset_secs: i32) -> String {
+        let local = time::UtcOffset::from_whole_seconds(offset_secs)
+            .map_or(self.0, |offset| self.0.to_offset(offset));
         format!(
             "{:02}:{:02}:{:02}",
-            self.0.hour(),
-            self.0.minute(),
-            self.0.second()
+            local.hour(),
+            local.minute(),
+            local.second()
         )
     }
 
@@ -75,7 +80,18 @@ mod tests {
         let json = serde_json::to_string(&ts).unwrap();
         assert_eq!(json, "\"2026-10-18T05:06:40Z\"");
         assert_eq!(serde_json::from_str::<Timestamp>(&json).unwrap(), ts);
-        assert_eq!(ts.clock(), "05:06:40");
+        assert_eq!(ts.clock_at(0), "05:06:40");
+    }
+
+    #[test]
+    fn the_time_of_day_is_the_computers_not_utcs() {
+        let ts = Timestamp::from_unix_seconds(1_792_300_000).unwrap();
+        // Chicago in winter, six hours behind: still the evening before.
+        assert_eq!(ts.clock_at(-6 * 3600), "23:06:40");
+        // India, five and a half hours ahead.
+        assert_eq!(ts.clock_at(5 * 3600 + 1800), "10:36:40");
+        // An offset no clock has is read as UTC, not a panic.
+        assert_eq!(ts.clock_at(i32::MAX), "05:06:40");
     }
 
     #[test]

@@ -238,7 +238,7 @@ fn render(view: &LayerView, agent: &str) -> String {
                 out,
                 "    v{:<3} {}  {:<36} {mark}",
                 version.version,
-                dim(&version.at.clock()),
+                dim(&crate::render::clock(&version.at)),
                 version.note
             );
         }

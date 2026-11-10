@@ -173,7 +173,10 @@ impl Runtime {
                 state.written.note(done.seen);
             }
             let what = if request.changes.is_empty() {
-                format!("Rolled back to {}", since.clock())
+                // The time the person's clock said, as the desktop's
+                // timeline shows it.
+                let offset = glass_platform::system::utc_offset_secs().unwrap_or(0);
+                format!("Rolled back to {}", since.clock_at(offset))
             } else {
                 let n = ids.len();
                 format!("Undid {n} change{}", if n == 1 { "" } else { "s" })

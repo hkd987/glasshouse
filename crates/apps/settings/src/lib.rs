@@ -1905,7 +1905,11 @@ impl ActionProvider for SettingsProvider {
                                 "Restarting into the update…".into()
                             }
                             (glass_api::RestartWhen::Tonight, Some(at)) => {
-                                format!("The computer restarts into the update at {}.", at.clock())
+                                let offset = glass_platform::system::utc_offset_secs().unwrap_or(0);
+                                format!(
+                                    "The computer restarts into the update at {}.",
+                                    at.clock_at(offset)
+                                )
                             }
                             _ => "It won't restart tonight: restart when you like.".into(),
                         }
