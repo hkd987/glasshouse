@@ -2338,11 +2338,6 @@ impl Runtime {
     }
 }
 
-/// Runs blocking work (writing and syncing a file, reading the audit log)
-/// without stalling the async workers that answer everyone else: on
-/// glassd's multi-threaded runtime the worker hands its other tasks to
-/// another thread first (docs/dev/performance.md, rule 3). Elsewhere, such
-/// as single-threaded test runtimes, it just runs it.
 /// A press on a task that has ended (or just did).
 fn ended() -> RuntimeError {
     RuntimeError::Conflict("that task has already ended".into())
@@ -2395,6 +2390,12 @@ const AUDIT_SUMMARY: usize = 1000;
 /// as long as a path may be.
 const AUDIT_TARGET: usize = glass_actions::MAX_PATH_BYTES;
 
+/// Runs blocking work (writing and syncing a file, reading the audit log,
+/// waiting for a run of audit records) without stalling the async workers
+/// that answer everyone else: on glassd's multi-threaded runtime the worker
+/// hands its other tasks to another thread first (docs/dev/performance.md,
+/// rule 3). Elsewhere, such as single-threaded test runtimes, it just runs
+/// it.
 pub(crate) fn blocking<R>(work: impl FnOnce() -> R) -> R {
     use tokio::runtime::{Handle, RuntimeFlavor};
     match Handle::try_current() {
