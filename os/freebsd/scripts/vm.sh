@@ -26,6 +26,8 @@
 #   type <text>              type text on the USB keyboard (letters, digits, space, . , - / :)
 #   usb-stick plug|unplug    plug a 16 MB USB drive into the running VM, or pull it out (tests of
 #                            IT's devices.usb_storage setting, ADR 0031)
+#   usb-keyboard plug|unplug plug a second USB keyboard into the running VM, or pull it out (the
+#                            desktop and the sign-in screen read devices that come later)
 # Env knobs: VM_DIR VM_SSH_PORT VM_CPUS VM_CPU_MODEL VM_ACCEL VM_MEM VM_DISK_SIZE VM_BOOT_TIMEOUT VM_BASE_IMAGE
 #   VM_FIRMWARE=uefi|bios VM_SCREEN VM_EXTRA_DISK (see lib.sh), VM_DEVICES (more QEMU arguments:
 #   emulated hardware, as tests/hardware/matrix.sh adds).
@@ -259,6 +261,16 @@ cmd_usb_stick() {
 	esac
 }
 
+# usb-keyboard plug|unplug: a second USB keyboard hot-plugged (QMP, which
+# says when QEMU refuses), as one paired or plugged in after sign-in.
+cmd_usb_keyboard() {
+	case ${1:-} in
+	plug) qmp '{"execute": "device_add", "arguments": {"driver": "usb-kbd", "id": "kbd2"}}' ;;
+	unplug) qmp '{"execute": "device_del", "arguments": {"id": "kbd2"}}' ;;
+	*) die "usage: vm.sh usb-keyboard plug|unplug" ;;
+	esac
+}
+
 cmd_key() {
 	(($# >= 1)) || die "usage: vm.sh key <key>... (QEMU names: ctrl-spc, ret, esc, a, shift-a)"
 	local k
@@ -441,6 +453,7 @@ scroll) cmd_scroll "$@" ;;
 keyup) cmd_keyupdown false "$@" ;;
 type) cmd_type "$@" ;;
 usb-stick) cmd_usb_stick "$@" ;;
+usb-keyboard) cmd_usb_keyboard "$@" ;;
 reset) cmd_reset ;;
 power-cut) cmd_power_cut ;;
 sleep-wake) cmd_sleep_wake "$@" ;;

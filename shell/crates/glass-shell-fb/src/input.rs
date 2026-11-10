@@ -1,10 +1,25 @@
 //! The keyboard and pointer, read from the kernel's evdev devices on one
 //! thread each and handed to the shell's loop as [`Input`].
+//!
+//! The devices are looked for again every [`RESCAN`]: a mouse plugged back
+//! in, a keyboard that paired after sign-in, the other side of a KVM
+//! switch. They were looked for once, when the screen came up, so none of
+//! those was ever read, and with the last device gone nothing on the
+//! screen could be answered, signing out included.
 
+use std::collections::BTreeSet;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use glass_platform::input::{InputDevice, RawEvent, codes, devices};
 use tokio::sync::mpsc;
+
+/// How often the devices are looked for again. A device that came is read
+/// within this.
+pub const RESCAN: Duration = Duration::from_secs(2);
 
 /// What the person did, in screen pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -21,41 +36,186 @@ pub enum Input {
 }
 
 /// Opens every input device, takes it from the console, and reads it on its
-/// own thread. Returns the stream and how many devices it reads.
+/// own thread; devices that come later are opened as they come. Returns
+/// the stream and how many devices it reads to begin with. The looking
+/// stops when the stream is dropped.
 pub fn start(screen: (u32, u32)) -> (mpsc::UnboundedReceiver<Input>, usize) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let mut opened = 0;
-    for path in devices().unwrap_or_default() {
-        let mut device = match InputDevice::open(&path) {
-            Ok(device) => device,
-            Err(e) => {
-                eprintln!("input: {e}");
+    let reading = Reading::new(tx, screen);
+    let opened = reading.take(devices().unwrap_or_default(), open);
+    thread::spawn(move || {
+        loop {
+            thread::sleep(RESCAN);
+            if reading.tx.is_closed() {
+                return;
+            }
+            reading.take(devices().unwrap_or_default(), open);
+        }
+    });
+    (rx, opened)
+}
+
+/// Opens the device at `path` and takes it from the console.
+fn open(path: &Path) -> Result<(InputDevice, Option<Axes>), String> {
+    let device = InputDevice::open(path).map_err(|e| e.to_string())?;
+    let name = device.name().unwrap_or_default();
+    if let Err(e) = device.grab() {
+        eprintln!("input: {} ({name}): can't take it: {e}", path.display());
+    }
+    let axes = device
+        .abs_range(codes::ABS_X)
+        .and_then(|x| Ok((x, device.abs_range(codes::ABS_Y)?)))
+        .ok();
+    eprintln!("input: {} ({name})", path.display());
+    Ok((device, axes))
+}
+
+/// Something events are read from: a device, or a test's stand-in.
+trait Source: Send + 'static {
+    /// Waits for events. An error, or no events at all, is the device
+    /// gone.
+    fn read(&mut self) -> io::Result<Vec<RawEvent>>;
+}
+
+impl Source for InputDevice {
+    fn read(&mut self) -> io::Result<Vec<RawEvent>> {
+        InputDevice::read(self)
+    }
+}
+
+/// The devices being read, by path, and where what they say goes.
+#[derive(Clone)]
+struct Reading {
+    paths: Arc<Mutex<BTreeSet<PathBuf>>>,
+    /// Those that couldn't be opened at the last look, so each is said
+    /// once and not at every look.
+    refused: Arc<Mutex<BTreeSet<PathBuf>>>,
+    tx: mpsc::UnboundedSender<Input>,
+    screen: (u32, u32),
+}
+
+impl Reading {
+    fn new(tx: mpsc::UnboundedSender<Input>, screen: (u32, u32)) -> Self {
+        Self {
+            paths: Arc::default(),
+            refused: Arc::default(),
+            tx,
+            screen,
+        }
+    }
+
+    fn paths(&self) -> std::sync::MutexGuard<'_, BTreeSet<PathBuf>> {
+        self.paths.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Opens those of `found` that aren't being read, each read on a
+    /// thread of its own until it goes. Returns how many it opened. One
+    /// that can't be opened is tried again at the next look (a device
+    /// plugged in during a session is the person's a moment after it
+    /// shows, when the sign-in screen has given it to them), and said
+    /// once.
+    fn take<S: Source>(
+        &self,
+        found: Vec<PathBuf>,
+        open: impl Fn(&Path) -> Result<(S, Option<Axes>), String>,
+    ) -> usize {
+        let mut opened = 0;
+        let mut refused = self.refused.lock().unwrap_or_else(|e| e.into_inner());
+        refused.retain(|path| found.contains(path));
+        for path in found {
+            if self.paths().contains(&path) {
                 continue;
             }
-        };
-        let name = device.name().unwrap_or_default();
-        if let Err(e) = device.grab() {
-            eprintln!("input: {} ({name}): can't take it: {e}", path.display());
-        }
-        let axes = device
-            .abs_range(codes::ABS_X)
-            .and_then(|x| Ok((x, device.abs_range(codes::ABS_Y)?)))
-            .ok();
-        eprintln!("input: {} ({name})", path.display());
-        let tx = tx.clone();
-        opened += 1;
-        thread::spawn(move || {
-            let mut batch = Batch::new(axes, screen);
-            while let Ok(events) = device.read() {
-                for input in events.iter().flat_map(|e| batch.push(*e)) {
-                    if tx.send(input).is_err() {
-                        return;
+            let (device, axes) = match open(&path) {
+                Ok(opened) => opened,
+                Err(e) => {
+                    if refused.insert(path.clone()) {
+                        eprintln!("input: {}: can't read it yet: {e}", path.display());
                     }
+                    continue;
                 }
-            }
-        });
+            };
+            refused.remove(&path);
+            self.paths().insert(path.clone());
+            opened += 1;
+            let reading = self.clone();
+            thread::spawn(move || {
+                let why = read_until_gone(device, Batch::new(axes, reading.screen), &reading.tx);
+                // Said, where a reader used to end with nothing in the
+                // log, and forgotten, so that the device is opened again
+                // when it's back under the same name.
+                if let Some(why) = why {
+                    eprintln!("input: {} is gone: {why}", path.display());
+                }
+                reading.paths().remove(&path);
+            });
+        }
+        opened
     }
-    (rx, opened)
+}
+
+/// Reads `device` until it goes (why, as `Some`) or nobody listens
+/// (`None`). Keys and buttons it had down when it went are let go: a
+/// keyboard switched away with Ctrl held (a KVM switch's own shortcut)
+/// left Ctrl down for good.
+fn read_until_gone(
+    mut device: impl Source,
+    mut batch: Batch,
+    tx: &mpsc::UnboundedSender<Input>,
+) -> Option<String> {
+    let mut down: BTreeSet<Held> = BTreeSet::new();
+    let why = loop {
+        let events = match device.read() {
+            Ok(events) if events.is_empty() => break "it closed".to_owned(),
+            Ok(events) => events,
+            Err(e) => break e.to_string(),
+        };
+        for input in events.iter().flat_map(|e| batch.push(*e)) {
+            match input {
+                Input::Key(code, 0) => drop(down.remove(&Held::Key(code))),
+                Input::Key(code, _) => drop(down.insert(Held::Key(code))),
+                Input::Button(button, true) => drop(down.insert(Held::Button(code_of(button)))),
+                Input::Button(button, false) => drop(down.remove(&Held::Button(code_of(button)))),
+                _ => {}
+            }
+            if tx.send(input).is_err() {
+                return None;
+            }
+        }
+    };
+    for held in down {
+        let up = match held {
+            Held::Key(code) => Input::Key(code, 0),
+            Held::Button(code) => Input::Button(button_of(code), false),
+        };
+        if tx.send(up).is_err() {
+            return None;
+        }
+    }
+    Some(why)
+}
+
+/// A key or a button a device has down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Held {
+    Key(u16),
+    Button(u16),
+}
+
+fn code_of(button: iced_core::mouse::Button) -> u16 {
+    match button {
+        iced_core::mouse::Button::Right => codes::BTN_RIGHT,
+        iced_core::mouse::Button::Middle => codes::BTN_MIDDLE,
+        _ => codes::BTN_LEFT,
+    }
+}
+
+fn button_of(code: u16) -> iced_core::mouse::Button {
+    match code {
+        codes::BTN_RIGHT => iced_core::mouse::Button::Right,
+        codes::BTN_MIDDLE => iced_core::mouse::Button::Middle,
+        _ => iced_core::mouse::Button::Left,
+    }
 }
 
 type Axes = (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>);
@@ -206,6 +366,159 @@ mod tests {
                 Input::Button(iced_core::mouse::Button::Left, true)
             ] if (x - 640.0).abs() < 0.1 && (y - 400.0).abs() < 0.1
         ));
+    }
+
+    /// A stand-in device: what it says, read by read, then gone.
+    struct Script(std::collections::VecDeque<io::Result<Vec<RawEvent>>>);
+
+    impl Source for Script {
+        fn read(&mut self) -> io::Result<Vec<RawEvent>> {
+            self.0
+                .pop_front()
+                .unwrap_or_else(|| Err(io::Error::other("Device not configured")))
+        }
+    }
+
+    fn script(reads: Vec<Vec<RawEvent>>) -> Script {
+        Script(reads.into_iter().map(Ok).collect())
+    }
+
+    fn all(rx: &mut mpsc::UnboundedReceiver<Input>) -> Vec<Input> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn a_device_that_goes_lets_go_of_what_it_had_down() {
+        // A keyboard switched away with Ctrl held, a mouse unplugged
+        // mid-drag: the key and the button stayed down for good.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let keyboard = script(vec![
+            vec![ev(codes::EV_KEY, 29, 1)],
+            vec![ev(codes::EV_KEY, 30, 1), ev(codes::EV_KEY, 30, 0)],
+            vec![ev(codes::EV_KEY, 29, 2)],
+        ]);
+        let why = read_until_gone(keyboard, Batch::new(None, (1280, 800)), &tx);
+        assert_eq!(why.as_deref(), Some("Device not configured"));
+        assert_eq!(
+            all(&mut rx),
+            [
+                Input::Key(29, 1),
+                Input::Key(30, 1),
+                Input::Key(30, 0),
+                Input::Key(29, 2),
+                // Gone: Ctrl comes up, and the key already let go doesn't again.
+                Input::Key(29, 0),
+            ]
+        );
+        let mouse = script(vec![vec![
+            ev(codes::EV_KEY, codes::BTN_LEFT, 1),
+            ev(codes::EV_SYN, codes::SYN_REPORT, 0),
+        ]]);
+        read_until_gone(mouse, Batch::new(None, (1280, 800)), &tx);
+        assert_eq!(
+            all(&mut rx),
+            [
+                Input::Button(iced_core::mouse::Button::Left, true),
+                Input::Button(iced_core::mouse::Button::Left, false),
+            ]
+        );
+        // A read of nothing is the device closed, not something to ask
+        // again at once, for good.
+        let closed = script(vec![vec![]]);
+        let why = read_until_gone(closed, Batch::new(None, (1280, 800)), &tx);
+        assert_eq!(why.as_deref(), Some("it closed"));
+        // Nobody listening ends the reader without a word.
+        drop(rx);
+        let unheard = script(vec![vec![ev(codes::EV_KEY, 30, 1)]]);
+        assert_eq!(
+            read_until_gone(unheard, Batch::new(None, (1280, 800)), &tx),
+            None
+        );
+    }
+
+    #[test]
+    fn a_device_that_comes_later_or_comes_back_is_read() {
+        // Looked for once, a keyboard paired after sign-in or a mouse
+        // plugged back in was never read.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let reading = Reading::new(tx, (1280, 800));
+        let (first, second) = (
+            PathBuf::from("/dev/input/event0"),
+            PathBuf::from("/dev/input/event1"),
+        );
+        // What each device says when opened: one key, named by how many
+        // times it has been opened, and then it goes.
+        let opens = Arc::new(Mutex::new(0u16));
+        let open = |_: &Path| {
+            let mut n = opens.lock().unwrap();
+            *n += 1;
+            Ok((script(vec![vec![ev(codes::EV_KEY, 100 + *n, 1)]]), None))
+        };
+        let wait = |rx: &mut mpsc::UnboundedReceiver<Input>, n: usize| {
+            let mut got = Vec::new();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while got.len() < n {
+                assert!(std::time::Instant::now() < deadline, "{got:?}");
+                got.extend(all(rx));
+                thread::sleep(Duration::from_millis(5));
+            }
+            got
+        };
+        let gone = |reading: &Reading| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !reading.paths().is_empty() {
+                assert!(std::time::Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+
+        // One device at first: read, then gone (its key let go).
+        assert_eq!(reading.take(vec![first.clone()], open), 1);
+        assert_eq!(wait(&mut rx, 2), [Input::Key(101, 1), Input::Key(101, 0)]);
+        gone(&reading);
+        // The next look finds it back, and another: both are read.
+        assert_eq!(reading.take(vec![first.clone(), second.clone()], open), 2);
+        let keys = wait(&mut rx, 4);
+        assert!(
+            keys.contains(&Input::Key(102, 1)) && keys.contains(&Input::Key(103, 1)),
+            "{keys:?}"
+        );
+        gone(&reading);
+
+        // One still being read isn't opened a second time.
+        let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
+        struct Held(std::sync::mpsc::Receiver<()>);
+        impl Source for Held {
+            fn read(&mut self) -> io::Result<Vec<RawEvent>> {
+                let _ = self.0.recv();
+                Err(io::Error::other("unplugged"))
+            }
+        }
+        let held = Mutex::new(Some(hold_rx));
+        let open_held = |_: &Path| {
+            let rx = held.lock().unwrap().take();
+            rx.map(|rx| (Held(rx), None))
+                .ok_or("Permission denied".to_owned())
+        };
+        assert_eq!(reading.take(vec![first.clone()], open_held), 1);
+        assert_eq!(reading.take(vec![first.clone()], open_held), 0);
+        assert_eq!(reading.paths().len(), 1);
+        drop(hold_tx);
+        gone(&reading);
+        // One that can't be opened is tried again at the next look, and
+        // noted once however many looks it takes.
+        assert_eq!(reading.take(vec![second.clone()], open_held), 0);
+        assert_eq!(reading.take(vec![second.clone()], open_held), 0);
+        assert!(reading.paths().is_empty());
+        assert_eq!(reading.refused.lock().unwrap().len(), 1);
+        // Opened in the end, or gone, it isn't one that refused any more.
+        assert_eq!(reading.take(vec![second.clone()], open), 1);
+        assert!(reading.refused.lock().unwrap().is_empty());
+        wait(&mut rx, 2);
+        gone(&reading);
+        assert_eq!(reading.take(vec![second.clone()], open_held), 0);
+        assert_eq!(reading.take(vec![], open_held), 0);
+        assert!(reading.refused.lock().unwrap().is_empty());
     }
 
     #[test]

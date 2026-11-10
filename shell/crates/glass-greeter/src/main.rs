@@ -203,12 +203,18 @@ async fn supervise(args: &Args) -> anyhow::Result<()> {
         // be starting, or starting again, as they sign in: it's told until
         // it hears (ADR 0053).
         let telling = su.map(|pid| tokio::spawn(tell_seat(user.clone(), pid)));
+        // A keyboard or a mouse that comes while they're signed in is
+        // theirs as the ones here at sign-in are.
+        let handing = tokio::spawn(hand_later_devices(account.uid, account.gid));
         let tty_name = tty_name(&args.tty);
         let serving = serve(&mut session, &user, &tty_name);
         let ended = until_stopped(serving, &mut terminate, || {
             su.into_iter().for_each(end_session);
         })
         .await;
+        // Over before the devices go back to root, or to anyone else.
+        handing.abort();
+        let _ = handing.await;
         // Never told after they left: glassd refuses a session that has
         // ended, should a try already under way land late.
         if let Some(telling) = telling {
@@ -516,6 +522,27 @@ fn hand_devices(tty: &Path, uid: u32, gid: u32) {
     for path in std::iter::once(tty.to_path_buf()).chain(inputs) {
         if let Err(e) = std::os::unix::fs::chown(&path, Some(uid), Some(gid)) {
             eprintln!("glass-greeter: {}: {e}", path.display());
+        }
+    }
+}
+
+/// While `uid` is signed in: gives them the input devices that come
+/// later. A device node is root's when it appears, so the desktop, which
+/// looks for new devices as this does, couldn't open a mouse plugged back
+/// in or a keyboard that paired after sign-in. Looked for twice as often
+/// as the desktop looks, so it's theirs by the desktop's next look.
+async fn hand_later_devices(uid: u32, gid: u32) {
+    use std::os::unix::fs::MetadataExt;
+    loop {
+        tokio::time::sleep(input::RESCAN / 2).await;
+        for path in glass_platform::input::devices().unwrap_or_default() {
+            if !std::fs::metadata(&path).is_ok_and(|m| m.uid() != uid) {
+                continue;
+            }
+            match std::os::unix::fs::chown(&path, Some(uid), Some(gid)) {
+                Ok(()) => eprintln!("glass-greeter: {} came, and is theirs", path.display()),
+                Err(e) => eprintln!("glass-greeter: {}: {e}", path.display()),
+            }
         }
     }
 }

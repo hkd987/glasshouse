@@ -93,6 +93,10 @@ Send as you go, not all at the end.
 - A power cut with a task running (PA-2): `jls` and `ls
   /var/db/glasshouse/sandboxes`, `vm.sh power-cut`, `vm.sh wait`, the same
   again (empty), and glassd.log's "removed a sandbox left behind"
+- A keyboard that comes after sign-in: `vm.sh usb-keyboard plug`, then
+  `desk.sh key ctrl-spc` and `vm.sh type "..."` (QEMU sends keys to the
+  keyboard plugged in last, so they arrive only if the desktop reads it);
+  `vm.sh usb-keyboard unplug`; the `input:` lines in `desk.sh log`
 - Signing in while glassd is down (ADR 0031): `service glassd stop`,
   `desk.sh signin`, `service glassd start`, then the greeter's "telling it
   again" and "glassd heard" lines in `/var/log/glass-greeter.log`
