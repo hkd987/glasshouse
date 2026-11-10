@@ -12,7 +12,7 @@ on:
     paths:
       - "**/Cargo.lock"
       - "apps/package-lock.json"
-      - "deny.toml"
+      - "**/deny.toml"
       - ".github/workflows/advisories.yml"
   workflow_dispatch:
 

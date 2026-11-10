@@ -50,6 +50,12 @@ ART_INPUTS = ("tools/branding/", "os/freebsd/overlay/usr/local/share/glasshouse/
 CONSOLE = ("crates/bin/glass-console/", "apps/console/")
 # Third-party code kept as upstream wrote it, apart from marked patches.
 VENDORED = ("shell/vendor/", "agents-app/vendor/")
+# The three Cargo workspaces, each with a lockfile of its own.
+LOCKFILES = (
+    ("main", "Cargo.toml"),
+    ("shell", "shell/Cargo.toml"),
+    ("agents app", "agents-app/Cargo.toml"),
+)
 
 
 def git(*args: str) -> str:
@@ -135,6 +141,17 @@ def plan(files: set[str], everything: bool) -> list[tuple[str, list[str]]]:
 
     if everything or any(f.endswith(("Cargo.toml", ".rs")) or f == "tools/check-layers.py" for f in files):
         steps.append(("layering", ["tools/check-layers.py"]))
+
+    # Each workspace's lockfile says what its manifests ask for. The shell
+    # and the Agents app build on the main workspace's crates, so a
+    # dependency added there changes their lockfiles too; the Agents app
+    # isn't built here or in CI (it needs WebKitGTK), so nothing else
+    # notices its lockfile going stale. Resolving needs no system library.
+    if everything or any(f.endswith(("Cargo.toml", "Cargo.lock")) for f in files):
+        for label, manifest in LOCKFILES:
+            steps.append((f"lockfile ({label})",
+                          ["cargo", "update", "--workspace", "--locked", "--quiet",
+                           "--manifest-path", manifest]))
 
     if everything or any(f.startswith(ART_INPUTS) for f in files):
         steps.append(("art", ["tools/branding/art.py", "--check"]))

@@ -25,6 +25,31 @@ Before adding a crate:
    wildcard, and depend on it with `.workspace = true`.
 4. Run `make deny`.
 
+Known problems in what we already depend on are a separate check, `make
+advisories` (the RustSec database for the three Cargo workspaces, npm's for
+the web apps). `.github/workflows/advisories.yml` runs it daily and when a
+lockfile or `deny.toml` changes, apart from `ci`, so that news about
+yesterday's dependencies doesn't fail an unrelated change. When it fails:
+
+- a vulnerability or a yanked release: move to the fixed version (`cargo
+  update -p <crate>` in that workspace), or replace the crate;
+- a crate its author has retired, with no known vulnerability: if we depend
+  on it ourselves, replace it. If something we depend on brings it, it
+  leaves when that does: add it to `ignore` in that workspace's `deny.toml`
+  with what brings it and what would remove it, and take the entry out when
+  the crate is gone from the lockfile.
+
+A failing advisories run is someone's to look at the day it fails: it is
+not part of `ci`, so nothing else will stop for it.
+
+The three workspaces each have a lockfile (`Cargo.lock`, `shell/Cargo.lock`,
+`agents-app/Cargo.lock`), and the shell and the Agents app build on the main
+workspace's crates: a dependency added there changes their lockfiles too.
+`make lint` checks all three are current when a manifest or a lockfile
+changes (`cargo update --workspace --locked`); to bring one up to date, run
+any cargo command in that workspace, such as `cargo metadata
+--manifest-path agents-app/Cargo.toml`, and commit the lockfile.
+
 What ships is listed for users and reviewers from the build itself:
 `tools/legal/notices.py` writes the image's `NOTICES.txt` (BR-2) during
 staging and fails on a license outside the allow list; `make sbom` writes the

@@ -66,9 +66,9 @@ dependencies = [
 
 [[package]]
 name = "async-executor"
-version = "1.14.0"
+version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
+checksum = "f426a31126c735126297bc5ea7a521263c9faff4f63ca415267ee625651c4f37"
 dependencies = [
  "async-task",
  "concurrent-queue",
@@ -620,7 +620,7 @@ version = "0.5.0"
 dependencies = [
  "libc",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1206,6 +1206,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "socket2",
  "thiserror 2.0.21",
  "time",
 ]
@@ -1217,6 +1218,7 @@ dependencies = [
  "ed25519-compact",
  "glass-api",
  "glass-crypto",
+ "glass-state",
  "glass-types",
  "hex",
  "serde",
@@ -1244,10 +1246,21 @@ dependencies = [
 name = "glass-policy"
 version = "0.1.0"
 dependencies = [
+ "glass-state",
  "glass-types",
  "serde",
  "thiserror 2.0.21",
  "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "glass-state"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
@@ -2793,6 +2806,16 @@ name = "smallvec"
 version = "1.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
+
+[[package]]
+name = "socket2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "soup3"

@@ -37,6 +37,23 @@ allow-wildcard-paths = true
 
 [advisories]
 yanked = "deny"
+# Crates their authors have retired, each brought in by something we depend
+# on and none with a known vulnerability. A retired crate has no fixed
+# version to move to: it leaves when the dependency that brings it does.
+# Each is here with that dependency, so that `make advisories` fails on
+# news (a vulnerability anywhere, or a newly retired crate to look at) and
+# not on what has been looked at. Take an entry out when its crate is gone
+# from the lockfile. This file is the desktop shell's too (shell/deny.toml
+# links here), so each of the two workspaces is told of the other's entries
+# as ones it didn't meet: a warning, not a failure.
+ignore = [
+    # The main workspace.
+    { id = "RUSTSEC-2026-0215", reason = "smallstr, retired: from yrs (Docs' CRDT), through 0.28.1. Leaves when yrs drops it." },
+    # The desktop shell.
+    { id = "RUSTSEC-2026-0196", reason = "cgmath, retired: from smithay 0.7 (the compositor). Leaves with a smithay that drops it." },
+    { id = "RUSTSEC-2024-0436", reason = "paste, retired: a macro used at build time by pixman, from smithay 0.7. Leaves with a pixman that drops it." },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser, retired: from fontdb, from cosmic-text 0.15 (iced 0.14's text). Leaves when cosmic-text moves to another font parser." },
+]
 
 [sources]
 unknown-registry = "deny"
