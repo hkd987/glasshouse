@@ -135,6 +135,24 @@ impl Mox {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+        // What is submitted waits in its queue, held: mox tries nothing.
+        // Left to deliver, how a message to `someone@elsewhere.example`
+        // fares depends on the network the tests run in. With no DNS the
+        // try fails for now and the message waits, which the tests were
+        // written against; where DNS answers (CI) the domain doesn't
+        // exist, mox gives up at once, and the queue is empty with a
+        // bounce in the Inbox.
+        let held = Command::new(&bin)
+            .arg("-config")
+            .arg(mox.dir.path().join("mox/mox.conf"))
+            .args(["queue", "holdrules", "add"])
+            .output()
+            .expect("mox queue holdrules add runs");
+        assert!(
+            held.status.success(),
+            "mox wouldn't hold its queue: {}",
+            String::from_utf8_lossy(&held.stderr)
+        );
         Some(mox)
     }
 

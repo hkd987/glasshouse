@@ -1575,6 +1575,46 @@ fn a_lock_screen_whose_password_nobody_checks_takes_it_again() {
     ));
 }
 
+// Every task glassd still had was a row of the command bar's Recent, laid
+// out again at each key typed.
+#[test]
+fn the_command_bars_recent_is_the_newest_few_however_many_tasks_there_are() {
+    use glass_shell::screens::command_bar::RECENT_MOST;
+    let theme = Theme::glass();
+    // Finished, so the menu bar and the banners are the same for any number.
+    let mut done = fixtures::tasks().remove(0);
+    done.state = glass_api::TileState::Done;
+    done.needs = None;
+    let many: Vec<_> = (0..200)
+        .map(|n| {
+            let mut task = done.clone();
+            task.id = glass_types::TaskId::new();
+            task.title = format!("Task {n}");
+            task
+        })
+        .collect();
+    let drawn = |tasks: &[glass_api::TaskView]| {
+        let mut live = Live::new(tasks.to_vec()).with_apps(fixtures::apps());
+        live.update(Message::OpenCommandBar);
+        let bar = live.command_bar();
+        glass_shell::render::frame(
+            live.view(&theme, bar.as_ref(), artboard_time(), SIZE),
+            Size::new(SIZE.0, SIZE.1),
+            1.0,
+        )
+        .rgba
+    };
+    let all = drawn(&many);
+    assert!(
+        all == drawn(&many[many.len() - RECENT_MOST..]),
+        "two hundred tasks draw as their newest {RECENT_MOST} do"
+    );
+    assert!(
+        all != drawn(&many[..RECENT_MOST]),
+        "and not as the oldest do"
+    );
+}
+
 #[test]
 fn dk1_an_app_the_command_bar_found_opens_with_a_click() {
     let theme = Theme::glass();

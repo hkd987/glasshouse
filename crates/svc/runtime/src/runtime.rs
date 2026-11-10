@@ -1453,6 +1453,57 @@ impl Runtime {
         Ok(())
     }
 
+    /// Forgets ended tasks nobody dismissed: those that last changed more
+    /// than `max_age` ago, and each person's oldest beyond their newest
+    /// `keep`. How many went.
+    ///
+    /// Nothing else took an ended task out of memory but `task.dismiss`,
+    /// which no screen sends, and an app's session that changed something
+    /// has no tile to dismiss at all: every task ever run stayed for as
+    /// long as glassd was up, each holding its snapshots past the 30 days
+    /// they are kept (`prune_snapshots` keeps what a task in memory could
+    /// undo from), and every list and scan grew with them. With the age the
+    /// snapshots are kept for, a task goes when its undo would.
+    pub fn retire_ended(&self, max_age: std::time::Duration, keep: usize) -> usize {
+        let before =
+            Timestamp::now().unix_seconds() - i64::try_from(max_age.as_secs()).unwrap_or(i64::MAX);
+        let mut ended: Vec<(u32, i64, TaskId)> = self
+            .tasks()
+            .values()
+            .filter_map(|task| {
+                let state = task.lock();
+                (!state.tile.is_live())
+                    .then(|| (task.user.uid, state.updated_at.unix_seconds(), task.id))
+            })
+            .collect();
+        // Each person's, newest first.
+        ended.sort_by_key(|&(uid, at, _)| (uid, std::cmp::Reverse(at)));
+        let mut gone = 0;
+        let mut theirs = (None, 0usize);
+        for (uid, at, id) in ended {
+            if theirs.0 != Some(uid) {
+                theirs = (Some(uid), 0);
+            }
+            theirs.1 += 1;
+            if at >= before && theirs.1 <= keep {
+                continue;
+            }
+            // As `dismiss` does, for a task that is still ended now.
+            let still_ended = self
+                .tasks()
+                .get(&id)
+                .is_some_and(|task| !task.lock().tile.is_live());
+            if !still_ended {
+                continue;
+            }
+            self.tasks().remove(&id);
+            let _ = std::fs::remove_dir_all(self.task_logs().join(id.to_string()));
+            let _ = self.events.send((uid, Event::TaskRemoved { task: id }));
+            gone += 1;
+        }
+        gone
+    }
+
     /// Where each task's folder is, its agent's output in it.
     fn task_logs(&self) -> std::path::PathBuf {
         self.config.state_dir.join("tasks")

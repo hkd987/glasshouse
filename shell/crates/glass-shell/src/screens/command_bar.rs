@@ -210,9 +210,13 @@ pub fn view<'a>(theme: &Theme, bar: &'a CommandBar<'a>) -> Element<'a, Message> 
         );
     }
     if !bar.recent.is_empty() {
+        // The newest few, in the order they were started. Every task
+        // glassd still had was a row here, laid out again at each key
+        // typed into the bar: a second or two a key at a couple of hundred.
+        let newest = &bar.recent[bar.recent.len().saturating_sub(RECENT_MOST)..];
         side = side.push(
             column![section("Recent")]
-                .extend(bar.recent.iter().map(recent_row))
+                .extend(newest.iter().map(recent_row))
                 .spacing(8),
         );
     }
@@ -413,6 +417,9 @@ fn answer<'a>(bar: &'a CommandBar<'a>) -> Element<'a, Message> {
         .push(text(answer.sources.as_str()).size(12).color(QUIET))
         .into()
 }
+
+/// How many tasks the command bar's Recent shows: the newest.
+pub const RECENT_MOST: usize = 6;
 
 fn recent_row(task: &TaskView) -> Element<'_, Message> {
     let (status, color) = match task.state {

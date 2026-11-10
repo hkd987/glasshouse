@@ -167,6 +167,63 @@ async fn old_output_of_tasks_no_longer_there_is_removed_and_a_live_tasks_is_kept
     );
 }
 
+// Ended tasks left glassd's memory only when dismissed, which nothing on
+// screen does: every task ever run stayed, with its snapshots.
+#[tokio::test]
+async fn ended_tasks_are_forgotten_by_age_and_count_and_running_ones_never() {
+    let h = harness();
+    // The desktop's connection, hearing what changes.
+    let desktop = glass_rpc::Client::connect(h.serve_control()).await.unwrap();
+    let _: serde_json::Value = desktop
+        .call(glass_api::methods::EVENTS_SUBSCRIBE, json!(null))
+        .await
+        .unwrap();
+    let mut ended = Vec::new();
+    for _ in 0..3 {
+        let task = h.rt.start(&h.me, h.request(&[], &[])).unwrap().id;
+        let _agent = h.agent(task).await;
+        h.rt.stop(&h.me, task).unwrap();
+        eventually(|| !h.rt.get(&h.me, task).unwrap().view.state.is_live()).await;
+        ended.push(task);
+        // A second apart, as the rule counts.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    }
+    let running = h.rt.start(&h.me, h.request(&[], &[])).unwrap().id;
+    let _agent = h.agent(running).await;
+    let logs = h.dir.path().join("state/tasks");
+    assert!(logs.join(ended[0].to_string()).exists());
+
+    let month = std::time::Duration::from_secs(30 * 24 * 3600);
+    // Room for all of them: nothing goes.
+    assert_eq!(h.rt.retire_ended(month, 10), 0);
+    // Room for two: the oldest ended goes, with what its agent printed,
+    // and the desktop hears.
+    assert_eq!(h.rt.retire_ended(month, 2), 1);
+    let listed: Vec<_> = h.rt.list(&h.me).into_iter().map(|t| t.id).collect();
+    assert!(!listed.contains(&ended[0]));
+    assert!(listed.contains(&ended[1]) && listed.contains(&ended[2]) && listed.contains(&running));
+    assert!(!logs.join(ended[0].to_string()).exists());
+    // The desktop is told the tile went.
+    let gone = ended[0];
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let note = desktop.next_notification().await.expect("still connected");
+            let event: Option<glass_api::Event> =
+                note.params.and_then(|p| serde_json::from_value(p).ok());
+            if matches!(event, Some(glass_api::Event::TaskRemoved { task }) if task == gone) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the desktop hears the task was removed");
+    // Past the age: every ended one goes; the one running stays.
+    assert_eq!(h.rt.retire_ended(std::time::Duration::ZERO, 10), 2);
+    let listed: Vec<_> = h.rt.list(&h.me).into_iter().map(|t| t.id).collect();
+    assert_eq!(listed, [running]);
+    assert_eq!(h.rt.retire_ended(std::time::Duration::ZERO, 0), 0);
+}
+
 #[tokio::test]
 async fn undo_brings_back_a_large_file_without_holding_it_whole() {
     // AU-21: a file comes back whatever its size. It was read whole into

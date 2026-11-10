@@ -75,6 +75,11 @@ const SNAPSHOT_CHECK: std::time::Duration = std::time::Duration::from_secs(24 * 
 /// How long what an ended task's agent printed is kept once no task shows
 /// it: long enough to look into what happened before a restart.
 const TASK_LOGS_KEPT: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+/// How many ended tasks glassd keeps for each person, the newest: past
+/// that the oldest go, though not yet as old as snapshots are kept. A list
+/// of a few hundred is slow to draw, and nobody rolls back their 201st
+/// task before last.
+const ENDED_TASKS_KEPT: usize = 200;
 
 fn main() -> ExitCode {
     // GLASS_LOG is `level` or `target=level,...`, e.g. `glass_runtime=debug,info`.
@@ -991,6 +996,18 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             let mut tick = tokio::time::interval(SNAPSHOT_CHECK);
             loop {
                 tick.tick().await;
+                // First the ended tasks whose time is up, so the snapshots
+                // only they were keeping go in the same pass.
+                let pruning = Arc::clone(&runtime);
+                match tokio::task::spawn_blocking(move || {
+                    pruning.retire_ended(SNAPSHOTS_KEPT, ENDED_TASKS_KEPT)
+                })
+                .await
+                {
+                    Ok(0) => {}
+                    Ok(gone) => tracing::info!(gone, "forgot tasks that ended long ago"),
+                    Err(e) => tracing::warn!("forgetting old tasks: {e}"),
+                }
                 let pruning = Arc::clone(&runtime);
                 match tokio::task::spawn_blocking(move || pruning.prune_snapshots(SNAPSHOTS_KEPT))
                     .await
