@@ -635,6 +635,110 @@ fn sk_others_see_nothing_until_the_person_says_yes() {
     }
 }
 
+// ADR 0034 §5: a read is held to the label of what it returns, and raises
+// the task's label to it. `skill.read {skill, draft}` was judged by the
+// skill's label alone and returned whatever draft of the person's was
+// named: one drafted by a task that had read confidential data, read
+// through an internal skill, left the task's label where it was.
+#[test]
+fn dp_a_draft_read_through_a_skill_is_that_skills_and_held_to_its_own_label() {
+    let org = org();
+    let (_a, b, id) = shared(&org);
+    let read: ActionName = READ.parse().unwrap();
+    let plain = b.ctx("priya", AGENT);
+    let preview = |input: Value| b.skills.preview(&plain, &read, &input);
+    // The skill as shared is Internal: below what the task below has read.
+    assert_eq!(
+        preview(json!({ "skill": id })).unwrap().label,
+        Some(Label::Internal)
+    );
+
+    // A task that has read confidential data drafts a skill of its own
+    // (not a change to this one): the draft is confidential.
+    let mut secret = b.ctx("priya", AGENT);
+    secret.data_label = Some(Label::Confidential);
+    let other = b
+        .with(
+            &secret,
+            DRAFT,
+            json!({ "files": files("Refunds over $5,000 need the CFO.") }),
+        )
+        .unwrap()
+        .data["draft"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Read by itself, it is judged as what it is.
+    assert_eq!(
+        preview(json!({ "draft": other })).unwrap().label,
+        Some(Label::Confidential)
+    );
+    // Named beside the internal skill, it isn't that skill's: refused where
+    // it is judged, and where it would be returned.
+    for refused in [
+        preview(json!({ "skill": id, "draft": other })).map(|_| ()),
+        b.with(&plain, READ, json!({ "skill": id, "draft": other }))
+            .map(|_| ()),
+    ] {
+        let Err(ActionError::InvalidInput(why)) = refused else {
+            panic!("{refused:?}")
+        };
+        assert!(why.contains("isn't a change to Refunds"), "{why}");
+    }
+
+    // A draft that does change the skill reads through it, at the skill's
+    // label: a task that has read more can't draft a change to it at all
+    // (no writing down), so such a draft is never labeled above its skill.
+    assert!(matches!(
+        b.with(
+            &secret,
+            DRAFT,
+            json!({ "skill": id, "files": files("Refunds take 30 days.") }),
+        ),
+        Err(ActionError::OutOfScope(_))
+    ));
+    let change = b
+        .with(
+            &plain,
+            DRAFT,
+            json!({ "skill": id, "files": files("Refunds take 30 days.") }),
+        )
+        .unwrap()
+        .data["draft"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        preview(json!({ "skill": id, "draft": change }))
+            .unwrap()
+            .label,
+        Some(Label::Internal)
+    );
+    let read = b
+        .with(&plain, READ, json!({ "skill": id, "draft": change }))
+        .unwrap();
+    assert!(
+        read.text.contains(&format!("draft {change}")),
+        "{}",
+        read.text
+    );
+
+    // What can't be found is refused where it is judged, not passed on
+    // with no label to be found (or not) when it runs.
+    assert!(matches!(
+        preview(json!({ "skill": "no-such-skill" })),
+        Err(ActionError::NotFound(_) | ActionError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        preview(json!({ "draft": "0".repeat(64) })),
+        Err(ActionError::NotFound(_))
+    ));
+    assert!(matches!(
+        preview(json!({})),
+        Err(ActionError::InvalidInput(_))
+    ));
+}
+
 #[test]
 fn ga1_what_each_action_returns_is_what_it_declares() {
     let org = org();
@@ -726,7 +830,8 @@ fn ga1_what_each_action_returns_is_what_it_declares() {
         READ,
         json!({ "skill": id, "proposal": proposal }),
     );
-    check(&a, &dana, READ, json!({ "skill": id, "draft": draft }));
+    // A draft read through its skill: one that changes it (Priya's fix).
+    check(&b, &priya, READ, json!({ "skill": id, "draft": fix }));
     check(
         &a,
         &a.ctx("dana", APP),

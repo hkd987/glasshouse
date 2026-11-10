@@ -1132,12 +1132,14 @@ impl ActionProvider for ArtifactsProvider {
             }
             READ => {
                 let input: ReadInput = parse_input(input)?;
-                // Reading it raises the task's label to its own.
-                let (title, label) = self.about(ctx, &input.artifact);
+                // Reading it raises the task's label to its own, so it has
+                // to be found here, where it is judged: one this couldn't
+                // find used to be "an artifact" with no label, which passes.
+                let artifact = self.artifact(Self::me(ctx), &input.artifact)?;
                 Ok(Preview {
-                    summary: format!("Read {title}"),
-                    targets: vec![title],
-                    label,
+                    summary: format!("Read {}", artifact.title),
+                    targets: vec![artifact.title],
+                    label: Some(artifact.label),
                     ..Preview::default()
                 })
             }

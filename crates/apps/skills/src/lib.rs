@@ -564,6 +564,19 @@ impl SkillsProvider {
     }
 
     /// A skill's label for a preview, when the person is in it.
+    /// The person's draft `id`, which must be a change to `skill`: a draft
+    /// of another skill, or of a new one, isn't this skill's to show.
+    fn draft_of(&self, login: &str, id: &str, skill: &Skill) -> Result<Draft, ActionError> {
+        let draft = self.draft(login, id)?;
+        if draft.skill.as_deref() != Some(skill.id.as_str()) {
+            return Err(invalid(format!(
+                "draft {} isn't a change to {}; read it by itself",
+                draft.id, skill.name
+            )));
+        }
+        Ok(draft)
+    }
+
     fn label_of(&self, ctx: &TaskContext, id: &str) -> (String, Option<Label>) {
         self.skill(Self::me(ctx), id)
             .map_or_else(|_| ("a skill".into(), None), |s| (s.name, Some(s.label)))
@@ -675,7 +688,7 @@ impl SkillsProvider {
                 (bundle.files, p.sha256.clone(), format!("proposal {}", p.id))
             }
             (None, Some(d), None) => {
-                let draft = self.draft(me, d)?;
+                let draft = self.draft_of(me, d, &skill)?;
                 (
                     draft.bundle.files,
                     draft.id.clone(),
@@ -1441,18 +1454,28 @@ impl ActionProvider for SkillsProvider {
             }
             READ => {
                 let input: ReadInput = parse_input(input)?;
-                // Reading one raises the task's label to its own.
+                // Reading one raises the task's label to its own, so what
+                // is read has to be found here, where it is judged: a
+                // preview that couldn't find it used to say "no label",
+                // which passes. And a draft read as a skill's is held to
+                // its own label too: it was judged by the skill's alone,
+                // and any of the person's drafts could be named.
                 let (name, label) = match (&input.skill, &input.draft) {
-                    (Some(id), _) => self.label_of(ctx, id),
-                    (None, Some(d)) => self.draft(me, d).map_or(("a draft".into(), None), |d| {
-                        ("a draft".into(), Some(d.label))
-                    }),
-                    _ => ("a skill".into(), None),
+                    (Some(id), draft) => {
+                        let skill = self.skill(me, id)?;
+                        let label = match draft {
+                            Some(d) => skill.label.max(self.draft_of(me, d, &skill)?.label),
+                            None => skill.label,
+                        };
+                        (skill.name, label)
+                    }
+                    (None, Some(d)) => ("a draft".into(), self.draft(me, d)?.label),
+                    (None, None) => return Err(invalid("name a skill, or a draft")),
                 };
                 Ok(Preview {
                     summary: format!("Read {name}"),
                     targets: vec![name],
-                    label,
+                    label: Some(label),
                     ..Preview::default()
                 })
             }

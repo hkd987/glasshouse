@@ -628,6 +628,19 @@ fn ar1_a_page_comes_from_a_granted_folder_and_only_from_one() {
         )
         .unwrap();
     assert_eq!(preview.reads, vec![a.home.join("Reports/q3.html")]);
+    // A read is judged by the artifact's label: found, it carries it;
+    // not found, it is refused where it is judged (it used to pass as
+    // "an artifact" with no label).
+    let found = a.preview("dana", READ, json!({ "artifact": id })).unwrap();
+    assert!(found.label.is_some(), "{found:?}");
+    let missing = a.preview("dana", READ, json!({ "artifact": "0000000000000000" }));
+    assert!(
+        matches!(
+            missing,
+            Err(ActionError::NotFound(_) | ActionError::InvalidInput(_))
+        ),
+        "{missing:?}"
+    );
 
     for path in ["../../etc/passwd", "/etc/passwd", "Secrets/x.html"] {
         let share = a.call("dana", AGENT, SHARE, json!({ "title": "x", "path": path }));

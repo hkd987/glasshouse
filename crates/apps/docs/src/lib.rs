@@ -1421,6 +1421,20 @@ impl ActionProvider for DocsProvider {
                 ..Preview::default()
             }
         };
+        // A read is judged by the doc's label, so the doc has to be found
+        // here: one this couldn't find used to be "a doc" with no label,
+        // which passes, and the read then ran if it found the doc after
+        // all (the console back in reach between the two).
+        let read = |summary: &str, id: &str| -> Result<Preview, ActionError> {
+            let (title, label) =
+                self.with_doc(Self::me(ctx), id, |c| Ok((c.title.clone(), c.label)))?;
+            Ok(Preview {
+                summary: format!("{summary} {title}"),
+                targets: vec![title],
+                label: Some(label),
+                ..Preview::default()
+            })
+        };
         match action.as_str() {
             LIST => {
                 let _: NoInput = parse_input(input)?;
@@ -1430,8 +1444,8 @@ impl ActionProvider for DocsProvider {
                     ..Preview::default()
                 })
             }
-            READ => Ok(titled("Read", &parse_input::<DocInput>(input)?.doc, true)),
-            OPEN => Ok(titled("Open", &parse_input::<DocInput>(input)?.doc, true)),
+            READ => read("Read", &parse_input::<DocInput>(input)?.doc),
+            OPEN => read("Open", &parse_input::<DocInput>(input)?.doc),
             CREATE => {
                 let input: CreateInput = parse_input(input)?;
                 let title = Self::check_title(&input.title)?;

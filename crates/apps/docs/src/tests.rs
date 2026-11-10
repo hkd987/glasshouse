@@ -575,6 +575,24 @@ fn adr0034_a_doc_is_labeled_and_takes_nothing_from_a_task_that_read_more() {
         )
         .unwrap();
     assert_eq!(preview.label, Some(Label::Internal));
+    // A read is judged by its doc's label, so one whose doc can't be found
+    // is refused where it is judged. It used to be "a doc" with no label,
+    // which passes: the read then ran with nothing having been checked,
+    // if it found the doc after all.
+    for action in [READ, OPEN] {
+        let missing = b.docs.preview(
+            &b.ctx("priya", AGENT),
+            &action.parse().unwrap(),
+            &json!({ "doc": "0000000000000000" }),
+        );
+        assert!(
+            matches!(
+                missing,
+                Err(ActionError::NotFound(_) | ActionError::InvalidInput(_))
+            ),
+            "{action}: {missing:?}"
+        );
+    }
     let mut ctx = b.ctx("priya", AGENT);
     ctx.data_label = Some(Label::Confidential);
     let refused = b.with(
