@@ -15,6 +15,7 @@ glass-gateway-providers.workspace = true
 glass-http.workspace = true
 glass-managed.workspace = true
 glass-types.workspace = true
+glass-state.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -29,6 +29,7 @@ glass-policy.workspace = true
 glass-rpc.workspace = true
 glass-runtime.workspace = true
 glass-types.workspace = true
+glass-state.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true

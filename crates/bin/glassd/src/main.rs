@@ -487,12 +487,13 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     }
 
     // Who signed in on an agent host (ADR 0067): kept beside glassd's state.
-    let people = config.people.as_ref().map(|p| {
-        Arc::new(glass_runtime::people::People::open(
-            config.state_dir.join("people.json"),
-            p.uid_base,
-        ))
-    });
+    let people = match &config.people {
+        Some(p) => Some(Arc::new(
+            glass_runtime::people::People::open(config.state_dir.join("people.json"), p.uid_base)
+                .map_err(|why| anyhow::anyhow!(why))?,
+        )),
+        None => None,
+    };
     let mut computers = None;
     let sandbox: Arc<dyn Sandbox> = match config.sandbox.backend {
         SandboxBackend::Jail => {

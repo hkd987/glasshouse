@@ -358,7 +358,8 @@ account.
 | `glass-agent-sdk` | lib | Convenience MCP client for Rust agents |
 | `glass-actions` | lib | The action contract: providers, previews, task context, registry |
 | `glass-managed` | lib | Managed settings between the admin console and devices: signed releases, catalog items and the store rule, catalog-first search, sync and reports (ADR 0023) |
-| `glass-http` | lib | Just enough HTTP/1.1 for our small servers: the bridge's dev mode and the console |
+| `glass-http` | lib | Just enough HTTP/1.1 for our small servers: the bridge's dev mode and the console; the accept loop they share, which outlives a failed accept and bounds connections |
+| `glass-state` | lib | Small state files, written whole and read back: one durable way to write one, and one way to read one that tells a damaged file from a missing one |
 | `glass-crypto` | lib | Sealing for chat and meetings (ADR 0030), on the base system's OpenSSL only |
 | `glass-script` | lib | Scripts agents run, and routines that run with no model: JavaScript on Boa, every import refused (ADR 0044) |
 | `glass-replay` | lib | A task's tool calls compiled into a script that does the same with no model (ADR 0046) |

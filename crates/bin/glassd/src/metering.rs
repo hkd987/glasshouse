@@ -5,7 +5,7 @@
 //! is kept on disk, so a restart loses no minutes, and an hour that
 //! couldn't be sent is tried again for as long as AWS takes it (six hours).
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -59,17 +59,23 @@ fn hour_of(at: OffsetDateTime) -> i64 {
 }
 
 impl Meter {
-    pub fn load(path: &PathBuf) -> Self {
-        std::fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+    /// The meter kept at `path`. One that can't be read as a meter is set
+    /// aside, and said: it held computer hours not yet reported, which
+    /// used to vanish without a word.
+    pub fn load(path: &Path) -> Self {
+        match glass_state::read_json_or_set_aside(path) {
+            Ok(meter) => meter.unwrap_or_default(),
+            Err(e) => {
+                tracing::error!(error = %e, "the meter of computer hours couldn't be read; hours not yet reported may be missing");
+                Self::default()
+            }
+        }
     }
 
-    pub fn save(&self, path: &PathBuf) -> std::io::Result<()> {
-        let making = path.with_extension("json.new");
-        std::fs::write(&making, serde_json::to_vec(self).unwrap_or_default())?;
-        std::fs::rename(&making, path)
+    /// Kept on disk, so a restart loses no minutes: synced, where it was
+    /// only renamed into place.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        glass_state::write_json(path, self, glass_state::PRIVATE)
     }
 
     /// A minute with `awake` computers on this host. An hour that ended

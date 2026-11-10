@@ -21,6 +21,7 @@ glass-managed.workspace = true
 glass-platform.workspace = true
 glass-policy.workspace = true
 glass-types.workspace = true
+glass-state.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -31,7 +31,6 @@
 //! what the one before it wrote (post-install.sh).
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use glass_api::{PatchStatus, PatchTrial, TrialState};
@@ -347,28 +346,7 @@ pub(crate) fn in_effect(history: &[PatchTrial], env: &str) -> Vec<PatchTrial> {
 /// Writes a sibling file, syncs it, renames it over `path` and syncs the
 /// directory: a crash leaves the old file or the new one.
 pub(crate) fn write_whole(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let dir = path.parent().unwrap_or(Path::new("/"));
-    std::fs::create_dir_all(dir).map_err(|e| format!("making {}: {e}", dir.display()))?;
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let new = dir.join(format!(".{name}.new"));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(mode)
-        .open(&new)
-        .map_err(|e| format!("writing {}: {e}", new.display()))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|e| format!("writing {}: {e}", new.display()))?;
-    std::fs::rename(&new, path).map_err(|e| format!("replacing {}: {e}", path.display()))?;
-    std::fs::File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| format!("syncing {}: {e}", dir.display()))
+    glass_state::write(path, bytes, mode).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 /// Checks a bundle and sets it up in a boot environment of its own, which

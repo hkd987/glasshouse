@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use glass_types::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -76,9 +76,13 @@ pub fn owner_key(sub: &str) -> String {
     format!("p{}", hex::encode(&digest[..12]))
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct Kept {
     people: Vec<Person>,
+    /// The lowest uid nobody has had: the next new person's, at least. Kept
+    /// so that a uid is never given twice, whatever happens to the list.
+    #[serde(default)]
+    next_uid: u32,
     /// `glass` tokens: their SHA-256, whose (key), until when.
     #[serde(default)]
     tokens: BTreeMap<String, (String, i64)>,
@@ -93,6 +97,9 @@ pub struct People {
     /// The first uid people get.
     base: u32,
     kept: Mutex<Kept>,
+    /// People's folders on this host, each named by its owner's uid: a
+    /// uid one of them is named for is someone's, whatever the list says.
+    homes: OnceLock<PathBuf>,
 }
 
 fn hash(secret: &str) -> String {
@@ -107,36 +114,79 @@ fn random_hex() -> Result<String, String> {
 
 impl People {
     /// The registry kept at `path`; people's uids start at `base`.
-    pub fn open(path: PathBuf, base: u32) -> Self {
-        let kept = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    ///
+    /// A registry that is there and can't be read is an error, and glassd
+    /// doesn't start on it: read as "nobody yet", the next person to sign
+    /// in was given the first uid again, which is someone else's, and with
+    /// it their folder and everything kept under their uid.
+    pub fn open(path: PathBuf, base: u32) -> Result<Self, String> {
+        let kept: Kept = glass_state::read_json(&path)
+            .map_err(|e| {
+                format!(
+                    "{e}. It says which account on this host is whose, so glassd won't guess: \
+                     put it right, or move it and people's folders away to start them afresh"
+                )
+            })?
             .unwrap_or_default();
-        Self {
+        Ok(Self {
             path,
             base,
             kept: Mutex::new(kept),
-        }
+            homes: OnceLock::new(),
+        })
+    }
+
+    /// Where people's folders are, each named by its owner's uid. A new
+    /// person is never given a uid one of them is named for: that folder
+    /// is someone's, even if a registry restored from a backup doesn't
+    /// know them.
+    pub fn keep_clear_of(&self, homes: PathBuf) {
+        let _ = self.homes.set(homes);
     }
 
     fn kept(&self) -> MutexGuard<'_, Kept> {
         self.kept.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn save(&self, kept: &Kept) -> Result<(), String> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let making = self.path.with_extension("json.new");
-        let text = serde_json::to_vec_pretty(kept).map_err(|e| e.to_string())?;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&making)
-            .and_then(|mut f| f.write_all(&text))
-            .and_then(|()| std::fs::rename(&making, &self.path))
-            .map_err(|e| format!("keeping who signed in: {e}"))
+    /// Changes the registry: `change` is made to a copy, the copy is kept
+    /// on disk, and only then is it what this host goes by. A change that
+    /// couldn't be kept (a full disk) didn't happen: before, it stayed in
+    /// memory, and the person it made was gone again at the next start
+    /// with their uid free for someone else.
+    fn change<T>(&self, change: impl FnOnce(&mut Kept) -> Result<T, String>) -> Result<T, String> {
+        let mut kept = self.kept();
+        let mut next = kept.clone();
+        let out = change(&mut next)?;
+        glass_state::write_json_pretty(&self.path, &next, glass_state::PRIVATE)
+            .map_err(|e| format!("keeping who signed in: {e}"))?;
+        *kept = next;
+        Ok(out)
+    }
+
+    /// A uid nobody has or had: past every one given, and not one a
+    /// folder is already named for.
+    fn free_uid(&self, kept: &Kept) -> Result<u32, String> {
+        let none_left = || "no uids left for people on this host".to_owned();
+        let given = kept
+            .people
+            .iter()
+            .map(|p| p.uid.saturating_add(1))
+            .max()
+            .unwrap_or(0);
+        let mut uid = self.base.max(kept.next_uid).max(given);
+        let last = self
+            .base
+            .checked_add(PEOPLE_MAX as u32)
+            .ok_or_else(none_left)?;
+        while let Some(homes) = self.homes.get()
+            && homes.join(uid.to_string()).exists()
+        {
+            uid = uid.checked_add(1).ok_or_else(none_left)?;
+        }
+        if uid >= last {
+            return Err(none_left());
+        }
+        Ok(uid)
     }
 
     /// The person these claims are, made the first time: a new uid.
@@ -146,46 +196,40 @@ impl People {
             return Err("the sign-in has no usable subject".into());
         }
         let clean = |text: &str| glass_api::display_line(text.trim()).into_owned();
-        let mut kept = self.kept();
-        if let Some(found) = kept.people.iter_mut().find(|p| p.key == sub) {
-            // Names and emails change; the subject doesn't.
-            let (email, name) = (clean(&claims.email), clean(&claims.name));
-            let changed = (!email.is_empty() && found.email != email)
-                || (!name.is_empty() && found.name != name);
-            if !email.is_empty() {
-                found.email = email;
-            }
-            if !name.is_empty() {
-                found.name = name;
-            }
-            let found = found.clone();
-            if changed {
-                self.save(&kept)?;
-            }
-            return Ok(found);
+        let (email, name) = (clean(&claims.email), clean(&claims.name));
+        // Known, and as they were: nothing to keep.
+        if let Some(found) = self.kept().people.iter().find(|p| p.key == sub)
+            && (email.is_empty() || found.email == email)
+            && (name.is_empty() || found.name == name)
+        {
+            return Ok(found.clone());
         }
-        if kept.people.len() >= PEOPLE_MAX {
-            return Err("no uids left for people on this host".into());
-        }
-        let uid = self
-            .base
-            .checked_add(u32::try_from(kept.people.len()).map_err(|e| e.to_string())?)
-            .ok_or("no uids left for people on this host")?;
-        let email = clean(&claims.email);
-        let name = match clean(&claims.name) {
-            n if n.is_empty() => email.clone(),
-            n => n,
-        };
-        let person = Person {
-            key: sub.to_owned(),
-            name,
-            email,
-            uid,
-            first_seen: Timestamp::now(),
-        };
-        kept.people.push(person.clone());
-        self.save(&kept)?;
-        Ok(person)
+        self.change(|kept| {
+            if let Some(found) = kept.people.iter_mut().find(|p| p.key == sub) {
+                // Names and emails change; the subject doesn't.
+                if !email.is_empty() {
+                    found.email = email;
+                }
+                if !name.is_empty() {
+                    found.name = name;
+                }
+                return Ok(found.clone());
+            }
+            if kept.people.len() >= PEOPLE_MAX {
+                return Err("no uids left for people on this host".into());
+            }
+            let uid = self.free_uid(kept)?;
+            let person = Person {
+                key: sub.to_owned(),
+                name: if name.is_empty() { email.clone() } else { name },
+                email,
+                uid,
+                first_seen: Timestamp::now(),
+            };
+            kept.people.push(person.clone());
+            kept.next_uid = uid + 1;
+            Ok(person)
+        })
     }
 
     pub fn by_uid(&self, uid: u32) -> Option<Person> {
@@ -197,11 +241,12 @@ impl People {
     pub fn issue_token(&self, person: &Person, now: i64) -> Result<(String, i64), String> {
         let token = format!("{}{}", glass_api::TOKEN_PREFIX, random_hex()?);
         let until = now + TOKEN_DAYS * 86_400;
-        let mut kept = self.kept();
-        kept.tokens.retain(|_, (_, until)| *until > now);
-        kept.tokens
-            .insert(hash(&token), (person.key.clone(), until));
-        self.save(&kept)?;
+        self.change(|kept| {
+            kept.tokens.retain(|_, (_, until)| *until > now);
+            kept.tokens
+                .insert(hash(&token), (person.key.clone(), until));
+            Ok(())
+        })?;
         Ok((token, until))
     }
 
@@ -221,36 +266,40 @@ impl People {
     /// Revokes every token of a person's: `glass` on every computer of
     /// theirs signs in again.
     pub fn revoke_tokens(&self, person: &Person) -> Result<usize, String> {
-        let mut kept = self.kept();
-        let before = kept.tokens.len();
-        kept.tokens.retain(|_, (key, _)| key != &person.key);
-        let gone = before - kept.tokens.len();
-        self.save(&kept)?;
-        Ok(gone)
+        self.change(|kept| {
+            let before = kept.tokens.len();
+            kept.tokens.retain(|_, (key, _)| key != &person.key);
+            Ok(before - kept.tokens.len())
+        })
     }
 
     /// A one-time login code for `glass login`; only its hash is kept.
     pub fn issue_code(&self, person: &Person, now: i64) -> Result<(String, i64), String> {
         let code = format!("{}{}", glass_api::CODE_PREFIX, random_hex()?);
         let until = now + CODE_SECS;
-        let mut kept = self.kept();
-        kept.codes.retain(|_, (_, until)| *until > now);
-        kept.codes.insert(hash(&code), (person.key.clone(), until));
-        self.save(&kept)?;
+        self.change(|kept| {
+            kept.codes.retain(|_, (_, until)| *until > now);
+            kept.codes.insert(hash(&code), (person.key.clone(), until));
+            Ok(())
+        })?;
         Ok((code, until))
     }
 
     /// Whose code this was: it works once, and not after it expires.
     pub fn take_code(&self, code: &str, now: i64) -> Result<Person, String> {
-        let mut kept = self.kept();
-        let taken = kept.codes.remove(&hash(code.trim()));
-        self.save(&kept)?;
-        let (key, until) =
-            taken.ok_or("that sign-in code isn't one this host gave, or it was used")?;
+        let code = hash(code.trim());
+        // One this host never gave changes nothing, and writes nothing.
+        if !self.kept().codes.contains_key(&code) {
+            return Err("that sign-in code isn't one this host gave, or it was used".into());
+        }
+        let (key, until) = self
+            .change(|kept| Ok(kept.codes.remove(&code)))?
+            .ok_or("that sign-in code isn't one this host gave, or it was used")?;
         if until <= now {
             return Err("that sign-in code is out of date: run glass login again".into());
         }
-        kept.people
+        self.kept()
+            .people
             .iter()
             .find(|p| p.key == key)
             .cloned()
@@ -459,7 +508,7 @@ mod tests {
     #[test]
     fn adr0067_each_person_gets_a_uid_and_tokens_and_codes_work_as_they_should() {
         let dir = tempfile::tempdir().unwrap();
-        let people = People::open(dir.path().join("people.json"), 200_000);
+        let people = People::open(dir.path().join("people.json"), 200_000).unwrap();
         let claims = |sub: &str, email: &str| Claims {
             sub: sub.into(),
             email: email.into(),
@@ -529,8 +578,93 @@ mod tests {
         );
 
         // Kept across restarts.
-        let reopened = People::open(dir.path().join("people.json"), 200_000);
+        let reopened = People::open(dir.path().join("people.json"), 200_000).unwrap();
         assert_eq!(reopened.by_uid(200_001).unwrap().key, "sub-sam");
         assert!(reopened.by_token(&sams, now).is_some());
+    }
+
+    fn someone(sub: &str) -> Claims {
+        Claims {
+            sub: sub.into(),
+            email: format!("{sub}@example.com"),
+            name: String::new(),
+        }
+    }
+
+    #[test]
+    fn adr0067_a_registry_that_cant_be_read_stops_the_host_instead_of_renumbering_people() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("people.json");
+        let people = People::open(path.clone(), 200_000).unwrap();
+        let dana = people.person(&someone("dana")).unwrap();
+        assert_eq!(dana.uid, 200_000);
+        drop(people);
+        // Cut short by a crash, or written by a version this one can't
+        // read: read as "nobody yet", the next person in got 200,000,
+        // which is Dana's, and with it Dana's folder.
+        let whole = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, &whole[..whole.len() / 2]).unwrap();
+        let refused = People::open(path.clone(), 200_000).unwrap_err();
+        assert!(
+            refused.contains("is damaged") && refused.contains("won't guess"),
+            "{refused}"
+        );
+        // Put right, it is what it was.
+        std::fs::write(&path, whole).unwrap();
+        let people = People::open(path, 200_000).unwrap();
+        assert_eq!(people.person(&someone("dana")).unwrap().uid, 200_000);
+        assert_eq!(people.person(&someone("sam")).unwrap().uid, 200_001);
+    }
+
+    #[test]
+    fn adr0067_a_person_who_couldnt_be_kept_wasnt_made_and_no_uid_is_given_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let homes = dir.path().join("people");
+        let open = || {
+            let people = People::open(state.join("people.json"), 200_000).unwrap();
+            people.keep_clear_of(homes.clone());
+            people
+        };
+        let people = open();
+        assert_eq!(people.person(&someone("dana")).unwrap().uid, 200_000);
+        // The disk is full (here: the registry's place is taken by a
+        // folder, so the new file can't be put there). Sam can't be kept.
+        let real = state.join("people.json");
+        let moved = state.join("people.json.away");
+        std::fs::rename(&real, &moved).unwrap();
+        std::fs::create_dir(&real).unwrap();
+        let refused = people.person(&someone("sam")).unwrap_err();
+        assert!(refused.contains("keeping who signed in"), "{refused}");
+        // And isn't someone this host goes by meanwhile: it used to hand
+        // Sam uid 200,001 from memory at the next try, make their folder,
+        // and forget them at the next start.
+        assert!(people.by_uid(200_001).is_none());
+        assert!(
+            people
+                .issue_token(&people.by_uid(200_000).unwrap(), 0)
+                .is_err()
+        );
+        std::fs::remove_dir(&real).unwrap();
+        std::fs::rename(&moved, &real).unwrap();
+        assert_eq!(people.person(&someone("sam")).unwrap().uid, 200_001);
+        drop(people);
+
+        // A registry from before Sam (a backup put back), with Sam's
+        // folder still on the host: Priya isn't given Sam's uid, whose
+        // folder it would open, nor is anyone after her.
+        std::fs::create_dir_all(homes.join("200001")).unwrap();
+        let kept: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&real).unwrap()).unwrap();
+        let mut older = kept.clone();
+        older["people"].as_array_mut().unwrap().truncate(1);
+        older["next_uid"] = 0.into();
+        std::fs::write(&real, serde_json::to_vec(&older).unwrap()).unwrap();
+        let people = open();
+        assert_eq!(people.person(&someone("priya")).unwrap().uid, 200_002);
+        assert_eq!(people.person(&someone("lee")).unwrap().uid, 200_003);
+        // Someone already known is who they were, at no cost.
+        assert_eq!(people.person(&someone("dana")).unwrap().uid, 200_000);
     }
 }

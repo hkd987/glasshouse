@@ -46,19 +46,9 @@ impl Seat {
     }
 }
 
-/// Writes the seat to `path` whole (temp, then rename), for root alone.
+/// Writes the seat to `path` whole, for root alone.
 fn keep(path: &Path, begin: &SeatBegin) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let new = path.with_extension("new");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&new)?;
-    file.write_all(&serde_json::to_vec(begin).map_err(std::io::Error::other)?)?;
-    std::fs::rename(&new, path)
+    glass_state::write_json(path, begin, glass_state::PRIVATE)
 }
 
 /// What a computer sleeps after when nobody set it (the table's default).

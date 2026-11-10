@@ -63,6 +63,8 @@ impl Identity {
         dev_people: bool,
         homes: PathBuf,
     ) -> Self {
+        // A new person never gets a uid one of these folders is named for.
+        people.keep_clear_of(homes.clone());
         Self {
             people,
             front_uid,

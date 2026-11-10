@@ -1193,6 +1193,7 @@ dependencies = [
  "glass-gateway-providers",
  "glass-http",
  "glass-managed",
+ "glass-state",
  "glass-types",
  "hex",
  "serde",
@@ -1260,6 +1261,7 @@ dependencies = [
  "glass-managed",
  "glass-platform",
  "glass-policy",
+ "glass-state",
  "glass-types",
  "hex",
  "serde",
@@ -1453,6 +1455,7 @@ dependencies = [
  "ed25519-compact",
  "glass-api",
  "glass-crypto",
+ "glass-state",
  "glass-types",
  "hex",
  "serde",
@@ -1502,6 +1505,7 @@ dependencies = [
 name = "glass-policy"
 version = "0.1.0"
 dependencies = [
+ "glass-state",
  "glass-types",
  "serde",
  "tempfile",
@@ -1587,6 +1591,7 @@ dependencies = [
  "glass-policy",
  "glass-replay",
  "glass-rpc",
+ "glass-state",
  "glass-tailoring",
  "glass-types",
  "hex",
@@ -1631,6 +1636,17 @@ dependencies = [
  "glass-managed",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "glass-state"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -1722,6 +1738,7 @@ dependencies = [
  "glass-policy",
  "glass-rpc",
  "glass-runtime",
+ "glass-state",
  "glass-types",
  "hex",
  "serde",

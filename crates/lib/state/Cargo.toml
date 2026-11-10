@@ -1,0 +1,20 @@
+[package]
+name = "glass-state"
+description = "Small state files, written whole and read back: one way to write one so a crash leaves the old file or the new, and one way to read one that tells a damaged file from a missing one."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

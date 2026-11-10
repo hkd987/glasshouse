@@ -12,8 +12,8 @@
 //! damaged or swapped copy is not trusted, and the device carries on with
 //! what it had before (or nothing) instead.
 
-use std::fs::{self, File};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::{DocKind, PublicKey, Signed};
@@ -74,17 +74,7 @@ impl ReleaseStore {
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.new"));
-    let mut file = File::create(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    fs::rename(&tmp, path)?;
-    File::open(dir)?.sync_all()
+    glass_state::write(path, bytes, glass_state::READABLE)
 }
 
 #[cfg(test)]

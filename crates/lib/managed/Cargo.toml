@@ -12,6 +12,7 @@ ed25519-compact.workspace = true
 glass-api.workspace = true
 glass-crypto.workspace = true
 glass-types.workspace = true
+glass-state.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

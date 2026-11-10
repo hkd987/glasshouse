@@ -242,16 +242,32 @@ impl Outbox {
         Ok(all[all.len().saturating_sub(n)..].to_vec())
     }
 
+    /// Every entry of a folder. One that is damaged is set aside and
+    /// said, and the rest are read: it used to fail the whole listing, so
+    /// one bad file in the outbox stopped every organization's payments
+    /// from being delivered, at each round and after each restart.
     fn read_all<T: serde::de::DeserializeOwned>(&self, which: &str) -> anyhow::Result<Vec<T>> {
         let mut out = Vec::new();
         for entry in std::fs::read_dir(self.dir.join(which))? {
             let path = entry?.path();
-            if path.extension().is_some_and(|e| e == "json") {
-                let text = std::fs::read(&path)?;
-                out.push(
-                    serde_json::from_slice(&text)
-                        .with_context(|| format!("{} is damaged", path.display()))?,
-                );
+            if !path.extension().is_some_and(|e| e == "json") {
+                continue;
+            }
+            match glass_state::read_json(&path) {
+                Ok(Some(entry)) => out.push(entry),
+                // Gone between the listing and the read: delivered.
+                Ok(None) => {}
+                Err(glass_state::ReadError::Damaged { reason, .. }) => {
+                    let kept = glass_state::set_aside(&path)
+                        .map_or_else(|e| format!("in place ({e})"), |p| p.display().to_string());
+                    tracing::error!(
+                        file = %path.display(),
+                        kept_as = %kept,
+                        %reason,
+                        "a queued payment's file is damaged; set aside for someone to look at"
+                    );
+                }
+                Err(e) => return Err(e.into()),
             }
         }
         Ok(out)
@@ -263,14 +279,13 @@ impl Outbox {
         self.dir.join(which).join(format!("{name}.json"))
     }
 
+    /// On disk before the relay answers Stripe: the file, and the folder
+    /// it is named in. Without the folder's sync a host that lost power
+    /// after the answer could come back without the payment, and Stripe
+    /// doesn't send one again that was answered 200.
     fn write<T: Serialize>(&self, which: &str, session: &str, value: &T) -> anyhow::Result<()> {
-        use std::io::Write as _;
         let path = self.path(which, session);
-        let tmp = path.with_extension("tmp");
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(&serde_json::to_vec_pretty(value)?)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, &path)?;
+        glass_state::write_json_pretty(&path, value, glass_state::READABLE)?;
         Ok(())
     }
 }
@@ -325,6 +340,38 @@ mod tests {
         let outbox = Outbox::open(dir.path(), Timing::default()).unwrap();
         assert_eq!(outbox.delivered_log(5).unwrap()[0].attempts, 1);
         assert!(outbox.seen("cs_1"));
+    }
+
+    #[test]
+    fn adr0040_one_damaged_file_doesnt_stop_the_other_payments() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Timestamp::now().unix_seconds();
+        let mut outbox = Outbox::open(dir.path(), Timing::default()).unwrap();
+        for session in ["cs_1", "cs_2"] {
+            assert!(
+                outbox
+                    .queue(event(session, Timestamp::now()), "https://a", now)
+                    .unwrap()
+            );
+        }
+        // One of the two is cut short, as by a disk that filled.
+        let damaged = outbox.path("outbox", "cs_1");
+        let whole = std::fs::read(&damaged).unwrap();
+        std::fs::write(&damaged, &whole[..whole.len() / 2]).unwrap();
+        // The other is still delivered, now and after a restart: one bad
+        // file used to fail every round, for every organization.
+        let due = outbox.due(now).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].event.session, "cs_2");
+        let outbox = Outbox::open(dir.path(), Timing::default()).unwrap();
+        assert_eq!(outbox.due(now).unwrap().len(), 1);
+        // And what was there is kept for someone to look at.
+        let kept: Vec<String> = std::fs::read_dir(dir.path().join("outbox"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".damaged-"))
+            .collect();
+        assert_eq!(kept.len(), 1, "{kept:?}");
     }
 
     #[test]

@@ -161,18 +161,7 @@ impl FileSchedules {
     }
 
     fn write(&self, all: &[StoredSchedule]) -> std::result::Result<(), String> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let making = self.path.with_extension("json.new");
-        let bytes = serde_json::to_vec_pretty(all).map_err(|e| e.to_string())?;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&making)
-            .and_then(|mut f| f.write_all(&bytes))
-            .and_then(|()| std::fs::rename(&making, &self.path))
+        glass_state::write_json_pretty(&self.path, all, glass_state::PRIVATE)
             .map_err(|e| format!("writing {}: {e}", self.path.display()))
     }
 

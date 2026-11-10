@@ -19,8 +19,8 @@
 //! one rename, the version they replace kept for [`PolicyStore::rollback`].
 
 use std::fmt;
-use std::fs::{self, File};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::{DEFAULT_POLICY, Policy};
@@ -194,20 +194,8 @@ impl PolicyStore {
 /// syncs the directory: a crash leaves the old file or the new one, never a
 /// mix.
 fn write_atomically(path: &Path, text: &str) -> Result<(), StoreError> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.new"));
-    let mut file = File::create(&tmp).map_err(io_err(format_args!("writing {}", tmp.display())))?;
-    file.write_all(text.as_bytes())
-        .and_then(|()| file.sync_all())
-        .map_err(io_err(format_args!("writing {}", tmp.display())))?;
-    fs::rename(&tmp, path).map_err(io_err(format_args!("replacing {}", path.display())))?;
-    File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(io_err(format_args!("syncing {}", dir.display())))
+    glass_state::write(path, text.as_bytes(), glass_state::READABLE)
+        .map_err(io_err(format_args!("writing {}", path.display())))
 }
 
 #[cfg(test)]

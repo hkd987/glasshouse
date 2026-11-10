@@ -103,15 +103,25 @@ impl Runtime {
         })
     }
 
+    /// What the person's tasks did before. A file that can't be read as
+    /// that is set aside and noted, and they start again: these are
+    /// suggestions ("you've done this three times"), nothing is lost that
+    /// a task depends on.
     fn load_flows(&self, login: &str) -> Flows {
-        self.flows_file(login)
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+        let Some(path) = self.flows_file(login) else {
+            return Flows::default();
+        };
+        match glass_state::read_json_or_set_aside(&path) {
+            Ok(flows) => flows.unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't read what this person's tasks did before");
+                Flows::default()
+            }
+        }
     }
 
     fn keep_flows(&self, login: &str, flows: &Flows) -> std::io::Result<()> {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::os::unix::fs::DirBuilderExt;
         let path = self
             .flows_file(login)
             .ok_or_else(|| std::io::Error::other("not a login"))?;
@@ -121,10 +131,7 @@ impl Runtime {
                 .mode(0o700)
                 .create(dir)?;
         }
-        let staged = path.with_extension("json.new");
-        std::fs::write(&staged, serde_json::to_vec(flows)?)?;
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))?;
-        std::fs::rename(staged, path)
+        glass_state::write_json(&path, flows, glass_state::PRIVATE)
     }
 
     /// At a task's end: its calls compiled, and let go. A `finished`

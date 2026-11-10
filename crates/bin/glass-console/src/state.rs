@@ -1769,10 +1769,8 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<Opti
 const CHAT_LOG: &str = "chat-messages.jsonl";
 
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
-    let tmp = path.with_extension("json.new");
-    std::fs::write(&tmp, serde_json::to_vec(value)?)
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+    glass_state::write_json(path, value, glass_state::READABLE)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 fn write_private(path: &Path, text: &str) -> anyhow::Result<()> {
