@@ -72,9 +72,18 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses bans sources
+      # Ubuntu 24.04 keeps user namespaces from programs that have no
+      # AppArmor profile. The console's confined bundler and agents'
+      # computers are made of them (unshare), on the hosts they run on too.
+      - name: User namespaces, as on the hosts this runs on
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: make lint-all
-      - run: make test
+      # Every test binary, whichever fails: one run says all that is wrong
+      # here, where a run stopped at the first told one thing at a time.
+      - run: make test TEST_ARGS=--no-fail-fast
+        if: success() || failure()
       - run: make tla
+        if: success() || failure()
 
   shell:
     name: desktop shell
@@ -136,14 +145,22 @@ jobs:
           sudo chown "$USER" /opt/pw-browsers
           make apps/node_modules
           cd apps && PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers npx playwright install --with-deps chromium
+      # Ubuntu 24.04 keeps user namespaces from programs that have no
+      # AppArmor profile. The console's confined bundler and agents'
+      # computers are made of them (unshare), on the hosts they run on too.
+      - name: User namespaces, as on the hosts this runs on
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: make apps-test
       - run: make console-test
+        if: success() || failure()
       # A suite that fails here and nowhere else: what glassd, the bridge and
       # the page said, since nobody can go and look.
       - name: What the dev host logged
         if: failure()
         run: |
-          for log in build/apps-e2e/*.log build/console-e2e/*.log build/console-e2e/*/*.log; do
+          # In the checkout's build folder, or where the suite put its
+          # state when the checkout is too deep for an agent's socket.
+          for log in build/apps-e2e/*.log build/console-e2e/*.log build/console-e2e/*/*.log /tmp/glass-e2e-*/*/*.log; do
             [ -f "$log" ] || continue
             echo "::group::$log"
             tail -n 200 "$log"

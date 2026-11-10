@@ -453,6 +453,7 @@ pub fn desktop(tasks: &[TaskView]) -> Desktop<'_> {
             .map(String::from)
             .to_vec(),
         dock: true,
+        away: false,
     }
 }
 

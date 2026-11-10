@@ -41,8 +41,8 @@ build: ## Build every crate for this host (debug)
 check: ## Type-check everything, fastest feedback (no codegen)
 	cargo check --workspace --all-targets
 
-test: ## Unit and integration tests on this host
-	cargo test --workspace
+test: ## Unit and integration tests on this host (TEST_ARGS=--no-fail-fast runs every test binary, whichever fails)
+	cargo test --workspace $(TEST_ARGS)
 
 lint: ## Lint what changed since main: rustfmt, clippy (warnings are errors), layering, art, shellcheck
 	tools/lint.py

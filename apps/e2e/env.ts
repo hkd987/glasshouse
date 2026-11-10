@@ -9,10 +9,12 @@ import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { suiteFolder } from "./folders.ts";
+
 export const REPO = join(dirname(fileURLToPath(import.meta.url)), "../..");
 export const BIN = join(process.env.CARGO_TARGET_DIR ?? join(REPO, "target"), "debug");
-/** The suite's own dev-host state (never the developer's build/dev). */
-export const DEV = process.env.GLASS_APPS_E2E_DIR ?? join(REPO, "build/apps-e2e");
+/** The suite's own dev-host state (never the developer's build/dev); see folders.ts. */
+export const DEV = process.env.GLASS_APPS_E2E_DIR ?? suiteFolder(join(REPO, "build/apps-e2e"), "apps");
 /** Its sockets: short paths, since a Unix socket's must stay under 104 bytes. */
 export const RUN = process.env.GLASS_APPS_E2E_RUN ?? join(tmpdir(), `glass-apps-e2e-${userInfo().uid}`);
 export const PORT = Number(process.env.GLASS_APPS_E2E_PORT ?? 7310);

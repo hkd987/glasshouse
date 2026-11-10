@@ -8,12 +8,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
 
+import { suiteFolder } from "./folders.ts";
+
 const repo = join(dirname(fileURLToPath(import.meta.url)), "../..");
 // The machine's browsers; never `playwright install`.
 process.env.PLAYWRIGHT_BROWSERS_PATH ??= "/opt/pw-browsers";
 // The device's state and sockets, where env.ts (glassctl, the audit log)
 // finds them. Set before any test module loads env.ts.
-process.env.GLASS_APPS_E2E_DIR ??= join(repo, "build/console-e2e/device");
+process.env.GLASS_APPS_E2E_DIR ??= suiteFolder(join(repo, "build/console-e2e/device"), "console-device");
 process.env.GLASS_APPS_E2E_RUN ??= join(tmpdir(), `glass-console-e2e-${userInfo().uid}`);
 
 export default defineConfig({

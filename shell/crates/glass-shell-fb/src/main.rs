@@ -24,14 +24,14 @@
 //! as `glassctl tasks` shows them, and the caller needs read and write
 //! access to the terminal and read access to `/dev/input/event*`.
 
-use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
-use glass_api::settings::SettingsView;
-use glass_api::{Event, TaskDetail, TaskRef, TaskView, UndoReport, methods};
+use glass_api::settings::Brightness;
+use glass_api::{Event, TaskView, methods};
 use glass_compositor::{CONTROL_RADIUS, CONTROLS, Compositor, TITLE_BAR, WorkArea};
 use glass_rpc::{Client, ClientError};
 use glass_shell::apps::{AppEntry, AppWindow, Start};
@@ -42,6 +42,7 @@ use glass_shell::screens::system;
 use glass_shell::screens::window::Controls;
 use glass_shell::session::Password;
 use glass_shell::{Message, Power, Theme, engine, session, wallpaper};
+use glass_shell_fb::calls::{Answer, Calls};
 use glass_shell_fb::display::{AppInput, Display, Route};
 use glass_shell_fb::input::{self, Input};
 use std::os::fd::OwnedFd;
@@ -63,6 +64,13 @@ const SETTLE: Duration = Duration::from_millis(50);
 const RECONNECT: Duration = Duration::from_millis(500);
 /// How often, at most, the desktop tells glassd the person is using it.
 const SEAT_REPORT: Duration = Duration::from_secs(15);
+/// How long glassd has to hear that; the next report says it again.
+const SEAT_WITHIN: Duration = Duration::from_secs(5);
+/// How long the sign-in screen has to check the password that unlocks the
+/// screen. Checking one that's wrong takes a few seconds on purpose.
+const UNLOCK_WITHIN: Duration = Duration::from_secs(30);
+/// What the person is told of something asked for while glassd is away.
+const AWAY: &str = "Lost touch with the system. Try again in a moment.";
 
 struct Args {
     tty: PathBuf,
@@ -125,7 +133,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
     // Without glassd there's no profile, so the launcher offers nothing
     // until it answers (AD-7).
     let (mut client, tasks, profile) = match attach(&args.socket).await {
-        Ok((client, tasks, profile)) => (Some(client), tasks, profile),
+        Ok((client, tasks, profile)) => (Some(Arc::new(client)), tasks, profile),
         Err(e) => {
             eprintln!("glassd: {e:#}; trying again");
             (None, Vec::new(), Vec::new())
@@ -146,6 +154,7 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
         live = live.lockable();
     }
     live.set_trash_full(trash_full());
+    live.set_away(client.is_none());
     let mut shell = Shell::open(args.tty, offset, live)?;
     let opened = started.elapsed();
     shell.draw(true);
@@ -159,11 +168,12 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
     if args.once {
         return Ok(None);
     }
+    // Calls to glassd are made off this loop, which goes on reading the
+    // keyboard and drawing while one waits; their answers come back here.
+    let (calls, mut answered) = Calls::start();
     // The person's settings (UX-1) after the first frame: the clock and
     // when the screen locks follow them.
-    shell
-        .carry_out_all(client.as_ref(), vec![Effect::LoadSettings])
-        .await;
+    shell.send(&calls, client.as_ref(), vec![Effect::LoadSettings]);
     // With the desktop drawn, the browser engine and the app bridge get
     // ready for the first web app the person opens.
     if engine_wanted && shell.apps.is_some() {
@@ -188,6 +198,11 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
     // When glassd last heard the person is here (ADR 0031): only a desktop
     // the sign-in screen started is the seat's.
     let mut reported: Option<Instant> = None;
+    // glassd, when it's back: connected to off the loop too.
+    let (attached, mut reattached) = mpsc::unbounded_channel();
+    let mut reconnecting = false;
+    // When the sign-in screen was asked to check a password, until it says.
+    let mut unlock_asked: Option<Instant> = None;
     let (mut apps_ready, apps_handled) = match shell.apps.as_mut().map(Compositor::fds).transpose()
     {
         Ok(Some(fds)) => watch_apps(fds),
@@ -203,38 +218,60 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
         // command bar's caret blinks.
         let banner_gone = until(shell.live.next_change());
         let blink = until(shell.display.next_redraw());
-        let reconnect = until(client.is_none().then(|| Instant::now() + RECONNECT));
+        let unlock_late = until(unlock_asked.map(|at| at + UNLOCK_WITHIN));
+        if client.is_none() && !reconnecting {
+            reconnecting = true;
+            reconnect(args.socket.clone(), attached.clone());
+        }
         tokio::select! {
-            note = next_note(client.as_ref()) => {
-                let Some(note) = note else {
+            note = next_note(client.as_deref()) => match note {
+                None => {
                     eprintln!("glassd closed the connection; trying again");
                     client = None;
-                    continue;
-                };
-                // The open task changing asks for its detail again, once
-                // for everything that arrived together.
-                let mut effects = Vec::from_iter(shell.apply(note));
-                let settled = tokio::time::sleep(SETTLE);
-                tokio::pin!(settled);
-                loop {
-                    tokio::select! {
-                        () = &mut settled => break,
-                        Some(note) = next_note(client.as_ref()) => effects.extend(shell.apply(note)),
-                    }
+                    redraw = shell.live.set_away(true);
                 }
-                shell.carry_out_all(client.as_ref(), effects).await;
-                redraw = true;
+                Some(note) => {
+                    // The open task changing asks for its detail again,
+                    // once for everything that arrived together.
+                    let mut effects = Vec::from_iter(shell.apply(note));
+                    let settled = tokio::time::sleep(SETTLE);
+                    tokio::pin!(settled);
+                    loop {
+                        tokio::select! {
+                            () = &mut settled => break,
+                            Some(note) = next_note(client.as_deref()) => effects.extend(shell.apply(note)),
+                        }
+                    }
+                    shell.send(&calls, client.as_ref(), effects);
+                    redraw = true;
+                }
+            },
+            Some(answer) = answered.recv() => {
+                // Taken and never answered: glassd has stopped answering
+                // with the connection open. The desktop says so and
+                // connects again, as when the connection closes.
+                if answer.unanswered() && client.is_some() {
+                    eprintln!("glassd didn't answer; trying again");
+                    client = None;
+                    shell.live.set_away(true);
+                    shell.dirty = true;
+                }
+                let next = shell.take_in(answer);
+                shell.send(&calls, client.as_ref(), next);
+                redraw = shell.changed();
             }
-            () = reconnect => {
-                let Ok((back, tasks, profile)) = attach(&args.socket).await else {
+            Some(back) = reattached.recv() => {
+                reconnecting = false;
+                let Ok((back, tasks, profile)) = back else {
                     continue;
                 };
                 eprintln!("glassd: connected again, {} tiles", tasks.len());
-                client = Some(back);
+                client = Some(Arc::new(back));
+                shell.live.set_away(false);
                 shell.live.set_apps(offered(&profile));
                 let mut effects = Vec::from_iter(shell.live.reload(tasks));
                 effects.push(Effect::LoadSettings);
-                shell.carry_out_all(client.as_ref(), effects).await;
+                shell.send(&calls, client.as_ref(), effects);
                 redraw = true;
             }
             Some(first) = inputs.recv() => {
@@ -247,12 +284,18 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 shell.live.touched(now);
                 if args.from_sign_in && reported.is_none_or(|at| now.duration_since(at) >= SEAT_REPORT) {
                     reported = Some(now);
-                    if let Some(client) = client.as_ref() {
-                        let said: Result<serde_json::Value, _> =
-                            client.call(methods::SEAT_ACTIVE, serde_json::Value::Null).await;
-                        if let Err(e) = said {
-                            eprintln!("seat: {e}");
-                        }
+                    // Said beside the loop: it came within 15 s of any key
+                    // or move, on the lock screen too, and held them all
+                    // until glassd answered.
+                    if let Some(client) = client.clone() {
+                        tokio::spawn(async move {
+                            let said: Result<serde_json::Value, _> = client
+                                .call_within(methods::SEAT_ACTIVE, serde_json::Value::Null, SEAT_WITHIN)
+                                .await;
+                            if let Err(e) = said {
+                                eprintln!("seat: {e}");
+                            }
+                        });
                     }
                 }
                 // A blank screen comes back; that key or move does nothing else.
@@ -264,9 +307,11 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 }
                 let mut effects = shell.input(&batch);
                 let launching = &mut shell.launching;
+                let mut unlocking = false;
                 effects.retain(|effect| match effect {
                     Effect::Unlock(password) => {
                         ask_to_unlock(password);
+                        unlocking = true;
                         false
                     }
                     Effect::Launch(app) => {
@@ -276,6 +321,9 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                     }
                     _ => true,
                 });
+                if unlocking {
+                    unlock_asked = Some(Instant::now());
+                }
                 let power = effects.iter().find_map(|e| match e {
                     Effect::Power(power) => Some(*power),
                     _ => None,
@@ -294,12 +342,23 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                     }
                     return Ok(power);
                 }
-                shell.carry_out_all(client.as_ref(), effects).await;
+                shell.send(&calls, client.as_ref(), effects);
                 redraw = shell.changed();
             }
             Some(answer) = answers.recv() => {
                 eprintln!("unlock: {answer}");
+                unlock_asked = None;
                 if let Some(Effect::Focus(id)) = shell.live.unlock_answered(answer == session::UNLOCKED) {
+                    shell.focus(id);
+                }
+                redraw = true;
+            }
+            () = unlock_late => {
+                // The sign-in screen is gone, or isn't answering: the lock
+                // screen stops saying "Checking…" and takes keys again.
+                eprintln!("unlock: the sign-in screen didn't answer in {} s", UNLOCK_WITHIN.as_secs());
+                unlock_asked = None;
+                if let Some(Effect::Focus(id)) = shell.live.unlock_unanswered() {
                     shell.focus(id);
                 }
                 redraw = true;
@@ -330,11 +389,11 @@ async fn run(args: Args, offset: UtcOffset) -> anyhow::Result<Option<Power>> {
                 // On the hour, settings again: the computer's offset from
                 // UTC moves with summer time.
                 if shell.now().minute() == 0 {
-                    shell.carry_out_all(client.as_ref(), vec![Effect::LoadSettings]).await;
+                    shell.send(&calls, client.as_ref(), vec![Effect::LoadSettings]);
                 }
                 if shell.live.idle_too_long(Instant::now()) {
                     let effects = Vec::from_iter(shell.live.update(Message::LockScreen));
-                    shell.carry_out_all(client.as_ref(), effects).await;
+                    shell.send(&calls, client.as_ref(), effects);
                 }
                 // And whether it has gone unused long enough to blank
                 // (`display.blank_after_minutes`, ADR 0031).
@@ -383,6 +442,18 @@ async fn attach(
     })
     .await
     .map_err(|_| anyhow!("glassd didn't answer in {} s", ATTACH_WITHIN.as_secs()))?
+}
+
+/// What [`attach`] gives.
+type Attached = anyhow::Result<(Client, Vec<TaskView>, Vec<glass_api::ProfileApp>)>;
+
+/// Tries glassd again in a moment, beside the loop, and sends how it went
+/// to `to`: connected and listed, or not (the loop asks again).
+fn reconnect(socket: PathBuf, to: mpsc::UnboundedSender<Attached>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(RECONNECT).await;
+        let _ = to.send(attach(&socket).await);
+    });
 }
 
 /// How long a started app has to show a window before the desktop stops
@@ -1085,56 +1156,52 @@ impl Shell {
         std::mem::take(&mut self.dirty)
     }
 
-    /// Makes the calls effects ask for, then the ones their answers ask
-    /// for, each once.
-    async fn carry_out_all(&mut self, client: Option<&Client>, effects: Vec<Effect>) {
-        let Some(client) = client else {
-            if !effects.is_empty() {
-                eprintln!("glassd isn't answering; not done: {effects:?}");
-            }
-            return;
-        };
-        let mut queue = VecDeque::new();
+    /// Asks for the calls `effects` need, each once, in order: made off
+    /// the loop ([`Calls`]), their answers come back to [`Shell::take_in`].
+    /// With glassd away nothing can be asked: what the person did is undone
+    /// on screen and says why ([`Live::not_done`]), where it used to be
+    /// dropped with a line in the log.
+    fn send(&mut self, calls: &Calls, client: Option<&Arc<Client>>, effects: Vec<Effect>) {
+        let mut asked: Vec<Effect> = Vec::new();
         for effect in effects {
-            if !queue.contains(&effect) {
-                queue.push_back(effect);
+            if asked.contains(&effect) {
+                continue;
             }
-        }
-        while let Some(effect) = queue.pop_front() {
-            for next in self.carry_out(client, effect).await {
-                if !queue.contains(&next) {
-                    queue.push_back(next);
+            asked.push(effect.clone());
+            match (effect, client) {
+                (Effect::Focus(id), _) => self.focus(id),
+                (effect, Some(client)) => calls.make(client, effect),
+                (effect, None) => {
+                    eprintln!("glassd isn't answering; not done: {effect:?}");
+                    self.dirty = true;
+                    if let Some(Effect::Focus(id)) = self.live.not_done(&effect, AWAY) {
+                        self.focus(id);
+                    }
                 }
             }
         }
     }
 
-    /// Makes the call an effect asks for and hands its answer to the
-    /// desktop; returns what that asks for next. A refused control shows
-    /// up in the tile's state, so it's only logged here; a refused roll
-    /// back is told on its card.
-    async fn carry_out(&mut self, client: &Client, effect: Effect) -> Vec<Effect> {
-        match effect {
-            Effect::Answer(answer) => {
-                let result: Result<serde_json::Value, _> =
-                    client.call(methods::APPROVAL_ANSWER, &answer).await;
+    /// Hands glassd's answer to a call to the desktop; returns what that
+    /// asks for next. A refused control shows up in the tile's state, so
+    /// it's only logged here; a refused roll back is told on its card, a
+    /// refused request in the command bar, and an answer to an ask that
+    /// didn't arrive puts the ask back.
+    fn take_in(&mut self, answer: Answer) -> Vec<Effect> {
+        match answer {
+            Answer::Approval { answer, result } => {
                 match result {
-                    Ok(_) => eprintln!("answered {}", answer.approval),
-                    Err(e) => eprintln!("approval.answer: {e}"),
+                    Ok(()) => eprintln!("answered {}", answer.approval),
+                    Err(e) => {
+                        eprintln!("approval.answer: {e}");
+                        self.dirty = true;
+                        let lost = Effect::Answer(answer);
+                        return self.live.not_done(&lost, &plain(&e)).into_iter().collect();
+                    }
                 }
                 Vec::new()
             }
-            // Done in `input`, which has the view and the windows; signing
-            // out ends the loop; an unlock request goes to the sign-in
-            // screen, and an app starts there too.
-            Effect::Focus(_)
-            | Effect::Activate(_)
-            | Effect::SignOut
-            | Effect::Power(_)
-            | Effect::Unlock(_)
-            | Effect::Launch(_) => Vec::new(),
-            Effect::LoadSettings => {
-                let result: Result<SettingsView, _> = client.call(methods::SETTINGS_GET, ()).await;
+            Answer::Settings(result) => {
                 match result {
                     Ok(settings) => {
                         // The computer's time zone, as it is now (ADR 0031).
@@ -1152,27 +1219,14 @@ impl Shell {
                 }
                 Vec::new()
             }
-            Effect::ChooseSetting(choice) => {
-                let result: Result<SettingsView, _> =
-                    client.call(methods::SETTINGS_SET, &choice).await;
+            Answer::SettingChosen { id, result } => {
                 match result {
                     Ok(settings) => self.dirty |= self.live.set_settings(settings),
-                    Err(e) => eprintln!("settings.set {}: {e}", choice.id),
+                    Err(e) => eprintln!("settings.set {id}: {e}"),
                 }
                 Vec::new()
             }
-            Effect::Brightness { up } => {
-                use glass_api::settings::{Brightness, BrightnessChange, BrightnessStep};
-                let change = BrightnessChange {
-                    step: Some(if up {
-                        BrightnessStep::Up
-                    } else {
-                        BrightnessStep::Down
-                    }),
-                    percent: None,
-                };
-                let result: Result<Brightness, _> =
-                    client.call(methods::DISPLAY_BRIGHTNESS, &change).await;
+            Answer::Brightness(result) => {
                 match result {
                     Ok(Brightness {
                         percent: Some(percent),
@@ -1187,26 +1241,17 @@ impl Shell {
                 }
                 Vec::new()
             }
-            Effect::ListApps => {
-                let result: Result<Vec<glass_api::ProfileApp>, _> =
-                    client.call(methods::APPS_LIST, ()).await;
+            Answer::Apps(result) => {
                 match result {
                     Ok(profile) => self.dirty |= self.live.set_apps(offered(&profile)),
                     Err(e) => eprintln!("apps.list: {e}"),
                 }
                 Vec::new()
             }
-            Effect::Get(task) => {
-                let started = Instant::now();
-                let result: Result<TaskDetail, _> =
-                    client.call(methods::TASK_GET, TaskRef { task }).await;
+            Answer::Detail { task, took, result } => {
                 match result {
                     Ok(detail) => {
-                        eprintln!(
-                            "task.get {}: {} ms",
-                            task.short(),
-                            started.elapsed().as_millis()
-                        );
+                        eprintln!("task.get {}: {} ms", task.short(), took.as_millis());
                         self.live.detail(detail);
                         self.dirty = true;
                     }
@@ -1214,22 +1259,20 @@ impl Shell {
                 }
                 Vec::new()
             }
-            Effect::Start(request) => {
-                let result: Result<TaskView, _> = client.call(methods::TASK_START, &request).await;
+            Answer::Started { agent, result } => {
                 self.dirty = true;
                 match result {
                     Ok(view) => {
-                        eprintln!("task.start {}: {}", request.agent, view.id.short());
+                        eprintln!("task.start {agent}: {}", view.id.short());
                         self.live.started(view).into_iter().collect()
                     }
                     Err(e) => {
-                        eprintln!("task.start {}: {e}", request.agent);
+                        eprintln!("task.start {agent}: {e}");
                         self.live.start_failed(plain(&e)).into_iter().collect()
                     }
                 }
             }
-            Effect::Undo(request) => {
-                let result: Result<UndoReport, _> = client.call(methods::TASK_UNDO, &request).await;
+            Answer::Undone(result) => {
                 self.dirty = true;
                 match result {
                     Ok(report) => self.live.undo_report(report).into_iter().collect(),
@@ -1240,29 +1283,23 @@ impl Shell {
                     }
                 }
             }
-            other => {
-                let Some((method, task)) = other.task_call() else {
-                    return Vec::new();
-                };
-                let result: Result<TaskView, _> = client.call(method, &task).await;
-                match result {
-                    // The new state shows at once; the event that follows
-                    // changes nothing more.
-                    Ok(view) => {
-                        self.dirty = true;
-                        self.live
-                            .apply(Event::TaskUpdated {
-                                task: Box::new(view),
-                            })
-                            .into_iter()
-                            .collect()
-                    }
-                    Err(e) => {
-                        eprintln!("{method}: {e}");
-                        Vec::new()
-                    }
+            Answer::Task { method, result } => match result {
+                // The new state shows at once; the event that follows
+                // changes nothing more.
+                Ok(view) => {
+                    self.dirty = true;
+                    self.live
+                        .apply(Event::TaskUpdated {
+                            task: Box::new(view),
+                        })
+                        .into_iter()
+                        .collect()
                 }
-            }
+                Err(e) => {
+                    eprintln!("{method}: {e}");
+                    Vec::new()
+                }
+            },
         }
     }
 
@@ -1292,7 +1329,7 @@ fn plain(error: &ClientError) -> String {
     match error {
         ClientError::Rpc(e) => e.message.clone(),
         ClientError::Closed | ClientError::Connect { .. } | ClientError::TimedOut { .. } => {
-            "Lost touch with the system. Try again in a moment.".to_owned()
+            AWAY.to_owned()
         }
         ClientError::Decode(_) => "Got an answer this desktop doesn't understand.".to_owned(),
     }

@@ -55,6 +55,9 @@ pub struct Desktop<'a> {
     /// they have the whole screen under the menu bar, and comes back at the
     /// screen's bottom edge (DK-1).
     pub dock: bool,
+    /// glassd isn't answering: the menu bar says "Reconnecting…" beside the
+    /// agents, whose tiles are as they were when it last did.
+    pub away: bool,
 }
 
 /// Which agent tiles the desktop shows. They don't stay on screen: a change
@@ -96,6 +99,7 @@ impl<'a> Desktop<'a> {
             open_apps: Vec::new(),
             apps: DOCK_APPS.map(String::from).to_vec(),
             dock: true,
+            away: false,
         }
     }
 }
@@ -360,15 +364,26 @@ fn menu_bar<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
     let left = row![mark, menus]
         .spacing(20.0 - MARK_REACH)
         .align_y(Vertical::Center);
-    let right = row![
-        agents_pill(theme, desktop.tasks, desktop.tiles == Tiles::Menu),
-        icons::view(&icons::SPARK, bar.text, 16.0, 16.0),
-        icons::view(&icons::WIFI, bar.text, 17.0, 17.0),
-        icons::view(&icons::BATTERY, bar.text, 24.0, 13.0),
-        label(desktop.clock.clone(), fonts::SANS),
-    ]
-    .spacing(16)
-    .align_y(Vertical::Center);
+    let mut right = Row::new().spacing(16).align_y(Vertical::Center);
+    if desktop.away {
+        // Dimmer than the menus: a state, not something to click.
+        let dim = Color {
+            a: bar.text.a * 0.7,
+            ..bar.text
+        };
+        right = right.push(text(AWAY).size(13).font(fonts::SANS).color(dim));
+    }
+    let right = right.push(
+        row![
+            agents_pill(theme, desktop.tasks, desktop.tiles == Tiles::Menu),
+            icons::view(&icons::SPARK, bar.text, 16.0, 16.0),
+            icons::view(&icons::WIFI, bar.text, 17.0, 17.0),
+            icons::view(&icons::BATTERY, bar.text, 24.0, 13.0),
+            label(desktop.clock.clone(), fonts::SANS),
+        ]
+        .spacing(16)
+        .align_y(Vertical::Center),
+    );
     container(row![left, iced_widget::space().width(Length::Fill), right].align_y(Vertical::Center))
         .width(Length::Fill)
         .height(Length::Fixed(MENU_BAR_HEIGHT))
@@ -383,6 +398,8 @@ fn menu_bar<'a>(theme: &Theme, desktop: &Desktop<'a>) -> Element<'a, Message> {
 }
 
 pub const MENU_BAR_HEIGHT: f32 = 32.0;
+/// What the menu bar says while glassd isn't answering.
+pub const AWAY: &str = "Reconnecting…";
 /// How far the mark's highlight reaches either side of it.
 const MARK_REACH: f32 = 6.0;
 const MARK_WIDTH: f32 = 16.0 + MARK_REACH * 2.0;

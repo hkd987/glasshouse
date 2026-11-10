@@ -1433,6 +1433,148 @@ fn ae3_enter_hands_what_no_app_is_called_to_the_desktop_agent() {
     assert!(live.tasks().iter().any(|t| t.id == id));
 }
 
+// The desktop dropped what it couldn't send while glassd was away. The
+// command bar had already latched "asked", which only an answer cleared:
+// Enter did nothing until sign-out, even with glassd back. An Approve took
+// its banner away and the answer went nowhere.
+#[test]
+fn what_glassd_never_heard_is_undone_on_screen_and_the_menu_bar_says_its_away() {
+    const WHY: &str = "Lost touch with the system. Try again in a moment.";
+    let tasks = fixtures::tasks();
+    let ask = tasks
+        .iter()
+        .find(|t| t.needs.is_some())
+        .cloned()
+        .expect("a needs-you tile");
+    let approval = ask.needs.as_ref().unwrap().id;
+    let mut live = Live::new(tasks).with_apps(fixtures::apps());
+    assert!(!live.away());
+    assert!(live.set_away(true), "that's a change to draw");
+    assert!(!live.set_away(true), "and no change the second time");
+
+    // A request for the desktop agent: back in the bar, with why.
+    live.update(Message::OpenCommandBar);
+    type_query(&mut live, "What's in my folder?");
+    let Some(Some(start @ Effect::Start(_))) = press(&mut live, Named::Enter) else {
+        panic!("Enter starts a task");
+    };
+    assert!(live.command_bar().is_none());
+    assert_eq!(
+        live.not_done(&start, WHY),
+        Some(Effect::Focus(glass_shell::screens::command_bar::INPUT))
+    );
+    let bar = live.command_bar().unwrap();
+    assert_eq!(
+        (bar.query.as_str(), bar.note),
+        ("What's in my folder?", Some(WHY))
+    );
+    // And Enter asks again: nothing is latched.
+    assert!(matches!(
+        press(&mut live, Named::Enter),
+        Some(Some(Effect::Start(_)))
+    ));
+    live.update(Message::CloseCommandBar);
+
+    // An ask approved: its banner went with the click, and comes back.
+    assert!(live.banners().contains(&ask.id));
+    let Some(answer @ Effect::Answer(_)) = live.update(Message::Approve(approval)) else {
+        panic!("Approve answers the ask");
+    };
+    assert!(!live.banners().contains(&ask.id));
+    assert_eq!(live.not_done(&answer, WHY), None);
+    assert!(
+        live.banners().contains(&ask.id),
+        "still waiting for an answer"
+    );
+
+    // What only changes when glassd says so needs nothing undone.
+    assert_eq!(live.not_done(&Effect::Pause(ask.id), WHY), None);
+    assert_eq!(live.not_done(&Effect::LoadSettings, WHY), None);
+
+    // The menu bar says so, and stops when glassd is back: the two frames
+    // differ in the menu bar, left of the agents, and nowhere else.
+    let theme = Theme::glass();
+    let drawn = |live: &Live| {
+        glass_shell::render::frame(
+            live.view(&theme, None, artboard_time(), SIZE),
+            Size::new(SIZE.0, SIZE.1),
+            1.0,
+        )
+    };
+    let away = drawn(&live);
+    assert!(live.set_away(false));
+    let back = drawn(&live);
+    let bar = glass_shell::screens::desktop::MENU_BAR_HEIGHT as u32;
+    let differs: Vec<(u32, u32)> = (0..away.height)
+        .flat_map(|y| (0..away.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let at = ((y * away.width + x) * 4) as usize;
+            away.rgba[at..at + 4] != back.rgba[at..at + 4]
+        })
+        .collect();
+    assert!(!differs.is_empty(), "the menu bar says it's reconnecting");
+    assert!(
+        differs.iter().all(|&(x, y)| y < bar && x > away.width / 2),
+        "and only there: {:?}",
+        differs
+            .iter()
+            .find(|&&(x, y)| y >= bar || x <= away.width / 2)
+    );
+}
+
+#[test]
+fn a_request_whose_answer_was_lost_doesnt_hold_the_command_bar_after_glassd_is_back() {
+    let mut live = Live::new(fixtures::tasks()).with_apps(fixtures::apps());
+    live.update(Message::OpenCommandBar);
+    type_query(&mut live, "Tidy my downloads");
+    assert!(matches!(
+        press(&mut live, Named::Enter),
+        Some(Some(Effect::Start(_)))
+    ));
+    // No answer ever comes; glassd restarts and the desktop reloads.
+    live.reload(fixtures::tasks());
+    live.update(Message::OpenCommandBar);
+    type_query(&mut live, "Tidy my downloads");
+    assert!(
+        matches!(press(&mut live, Named::Enter), Some(Some(Effect::Start(_)))),
+        "Enter starts a task again"
+    );
+}
+
+// With the sign-in screen gone (its end of the pipe closed) the lock screen
+// said "Checking…" and took no more keys, for good.
+#[test]
+fn a_lock_screen_whose_password_nobody_checks_takes_it_again() {
+    let mut live = Live::new(fixtures::tasks())
+        .signed_in_as("Dana Ruiz")
+        .lockable();
+    assert_eq!(live.unlock_unanswered(), None, "not locked: nothing to do");
+    live.update(Message::LockScreen);
+    assert_eq!(live.unlock_unanswered(), None, "nothing being checked");
+    live.update(Message::PasswordChanged("correct horse".into()));
+    assert!(matches!(
+        live.update(Message::SignIn),
+        Some(Effect::Unlock(_))
+    ));
+    assert!(live.checking_password());
+    // While it's with the sign-in screen, nothing more is taken.
+    live.update(Message::PasswordChanged("more".into()));
+    assert_eq!(live.update(Message::SignIn), None);
+
+    assert_eq!(
+        live.unlock_unanswered(),
+        Some(Effect::Focus(glass_shell::screens::login::PASSWORD))
+    );
+    assert!(!live.checking_password());
+    assert!(live.is_locked(), "still locked");
+    // And the next try goes to the sign-in screen again.
+    live.update(Message::PasswordChanged("correct horse".into()));
+    assert!(matches!(
+        live.update(Message::SignIn),
+        Some(Effect::Unlock(_))
+    ));
+}
+
 #[test]
 fn dk1_an_app_the_command_bar_found_opens_with_a_click() {
     let theme = Theme::glass();

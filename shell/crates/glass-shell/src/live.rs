@@ -37,6 +37,9 @@ pub struct Live {
     command: Option<String>,
     /// What was handed to the desktop agent, until `task.start` answers.
     asked: Option<String>,
+    /// glassd isn't answering: the menu bar says so, and what the person
+    /// asks for meanwhile is told it wasn't done ([`Live::not_done`]).
+    away: bool,
     /// Why the desktop agent couldn't take it, in the command bar until
     /// the text changes.
     agent_note: Option<String>,
@@ -285,6 +288,7 @@ impl Live {
             tasks,
             command: None,
             asked: None,
+            away: false,
             agent_note: None,
             wallpaper: true,
             open: None,
@@ -506,6 +510,68 @@ impl Live {
         Some(Effect::Focus(login::PASSWORD))
     }
 
+    /// Whether a password is with the sign-in screen, being checked.
+    pub fn checking_password(&self) -> bool {
+        self.locked.as_ref().is_some_and(|l| l.checking)
+    }
+
+    /// The sign-in screen never answered an unlock request (it isn't
+    /// there, or its end of the pipe closed). The lock screen showed
+    /// "Checking…" and took no more keys, for good: now it says so and
+    /// takes the password again.
+    pub fn unlock_unanswered(&mut self) -> Option<Effect> {
+        let locked = self.locked.as_mut().filter(|l| l.checking)?;
+        locked.checking = false;
+        locked.message = Some("Couldn't check that password. Try again.".into());
+        Some(Effect::Focus(login::PASSWORD))
+    }
+
+    /// Whether glassd is answering, as the desktop program finds it; true
+    /// when that changed. While it's away the menu bar says "Reconnecting".
+    pub fn set_away(&mut self, away: bool) -> bool {
+        std::mem::replace(&mut self.away, away) != away
+    }
+
+    /// Whether glassd isn't answering ([`Live::set_away`]).
+    pub fn away(&self) -> bool {
+        self.away
+    }
+
+    /// `effect` couldn't be carried out: glassd is away, or the call was
+    /// lost. What the person did is undone on screen, with `why` where
+    /// there's a place for words, so nothing looks done that wasn't:
+    ///
+    /// - a request handed to the desktop agent comes back in the command
+    ///   bar ([`Live::start_failed`]). Dropped silently it left the bar
+    ///   refusing every later request until sign-out;
+    /// - a roll back's card says why ([`Live::undo_failed`]);
+    /// - an ask that was answered shows as a banner again: the answer
+    ///   didn't reach glassd, and the agent is still waiting.
+    ///
+    /// The rest (pause, stop, a setting, the task's detail) show as they
+    /// are, since they only ever change when glassd says so.
+    pub fn not_done(&mut self, effect: &Effect, why: &str) -> Option<Effect> {
+        self.not_done_at(effect, why, Instant::now())
+    }
+
+    /// [`Live::not_done`] at a given moment, which times the banner.
+    pub fn not_done_at(&mut self, effect: &Effect, why: &str, at: Instant) -> Option<Effect> {
+        match effect {
+            Effect::Start(_) => self.start_failed(why.to_owned()),
+            Effect::Undo(_) => {
+                self.undo_failed(why.to_owned());
+                None
+            }
+            Effect::Answer(answer) => {
+                if let Some(task) = self.asking(answer.approval) {
+                    self.notify(task, TileState::NeedsYou, at);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Whether the Trash has anything in it; true when that changed.
     pub fn set_trash_full(&mut self, full: bool) -> bool {
         std::mem::replace(&mut self.trash_full, full) != full
@@ -577,6 +643,10 @@ impl Live {
     /// if still there, has its detail fetched again. Nothing shows as news.
     pub fn reload(&mut self, tasks: Vec<TaskView>) -> Option<Effect> {
         self.tasks = tasks;
+        // A request whose answer was lost with the connection: the command
+        // bar takes requests again. (If glassd did start it, it is among
+        // `tasks`.)
+        self.asked = None;
         let present = |id: TaskId| self.tasks.iter().any(|t| t.id == id);
         self.banners.retain(|b| present(b.task));
         match self.open_task() {
@@ -1475,6 +1545,7 @@ impl Live {
             apps: self.apps.iter().map(|app| app.id.clone()).collect(),
             dock: self.shows_dock(),
             clock: desktop::clock(now, self.hour24()),
+            away: self.away,
             ..Desktop::live(&self.tasks, now)
         };
         let mut overlays = Vec::new();

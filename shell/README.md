@@ -44,10 +44,17 @@ clicking a tile, or its Review, opens the expanded view (`task.get`, fetched
 again whenever that task changes) with Pause, Stop, Take over, the ask's
 answers and Roll back (`task.undo`, a dry run first); Ctrl Space opens the
 command bar; Esc closes the command bar, then the agents menu, then the
-expanded view. If glassd isn't answering (still starting, or restarting
-after an update or a crash) the desktop stays up and tries it again every
-half second, then reloads the tiles. Its log is
-`/var/log/glass-shell-fb.log` in the VM.
+expanded view. The desktop never waits for glassd: its calls are made beside
+its loop (`glass_shell_fb::calls`), one at a time in the order asked, each
+given up on after a limit, so the pointer, the keys, the clock and signing
+out go on whatever glassd is doing. If glassd isn't answering (still
+starting, restarting after an update or a crash, or hung with the
+connection open) the desktop stays up, the menu bar says "Reconnecting…",
+and it tries again every half second, then reloads the tiles. What the
+person asks for meanwhile isn't dropped silently: a request for the desktop
+agent comes back in the command bar with why, a roll back's card says why,
+and an ask they answered shows as a banner again (`Live::not_done`). Its
+log is `/var/log/glass-shell-fb.log` in the VM.
 
 Images ship `glass-greeter` (ADR 0019) and `glass-shell-fb` with the rest
 (`os/freebsd/dist.manifest`, built by `make freebsd`), and `post-install.sh`

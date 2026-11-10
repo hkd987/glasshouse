@@ -65,6 +65,17 @@ if [ -z "${GLASS_DEV_SKIP_BUILD:-}" ]; then
 	build
 fi
 
+# A Unix socket's path stops at about 104 bytes. The longest here is an
+# agent's, in its task's sandbox under the state folder: past the limit,
+# every task fails before its agent starts, with nothing that says a folder
+# is too deep. Said here instead, before anything runs.
+agent_socket="$dev/state/sandboxes/glass-00000000/run/glasshouse/agent.sock"
+if [ "${#agent_socket}" -gt 103 ] || [ "$(printf %s "$run/control.sock" | wc -c)" -gt 103 ]; then
+	echo "host-run: $dev (or $run) is too deep: an agent's socket under it would have a path of ${#agent_socket} bytes, and a Unix socket's stops at 103." >&2
+	echo "host-run: set GLASS_DEV_DIR (and GLASS_DEV_RUN) to a shorter folder, such as /tmp/glass-dev." >&2
+	exit 1
+fi
+
 mkdir -p "$dev/home" "$dev/state" "$run"
 # Our apps' source as images lay it out (ADR 0032), linked to the workspace's;
 # remixing off removes the links, never what they point at.
