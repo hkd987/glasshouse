@@ -52,7 +52,7 @@ pub fn remove_tree(path: &Path) -> crate::Result<()> {
 }
 
 /// Who should own files the broker creates for a user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Owner {
     pub uid: u32,
     pub gid: u32,
@@ -68,7 +68,8 @@ pub struct EntryInfo {
 }
 
 /// What a path names, without following a symlink at its end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FileKind {
     File,
     Dir,
@@ -77,8 +78,10 @@ pub enum FileKind {
 }
 
 /// A file's identity and state, enough to tell whether it changed (undo
-/// compares what a task left with what is there now).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// compares what a task left with what is there now). Kept with a task's
+/// record (ADR 0020), where it means something only on the file system it
+/// was read from: the inode number is part of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Stat {
     pub kind: FileKind,
     pub ino: u64,

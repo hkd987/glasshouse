@@ -46,8 +46,9 @@ a soak test, and a run on real hardware.
 
 ## Consequences
 - A crash costs a few seconds without agents, and the agent that was
-  running is ended, its sandbox removed (ADR 0053). Tasks are in memory, so
-  they don't survive it.
+  running is ended, its sandbox removed (ADR 0053). Tasks were in memory, so
+  they didn't survive it; since 2026-11-10 each is kept on disk and comes
+  back ended, with its undo (ADR 0020's amendment).
 - A glassd that crashes over and over stops being restarted after 100
   times. That many crashes in one boot is a bug to find in its log, not
   something to hide.

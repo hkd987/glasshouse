@@ -19,6 +19,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use glass_platform::fs::{ConfinedDir, FileKind, Stat};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Files up to this size are fingerprinted by content too, so a file
@@ -29,8 +30,10 @@ use sha2::{Digest, Sha256};
 /// file alone.
 pub(crate) const DIGEST_LIMIT: u64 = 1 << 20;
 
-/// Undo's record of one task's writes.
-#[derive(Debug, Default, Clone)]
+/// Undo's record of one task's writes. Kept on disk with the task (ADR
+/// 0020), so an undo after glassd starts again judges each file as it would
+/// have before.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub(crate) struct Written {
     changes: BTreeMap<u32, Touched>,
     files: BTreeMap<PathBuf, Option<Left>>,
@@ -42,14 +45,14 @@ pub(crate) struct Written {
 }
 
 /// How one change left its files: `files` and `cleared` as in [`Written`].
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct After {
     files: BTreeMap<PathBuf, Option<Left>>,
     cleared: BTreeSet<PathBuf>,
 }
 
 /// The files one change touched.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Touched {
     pub paths: Vec<PathBuf>,
     /// How many of the task's snapshots existed when the change ran.
@@ -57,7 +60,7 @@ pub(crate) struct Touched {
 }
 
 /// How the task left a file that exists.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Left {
     stat: Stat,
     digest: Option<[u8; 32]>,

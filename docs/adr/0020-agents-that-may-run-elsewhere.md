@@ -67,3 +67,51 @@ Rules for new code, checked in review (`containment-review`):
 - The checkpoint call (item 4) changes the agent SDK and the add-agent
   skill; first-party agents get it first.
 - Nothing here changes what an agent can reach today.
+
+## Amended 2026-11-10 (audit 5.1): tasks are kept on disk (item 3, in part)
+
+Nothing of a task was on disk but its agent's output. Stopping glassd, a
+crash or a power cut took every task with it, and the undo of all they had
+changed, though the snapshots to undo from stayed: `glassctl undo` said "no
+task". Found again by cutting the power under a task and asking for its undo.
+
+- **A task's record is written beside its agent's output**,
+  `<state>/tasks/<id>/task.json`, readable by root alone, through the
+  durable state-file helper: what was fixed when the task started (whose it
+  is, its agent's catalog entry, its request, scope and grants) and its
+  record so far (its tile, activity, changes, snapshot handles, and how it
+  left each file, which is what undo judges by). Not what only a running
+  task has: its gate, its socket, the calls a routine would be made of.
+- **When.** As it starts waiting for the person; within a second of a change
+  it records (one write covers a burst); after an undo; when the person's
+  edits are recorded at hand back; when it ends.
+- **At start glassd reads the records back as ended tasks**, before it takes
+  calls and before snapshots are pruned (a snapshot is kept while a task in
+  memory could undo from it). A task that was still working comes back as
+  failed, "the system restarted while it was working", and that end goes on
+  the audit record, where the task's records used to just stop. Its rules
+  are ones that allow nothing (`Policy::for_ended`): an ended task makes no
+  calls.
+- **A record can be behind its task** by the changes of its last second. An
+  undo after a restart knows nothing of such a change and leaves its files
+  alone: the record says how the task left each file, and a file that is
+  another way now was changed since. Being behind only ever leaves more as
+  it is; the audit log has every step. `specs/tla/Undo.tla` checks undo's
+  promises with glassd stopping at any step and a record that is behind.
+- **A record goes with its task**: `task.dismiss`, the retention of ended
+  tasks (ADR 0055's 30 days and 200 a person) and an app's session that
+  changed nothing remove it. A record this glassd can't read (damaged, or a
+  later glassd's) is passed over, said in the log, and its folder goes after
+  seven days as task output does.
+
+- **The desktop can let an ended task go.** A restart used to clear every
+  ended tile, and nothing on the desktop sent `task.dismiss`. Ended tasks
+  now stay through restarts, so an ended task's expanded view has Dismiss
+  in its header and the agents menu has "Clear finished" for all of them.
+
+Still open in item 3: snapshots are named by their own ids, not per task, so
+they can't yet be sent with one (`zfs send`). And one window stays: glassd
+stopping in the few milliseconds between an undo's last step and its
+record's write. That undo is offered again; it finds the files other than
+the task left them and leaves them, saying so, and an app's revert may be
+asked a second time.

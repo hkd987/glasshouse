@@ -211,6 +211,10 @@ impl Runtime {
                 state.caption = summary;
             }
             self.publish(&task);
+            // What is undone now, kept: an undo after glassd starts again
+            // doesn't offer it a second time (ADR 0020).
+            let (rt, undone) = (Arc::clone(self), Arc::clone(&task));
+            let _ = tokio::task::spawn_blocking(move || rt.keep(&undone)).await;
         }
         // The audit record above keeps the paths as they are; the report
         // shows them, and a file name is whatever the agent called it.
@@ -753,7 +757,7 @@ fn restore(
     // other is copied as it is read. A deleted video or disk image comes
     // back however large it is: read whole first, as every file was, one
     // the size of the computer's memory ended glassd mid-rollback, and the
-    // undo with it (tasks don't outlive a restart, ADR 0055).
+    // undo with it.
     if from.metadata()?.len() <= crate::written::DIGEST_LIMIT {
         let mut data = Vec::new();
         io::Read::read_to_end(&mut from, &mut data)?;

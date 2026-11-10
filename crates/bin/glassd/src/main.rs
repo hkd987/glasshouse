@@ -795,6 +795,23 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             )));
     }
 
+    // The tasks of the glassd before this one, back as ended tasks with
+    // what they changed and the snapshots to undo it from (ADR 0020). Before
+    // any call is taken, and before the first prune below: a snapshot is
+    // kept while a task in memory could undo from it.
+    let restored = {
+        let runtime = Arc::clone(&runtime);
+        tokio::task::spawn_blocking(move || runtime.restore_tasks()).await?
+    };
+    if restored != glass_runtime::Restored::default() {
+        tracing::info!(
+            tasks = restored.tasks,
+            interrupted = restored.interrupted,
+            unread = restored.unread,
+            "tasks from before this start are back, ended, with their undo"
+        );
+    }
+
     // A new agent version re-checks every layer on it (TL-13).
     runtime.recheck_layers();
 

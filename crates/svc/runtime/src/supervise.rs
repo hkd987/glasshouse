@@ -149,6 +149,10 @@ pub(crate) async fn run(rt: Arc<Runtime>, task: Arc<Task>, stop: oneshot::Receiv
     rt.audit(event);
     rt.publish(&task);
     rt.forget_if_unchanged(&task);
+    // The task as it ended, on disk: it and its undo outlive this glassd
+    // (ADR 0020).
+    let (rt, ended) = (Arc::clone(&rt), Arc::clone(&task));
+    let _ = tokio::task::spawn_blocking(move || rt.keep(&ended)).await;
 }
 
 async fn setup_and_wait(

@@ -1405,6 +1405,10 @@ impl Runtime {
                 // The user's edits join the task's changes, undoable like
                 // the agent's (ADR 0017).
                 let edits = self.record_edits(&task, handle).await?;
+                // Theirs to undo after a restart of glassd too (ADR 0020).
+                if !edits.is_empty() {
+                    self.keep(&task);
+                }
                 match edits.len() {
                     0 => "You handed back without changing any files.".to_owned(),
                     n => format!(
@@ -1469,8 +1473,10 @@ impl Runtime {
             ));
         }
         self.tasks().remove(&id);
-        // What its agent printed goes with it: nothing shows it now.
-        let _ = std::fs::remove_dir_all(self.task_logs().join(id.to_string()));
+        // What its agent printed and its record go with it: nothing shows
+        // them now.
+        self.unkeep(&task);
+        let _ = std::fs::remove_dir_all(self.task_folder(id));
         let _ = self
             .events
             .send((task.user.uid, Event::TaskRemoved { task: id }));
@@ -1520,8 +1526,10 @@ impl Runtime {
             if !still_ended {
                 continue;
             }
-            self.tasks().remove(&id);
-            let _ = std::fs::remove_dir_all(self.task_logs().join(id.to_string()));
+            if let Some(task) = self.tasks().remove(&id) {
+                self.unkeep(&task);
+            }
+            let _ = std::fs::remove_dir_all(self.task_folder(id));
             let _ = self.events.send((uid, Event::TaskRemoved { task: id }));
             gone += 1;
         }
@@ -1533,11 +1541,17 @@ impl Runtime {
         self.config.state_dir.join("tasks")
     }
 
-    /// Removes the output of tasks no longer in memory that ended more than
-    /// `max_age` ago: how many. A task's log is for looking at while its
-    /// tile is there, and for a while after glassd restarted without it
-    /// (tasks don't outlive a restart, ADR 0055; what went wrong before one
-    /// is often in these). Nothing removed them before. Blocking.
+    /// One task's folder: its agent's output and its record (`kept.rs`).
+    pub(crate) fn task_folder(&self, id: TaskId) -> std::path::PathBuf {
+        self.task_logs().join(id.to_string())
+    }
+
+    /// Removes the folders of tasks no longer in memory that ended more
+    /// than `max_age` ago: how many. A task in memory keeps its folder (its
+    /// agent's output, its record); one that left without its folder going
+    /// (a record this glassd couldn't read back, a glassd from before
+    /// records were kept) keeps it this long, since what went wrong is
+    /// often in it. Nothing removed them before. Blocking.
     pub fn prune_task_logs(&self, max_age: std::time::Duration) -> usize {
         let before = std::time::SystemTime::now()
             .checked_sub(max_age)

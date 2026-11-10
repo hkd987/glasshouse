@@ -30,6 +30,7 @@ mod error;
 mod execute;
 mod flows;
 pub mod hwpatch;
+mod kept;
 mod labels;
 mod model;
 pub mod osupdate;
@@ -60,6 +61,7 @@ pub use config::{
 };
 pub use control_api::ControlApi;
 pub use error::RuntimeError;
+pub use kept::Restored;
 pub use runtime::{RunningAgent, Runtime, RuntimeParts, SettingsHandle};
 pub use schedules::{
     FileSchedules, Holder, LastRun, ScheduleStore, StoreError, StoredSchedule, Turn, next_slot,

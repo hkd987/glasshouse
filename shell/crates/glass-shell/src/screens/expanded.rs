@@ -106,6 +106,8 @@ pub enum Control {
     Stop,
     TakeOver,
     HandBack,
+    /// An ended task's one control: its tile goes (AW-1).
+    Dismiss,
 }
 
 impl Control {
@@ -116,6 +118,7 @@ impl Control {
             Control::Stop => "Stop",
             Control::TakeOver => "Take over",
             Control::HandBack => "Hand back",
+            Control::Dismiss => "Dismiss",
         }
     }
 
@@ -126,6 +129,7 @@ impl Control {
             Control::Stop => &icons::STOP,
             Control::TakeOver => &icons::POINTER,
             Control::HandBack => &icons::HAND_BACK,
+            Control::Dismiss => &icons::TRASH,
         }
     }
 
@@ -138,12 +142,14 @@ impl Control {
 /// The header's controls for a task (AW-11), each with the message it
 /// sends, or `None` when it's shown but doesn't apply right now. Pause
 /// turns into Resume while paused, Take over into Hand back while the
-/// person drives; a task that has ended has none.
+/// person drives. A task that has ended has Dismiss alone: ended tasks
+/// stay, through restarts of the system too, until the person lets them
+/// go (AW-1), and nothing on the desktop did that.
 pub fn controls(task: &TaskView) -> Vec<(Control, Option<Message>)> {
-    if !task.state.is_live() {
-        return Vec::new();
-    }
     let id = task.id;
+    if !task.state.is_live() {
+        return vec![(Control::Dismiss, Some(Message::Dismiss(id)))];
+    }
     let hold = match task.state {
         TileState::Paused => (Control::Resume, Some(Message::Resume(id))),
         // Driving already holds the agent; Hand back lets it go on.
@@ -1613,8 +1619,11 @@ mod tests {
             names(TileState::YouAreDriving),
             [(Pause, false), (Stop, true), (HandBack, true)]
         );
+        // AW-1: an ended task can only be let go.
         for state in [TileState::Done, TileState::Failed, TileState::Stopped] {
-            assert!(names(state).is_empty(), "{state:?}");
+            assert_eq!(names(state), [(Dismiss, true)], "{state:?}");
+            let ended = task(state);
+            assert_eq!(controls(&ended)[0].1, Some(Message::Dismiss(ended.id)));
         }
     }
 

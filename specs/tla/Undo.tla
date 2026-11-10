@@ -39,6 +39,18 @@
 (*     standing left it (`Written::left_after`), not with how the task's   *)
 (*     last undo left it: put back to another task's version, it isn't     *)
 (*     this task's to take further back.                                   *)
+(*                                                                         *)
+(* glassd stopping and starting again (ADR 0020, `kept.rs`): each task's   *)
+(* snapshots, changes and how it left its files are written to disk        *)
+(* (Keep), at any step after a change, so the record can be behind its     *)
+(* task; an undo's end writes it in the same step. Restart is glassd       *)
+(* stopping at any step, with actions and undos in flight, and coming back *)
+(* with every task ended and as its record says. The promises below hold   *)
+(* through it: a record that is behind only leaves more files alone.       *)
+(* Not modelled: glassd stopping between an undo's last step and its       *)
+(* record's write, a few milliseconds in `undo`. That undo is offered      *)
+(* again after the restart; it finds the files other than the task left    *)
+(* them and leaves them, and a revert hook may be asked a second time.     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -49,6 +61,7 @@ CONSTANTS
     MaxEdits,       \* the person's own edits, outside any task
     MaxUndos,       \* undo requests, all tasks together
     RevertMayFail,  \* a provider's revert hook may fail
+    MaxRestarts,    \* glassd stopping (a crash, a power cut) and starting again
     Fixed           \* the code with ADR 0051's fixes
 
 Person == "person"
@@ -67,9 +80,11 @@ VARIABLES
     clock,    \* one clock for every write, snapshot and record
     count,    \* actions, edits and undos so far
     lock,     \* Fixed: the task or undo holding the person's turn, or None
-    bad       \* what went wrong, for the invariants
+    bad,      \* what went wrong, for the invariants
+    disk      \* each task's record on disk (`kept.rs`): snaps, chg and left
+              \* as they were when it was last written
 
-vars == <<fs, snaps, chg, left, act, undos, clock, count, lock, bad>>
+vars == <<fs, snaps, chg, left, act, undos, clock, count, lock, bad, disk>>
 
 Idle == [phase |-> "idle"]
 
@@ -81,9 +96,11 @@ Init ==
     /\ act = [t \in Tasks |-> Idle]
     /\ undos = {}
     /\ clock = 1
-    /\ count = [a |-> [t \in Tasks |-> 0], edits |-> 0, undos |-> 0]
+    /\ count = [a |-> [t \in Tasks |-> 0], edits |-> 0, undos |-> 0, restarts |-> 0]
     /\ lock = None
     /\ bad = {}
+    /\ disk = [t \in Tasks |-> [snaps |-> <<>>, chg |-> <<>>,
+                                 left |-> [f \in Files |-> Untouched]]]
 
 Undoing(t) == \E u \in undos : u.task = t
 
@@ -115,7 +132,7 @@ StartAction(t, f, notify) ==
     /\ clock' = clock + 1
     /\ count' = [count EXCEPT !.a[t] = @ + 1]
     /\ Take(t)
-    /\ UNCHANGED <<fs, chg, left, undos, bad>>
+    /\ UNCHANGED <<fs, chg, left, undos, bad, disk>>
 
 \* The provider writes.
 Write(t) ==
@@ -126,7 +143,7 @@ Write(t) ==
           /\ act' = [act EXCEPT ![t].phase = "wrote", ![t].prev = fs[f],
                                 ![t].wrote = v]
     /\ clock' = clock + 1
-    /\ UNCHANGED <<snaps, chg, left, undos, count, lock, bad>>
+    /\ UNCHANGED <<snaps, chg, left, undos, count, lock, bad, disk>>
 
 \* `written::look` right after the provider returns, then the record.
 Record(t) ==
@@ -142,7 +159,7 @@ Record(t) ==
     /\ act' = [act EXCEPT ![t] = Idle]
     /\ clock' = clock + 1
     /\ Give
-    /\ UNCHANGED <<fs, snaps, undos, count>>
+    /\ UNCHANGED <<fs, snaps, undos, count, disk>>
 
 \* Anyone glassd doesn't run changes the file.
 Edit(f) ==
@@ -150,7 +167,7 @@ Edit(f) ==
     /\ fs' = [fs EXCEPT ![f] = [by |-> Person, n |-> clock]]
     /\ clock' = clock + 1
     /\ count' = [count EXCEPT !.edits = @ + 1]
-    /\ UNCHANGED <<snaps, chg, left, act, undos, lock, bad>>
+    /\ UNCHANGED <<snaps, chg, left, act, undos, lock, bad, disk>>
 
 (***************************************************************************)
 (* Undo of task t: scope 0 is everything not undone yet ("Undo all"); a   *)
@@ -191,7 +208,7 @@ UndoPlan(t, scope) ==
             restored |-> [f \in files |-> NoValue]]}
     /\ count' = [count EXCEPT !.undos = @ + 1]
     /\ Take("undo")
-    /\ UNCHANGED <<fs, snaps, chg, left, act, clock, bad>>
+    /\ UNCHANGED <<fs, snaps, chg, left, act, clock, bad, disk>>
 
 \* `step`: what the file needs, from the snapshot's copy, the file now and
 \* how the task left it when undo planned.
@@ -209,7 +226,7 @@ UndoCheck(u, f) ==
                   ELSE IF it.kept THEN "leave"           \* a kept step's
                   ELSE "restore"
        IN undos' = (undos \ {u}) \union {[u EXCEPT !.dec[f] = dec]}
-    /\ UNCHANGED <<fs, snaps, chg, left, act, clock, count, lock, bad>>
+    /\ UNCHANGED <<fs, snaps, chg, left, act, clock, count, lock, bad, disk>>
 
 \* `restore` (or nothing), a step after the check.
 UndoAct(u, f) ==
@@ -238,8 +255,8 @@ UndoAct(u, f) ==
                     {[u EXCEPT !.done = @ \union {f},
                                !.alone = IF u.dec[f] = "leave" THEN @ \union {f}
                                          ELSE @]}
-               /\ UNCHANGED <<fs, bad>>
-    /\ UNCHANGED <<snaps, chg, left, act, clock, count, lock>>
+               /\ UNCHANGED <<fs, bad, disk>>
+    /\ UNCHANGED <<snaps, chg, left, act, clock, count, lock, disk>>
 
 \* The end of `undo`: revert hooks, changes marked, what undo left noted.
 UndoFinish(u, failed) ==
@@ -261,7 +278,36 @@ UndoFinish(u, failed) ==
                     ELSE bad
     /\ undos' = undos \ {u}
     /\ Give
+    \* `undo` writes the task's record before it answers.
+    /\ disk' = [disk EXCEPT ![u.task] =
+                    [snaps |-> snaps[u.task], chg |-> chg'[u.task], left |-> left'[u.task]]]
     /\ UNCHANGED <<fs, snaps, act, clock, count>>
+
+(***************************************************************************)
+(* The record on disk, and glassd starting again from it (ADR 0020).      *)
+(***************************************************************************)
+\* The task's record is written: within a second of a change, so at any
+\* step after it, or not before glassd stops.
+Keep(t) ==
+    /\ disk[t] # [snaps |-> snaps[t], chg |-> chg[t], left |-> left[t]]
+    /\ disk' = [disk EXCEPT ![t] = [snaps |-> snaps[t], chg |-> chg[t], left |-> left[t]]]
+    /\ UNCHANGED <<fs, snaps, chg, left, act, undos, clock, count, lock, bad>>
+
+\* glassd stops, at any step, and starts again: every task is ended, and is
+\* what its record says. What was in flight is gone from memory (a step's
+\* write that landed stays in the file, on no record; an undo's restores
+\* so far stay too), and so is whoever held the person's turn.
+Restart ==
+    /\ count.restarts < MaxRestarts
+    /\ snaps' = [t \in Tasks |-> disk[t].snaps]
+    /\ chg' = [t \in Tasks |-> disk[t].chg]
+    /\ left' = [t \in Tasks |-> disk[t].left]
+    /\ act' = [t \in Tasks |-> Idle]
+    /\ undos' = {}
+    /\ lock' = None
+    /\ count' = [count EXCEPT !.restarts = @ + 1,
+                              !.a = [t \in Tasks |-> MaxActions]]
+    /\ UNCHANGED <<fs, clock, bad, disk>>
 
 \* Every action, edit and undo spent and nothing in flight: the model's end,
 \* not a deadlock. A turn never given back would be one.
@@ -280,6 +326,8 @@ Next ==
     \/ \E t \in Tasks : \E scope \in 0..Len(chg[t]) : UndoPlan(t, scope)
     \/ \E u \in undos, f \in Files : UndoCheck(u, f) \/ UndoAct(u, f)
     \/ \E u \in undos : \E failed \in SUBSET u.ids : UndoFinish(u, failed)
+    \/ \E t \in Tasks : Keep(t)
+    \/ Restart
 
 Spec == Init /\ [][Next]_vars
 

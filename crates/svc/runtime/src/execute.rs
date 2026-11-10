@@ -582,6 +582,11 @@ impl Runtime {
                     state.written.note_changes(&ids, seen);
                 }
                 self.publish(task);
+                // What it changed, kept for an undo after glassd starts
+                // again (ADR 0020).
+                if def.side_effect != SideEffect::None {
+                    self.keep_soon(task);
+                }
                 // The app whose data this was hears, if a window of it is
                 // open: Calendar shows the hold an agent just made, where
                 // it showed it at the next change of week. (Mail and Chat
@@ -673,6 +678,10 @@ impl Runtime {
             );
         }
         self.publish(task);
+        // A task waits here for as long as the person takes: its record is
+        // on disk as it starts waiting, whatever it changed in the second
+        // before (ADR 0020).
+        self.keep(task);
 
         let outcome = tokio::select! {
             answer = &mut reply => answer.unwrap_or(Outcome::Withdrawn),

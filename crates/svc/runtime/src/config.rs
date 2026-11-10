@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use glass_api::{AgentMode, AgentSummary, AppManifest, CustomizationPoint};
 use glass_types::AgentId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One agent IT published to the fleet (AD-5): how to run it and what to say
 /// about it. What it may do is policy's business, not the catalog's.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogEntry {
     pub id: AgentId,

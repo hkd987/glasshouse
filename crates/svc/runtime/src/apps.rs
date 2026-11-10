@@ -729,6 +729,7 @@ impl Runtime {
     pub(crate) fn forget_if_unchanged(&self, task: &Task) {
         if task.is_app() && task.lock().changes.is_empty() {
             self.tasks().remove(&task.id);
+            self.unkeep(task);
         }
     }
 }

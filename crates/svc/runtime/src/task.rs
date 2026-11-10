@@ -2,18 +2,20 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use glass_actions::TaskContext;
+use glass_actions::{Grant, TaskContext};
 use glass_api::{
     ActivityEntry, ActivityKind, AppManifest, ApprovalView, ChangeEntry, DisplaySafe, FeedLine,
     Progress, Receipt, ScopeRequest, SnapshotMarker, TaskDetail, TaskView, TileState, display_line,
 };
+use glass_platform::fs::Owner;
 use glass_platform::sandbox::SandboxSpec;
 use glass_platform::snapshot::SnapshotHandle;
 use glass_policy::EffectivePolicy;
-use glass_types::{Label, TaskId, Timestamp};
+use glass_types::{AgentPrincipal, Label, TaskId, Timestamp, UserRef};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{oneshot, watch};
 
@@ -75,6 +77,10 @@ pub(crate) struct Task {
     pub stop: Mutex<Option<oneshot::Sender<()>>>,
     /// Actions past every check and running now. Sleep waits for these.
     pub in_flight: AtomicUsize,
+    /// A write of the task's record is on its way (`Runtime::keep_soon`).
+    pub keeping: AtomicBool,
+    /// Dismissed or retired: its record is gone and isn't written again.
+    pub gone: AtomicBool,
     state: Mutex<TaskState>,
 }
 
@@ -218,7 +224,7 @@ pub(crate) struct NewTask {
 
 /// The routine a task runs (DA-4): the agent reads it by id and runs its
 /// script first.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RoutineRun {
     pub id: String,
     pub version: u32,
@@ -227,7 +233,7 @@ pub(crate) struct RoutineRun {
 }
 
 /// The schedule a task's run is of (ADR 0069): whose, and which.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ScheduleRun {
     pub owner: String,
     pub id: String,
@@ -235,7 +241,7 @@ pub(crate) struct ScheduleRun {
 
 /// What a continued task tells the harness about the task it carries on
 /// from.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Continued {
     pub id: TaskId,
     pub agent: String,
@@ -306,6 +312,8 @@ impl Task {
             gate: watch::Sender::new(Gate::Run),
             stop: Mutex::new(Some(new.stop)),
             in_flight: AtomicUsize::new(0),
+            keeping: AtomicBool::new(false),
+            gone: AtomicBool::new(false),
             state: Mutex::new(TaskState {
                 tile: TileState::Starting,
                 caption: "Setting up a sandbox".into(),
@@ -431,6 +439,231 @@ impl Task {
         };
         detail.make_display_safe();
         detail
+    }
+}
+
+/// The version of [`Kept`] this glassd writes and reads.
+const KEPT_VERSION: u32 = 1;
+
+/// Why a task that was working when glassd stopped has ended.
+pub(crate) const RESTARTED: &str = "the system restarted while it was working";
+
+/// A task as it is kept on disk (ADR 0020, item 3): what was fixed when it
+/// started and its record so far, without what only a running task has
+/// (its gate, its stop, its socket, the calls a routine would be made of).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Kept {
+    version: u32,
+    pub id: TaskId,
+    pub user: Person,
+    pub entry: CatalogEntry,
+    prompt: String,
+    scope: ScopeRequest,
+    plan: Vec<String>,
+    grants: Vec<Grant>,
+    sandbox: SandboxSpec,
+    cant_touch: Vec<String>,
+    settings: BTreeMap<String, Value>,
+    layer: Option<u32>,
+    continues: Option<Continued>,
+    routine: Option<RoutineRun>,
+    schedule: Option<ScheduleRun>,
+    pub app: Option<AppManifest>,
+    started_at: Timestamp,
+    tile: TileState,
+    caption: String,
+    progress: Option<Progress>,
+    feed: Vec<FeedLine>,
+    activity: Vec<ActivityEntry>,
+    changes: Vec<ChangeEntry>,
+    written: Written,
+    snapshots: Vec<KeptSnapshot>,
+    actions: u32,
+    failure: Option<String>,
+    updated_at: Timestamp,
+    title: String,
+    title_fixed: bool,
+    data_label: Option<Label>,
+    answer: Option<String>,
+    models_sent_to: Vec<String>,
+}
+
+/// Whose task it is, as the kernel named them when it started.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Person {
+    pub name: String,
+    pub uid: u32,
+    gid: u32,
+    home: PathBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct KeptSnapshot {
+    marker: SnapshotMarker,
+    handle: SnapshotHandle,
+}
+
+impl Kept {
+    /// Whether this glassd reads records of this version.
+    pub fn readable(&self) -> bool {
+        self.version == KEPT_VERSION
+    }
+}
+
+impl Task {
+    /// The task as it stands, to keep on disk.
+    pub fn kept(&self) -> Kept {
+        let state = self.lock();
+        Kept {
+            version: KEPT_VERSION,
+            id: self.id,
+            user: Person {
+                name: self.user.name.clone(),
+                uid: self.user.uid,
+                gid: self.user.gid,
+                home: self.user.home.clone(),
+            },
+            entry: self.entry.clone(),
+            prompt: self.prompt.clone(),
+            scope: self.scope.clone(),
+            plan: self.plan.clone(),
+            grants: self.ctx.grants.clone(),
+            sandbox: self.sandbox.clone(),
+            cant_touch: self.cant_touch.clone(),
+            settings: self.settings.clone(),
+            layer: self.layer,
+            continues: self.continues.clone(),
+            routine: self.routine.clone(),
+            schedule: self.schedule.clone(),
+            app: self.app.as_deref().cloned(),
+            started_at: self.started_at,
+            tile: state.tile,
+            caption: state.caption.clone(),
+            progress: state.progress,
+            feed: state.feed.iter().cloned().collect(),
+            activity: state.activity.clone(),
+            changes: state.changes.clone(),
+            written: state.written.clone(),
+            snapshots: state
+                .snapshots
+                .iter()
+                .map(|s| KeptSnapshot {
+                    marker: s.marker.clone(),
+                    handle: s.handle.clone(),
+                })
+                .collect(),
+            actions: state.actions,
+            failure: state.failure.clone(),
+            updated_at: state.updated_at,
+            title: state.title.clone(),
+            title_fixed: state.title_fixed,
+            data_label: state.data_label,
+            answer: state.answer.clone(),
+            models_sent_to: state.models_sent_to.clone(),
+        }
+    }
+
+    /// A task read back from its record after glassd started again: ended,
+    /// with what it changed and the snapshots to undo it from. `policy` is
+    /// the one for an ended task (`Policy::for_ended`). Also whether it was
+    /// still working when glassd stopped: it comes back as failed, saying
+    /// so.
+    pub fn restored(kept: Kept, policy: EffectivePolicy) -> (Self, bool) {
+        let user = Caller {
+            name: kept.user.name,
+            uid: kept.user.uid,
+            gid: kept.user.gid,
+            home: kept.user.home,
+        };
+        let ctx = TaskContext {
+            principal: AgentPrincipal {
+                agent: kept.entry.id.clone(),
+                on_behalf_of: UserRef {
+                    name: user.name.clone(),
+                    uid: user.uid,
+                },
+                task: kept.id,
+            },
+            owner: Owner {
+                uid: user.uid,
+                gid: user.gid,
+            },
+            home: user.home.clone(),
+            grants: kept.grants,
+            groups: policy.groups().map(str::to_owned).collect(),
+            data_label: None,
+        };
+        // The calls a routine would be made of were in memory only.
+        let mut trace = Trace::default();
+        trace.end(Err(
+            "the system has restarted since it ran, and its steps aren't kept through that".into(),
+        ));
+        let interrupted = kept.tile.is_live();
+        let mut state = TaskState {
+            tile: kept.tile,
+            caption: kept.caption,
+            progress: kept.progress,
+            feed: kept.feed.into(),
+            activity: kept.activity,
+            changes: kept.changes,
+            written: kept.written,
+            snapshots: kept
+                .snapshots
+                .into_iter()
+                .map(|s| TakenSnapshot {
+                    marker: s.marker,
+                    handle: s.handle,
+                })
+                .collect(),
+            actions: kept.actions,
+            failure: kept.failure,
+            updated_at: kept.updated_at,
+            // A take over ended with glassd: what the person did since is
+            // theirs, not the task's.
+            takeover: None,
+            sleeping: None,
+            connected: false,
+            title: kept.title,
+            title_fixed: kept.title_fixed,
+            data_label: kept.data_label,
+            answer: kept.answer,
+            models_sent_to: kept.models_sent_to,
+            trace,
+        };
+        if interrupted {
+            state.tile = TileState::Failed;
+            state.failure = Some(RESTARTED.into());
+            state.progress = None;
+            state.note(ActivityKind::State, format!("Failed: {RESTARTED}"));
+        }
+        let task = Self {
+            id: kept.id,
+            user,
+            entry: kept.entry,
+            prompt: kept.prompt,
+            scope: kept.scope,
+            plan: kept.plan,
+            policy: std::sync::RwLock::new(Arc::new(policy)),
+            ctx,
+            sandbox: kept.sandbox,
+            cant_touch: kept.cant_touch,
+            settings: kept.settings,
+            layer: kept.layer,
+            // An attended task's socket went with the glassd that made it.
+            driver_socket: None,
+            continues: kept.continues,
+            routine: kept.routine,
+            schedule: kept.schedule,
+            app: kept.app.map(Arc::new),
+            started_at: kept.started_at,
+            gate: watch::Sender::new(Gate::Ended),
+            stop: Mutex::new(None),
+            in_flight: AtomicUsize::new(0),
+            keeping: AtomicBool::new(false),
+            gone: AtomicBool::new(false),
+            state: Mutex::new(state),
+        };
+        (task, interrupted)
     }
 }
 

@@ -9,7 +9,7 @@
 #   3. sleep: that task pauses before the machine sleeps and resumes after
 #   4. crash recovery: kill -9 glassd mid-task; its supervisor starts it
 #      again, which removes the orphaned jail and its limits, and the audit
-#      log is intact
+#      log is intact; the task is back, ended, and its undo works (FD-4)
 #   5. the model gateway with the scripted provider, under a test policy
 #   6. branding: no base-system name where a user looks (BR-1, BR-2)
 #   7. boot: the settings a fast boot depends on (no reboot; see
@@ -91,6 +91,16 @@ left=$("$vm" run "$glass_limits")
 [[ $left -eq 0 ]] || { echo "FAIL $left resource limits of the orphaned jail survived the restart"; exit 1; }
 "$vm" run "grep -q 'removed a sandbox left behind' /var/log/glassd.log"
 echo "PASS crash recovery (orphaned jail removed on restart)"
+# The task itself is back: ended, saying the restart ended it, with what it
+# had changed still undoable (ADR 0020, FD-4). It was waiting for the person
+# when glassd was killed, and its record is on disk from then.
+shown=$("$vm" run "su demo -c 'glassctl show $task'")
+[[ $shown == *"the system restarted while it was working"* ]] || { echo "FAIL the task isn't back after the restart, or doesn't say why it ended: $shown"; exit 1; }
+undone=$("$vm" run "su demo -c 'glassctl undo $task'")
+[[ $undone == *"Rolled back"* && $undone == *"Did remove"* ]] || { echo "FAIL undo after a restart: $undone"; exit 1; }
+"$vm" run "su demo -c 'glassctl audit $task'" | grep -q "TaskFinished.*the system restarted" || { echo "FAIL the interrupted task's end isn't on the audit record"; exit 1; }
+"$vm" run "su demo -c 'glassctl dismiss $task'" >/dev/null
+echo "PASS a task cut short by a crash is back with its undo (FD-4)"
 
 step "model gateway, scripted provider (DP-1, DP-2, DP-3, DP-5)"
 # The scenario needs a model in policy: install the test policy (the default

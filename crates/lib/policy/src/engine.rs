@@ -337,6 +337,26 @@ impl Policy {
         effective
     }
 
+    /// The rules for a task of `agent`'s that has ended, read back from its
+    /// record after glassd started again (ADR 0020): it may call nothing,
+    /// reach nothing and use no model. An ended task makes no calls; what
+    /// it still needs of a policy is the person's groups as they are now,
+    /// which an undo passes to the app that puts a change back.
+    pub fn for_ended(&self, user: &str, agent: &AgentId, app: bool) -> EffectivePolicy {
+        let groups: Vec<&GroupPolicy> = self.groups_of(user).collect();
+        let nothing = AgentPolicy {
+            id: agent.clone(),
+            allowed_actions: Vec::new(),
+            tiers: BTreeMap::new(),
+            max_label: Some(Label::Public),
+            egress: Vec::new(),
+            models: Some(Vec::new()),
+        };
+        let mut effective = self.build(user, &groups, &nothing);
+        effective.app = app;
+        effective
+    }
+
     fn build(&self, user: &str, groups: &[&GroupPolicy], agent: &AgentPolicy) -> EffectivePolicy {
         let max_label = groups
             .iter()
@@ -959,6 +979,29 @@ mod tests {
         assert_eq!(eff.models().allowed().count(), 0, "apps call no models");
         let stranger = policy.for_app("stranger", &app, &declared, Label::Public);
         assert_eq!(stranger.max_label(), Label::Public);
+    }
+
+    #[test]
+    fn fd4_an_ended_tasks_rules_allow_nothing_and_keep_the_persons_groups() {
+        // A task read back from its record (ADR 0020), whether or not
+        // policy still knows its agent.
+        let policy = Policy::from_toml(POLICY).unwrap();
+        for agent in ["invoice-agent", "an-agent-policy-no-longer-names"] {
+            let ended = policy.for_ended("demo", &agent.parse().unwrap(), false);
+            for action in ["files.write", "mail.send", "files.read"] {
+                assert_eq!(
+                    ended.tier_for(&name(action), Tier::Auto).tier,
+                    Tier::Never,
+                    "{agent} {action}"
+                );
+            }
+            assert!(ended.egress().is_empty());
+            assert_eq!(ended.max_label(), Label::Public);
+            assert_eq!(
+                ended.groups().collect::<Vec<_>>(),
+                invoice().groups().collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

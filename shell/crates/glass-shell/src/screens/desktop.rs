@@ -263,6 +263,14 @@ pub fn ordered(tasks: &[TaskView]) -> Vec<&TaskView> {
     ordered
 }
 
+/// The agents menu's button that dismisses every ended task.
+pub const CLEAR_FINISHED: &str = "Clear finished";
+
+/// How many of `tasks` have ended: what "Clear finished" would dismiss.
+pub fn ended_count(tasks: &[TaskView]) -> usize {
+    tasks.iter().filter(|t| !t.state.is_live()).count()
+}
+
 /// Room around the tiles inside the agents menu.
 const MENU_PADDING: f32 = 12.0;
 /// Room the menu leaves for the dock.
@@ -296,15 +304,32 @@ fn agents_menu<'a>(
             if w == 1 { "s" } else { "" }
         ),
     };
-    let header = row![
+    let mut header = row![
         text("Agents")
             .size(13)
             .font(fonts::SEMIBOLD)
             .color(hex(0xF3F5F7)),
         iced_widget::space().width(Length::Fill),
-        text(summary).size(12).color(hex(0xA9B1BC)),
     ]
+    .spacing(12)
     .align_y(Vertical::Center);
+    // Ended tasks stay until the person lets them go, through restarts of
+    // the system too (AW-1): one click for all of them, where the only
+    // way was `glassctl dismiss`, a task at a time.
+    if ended_count(desktop.tasks) > 0 {
+        header = header.push(
+            button(text(CLEAR_FINISHED).size(12).color(hex(0xC9D1DA)))
+                .padding(Padding::from([2.0, 8.0]))
+                .on_press(Message::DismissEnded)
+                .style(style::button_like(style::outlined(
+                    hex(0x15181D),
+                    8.0,
+                    1.0,
+                    hex(0x323842),
+                ))),
+        );
+    }
+    let header = header.push(text(summary).size(12).color(hex(0xA9B1BC)));
     let body: Element<'a, Message> = if desktop.tasks.is_empty() {
         text("No agents yet. Press Ctrl Space to hand one a task.")
             .size(13)

@@ -222,6 +222,9 @@ pub enum Effect {
     Stop(TaskId),
     TakeOver(TaskId),
     HandBack(TaskId),
+    /// `task.dismiss` for each of these ended tasks (AW-1). glassd says
+    /// each is gone (`TaskRemoved`), which is what takes its tile away.
+    Dismiss(Vec<TaskId>),
     /// End the session: the desktop program exits and the sign-in screen
     /// comes back (ADR 0019).
     SignOut,
@@ -1081,6 +1084,21 @@ impl Live {
             Message::Stop(task) => Some(Effect::Stop(task)),
             Message::TakeOver(task) => Some(Effect::TakeOver(task)),
             Message::HandBack(task) => Some(Effect::HandBack(task)),
+            // AW-1: only what has ended; a live task is stopped first.
+            Message::Dismiss(task) => self
+                .tasks
+                .iter()
+                .any(|t| t.id == task && !t.state.is_live())
+                .then(|| Effect::Dismiss(vec![task])),
+            Message::DismissEnded => {
+                let ended: Vec<TaskId> = self
+                    .tasks
+                    .iter()
+                    .filter(|t| !t.state.is_live())
+                    .map(|t| t.id)
+                    .collect();
+                (!ended.is_empty()).then_some(Effect::Dismiss(ended))
+            }
             // AW-15: pick a marker, see what rolling back to it would
             // change (`dry_run`), then roll back.
             Message::SelectSnapshot(snapshot) => {
@@ -1864,6 +1882,48 @@ mod tests {
             task: detail.view.id,
         });
         assert!(live.open_task().is_none());
+    }
+
+    #[test]
+    fn aw1_dismiss_asks_glassd_for_ended_tasks_only_and_clear_finished_for_all_of_them() {
+        // Two ended tasks and one still at work.
+        let (_, detail) = with_invoices();
+        let like = |state: TileState| TaskView {
+            id: TaskId::new(),
+            state,
+            ..detail.view.clone()
+        };
+        let tasks = vec![
+            like(TileState::Done),
+            like(TileState::Working),
+            like(TileState::Failed),
+        ];
+        let ended = vec![tasks[0].id, tasks[2].id];
+        let running = vec![tasks[1].id];
+        let mut live = Live::new(tasks);
+        // One ended task: asked of glassd. Its tile goes when glassd says
+        // the task is gone, not before.
+        assert_eq!(
+            live.update(Message::Dismiss(ended[0])),
+            Some(Effect::Dismiss(vec![ended[0]]))
+        );
+        assert!(live.tasks().iter().any(|t| t.id == ended[0]));
+        // A task still at work is stopped first: nothing is asked.
+        assert_eq!(live.update(Message::Dismiss(running[0])), None);
+        // "Clear finished": every ended task, and none that is live.
+        assert_eq!(
+            live.update(Message::DismissEnded),
+            Some(Effect::Dismiss(ended.clone()))
+        );
+        for id in &ended {
+            live.apply(Event::TaskRemoved { task: *id });
+        }
+        assert_eq!(
+            live.tasks().iter().map(|t| t.id).collect::<Vec<_>>(),
+            running
+        );
+        // Nothing ended is left: nothing to ask.
+        assert_eq!(live.update(Message::DismissEnded), None);
     }
 
     #[test]

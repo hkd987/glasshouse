@@ -95,6 +95,11 @@ pub enum Message {
     Stop(TaskId),
     TakeOver(TaskId),
     HandBack(TaskId),
+    /// An ended task's Dismiss (`task.dismiss`, AW-1): its tile goes; the
+    /// audit log and its snapshots stay.
+    Dismiss(TaskId),
+    /// The agents menu's "Clear finished": every ended task's tile goes.
+    DismissEnded,
     /// Pick a snapshot on the timeline or in the activity log (AW-15).
     SelectSnapshot(SnapshotId),
     /// "Roll back to 2:11 PM": first asks what it would change.

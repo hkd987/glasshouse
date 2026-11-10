@@ -1323,6 +1323,14 @@ impl Shell {
                     Vec::new()
                 }
             },
+            // The tiles go as glassd says each task is gone; one it
+            // wouldn't dismiss stays, with why in the log.
+            Answer::Dismissed(result) => {
+                if let Err(e) = result {
+                    eprintln!("task.dismiss: {e}");
+                }
+                Vec::new()
+            }
         }
     }
 

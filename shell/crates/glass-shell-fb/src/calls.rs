@@ -64,6 +64,8 @@ pub enum Answer {
         method: &'static str,
         result: Result<TaskView, ClientError>,
     },
+    /// `task.dismiss` for one or more ended tasks: the first that failed.
+    Dismissed(Result<(), ClientError>),
 }
 
 impl Answer {
@@ -80,6 +82,7 @@ impl Answer {
             Answer::Detail { result, .. } => result.as_ref().err(),
             Answer::Started { result, .. } | Answer::Task { result, .. } => result.as_ref().err(),
             Answer::Undone(result) => result.as_ref().err(),
+            Answer::Dismissed(result) => result.as_ref().err(),
         };
         matches!(error, Some(ClientError::TimedOut { .. }))
     }
@@ -213,6 +216,21 @@ async fn call(client: &Client, effect: Effect, within: Duration) -> Option<Answe
                 .call_within(methods::TASK_UNDO, &request, within)
                 .await,
         ),
+        // glassd answers each with nothing and says the task is gone
+        // (`TaskRemoved`), which is what takes its tile off the screen.
+        Effect::Dismiss(tasks) => {
+            let mut result = Ok(());
+            for task in tasks {
+                let answer: Result<serde_json::Value, _> = client
+                    .call_within(methods::TASK_DISMISS, TaskRef { task }, within)
+                    .await;
+                if let Err(e) = answer {
+                    result = Err(e);
+                    break;
+                }
+            }
+            Answer::Dismissed(result)
+        }
         other => {
             let (method, task) = other.task_call()?;
             Answer::Task {

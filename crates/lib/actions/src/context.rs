@@ -6,7 +6,7 @@ use glass_types::{AgentPrincipal, Label};
 use crate::ActionError;
 
 /// A folder the task was given, under the name the agent sees.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Grant {
     /// The first path segment agents use, such as `Invoices`.
     pub name: String,
