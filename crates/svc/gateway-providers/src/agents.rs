@@ -219,10 +219,8 @@ impl SignIn {
                 Err(e) => return Err(e.into()),
             };
             stream.set_nonblocking(false)?;
-            stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-            let mut request = vec![0u8; 8192];
-            let n = stream.read(&mut request).unwrap_or(0);
-            let request = String::from_utf8_lossy(&request[..n]);
+            let request = request_head(&mut stream);
+            let request = String::from_utf8_lossy(&request);
             let target = request
                 .lines()
                 .next()
@@ -263,6 +261,41 @@ impl SignIn {
             }
         }
     }
+}
+
+/// How long a caller of the sign-in's port has to send its request.
+const REQUEST_WITHIN: Duration = Duration::from_secs(10);
+/// The most of a request that is read: its first line is all that's used.
+const REQUEST_MOST: usize = 8192;
+
+/// A request's head (to its blank line), as far as it comes in
+/// [`REQUEST_WITHIN`] and [`REQUEST_MOST`].
+///
+/// One `read` gives what has arrived so far, which needn't be the whole
+/// request: a browser's usually is, and a request that came in two pieces
+/// was read as its first piece, found not to be the sign-in's, answered
+/// "That isn't the sign-in…" and closed with the rest still on its way.
+/// The person then had to sign in again.
+fn request_head(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    let started = Instant::now();
+    let mut request = Vec::new();
+    let mut chunk = [0u8; 2048];
+    while !request.windows(4).any(|w| w == b"\r\n\r\n") && request.len() < REQUEST_MOST {
+        let Some(left) = REQUEST_WITHIN
+            .checked_sub(started.elapsed())
+            .filter(|left| !left.is_zero())
+        else {
+            break;
+        };
+        if stream.set_read_timeout(Some(left)).is_err() {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => request.extend_from_slice(&chunk[..n]),
+        }
+    }
+    request
 }
 
 /// This computer's name, as the front's page shows it: letters, digits,
@@ -374,7 +407,29 @@ mod tests {
         assert!(
             other.ends_with("That isn't the sign-in the Glasshouse Agents app is waiting for.")
         );
-        let said = browser_comes_back(&page, "gac_once", None);
+        // The browser's request needn't arrive at once: one that comes in
+        // two pieces is the same request. (Read as its first piece, it was
+        // "not the sign-in" and the connection closed under the second.)
+        let said = {
+            let port = page
+                .split_once("port=")
+                .and_then(|(_, rest)| rest.split('&').next())
+                .unwrap();
+            let state = page
+                .split_once("state=")
+                .and_then(|(_, rest)| rest.split('&').next())
+                .unwrap();
+            let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+            stream.write_all(b"GET /callback?code=gac_once").unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+            stream
+                .write_all(format!("&state={state} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+                .unwrap();
+            let mut said = String::new();
+            stream.read_to_string(&mut said).unwrap();
+            said
+        };
         assert!(
             said.ends_with("go back to the Glasshouse Agents app."),
             "{said}"
