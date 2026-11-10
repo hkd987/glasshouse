@@ -532,6 +532,67 @@ fn dp30_a_send_that_waited_in_drafts_is_sent_once_and_leaves_drafts() {
     assert_eq!(s.link.submitted().len(), 1, "once, never twice");
 }
 
+// The person opens a draft, goes on writing and presses Send with the
+// mail server out of reach. The answer said the message was kept in
+// Drafts; Drafts kept the text from before they went on, and the page had
+// cleared what they wrote.
+#[test]
+fn dp30_a_draft_sent_with_more_written_while_offline_keeps_what_was_written() {
+    let (home, ctx) = setup();
+    let s = service();
+    s.connect(&ctx);
+    s.link.offline(true);
+    let first = json!({ "messages": [{ "to": ["dana@northwind.example"], "subject": "Waiting", "body": "x" }] });
+    s.provider
+        .invoke(&ctx, &action("mail.send"), &first)
+        .unwrap_err();
+    let kept = drafts_in(home.path());
+    assert_eq!(kept.len(), 1);
+    let id = format!("drafts/{}", kept[0]);
+
+    // More written, and another person added, then Send again: still out of reach.
+    let more = json!({ "messages": [{
+        "to": ["dana@northwind.example", "priya@northwind.example"],
+        "subject": "Waiting, with the numbers",
+        "body": "x\n\nThe numbers are attached to my next one.",
+        "draft": id,
+    }] });
+    let err = s
+        .provider
+        .invoke(&ctx, &action("mail.send"), &more)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(&id), "{err}");
+    // The same draft, not a copy beside it, holding what was written.
+    assert_eq!(drafts_in(home.path()), kept);
+    let read = s
+        .provider
+        .invoke(&ctx, &action("mail.read"), &json!({ "id": id }))
+        .unwrap();
+    let message = &read.data["message"];
+    assert_eq!(message["subject"], "Waiting, with the numbers");
+    assert!(
+        message["body"]
+            .as_str()
+            .unwrap()
+            .contains("The numbers are attached"),
+        "{message}"
+    );
+    assert_eq!(
+        message["to"],
+        json!(["dana@northwind.example", "priya@northwind.example"])
+    );
+
+    // Back in reach, the draft is sent as last written, once.
+    s.link.offline(false);
+    s.provider
+        .invoke(&ctx, &action("mail.send"), &more)
+        .unwrap();
+    let sent = s.link.submitted();
+    assert_eq!(sent.len(), 1);
+    assert!(drafts_in(home.path()).is_empty());
+}
+
 #[test]
 fn dp30_two_calls_never_send_one_draft_twice() {
     let (home, ctx) = setup();

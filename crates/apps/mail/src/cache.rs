@@ -228,6 +228,14 @@ impl Cache {
         }
     }
 
+    /// Puts `raw` in place of a message that is here: a draft the person
+    /// went on writing. Whole or not at all, as every write here is.
+    pub(crate) fn replace(&self, role: Role, name: &str, raw: &[u8]) -> std::io::Result<PathBuf> {
+        let rel = rel_dir(role).join(name);
+        self.home.write(&rel, raw, Some(self.owner))?;
+        Ok(rel)
+    }
+
     /// Saves a new local message (a draft, or a send with no service)
     /// under a name nobody has taken: two tasks writing the same subject in
     /// the same second get two files.

@@ -117,7 +117,9 @@ EditSave(d) ==
 \* SMTP: in reach, the server takes it. Out of reach, or (LostReplies) it
 \* took it and the reply was lost on the way back, the call keeps it in
 \* Drafts (keep_unsent): before the fix as a new draft, even when it was
-\* one; now in the draft it names.
+\* one; now in the draft it names. (With the text this call tried to send:
+\* a draft the person went on writing before Send holds what they wrote.
+\* The message here is the draft's, so that is the same step.)
 Submit(p) ==
     /\ pc[p].at = "submit"
     /\ LET m == pc[p].m

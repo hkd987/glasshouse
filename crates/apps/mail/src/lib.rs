@@ -958,7 +958,11 @@ impl MailProvider {
 
     /// Keeps messages that weren't sent in Drafts; their ids. One that is
     /// a draft stays that draft, with what this call tried to send
-    /// (DP-30): a copy beside it would be sent again.
+    /// (DP-30): a copy beside it would be sent again. What it tried to
+    /// send takes the draft's place when the person had gone on writing:
+    /// it was written only if no such draft was there, which one always
+    /// was, so the answer said "kept in Drafts" and Drafts kept the text
+    /// from before, the page having cleared the new.
     fn keep_unsent(&self, ctx: &TaskContext, cache: &Cache, messages: &[Message]) -> Vec<String> {
         let (from, _) = self.sender(&ctx.principal.on_behalf_of.name);
         messages
@@ -976,7 +980,7 @@ impl MailProvider {
                 let files = Self::attachments(ctx, m).unwrap_or_default();
                 let raw = self.build(ctx, m, &message::new_message_id(&from), &files);
                 let rel = match draft {
-                    Some(name) => cache.keep(Role::Drafts, name, &raw).ok()?,
+                    Some(name) => cache.replace(Role::Drafts, name, &raw).ok()?,
                     None => cache.save_new(Role::Drafts, &Self::stem(m, i), &raw).ok()?,
                 };
                 attribute(ctx, &cache.host_path(&rel));
