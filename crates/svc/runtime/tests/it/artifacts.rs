@@ -192,6 +192,40 @@ async fn ar1_an_agents_share_asks_who_sees_it_and_the_colleague_opens_it() {
     let record = audited(&h, "artifact.share").pop().expect("audited");
     assert_eq!(record.event.outcome, Some(Outcome::Completed));
     assert_eq!(record.event.decision.as_ref().unwrap().tier, Tier::Ask);
+    // It left this computer, and the task's changes say so: it was on the
+    // audit record alone, with nothing in Changes and nothing in what a
+    // roll back says it can't undo (the action reports no change itself).
+    let task =
+        h.rt.list(&h.me)
+            .into_iter()
+            .find(|t| t.agent.as_str() == "claude-code")
+            .expect("the agent's task")
+            .id;
+    let changes = h.rt.get(&h.me, task).unwrap().changes;
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].kind, glass_api::ChangeKind::Sent);
+    assert_eq!(changes[0].target, "Q3 forecast");
+    assert_eq!(changes[0].action.as_str(), "artifact.share");
+    assert!(!changes[0].reversible);
+    let undo =
+        h.rt.undo(
+            &h.me,
+            glass_api::UndoRequest {
+                task,
+                to: None,
+                changes: Vec::new(),
+                dry_run: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        undo.not_undone
+            .iter()
+            .any(|line| line.contains("Q3 forecast")),
+        "a roll back says it can't take the share back: {:?}",
+        undo.not_undone
+    );
 
     // Priya opens it and comments.
     let list = org.priya("artifact.list", json!({}));

@@ -542,7 +542,24 @@ impl Runtime {
                     }
                     let at = Timestamp::now();
                     let mut ids = Vec::new();
-                    for change in output.changes {
+                    let mut changes = output.changes;
+                    // What left the machine or can't be undone is in the
+                    // task's changes, and so in what a roll back says it
+                    // couldn't undo, whether or not its action says so.
+                    // Sixteen such actions reported no change (a doc
+                    // written, an artifact or an app shared, a skill
+                    // proposed): they were on the audit record and nowhere
+                    // the person looks. The rule is kept here, once, for
+                    // those and for the next one written.
+                    if changes.is_empty() && def.side_effect == SideEffect::Irreversible {
+                        changes.push(glass_actions::Change {
+                            kind: glass_api::ChangeKind::Sent,
+                            target: target.clone(),
+                            reversible: false,
+                            paths: Vec::new(),
+                        });
+                    }
+                    for change in changes {
                         let id = state.changes.len() as u32;
                         state.changes.push(ChangeEntry {
                             id,
