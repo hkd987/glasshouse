@@ -255,6 +255,7 @@ impl ComputerSandbox {
     fn spec(&self, uid: u32, id: &str) -> ComputerSpec {
         ComputerSpec {
             id: id.to_owned(),
+            owner: uid,
             dir: self.dir.join(uid.to_string()).join(id),
             memory_mib: self.memory_mib,
             vcpus: self.vcpus,
@@ -588,9 +589,13 @@ impl ComputerSandbox {
         };
         let mut awake = 0;
         for owner in owners.flatten() {
+            let Some(uid) = owner_uid(&owner) else {
+                continue;
+            };
             for entry in fs::read_dir(owner.path()).into_iter().flatten().flatten() {
                 let computer = ComputerSpec {
                     id: entry.file_name().to_string_lossy().into_owned(),
+                    owner: uid,
                     dir: entry.path(),
                     memory_mib: self.memory_mib,
                     vcpus: self.vcpus,
@@ -1264,6 +1269,9 @@ impl Sandbox for ComputerSandbox {
             });
         };
         for owner in owners.flatten() {
+            let Some(uid) = owner_uid(&owner) else {
+                continue;
+            };
             let Ok(computers) = fs::read_dir(owner.path()) else {
                 continue;
             };
@@ -1273,6 +1281,7 @@ impl Sandbox for ComputerSandbox {
                 };
                 let computer = ComputerSpec {
                     id: id.clone(),
+                    owner: uid,
                     dir: entry.path(),
                     memory_mib: self.memory_mib,
                     vcpus: self.vcpus,
@@ -1320,6 +1329,13 @@ impl ToolRunner for ComputerSandbox {
     fn runs_as_user(&self) -> bool {
         UnshareTools.runs_as_user()
     }
+}
+
+/// Whose computers a folder under the computers' folder holds: it is
+/// named by their uid (`<dir>/<uid>/<id>`). Anything else there isn't an
+/// owner's folder.
+fn owner_uid(folder: &fs::DirEntry) -> Option<u32> {
+    folder.file_name().to_str()?.parse().ok()
 }
 
 #[cfg(test)]

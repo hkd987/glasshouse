@@ -17,6 +17,9 @@ use serde_json::{Value, json};
 use super::*;
 
 const ID: &str = "dana-reconciler";
+/// Its owner's uid, and so its name on the host ([`ComputerSpec::host_id`]).
+const OWNER: u32 = 1001;
+const HOST_ID: &str = "u1001-dana-reconciler";
 const DEVICE_STATE: &[u8] = b"device state";
 const GUEST_MEMORY: &[u8] = b"guest memory";
 
@@ -254,6 +257,11 @@ impl StandIn {
         fake.refusals
             .push((method.into(), path.into(), status, message.into()));
     }
+
+    /// Takes everything again.
+    fn allow_all(&self) {
+        self.fake.lock().unwrap().refusals.clear();
+    }
 }
 
 /// Answers one request as Firecracker's server does.
@@ -365,6 +373,11 @@ struct Host {
 
 impl Host {
     fn new(name: &str, version: &str) -> Self {
+        Self::of(name, version, ID, OWNER)
+    }
+
+    /// One whose computer is `owner`'s `id`.
+    fn of(name: &str, version: &str, id: &str, owner: u32) -> Self {
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("glass-fc-{name}-{}-{n}", std::process::id()));
@@ -392,8 +405,9 @@ impl Host {
             api_timeout: Duration::from_secs(5),
         };
         let computer = ComputerSpec {
-            id: ID.into(),
-            dir: dir.join("computers").join(ID),
+            id: id.into(),
+            owner,
+            dir: dir.join("computers").join(id),
             memory_mib: 1024,
             vcpus: 2,
         };
@@ -506,7 +520,7 @@ fn adr0065_a_firecracker_computer_snapshots_and_resumes() {
             full_snapshot()
         ]
     );
-    assert!(!process::alive(pid, ID));
+    assert!(!process::alive(pid, HOST_ID));
     assert!(!hypervisor.running(computer));
 
     // Its folder holds all of it, and nothing of the run.
@@ -604,6 +618,71 @@ fn adr0065_a_snapshot_from_another_firecracker_boots_from_disk() {
 }
 
 #[test]
+fn adr0065_a_snapshot_that_doesnt_load_boots_from_disk_and_isnt_tried_again() {
+    let host = Host::new("unresumed", "1.17.0");
+    let (hypervisor, computer) = (&host.hypervisor, &host.computer);
+    hypervisor.start_computer(computer).unwrap();
+    let disk = File::options()
+        .read(true)
+        .write(true)
+        .open(host.file("data.img"))
+        .unwrap();
+    disk.write_all_at(b"the agent's files", 4096).unwrap();
+    hypervisor.suspend(computer).unwrap();
+    host.standin.seen();
+
+    // Its snapshot is this Firecracker's own, and doesn't load (the file
+    // was cut short, the host's processor isn't the one it was made on).
+    // The start was an error, the snapshot stayed, and every start after
+    // was the same error: the computer never started again.
+    host.standin.refuse(
+        "PUT",
+        "/snapshot/load",
+        400,
+        "Load snapshot error: Failed to restore from snapshot",
+    );
+    let why = "Firecracker refused PUT /snapshot/load (HTTP 400): Load snapshot error: \
+               Failed to restore from snapshot.";
+    assert_eq!(
+        hypervisor.start_computer(computer),
+        Ok(Started::BootedUnresumed { why: why.into() })
+    );
+    // Asked once, by a Firecracker that was then replaced: the boot is a
+    // new one's.
+    let seen = host.standin.seen();
+    assert_eq!(seen[0], get("/"));
+    assert_eq!(
+        (seen[1].method.as_str(), seen[1].path.as_str()),
+        ("PUT", "/snapshot/load")
+    );
+    assert_eq!(seen[2..], boot_sequence());
+    assert!(hypervisor.running(computer));
+
+    // Its files are kept; the snapshot isn't, and its screen says what
+    // happened.
+    let mut files = [0; 17];
+    disk.read_exact_at(&mut files, 4096).unwrap();
+    assert_eq!(&files, b"the agent's files");
+    assert!(!host.file("snapshot").exists());
+    let screen = fs::read_to_string(computer.screen()).unwrap();
+    assert!(
+        screen.contains("couldn't be resumed as it was put away"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Failed to restore from snapshot"),
+        "{screen}"
+    );
+    assert!(screen.contains("its files are all here"), "{screen}");
+
+    // From here it is put away and resumed as any other.
+    host.standin.allow_all();
+    hypervisor.suspend(computer).unwrap();
+    assert_eq!(hypervisor.start_computer(computer), Ok(Started::Resumed));
+    hypervisor.suspend(computer).unwrap();
+}
+
+#[test]
 fn adr0065_a_firecracker_refusal_is_a_readable_error() {
     let host = Host::new("refusal", "1.17.0");
     let (hypervisor, computer) = (&host.hypervisor, &host.computer);
@@ -623,7 +702,7 @@ fn adr0065_a_firecracker_refusal_is_a_readable_error() {
     );
     // Nothing of it is left running; its disk stays.
     let pid = host.standin.pid().unwrap();
-    assert!(!process::alive(pid, ID));
+    assert!(!process::alive(pid, HOST_ID));
     assert!(!hypervisor.running(computer));
     assert!(!host.file("jail").exists());
     assert!(!host.file("firecracker.json").exists());
@@ -702,7 +781,7 @@ fn adr0065_running_means_its_firecracker_is_alive() {
     fs::hard_link(host.dir.join("api.sock"), socket).unwrap();
 
     // Its Firecracker ended: the next start boots it afresh.
-    process::stop(running.pid, ID).unwrap();
+    process::stop(running.pid, HOST_ID).unwrap();
     assert!(!hypervisor.running(computer));
     host.standin.seen();
     assert_eq!(hypervisor.start_computer(computer), Ok(Started::Booted));
@@ -729,7 +808,8 @@ fn adr0065_the_jailer_runs_each_computer_in_a_jail_of_its_own() {
     };
     let computer = ComputerSpec {
         id: ID.into(),
-        dir: "/srv/computers/dana-reconciler".into(),
+        owner: OWNER,
+        dir: "/srv/computers/1001/dana-reconciler".into(),
         memory_mib: 1024,
         vcpus: 2,
     };
@@ -739,7 +819,7 @@ fn adr0065_the_jailer_runs_each_computer_in_a_jail_of_its_own() {
         args(&command),
         [
             "--id",
-            "dana-reconciler",
+            "u1001-dana-reconciler",
             "--exec-file",
             "/usr/bin/firecracker",
             "--uid",
@@ -755,7 +835,7 @@ fn adr0065_the_jailer_runs_each_computer_in_a_jail_of_its_own() {
             "--parent-cgroup",
             "glasshouse-computers",
             "--chroot-base-dir",
-            "/srv/computers/dana-reconciler/jail",
+            "/srv/computers/1001/dana-reconciler/jail",
             "--netns",
             "/var/run/netns/computers",
             "--daemonize",
@@ -776,19 +856,74 @@ fn adr0065_the_jailer_runs_each_computer_in_a_jail_of_its_own() {
             .any(|a| a == "--parent-cgroup" || a == "--netns")
     );
 
-    // Ids are the jailer's: letters, digits and dashes, at most 64.
+    // Ids are the jailer's: letters, digits and dashes, at most 64 with
+    // the owner in front ("u1001-", so 58 of the computer's own).
     let hypervisor = FirecrackerHypervisor::new(config);
-    for id in ["", "../etc", "dana_reconciler", &"a".repeat(65)] {
+    for id in ["", "../etc", "dana_reconciler", &"a".repeat(59)] {
         let odd = ComputerSpec {
             id: id.into(),
             ..computer.clone()
         };
         let error = hypervisor.start_computer(&odd).unwrap_err();
         assert!(
-            error.starts_with("A computer's id is letters, digits and dashes"),
+            error.starts_with("A computer's id is letters, digits and dashes, at most 58"),
             "{error}"
         );
     }
+    let longest = ComputerSpec {
+        id: "a".repeat(58),
+        ..computer.clone()
+    };
+    assert!(check_id(&longest).is_ok());
+}
+
+#[test]
+fn adr0066_two_peoples_own_computers_share_no_jail_cgroup_or_process() {
+    // Every person's own computer has the same id (`PERSON_COMPUTER`). By
+    // id alone, as the jailer was run, two people's machines were in one
+    // cgroup (one memory.max and cpu.max between them), and the check
+    // that a process is a computer's machine passed for either's.
+    let own = glass_api::PERSON_COMPUTER;
+    let (hers, his) = (
+        Host::of("danas", "1.17.0", own, 1001),
+        Host::of("omars", "1.17.0", own, 1002),
+    );
+    let (dana, omar) = (&hers.computer, &his.computer);
+    assert_eq!(dana.id, omar.id);
+    assert_eq!(hers.hypervisor.start_computer(dana), Ok(Started::Booted));
+    assert_eq!(his.hypervisor.start_computer(omar), Ok(Started::Booted));
+
+    // The jailer was given a name for each that the other doesn't have:
+    // a cgroup and a jail for each.
+    assert_eq!(hers.jailer_calls()[0][..2], ["--id", "u1001-computer"]);
+    assert_eq!(his.jailer_calls()[0][..2], ["--id", "u1002-computer"]);
+    assert!(hers.hypervisor.jail(dana).ends_with("u1001-computer/root"));
+    assert!(his.hypervisor.jail(omar).ends_with("u1002-computer/root"));
+
+    // Each one's machine is its own and not the other's.
+    let (danas, omars) = (read_state(dana).unwrap(), read_state(omar).unwrap());
+    assert_ne!(danas.pid, omars.pid);
+    assert!(process::alive(danas.pid, &dana.host_id()));
+    assert!(!process::alive(danas.pid, &omar.host_id()));
+
+    // Omar's machine ends, and his folder's record goes stale: the pid it
+    // names is Dana's machine now (as after a restart of the host, with
+    // pids given out again). His computer isn't running, and starting it
+    // clears what the record names without touching hers.
+    process::stop(omars.pid, &omar.host_id()).unwrap();
+    write_state(
+        omar,
+        &Running {
+            pid: danas.pid,
+            ..omars
+        },
+    )
+    .unwrap();
+    assert!(!his.hypervisor.running(omar));
+    assert_eq!(his.hypervisor.start_computer(omar), Ok(Started::Booted));
+    assert!(process::alive(danas.pid, &dana.host_id()));
+    assert!(hers.hypervisor.running(dana));
+    assert!(his.hypervisor.running(omar));
 }
 
 #[test]

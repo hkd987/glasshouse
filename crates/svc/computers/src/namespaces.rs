@@ -423,6 +423,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         ComputerSpec {
             id: "dana-reconciler".into(),
+            owner: 1001,
             dir,
             memory_mib: 1024,
             vcpus: 1,

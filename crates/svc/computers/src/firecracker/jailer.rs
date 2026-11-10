@@ -1,6 +1,10 @@
 //! The jailer's command line for one computer, as Firecracker v1.17.0's
 //! `docs/jailer.md` describes it.
 //!
+//! The jailer's id for a computer is the computer's name on this host
+//! (`u<owner's uid>-<its id>`, [`ComputerSpec::host_id`]), which no other
+//! computer here has.
+//!
 //! The jailer makes `<chroot base>/<firecracker's file name>/<id>/root`,
 //! copies Firecracker in, puts it in a cgroup (v2) with the computer's
 //! memory and CPU, chroots it there in a mount namespace and a PID
@@ -27,8 +31,10 @@ const CPU_PERIOD_US: u64 = 100_000;
 pub fn command(config: &FirecrackerConfig, computer: &ComputerSpec) -> Command {
     let mut command = Command::new(&config.jailer);
     command
+        // Its name on this host, not its id alone: the jailer names the
+        // cgroup by this, and every person's own computer has the same id.
         .arg("--id")
-        .arg(&computer.id)
+        .arg(computer.host_id())
         .arg("--exec-file")
         .arg(&config.firecracker)
         .arg("--uid")

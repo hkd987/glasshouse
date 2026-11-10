@@ -297,3 +297,21 @@ deploys on their own AWS" (2026-10-27): the hosted form is decided, §9.
 - Grok Bot runs on xAI's computers; I found no sign of it deploying
   into a customer's cloud. Running in theirs, with their models, their
   keys and their audit, is the enterprise difference.
+
+## Amended 2026-11-10 (audit 7.2, 7.4)
+- **A computer's name on its host** is `u<owner's uid>-<its id>`, and
+  that is the jailer's `--id`: the name of its jail, its cgroup and the
+  process that is its machine. The jailer was given the computer's id
+  alone, and every person's own computer has the same id (ADR 0068):
+  two people's machines were in one cgroup, with one `memory.max` and
+  `cpu.max` between them, and the check that a pid is a computer's
+  machine passed for either's, so a record gone stale could stop another
+  person's machine. A computer's own id has what the jailer's 64
+  characters leave (58 for a four-digit uid). QEMU's check is by the pid
+  file it was started with, where any QEMU passed.
+- **A snapshot that doesn't load** is treated as one the host's
+  Firecracker can't restore, whatever version made it: the computer
+  starts from its disk in a new Firecracker, the snapshot goes, and its
+  screen says why. Kept, it was tried again at every start and the
+  computer never started. A snapshot that couldn't be moved into the
+  jail is not that: it stays, and the start fails.

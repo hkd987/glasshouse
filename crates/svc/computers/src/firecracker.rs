@@ -136,6 +136,32 @@ pub enum Started {
         saved_by: String,
         host: String,
     },
+    /// From its disk, because its snapshot, made by this same Firecracker,
+    /// didn't load (`why`): the same loss, and the same files.
+    BootedUnresumed {
+        why: String,
+    },
+}
+
+/// Why a start didn't happen.
+enum Failed {
+    /// Firecracker was given its snapshot and didn't load it.
+    Snapshot(String),
+    Other(String),
+}
+
+impl Failed {
+    fn into_text(self) -> String {
+        match self {
+            Self::Snapshot(why) | Self::Other(why) => why,
+        }
+    }
+}
+
+impl From<String> for Failed {
+    fn from(why: String) -> Self {
+        Self::Other(why)
+    }
 }
 
 impl fmt::Display for Started {
@@ -149,6 +175,11 @@ impl fmt::Display for Started {
                 "It started again from its disk: it was put away by Firecracker {saved_by}, \
                  and this host's Firecracker {host} can't resume that. The programs it had \
                  open were closed; its files are all here."
+            ),
+            Self::BootedUnresumed { why } => write!(
+                f,
+                "It started again from its disk: it couldn't be resumed as it was put away. \
+                 {why} The programs it had open were closed; its files are all here."
             ),
         }
     }
@@ -186,7 +217,7 @@ impl FirecrackerHypervisor {
 
     /// [`Hypervisor::start`], saying how it started.
     pub fn start_computer(&self, computer: &ComputerSpec) -> Result<Started, String> {
-        check_id(&computer.id)?;
+        check_id(computer)?;
         if self.running(computer) {
             return Ok(Started::AlreadyRunning);
         }
@@ -195,26 +226,25 @@ impl FirecrackerHypervisor {
         fs::create_dir_all(&computer.dir)
             .map_err(|e| format!("Couldn't make {}: {e}.", computer.dir.display()))?;
         self.make_data_disk(computer)?;
-        let started = self.make_jail(computer, &jail).and_then(|()| {
-            let pid = self.launch(computer, &jail)?;
-            let client = Client::new(jail.join(jailer::API_SOCKET.trim_start_matches('/')));
-            let info = self.wait_for_api(&client, pid, &computer.id)?;
-            let started = self.boot_or_resume(computer, &jail, &client, &info.vmm_version)?;
-            write_state(
-                computer,
-                &Running {
-                    pid,
-                    api_socket: client.socket().to_owned(),
-                    vsock: jail.join(VSOCK),
-                    jail: jail.clone(),
-                    firecracker_version: info.vmm_version,
-                },
-            )?;
-            Ok(started)
-        });
+        let started = match self.start_once(computer, &jail) {
+            // Its snapshot didn't load. Kept, it was tried again at the
+            // next start and the one after, and the computer never
+            // started again. It starts from its disk (ADR 0065: open
+            // programs are lost, files never are), in a new Firecracker:
+            // one that failed a load isn't asked for anything else.
+            Err(Failed::Snapshot(why)) => self
+                .clear(computer)
+                .and_then(|()| remove_all(&computer.dir.join(SNAPSHOT)))
+                .and_then(|()| self.start_once(computer, &jail).map_err(Failed::into_text))
+                .map(|_| Started::BootedUnresumed { why }),
+            other => other.map_err(Failed::into_text),
+        };
         match started {
             Ok(started) => {
-                if let Started::BootedFromDisk { .. } = started {
+                if matches!(
+                    started,
+                    Started::BootedFromDisk { .. } | Started::BootedUnresumed { .. }
+                ) {
                     let _ = note(computer, &started.to_string());
                 }
                 Ok(started)
@@ -226,18 +256,39 @@ impl FirecrackerHypervisor {
         }
     }
 
+    /// One Firecracker in a new jail, resumed or booted.
+    fn start_once(&self, computer: &ComputerSpec, jail: &Path) -> Result<Started, Failed> {
+        self.make_jail(computer, jail)?;
+        let pid = self.launch(computer, jail)?;
+        let client = Client::new(jail.join(jailer::API_SOCKET.trim_start_matches('/')));
+        let info = self.wait_for_api(&client, pid, &computer.host_id())?;
+        let started = self.boot_or_resume(computer, jail, &client, &info.vmm_version)?;
+        write_state(
+            computer,
+            &Running {
+                pid,
+                api_socket: client.socket().to_owned(),
+                vsock: jail.join(VSOCK),
+                jail: jail.to_owned(),
+                firecracker_version: info.vmm_version,
+            },
+        )?;
+        Ok(started)
+    }
+
     /// The jailer's command for `computer`.
     pub fn jailer_command(&self, computer: &ComputerSpec) -> Command {
         jailer::command(&self.config, computer)
     }
 
-    /// Its jail: `<dir>/jail/<firecracker's file name>/<id>/root`.
+    /// Its jail: `<dir>/jail/<firecracker's file name>/<its name on this
+    /// host>/root`, where the jailer makes it.
     fn jail(&self, computer: &ComputerSpec) -> PathBuf {
         computer
             .dir
             .join(JAIL)
             .join(self.exec_name())
-            .join(&computer.id)
+            .join(computer.host_id())
             .join("root")
     }
 
@@ -252,7 +303,8 @@ impl FirecrackerHypervisor {
 
     /// Its Firecracker, from its folder's record, if that runs.
     fn find(&self, computer: &ComputerSpec) -> Option<Running> {
-        read_state(computer).filter(|running| process::alive(running.pid, &computer.id))
+        let ours = computer.host_id();
+        read_state(computer).filter(|running| process::alive(running.pid, &ours))
     }
 
     /// Stops what's left of an earlier run (a Firecracker the host lost
@@ -269,8 +321,9 @@ impl FirecrackerHypervisor {
             pids.extend(pid_file(&running.jail));
         }
         pids.extend(pid_file(&self.jail(computer)));
+        let ours = computer.host_id();
         for pid in pids {
-            process::stop(pid, &computer.id)?;
+            process::stop(pid, &ours)?;
         }
         remove_all(&computer.dir.join(JAIL))?;
         remove(&computer.dir.join(STATE))
@@ -372,7 +425,7 @@ impl FirecrackerHypervisor {
         jail: &Path,
         client: &Client,
         version: &str,
-    ) -> Result<Started, String> {
+    ) -> Result<Started, Failed> {
         match snapshot_version(computer) {
             Some(saved) if saved == version => {
                 resume(computer, jail, client, self.config.uid, self.config.gid)?;
@@ -499,7 +552,7 @@ impl Hypervisor for FirecrackerHypervisor {
     /// Pauses it, takes a full snapshot into its folder and stops its
     /// Firecracker. If the snapshot fails it resumes, and keeps running.
     fn suspend(&self, computer: &ComputerSpec) -> Result<(), String> {
-        check_id(&computer.id)?;
+        check_id(computer)?;
         let Some(running) = self.find(computer) else {
             // Not running: its folder holds its disk, and its snapshot if
             // it has one, already.
@@ -534,7 +587,7 @@ impl Hypervisor for FirecrackerHypervisor {
             };
             return Err(format!("Couldn't snapshot {id}, so {resumed}. {e}"));
         }
-        process::stop(running.pid, id)?;
+        process::stop(running.pid, &computer.host_id())?;
         self.keep_snapshot(computer, &running.jail, &info.vmm_version)?;
         self.clear(computer)
     }
@@ -548,7 +601,7 @@ fn resume(
     client: &Client,
     uid: u32,
     gid: u32,
-) -> Result<(), String> {
+) -> Result<(), Failed> {
     let kept = computer.dir.join(SNAPSHOT);
     let moves = [(SNAP_STATE, RESUME_STATE), (SNAP_MEMORY, RESUME_MEMORY)];
     let put_back = || {
@@ -564,7 +617,9 @@ fn resume(
             chown(&from, Some(uid), Some(gid)).and_then(|()| fs::rename(&from, jail.join(in_jail)));
         if let Err(e) = moved {
             put_back();
-            return Err(format!("couldn't move its snapshot into its jail: {e}."));
+            return Err(Failed::Other(format!(
+                "couldn't move its snapshot into its jail: {e}."
+            )));
         }
     }
     let load = client.load_snapshot(&SnapshotLoad {
@@ -577,7 +632,7 @@ fn resume(
     });
     if let Err(e) = load {
         put_back();
-        return Err(e);
+        return Err(Failed::Snapshot(e));
     }
     // Resumed. Its files were moved, not copied: resuming from them again
     // would undo what the disk has had since. What's left is its version.
@@ -623,16 +678,24 @@ fn inside(name: &str) -> String {
     format!("/{}", name.trim_start_matches('/'))
 }
 
-/// The jailer's rule for ids: letters, digits and dashes, at most 64.
-fn check_id(id: &str) -> Result<(), String> {
+/// The most characters of a jailer's id.
+const JAILER_ID_MOST: usize = 64;
+
+/// The jailer's rule for an id: letters, digits and dashes, at most 64.
+/// Its id for a computer is the computer's name on this host
+/// ([`ComputerSpec::host_id`]), so the computer's own id has what that
+/// leaves.
+fn check_id(computer: &ComputerSpec) -> Result<(), String> {
+    let id = &computer.id;
     let fits = !id.is_empty()
-        && id.len() <= 64
+        && computer.host_id().len() <= JAILER_ID_MOST
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     if fits {
         Ok(())
     } else {
+        let most = JAILER_ID_MOST - (computer.host_id().len() - id.len());
         Err(format!(
-            "A computer's id is letters, digits and dashes, at most 64: {id:?} isn't."
+            "A computer's id is letters, digits and dashes, at most {most}: {id:?} isn't."
         ))
     }
 }

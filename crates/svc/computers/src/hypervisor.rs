@@ -16,8 +16,12 @@ use glass_platform::sandbox::ProcessSpec;
 /// One agent's computer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComputerSpec {
-    /// `dana-reconciler`: letters, digits and `-`.
+    /// `dana-reconciler`: letters, digits and `-`. Its owner's name for
+    /// it: two people's computers may have the same id, and each
+    /// person's own computer does (`computer`).
     pub id: String,
+    /// Whose it is: their uid on this host.
+    pub owner: u32,
     /// Its own folder on the host: its disk (a root tree for namespaces, an
     /// image file and snapshots for a VM), its logs, its sockets.
     pub dir: PathBuf,
@@ -26,6 +30,16 @@ pub struct ComputerSpec {
 }
 
 impl ComputerSpec {
+    /// Its name on this host, which no other computer here has:
+    /// `u1001-computer`. What the host names by computer (a jail, a
+    /// cgroup, the process that is its machine) is named by this, never
+    /// by `id` alone: by `id`, every person's own computer was "computer",
+    /// in one cgroup with one memory limit between them, and one's stale
+    /// record could stop another's machine.
+    pub fn host_id(&self) -> String {
+        format!("u{}-{}", self.owner, self.id)
+    }
+
     /// Its terminal: what its tasks and the person print, appended.
     pub fn screen(&self) -> PathBuf {
         self.dir.join("screen.log")

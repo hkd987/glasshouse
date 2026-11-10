@@ -80,13 +80,28 @@ impl QemuHypervisor {
         Self { config }
     }
 
+    /// Its QEMU's pid, from its folder's pid file, if that process is its
+    /// QEMU: a QEMU started with this very pid file. Any QEMU passed
+    /// before, so a pid another computer's QEMU had by now (the host
+    /// restarted, the file stayed) was taken for this one's, and stopping
+    /// this computer stopped that one.
     fn pid(computer: &ComputerSpec) -> Option<u32> {
-        let text = fs::read_to_string(computer.dir.join(PID)).ok()?;
+        use std::os::unix::ffi::OsStrExt;
+        let file = computer.dir.join(PID);
+        let text = fs::read_to_string(&file).ok()?;
         let pid: u32 = text.trim().parse().ok()?;
         let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        String::from_utf8_lossy(&cmdline)
-            .contains("qemu-system")
-            .then_some(pid)
+        if !String::from_utf8_lossy(&cmdline).contains("qemu-system") {
+            return None;
+        }
+        // However the folder was spelled when it started.
+        let file = fs::canonicalize(&file).ok()?;
+        let mut args = cmdline.split(|b| *b == 0);
+        let ours = args.by_ref().any(|a| a == b"-pidfile")
+            && args.next().is_some_and(|a| {
+                fs::canonicalize(std::ffi::OsStr::from_bytes(a)).is_ok_and(|p| p == file)
+            });
+        ours.then_some(pid)
     }
 
     fn port(computer: &ComputerSpec) -> Result<u16, String> {
@@ -175,7 +190,8 @@ impl QemuHypervisor {
             qemu.args(["-global", "driver=cfi.pflash01,property=secure,value=on"]);
         }
         let status = qemu
-            .args(["-nodefaults", "-name", &computer.id, "-machine", "q35"])
+            .args(["-nodefaults", "-name", &computer.host_id()])
+            .args(["-machine", "q35"])
             .args(["-accel", &self.config.accel, "-cpu", &self.config.cpu])
             .args(["-smp", &computer.vcpus.to_string()])
             .args(["-m", &computer.memory_mib.to_string()])
@@ -642,6 +658,7 @@ impl Hypervisor for QemuHypervisor {
                     let path = entry.path();
                     let spec = ComputerSpec {
                         id: String::new(),
+                        owner: 0,
                         dir: path.clone(),
                         memory_mib: 0,
                         vcpus: 0,
@@ -837,6 +854,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let spec = ComputerSpec {
             id: "computer".into(),
+            owner: 1001,
             dir: dir.path().into(),
             memory_mib: 3072,
             vcpus: 2,
@@ -844,6 +862,47 @@ mod tests {
         run.workdir = "/work/01a1b2c3".into();
         assert!(hv.command(&spec, &run).is_err());
         assert!(hv.frame(&spec).is_err());
+    }
+
+    #[test]
+    fn adr0072_a_computers_machine_is_the_qemu_started_with_its_own_pid_file() {
+        // Any QEMU passed for a computer's: after the host restarted, with
+        // pids given out again, the pid in one computer's file could be
+        // another's machine, and stopping the first stopped that.
+        let dir = tempfile::tempdir().unwrap();
+        let spec = |name: &str| {
+            let dir = dir.path().join(name);
+            fs::create_dir_all(&dir).unwrap();
+            ComputerSpec {
+                id: "computer".into(),
+                owner: 1001,
+                dir,
+                memory_mib: 3072,
+                vcpus: 2,
+            }
+        };
+        let (dana, omar) = (spec("dana"), spec("omar"));
+        // A stand-in for Dana's QEMU: a process whose command line names
+        // QEMU and her pid file, as QEMU's own does.
+        let mut machine = Command::new("sh")
+            // Two commands, or the shell becomes `sleep` and its command
+            // line with it.
+            .args(["-c", "sleep 30; exit 0", "qemu-system-x86_64", "-pidfile"])
+            .arg(dana.dir.join(PID))
+            .spawn()
+            .unwrap();
+        let pid = machine.id();
+        fs::write(dana.dir.join(PID), format!("{pid}\n")).unwrap();
+        assert_eq!(QemuHypervisor::pid(&dana), Some(pid));
+        // Omar's file names the same process: it isn't his.
+        fs::write(omar.dir.join(PID), format!("{pid}\n")).unwrap();
+        assert_eq!(QemuHypervisor::pid(&omar), None);
+        // Nor is a process that isn't QEMU, or one that has ended.
+        fs::write(omar.dir.join(PID), format!("{}\n", std::process::id())).unwrap();
+        assert_eq!(QemuHypervisor::pid(&omar), None);
+        machine.kill().unwrap();
+        machine.wait().unwrap();
+        assert_eq!(QemuHypervisor::pid(&dana), None);
     }
 
     #[test]
