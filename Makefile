@@ -28,7 +28,7 @@ export DIST_PROFILE := $(FREEBSD_PROFILE)
 
 .PHONY: help build check test lint lint-all fmt check-layers deny advisories sbom timings freebsd dev-host e2e-vm \
 	test-env image-release legal-base ci clean shell shell-test shell-lint shell-preview shell-vm greeter-vm \
-	apps-build apps-test apps-lint apps-dev freebsd-ports agents-app agents-app-test agents-app-lint agents-app-deps \
+	apps-build apps-test apps-lint apps-dev freebsd-ports agents-app agents-app-test agents-app-lint agents-app-deps agents-app-deps-list \
 	console-dev console-test console-lint meet-test tla
 
 help: ## List targets
@@ -155,8 +155,13 @@ agents-app-lint: ## The Agents desktop app's formatting and clippy (warnings are
 	cargo fmt --manifest-path agents-app/Cargo.toml --all --check
 	cargo clippy $(AGENTS_APP) --workspace --all-targets -- -D warnings
 
+AGENTS_APP_DEPS := libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
 agents-app-deps: ## Linux: WebKitGTK and the tray's libraries, to build the Agents desktop app
-	apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+	apt-get install -y --no-install-recommends $(AGENTS_APP_DEPS)
+# Their names, for CI, which installs them with its other packages
+# (tools/dev/ci-packages.sh rides out a package server that can't be found).
+agents-app-deps-list:
+	@echo $(AGENTS_APP_DEPS)
 
 # The first-party web apps and their SDK (ADR 0009, 0024): a TypeScript
 # workspace in apps/, built with esbuild, tested in headless Chromium against

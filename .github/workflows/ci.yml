@@ -132,9 +132,9 @@ jobs:
         # Seconds when the package servers answer; see ci-packages.sh.
         timeout-minutes: 15
         run: |
-          tools/dev/ci-packages.sh clang lld libssl-dev pkg-config
-          # WebKitGTK and the tray's libraries: its window on Linux.
-          sudo make agents-app-deps
+          # With WebKitGTK and the tray's libraries: its window on Linux.
+          tools/dev/ci-packages.sh clang lld libssl-dev pkg-config \
+            $(make -s agents-app-deps-list)
       - name: The pinned Rust toolchain
         run: rustup show
       - uses: Swatinem/rust-cache@v2
