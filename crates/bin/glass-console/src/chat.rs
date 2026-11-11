@@ -43,6 +43,25 @@ pub struct Stored {
     /// added at: their computers get the whole history (ADR 0030 C2).
     #[serde(default)]
     pub joined: BTreeMap<String, u64>,
+    /// The sequence number each of `epochs` was taken at, in the same
+    /// order, so a computer that has the conversation is sent only the
+    /// epochs since its cursor. Shorter than `epochs` for a conversation
+    /// kept by a console from before this: all its epochs are sent then.
+    #[serde(default)]
+    pub epoch_seqs: Vec<u64>,
+}
+
+impl Stored {
+    /// The epochs a computer whose cursor is `since` hasn't been sent, or
+    /// all of them for one the conversation is new to (`whole`): its
+    /// people were added since, or it was made since. Each epoch is sent
+    /// whole: its maker's signature covers every envelope.
+    fn epochs_since(&self, since: u64, whole: bool) -> &[Epoch] {
+        if whole || self.created_seq > since || self.epoch_seqs.len() != self.epochs.len() {
+            return &self.epochs;
+        }
+        &self.epochs[self.epoch_seqs.partition_point(|at| *at <= since)..]
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -372,6 +391,7 @@ impl ChatState {
                 created_seq: seq,
                 changed_seq: seq,
                 joined: BTreeMap::new(),
+                epoch_seqs: vec![seq],
             },
         );
         Ok(seq)
@@ -432,6 +452,14 @@ impl ChatState {
         stored.changed_seq = seq;
         for login in added {
             stored.joined.insert(login, seq);
+        }
+        // A conversation from before these were kept, still at its first
+        // epoch, took it when it was made.
+        if stored.epoch_seqs.is_empty() && stored.epochs.len() == 1 {
+            stored.epoch_seqs.push(stored.created_seq);
+        }
+        if stored.epoch_seqs.len() == stored.epochs.len() {
+            stored.epoch_seqs.push(seq);
         }
         stored.epochs.push(epoch);
         Ok(seq)
@@ -557,9 +585,15 @@ impl ChatState {
     /// was sent and moves its cursor only past what it kept
     /// (specs/tla/ChatSync.tla), so:
     ///
-    /// - a conversation goes with its epochs when it was made, or its
-    ///   members changed, since the cursor, or someone here was added to
-    ///   it since (who is sent its history too);
+    /// - a conversation goes when it was made, or its members changed,
+    ///   since the cursor, or someone here was added to it since (who is
+    ///   sent its history too);
+    /// - with it go the epochs since the cursor, or all of them where the
+    ///   conversation is new to the computer. An epoch of a 500-person
+    ///   channel is 183 KB (an envelope a member), and every change of
+    ///   its members sent every epoch to all 500 computers: past 45
+    ///   changes that is more than the 8 MiB a computer reads, and its
+    ///   chat, docs and artifacts stopped syncing;
     /// - the keys that go are the ones those conversations and epochs
     ///   name, and the senders' of the messages in the answer;
     /// - a computer that starts over asks from 0 and is sent everything.
@@ -612,15 +646,18 @@ impl ChatState {
             0
         };
         // The keys the answer's records name: a fresh conversation's
-        // members, the makers of its epochs and whoever they are sealed
-        // to, and each message's sender.
+        // members, the makers of the epochs sent and whoever they are
+        // sealed to, and each message's sender.
         let mut people: BTreeSet<&str> = BTreeSet::new();
         let mut named: BTreeSet<String> = BTreeSet::new();
+        let mut epochs: Vec<Epoch> = Vec::new();
         for stored in &fresh {
             people.extend(stored.conversation.members.iter().map(String::as_str));
-            for epoch in &stored.epochs {
+            let whole = joined.contains(stored.conversation.id.as_str());
+            for epoch in stored.epochs_since(since, whole) {
                 named.insert(epoch.body.made_by.clone());
                 named.extend(epoch.body.envelopes.iter().map(|e| e.key.clone()));
+                epochs.push(epoch.clone());
             }
         }
         let mut messages = Vec::new();
@@ -637,8 +674,7 @@ impl ChatState {
         }
         ChatSyncResponse {
             conversations: fresh.iter().map(|s| s.conversation.clone()).collect(),
-            // Whole: the maker's signature covers every envelope.
-            epochs: fresh.iter().flat_map(|s| s.epochs.clone()).collect(),
+            epochs,
             messages,
             keys: self
                 .keys
@@ -2264,8 +2300,8 @@ mod tests {
         assert_eq!(ids(&made.keys), both);
 
         // Sam is added to the first channel. Dana's computer is sent the
-        // channel as it is now with its epochs and Sam's key, and no
-        // message again; Sam's is sent its history too.
+        // channel as it is now with its new epoch and Sam's key, and no
+        // message again; Sam's is sent every epoch and its history.
         let everyone = ["dana", "priya", "sam"];
         let (status, body, _) = change(
             &org,
@@ -2282,7 +2318,15 @@ mod tests {
         let changed = org.sync(&dana, made.cursor, 0).await;
         assert_eq!(changed.conversations.len(), 1);
         assert_eq!(changed.conversations[0].members.len(), 3);
-        assert_eq!(changed.epochs.len(), 2);
+        assert_eq!(
+            changed
+                .epochs
+                .iter()
+                .map(|e| e.body.number)
+                .collect::<Vec<_>>(),
+            [2],
+            "the epoch it hasn't got; it has the first"
+        );
         assert!(changed.messages.is_empty());
         assert!(changed.keys.iter().any(|k| k.id == sam.key.id));
         let joined = org.sync(&sam, changed.cursor - 1, 0).await;
@@ -2313,6 +2357,56 @@ mod tests {
         let rekeyed = org.sync(&dana, changed.cursor, 0).await;
         assert_eq!(rekeyed.messages.len(), 1);
         assert_eq!(ids(&rekeyed.keys), ids(std::slice::from_ref(&again.key)));
+    }
+
+    /// A console from before each epoch's number was kept has
+    /// conversations without them. One still at its first epoch took it
+    /// when it was made; one that had changed already is sent whole, as
+    /// every conversation was.
+    #[tokio::test]
+    async fn cf91_a_conversation_from_before_epochs_were_numbered_is_still_sent_right() {
+        let org = Org::new().await;
+        let priya = org.computer("laptop-priya", "priya").await;
+        let dana = org.computer("laptop-dana", "dana").await;
+        let _sam = org.computer("laptop-sam", "sam").await;
+        let _jordan = org.computer("laptop-jordan", "jordan").await;
+        let (_, channel, key) = org.channel(&priya, &["dana", "priya"], "#deal").await;
+        let as_before = |org: &Org| {
+            let mut state = org.console.state();
+            state
+                .chat
+                .conversations
+                .get_mut(&channel)
+                .unwrap()
+                .epoch_seqs
+                .clear();
+        };
+        let numbers = |answer: &ChatSyncResponse| -> Vec<u32> {
+            answer.epochs.iter().map(|e| e.body.number).collect()
+        };
+        as_before(&org);
+        let first = org.sync(&dana, 0, 0).await;
+        assert_eq!(numbers(&first), [1]);
+
+        // Its first change since: Dana's computer has epoch 1, and is
+        // sent the second alone.
+        let three = ["dana", "priya", "sam"];
+        let (status, body, key) =
+            change(&org, &priya, &channel, 2, &key, &three, &["sam"], &three).await;
+        assert_eq!(status, 200, "{body}");
+        let second = org.sync(&dana, first.cursor, 0).await;
+        assert_eq!(numbers(&second), [2]);
+
+        // One that had changed before the console kept numbers: all of
+        // its epochs, since which are new can't be told.
+        as_before(&org);
+        let four = ["dana", "jordan", "priya", "sam"];
+        let (status, body, _) =
+            change(&org, &priya, &channel, 3, &key, &four, &["jordan"], &four).await;
+        assert_eq!(status, 200, "{body}");
+        let third = org.sync(&dana, second.cursor, 0).await;
+        assert_eq!(numbers(&third), [1, 2, 3]);
+        assert_eq!(third.conversations[0].members.len(), 4);
     }
 
     /// IT sets how long chat is kept: the Chat release's version.

@@ -919,9 +919,9 @@ pub mod testing {
         blobs: Vec<crate::shared::SealedBlob>,
         /// (conversation, login, sequence number) for each person added.
         joined: Vec<(String, String, u64)>,
-        /// Each conversation's sequence number: when it was made, or its
-        /// members last changed.
-        changed: std::collections::HashMap<String, u64>,
+        /// Each conversation's sequence numbers: when it was made, and
+        /// each time its members changed. One for each of its epochs.
+        changed: std::collections::HashMap<String, Vec<u64>>,
     }
 
     #[derive(Debug)]
@@ -1142,7 +1142,8 @@ pub mod testing {
             }
             kept.seq += 1;
             let seq = kept.seq;
-            kept.changed.insert(request.conversation.id.clone(), seq);
+            kept.changed
+                .insert(request.conversation.id.clone(), vec![seq]);
             kept.conversations
                 .push((request.conversation.clone(), vec![request.epoch.clone()]));
             Ok(seq)
@@ -1245,7 +1246,7 @@ pub mod testing {
             for login in added {
                 kept.joined.push((id.clone(), login, seq));
             }
-            kept.changed.insert(id.clone(), seq);
+            kept.changed.entry(id.clone()).or_default().push(seq);
             let (conversation, epochs) = &mut kept.conversations[at];
             conversation.members = after;
             conversation.epoch = epoch.body.number;
@@ -1271,29 +1272,37 @@ pub mod testing {
                 .collect();
             let ids: Vec<&str> = theirs.iter().map(|(c, _)| c.id.as_str()).collect();
             // As the console answers (glass-console's `ChatState::sync`):
-            // only what changed since the cursor. A conversation goes with
-            // its epochs when it was made or its members changed since, or
-            // someone here was added to it since; the keys that go are the
-            // ones those name, and the senders' of the answer's messages.
+            // only what changed since the cursor. A conversation goes when
+            // it was made or its members changed since, or someone here
+            // was added to it since. With it go the epochs since the
+            // cursor, or all of them where it is new to the computer. The
+            // keys that go are the ones those name, and the senders' of
+            // the answer's messages.
             let added = |id: &str| {
                 kept.joined
                     .iter()
                     .any(|(c, l, at)| c == id && logins.contains(&l) && *at > request.since)
             };
+            let at = |id: &str| kept.changed.get(id).map_or(&[][..], Vec::as_slice);
             let fresh: Vec<&(Conversation, Vec<Epoch>)> = theirs
                 .iter()
                 .copied()
                 .filter(|(c, _)| {
-                    kept.changed
-                        .get(&c.id)
-                        .is_some_and(|at| *at > request.since)
-                        || added(&c.id)
+                    at(&c.id).last().is_some_and(|at| *at > request.since) || added(&c.id)
                 })
                 .collect();
             let people: Vec<&String> = fresh.iter().flat_map(|(c, _)| &c.members).collect();
-            let mut named: Vec<String> = fresh
+            let mut epochs: Vec<Epoch> = Vec::new();
+            for (conversation, all) in &fresh {
+                let known = at(&conversation.id)
+                    .iter()
+                    .take_while(|at| **at <= request.since)
+                    .count();
+                let from = if added(&conversation.id) { 0 } else { known };
+                epochs.extend(all.iter().skip(from).cloned());
+            }
+            let mut named: Vec<String> = epochs
                 .iter()
-                .flat_map(|(_, epochs)| epochs)
                 .flat_map(|e| {
                     e.body
                         .envelopes
@@ -1317,7 +1326,7 @@ pub mod testing {
             }
             Ok(ChatSyncResponse {
                 conversations: fresh.iter().map(|(c, _)| c.clone()).collect(),
-                epochs: fresh.iter().flat_map(|(_, e)| e.clone()).collect(),
+                epochs,
                 messages,
                 keys: kept
                     .keys

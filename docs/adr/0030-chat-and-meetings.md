@@ -903,9 +903,16 @@ Dana in forty channels, the answer for one new message was 53 KB; a doc
 and an artifact are each a conversation, so people have hundreds. It is
 1 KB now (`cf91_an_answer_carries_only_what_changed_since_the_computer_asked`).
 
-- A conversation goes, with all its epochs, when it was made or its
-  members changed since the computer's cursor, or someone on the computer
-  was added to it since (who is sent its history too, as before).
+- A conversation goes when it was made or its members changed since the
+  computer's cursor, or someone on the computer was added to it since
+  (who is sent its history too, as before).
+- With it go the epochs since the cursor (`Stored.epoch_seqs`), or all of
+  them where the conversation is new to the computer. An epoch is sealed
+  to every member, 366 bytes each: 183 KB for a channel of 500. Every
+  change of its members sent every epoch to all 500 computers, and past
+  45 changes that is more than the 8 MiB a computer reads in one answer:
+  each member's chat, docs and artifacts stopped syncing. A member's
+  computer is sent the one new epoch now.
 - The keys that go are the ones those conversations and epochs name
   (members, each epoch's maker, whoever an epoch is sealed to), and the
   senders' of the messages in the answer. The last matters when a
@@ -925,6 +932,16 @@ Chat's, Docs', Artifacts', Skills' and meetings' tests run against it.
 What it no longer does: an answer used to repeat everything, so a record
 a computer had refused was offered again at every sync. It is offered
 once now, and again only when the conversation changes.
+
+Still open, and not a fix of this size: **someone new to a large,
+much-changed conversation** is sent every epoch, because their computer
+checks the chain from the start. Past 45 changes of a 500-person
+channel that answer passes 8 MiB and the newcomer's computer can't take
+it; their sync then stops for everything, as every member's did before.
+It needs the chain to be checkable from a later point (an epoch that
+restates who is in the conversation, signed by enough of them) or §7's
+move to MLS. A pilot's channels are nowhere near it: one of 50 people
+would need about 450 changes.
 
 ## Amended 2026-11-11 (audit 5.3, the owner's decision): how long chat is kept, as built
 §4's retention is built, as §4 decided it: IT sets it on the console's
