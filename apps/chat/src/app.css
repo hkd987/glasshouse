@@ -1042,6 +1042,14 @@
   margin: 0 auto 10px;
 }
 
+/* Where a conversation's history ends by the period IT set for it. */
+.kept {
+  align-self: center;
+  margin: 8px 0 12px;
+  font-size: 12px;
+  text-align: center;
+}
+
 .button.small {
   height: 28px;
   padding: 0 12px;

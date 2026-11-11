@@ -81,6 +81,9 @@ pub struct Console {
     releases: watch::Sender<u64>,
     /// Bumped whenever chat changes, to wake computers waiting on it.
     chat_changed: watch::Sender<u64>,
+    /// IT changed how long chat is kept: the console's own copy is gone
+    /// over now, not at the next day's pass (CF-61).
+    chat_kept_changed: tokio::sync::Notify,
     /// Meetings' sessions, in memory only (ADR 0030 §6).
     rooms: Mutex<crate::meet::Rooms>,
     /// Signatures of device requests seen lately, with their times: one
@@ -154,6 +157,23 @@ const MAX_MODEL_CALLS: usize = 64;
 /// How often meetings' sessions are checked against the relay's rooms, so
 /// one that everybody dropped out of ends, and its keys go (ADR 0052).
 const MEETINGS_SWEEP: Duration = Duration::from_secs(30);
+/// How often the console's chat is checked against the organization's
+/// rule for how long chat is kept (CF-61).
+const CHAT_TRIM: Duration = Duration::from_secs(24 * 3600);
+
+/// `POST /api/chat/keep`: how long chat is kept (CF-61).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeepChat {
+    /// Days channels keep their messages; 0 is for good.
+    channel_days: u32,
+    /// The same for direct messages and groups.
+    dm_days: u32,
+    /// Without it, the answer is what this would remove, and nothing is
+    /// changed.
+    #[serde(default)]
+    confirm: bool,
+}
 
 /// `POST /api/credits/checkout`: what an admin buys.
 #[derive(Deserialize)]
@@ -377,6 +397,7 @@ impl Console {
             sessions: Mutex::new(HashMap::new()),
             releases,
             chat_changed,
+            chat_kept_changed: tokio::sync::Notify::new(),
             rooms: Mutex::new(crate::meet::Rooms::default()),
             seen: Mutex::new(HashMap::new()),
             relay: std::sync::OnceLock::new(),
@@ -1226,6 +1247,22 @@ impl Console {
         self.releases.send_modify(|n| *n += 1);
     }
 
+    /// Removes the chat older than the organization keeps it from what the
+    /// console holds, as of `now` (CF-61, [`State::keep_chat_for`]); how
+    /// many messages went. With no period set, nothing is removed.
+    ///
+    /// It blocks on the disk. The log is written again from the log, with
+    /// the console's state let go: computers go on posting and syncing
+    /// while a long history is copied, and what they post meanwhile is in
+    /// the log that takes its place.
+    pub fn trim_chat(&self, now: glass_types::Timestamp) -> anyhow::Result<usize> {
+        let Some((gone, log, len)) = self.state().chat_past_keeping(now)? else {
+            return Ok(0);
+        };
+        let tmp = crate::chat::copy_log_without(&log, len, &gone)?;
+        self.state().forget_chat(&gone, &tmp, len)
+    }
+
     /// Serves until the listener fails.
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> anyhow::Result<()> {
         let flusher = Arc::clone(&self);
@@ -1249,6 +1286,32 @@ impl Console {
             loop {
                 tokio::time::sleep(MEETINGS_SWEEP).await;
                 sweeper.sweep_meetings().await;
+            }
+        });
+        // Chat older than the organization keeps it goes from the
+        // console's copy (CF-61, ADR 0030 §4): as it starts, once a day,
+        // and when IT changes the periods.
+        let trimmer = Arc::clone(&self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(CHAT_TRIM);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    () = trimmer.chat_kept_changed.notified() => {}
+                }
+                let trimmer = Arc::clone(&trimmer);
+                let trimmed = tokio::task::spawn_blocking(move || {
+                    trimmer.trim_chat(glass_types::Timestamp::now())
+                });
+                match trimmed.await {
+                    Ok(Ok(0)) => {}
+                    Ok(Ok(removed)) => tracing::info!(
+                        removed,
+                        "removed chat messages older than the organization keeps them"
+                    ),
+                    Ok(Err(e)) => tracing::warn!("removing chat past its period: {e:#}"),
+                    Err(e) => tracing::warn!("removing chat past its period: {e}"),
+                }
             }
         });
         // An accept that fails is tried again, and connections have a
@@ -1537,6 +1600,44 @@ impl Console {
                 Ok(v) => ok(v),
                 Err(e) => error(500, &format!("{e:#}")),
             },
+            ("GET", ["chat"]) => ok(views::chat(&self.state())),
+            // How long chat is kept (CF-61). Asked first without `confirm`:
+            // IT is told how many messages would go and nothing changes.
+            // Removing is for good, on every computer.
+            ("POST", ["chat", "keep"]) => {
+                let keep: KeepChat = match body(request) {
+                    Ok(b) => b,
+                    Err(r) => return r,
+                };
+                let kept_for = glass_managed::chat::KeptFor {
+                    channel_days: keep.channel_days,
+                    dm_days: keep.dm_days,
+                };
+                let mut state = self.state();
+                if let Err(r) = State::chat_kept_checked(kept_for) {
+                    return refused(r);
+                }
+                if !keep.confirm {
+                    let now = glass_types::Timestamp::now();
+                    return ok(json!({ "would_remove": state.chat_past(kept_for, now) }));
+                }
+                match state.keep_chat_for(kept_for, &user) {
+                    Ok(version) => {
+                        drop(state);
+                        tracing::info!(
+                            %user,
+                            channel_days = kept_for.channel_days,
+                            dm_days = kept_for.dm_days,
+                            version,
+                            "chat: how long it is kept was set"
+                        );
+                        self.released();
+                        self.chat_kept_changed.notify_one();
+                        ok(json!({ "version": version }))
+                    }
+                    Err(r) => refused(r),
+                }
+            }
             ("POST", ["policy", "edit"]) => {
                 let edit: Edit = match body(request) {
                     Ok(b) => b,
@@ -3292,6 +3393,73 @@ mod tests {
         assert_eq!(sign_in(&t.console, "nobody").await, Err(403));
     }
 
+    // ADR 0030 §4: IT sets how long chat is kept on the console. Asked
+    // without `confirm` it is told what would go and nothing changes;
+    // confirmed, a new Chat release goes to every computer, signed.
+    #[tokio::test]
+    async fn cf61_it_sets_how_long_chat_is_kept_and_every_computer_is_sent_it() {
+        let t = console().await;
+        let first = t.sync("d", None, 0).await.chat.expect("the Chat release");
+        let (status, page) = t.call("GET", "/api/chat", Value::Null).await;
+        assert_eq!(status, 200, "{page}");
+        assert_eq!(page["kept_for"], json!({ "channel_days": 0, "dm_days": 0 }));
+        assert_eq!(page["version"], first.version);
+        assert!(page["set"].is_null(), "nobody set it yet: {page}");
+        assert!(
+            page["fingerprint"].as_str().is_some_and(|f| f.len() == 39),
+            "{page}"
+        );
+
+        // What it would do, first: nothing is old enough here, and
+        // nothing is changed by asking.
+        let keep = json!({ "channel_days": 90, "dm_days": 30 });
+        let (status, asked) = t.call("POST", "/api/chat/keep", keep).await;
+        assert_eq!(status, 200, "{asked}");
+        assert_eq!(asked, json!({ "would_remove": 0 }));
+        assert!(!t.console.state().chat.kept_for.is_set());
+
+        let keep = json!({ "channel_days": 90, "dm_days": 30, "confirm": true });
+        let (status, done) = t.call("POST", "/api/chat/keep", keep).await;
+        assert_eq!(status, 200, "{done}");
+        assert_eq!(done["version"], first.version + 1);
+        let (_, page) = t.call("GET", "/api/chat", Value::Null).await;
+        assert_eq!(
+            page["kept_for"],
+            json!({ "channel_days": 90, "dm_days": 30 })
+        );
+        assert_eq!(page["set"]["by"], "pat");
+
+        // A computer that has the first release is sent the new one, and
+        // it opens under the org's key as a newer version of the same.
+        let body = json!({ "device": "d", "chat": first.version, "wait_secs": 0 });
+        let r = t.device("/device/v1/sync", body).await;
+        let response: SyncResponse = serde_json::from_slice(&r.body).unwrap();
+        let signed = response.chat.expect("the new release");
+        let release: glass_managed::ChatRelease = signed
+            .open(DocKind::Chat, "acme", &[t.key], Some(first.version))
+            .unwrap();
+        assert_eq!(release.channel_days, 90);
+        assert_eq!(release.dm_days, 30);
+        let before: glass_managed::ChatRelease =
+            first.open(DocKind::Chat, "acme", &[t.key], None).unwrap();
+        assert_eq!(
+            release.compliance, before.compliance,
+            "IT's key is as it was"
+        );
+
+        // More days than there are to set is refused, asked or confirmed.
+        for confirm in [false, true] {
+            let keep = json!({ "channel_days": 40_000, "dm_days": 0, "confirm": confirm });
+            let (status, body) = t.call("POST", "/api/chat/keep", keep).await;
+            assert_eq!(status, 400, "{body}");
+            assert!(
+                body["error"].as_str().unwrap().contains("36500 days"),
+                "{body}"
+            );
+        }
+        assert_eq!(t.console.state().chat.kept_for.channel_days, 90);
+    }
+
     #[tokio::test]
     async fn cf80_support_staff_reach_nothing_but_remote_help() {
         let t = console().await;
@@ -3327,6 +3495,12 @@ mod tests {
                 json!({ "ring": "broad", "hold": true }),
             ),
             ("GET", "/api/mail", Value::Null),
+            ("GET", "/api/chat", Value::Null),
+            (
+                "POST",
+                "/api/chat/keep",
+                json!({ "channel_days": 1, "dm_days": 1, "confirm": true }),
+            ),
             ("GET", "/api/roles", Value::Null),
             ("GET", "/api/settings", Value::Null),
             ("GET", "/api/a-route-nobody-wrote-yet", Value::Null),
@@ -3335,6 +3509,7 @@ mod tests {
             assert_eq!(status, 403, "{method} {path}");
         }
         assert_eq!(t.console.state().policy, before, "nothing changed");
+        assert!(!t.console.state().chat.kept_for.is_set());
         assert_eq!(t.console.state().fleet.devices["d"].ring, Ring::Broad);
         assert!(!t.console.state().os_held(Ring::Broad));
     }

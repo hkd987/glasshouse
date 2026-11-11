@@ -22,6 +22,13 @@ impl Timestamp {
         self.0.unix_timestamp()
     }
 
+    /// The time `text` names, as this type is written (RFC 3339).
+    pub fn parse(text: &str) -> Option<Self> {
+        OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+            .ok()
+            .map(Self)
+    }
+
     /// Milliseconds since the epoch: a cursor finer than a second.
     pub fn unix_millis(&self) -> i64 {
         i64::try_from(self.0.unix_timestamp_nanos() / 1_000_000).unwrap_or(i64::MAX)
@@ -73,6 +80,16 @@ impl fmt::Display for Timestamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_what_it_writes_and_nothing_else() {
+        let ts = Timestamp::from_unix_seconds(1_792_300_000).unwrap();
+        assert_eq!(Timestamp::parse(&ts.to_string()), Some(ts));
+        assert_eq!(Timestamp::parse("2026-10-18T05:06:40Z"), Some(ts));
+        assert_eq!(Timestamp::parse("2026-10-18T07:06:40+02:00"), Some(ts));
+        assert_eq!(Timestamp::parse("yesterday"), None);
+        assert_eq!(Timestamp::parse(""), None);
+    }
 
     #[test]
     fn serializes_as_rfc3339() {

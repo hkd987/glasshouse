@@ -20,7 +20,7 @@ use anyhow::Context;
 
 use glass_managed::chat::{
     COMPLIANCE, ChatSyncRequest, ChatSyncResponse, Conversation, ConversationKind,
-    CreateConversation, Epoch, Keys, MAX_MEMBERS, MemberKey, Message, is_conversation_id,
+    CreateConversation, Epoch, KeptFor, Keys, MAX_MEMBERS, MemberKey, Message, is_conversation_id,
 };
 use glass_types::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,20 @@ pub struct ChatState {
     pub compliance: String,
     #[serde(default)]
     pub release: Option<glass_managed::Signed>,
+    /// How long the organization keeps chat (CF-61, ADR 0030 §4): what
+    /// the release says, and what the console's own copy goes by.
+    #[serde(default)]
+    pub kept_for: KeptFor,
+    /// Who set that last, and when.
+    #[serde(default)]
+    pub kept_set: Option<KeptSet>,
+}
+
+/// Who set how long chat is kept, and when.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeptSet {
+    pub by: String,
+    pub at: Timestamp,
 }
 
 fn rule(m: impl Into<String>) -> Refused {
@@ -116,16 +130,90 @@ pub fn open_log(chat: &mut ChatState, path: &Path) -> anyhow::Result<bool> {
         .extend(logged.into_iter().filter(|m| m.seq > last));
     chat.seq = chat.seq.max(chat.messages.last().map_or(0, |m| m.seq));
     if moving || torn {
-        let mut whole = Vec::new();
-        for message in &chat.messages {
-            serde_json::to_writer(&mut whole, message)?;
-            whole.push(b'\n');
-        }
-        let tmp = path.with_extension("jsonl.new");
-        std::fs::write(&tmp, whole).with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+        write_log(path, &chat.messages)?;
     }
     Ok(moving)
+}
+
+/// Makes the chat log at `path` hold `messages` and nothing else: written
+/// beside it and moved into place, so a crash leaves the log it was or the
+/// log it is to be.
+pub fn write_log<'a>(
+    path: &Path,
+    messages: impl IntoIterator<Item = &'a Message>,
+) -> anyhow::Result<()> {
+    let tmp = path.with_extension("jsonl.new");
+    let written = (|| -> anyhow::Result<()> {
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        for message in messages {
+            serde_json::to_writer(&mut file, message)?;
+            file.write_all(b"\n")?;
+        }
+        file.into_inner()
+            .map_err(std::io::IntoInnerError::into_error)?
+            .sync_all()?;
+        Ok(())
+    })();
+    written.with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Copies the first `len` bytes of the chat log at `path` to a new file
+/// beside it, without the messages numbered in `gone`; the new file's
+/// path. [`finish_log`] makes it the log.
+///
+/// It reads the log from disk, not the console's memory, so the console
+/// needn't be held still while a long history is written again: computers
+/// go on posting, and what they post lands past `len`.
+pub fn copy_log_without(
+    path: &Path,
+    len: u64,
+    gone: &BTreeSet<u64>,
+) -> anyhow::Result<std::path::PathBuf> {
+    use std::io::{BufRead, Read};
+
+    #[derive(Deserialize)]
+    struct Numbered {
+        seq: u64,
+    }
+    let tmp = path.with_extension("jsonl.new");
+    let copied = (|| -> std::io::Result<()> {
+        let mut from = std::io::BufReader::new(std::fs::File::open(path)?.take(len));
+        let mut to = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            if from.read_until(b'\n', &mut line)? == 0 {
+                break;
+            }
+            // A line that isn't a message isn't this pass's to judge.
+            let going =
+                serde_json::from_slice::<Numbered>(&line).is_ok_and(|m| gone.contains(&m.seq));
+            if !going {
+                to.write_all(&line)?;
+            }
+        }
+        to.flush()
+    })();
+    copied.with_context(|| format!("writing {}", tmp.display()))?;
+    Ok(tmp)
+}
+
+/// Makes `tmp` the chat log at `path`: what was posted since
+/// [`copy_log_without`] read the first `len` bytes goes after what it
+/// kept, and the whole is on disk before it takes the log's place.
+pub fn finish_log(path: &Path, tmp: &Path, len: u64) -> anyhow::Result<()> {
+    use std::io::Seek;
+
+    let finished = (|| -> std::io::Result<()> {
+        let mut from = std::fs::File::open(path)?;
+        from.seek(std::io::SeekFrom::Start(len))?;
+        let mut to = std::fs::OpenOptions::new().append(true).open(tmp)?;
+        std::io::copy(&mut from, &mut to)?;
+        to.sync_all()
+    })();
+    finished.with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(tmp, path).with_context(|| format!("writing {}", path.display()))
 }
 
 /// Appends `message` to the chat log at `path`.
@@ -424,6 +512,40 @@ impl ChatState {
         Ok(self.seq)
     }
 
+    /// The sequence numbers of the chat that is past `kept_for` at `now`
+    /// (seconds since 1970): what a pass by those periods would remove
+    /// (CF-61).
+    ///
+    /// Chat is channels, direct messages and groups. A doc's, an
+    /// artifact's or a skill's messages are its content and a meeting's
+    /// its record, so none of them is ever named here. The console can't
+    /// read a message, so it goes by what it can see: the conversation's
+    /// kind, and when the message arrived.
+    pub fn past_keeping(&self, kept_for: KeptFor, now: i64) -> BTreeSet<u64> {
+        if !kept_for.is_set() {
+            return BTreeSet::new();
+        }
+        self.messages
+            .iter()
+            .filter(|m| {
+                m.header().is_ok_and(|h| {
+                    self.conversations
+                        .get(&h.conversation)
+                        .is_some_and(|s| kept_for.is_past(s.conversation.kind, m, now))
+                })
+            })
+            .map(|m| m.seq)
+            .collect()
+    }
+
+    /// Forgets the messages numbered in `gone`. Sequence numbers aren't
+    /// given out again: the next post still takes the one after the last.
+    pub fn forget(&mut self, gone: &BTreeSet<u64>) {
+        self.messages.retain(|m| !gone.contains(&m.seq));
+        // Made again from what is left, at the next post.
+        self.posted = Posted(None);
+    }
+
     /// What changed for the people on `request.device` since its cursor.
     pub fn sync(&self, request: &ChatSyncRequest) -> ChatSyncResponse {
         // Only logins with a key on this computer: a computer hears of its
@@ -566,7 +688,10 @@ mod tests {
         Joined, MediaKey, MediaKeyRecord, MediaKeys, MeetBody, MeetOp, MeetRequest,
     };
 
-    use super::{ChatState, append_log, open_log};
+    use glass_managed::chat::KeptFor;
+    use glass_types::Timestamp;
+
+    use super::{ChatState, append_log, copy_log_without, open_log, write_log};
     use crate::directory::LocalDirectory;
     use crate::relay::Relay;
     use crate::server::Console;
@@ -2045,6 +2170,237 @@ mod tests {
             ..request
         };
         assert_eq!(chat.sync(&request).messages.len(), 6);
+    }
+
+    /// IT sets how long chat is kept: the Chat release's version.
+    fn keep_chat(org: &Org, channel_days: u32, dm_days: u32) -> u64 {
+        let kept_for = KeptFor {
+            channel_days,
+            dm_days,
+        };
+        org.console.state().keep_chat_for(kept_for, "root").unwrap()
+    }
+
+    /// The messages numbered `seqs` arrived `days` days ago, in memory and
+    /// in the log.
+    fn aged(org: &Org, seqs: &[u64], days: i64) {
+        let at = Timestamp::from_unix_seconds(Timestamp::now().unix_seconds() - days * 24 * 3600)
+            .unwrap()
+            .to_string();
+        let mut state = org.console.state();
+        for message in &mut state.chat.messages {
+            if seqs.contains(&message.seq) {
+                message.at = Some(at.clone());
+            }
+        }
+        write_log(
+            &org.dir.path().join("chat-messages.jsonl"),
+            &state.chat.messages,
+        )
+        .unwrap();
+    }
+
+    fn seqs(messages: &[Message]) -> Vec<u64> {
+        messages.iter().map(|m| m.seq).collect()
+    }
+
+    /// A conversation of `kind` that `by` makes with `members`: its id and
+    /// epoch key.
+    async fn a_conversation(
+        org: &Org,
+        by: &Computer,
+        members: &[&str],
+        kind: ConversationKind,
+    ) -> (String, EpochKey) {
+        let keys = org.keys(members).await;
+        let compliance =
+            glass_crypto::PublicKey::from_bytes(&hex::decode(&keys.compliance).unwrap()).unwrap();
+        let id = new_conversation_id().unwrap();
+        let key = EpochKey::generate().unwrap();
+        let epoch = Epoch::make(
+            &id,
+            1,
+            &key,
+            None,
+            &keys.keys,
+            &compliance,
+            (&by.key, &by.secret),
+        )
+        .unwrap();
+        let conversation = Conversation {
+            id: id.clone(),
+            kind,
+            members: members.iter().map(|m| (*m).to_owned()).collect(),
+            created_by: by.key.login.clone(),
+            name: (kind != ConversationKind::Direct)
+                .then(|| seal_name(&key, &id, 1, "Renewal notes").unwrap()),
+            epoch: 1,
+            label: None,
+        };
+        let (status, body) = org
+            .post(
+                "chat/conversations",
+                &json!({ "device": by.name, "conversation": conversation, "epoch": epoch }),
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        (id, key)
+    }
+
+    /// The console's own copy of chat goes by the periods IT set (CF-61,
+    /// ADR 0030 §4): one for channels, one for direct messages and
+    /// groups. Only chat goes; a doc's messages are the doc.
+    #[tokio::test]
+    async fn cf61_the_console_removes_chat_past_its_period_and_nothing_else() {
+        let org = Org::new().await;
+        let priya = org.computer("laptop-priya", "priya").await;
+        let dana = org.computer("laptop-dana", "dana").await;
+        let (status, channel, key) = org.channel(&priya, &["priya", "dana"], "#renewals").await;
+        assert_eq!(status, 200);
+        let both = ["priya", "dana"];
+        let (doc, doc_key) = a_conversation(&org, &priya, &both, ConversationKind::Doc).await;
+        let (dm, dm_key) = a_conversation(&org, &priya, &both, ConversationKind::Direct).await;
+        for text in ["forty days ago", "forty days ago too", "today"] {
+            let (status, body) = org.say(&priya, &channel, 1, &key, text).await;
+            assert_eq!(status, 200, "{body}");
+        }
+        let (status, body) = org.say(&priya, &doc, 1, &doc_key, "the doc's words").await;
+        assert_eq!(status, 200, "{body}");
+        let (status, body) = org.say(&priya, &dm, 1, &dm_key, "lunch?").await;
+        assert_eq!(status, 200, "{body}");
+        let first = org.console.state().chat.messages[0].seq;
+        let (old_one, old_two, new, in_doc, direct) =
+            (first, first + 1, first + 2, first + 3, first + 4);
+        aged(&org, &[old_one, old_two, in_doc, direct], 40);
+        let trim = || org.console.trim_chat(Timestamp::now()).unwrap();
+        let held = || seqs(&org.console.state().chat.messages);
+        let release = || org.console.state().chat.release.clone().unwrap();
+
+        // No period, the default: everything is kept, and the release
+        // says nothing of it, as before there were periods.
+        assert_eq!(org.console.state().chat.kept_for, KeptFor::default());
+        assert!(!release().payload.contains("days"), "{}", release().payload);
+        assert_eq!(trim(), 0);
+
+        // Channels sixty days: forty days old is kept.
+        let v1 = release().version;
+        assert_eq!(keep_chat(&org, 60, 0), v1 + 1);
+        assert_eq!(trim(), 0);
+
+        // Channels thirty: the two old channel messages go. Today's
+        // stays; the direct message has no period; the doc isn't chat.
+        assert_eq!(keep_chat(&org, 30, 0), v1 + 2);
+        assert_eq!(trim(), 2);
+        assert_eq!(held(), [new, in_doc, direct]);
+        assert_eq!(trim(), 0, "and nothing more the next day");
+
+        // Direct messages a week: that one goes too. The doc's stay, old
+        // as they are.
+        keep_chat(&org, 30, 7);
+        assert_eq!(trim(), 1);
+        assert_eq!(held(), [new, in_doc]);
+
+        // The release every computer gets says both, signed; the same
+        // periods again are no new release.
+        let signed = release();
+        assert_eq!(signed.version, v1 + 3);
+        let said: glass_managed::ChatRelease = serde_json::from_str(&signed.payload).unwrap();
+        assert_eq!(
+            said.kept(),
+            KeptFor {
+                channel_days: 30,
+                dm_days: 7
+            }
+        );
+        assert_eq!(keep_chat(&org, 30, 7), v1 + 3);
+
+        // A computer that asks from the start gets what is left; a console
+        // that restarts holds the same, and the same periods.
+        assert_eq!(seqs(&org.sync(&dana, 0, 0).await.messages), [new, in_doc]);
+        let directory = LocalDirectory::starter("root");
+        let reopened = State::open(org.dir.path(), "acme", "Acme Corp", &directory).unwrap();
+        assert_eq!(reopened.chat.messages, org.console.state().chat.messages);
+        assert_eq!(reopened.chat.kept_for, said.kept());
+        assert_eq!(reopened.chat.kept_set.unwrap().by, "root");
+
+        // IT takes the periods away again: nothing more goes, at any age.
+        keep_chat(&org, 0, 0);
+        aged(&org, &[new], 4000);
+        assert_eq!(trim(), 0);
+        assert!(!release().payload.contains("days"));
+
+        // Longer than there is to set is a slip of the hand, and refused.
+        let refused = org.console.state().keep_chat_for(
+            KeptFor {
+                channel_days: KeptFor::MAX_DAYS + 1,
+                dm_days: 0,
+            },
+            "root",
+        );
+        assert!(matches!(refused, Err(Refused::Invalid(_))), "{refused:?}");
+    }
+
+    /// Sequence numbers are never given out twice, even when every message
+    /// the log held is past its period: a computer's cursor is one of
+    /// them, and it would never hear of a message numbered under it.
+    #[tokio::test]
+    async fn cf61_with_every_message_gone_the_next_post_takes_the_next_number() {
+        let org = Org::new().await;
+        let priya = org.computer("laptop-priya", "priya").await;
+        let _dana = org.computer("laptop-dana", "dana").await;
+        let (_, channel, key) = org.channel(&priya, &["priya", "dana"], "#renewals").await;
+        org.say(&priya, &channel, 1, &key, "one").await;
+        org.say(&priya, &channel, 1, &key, "two").await;
+        let last = org.console.state().chat.seq;
+        aged(&org, &[last - 1, last], 40);
+        keep_chat(&org, 30, 30);
+        assert_eq!(org.console.trim_chat(Timestamp::now()).unwrap(), 2);
+        assert!(org.console.state().chat.messages.is_empty());
+
+        let directory = LocalDirectory::starter("root");
+        let reopened = State::open(org.dir.path(), "acme", "Acme Corp", &directory).unwrap();
+        assert!(reopened.chat.messages.is_empty());
+        assert_eq!(reopened.chat.seq, last, "the console restarts knowing it");
+        let (status, body) = org.say(&priya, &channel, 1, &key, "three").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["seq"], last + 1);
+    }
+
+    /// The log is written again with the console's state let go, so
+    /// computers go on posting meanwhile: what they post is in the log
+    /// that takes its place.
+    #[tokio::test]
+    async fn cf61_a_message_posted_while_old_ones_are_removed_is_kept() {
+        let org = Org::new().await;
+        let priya = org.computer("laptop-priya", "priya").await;
+        let _dana = org.computer("laptop-dana", "dana").await;
+        let (_, channel, key) = org.channel(&priya, &["priya", "dana"], "#renewals").await;
+        org.say(&priya, &channel, 1, &key, "forty days ago").await;
+        org.say(&priya, &channel, 1, &key, "today").await;
+        let last = org.console.state().chat.seq;
+        aged(&org, &[last - 1], 40);
+        keep_chat(&org, 30, 30);
+
+        let (gone, log, len) = org
+            .console
+            .state()
+            .chat_past_keeping(Timestamp::now())
+            .unwrap()
+            .expect("one message is past its period");
+        assert_eq!(gone.iter().copied().collect::<Vec<_>>(), [last - 1]);
+        let tmp = copy_log_without(&log, len, &gone).unwrap();
+        let (status, body) = org.say(&priya, &channel, 1, &key, "meanwhile").await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            org.console.state().forget_chat(&gone, &tmp, len).unwrap(),
+            1
+        );
+
+        assert_eq!(seqs(&org.console.state().chat.messages), [last, last + 1]);
+        let directory = LocalDirectory::starter("root");
+        let reopened = State::open(org.dir.path(), "acme", "Acme Corp", &directory).unwrap();
+        assert_eq!(reopened.chat.messages, org.console.state().chat.messages);
+        assert_eq!(reopened.chat.seq, last + 1);
     }
 
     /// A console before ADR 0052 kept messages in chat.json: they move to

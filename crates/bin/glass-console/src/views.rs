@@ -318,6 +318,22 @@ pub fn mail(state: &State) -> anyhow::Result<Value> {
     }))
 }
 
+/// The Chat page (ADR 0030 §4): the compliance key every computer seals
+/// to, by its fingerprint, and how long chat is kept (CF-61).
+pub fn chat(state: &State) -> Value {
+    let release = state.chat.release.as_ref();
+    let fingerprint = release
+        .and_then(|s| serde_json::from_str::<glass_managed::ChatRelease>(&s.payload).ok())
+        .map(|r| r.fingerprint);
+    json!({
+        "version": release.map(|s| s.version),
+        "fingerprint": fingerprint,
+        "kept_for": state.chat.kept_for,
+        "set": state.chat.kept_set,
+        "max_days": glass_managed::chat::KeptFor::MAX_DAYS,
+    })
+}
+
 pub fn item(state: &State, directory: &dyn Directory, titles: &Titles, id: &str) -> Option<Value> {
     let doc = state.draft().ok()?;
     let entry = state

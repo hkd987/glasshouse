@@ -12,7 +12,7 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 import { type Browser, type Page, expect, test } from "@playwright/test";
 
-import { CHAT_URL, CONSOLE_SHOTS, CONSOLE_STATE } from "./console-env.ts";
+import { CHAT_URL, CONSOLE_SHOTS, CONSOLE_STATE, CONSOLE_URL } from "./console-env.ts";
 import { type ApprovalView, BIN, DEV, audit, glassctl, glassctlJson, mcp } from "./env.ts";
 
 const me = userInfo().username;
@@ -88,6 +88,46 @@ test("cf91 two people message each other in Chat, live and sealed end to end", a
   expect(held).not.toContain("Northwind terms");
   expect(held).not.toContain("Reading them now");
   await close();
+});
+
+test("cf61 adr0030 where IT keeps direct messages thirty days, Chat says so where the history ends", async ({ browser }) => {
+  // IT, in the console: the Chat page, asked first, then confirmed.
+  const context = await browser.newContext();
+  const it = await context.newPage();
+  await it.goto(CONSOLE_URL);
+  await it.click(`button[data-user="${me}"]`);
+  await it.waitForSelector("html[data-ready=true][data-page=policy]", { state: "attached" });
+  const loaded = () => audit().filter((r) => r.event.kind === "chat_loaded").length;
+  const keep = async (channel: string, dm: string): Promise<void> => {
+    const before = loaded();
+    await it.goto(`${CONSOLE_URL}#/chat`);
+    await it.waitForSelector("html[data-ready=true][data-page=chat]", { state: "attached" });
+    await it.fill("input[name=channel-days]", channel);
+    await it.fill("input[name=dm-days]", dm);
+    await it.click("button[data-test=keep-ask]");
+    await it.click("button[data-test=keep-confirm]");
+    await expect(it.locator(".notice")).toContainText("Every computer applies it");
+    // This computer has IT's new Chat release.
+    await expect.poll(loaded, { timeout: 5000 }).toBeGreaterThan(before);
+  };
+  await keep("", "30");
+
+  const { page, close } = await openChat(browser);
+  await expect(page.locator(".pane-head h1")).toHaveText("Priya Shah");
+  await expect(page.locator("[data-test=kept-days]")).toHaveText("Your organization keeps messages here for 30 days. Older ones are removed.");
+  // Today's messages are well inside it.
+  await expect(page.locator("[data-test=messages]")).toContainText(HELLO);
+  await page.screenshot({ path: join(CONSOLE_SHOTS, "chat-kept-days.png") });
+  await close();
+
+  // Kept for good again: nothing says otherwise.
+  await keep("", "");
+  const again = await openChat(browser);
+  await expect(again.page.locator(".pane-head h1")).toHaveText("Priya Shah");
+  await expect(again.page.locator("[data-test=messages]")).toContainText(HELLO);
+  await expect(again.page.locator("[data-test=kept-days]")).toHaveCount(0);
+  await again.close();
+  await context.close();
 });
 
 test("cf91 au10 an agent's post waits on the desktop and shows its by-line", async ({ browser }) => {

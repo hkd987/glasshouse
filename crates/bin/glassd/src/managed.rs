@@ -22,6 +22,7 @@ use glass_app_catalog::Applied;
 use glass_audit::{AuditEvent, EventKind, Outcome};
 use glass_first_party::{ChatHandle, ChatNotice};
 use glass_gateway_providers::ConsoleClient;
+use glass_managed::chat::KeptFor;
 use glass_managed::device;
 use glass_managed::directory::{self, DirectoryRelease};
 use glass_managed::{
@@ -827,9 +828,15 @@ impl Managed {
         let key = release
             .key()
             .map_err(|e| Refused::Content(format!("the compliance key: {e}")))?;
-        if ChatRelease::new(&key) != release {
+        let kept_for = release.kept();
+        if ChatRelease::new(&key).keeping(kept_for) != release {
             return Err(Refused::Content(
                 "the compliance key's fingerprint doesn't match it".into(),
+            ));
+        }
+        if kept_for.channel_days.max(kept_for.dm_days) > KeptFor::MAX_DAYS {
+            return Err(Refused::Content(
+                "how long chat is kept is longer than there is to set".into(),
             ));
         }
         if !again {
@@ -843,8 +850,10 @@ impl Managed {
         let mut event = AuditEvent::new(
             EventKind::ChatLoaded,
             format!(
-                "Chat v{} from the admin console is in force (compliance key {})",
-                signed.version, release.fingerprint
+                "Chat v{} from the admin console is in force (compliance key {}; {})",
+                signed.version,
+                release.fingerprint,
+                kept_words(kept_for)
             ),
         );
         event.detail = serde_json::json!({
@@ -852,9 +861,20 @@ impl Managed {
             "version": signed.version,
             "key": signed.key,
             "fingerprint": release.fingerprint,
+            "channel_days": kept_for.channel_days,
+            "dm_days": kept_for.dm_days,
             "from_disk": again,
         });
         self.runtime.append_audit(event);
+        // What is past IT's periods goes now (CF-61), as glassd starts and
+        // when they change; main.rs looks again every hour. Off this
+        // thread: it rewrites each person's store, and the next release
+        // shouldn't wait on that.
+        self.org.chat.set_kept_for(kept_for);
+        if kept_for.is_set() {
+            let chat = self.org.chat.clone();
+            std::thread::spawn(move || chat.trim());
+        }
         tracing::info!(version = signed.version, "managed: chat release applied");
         Ok(())
     }
@@ -989,6 +1009,24 @@ fn sync_chat(chat: &ChatHandle) {
     }
 }
 
+/// How long the organization keeps chat, in an audit record's words.
+fn kept_words(kept_for: KeptFor) -> String {
+    let period = |days: u32| match days {
+        0 => "for good".to_owned(),
+        1 => "a day".to_owned(),
+        days => format!("{days} days"),
+    };
+    if kept_for.is_set() {
+        format!(
+            "channels kept {}, direct messages {}",
+            period(kept_for.channel_days),
+            period(kept_for.dm_days)
+        )
+    } else {
+        "chat kept for good".to_owned()
+    }
+}
+
 /// The audit record for a chat notice (AU-1): key ids, conversation ids and
 /// reasons, never a message.
 pub(crate) fn chat_event(notice: &ChatNotice) -> Option<AuditEvent> {
@@ -1014,6 +1052,23 @@ pub(crate) fn chat_event(notice: &ChatNotice) -> Option<AuditEvent> {
             event.outcome = Some(Outcome::Blocked);
             event.user = (!login.is_empty()).then(|| login.clone());
             event.detail = serde_json::json!({ "conversation": conversation, "reason": reason });
+            Some(event)
+        }
+        ChatNotice::Trimmed { removed, kept_for } => {
+            let messages = if *removed == 1 { "message" } else { "messages" };
+            let mut event = AuditEvent::new(
+                EventKind::ChatTrimmed,
+                format!(
+                    "Removed {removed} chat {messages} from this computer, older than the \
+                     organization keeps them ({})",
+                    kept_words(*kept_for)
+                ),
+            );
+            event.detail = serde_json::json!({
+                "removed": removed,
+                "channel_days": kept_for.channel_days,
+                "dm_days": kept_for.dm_days,
+            });
             Some(event)
         }
         ChatNotice::Changed { .. } => None,
@@ -1270,6 +1325,101 @@ mod tests {
         // The previous policy is kept for rollback (ADR 0021).
         let previous = std::fs::read_to_string(d.config.state_dir.join("policy/previous.toml"));
         assert_eq!(previous.unwrap(), glass_policy::DEFAULT_POLICY);
+    }
+
+    fn chat_release(key: &OrgKey, version: u64, kept_for: KeptFor) -> Signed {
+        let compliance = glass_crypto::SecretKey::from_bytes(&[9; 32])
+            .unwrap()
+            .public()
+            .unwrap();
+        let release = ChatRelease::new(&compliance).keeping(kept_for);
+        key.sign(
+            DocKind::Chat,
+            "acme",
+            version,
+            serde_json::to_string(&release).unwrap(),
+        )
+    }
+
+    fn chat_sync(signed: Signed) -> SyncResponse {
+        SyncResponse {
+            chat: Some(signed),
+            ..sync(None, None)
+        }
+    }
+
+    // ADR 0030 §4: how long chat is kept rides IT's Chat release, signed,
+    // and is in force on a computer from when it arrives, and again after
+    // a restart with no console in reach.
+    #[tokio::test]
+    async fn cf61_how_long_chat_is_kept_arrives_with_its_chat_release() {
+        let key = OrgKey::from_seed([7; 32]);
+        let d = device(&key);
+        let mut m = d.managed();
+        // A release that says nothing of it: chat is kept for good.
+        assert!(m.handle(chat_sync(chat_release(&key, 1, KeptFor::default()))));
+        assert_eq!(d.org.chat.kept_for(), KeptFor::default());
+
+        let kept_for = KeptFor {
+            channel_days: 90,
+            dm_days: 30,
+        };
+        assert!(m.handle(chat_sync(chat_release(&key, 2, kept_for))));
+        assert_eq!(d.org.chat.kept_for(), kept_for);
+        let loaded = glass_audit::read(&d.dir.path().join("audit.log"), |r| {
+            r.event.kind == EventKind::ChatLoaded
+        })
+        .unwrap();
+        let last = &loaded.last().unwrap().event;
+        assert!(
+            last.summary
+                .contains("channels kept 90 days, direct messages 30 days"),
+            "{}",
+            last.summary
+        );
+        assert_eq!(last.detail["channel_days"], 90);
+        assert_eq!(last.detail["dm_days"], 30);
+
+        // A period longer than there is to set isn't IT's console's doing:
+        // refused, and the periods in force stay.
+        let absurd = KeptFor {
+            channel_days: KeptFor::MAX_DAYS + 1,
+            dm_days: 0,
+        };
+        m.handle(chat_sync(chat_release(&key, 3, absurd)));
+        assert_eq!(d.org.chat.kept_for(), kept_for);
+        assert_eq!(d.audited(EventKind::ManagedRefused), 1);
+
+        // After a restart, from the release kept on disk.
+        drop(m);
+        d.org.chat.set_kept_for(KeptFor::default());
+        let _m = d.managed();
+        assert_eq!(d.org.chat.kept_for(), kept_for);
+    }
+
+    /// The record of a removal says how many and by which periods, never
+    /// which messages or whose.
+    #[test]
+    fn cf61_a_removal_is_on_the_record_by_count() {
+        let event = chat_event(&ChatNotice::Trimmed {
+            removed: 12,
+            kept_for: KeptFor {
+                channel_days: 90,
+                dm_days: 0,
+            },
+        })
+        .unwrap();
+        assert_eq!(event.kind, EventKind::ChatTrimmed);
+        assert_eq!(
+            event.summary,
+            "Removed 12 chat messages from this computer, older than the organization keeps \
+             them (channels kept 90 days, direct messages for good)"
+        );
+        assert_eq!(event.user, None);
+        assert_eq!(
+            event.detail,
+            serde_json::json!({ "removed": 12, "channel_days": 90, "dm_days": 0 })
+        );
     }
 
     #[tokio::test]

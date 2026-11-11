@@ -897,3 +897,59 @@ computer's people, not what changed since its cursor; and the other work
 done under the console's one lock (a kernel bundle read and encoded, the
 replay cache scanned on every request, the fleet file rewritten every two
 seconds).
+
+## Amended 2026-11-11 (audit 5.3, the owner's decision): how long chat is kept, as built
+§4's retention is built, as §4 decided it: IT sets it on the console's
+Chat page, it rides the Chat release, the console and every computer
+remove what is past it. Chat history was the last store on a computer and
+on the console that only grew; the owner's answer was an admin setting,
+and unset, chat is kept for good.
+
+- **Two periods** (`glass_managed::chat::KeptFor`): days for channels, and
+  days for direct messages and groups. Empty (0) is for good. The longest
+  is 36,500 days.
+- **What isn't chat stays.** A doc's, an artifact's and a skill's messages
+  are its content, and a meeting's its record: no period is theirs.
+- **The release** (`ChatRelease.channel_days`, `dm_days`) is signed, has no
+  rings, and is written without the periods where none is set, so it is
+  the release it was and a computer whose OS is from before this still
+  reads it. A release that sets one, such a computer refuses: it keeps the
+  release it has (the compliance key), removes nothing, and shows as
+  refusing on the Devices page until it is updated.
+- **Asked first.** `POST /api/chat/keep` without `confirm` answers with
+  how many messages the console holds that would go, and changes nothing;
+  the page shows that before its button removes anything. Removing is for
+  good.
+- **A message's age** is the time the console took it; for a person's own
+  post as their computer kept it, the time its id starts with. One whose
+  time can't be read is kept.
+- **A computer** applies the periods when the release arrives, as glassd
+  starts (from the release on disk, with no console in reach) and every
+  hour. Each pass that removes something is on the audit record
+  (`chat_trimmed`: how many messages and the periods, never which or
+  whose). A sync keeps nothing that is past its period, whatever the
+  console answers with (`specs/tla/ChatSync.tla`, `ChatSync_rule.cfg`).
+- **The console** goes over its own copy as it starts, once a day and when
+  IT changes the periods. The log is written again from the log, with the
+  console's state let go, so posting and syncing go on meanwhile. Sequence
+  numbers aren't given out again, though every message be gone.
+- **What a person sees.** Where a conversation's history ends, Chat says
+  "Your organization keeps messages here for 30 days. Older ones are
+  removed." What refers to a message that's gone (a reaction, an edit, a
+  pin) isn't shown, and a reply stands on its own.
+
+Not built, from §4:
+- **Legal hold (CF-64).** Nothing can be kept past its period, and the
+  Chat page says so beside the fields. A hold must come before this is
+  safe for an organization that may have to preserve chat.
+- **Envelopes and chain records** of epochs no remaining message needs
+  are still kept.
+- **The custody log.** The console records who set the periods last and
+  when, and logs each change; it has no hash-chained log of its own yet.
+- **IT's own key.** The page shows the fingerprint of the development key
+  the console makes (slice C3 moves making it to IT's browser).
+
+Decided here: a group is kept as direct messages are, since both are
+people writing to each other with no name of their own. Making a period
+longer brings nothing back: what a computer removed is gone, and its sync
+is past it.

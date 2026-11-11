@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use glass_api::AppManifest;
 use glass_app_studio::diff::FileChange;
+use glass_managed::chat::KeptFor;
 use glass_managed::hwpatch::Bundle as PatchBundle;
 use glass_managed::hwreview::{
     OrgPatch, PatchFetch, PatchSubmission, PatchSubmitted, bundle_digest,
@@ -1629,6 +1630,104 @@ impl State {
             Some(message) => crate::chat::append_log(&self.dir.join(CHAT_LOG), message),
             None => Ok(()),
         }
+    }
+
+    /// IT sets how long chat is kept (CF-61, ADR 0030 §4): days for
+    /// channels, and days for direct messages and groups; 0 is for good.
+    /// It goes out in a new Chat release, signed, to every computer at
+    /// once (no rings: one organization, one rule), and the console's own
+    /// copy goes by it from the next pass. The release's version.
+    pub fn keep_chat_for(&mut self, kept_for: KeptFor, by: &str) -> Result<u64, Refused> {
+        Self::chat_kept_checked(kept_for)?;
+        let signed = self
+            .chat
+            .release
+            .as_ref()
+            .ok_or_else(|| Refused::Rule("Chat isn't set up yet.".into()))?;
+        if kept_for == self.chat.kept_for {
+            return Ok(signed.version);
+        }
+        let release: glass_managed::ChatRelease =
+            serde_json::from_str(&signed.payload).map_err(internal)?;
+        let payload = serde_json::to_string(&release.keeping(kept_for)).map_err(internal)?;
+        let version = signed.version + 1;
+        let before = (
+            self.chat.release.clone(),
+            self.chat.kept_for,
+            self.chat.kept_set.clone(),
+        );
+        self.chat.release = Some(self.key.sign(DocKind::Chat, &self.org.id, version, payload));
+        self.chat.kept_for = kept_for;
+        self.chat.kept_set = Some(crate::chat::KeptSet {
+            by: by.to_owned(),
+            at: Timestamp::now(),
+        });
+        // Not saved, not so: a console that restarted would sign this
+        // version again with other content, which computers that had the
+        // first would never take.
+        if let Err(e) = self.save_chat() {
+            (self.chat.release, self.chat.kept_for, self.chat.kept_set) = before;
+            return Err(unsaved(e));
+        }
+        Ok(version)
+    }
+
+    /// Whether `kept_for` is something IT may set.
+    pub fn chat_kept_checked(kept_for: KeptFor) -> Result<(), Refused> {
+        if kept_for.channel_days.max(kept_for.dm_days) > KeptFor::MAX_DAYS {
+            return Err(Refused::Invalid(vec![format!(
+                "The longest chat can be kept is {} days; leave it empty to keep it for good.",
+                KeptFor::MAX_DAYS
+            )]));
+        }
+        Ok(())
+    }
+
+    /// How many messages the console holds that `kept_for` would remove
+    /// as of `now`: what IT is shown before it sets a period.
+    pub fn chat_past(&self, kept_for: KeptFor, now: Timestamp) -> usize {
+        self.chat.past_keeping(kept_for, now.unix_seconds()).len()
+    }
+
+    /// What a pass over the console's chat would remove as of `now`
+    /// (CF-61): the messages' sequence numbers, with the chat log's path
+    /// and its length at this moment. `None` with no period set, or
+    /// nothing past one. [`Console::trim_chat`](crate::server::Console::trim_chat)
+    /// is the pass.
+    pub fn chat_past_keeping(
+        &self,
+        now: Timestamp,
+    ) -> anyhow::Result<Option<(BTreeSet<u64>, PathBuf, u64)>> {
+        let gone = self
+            .chat
+            .past_keeping(self.chat.kept_for, now.unix_seconds());
+        if gone.is_empty() {
+            return Ok(None);
+        }
+        // The last sequence number first. The log's last message is how a
+        // console that restarts knows it, and that message may be going.
+        self.save_chat()?;
+        let log = self.dir.join(CHAT_LOG);
+        let len = std::fs::metadata(&log)
+            .with_context(|| format!("reading {}", log.display()))?
+            .len();
+        Ok(Some((gone, log, len)))
+    }
+
+    /// Ends a pass over the console's chat: `tmp`, the log's first
+    /// `copied` bytes without the messages in `gone`, takes the log's
+    /// place with what was posted since, and only then are the messages
+    /// forgotten here. A log that couldn't be written leaves the console
+    /// as it was.
+    pub fn forget_chat(
+        &mut self,
+        gone: &BTreeSet<u64>,
+        tmp: &Path,
+        copied: u64,
+    ) -> anyhow::Result<usize> {
+        crate::chat::finish_log(&self.dir.join(CHAT_LOG), tmp, copied)?;
+        self.chat.forget(gone);
+        Ok(gone.len())
     }
 
     /// Registers a computer's key (ADR 0030 slice P), with the proof that

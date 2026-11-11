@@ -43,6 +43,7 @@ pub(crate) fn of(action: &str) -> Option<Value> {
                 ),
                 "messages": { "type": "array", "description": "oldest first; a thread's root first, then its replies", "items": message_view() },
                 "more_before": { "type": "boolean", "description": "whether older messages come before these (read with before: the first one's id)" },
+                "kept_days": { "type": "integer", "description": "present where the organization keeps a conversation like this one only this many days: older messages are removed" },
                 "thread": object(
                     json!({ "root": message, "draft": draft() }),
                     &["root", "draft"],

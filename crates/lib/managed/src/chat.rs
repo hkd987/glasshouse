@@ -171,6 +171,57 @@ impl MemberSecret {
     }
 }
 
+/// How long the organization keeps chat (CF-61, ADR 0030 §4): days for
+/// channels, and days for direct messages and groups. 0 keeps them for
+/// good, which is how it is until IT sets a period.
+///
+/// It reaches every computer in IT's Chat release
+/// ([`crate::ChatRelease`]), so the console and every computer go by the
+/// same one: each removes what is past it from what it holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeptFor {
+    #[serde(default)]
+    pub channel_days: u32,
+    #[serde(default)]
+    pub dm_days: u32,
+}
+
+impl KeptFor {
+    /// The longest period there is to set: a hundred years.
+    pub const MAX_DAYS: u32 = 36_500;
+
+    /// Whether IT set a period for anything.
+    pub fn is_set(self) -> bool {
+        self != Self::default()
+    }
+
+    /// How many days a conversation of `kind` keeps its messages; `None`
+    /// is for good. A doc's, an artifact's or a skill's messages are its
+    /// content and a meeting's its record: none of them is chat, and no
+    /// period here is theirs.
+    pub fn days(self, kind: ConversationKind) -> Option<u32> {
+        let days = match kind {
+            ConversationKind::Channel => self.channel_days,
+            ConversationKind::Direct | ConversationKind::Group => self.dm_days,
+            ConversationKind::Meeting
+            | ConversationKind::Artifact
+            | ConversationKind::Skill
+            | ConversationKind::Doc => 0,
+        };
+        (days > 0).then_some(days)
+    }
+
+    /// Whether `message`, in a conversation of `kind`, is past keeping at
+    /// `now` (seconds since 1970). One whose time can't be read is kept.
+    pub fn is_past(self, kind: ConversationKind, message: &Message, now: i64) -> bool {
+        self.days(kind).is_some_and(|days| {
+            let before = now - i64::from(days) * 24 * 3600;
+            message.written_unix_secs().is_some_and(|at| at < before)
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationKind {
@@ -643,6 +694,20 @@ impl Message {
             return Err(ChatError::Invalid("the message is too long".into()));
         }
         Ok(message)
+    }
+
+    /// When it was written, in seconds since 1970, for a rule about how
+    /// long chat is kept (CF-61): the console's time for it, or, where
+    /// that isn't known (a person's own post as their computer kept it;
+    /// one from before the console stamped them), the time its id starts
+    /// with, which its sender's computer wrote. `None` if neither reads.
+    pub fn written_unix_secs(&self) -> Option<i64> {
+        if let Some(at) = self.at.as_deref().and_then(glass_types::Timestamp::parse) {
+            return Some(at.unix_seconds());
+        }
+        let header = self.header().ok()?;
+        let millis = u64::from_str_radix(header.id.get(..12)?, 16).ok()?;
+        i64::try_from(millis / 1000).ok()
     }
 
     /// The header, parsed and checked for shape.
@@ -1301,6 +1366,75 @@ mod tests {
         let name = seal_name(&key, &cv, 1, "#northwind-deal").unwrap();
         assert_eq!(open_name(&key, &cv, 1, &name).unwrap(), "#northwind-deal");
         assert!(!name.contains(&hex::encode("northwind")));
+    }
+
+    // ADR 0030 §4: a period for channels, one for direct messages and
+    // groups, and none for what isn't chat.
+    #[test]
+    fn cf61_a_period_is_for_a_kind_of_conversation_and_goes_by_when_the_console_took_a_message() {
+        use ConversationKind::{Artifact, Channel, Direct, Doc, Group, Meeting, Skill};
+        let kept_for = KeptFor {
+            channel_days: 90,
+            dm_days: 30,
+        };
+        assert!(kept_for.is_set());
+        assert!(!KeptFor::default().is_set());
+        assert_eq!(kept_for.days(Channel), Some(90));
+        assert_eq!(kept_for.days(Direct), Some(30));
+        assert_eq!(kept_for.days(Group), Some(30));
+        for kind in [Meeting, Artifact, Skill, Doc] {
+            assert_eq!(kept_for.days(kind), None, "{kind:?} isn't chat");
+        }
+        for kind in [Channel, Direct, Group, Meeting, Artifact, Skill, Doc] {
+            assert_eq!(KeptFor::default().days(kind), None, "for good");
+        }
+
+        // A message's time: the console's, where it has one; else the time
+        // its id starts with, which its sender's computer wrote.
+        let day = 24 * 3600;
+        let now = 1_800_000_000;
+        let message = |at: Option<i64>, id_secs: i64| {
+            let header = Header {
+                v: 1,
+                org: "acme".into(),
+                conversation: new_conversation_id().unwrap(),
+                epoch: 1,
+                id: new_message_id(u64::try_from(id_secs).unwrap() * 1000).unwrap(),
+                sender: "priya".into(),
+                key: "k".into(),
+            };
+            Message {
+                header: serde_json::to_string(&header).unwrap(),
+                nonce: String::new(),
+                ct: String::new(),
+                signature: String::new(),
+                seq: 1,
+                at: at.map(|secs| {
+                    glass_types::Timestamp::from_unix_seconds(secs)
+                        .unwrap()
+                        .to_string()
+                }),
+            }
+        };
+        let taken = message(Some(now - 40 * day), now);
+        assert_eq!(taken.written_unix_secs(), Some(now - 40 * day));
+        assert!(kept_for.is_past(Direct, &taken, now), "40 days, kept 30");
+        assert!(!kept_for.is_past(Channel, &taken, now), "40 days, kept 90");
+        assert!(!kept_for.is_past(Doc, &taken, now));
+        assert!(!KeptFor::default().is_past(Direct, &taken, now));
+        // To the second: kept on its last day, gone the second after.
+        let edge = message(Some(now - 30 * day), now);
+        assert!(!kept_for.is_past(Direct, &edge, now));
+        assert!(kept_for.is_past(Direct, &edge, now + 1));
+        // A person's own post, as their computer kept it before a sync.
+        let own = message(None, now - 31 * day);
+        assert_eq!(own.written_unix_secs(), Some(now - 31 * day));
+        assert!(kept_for.is_past(Direct, &own, now));
+        // One whose time can't be read is kept, never removed on a guess.
+        let mut unread = message(None, now - 400 * day);
+        unread.header = "{}".into();
+        assert_eq!(unread.written_unix_secs(), None);
+        assert!(!kept_for.is_past(Direct, &unread, now));
     }
 
     #[test]

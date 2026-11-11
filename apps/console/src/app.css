@@ -926,3 +926,23 @@ details.file[open] summary {
   margin: 12px 0 8px;
   font-size: 13px;
 }
+
+/* Chat (ADR 0030 §4): how long chat is kept, and the step before removing. */
+.field .days {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.field .days input.text.short {
+  width: 110px;
+}
+.confirm {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fafbfc;
+}
+.confirm p {
+  margin: 0 0 8px;
+}

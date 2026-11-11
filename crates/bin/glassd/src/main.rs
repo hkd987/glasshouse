@@ -1161,6 +1161,28 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
         });
     }
 
+    // Chat older than the organization keeps it goes from this computer's
+    // stores (CF-61, ADR 0030 §4): when IT's periods arrive with its Chat
+    // release (managed.rs), and every hour after, each removal on the
+    // record. A computer goes by the periods it has with no console in
+    // reach. With none set, the default, nothing is ever removed.
+    {
+        let chat = org.chat.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            // The first tick is at once, before the release is read: the
+            // release's own pass is the one as glassd starts.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let chat = chat.clone();
+                if let Err(e) = tokio::task::spawn_blocking(move || chat.trim()).await {
+                    tracing::warn!("chat: removing what's past the organization's periods: {e}");
+                }
+            }
+        });
+    }
+
     // New mail wakes Mail (ADR 0037): a watcher per person signed in waits
     // on their Inbox (IMAP IDLE) and syncs it into ~/Mail.
     {

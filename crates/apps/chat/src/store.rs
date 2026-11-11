@@ -16,9 +16,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use glass_crypto::{EpochKey, PublicKey};
 pub use glass_managed::chat::ChatFailure;
 use glass_managed::chat::{
-    ChatLink, ChatSyncRequest, ChatSyncResponse, Conversation, ConversationKind, Epoch, LinkError,
-    MemberKey, MemberSecret, Message, RegisterKey, is_conversation_id,
+    ChatLink, ChatSyncRequest, ChatSyncResponse, Conversation, ConversationKind, Epoch, KeptFor,
+    LinkError, MemberKey, MemberSecret, Message, RegisterKey, is_conversation_id,
 };
+use glass_types::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// What glassd audits from chat (AU-1).
@@ -38,6 +39,10 @@ pub enum Notice {
         logins: Vec<String>,
         kinds: Vec<ConversationKind>,
     },
+    /// Chat older than the organization keeps it was removed from this
+    /// computer (CF-61): how many messages, and the periods they were
+    /// past.
+    Trimmed { removed: usize, kept_for: KeptFor },
 }
 
 // Chat, docs, sheets and artifacts all say these (ADR 0033), so they name
@@ -101,6 +106,9 @@ struct Inner {
     /// People whose store's file is there and couldn't be read: nothing
     /// is saved over it until it can be.
     unread: Mutex<HashMap<String, String>>,
+    /// How long the organization keeps chat (IT's Chat release, CF-61);
+    /// for good until it sets a period.
+    kept_for: Mutex<KeptFor>,
     /// How many times a store's file was parsed (for tests).
     parses: AtomicU64,
     /// Tests only: writes fail, as on a full disk.
@@ -226,6 +234,7 @@ impl ChatHandle {
             listeners: Mutex::new(Vec::new()),
             drafts: Mutex::new(HashMap::new()),
             folds: Mutex::new(HashMap::new()),
+            kept_for: Mutex::new(KeptFor::default()),
             item_logs: Mutex::new(HashMap::new()),
             stores: Mutex::new(HashMap::new()),
             unread: Mutex::new(HashMap::new()),
@@ -741,6 +750,79 @@ impl ChatHandle {
         logins
     }
 
+    /// How long the organization keeps chat (CF-61), from IT's Chat
+    /// release. From here on nothing older is kept from a sync, and
+    /// [`ChatHandle::trim`] removes what is here already.
+    pub fn set_kept_for(&self, kept_for: KeptFor) {
+        *self
+            .0
+            .kept_for
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = kept_for;
+    }
+
+    /// The periods in force here.
+    pub fn kept_for(&self) -> KeptFor {
+        *self
+            .0
+            .kept_for
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Removes the chat older than the organization keeps it from every
+    /// person's store on this computer, and says so (a [`Notice::Trimmed`],
+    /// which glassd puts on the audit record). How many messages went.
+    /// glassd calls it when IT's periods arrive and every hour; with none
+    /// set, nothing is ever removed.
+    ///
+    /// Chat is channels, direct messages and groups. A doc's, an
+    /// artifact's or a skill's messages are its content, and a meeting's
+    /// its record: none of them is touched.
+    pub fn trim(&self) -> usize {
+        self.trim_as_of(Timestamp::now())
+    }
+
+    /// [`ChatHandle::trim`] as it would be at `now`.
+    #[doc(hidden)]
+    pub fn trim_as_of(&self, now: Timestamp) -> usize {
+        let kept_for = self.kept_for();
+        if !kept_for.is_set() {
+            return 0;
+        }
+        let mut removed = 0;
+        let mut changed = Vec::new();
+        {
+            let _write = self.lock();
+            for login in self.logins() {
+                let mut store = self.load_to_change(&login);
+                let gone = store.trim(kept_for, now.unix_seconds());
+                if gone == 0 {
+                    continue;
+                }
+                // One that can't be saved now (a full disk) is as it was,
+                // and is tried again at the next trim.
+                if self.save(&login, &store).is_ok() {
+                    removed += gone;
+                    changed.push(login);
+                }
+            }
+        }
+        if removed > 0 {
+            self.notify(&Notice::Trimmed { removed, kept_for });
+            // Open Chat windows show what is here now.
+            self.notify(&Notice::Changed {
+                logins: changed,
+                kinds: vec![
+                    ConversationKind::Direct,
+                    ConversationKind::Group,
+                    ConversationKind::Channel,
+                ],
+            });
+        }
+        removed
+    }
+
     /// One round with the console: waits up to `wait_secs` for news for
     /// this computer's people and keeps what checks out. Whether anything
     /// new arrived. A store that couldn't be kept is an error, so glassd
@@ -773,6 +855,14 @@ impl ChatHandle {
                 let mut store = self.load_to_change(login);
                 let mut refused = Vec::new();
                 let news = store.absorb(&connection.org, login, &response, &mut refused);
+                // Nothing past the organization's periods is kept,
+                // whatever the console still had of it: its own pass is
+                // once a day, and an answer may have been on its way
+                // since before a message aged (CF-61, ChatSync.tla).
+                let kept_for = self.kept_for();
+                if kept_for.is_set() {
+                    store.trim(kept_for, Timestamp::now().unix_seconds());
+                }
                 for kind in &news {
                     if !kinds.contains(kind) {
                         kinds.push(*kind);
@@ -1006,6 +1096,28 @@ impl Store {
             return;
         }
         self.keep_new(conversation, message);
+    }
+
+    /// Removes the chat that is past `kept_for` at `now` (seconds since
+    /// 1970): the messages of channels, direct messages and groups,
+    /// whatever they carry (an edit, a reaction, a pin and a topic are
+    /// messages too). What refers to a message that's gone is shown as it
+    /// is for one that never arrived: not at all, and a reply on its own
+    /// (fold.rs). How many went.
+    pub(crate) fn trim(&mut self, kept_for: KeptFor, now: i64) -> usize {
+        let mut removed = 0;
+        for (id, list) in &mut self.messages {
+            let Some(kind) = self.conversations.get(id).map(|c| c.kind) else {
+                continue;
+            };
+            if kept_for.days(kind).is_none() {
+                continue;
+            }
+            let had = list.len();
+            list.retain(|m| !kept_for.is_past(kind, m, now));
+            removed += had - list.len();
+        }
+        removed
     }
 
     /// Keeps `message`, which isn't in the conversation yet, in sequence

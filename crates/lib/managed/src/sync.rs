@@ -133,9 +133,25 @@ pub struct ChatRelease {
     pub compliance: String,
     /// What every computer shows, so IT can compare it with its file.
     pub fingerprint: String,
+    /// How many days channels keep their messages (CF-61); 0, and not
+    /// written, keeps them for good. A release that sets no period is the
+    /// release it was before there were periods, which a computer whose
+    /// OS is from before them still reads; one that sets a period, such a
+    /// computer refuses, and keeps the release it has.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub channel_days: u32,
+    /// The same for direct messages and groups.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dm_days: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl ChatRelease {
+    /// The release for IT's key, with nothing said about how long chat is
+    /// kept.
     pub fn new(compliance: &glass_crypto::PublicKey) -> Self {
         let bytes = compliance.to_bytes();
         let digest = hex::encode_upper(glass_crypto::sha256(&bytes));
@@ -149,7 +165,25 @@ impl ChatRelease {
         Self {
             compliance: hex::encode(bytes),
             fingerprint,
+            channel_days: 0,
+            dm_days: 0,
         }
+    }
+
+    /// How long the organization keeps chat (CF-61).
+    pub fn kept(&self) -> crate::chat::KeptFor {
+        crate::chat::KeptFor {
+            channel_days: self.channel_days,
+            dm_days: self.dm_days,
+        }
+    }
+
+    /// The same release, keeping chat for `kept`.
+    #[must_use]
+    pub fn keeping(mut self, kept: crate::chat::KeptFor) -> Self {
+        self.channel_days = kept.channel_days;
+        self.dm_days = kept.dm_days;
+        self
     }
 
     pub fn key(&self) -> Result<glass_crypto::PublicKey, glass_crypto::CryptoError> {
@@ -237,4 +271,52 @@ pub struct MadeApp {
     #[serde(default)]
     pub beyond_base: Vec<String>,
     pub saved_at: Timestamp,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::KeptFor;
+
+    // ADR 0030 §4: the periods ride the Chat release. One that sets none
+    // is, to the byte, the release from before there were periods, which
+    // a computer whose OS is from then reads.
+    #[test]
+    fn cf61_a_chat_release_names_its_periods_only_where_it_sets_them() {
+        /// The release as it was before the periods.
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Before {
+            compliance: String,
+            fingerprint: String,
+        }
+        let key = glass_crypto::SecretKey::from_bytes(&[9; 32])
+            .unwrap()
+            .public()
+            .unwrap();
+        let unset = ChatRelease::new(&key);
+        assert_eq!(unset.kept(), KeptFor::default());
+        let wire = serde_json::to_string(&unset).unwrap();
+        assert!(!wire.contains("days"), "{wire}");
+        let before: Before = serde_json::from_str(&wire).unwrap();
+        assert_eq!(before.compliance, unset.compliance);
+        assert_eq!(before.fingerprint, unset.fingerprint);
+        assert_eq!(serde_json::from_str::<ChatRelease>(&wire).unwrap(), unset);
+
+        let kept_for = KeptFor {
+            channel_days: 90,
+            dm_days: 0,
+        };
+        let set = unset.clone().keeping(kept_for);
+        assert_eq!(set.kept(), kept_for);
+        assert_eq!(set.key().unwrap().to_bytes(), key.to_bytes());
+        let wire = serde_json::to_string(&set).unwrap();
+        assert!(wire.contains("\"channel_days\":90"), "{wire}");
+        assert!(!wire.contains("dm_days"), "{wire}");
+        assert_eq!(serde_json::from_str::<ChatRelease>(&wire).unwrap(), set);
+        // And that older computer refuses it, keeping the release it has.
+        assert!(serde_json::from_str::<Before>(&wire).is_err());
+        // Taking the periods away gives the first release back.
+        assert_eq!(set.keeping(KeptFor::default()), unset);
+    }
 }

@@ -506,6 +506,59 @@ test("nv3 ad2 the mail service IT sets in the console shows in Mail on the devic
   await mail.close();
 });
 
+test("cf61 adr0030 IT sets how long chat is kept, sees what it would remove first, and the computer has it", async ({ browser }) => {
+  const { page, close } = await session(browser);
+  await open(page, "#/chat", "chat");
+  const now = page.locator("[data-test=kept-now]");
+  const before = await now.textContent();
+  expect(before).toContain("Now: channels are kept ");
+  await expect(page.locator("[data-test=no-holds]")).toContainText("Holds aren't built yet");
+  await expect(page.locator("[data-test=fingerprint]")).toContainText(/^([0-9A-F]{4} ){7}[0-9A-F]{4}$/);
+
+  // Not a number of days: said, and nothing asked of the console.
+  await page.fill("input[name=channel-days]", "a month");
+  await page.click("button[data-test=keep-ask]");
+  await expect(page.locator(".notice.bad")).toContainText("Channels: a whole number of days");
+  await expect(page.locator("[data-test=confirm]")).toHaveCount(0);
+
+  // Asked first: what it would remove, and nothing changed yet.
+  await page.fill("input[name=channel-days]", "90");
+  await page.fill("input[name=dm-days]", "30");
+  await page.click("button[data-test=keep-ask]");
+  const confirm = page.locator("[data-test=confirm]");
+  await expect(confirm).toContainText("Channels are kept for 90 days; direct messages and groups for 30 days.");
+  await expect(confirm).toContainText("No message the console holds is old enough to go today.");
+  await expect(now).toHaveText(before ?? "");
+  const kept = (r: { event: { kind: string; detail?: unknown } }) => (r.event.kind === "chat_loaded" ? (r.event.detail as { channel_days?: number; dm_days?: number }) : null);
+  expect(audit().filter((r) => kept(r)?.channel_days === 90)).toHaveLength(0);
+  await shot(page, "chat-kept-asked");
+
+  await page.click("button[data-test=keep-confirm]");
+  await expect(page.locator(".notice")).toContainText("Every computer applies it in about a second");
+  await expect(page.locator("[data-test=kept-now]")).toContainText("channels are kept for 90 days; direct messages and groups for 30 days");
+  await expect(page.locator("[data-test=kept-now]")).toContainText(`Set by ${ADMIN}`);
+  const set = Date.now();
+  await shot(page, "chat-kept-set");
+
+  // The computer applies IT's Chat release, signed, and records it.
+  const applied = () => audit().find((r) => kept(r)?.channel_days === 90 && kept(r)?.dm_days === 30);
+  while (!applied()) {
+    expect(Date.now() - set, "how long chat is kept, on the device").toBeLessThan(PROPAGATION_BUDGET_MS);
+    await page.waitForTimeout(20);
+  }
+  measured.chat_kept_propagation_ms = Date.now() - set;
+  expect(applied()?.event.summary).toContain("channels kept 90 days, direct messages 30 days");
+
+  // And back to for good, which removes nothing more.
+  await page.fill("input[name=channel-days]", "");
+  await page.fill("input[name=dm-days]", "");
+  await page.click("button[data-test=keep-ask]");
+  await expect(confirm).toContainText("Nothing more is removed from here on.");
+  await page.click("button[data-test=keep-confirm]");
+  await expect(page.locator("[data-test=kept-now]")).toContainText("channels are kept for good; direct messages and groups for good");
+  await close();
+});
+
 test("ux1 adr0031 IT locks settings for a group and the computer's Settings shows them locked", async ({ browser }) => {
   const { page, close } = await session(browser);
   // This computer's person is one of IT's admins.

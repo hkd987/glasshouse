@@ -778,6 +778,12 @@ impl ChatProvider {
             "messages": views,
             "more_before": more_before,
         });
+        // Where the organization keeps a conversation like this one only
+        // so many days, a reader is told: history that ends is IT's
+        // period's doing, not a fault.
+        if let Some(days) = self.handle.kept_for().days(conversation.kind) {
+            data["kept_days"] = json!(days);
+        }
         if let Some(root) = &input.thread {
             data["thread"] = json!({ "root": root, "draft": self.handle.draft(me, &conversation.id, Some(root)) });
         }
@@ -1479,7 +1485,7 @@ mod tests {
 
     use glass_crypto::SecretKey;
     use glass_managed::chat::testing::MemoryLink;
-    use glass_managed::chat::{COMPLIANCE, ChatLink};
+    use glass_managed::chat::{COMPLIANCE, ChatLink, KeptFor};
     use glass_managed::directory::Applied;
     use glass_managed::shared::BlobLink;
     use glass_managed::{ChatRelease, DirectoryRelease, Person};
@@ -2008,6 +2014,159 @@ mod tests {
                 .iter()
                 .all(|m| !m.ct.contains(&hex::encode("Ship Monday")))
         );
+    }
+
+    // The owner's decision of 2026-11-11: how long chat is kept is IT's
+    // to set, and unset it is kept. (The console in these tests stamps
+    // every message 2026-10-19, so what arrives from it is more than a day
+    // old; what a person posts here and now is not.)
+    #[test]
+    fn cf61_chat_older_than_its_rule_goes_from_a_computer_and_isnt_kept_again() {
+        use glass_managed::shared::Shared;
+        let org = org();
+        let (a, b, channel) = launch_channel(&org);
+        let root = say(&a, "dana", &channel, "Ship Friday", None);
+        say(&a, "dana", &channel, "Budget is 40k", None);
+        // An artifact shared with Priya: an item, kept as messages too.
+        let item = Shared::create(
+            &a.provider,
+            "dana",
+            ConversationKind::Artifact,
+            "Q3 page",
+            glass_types::Label::Internal,
+            &["priya".to_owned()],
+        )
+        .unwrap();
+        Shared::post(&a.provider, "dana", &item, "First cut", None, None, None).unwrap();
+        sync(&[&b]);
+        // Priya answers today, in the thread.
+        let reply = say(&b, "priya", &channel, "Can we do Monday?", Some(&root));
+        let shown = |c: &Computer, login: &str| -> Vec<String> {
+            let read = c
+                .call(login, READ, json!({ "conversation": channel }))
+                .unwrap();
+            read.data["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["text"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let items = |c: &Computer| {
+            Shared::item(&c.provider, "priya", &item)
+                .unwrap()
+                .messages
+                .len()
+        };
+        // (A reply shows under what it answers, not in the timeline.)
+        assert_eq!(shown(&b, "priya"), ["Ship Friday", "Budget is 40k"]);
+        assert_eq!(items(&b), 1);
+
+        // No rule: nothing ever goes, and nobody is told there's one.
+        assert_eq!(b.handle.trim(), 0);
+        let read = b
+            .call("priya", READ, json!({ "conversation": channel }))
+            .unwrap();
+        assert!(read.data.get("kept_days").is_none(), "{}", read.data);
+
+        // IT keeps direct messages a day: a channel isn't one, and stays.
+        b.handle.set_kept_for(KeptFor {
+            channel_days: 0,
+            dm_days: 1,
+        });
+        assert_eq!(b.handle.trim(), 0);
+        let read = b
+            .call("priya", READ, json!({ "conversation": channel }))
+            .unwrap();
+        assert!(read.data.get("kept_days").is_none(), "{}", read.data);
+
+        // And channels a day. Dana's two messages go; Priya's reply from
+        // today stays, on its own now that what it answered is gone.
+        let kept_for = KeptFor {
+            channel_days: 1,
+            dm_days: 1,
+        };
+        b.handle.set_kept_for(kept_for);
+        assert_eq!(b.handle.trim(), 2);
+        assert_eq!(shown(&b, "priya"), ["Can we do Monday?"]);
+        let read = b
+            .call("priya", READ, json!({ "conversation": channel }))
+            .unwrap();
+        assert_eq!(read.data["kept_days"], 1);
+        assert_eq!(read.data["more_before"], false);
+        assert_eq!(read.data["messages"][0]["id"], reply.as_str());
+        assert!(
+            b.notices.lock().unwrap().contains(&Notice::Trimmed {
+                removed: 2,
+                kept_for
+            }),
+            "said once, for glassd's record"
+        );
+        // The artifact is not chat: its messages are what it is.
+        assert_eq!(items(&b), 1);
+        // Again, with nothing left past the rule: nothing, and no notice.
+        let told = b.notices.lock().unwrap().len();
+        assert_eq!(b.handle.trim(), 0);
+        assert_eq!(b.notices.lock().unwrap().len(), told);
+
+        // The console still has the old messages, and sends them all again
+        // when someone new starts Chat on this computer. They aren't kept.
+        b.call("sam", LIST, json!({})).unwrap();
+        sync(&[&b]);
+        assert_eq!(shown(&b, "priya"), ["Can we do Monday?"]);
+        assert_eq!(items(&b), 1);
+    }
+
+    // ADR 0030 §4: a period for channels, and one for direct messages
+    // and groups. Each goes by its own.
+    #[test]
+    fn cf61_channels_and_direct_messages_each_have_their_own_period() {
+        let org = org();
+        let (a, b, channel) = launch_channel(&org);
+        say(&a, "dana", &channel, "Ship Friday", None);
+        let direct = a
+            .call(
+                "dana",
+                POST,
+                json!({ "posts": [{ "to": ["priya"], "text": "Lunch?" }] }),
+            )
+            .unwrap();
+        let direct = direct.data["posted"][0]["conversation"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        sync(&[&b]);
+        let shown = |conversation: &str| -> usize {
+            let read = b
+                .call("priya", READ, json!({ "conversation": conversation }))
+                .unwrap();
+            read.data["messages"].as_array().unwrap().len()
+        };
+        let kept_days = |conversation: &str| {
+            let read = b
+                .call("priya", READ, json!({ "conversation": conversation }))
+                .unwrap();
+            read.data.get("kept_days").cloned()
+        };
+        assert_eq!((shown(&channel), shown(&direct)), (1, 1));
+
+        // Direct messages a day (what the console sent is weeks old),
+        // channels a hundred years.
+        b.handle.set_kept_for(KeptFor {
+            channel_days: KeptFor::MAX_DAYS,
+            dm_days: 1,
+        });
+        assert_eq!(b.handle.trim(), 1);
+        assert_eq!((shown(&channel), shown(&direct)), (1, 0));
+        assert_eq!(kept_days(&channel), Some(json!(KeptFor::MAX_DAYS)));
+        assert_eq!(kept_days(&direct), Some(json!(1)));
+
+        // IT takes the periods away: nothing more goes, and nobody is
+        // told of one.
+        b.handle.set_kept_for(KeptFor::default());
+        assert_eq!(b.handle.trim(), 0);
+        assert_eq!((shown(&channel), shown(&direct)), (1, 0));
+        assert_eq!(kept_days(&channel), None);
     }
 
     #[test]

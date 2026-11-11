@@ -369,6 +369,18 @@ export interface MailPage {
   people: number | null;
 }
 
+/** The Chat page (ADR 0030 §4): how long chat is kept (CF-61), and the compliance key by its fingerprint. */
+export interface ChatPage {
+  /** The Chat release every computer has, if one was signed. */
+  version: number | null;
+  fingerprint: string | null;
+  /** Days each kind is kept; 0 is for good. */
+  kept_for: { channel_days: number; dm_days: number };
+  /** Who set that last, and when. */
+  set: { by: string; at: string } | null;
+  max_days: number;
+}
+
 /** The Support page (CF-80): the person's roles, every tool, and the computers they reach. */
 export interface SupportPage {
   roles: { id: string; name: string; tools: SupportTool[]; people: string[]; unattended: string[]; max_minutes: number }[];

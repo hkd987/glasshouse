@@ -107,6 +107,9 @@ pub enum EventKind {
     ChatRefused,
     /// IT's Chat release (the compliance key) was applied (ADR 0030).
     ChatLoaded,
+    /// Chat older than the organization keeps was removed from this
+    /// computer (CF-61). How many messages, never which.
+    ChatTrimmed,
     /// The org's model credits key arrived from its console, changed or was
     /// taken away (ADR 0039). Never the key itself.
     CreditsKeyApplied,

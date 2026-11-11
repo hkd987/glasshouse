@@ -293,6 +293,14 @@ shows (ADR 0053).
   account, which reads it to deliver, filter and serve it (ADR 0037). That
   is offered only to orgs with no mail of their own, never to a regulated
   pilot; the console itself still holds no mail content.
+- **How long chat is kept is IT's to set (CF-61, ADR 0030 §4).** Days for
+  channels, and days for direct messages and groups, on the console's
+  Chat page; unset, chat is kept for good. The periods reach every
+  computer at once in the signed Chat release (no rings), and the console
+  and each computer remove what is past them from what they hold, a
+  computer with no console in reach too, each removal on its audit
+  record. Docs, artifacts, skills and meetings are conversations of their
+  own kinds, not chat: no period is theirs. Legal hold isn't built.
 - **What people make together is a sealed conversation (AR, DC, SH,
   ADR 0033).** Artifacts, docs and sheets are chat conversations of their
   own kinds, reached through `glass-managed::shared::Shared` (no app

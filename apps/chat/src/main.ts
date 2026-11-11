@@ -100,6 +100,8 @@ const state = {
   /** The open conversation's timeline: thread roots, oldest first. */
   messages: [] as Message[],
   moreBefore: false,
+  /** How many days the organization keeps a conversation like the open one, where IT set a period. */
+  keptDays: null as number | null,
   /** The open conversation was last read with nobody looking, so it isn't marked read. */
   peeked: false,
   /** `chat.read`'s view of the open conversation: topic, pins, level, draft. */
@@ -459,6 +461,8 @@ interface Read {
   conversation?: ConversationView;
   messages: Message[];
   more_before?: boolean;
+  /** Present where the organization keeps a conversation like this one only this many days. */
+  kept_days?: number;
   thread?: { root: string; draft: string | null };
 }
 
@@ -510,6 +514,7 @@ async function readOpen(read: number): Promise<void> {
         state.messages = fresh;
         state.moreBefore = result.data.more_before ?? false;
       }
+      state.keptDays = result.data.kept_days ?? null;
       state.view = result.data.conversation ?? null;
       remember(fresh);
       state.peeked = peek;
@@ -547,6 +552,7 @@ async function loadEarlier(): Promise<boolean> {
     const have = new Set(state.messages.map((m) => m.id));
     state.messages = [...result.data.messages.filter((m) => !have.has(m.id)), ...state.messages];
     state.moreBefore = result.data.more_before ?? false;
+    state.keptDays = result.data.kept_days ?? null;
     remember(result.data.messages);
     return true;
   } catch (error) {
@@ -2030,6 +2036,18 @@ function drawTimeline(): void {
           },
         },
         "Show earlier messages",
+      ),
+    );
+  // Where history ends because the organization keeps only so many days,
+  // say so there: it isn't a fault, and the messages aren't coming.
+  else if (state.keptDays !== null)
+    items.push(
+      h(
+        "p",
+        { class: "kept muted", "data-test": "kept-days" },
+        state.keptDays === 1
+          ? "Your organization keeps messages here for a day. Older ones are removed."
+          : `Your organization keeps messages here for ${state.keptDays} days. Older ones are removed.`,
       ),
     );
   state.messages.forEach((m, i) => {
