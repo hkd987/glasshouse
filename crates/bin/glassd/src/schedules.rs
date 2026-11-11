@@ -8,7 +8,8 @@
 //! for every half minute. Each item keeps the whole schedule in `body`,
 //! with its `version` beside it for the write that claims a run.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use glass_gateway_providers::dynamodb::{DynamoDb, DynamoError, Expression};
 use glass_runtime::{ScheduleStore, StoreError, StoredSchedule};
@@ -72,6 +73,7 @@ pub fn store(
     Ok(Arc::new(DynamoSchedules {
         client,
         table: settings.table.clone().unwrap_or_default(),
+        unread: Unread::default(),
     }))
 }
 
@@ -79,6 +81,64 @@ pub fn store(
 pub struct DynamoSchedules {
     client: DynamoDb,
     table: String,
+    unread: Unread,
+}
+
+/// The items this host couldn't read and has said so about: once each,
+/// not every half minute.
+#[derive(Debug, Default)]
+struct Unread(Mutex<HashSet<String>>);
+
+/// More than this many remembered, and they are forgotten (and said
+/// again): the table is the stack's, not this host's to bound.
+const UNREAD_REMEMBERED: usize = 1024;
+
+impl Unread {
+    /// The schedules among `items` this host can read.
+    ///
+    /// One it can't is left out and logged, where it used to fail the
+    /// whole answer (audit 4.11). The table is shared by hosts that may be
+    /// a version apart while an update goes round, and one schedule
+    /// written by the newer (who it runs as, of a kind this host doesn't
+    /// know) made "what is due" fail on every older host every half
+    /// minute: they ran nothing, for anyone, and the person's own list
+    /// failed with it. An item damaged by hand did the same for good.
+    ///
+    /// Left out, it is as it was: a write is an item's own, and only over
+    /// a version this host read. A host that can read it runs it.
+    fn readable(&self, items: &[Value]) -> Vec<StoredSchedule> {
+        items
+            .iter()
+            .filter_map(|item| match from_item(item) {
+                Ok(schedule) => Some(schedule),
+                Err(why) => {
+                    self.say_once(item, &why);
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn say_once(&self, item: &Value, why: &str) {
+        let part = |name: &str, kind: &str| item[name][kind].as_str().unwrap_or("?").to_owned();
+        let (owner, id, version) = (part("owner", "S"), part("id", "S"), part("version", "N"));
+        let mut said = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if said.len() >= UNREAD_REMEMBERED {
+            said.clear();
+        }
+        if said.insert(format!("{owner}/{id}/{version}")) {
+            // Not its body: that is the person's own words.
+            tracing::warn!(
+                owner,
+                schedule = id,
+                version,
+                "left a schedule out, this host can't read it (written by a newer one, or damaged): {why}"
+            );
+        }
+    }
 }
 
 fn s(text: &str) -> Value {
@@ -147,7 +207,8 @@ impl ScheduleStore for DynamoSchedules {
     }
 
     fn of(&self, owner: &str) -> Result<Vec<StoredSchedule>, String> {
-        self.client
+        let items = self
+            .client
             .query(
                 &self.table,
                 None,
@@ -157,10 +218,8 @@ impl ScheduleStore for DynamoSchedules {
                     values: json!({ ":o": s(owner) }),
                 },
             )
-            .map_err(|e| e.to_string())?
-            .iter()
-            .map(from_item)
-            .collect()
+            .map_err(|e| e.to_string())?;
+        Ok(self.unread.readable(&items))
     }
 
     fn replace(&self, schedule: &StoredSchedule, seen: u64) -> Result<(), StoreError> {
@@ -195,7 +254,8 @@ impl ScheduleStore for DynamoSchedules {
     }
 
     fn due(&self, now: i64) -> Result<Vec<StoredSchedule>, String> {
-        self.client
+        let items = self
+            .client
             .query(
                 &self.table,
                 Some(DUE_INDEX),
@@ -205,10 +265,8 @@ impl ScheduleStore for DynamoSchedules {
                     values: json!({ ":q": s(QUEUE), ":now": n(now) }),
                 },
             )
-            .map_err(|e| e.to_string())?
-            .iter()
-            .map(from_item)
-            .collect()
+            .map_err(|e| e.to_string())?;
+        Ok(self.unread.readable(&items))
     }
 }
 
@@ -282,6 +340,59 @@ mod tests {
         assert!(from_item(&json!({ "owner": s("p") })).is_err());
     }
 
+    /// `made`'s body with who it runs as of a kind this version doesn't
+    /// know, as a host a version on might write it.
+    fn from_a_newer_host(made: &StoredSchedule, id: &str) -> String {
+        let mut body = serde_json::to_value(made).unwrap();
+        body["id"] = id.into();
+        body["holder"] = json!({ "kind": "team", "team": "finance" });
+        body.to_string()
+    }
+
+    // Audit 4.11: one item this host can't read failed the whole answer,
+    // so "what is due" failed every half minute and the host ran nothing.
+    #[test]
+    fn a_schedule_this_host_cant_read_is_left_out_and_the_rest_are_answered() {
+        let kept = schedule(true);
+        let mut other = schedule(true);
+        other.id = "s111111111111".into();
+        let mut newer = item(&kept).unwrap();
+        newer["id"] = s("s222222222222");
+        newer["body"] = s(&from_a_newer_host(&kept, "s222222222222"));
+        let no_body = json!({ "owner": s("p0123"), "id": s("s333333333333") });
+        let items = [
+            item(&kept).unwrap(),
+            newer.clone(),
+            no_body,
+            item(&other).unwrap(),
+        ];
+        let unread = Unread::default();
+        assert_eq!(unread.readable(&items), vec![kept.clone(), other.clone()]);
+        // Said once each, however often it is asked: every half minute.
+        let said = || {
+            let mut said: Vec<String> = unread.0.lock().unwrap().iter().cloned().collect();
+            said.sort();
+            said
+        };
+        let once = said();
+        assert_eq!(
+            once,
+            ["p0123/s222222222222/3", "p0123/s333333333333/?"],
+            "by owner, id and version; never by what the schedule says"
+        );
+        assert_eq!(unread.readable(&items).len(), 2);
+        assert_eq!(said(), once);
+        // A version on, it is said again: it may be readable now, or not.
+        newer["version"] = n(4);
+        unread.readable(&[newer]);
+        assert_eq!(said().len(), 3);
+        // What is remembered has an end.
+        for i in 0..UNREAD_REMEMBERED + 5 {
+            unread.readable(&[json!({ "owner": s("p"), "id": s(&format!("s{i}")) })]);
+        }
+        assert!(unread.0.lock().unwrap().len() <= UNREAD_REMEMBERED);
+    }
+
     #[test]
     fn adr0069_dynamodb_needs_a_table_and_a_region() {
         let parse = |text: &str| toml::from_str::<SchedulesConfig>(text).unwrap();
@@ -314,6 +425,7 @@ mod tests {
             )
             .unwrap(),
             table: table.clone(),
+            unread: Unread::default(),
         };
         let (a, b) = (host(), host());
         let mut made = schedule(true);
@@ -325,6 +437,28 @@ mod tests {
             Err(StoreError::Changed),
             "an id is taken once"
         );
+        // Audit 4.11: beside it, the same person's schedule as a newer
+        // host might write it, due too. This host can't read who it runs
+        // as; it answers with the one it can, and the other is untouched.
+        let mut newer = item(&made).unwrap();
+        let newer_id = format!("s{:012x}", rand_id() ^ 0xffff);
+        newer["id"] = s(&newer_id);
+        newer["body"] = s(&from_a_newer_host(&made, &newer_id));
+        let unconditional = Expression {
+            text: "attribute_not_exists(#id)",
+            names: names(&[("#id", "id")]),
+            values: json!({}),
+        };
+        a.client.put(&table, &newer, &unconditional).unwrap();
+        let mine = a.of(&made.owner).unwrap();
+        assert!(mine.iter().any(|s| s.id == made.id), "{mine:?}");
+        assert!(!mine.iter().any(|s| s.id == newer_id));
+        let due = b.due(made.next_run).unwrap();
+        assert!(due.iter().any(|s| s.id == made.id), "{due:?}");
+        assert!(!due.iter().any(|s| s.id == newer_id));
+        let kept = a.client.get(&table, &key(&made.owner, &newer_id)).unwrap();
+        assert_eq!(kept.as_ref(), Some(&newer), "as the newer host wrote it");
+        assert!(a.remove(&made.owner, &newer_id).unwrap());
         assert!(a.of(&made.owner).unwrap().iter().any(|s| s.id == made.id));
         let due = b.due(made.next_run).unwrap();
         assert!(due.iter().any(|s| s.id == made.id), "{due:?}");

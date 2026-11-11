@@ -15,6 +15,9 @@
 #   - Sam sees none of hers and can't turn off, remove or run his
 #     schedules on her agents; bad schedules, zones and directions, and a
 #     21st, are refused; all on the record.
+# All of it with one schedule in the table that neither host can read, as
+# a host a version on might have written it: each host leaves it out, says
+# so once, and runs the rest (audit 4.11).
 # Needs root: it makes the front's account, as the stack does. Takes about
 # four minutes: schedules run on the minute.
 set -Eeuo pipefail
@@ -141,6 +144,39 @@ for who in dana sam; do
 	for id in $(json '" ".join(s["id"] for s in d)'); do as "$who" DELETE "schedules/$id" >/dev/null; done
 done
 
+# One of Dana's as a host a version on might write it: who it runs as is
+# of a kind these hosts don't know, and it is due at once, for good. A host
+# that fails its whole answer on one item it can't read (audit 4.11) lists
+# none of Dana's schedules and runs nobody's, so every check below fails.
+dynamodb() { # <operation> <json>: the answer's body
+	curl -fsS -X POST "$GLASS_LOCAL_DYNAMODB/" \
+		-H "X-Amz-Target: DynamoDB_20120810.$1" -H 'Content-Type: application/x-amz-json-1.0' \
+		-H "Authorization: AWS4-HMAC-SHA256 Credential=local/20260101/$GLASS_LOCAL_REGION/dynamodb/aws4_request, SignedHeaders=host;x-amz-date, Signature=0" \
+		-H 'X-Amz-Date: 20260101T000000Z' -d "$2"
+}
+dana_key=$(owner_of "$(sub_of dana@example.com)")
+newer=sfffffffffffe
+newer_key=$(python3 -c 'import json,sys; print(json.dumps({"TableName": sys.argv[1], "Key": {"owner": {"S": sys.argv[2]}, "id": {"S": sys.argv[3]}}}))' \
+	"$GLASS_LOCAL_SCHEDULES_TABLE" "$dana_key" "$newer")
+dynamodb PutItem "$(
+	python3 - "$GLASS_LOCAL_SCHEDULES_TABLE" "$dana_key" "$newer" <<'PY'
+import json, sys
+
+table, owner, schedule = sys.argv[1:]
+body = {
+    "owner": owner, "id": schedule, "version": 1,
+    "holder": {"kind": "team", "team": "finance"},
+    "persona": "reconciler", "prompt": "computer_run {\"command\": \"echo from-a-newer-host\"}",
+    "when": "hourly", "zone": "UTC", "enabled": True, "next_run": 0,
+    "created_at": "2026-01-01T00:00:00Z",
+}
+print(json.dumps({"TableName": table, "Item": {
+    "owner": {"S": owner}, "id": {"S": schedule}, "version": {"N": "1"},
+    "next_run": {"N": "0"}, "queue": {"S": "due"}, "body": {"S": json.dumps(body)},
+}}))
+PY
+)" >/dev/null
+
 expect "Dana adds an agent" 200 "$(as dana POST agents '{"template":"desktop-agent","name":"Reconciler"}')"
 body=$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$(run 'echo dana-ledger > /root/ledger.txt')")
 as dana POST agents/reconciler/ask "$body" >/dev/null
@@ -169,6 +205,8 @@ expect "no directions" 400 "$(as dana POST agents/reconciler/schedules '{"prompt
 expect "a field it doesn't take" 400 "$(as dana POST agents/reconciler/schedules '{"prompt":"x","when":"hourly","run_as":"root"}')"
 expect "an agent she doesn't have" 404 "$(as dana POST agents/closer/schedules "$(schedule hourly UTC 'true')")"
 expect "an agent id that's a path" 404 "$(as dana POST 'agents/..%2Fsam/schedules' "$(schedule hourly UTC 'true')")"
+as dana GET schedules >/dev/null
+expect "Dana's list has her three, without the one this version can't read" "3 False" "$(json 'str(len(d)) + " " + str(any(s["id"] == "'"$newer"'" for s in d))')"
 as sam GET schedules >/dev/null
 expect "Sam sees none of Dana's" 0 "$(json 'len(d)')"
 expect "Sam can't turn hers off" 404 "$(as sam POST "schedules/$first/off")"
@@ -229,6 +267,19 @@ if grep -q "Scheduled reconciler: every day at" "$a/state/audit/audit.log" && gr
 else
 	fail "schedules aren't on A's record"
 fi
+
+# The schedule neither host could read: each said so once in four minutes
+# of asking what is due every half minute, and it is as it was written.
+for host in "$a" "$b"; do
+	expect "host ${host##*/s} left out the schedule it can't read, and said so once" 1 \
+		"$(grep -c "left a schedule out" "$host/glassd.log" || true)"
+done
+dynamodb GetItem "$newer_key" >"$work/body"
+expect "  it is in the table as the newer host wrote it" "1 team" "$(json 'd["Item"]["version"]["N"] + " " + __import__("json").loads(d["Item"]["body"]["S"])["holder"]["kind"]')"
+if find "$a/state-computers" "$b/state-computers" -name screen.log -exec grep -l from-a-newer-host {} + 2>/dev/null | grep -q .; then
+	fail "a host ran the schedule it can't read"
+fi
+dynamodb DeleteItem "$newer_key" >/dev/null
 
 for id in "$first" "$second" "$off"; do as dana DELETE "schedules/$id" >/dev/null; done
 curl -fsS -X POST "$GLASS_LOCAL_METERING/_fake/lifecycle?host=host-a&state=InService" >/dev/null

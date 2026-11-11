@@ -136,3 +136,29 @@ other, under the same tiers, audit and undo.
   decides and there's no limit.
 - **Minute slots only.** No "every 15 minutes" yet. The web app has no
   schedules page yet; the API, `glass` and the record do.
+
+## Amended 2026-11-11 (audit 4.11): a schedule a host can't read is left out
+The table is shared by hosts that are a version apart while an update goes
+round. A host failed its whole answer on one item it couldn't read: one
+schedule written by the newer version (who it runs as, of a kind the older
+doesn't know) made "what is due" fail on every older host every half
+minute, so they ran nothing for anyone, and that person could neither list
+nor add schedules there. An item damaged by hand did the same for good.
+
+- A host leaves such an item out of both answers (a person's schedules,
+  what is due) and logs it once, by owner, id and version, never by what
+  it says. A host that can read it runs it.
+- Left out, it is untouched: a write is one item's own and only over a
+  version the host read, and removing by id still works.
+- A person's count toward the twenty leaves it out too, on that host.
+- The file store (a laptop, a development host) is one host's own file:
+  unreadable, it is an error as before, never read as less than it holds
+  and written over.
+
+Still open from the same finding: the body is written whole, so a host
+that reads a schedule with a field it doesn't know and claims its run
+writes it back without that field; and nothing says which version of the
+format an item is.
+
+`tests/local-aws/schedules.sh` runs its two hosts with such a schedule in
+the table from start to end.
