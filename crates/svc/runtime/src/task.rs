@@ -142,12 +142,22 @@ pub(crate) struct Trace {
 const MAX_TRACE_BYTES: usize = 2 * 1024 * 1024;
 
 impl Trace {
+    /// Whether it takes another call. Asked before a call is made up for
+    /// it: once full, every later result was still copied for it and
+    /// written out to be measured, under the task's lock (audit 9.6).
+    pub fn has_room(&mut self) -> bool {
+        if self.calls.len() >= glass_replay::MAX_CALLS {
+            self.full = true;
+        }
+        !self.full
+    }
+
     pub fn push(&mut self, call: glass_replay::Call) {
-        let size = call.input.to_string().len() + call.text.len() + call.data.to_string().len();
-        if self.full
-            || self.calls.len() >= glass_replay::MAX_CALLS
-            || self.bytes + size > MAX_TRACE_BYTES
-        {
+        if !self.has_room() {
+            return;
+        }
+        let size = written(&call.input) + call.text.len() + written(&call.data);
+        if self.bytes + size > MAX_TRACE_BYTES {
             self.full = true;
             return;
         }
@@ -178,6 +188,30 @@ impl Trace {
         self.calls = Vec::new();
         self.bytes = 0;
     }
+}
+
+/// About how long `value` is written as JSON, without writing it: the
+/// size a trace counts a call's input and data as. Strings' lengths and a
+/// little for each value's punctuation; escapes aren't counted.
+fn written(value: &Value) -> usize {
+    let mut size = 0;
+    let mut rest = vec![value];
+    while let Some(value) = rest.pop() {
+        size += match value {
+            Value::Null | Value::Bool(_) => 5,
+            Value::Number(_) => 8,
+            Value::String(text) => text.len() + 3,
+            Value::Array(items) => {
+                rest.extend(items);
+                2
+            }
+            Value::Object(fields) => {
+                rest.extend(fields.values());
+                2 + fields.keys().map(|name| name.len() + 4).sum::<usize>()
+            }
+        };
+    }
+    size
 }
 
 /// A trace as it stood, to compile away from the task's lock.
@@ -774,5 +808,68 @@ impl TaskState {
             }
             TileState::Stopped => "Stopped by you.".into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn call(text: &str, data: Value) -> glass_replay::Call {
+        glass_replay::Call {
+            tool: "files_read".into(),
+            input: json!({ "path": "Reports/q3.csv" }),
+            text: text.to_owned(),
+            data,
+            changes: false,
+            day: None,
+        }
+    }
+
+    // Audit 9.6: every result was written out as JSON to be measured, and
+    // once the trace was full each later one was still copied for it.
+    #[test]
+    fn nv21_a_trace_measures_without_writing_and_takes_nothing_once_full() {
+        // What it counts is about what the value is written as.
+        for value in [
+            json!(null),
+            json!({ "rows": [1, 2, 3], "name": "Northwind", "paid": false }),
+            json!({ "messages": vec![json!({ "from": "ana@example.com", "subject": "Launch" }); 40] }),
+            json!("x".repeat(10_000)),
+        ] {
+            let (counted, real) = (written(&value), value.to_string().len());
+            assert!(
+                counted >= real && counted <= real * 2 + 8,
+                "{counted} counted for {real} written"
+            );
+        }
+
+        // It keeps calls up to its size, then is full, and stays so.
+        let mut trace = Trace::default();
+        let big = "x".repeat(MAX_TRACE_BYTES / 2 - 1024);
+        for _ in 0..2 {
+            assert!(trace.has_room());
+            trace.push(call(&big, json!({})));
+        }
+        assert_eq!((trace.calls.len(), trace.full), (2, false));
+        trace.push(call(&big, json!({})));
+        assert_eq!((trace.calls.len(), trace.full), (2, true));
+        assert!(!trace.has_room(), "nothing more is made up for it");
+        trace.push(call("small", json!({})));
+        assert_eq!(trace.calls.len(), 2);
+
+        // And calls up to their number.
+        let mut trace = Trace::default();
+        for _ in 0..glass_replay::MAX_CALLS {
+            trace.push(call("ok", json!({})));
+        }
+        assert!(!trace.full);
+        assert!(!trace.has_room());
+        assert!(trace.full);
+        assert_eq!(trace.calls.len(), glass_replay::MAX_CALLS);
     }
 }

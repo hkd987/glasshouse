@@ -530,7 +530,9 @@ impl Runtime {
                         [first, rest @ ..] => format!("{first} · {} more", rest.len()),
                     };
                     state.record_action(&verb, &target, &preview.summary);
-                    if let Some(input) = recorded {
+                    if let Some(input) = recorded
+                        && state.trace.has_room()
+                    {
                         state.trace.push(glass_replay::Call {
                             tool: def.mcp_name(),
                             input,
