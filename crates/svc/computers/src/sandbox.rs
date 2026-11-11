@@ -1410,6 +1410,14 @@ impl ComputerSandbox {
         Ok(())
     }
 
+    /// Removes from the store the chunks no computer's version names
+    /// (ADR 0066): what sleeps leave behind as versions are trimmed.
+    /// glassd calls it once a day. `None` on a host with no store.
+    pub fn collect(&self) -> Option<std::result::Result<crate::store::Collected, String>> {
+        let (store, _) = self.store.as_ref()?;
+        Some(store.gc())
+    }
+
     /// Keeps this host's leases (ADR 0066): glassd calls it every
     /// [`crate::store::RENEW_EVERY`].
     ///

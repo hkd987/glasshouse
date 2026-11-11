@@ -402,6 +402,10 @@ and some a Marketplace listing:
   must refuse when the object is there (`If-None-Match: *`). It was run
   here against moto. On AWS: is it refused with 412 under the bucket's
   policy and KMS key, through the S3 endpoint?
+- **S3's conditional delete.** The daily clear-out of chunks no sleeping
+  computer names deletes each only if it is still the object it listed
+  (`If-Match` with the entity tag). On AWS: does a chunk put again under
+  the KMS key get a new tag, and is the delete then refused with 412?
 - **The listing.** Does it take contract pricing with a metered
   `agent_computer_hours` dimension? Do the AMI and template pass AWS's scans?
 - **The Bot Framework and TLS.** Does Microsoft's Bot Framework connect under

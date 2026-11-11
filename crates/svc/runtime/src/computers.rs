@@ -415,6 +415,41 @@ impl Runtime {
         *self.lease_trouble.lock().unwrap_or_else(|e| e.into_inner()) = troubled;
     }
 
+    /// Removes from the store the chunks of sleeping computers that no
+    /// version names any more (ADR 0066, audit 5.3): each sleep trims old
+    /// versions, and what only they held stayed in the bucket for good.
+    /// glassd calls it once a day; what went is on the record.
+    pub async fn collect_computer_chunks(&self) {
+        let Some(computers) = self.computers.as_ref().map(Arc::clone) else {
+            return;
+        };
+        let collected = tokio::task::spawn_blocking(move || computers.collect()).await;
+        match collected {
+            Ok(Some(Ok(collected))) if collected.deleted > 0 => {
+                let mut event = AuditEvent::new(
+                    EventKind::Computer,
+                    format!(
+                        "Removed {} chunks of sleeping computers that no version names any \
+                         more ({} MB)",
+                        collected.deleted,
+                        collected.freed.div_ceil(1024 * 1024)
+                    ),
+                );
+                event.detail = serde_json::json!({
+                    "chunks_removed": collected.deleted,
+                    "bytes_freed": collected.freed,
+                    "chunks_kept": collected.kept,
+                });
+                self.audit(event);
+            }
+            Ok(Some(Ok(_)) | None) => {}
+            Ok(Some(Err(why))) => {
+                tracing::warn!("couldn't clear out sleeping computers' unused chunks: {why}");
+            }
+            Err(e) => tracing::warn!("clearing out unused chunks stopped: {e}"),
+        }
+    }
+
     /// Puts to sleep the computers nobody used for `idle`, so nothing stays
     /// on a host it needn't (ADR 0065 §11). glassd calls it every minute.
     pub async fn sleep_idle_computers(&self, idle: Duration) {

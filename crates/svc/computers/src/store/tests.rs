@@ -792,8 +792,11 @@ impl Blobs for Slow {
         self.inner().get(key)
     }
     fn exists(&self, key: &str) -> Result<bool, String> {
-        self.asked.lock().unwrap().push(key.to_owned());
         self.inner().exists(key)
+    }
+    fn modified(&self, key: &str) -> Result<Option<std::time::SystemTime>, String> {
+        self.asked.lock().unwrap().push(key.to_owned());
+        self.inner().modified(key)
     }
     fn delete(&self, key: &str) -> Result<(), String> {
         self.inner().delete(key)
@@ -1153,4 +1156,252 @@ fn adr0066_s3_lets_one_host_take_a_computer() {
             .collect::<Vec<_>>(),
         ["glasshouse/computers/dana/lease/00000000000000000002.json"]
     );
+}
+
+// GC and saves (audit 5.3): chunks no version names are collected, and a
+// save never ends up naming one that was.
+
+type Hook = Mutex<Option<Box<dyn FnOnce() + Send>>>;
+
+/// A store in which something happens, once, at a chosen moment: just
+/// before a version is written (a save's last step), or just after the
+/// chunks are listed (GC's first).
+#[derive(Default)]
+struct Meanwhile {
+    inner: Option<Arc<dyn Blobs>>,
+    before_version: Hook,
+    reading_a_version: Hook,
+    after_listing_chunks: Hook,
+}
+
+impl std::fmt::Debug for Meanwhile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Meanwhile")
+    }
+}
+
+impl Meanwhile {
+    fn over(inner: Arc<dyn Blobs>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Some(inner),
+            ..Self::default()
+        })
+    }
+    fn inner(&self) -> &dyn Blobs {
+        self.inner.as_deref().unwrap()
+    }
+    fn run(hook: &Hook) {
+        let hook = hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
+impl Blobs for Meanwhile {
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
+        if key.contains("/versions/") {
+            Self::run(&self.before_version);
+        }
+        self.inner().put(key, bytes)
+    }
+    fn put_hashed(&self, key: &str, bytes: &[u8], sha256: &str) -> Result<(), String> {
+        self.inner().put_hashed(key, bytes, sha256)
+    }
+    fn put_new(&self, key: &str, bytes: &[u8]) -> Result<bool, String> {
+        self.inner().put_new(key, bytes)
+    }
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        if key.contains("/versions/") {
+            Self::run(&self.reading_a_version);
+        }
+        self.inner().get(key)
+    }
+    fn exists(&self, key: &str) -> Result<bool, String> {
+        self.inner().exists(key)
+    }
+    fn modified(&self, key: &str) -> Result<Option<std::time::SystemTime>, String> {
+        self.inner().modified(key)
+    }
+    fn delete(&self, key: &str) -> Result<(), String> {
+        self.inner().delete(key)
+    }
+    fn delete_listed(&self, listed: &Listed) -> Result<bool, String> {
+        self.inner().delete_listed(listed)
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<Listed>, String> {
+        let listed = self.inner().list(prefix);
+        if prefix == "chunks/" {
+            Self::run(&self.after_listing_chunks);
+        }
+        listed
+    }
+}
+
+/// Makes every chunk in the folder store look written `ago` ago.
+fn age_chunks(blobs: &FolderBlobs, ago: Duration) {
+    let then = std::time::SystemTime::now() - ago;
+    for listed in blobs.list("chunks/").unwrap() {
+        fs::File::options()
+            .write(true)
+            .open(blobs.root().join(&listed.key))
+            .unwrap()
+            .set_modified(then)
+            .unwrap();
+    }
+}
+
+#[test]
+fn adr0066_gc_in_the_middle_of_a_save_takes_nothing_the_save_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let folder = Arc::new(FolderBlobs::new(tmp.path().join("store")).unwrap());
+    let image = tmp.path().join("disk.img");
+    many_chunks(&image, 6);
+
+    // A computer slept once and was removed since: its chunks are in the
+    // store, two days old, and no version names them.
+    let plain = Store::new(folder.clone());
+    plain.save_file("gone", &image).unwrap();
+    plain.remove("gone").unwrap();
+    age_chunks(&folder, Duration::from_secs(2 * 24 * 3600));
+    assert_eq!(chunk_count(folder.as_ref()), 6);
+
+    // Another computer with the same bytes sleeps, and GC runs after its
+    // chunks are in and before its version is written: the moment a save
+    // that relied on those old chunks lost them.
+    let meanwhile = Meanwhile::over(folder.clone());
+    *meanwhile.before_version.lock().unwrap() = Some(Box::new({
+        let collector = Store::new(folder.clone());
+        move || {
+            let collected = collector.gc().unwrap();
+            assert_eq!(
+                (collected.deleted, collected.kept),
+                (0, 6),
+                "sent again by the save, they are new"
+            );
+        }
+    }));
+    let store = Store::new(meanwhile.clone());
+    let saved = store.save_file("dana", &image).unwrap();
+    assert_eq!(saved.uploaded, fs::metadata(&image).unwrap().len());
+    assert!(meanwhile.before_version.lock().unwrap().is_none(), "GC ran");
+    let back = tmp.path().join("back.img");
+    store.restore_file("dana", &saved.version, &back).unwrap();
+    assert_eq!(fs::read(&back).unwrap(), fs::read(&image).unwrap());
+
+    // A third computer with the same bytes, a moment later: the chunks
+    // are in the store and young, and none is sent again.
+    let counting = Arc::new(Counting {
+        inner: FolderBlobs::new(tmp.path().join("store")).unwrap(),
+        puts: Mutex::new(Vec::new()),
+    });
+    let third = Store::new(counting.clone())
+        .save_file("sam", &image)
+        .unwrap();
+    assert_eq!(third.uploaded, 0);
+    assert!(
+        counting
+            .taken()
+            .iter()
+            .all(|key| !key.starts_with("chunks/")),
+        "only its version was written"
+    );
+
+    // What no version names and is a day old goes; what one names stays.
+    plain.remove("dana").unwrap();
+    plain.remove("sam").unwrap();
+    plain.save_file("kept", &image).unwrap();
+    let other = tmp.path().join("other.img");
+    write(&other, &noise(77, CHUNK_SIZE + 5), 0o600);
+    let orphan = plain.save_file("orphan", &other).unwrap();
+    plain.remove("orphan").unwrap();
+    assert!(orphan.uploaded > 0);
+    age_chunks(&folder, Duration::from_secs(2 * 24 * 3600));
+    let collected = plain.gc().unwrap();
+    assert_eq!((collected.deleted, collected.kept), (2, 6));
+    assert_eq!(collected.freed, (CHUNK_SIZE + 5) as u64);
+    let back = tmp.path().join("kept.img");
+    let kept = plain.latest("kept").unwrap().unwrap();
+    plain.restore_file("kept", &kept, &back).unwrap();
+    assert_eq!(fs::read(&back).unwrap(), fs::read(&image).unwrap());
+}
+
+#[test]
+fn adr0066_a_chunk_sent_again_after_gc_listed_it_stays() {
+    // In a folder (the stand-in), and in S3, where the delete itself is
+    // refused: the object is not the one that was listed.
+    let s3 = StandIn::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let stores: [(&str, Arc<dyn Blobs>); 2] = [
+        (
+            "a folder",
+            Arc::new(FolderBlobs::new(tmp.path().join("store")).unwrap()),
+        ),
+        ("S3", Arc::new(S3Blobs::new(s3.client(), "/glasshouse/"))),
+    ];
+    for (name, blobs) in stores {
+        let bytes = noise(5, 1000);
+        let sha = hex::encode(Sha256::digest(&bytes));
+        let key = format!("chunks/{sha}");
+        blobs.put_hashed(&key, &bytes, &sha).unwrap();
+        let meanwhile = Meanwhile::over(blobs.clone());
+        // No version names it and it is old enough (no grace here). Then,
+        // between GC's listing and its delete, a save sends it again.
+        *meanwhile.after_listing_chunks.lock().unwrap() = Some(Box::new({
+            let (blobs, key, bytes, sha) = (blobs.clone(), key.clone(), bytes.clone(), sha.clone());
+            move || {
+                std::thread::sleep(Duration::from_millis(20));
+                blobs.put_hashed(&key, &bytes, &sha).unwrap();
+            }
+        }));
+        let collector = Store::new(meanwhile.clone()).with_grace(Duration::ZERO);
+        let collected = collector.gc().unwrap();
+        assert_eq!((collected.deleted, collected.freed), (0, 0), "{name}");
+        assert_eq!(blobs.get(&key).unwrap().unwrap(), bytes, "{name}");
+        // Left alone since, it goes at the next pass.
+        let collected = collector.gc().unwrap();
+        assert_eq!(collected.deleted, 1, "{name}");
+        assert!(blobs.get(&key).unwrap().is_none(), "{name}");
+    }
+    let seen = s3.seen();
+    assert!(seen.iter().all(|r| r.refused.is_none()), "{seen:?}");
+    let deletes: Vec<_> = seen.iter().filter(|r| r.method == "DELETE").collect();
+    assert_eq!(deletes.len(), 2);
+    assert!(deletes.iter().all(|r| r.header("if-match").is_some()));
+}
+
+// specs/tla/ChunkStore.tla ("ageAtListing"): GC judged a chunk's age after
+// it had read the versions. A computer that slept while it read them, in
+// a pass slow enough, had its chunks found old and named by no version.
+#[test]
+fn adr0066_a_chunk_written_while_gc_reads_the_versions_is_young_to_that_pass() {
+    let tmp = tempfile::tempdir().unwrap();
+    let folder = Arc::new(FolderBlobs::new(tmp.path().join("store")).unwrap());
+    let plain = Store::new(folder.clone());
+    let first = tmp.path().join("first.img");
+    many_chunks(&first, 2);
+    plain.save_file("first", &first).unwrap();
+    let second = tmp.path().join("second.img");
+    write(&second, &noise(31, CHUNK_SIZE + 9), 0o600);
+
+    // GC, with a grace of a tenth of a second, is reading the versions
+    // when another computer sleeps; the pass then takes three times its
+    // grace to get to the chunks.
+    let meanwhile = Meanwhile::over(folder.clone());
+    *meanwhile.reading_a_version.lock().unwrap() = Some(Box::new({
+        let (saver, second) = (Store::new(folder.clone()), second.clone());
+        move || {
+            saver.save_file("second", &second).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }));
+    let collector = Store::new(meanwhile.clone()).with_grace(Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(150));
+    let collected = collector.gc().unwrap();
+    assert!(meanwhile.reading_a_version.lock().unwrap().is_none());
+    assert_eq!(collected.deleted, 0, "{collected:?}");
+    let back = tmp.path().join("back.img");
+    let version = plain.latest("second").unwrap().unwrap();
+    plain.restore_file("second", &version, &back).unwrap();
+    assert_eq!(fs::read(&back).unwrap(), fs::read(&second).unwrap());
 }

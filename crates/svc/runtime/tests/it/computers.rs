@@ -331,6 +331,61 @@ async fn adr0066_a_computer_another_host_took_stops_its_tasks_and_goes_aside_on_
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0066_chunks_no_sleeping_computer_names_are_removed_and_it_is_on_the_record() {
+    // Audit 5.3: nothing called the store's GC, so every sleep left the
+    // chunks only its trimmed versions held in the bucket for good.
+    let h = harness();
+    let Some(rt) = on_computers_with_store(&h) else {
+        return;
+    };
+    rt.computer_make(
+        &h.me,
+        ComputerNew {
+            id: "reconciler".into(),
+            name: "Reconciler".into(),
+            role: "Matches invoices to payments".into(),
+            agent: "invoice-demo".parse().unwrap(),
+        },
+    )
+    .unwrap();
+    let first = rt.start(&h.me, ask("Match March's invoices")).unwrap();
+    eventually(|| rt.get(&h.me, first.id).unwrap().view.state == TileState::Done).await;
+    rt.computer_sleep(&h.me, "reconciler").await.unwrap();
+
+    // A chunk no version names, from a version trimmed two days ago.
+    let chunks = h.dir.path().join("store/chunks");
+    let before = fs::read_dir(&chunks).unwrap().count();
+    assert!(before > 0);
+    let orphan = chunks.join("ab".repeat(32));
+    fs::write(&orphan, vec![7u8; 3 * 1024 * 1024]).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&orphan)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600))
+        .unwrap();
+
+    rt.collect_computer_chunks().await;
+    assert!(!orphan.exists());
+    assert_eq!(fs::read_dir(&chunks).unwrap().count(), before);
+    let audit = fs::read_to_string(h.audit_path()).unwrap();
+    assert_eq!(
+        audit
+            .matches("Removed 1 chunks of sleeping computers that no version names any more (3 MB)")
+            .count(),
+        1,
+        "{audit}"
+    );
+    // The computer wakes with what it had; and with nothing to remove,
+    // nothing more is said.
+    let second = rt.start(&h.me, ask("How many are left?")).unwrap();
+    eventually(|| rt.get(&h.me, second.id).unwrap().view.state == TileState::Done).await;
+    rt.collect_computer_chunks().await;
+    let audit = fs::read_to_string(h.audit_path()).unwrap();
+    assert_eq!(audit.matches("chunks of sleeping computers").count(), 1);
+}
+
 fn ask(prompt: &str) -> glass_api::TaskRequest {
     glass_api::TaskRequest {
         persona: None,

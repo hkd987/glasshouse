@@ -666,6 +666,12 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             made
         }
     };
+    // This host's name among the stack's, for spreading out what every
+    // host does once a day.
+    let host_name = computers
+        .as_ref()
+        .map(|c| c.host().to_owned())
+        .unwrap_or_default();
     let snapshots: Arc<dyn Snapshotter> = match config.snapshots.backend {
         SnapshotBackend::Zfs => Arc::new(ZfsSnapshotter::new()),
         SnapshotBackend::Copy => Arc::new(CopySnapshotter::new(config.state_dir.join("snapshots"))),
@@ -964,6 +970,30 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             loop {
                 tick.tick().await;
                 runtime.keep_computer_leases().await;
+            }
+        });
+    }
+
+    // Chunks no sleeping computer's version names are removed from the
+    // store once a day (ADR 0066). Hosts started together don't all do it
+    // at once, or as they start: the first pass is twenty minutes to two
+    // hours in, by the host's name.
+    if config.sandbox.backend == SandboxBackend::Computers
+        && config.sandbox.computers.store.is_some()
+    {
+        let runtime = Arc::clone(&runtime);
+        let first = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            host_name.hash(&mut hasher);
+            std::time::Duration::from_secs(20 * 60 + hasher.finish() % (100 * 60))
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(first).await;
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+            loop {
+                tick.tick().await;
+                runtime.collect_computer_chunks().await;
             }
         });
     }

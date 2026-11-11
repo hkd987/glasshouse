@@ -237,10 +237,10 @@ and a host with KVM: run each against the real thing.
     second time from its last sleep and lose one copy's work.
 - **The store**:
   - parallel transfers when a computer wakes (saving has them, see the
-    amendment below), and connections kept open between requests: each
+    amendments below), and connections kept open between requests: each
     chunk is still a new TLS connection;
-  - a lock against GC deleting a chunk a save reused but hasn't recorded
-    yet;
+  - a computer nobody has any more (its person left) stays in the bucket:
+    there is no way to remove one yet;
   - manifests and computers' records signed by the host, so a bucket
     writer can't change one. Today both are trusted as the bucket is, and
     only hosts' roles may write it.
@@ -406,3 +406,58 @@ and two ways the lease could have been wrong (a cut-off host given the
 lease back because nobody held it; trust as long as the lease): each
 breaks the first of those. `AgentComputers.tla` is still the computer on
 one host.
+
+## Amended 2026-11-11 (audit 5.3): chunks no version names are removed
+
+Each sleep keeps a computer's three newest versions and removes the ones
+before. The chunks only those held stayed in the bucket: `Store::gc`
+existed and nothing called it, because as written it could delete a chunk
+a save was about to name. Storage only grew.
+
+A host now runs it once a day (`collect_computer_chunks`; the first pass
+twenty minutes to two hours after it starts, by the host's name, so hosts
+don't all list the bucket at once). What it removes is on the audit
+record. It deletes a chunk only if no version names it and it was written
+more than a day before the pass began (`GRACE`).
+
+Why a save and GC can't meet over a chunk:
+
+- **A chunk the computer's last version names** is named by that version
+  for as long as the save runs. GC keeps it.
+- **Any other chunk** in the new version was sent by this save, or was in
+  the store and under an hour old when the save looked
+  (`REUSE_YOUNGER`). Before, a save relied on any chunk the store had,
+  however old: an old one no version named was the one GC took. An old
+  one is now sent again, which makes it a new object.
+- **A save writes its version within an hour** (`SAVE_WITHIN`) or not at
+  all. So a chunk is under two hours old when a version first names it,
+  and GC waits a day: the gap is what clocks may differ by.
+- **GC judges a chunk's age as of the moment before it reads the
+  versions**, however long the pass takes. It judged it after, so a pass
+  slow enough could find a chunk old that a version written meanwhile
+  named. The model found that one.
+- **GC deletes only the object it listed.** A chunk sent again between
+  its listing and its delete has a new entity tag, and S3 refuses the
+  delete (`If-Match`, conditional deletes, in general purpose buckets
+  since September 2025). Under the stack's KMS key every put of a key has
+  a tag of its own, the same bytes included. A bucket without KMS would
+  not tell the two apart; the stack's bucket policy allows no such put.
+
+What it costs: a computer's first sleep sends again any chunk older than
+an hour that it shares with another computer (it used to ask and skip).
+Sleeps after the first name mostly what the last version did, as before.
+The question a save asks about a chunk is now a listing of that one key,
+which also says when it was written.
+
+Two hosts may collect at once: each deletes only what is still as it
+listed it, and a chunk gone already is gone.
+
+Not done: removing a computer nobody has any more. `Store::remove` has no
+caller, because nothing in the product removes a computer yet.
+
+Modelled as `specs/tla/ChunkStore.tla`: two computers' saves sharing
+chunks, trims, and GC at any step; every chunk a version names is there.
+Its Old switches are the save that relied on any chunk, GC deleting
+without checking the object, and GC judging age after it read the
+versions.
+

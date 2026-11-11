@@ -15,6 +15,9 @@ pub struct Listed {
     pub size: u64,
     /// When it was last written.
     pub modified: SystemTime,
+    /// What tells this writing of it from the next, where the store has
+    /// such a thing (S3's entity tag).
+    pub tag: Option<String>,
 }
 
 /// A flat store of objects by key (`chunks/<sha256>`,
@@ -37,8 +40,25 @@ pub trait Blobs: Send + Sync + fmt::Debug {
     /// The object at `key`, or `None` if there's none.
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
     fn exists(&self, key: &str) -> Result<bool, String>;
+    /// When the object at `key` was last written, or `None` if there's
+    /// none: what a save asks before it relies on a chunk it didn't send
+    /// itself.
+    fn modified(&self, key: &str) -> Result<Option<SystemTime>, String> {
+        Ok(self
+            .list(key)?
+            .into_iter()
+            .find(|listed| listed.key == key)
+            .map(|listed| listed.modified))
+    }
     /// Deletes `key`. Deleting what isn't there is no error.
     fn delete(&self, key: &str) -> Result<(), String>;
+    /// Deletes an object only if it is still the one `listed`: not
+    /// written again since. `Ok(false)` if it was, and it stays. GC
+    /// deletes this way, so a chunk a save puts between GC's listing and
+    /// its delete is not lost.
+    fn delete_listed(&self, listed: &Listed) -> Result<bool, String> {
+        self.delete(&listed.key).map(|()| true)
+    }
     /// Every object whose key starts with `prefix`, in key order.
     fn list(&self, prefix: &str) -> Result<Vec<Listed>, String>;
 }
@@ -157,6 +177,27 @@ impl Blobs for FolderBlobs {
         }
     }
 
+    fn modified(&self, key: &str) -> Result<Option<SystemTime>, String> {
+        match fs::symlink_metadata(self.path(key)?) {
+            Ok(meta) if meta.is_file() => meta
+                .modified()
+                .map(Some)
+                .map_err(|e| format!("can't look at {key} in the store folder: {e}")),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("can't look for {key} in the store folder: {e}")),
+        }
+    }
+
+    fn delete_listed(&self, listed: &Listed) -> Result<bool, String> {
+        // A folder has no delete-if-unchanged: looked at again, then
+        // deleted. Development and tests; S3 checks it itself.
+        match self.modified(&listed.key)? {
+            Some(at) if at != listed.modified => Ok(false),
+            _ => self.delete(&listed.key).map(|()| true),
+        }
+    }
+
     fn delete(&self, key: &str) -> Result<(), String> {
         let path = self.path(key)?;
         match fs::remove_file(&path) {
@@ -231,6 +272,7 @@ impl Blobs for FolderBlobs {
                         key,
                         size: meta.len(),
                         modified: meta.modified().map_err(failed)?,
+                        tag: None,
                     });
                 }
             }
@@ -295,6 +337,13 @@ impl Blobs for S3Blobs {
         self.client.delete(&self.key(key))
     }
 
+    fn delete_listed(&self, listed: &Listed) -> Result<bool, String> {
+        match &listed.tag {
+            Some(tag) => self.client.delete_if(&self.key(&listed.key), tag),
+            None => self.delete(&listed.key).map(|()| true),
+        }
+    }
+
     fn list(&self, prefix: &str) -> Result<Vec<Listed>, String> {
         let now = SystemTime::now();
         Ok(self
@@ -307,6 +356,7 @@ impl Blobs for S3Blobs {
                     size: object.size,
                     // An object without a time counts as new, so GC keeps it.
                     modified: object.modified.unwrap_or(now),
+                    tag: object.etag,
                 })
             })
             .collect())

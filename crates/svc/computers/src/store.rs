@@ -19,9 +19,23 @@
 //! modes, times, symlinks and empty folders.
 //!
 //! [`Store::gc`] deletes the chunks no manifest refers to, but never one
-//! written in the last hour ([`GRACE`]): a save writes its manifest last,
-//! and gives up rather than write one more than an hour after it began, so
-//! nothing it uploaded is collected under it.
+//! written in the last day ([`GRACE`]), and only if it is still the object
+//! it listed. A save and GC never meet over a chunk:
+//!
+//! - A chunk the computer's last version names is named by that version
+//!   for as long as the save runs, so GC keeps it.
+//! - Any other chunk in the new version was sent by this save, or was in
+//!   the store and less than an hour old ([`REUSE_YOUNGER`]) when the save
+//!   looked. The save writes its manifest within an hour
+//!   ([`SAVE_WITHIN`]) or not at all. So each such chunk is under two
+//!   hours old when a version names it, and GC waits a day.
+//! - A chunk sent again between GC's listing and its delete is another
+//!   object by then, and the delete is refused (S3's `If-Match`).
+//!
+//! Before, a save relied on any chunk the store had, however old: one that
+//! no version named, which GC then collected, left a version naming a
+//! chunk that was gone. GC had no caller for that reason, and every sleep
+//! left chunks in the bucket for good.
 //!
 //! Not kept: owners (a computer's files are all its own), sockets, pipes
 //! and devices (named in [`Saved::skipped`]), hard links (each path is a
@@ -54,9 +68,20 @@ use manifest::{Entry, FORMAT, Kind, Manifest, Of, Stamp};
 
 /// The most of a file one chunk holds.
 pub const CHUNK_SIZE: usize = 4 * 1024 * 1024;
-/// How long GC leaves a chunk no manifest refers to: a save in progress
-/// has this long to write its manifest.
-pub const GRACE: Duration = Duration::from_secs(3600);
+/// How long GC leaves a chunk no manifest refers to: a day. Far longer
+/// than a save takes ([`SAVE_WITHIN`]) on top of how old a chunk a save
+/// relies on may be ([`REUSE_YOUNGER`]), with hours to spare for hosts'
+/// clocks and the store's.
+pub const GRACE: Duration = Duration::from_secs(24 * 3600);
+/// How long a save has to write its manifest: past this it gives up, and
+/// says so.
+pub const SAVE_WITHIN: Duration = Duration::from_secs(3600);
+/// A save sends every chunk its computer's last version doesn't name,
+/// unless the store has it and it was written less than this long ago: an
+/// earlier try of the same save, or another computer's save just now. An
+/// older one may be one no version names, which GC is about to collect:
+/// sent again, it is new, and GC leaves it.
+pub const REUSE_YOUNGER: Duration = Duration::from_secs(3600);
 
 /// Computers' versions, kept in [`Blobs`].
 #[derive(Debug, Clone)]
@@ -111,6 +136,9 @@ struct Upload {
 #[derive(Debug)]
 struct Sending {
     blobs: Arc<dyn Blobs>,
+    /// A chunk in the store is relied on only if it was written less
+    /// than this long ago ([`REUSE_YOUNGER`]); otherwise it is sent.
+    reuse_younger: Duration,
     state: Mutex<SendState>,
     /// Told when a chunk has gone, or failed to.
     turn: Condvar,
@@ -133,9 +161,10 @@ impl Sending {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Stores the chunk `name` unless the store has it, beside the others
-    /// on their way; waits for room among them first. An error is an
-    /// earlier chunk's: the save has failed.
+    /// Stores the chunk `name`, beside the others on their way, unless
+    /// the store has it and it is young enough to rely on; waits for room
+    /// among them first. An error is an earlier chunk's: the save has
+    /// failed.
     fn send(self: &Arc<Self>, name: String, bytes: Vec<u8>) -> Result<(), String> {
         let mut state = self.state();
         loop {
@@ -163,10 +192,18 @@ impl Sending {
                     result: Some(Err("storing a chunk stopped unexpectedly".to_owned())),
                 };
                 let key = chunk_key(&name);
-                let stored = sending.blobs.exists(&key).and_then(|there| {
-                    if there {
+                let stored = sending.blobs.modified(&key).and_then(|written| {
+                    // Written after now, by this clock: young.
+                    let young = written.is_some_and(|at| {
+                        SystemTime::now()
+                            .duration_since(at)
+                            .map_or(true, |age| age < sending.reuse_younger)
+                    });
+                    if young {
                         Ok(0)
                     } else {
+                        // Not there, or old enough that it may be one no
+                        // version names: sent, it is new to GC.
                         sending
                             .blobs
                             .put_hashed(&key, &bytes, &name)
@@ -298,12 +335,22 @@ impl Store {
         }
     }
 
-    /// Another time for [`GRACE`]: GC leaves chunks younger than `grace`,
-    /// and a save must write its manifest within it.
+    /// Another time for [`GRACE`]: GC leaves chunks younger than `grace`.
+    /// A save's own times shrink with it, so the two still can't meet: it
+    /// writes its manifest within half of it and relies on a chunk in the
+    /// store only if it is younger than a quarter.
     #[must_use]
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
         self
+    }
+
+    fn save_within(&self) -> Duration {
+        SAVE_WITHIN.min(self.grace / 2)
+    }
+
+    fn reuse_younger(&self) -> Duration {
+        REUSE_YOUNGER.min(self.grace / 4)
     }
 
     /// Saves the folder tree at `dir` as a new version of `computer`.
@@ -523,7 +570,14 @@ impl Store {
     /// Deletes every chunk no manifest refers to and older than the grace
     /// period. A manifest it can't read stops it before it deletes anything:
     /// it may refer to chunks.
+    ///
+    /// A chunk's age is judged as of the moment before the manifests are
+    /// read, however long the pass then takes: a chunk written since, by a
+    /// save whose manifest this pass didn't see, is young to it. (Judged
+    /// after, as it was, a pass that took long enough could find such a
+    /// chunk old and not referred to. `specs/tla/ChunkStore.tla` found it.)
     pub fn gc(&self) -> Result<Collected, String> {
+        let now = SystemTime::now();
         let mut referenced: HashSet<String> = HashSet::new();
         for listed in self.blobs.list("computers/")? {
             if !is_manifest_key(&listed.key) {
@@ -542,7 +596,6 @@ impl Store {
             })?;
             referenced.extend(manifest.chunk_names().map(str::to_owned));
         }
-        let now = SystemTime::now();
         let mut collected = Collected::default();
         for chunk in self.blobs.list("chunks/")? {
             let name = chunk.key.strip_prefix("chunks/").unwrap_or_default();
@@ -555,9 +608,14 @@ impl Store {
                 collected.kept += 1;
                 continue;
             }
-            self.blobs.delete(&chunk.key)?;
-            collected.deleted += 1;
-            collected.freed += chunk.size;
+            // Only the object that was listed: one a save has sent again
+            // since is new, and stays.
+            if self.blobs.delete_listed(&chunk)? {
+                collected.deleted += 1;
+                collected.freed += chunk.size;
+            } else {
+                collected.kept += 1;
+            }
         }
         Ok(collected)
     }
@@ -580,6 +638,7 @@ impl Store {
             stored,
             sending: Arc::new(Sending {
                 blobs: Arc::clone(&self.blobs),
+                reuse_younger: self.reuse_younger(),
                 state: Mutex::new(SendState::default()),
                 turn: Condvar::new(),
             }),
@@ -612,12 +671,12 @@ impl Store {
     /// Writes the manifest, last, if the save was quick enough that GC
     /// can't have collected what it uploaded.
     fn commit(&self, manifest: &Manifest, started: Instant) -> Result<(), String> {
-        if started.elapsed() >= self.grace {
+        if started.elapsed() >= self.save_within() {
             return Err(format!(
-                "saving {} took longer than GC leaves new chunks alone ({} minutes), so \
-                 nothing was saved; saving again reuses what was uploaded",
+                "saving {} took longer than a save may ({} minutes), so nothing was saved; \
+                 saving again reuses what was uploaded",
                 manifest.computer,
-                self.grace.as_secs() / 60
+                self.save_within().as_secs() / 60
             ));
         }
         let json = serde_json::to_vec(manifest)

@@ -58,6 +58,10 @@ pub struct S3Object {
     pub size: u64,
     /// When it was last put, if S3 said.
     pub modified: Option<SystemTime>,
+    /// Its entity tag as S3 gave it, quotes and all: what
+    /// [`S3Client::delete_if`] names. Under SSE-KMS every put of a key
+    /// has a tag of its own, the same bytes put again included.
+    pub etag: Option<String>,
 }
 
 /// A client for one bucket.
@@ -299,6 +303,28 @@ impl S3Client {
             let reply = self.http.send("DELETE", &signed.url, &headers, &[])?;
             match reply.status {
                 200..=299 | 404 => Ok(()),
+                status => Err(refused(status, &reply.body)),
+            }
+        })
+    }
+
+    /// Deletes `key` only if it is still the object `etag` names (from a
+    /// listing): `Ok(false)` if it has been put again since, and is kept.
+    /// One that is gone already is deleted. S3 checks the tag itself
+    /// (`If-Match`, conditional deletes), so nothing put between a listing
+    /// and this is lost to it.
+    pub fn delete_if(&self, key: &str, etag: &str) -> Result<bool, String> {
+        check_key(key)?;
+        let extra = [("if-match", etag)];
+        self.retrying(&format!("delete {key}"), || {
+            let signed = self.signed("DELETE", Some(key), &[], &extra, &[])?;
+            let headers = signed.headers();
+            let reply = self.http.send("DELETE", &signed.url, &headers, &[])?;
+            match reply.status {
+                200..=299 | 404 => Ok(true),
+                412 => Ok(false),
+                // Another write or delete of it was under way.
+                409 => Err(Try::Again("another write of it was under way".to_owned())),
                 status => Err(refused(status, &reply.body)),
             }
         })
@@ -547,6 +573,7 @@ fn parse_list(xml: &str) -> Result<Page, String> {
             key: unescape(key),
             size,
             modified,
+            etag: element(block, "ETag").map(|tag| unescape(tag.trim())),
         });
         rest = &after[end + "</Contents>".len()..];
     }
@@ -1168,11 +1195,38 @@ pub mod testing {
                 None => reply(404, b"", true),
             },
             ("DELETE", Some(key)) => {
+                // A conditional delete: only the object the tag names.
+                let wanted = headers
+                    .iter()
+                    .find(|(name, _)| name == "if-match")
+                    .map(|(_, value)| value.as_str());
+                if let (Some(wanted), Some((_, put))) = (wanted, state.objects.get(key))
+                    && wanted != "*"
+                    && wanted != etag(*put)
+                {
+                    return reply(
+                        412,
+                        &error(
+                            "PreconditionFailed",
+                            "At least one of the pre-conditions you specified did not hold",
+                        ),
+                        false,
+                    );
+                }
                 state.objects.remove(key);
                 reply(204, b"", false)
             }
             _ => reply(405, &error("MethodNotAllowed", "No."), false),
         }
+    }
+
+    /// An object's entity tag: one of its own for each put, the same
+    /// bytes put again included, as S3's are under SSE-KMS.
+    fn etag(put: SystemTime) -> String {
+        let nanos = put
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        format!("\"{nanos:x}\"")
     }
 
     fn list(state: &State, query: &str) -> Vec<u8> {
@@ -1214,15 +1268,16 @@ pub mod testing {
                 escape(token)
             ));
         }
-        for (key, (bytes, modified)) in page {
-            let modified = OffsetDateTime::from(*modified)
+        for (key, (bytes, put)) in page {
+            let modified = OffsetDateTime::from(*put)
                 .format(&Rfc3339)
                 .unwrap_or_default();
             xml.push_str(&format!(
                 "<Contents><Key>{}</Key><LastModified>{modified}</LastModified>\
-                 <ETag>&quot;0&quot;</ETag><Size>{}</Size><StorageClass>STANDARD\
+                 <ETag>{}</ETag><Size>{}</Size><StorageClass>STANDARD\
                  </StorageClass></Contents>",
                 escape(key),
+                escape(&etag(*put)),
                 bytes.len()
             ));
         }
@@ -1620,6 +1675,44 @@ mod tests {
                 .sum()
         });
         assert_eq!(made, 1);
+    }
+
+    #[test]
+    fn adr0066_s3_deletes_an_object_only_if_it_is_the_one_listed() {
+        let s3 = StandIn::start();
+        let client = s3.client();
+        client.put("chunks/aa", b"a chunk").unwrap();
+        client.put("chunks/bb", b"another").unwrap();
+        let listed = client.list("chunks/").unwrap();
+        let tag = |key: &str| {
+            listed
+                .iter()
+                .find(|o| o.key == key)
+                .and_then(|o| o.etag.clone())
+                .unwrap()
+        };
+        assert!(tag("chunks/aa").starts_with('"'), "as S3 gives it, quoted");
+        // Put again since the listing, the same bytes: it is another
+        // object now, and stays.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        client.put("chunks/aa", b"a chunk").unwrap();
+        assert!(!client.delete_if("chunks/aa", &tag("chunks/aa")).unwrap());
+        assert_eq!(client.get("chunks/aa", 100).unwrap().unwrap(), b"a chunk");
+        // Unchanged, it goes; gone already, there is nothing to keep.
+        assert!(client.delete_if("chunks/bb", &tag("chunks/bb")).unwrap());
+        assert!(client.get("chunks/bb", 100).unwrap().is_none());
+        assert!(client.delete_if("chunks/bb", &tag("chunks/bb")).unwrap());
+        let seen = s3.seen();
+        assert!(seen.iter().all(|r| r.refused.is_none()), "{seen:?}");
+        // The condition is in what's signed.
+        let delete = seen.iter().find(|r| r.method == "DELETE").unwrap();
+        assert_eq!(delete.header("if-match"), Some(tag("chunks/aa").as_str()));
+        assert!(
+            delete
+                .header("authorization")
+                .unwrap()
+                .contains("SignedHeaders=host;if-match;x-amz-content-sha256;x-amz-date,")
+        );
     }
 
     #[test]
