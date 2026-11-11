@@ -998,3 +998,21 @@ Decided here: a group is kept as direct messages are, since both are
 people writing to each other with no name of their own. Making a period
 longer brings nothing back: what a computer removed is gone, and its sync
 is past it.
+
+## Amended 2026-11-11 (audit 10.4): Chat reads the open conversation when it changed
+At every change in any of a person's conversations the Chat page asked for
+the list, the open conversation and its open thread again: three calls,
+each on the audit record, for a message that was mostly somewhere else.
+
+`chat.list` gives each conversation a `stamp` that changes whenever
+anything in it does on this computer (a message, an edit, a reaction, a
+pin, a topic, or messages going because they are past their period): how
+many messages it holds and the newest one's number. The page remembers
+the stamp the open conversation had when it was read, and reads it and
+its thread again only when the list shows another. A message elsewhere
+is one call, the list.
+
+What glassd does for the list was already kept between calls (a
+conversation is folded once per new message, ADR 0052). Still open from
+the same finding: the page draws its whole timeline again at each read,
+and nothing measures Chat with a long history in it.

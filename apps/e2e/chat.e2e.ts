@@ -764,4 +764,38 @@ test.describe("C4a: like Slack, inside the seal", { tag: "@c4a" }, () => {
     await page.screenshot({ path: join(CONSOLE_SHOTS, "chat-members.png") });
     await close();
   });
+
+  test("cf92 a message in another conversation is the list's to show: the open one isn't read again", async ({ browser }) => {
+    // Audit 10.4: every change anywhere cost a read of the open
+    // conversation (and of its open thread), each on the audit record.
+    const channel = priya("conversation", CHANNEL);
+    const { page, close } = await openChat(browser);
+    const direct = page.locator(".sidebar .row", { hasText: "Priya Shah" });
+    if (!((await direct.getAttribute("class")) ?? "").includes("active")) await direct.click();
+    await expect(page.locator(".pane-head h1")).toHaveText("Priya Shah");
+    const calls = (action: string) => audit().filter((r) => r.event.kind === "action" && r.event.agent === "chat" && r.event.action === action).length;
+    // Whatever opening it asked for has been answered.
+    await page.waitForTimeout(500);
+    const before = { reads: calls("chat.read"), lists: calls("chat.list") };
+
+    // Priya writes in the channel: the list shows it, and that is all.
+    const elsewhere = `Elsewhere ${Date.now()}`;
+    priyaCall("chat.post", { posts: [{ conversation: channel, text: elsewhere }] });
+    const row = page.locator(".sidebar .row", { hasText: CHANNEL.slice(1) });
+    // (An earlier test muted the channel, so its row shows nothing new:
+    // the page having asked for the list again is the sign it heard.)
+    await expect.poll(() => calls("chat.list"), { timeout: 5000 }).toBeGreaterThan(before.lists);
+    await page.waitForTimeout(500);
+    expect(calls("chat.read"), "the open conversation was read again for a message that isn't in it").toBe(before.reads);
+
+    // She writes here: the open conversation is read, and shows it.
+    const here = `Here ${Date.now()}`;
+    priya("say", me, here);
+    await expect(inTimeline(page, { text: here })).toBeVisible({ timeout: 5000 });
+    expect(calls("chat.read")).toBeGreaterThan(before.reads);
+    // And the channel, opened, has what she wrote there.
+    await row.click();
+    await expect(inTimeline(page, { text: elsewhere })).toBeVisible();
+    await close();
+  });
 });

@@ -471,6 +471,21 @@ const looking = (): boolean => !document.hidden && document.hasFocus();
 
 /** Counts the reads of the open conversation, so only the newest one's answer is shown. */
 let reads = 0;
+/**
+ * The conversation last read, and its stamp in the list as of then. While
+ * the list shows the same stamp for it, there is nothing new in it to read
+ * (audit 10.4): a message in another conversation used to cost a read of
+ * the open one and of its open thread, each a call on the audit record.
+ */
+let readAs: { id: string; stamp: string } | null = null;
+
+/** Whether the open conversation has changed since it was read, as far as the list says. */
+function openChanged(): boolean {
+  const id = openId();
+  if (!id) return false;
+  const stamp = state.conversations.find((c) => c.id === id)?.stamp;
+  return stamp === undefined || readAs?.id !== id || readAs.stamp !== stamp;
+}
 /** The newest read, done when its answer is shown. */
 let newest: Promise<void> = Promise.resolve();
 
@@ -492,6 +507,9 @@ async function readOpen(read: number): Promise<void> {
   const id = openId();
   if (!id) return;
   const peek = !looking();
+  // As the list had it before this read: anything that arrives during the
+  // read changes the list's next stamp, and is read then.
+  const stamp = state.conversations.find((c) => c.id === id)?.stamp;
   try {
     const limit = Math.min(200, Math.max(50, state.messages.length));
     const result = await bridge.call<Read>("chat.read", { conversation: id, limit, ...(peek ? { peek: true } : {}) });
@@ -518,6 +536,7 @@ async function readOpen(read: number): Promise<void> {
       state.view = result.data.conversation ?? null;
       remember(fresh);
       state.peeked = peek;
+      readAs = stamp === undefined ? null : { id, stamp };
       const row = state.conversations.find((c) => c.id === id);
       if (row) {
         // Reading it in Chat, looking, marked it read.
@@ -1551,7 +1570,7 @@ function confirmDelete(m: Message): void {
 
 // --- Live updates ---------------------------------------------------------------------------
 
-/** Waits for news and reads it: one `chat.list`, and the open conversation (and thread), per change. */
+/** Waits for news and reads it: one `chat.list` per change, and the open conversation (and thread) when it is what changed. */
 function live(): void {
   watch(
     bridge,
@@ -1562,8 +1581,12 @@ function live(): void {
       // or not, never dropped (NV-3, ADR 0051).
       while (state.sending) await new Promise((resolve) => setTimeout(resolve, 200));
       await loadList();
-      await loadMessages();
-      await loadThread();
+      // The open conversation, and its thread, only if something in it
+      // changed: a message elsewhere is the list's to show.
+      if (openChanged()) {
+        await loadMessages();
+        await loadThread();
+      }
       render();
     },
     {

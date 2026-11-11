@@ -638,6 +638,7 @@ impl ChatProvider {
                     "draft": self.handle.draft(me, &c.id, None),
                     "last_at": last.map(|m| m.at.clone()),
                     "last_from": last.map(|m| self.name(&m.sender)),
+                    "stamp": stamp(&store, &c.id),
                 });
                 (last.map_or(0, |m| m.seq), view, line)
             })
@@ -910,6 +911,19 @@ impl ChatProvider {
 /// Conversation `c` as a shared item, its messages opened with `member`'s
 /// keys; what this computer can't open is left out. None for an item whose
 /// sealed label isn't the one the console keeps in the clear.
+/// What changes whenever anything in conversation `id` does on this
+/// computer: a message, an edit, a reaction, a pin, a topic, or messages
+/// going because they are past the period chat is kept. A reader that
+/// holds the conversation as of one stamp needn't read it again while the
+/// list shows the same one (audit 10.4: Chat read the open conversation,
+/// and its open thread, again at every change in any conversation).
+fn stamp(store: &Store, id: &str) -> String {
+    let all = store.messages.get(id).map_or(&[][..], Vec::as_slice);
+    // How many, and the newest: one that arrives late, numbered before
+    // the newest, changes the first.
+    format!("{}:{}", all.len(), all.last().map_or(0, |m| m.seq))
+}
+
 fn open_item(
     store: &Store,
     member: &Member,
@@ -2141,6 +2155,76 @@ mod tests {
         sync(&[&b]);
         assert_eq!(shown(&b, "priya"), ["Can we do Monday?"]);
         assert_eq!(items(&b), 1);
+    }
+
+    // Audit 10.4: Chat read the open conversation again at every change
+    // anywhere. The list's stamp says whether there is anything to read.
+    #[test]
+    fn cf92_a_conversations_stamp_changes_when_it_does_and_only_then() {
+        let org = org();
+        let (a, b, channel) = launch_channel(&org);
+        let root = say(&a, "dana", &channel, "Ship Friday", None);
+        let direct = a
+            .call(
+                "dana",
+                POST,
+                json!({ "posts": [{ "to": ["priya"], "text": "Lunch?" }] }),
+            )
+            .unwrap();
+        let direct = direct.data["posted"][0]["conversation"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        sync(&[&b]);
+        let stamps = |c: &Computer| -> (String, String) {
+            let list = c.call("priya", LIST, json!({})).unwrap();
+            let of = |id: &str| {
+                list.data["conversations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|c| c["id"] == id)
+                    .unwrap()["stamp"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            };
+            (of(&channel), of(&direct))
+        };
+        let first = stamps(&b);
+        // Listing and reading change nothing.
+        b.call("priya", READ, json!({ "conversation": channel }))
+            .unwrap();
+        assert_eq!(stamps(&b), first);
+
+        // A message in the channel changes the channel's, not the other.
+        say(&a, "dana", &channel, "Budget is 40k", None);
+        sync(&[&b]);
+        let second = stamps(&b);
+        assert_ne!(second.0, first.0);
+        assert_eq!(second.1, first.1);
+
+        // So does what isn't a message people wrote: a reaction.
+        a.call(
+            "dana",
+            everyday::REACT,
+            json!({ "conversation": channel, "message": root, "emoji": "👍" }),
+        )
+        .unwrap();
+        sync(&[&b]);
+        let third = stamps(&b);
+        assert_ne!(third.0, second.0);
+        assert_eq!(third.1, first.1);
+
+        // And messages going because they are past their period.
+        b.handle.set_kept_for(KeptFor {
+            channel_days: 0,
+            dm_days: 1,
+        });
+        assert_eq!(b.handle.trim(), 1);
+        let fourth = stamps(&b);
+        assert_eq!(fourth.0, third.0);
+        assert_ne!(fourth.1, first.1);
     }
 
     // ADR 0030 §4: a period for channels, and one for direct messages

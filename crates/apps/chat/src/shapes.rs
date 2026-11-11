@@ -186,7 +186,8 @@ fn conversation_row() -> Value {
             "notify": notify(),
             "draft": draft(),
             "last_at": { "type": ["string", "null"], "description": "when its newest message was sent, RFC 3339; null when it has none" },
-            "last_from": { "type": ["string", "null"], "description": "who sent its newest message, by name" }
+            "last_from": { "type": ["string", "null"], "description": "who sent its newest message, by name" },
+            "stamp": { "type": "string", "description": "changes whenever anything in the conversation does (a message, an edit, a reaction, a pin, a topic); the same stamp as last time means there is nothing new to read in it" }
         }),
         &[
             "id",

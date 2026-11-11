@@ -31,6 +31,8 @@ export interface Conversation {
   notify?: Level;
   /** The conversation's main draft, kept in glassd. */
   draft?: string | null;
+  /** Changes whenever anything in the conversation does; the same as last time means nothing new to read in it. */
+  stamp?: string;
 }
 
 /** `chat.read`'s `data.conversation`. */
