@@ -32,10 +32,27 @@ interface View {
   impact: Impact | null;
   message: { text: string; tone: "ok" | "bad" } | null;
   busy: boolean;
+  /** The fields of "How long each computer keeps things", as typed. */
+  kept: { audit: string; offline: string };
+}
+
+/** The draft's periods as the fields show them: empty for 0, which keeps. */
+function keptFields(page: PolicyPage): View["kept"] {
+  const field = (days: number): string => (days === 0 ? "" : String(days));
+  return { audit: field(page.kept.audit_days), offline: field(page.kept.offline_days) };
+}
+
+/** A field's days: empty is 0; anything else a whole number of days. */
+function keptDays(text: string, what: string): number {
+  const trimmed = text.trim();
+  if (trimmed === "") return 0;
+  if (!/^\d{1,6}$/.test(trimmed) || Number(trimmed) < 1) throw new Error(`${what}: a whole number of days, or empty.`);
+  return Number(trimmed);
 }
 
 export async function policyPage(root: HTMLElement, group: string | null): Promise<void> {
-  const view: View = { page: await load(group), impact: null, message: null, busy: false };
+  const page = await load(group);
+  const view: View = { page, impact: null, message: null, busy: false, kept: keptFields(page) };
   const draw = () => show(root, render(view, act));
   async function act(work: () => Promise<string | null>, keepImpact = false): Promise<void> {
     if (view.busy) return;
@@ -44,6 +61,7 @@ export async function policyPage(root: HTMLElement, group: string | null): Promi
     for (const button of root.querySelectorAll<HTMLButtonElement>("button")) button.disabled = true;
     const said = await carryOut(work, async () => {
       view.page = await load(view.page.group.name);
+      view.kept = keptFields(view.page);
     });
     view.busy = false;
     if (said === SIGNED_OUT) return;
@@ -283,6 +301,59 @@ function render(view: View, act: Act): HTMLElement {
     ),
   );
 
+  // For the whole org, so on Everyone's page: how long each computer
+  // keeps audit records (ADR 0053) and what apps kept to work offline
+  // (ADR 0024). Saved to the draft like any rule, then previewed and
+  // published. (How long chat is kept is on the Chat page: it isn't
+  // policy, and reaches every computer at once.)
+  const keptField = (label: string, name: "audit" | "offline", hint: string): HTMLElement =>
+    h(
+      "label",
+      { class: "field" },
+      label,
+      h(
+        "span",
+        { class: "days" },
+        h("input", {
+          class: "text short",
+          name: `kept-${name}`,
+          inputmode: "numeric",
+          value: view.kept[name],
+          oninput: (e: Event) => {
+            view.kept[name] = (e.target as HTMLInputElement).value;
+          },
+        }),
+        h("span", { class: "hint" }, hint),
+      ),
+    );
+  const kept = everyone
+    ? card(
+        "How long each computer keeps things",
+        "For everyone in the org. Saved to the draft: preview, then publish.",
+        keptField("Audit records", "audit", `days · at least ${p.kept.audit_least}, or empty to keep every record`),
+        keptField("What apps kept to work offline", "offline", "days · empty keeps it until newer entries replace it"),
+        h(
+          "div",
+          { class: "actions" },
+          h(
+            "button",
+            {
+              class: "button primary",
+              "data-test": "save-kept",
+              onclick: () =>
+                act(async () => {
+                  const audit_days = keptDays(view.kept.audit, "Audit records");
+                  const offline_days = keptDays(view.kept.offline, "What apps kept to work offline");
+                  await edit({ edit: "kept", audit_days, offline_days });
+                  return "Saved to the draft. Preview the impact, then publish.";
+                }),
+            },
+            "Save to draft",
+          ),
+        ),
+      )
+    : null;
+
   const rollout = card(
     "Versions and rollout",
     "A version reaches the pilot ring first, then early, then broad. Rolling back is a new version, everywhere at once.",
@@ -395,7 +466,7 @@ function render(view: View, act: Act): HTMLElement {
     h(
       "div",
       { class: "columns" },
-      h("div", { class: "main" }, tiers, h("div", { class: "pair" }, agents, labels), h("div", { class: "pair" }, profiles, rollout)),
+      h("div", { class: "main" }, tiers, h("div", { class: "pair" }, agents, labels), h("div", { class: "pair" }, profiles, rollout), kept),
       h("aside", { class: "side" }, live, impact),
     ),
   );

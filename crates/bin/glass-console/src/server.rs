@@ -3393,6 +3393,81 @@ mod tests {
         assert_eq!(sign_in(&t.console, "nobody").await, Err(403));
     }
 
+    // The owner's decisions on the audit log and the apps' offline cache:
+    // an admin can set them. They were in policy with a preview line and
+    // no way to set them from the console.
+    #[tokio::test]
+    async fn ad2_it_sets_how_long_computers_keep_audit_records_and_offline_entries() {
+        let t = console().await;
+        t.sync("d", None, 0).await;
+        t.call("POST", "/api/fleet/d/ring", json!({ "ring": "pilot" }))
+            .await;
+        let (_, page) = t
+            .call("GET", "/api/policy?group=everyone", Value::Null)
+            .await;
+        assert_eq!(
+            page["kept"],
+            json!({ "audit_days": 400, "offline_days": 0, "audit_least": 30 })
+        );
+
+        // Fewer days than an audit needs: refused, in IT's words.
+        let (status, body) = t
+            .call(
+                "POST",
+                "/api/policy/edit",
+                json!({ "edit": "kept", "audit_days": 7, "offline_days": 0 }),
+            )
+            .await;
+        assert_eq!(status, 400, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("at least 30 days"),
+            "{body}"
+        );
+
+        let (status, body) = t
+            .call(
+                "POST",
+                "/api/policy/edit",
+                json!({ "edit": "kept", "audit_days": 730, "offline_days": 7 }),
+            )
+            .await;
+        assert_eq!(status, 200, "{body}");
+        let (_, page) = t
+            .call("GET", "/api/policy?group=everyone", Value::Null)
+            .await;
+        assert_eq!(page["kept"]["audit_days"], 730);
+        assert_eq!(page["kept"]["offline_days"], 7);
+        assert_eq!(page["draft_changed"], true);
+
+        // The preview says both in words, and a pilot computer gets them.
+        let (_, impact) = t.call("POST", "/api/policy/preview", json!({})).await;
+        let changes: Vec<&str> = impact["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(
+            changes.contains(
+                &"Everyone: audit records are kept on each computer for 730 days, then removed"
+            ),
+            "{changes:?}"
+        );
+        assert!(
+            changes.iter().any(|c| c.contains("forgotten after 7 days")),
+            "{changes:?}"
+        );
+        let (status, body) = t.publish("How long computers keep things").await;
+        assert_eq!(status, 200, "{body}");
+        let signed = t.sync("d", None, 0).await.policy.expect("the new policy");
+        let release: PolicyRelease = signed
+            .open(DocKind::Policy, "acme", &[t.key], None)
+            .unwrap();
+        let policy = glass_policy::Policy::from_toml(&release.policy).unwrap();
+        assert_eq!(policy.audit_retention_days(), Some(730));
+        assert_eq!(policy.offline_cache_days(), Some(7));
+    }
+
     // ADR 0030 §4: IT sets how long chat is kept on the console. Asked
     // without `confirm` it is told what would go and nothing changes;
     // confirmed, a new Chat release goes to every computer, signed.

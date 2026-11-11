@@ -101,6 +101,8 @@ export interface PolicyPage {
   org_apps_off: string[];
   max_label: string | null;
   org_max_label: string;
+  /** How long each computer keeps things, org-wide, in the draft: days, 0 keeps. */
+  kept: { audit_days: number; offline_days: number; audit_least: number };
   routes: { label: string; route: string }[];
   versions: { version: number; note: string; by: string; at: string; rolls_back_to: number | null; rings: Ring[] }[];
   rings: Partial<Record<Ring, number>>;

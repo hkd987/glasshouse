@@ -61,6 +61,12 @@ pub enum Edit {
     },
     /// Whether agents may use the org's model credits (ADR 0039).
     Credits { on: bool },
+    /// How long each computer keeps things, for the whole org, in days:
+    /// audit records (ADR 0053; 0 keeps every record, otherwise at least
+    /// 30), and what apps kept to work offline (ADR 0024; 0 keeps it
+    /// until newer entries replace it). Both were in policy with no
+    /// control to set them by.
+    Kept { audit_days: u32, offline_days: u32 },
     /// Whether an agent may ask AI models (`model.complete`, AD-2), on
     /// whatever routes the org's models allow. For every group.
     ModelCalls { agent: AgentId, on: bool },
@@ -172,6 +178,21 @@ fn group<'a>(doc: &'a mut PolicyDocument, name: &str) -> &'a mut GroupPolicy {
 pub fn apply(doc: &mut PolicyDocument, edit: Edit) -> Result<(), String> {
     match edit {
         Edit::Credits { on } => credits(doc, on),
+        Edit::Kept {
+            audit_days,
+            offline_days,
+        } => {
+            // Said here in IT's words; a device says it in the policy's.
+            let least = glass_policy::document::MIN_AUDIT_RETENTION_DAYS;
+            if (1..least).contains(&audit_days) {
+                return Err(format!(
+                    "Audit records are kept at least {least} days, or leave it empty to keep \
+                     every record."
+                ));
+            }
+            doc.org.audit_retention_days = audit_days;
+            doc.org.offline_cache_days = offline_days;
+        }
         Edit::Mail { mail } => {
             doc.mail = mail;
         }
@@ -346,6 +367,55 @@ mod tests {
 
     fn doc() -> PolicyDocument {
         toml::from_str(glass_policy::DEFAULT_POLICY).unwrap()
+    }
+
+    // The owner's decisions on the audit log ("a default, then an admin
+    // can configure") and the apps' offline cache: both were in policy
+    // with nothing in the console to set them by.
+    #[test]
+    fn ad2_it_sets_how_long_each_computer_keeps_audit_records_and_what_apps_kept_offline() {
+        let mut d = doc();
+        assert_eq!(
+            (d.org.audit_retention_days, d.org.offline_cache_days),
+            (400, 0)
+        );
+        let edit: Edit =
+            serde_json::from_str(r#"{"edit":"kept","audit_days":730,"offline_days":7}"#).unwrap();
+        apply(&mut d, edit).unwrap();
+        assert_eq!(
+            (d.org.audit_retention_days, d.org.offline_cache_days),
+            (730, 7)
+        );
+        glass_policy::Policy::from_document(d.clone()).expect("a device takes it");
+
+        // Every record for good, and offline entries until replaced.
+        apply(
+            &mut d,
+            Edit::Kept {
+                audit_days: 0,
+                offline_days: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (d.org.audit_retention_days, d.org.offline_cache_days),
+            (0, 0)
+        );
+
+        // Fewer days than an audit needs: refused in words, nothing set.
+        let refused = apply(
+            &mut d,
+            Edit::Kept {
+                audit_days: 7,
+                offline_days: 3,
+            },
+        )
+        .unwrap_err();
+        assert!(refused.contains("at least 30 days"), "{refused}");
+        assert_eq!(
+            (d.org.audit_retention_days, d.org.offline_cache_days),
+            (0, 0)
+        );
     }
 
     #[test]

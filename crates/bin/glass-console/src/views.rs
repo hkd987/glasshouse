@@ -270,6 +270,12 @@ pub fn policy(
             .unwrap_or_default(),
         "max_label": rules.and_then(|g| g.max_label),
         "org_max_label": doc.org.max_label,
+        // How long each computer keeps things, org-wide, in the draft.
+        "kept": {
+            "audit_days": doc.org.audit_retention_days,
+            "offline_days": doc.org.offline_cache_days,
+            "audit_least": glass_policy::document::MIN_AUDIT_RETENTION_DAYS,
+        },
         "routes": routes(&doc),
         "versions": versions,
         "rings": state.policy.rings,

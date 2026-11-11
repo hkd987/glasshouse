@@ -153,6 +153,8 @@ once was there until 200 newer reads had replaced it.
 
 The owner's decision: IT may set a number of days (`[org]
 offline_cache_days` in policy); unset, the default, it is kept as before.
+IT sets it in the console on the Everyone policy page, under "How long
+each computer keeps things", beside the audit log's.
 
 - The rule travels with the app's session (`AppSession.offline_days`),
   so a page has it from its last time online and holds to it with no

@@ -288,7 +288,10 @@ begun whose first record chains onto the segment's last.
 **How long records are kept.** A policy setting, `[org]
 audit_retention_days`, which IT publishes from the console like any other
 policy change (the preview says "audit records are kept on each computer
-for N days, then removed").
+for N days, then removed"). IT sets it on the Everyone policy page, under
+"How long each computer keeps things" (since 2026-11-11: until then the
+setting was in policy and the console had no control for it, so it could
+be changed only in the policy's text).
 
 - **The default is 400 days**: thirteen months and a few days. A year is
   what an audit of a year's controls, and the common rules for audit

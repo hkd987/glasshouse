@@ -927,7 +927,8 @@ details.file[open] summary {
   font-size: 13px;
 }
 
-/* Chat (ADR 0030 §4): how long chat is kept, and the step before removing. */
+/* A number of days with its unit beside it (Chat's periods, and the
+   Everyone policy's), and Chat's step before removing. */
 .field .days {
   display: flex;
   align-items: center;

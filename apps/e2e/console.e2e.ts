@@ -506,6 +506,59 @@ test("nv3 ad2 the mail service IT sets in the console shows in Mail on the devic
   await mail.close();
 });
 
+test("ad2 IT sets how long computers keep audit records and what apps kept offline, and the computer has them", async ({ browser }) => {
+  const { page, close } = await session(browser);
+  const before = version(status().policy);
+  await open(page, "#/policy/everyone", "policy");
+  await expect(page.locator("input[name=kept-audit]")).toHaveValue("400");
+  await expect(page.locator("input[name=kept-offline]")).toHaveValue("");
+
+  // Fewer days than an audit needs: said, and the draft is as it was.
+  await page.fill("input[name=kept-audit]", "7");
+  await page.click("button[data-test=save-kept]");
+  await expect(page.locator(".notice.bad")).toContainText("Audit records are kept at least 30 days");
+  await expect(page.locator("input[name=kept-audit]")).toHaveValue("400");
+
+  await page.fill("input[name=kept-audit]", "730");
+  await page.fill("input[name=kept-offline]", "7");
+  await page.click("button[data-test=save-kept]");
+  await expect(page.locator(".notice")).toContainText("Saved to the draft");
+  await page.click("button[data-test=preview]");
+  const changes = page.locator("[data-test=changes]");
+  await expect(changes).toContainText("Everyone: audit records are kept on each computer for 730 days, then removed");
+  await expect(changes).toContainText("Everyone: what an app kept to work offline is forgotten after 7 days, the next time the app opens");
+  await page.locator("input[name=kept-audit]").scrollIntoViewIfNeeded();
+  await shot(page, "policy-kept-previewed");
+
+  await page.click("button[data-test=publish]");
+  await expect(page.locator(".notice")).toContainText("to the pilot ring");
+  const published = Date.now();
+  while (version(status().policy) <= before) {
+    expect(Date.now() - published, "the periods on the device").toBeLessThan(PROPAGATION_BUDGET_MS);
+    await page.waitForTimeout(20);
+  }
+  const policy = readFileSync(join(DEV, "policy.toml"), "utf8");
+  expect(policy).toContain("audit_retention_days = 730");
+  expect(policy).toContain("offline_cache_days = 7");
+
+  // Back as it was, so the computer's log is trimmed by the default again.
+  // (The preview compares with what every ring runs, and only the pilot
+  // ring had the change: it is back to what the others never left.)
+  await page.fill("input[name=kept-audit]", "400");
+  await page.fill("input[name=kept-offline]", "");
+  await page.click("button[data-test=save-kept]");
+  await expect(page.locator(".notice")).toContainText("Saved to the draft");
+  await page.click("button[data-test=preview]");
+  await expect(page.locator("[data-test=impact]")).toBeVisible();
+  await expect(changes).not.toContainText("audit records");
+  await expect(changes).not.toContainText("to work offline");
+  await page.click("button[data-test=publish]");
+  await expect(page.locator(".notice")).toContainText("to the pilot ring");
+  await expect.poll(() => version(status().policy), { timeout: PROPAGATION_BUDGET_MS }).toBe(before + 2);
+  expect(readFileSync(join(DEV, "policy.toml"), "utf8")).not.toContain("audit_retention_days");
+  await close();
+});
+
 test("cf61 adr0030 IT sets how long chat is kept, sees what it would remove first, and the computer has it", async ({ browser }) => {
   const { page, close } = await session(browser);
   await open(page, "#/chat", "chat");
