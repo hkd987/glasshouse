@@ -547,15 +547,32 @@ impl ChatState {
     }
 
     /// What changed for the people on `request.device` since its cursor.
+    ///
+    /// Only what changed (audit 9.4). An answer used to carry every
+    /// conversation of the computer's people with every epoch and every
+    /// member's key, at every message: for someone in a few hundred
+    /// conversations (a doc and an artifact are each one), hundreds of
+    /// kilobytes built under the console's lock and read again by the
+    /// computer, for each line typed in a doc. A computer keeps what it
+    /// was sent and moves its cursor only past what it kept
+    /// (specs/tla/ChatSync.tla), so:
+    ///
+    /// - a conversation goes with its epochs when it was made, or its
+    ///   members changed, since the cursor, or someone here was added to
+    ///   it since (who is sent its history too);
+    /// - the keys that go are the ones those conversations and epochs
+    ///   name, and the senders' of the messages in the answer;
+    /// - a computer that starts over asks from 0 and is sent everything.
     pub fn sync(&self, request: &ChatSyncRequest) -> ChatSyncResponse {
+        let since = request.since;
         // Only logins with a key on this computer: a computer hears of its
         // own people's conversations, nobody else's.
-        let mine: Vec<&MemberKey> = self
+        let logins: BTreeSet<&str> = self
             .keys
             .iter()
             .filter(|k| k.device == request.device && request.logins.contains(&k.login))
+            .map(|k| k.login.as_str())
             .collect();
-        let logins: BTreeSet<&str> = mine.iter().map(|k| k.login.as_str()).collect();
         let theirs: Vec<&Stored> = self
             .conversations
             .values()
@@ -567,48 +584,66 @@ impl ChatState {
             })
             .collect();
         let ids: BTreeSet<&str> = theirs.iter().map(|s| s.conversation.id.as_str()).collect();
-        // Whole: the maker's signature covers every envelope.
-        let epochs = theirs.iter().flat_map(|s| s.epochs.clone()).collect();
         // Someone added since the cursor gets the conversation's history.
         let joined: BTreeSet<&str> = theirs
             .iter()
             .filter(|s| {
                 s.joined
                     .iter()
-                    .any(|(l, at)| logins.contains(l.as_str()) && *at > request.since)
+                    .any(|(l, at)| logins.contains(l.as_str()) && *at > since)
             })
             .map(|s| s.conversation.id.as_str())
+            .collect();
+        // What this computer hasn't been sent as it is now.
+        let fresh: Vec<&Stored> = theirs
+            .iter()
+            .copied()
+            .filter(|s| {
+                s.created_seq.max(s.changed_seq) > since
+                    || joined.contains(s.conversation.id.as_str())
+            })
             .collect();
         // In sequence order: what's new starts past the cursor, unless
         // someone here was added since, whose conversation's history is
         // theirs too.
         let from = if joined.is_empty() {
-            self.messages.partition_point(|m| m.seq <= request.since)
+            self.messages.partition_point(|m| m.seq <= since)
         } else {
             0
         };
-        let messages: Vec<Message> = self.messages[from..]
-            .iter()
-            .filter(|m| {
-                m.header().is_ok_and(|h| {
-                    ids.contains(h.conversation.as_str())
-                        && (m.seq > request.since || joined.contains(h.conversation.as_str()))
-                })
-            })
-            .cloned()
-            .collect();
-        let people: BTreeSet<&str> = theirs
-            .iter()
-            .flat_map(|s| s.conversation.members.iter().map(String::as_str))
-            .collect();
+        // The keys the answer's records name: a fresh conversation's
+        // members, the makers of its epochs and whoever they are sealed
+        // to, and each message's sender.
+        let mut people: BTreeSet<&str> = BTreeSet::new();
+        let mut named: BTreeSet<String> = BTreeSet::new();
+        for stored in &fresh {
+            people.extend(stored.conversation.members.iter().map(String::as_str));
+            for epoch in &stored.epochs {
+                named.insert(epoch.body.made_by.clone());
+                named.extend(epoch.body.envelopes.iter().map(|e| e.key.clone()));
+            }
+        }
+        let mut messages = Vec::new();
+        for message in &self.messages[from..] {
+            let Ok(header) = message.header() else {
+                continue;
+            };
+            if ids.contains(header.conversation.as_str())
+                && (message.seq > since || joined.contains(header.conversation.as_str()))
+            {
+                named.insert(header.key);
+                messages.push(message.clone());
+            }
+        }
         ChatSyncResponse {
-            conversations: theirs.iter().map(|s| s.conversation.clone()).collect(),
-            epochs,
+            conversations: fresh.iter().map(|s| s.conversation.clone()).collect(),
+            // Whole: the maker's signature covers every envelope.
+            epochs: fresh.iter().flat_map(|s| s.epochs.clone()).collect(),
             messages,
             keys: self
                 .keys
                 .iter()
-                .filter(|k| people.contains(k.login.as_str()))
+                .filter(|k| people.contains(k.login.as_str()) || named.contains(&k.id))
                 .cloned()
                 .collect(),
             cursor: self.seq,
@@ -1667,16 +1702,14 @@ mod tests {
                         since: *since,
                         wait_secs: 0,
                     };
+                    // An answer holds only what changed, so news is an
+                    // answer with something in it.
                     let answer = chat.sync(&request);
-                    let by_answer = !answer.messages.is_empty()
-                        || chat.conversations.values().any(|s| {
-                            s.created_seq.max(s.changed_seq) > request.since
-                                && answer
-                                    .conversations
-                                    .iter()
-                                    .any(|c| c.id == s.conversation.id)
-                        });
+                    let by_answer = !answer.messages.is_empty() || !answer.conversations.is_empty();
                     assert_eq!(chat.news(&request), by_answer, "{} since {since}", who.name);
+                    if !by_answer {
+                        assert!(answer.epochs.is_empty() && answer.keys.is_empty());
+                    }
                 }
             }
         }
@@ -2170,6 +2203,116 @@ mod tests {
             ..request
         };
         assert_eq!(chat.sync(&request).messages.len(), 6);
+    }
+
+    /// An answer carries what changed since the computer asked, not all
+    /// the computer's people have (audit 9.4, the rest).
+    #[tokio::test]
+    async fn cf91_an_answer_carries_only_what_changed_since_the_computer_asked() {
+        let org = Org::new().await;
+        // Priya and Dana share 40 channels, with five messages among them.
+        let (priya, dana, channel, key) = long_history(&org, 5).await;
+        let sam = org.computer("laptop-sam", "sam").await;
+        let ids = |keys: &[MemberKey]| {
+            let mut ids: Vec<String> = keys.iter().map(|k| k.id.clone()).collect();
+            ids.sort();
+            ids
+        };
+        let both = ids(&[priya.key.clone(), dana.key.clone()]);
+
+        // From the start: everything.
+        let all = org.sync(&dana, 0, 0).await;
+        assert_eq!(all.conversations.len(), 40);
+        assert_eq!(all.epochs.len(), 40);
+        assert_eq!(all.messages.len(), 5);
+        assert_eq!(ids(&all.keys), both);
+
+        // Nothing since: nothing.
+        let none = org.sync(&dana, all.cursor, 0).await;
+        assert!(none.conversations.is_empty() && none.epochs.is_empty());
+        assert!(none.messages.is_empty() && none.keys.is_empty());
+        assert_eq!(none.cursor, all.cursor);
+
+        // One message: the message and its sender's key, where it used to
+        // be all forty conversations again with their epochs and keys.
+        let (status, _) = org.say(&priya, &channel, 1, &key, "the sixth").await;
+        assert_eq!(status, 200);
+        let one = org.sync(&dana, all.cursor, 0).await;
+        assert!(one.conversations.is_empty() && one.epochs.is_empty());
+        assert_eq!(one.messages.len(), 1);
+        assert_eq!(ids(&one.keys), ids(std::slice::from_ref(&priya.key)));
+        let was = serde_json::to_vec(&ChatSyncResponse {
+            messages: one.messages.clone(),
+            ..all.clone()
+        })
+        .unwrap()
+        .len();
+        let is = serde_json::to_vec(&one).unwrap().len();
+        // 53 KB and 1 KB when this was written.
+        assert!(is * 10 < was, "{is} of {was} bytes");
+
+        // A channel made since: it, its epoch and its members' keys.
+        let (status, lunch, _) = org.channel(&priya, &["priya", "dana"], "#lunch").await;
+        assert_eq!(status, 200);
+        let made = org.sync(&dana, one.cursor, 0).await;
+        assert_eq!(
+            made.conversations.iter().map(|c| &c.id).collect::<Vec<_>>(),
+            [&lunch]
+        );
+        assert_eq!(made.epochs.len(), 1);
+        assert!(made.messages.is_empty());
+        assert_eq!(ids(&made.keys), both);
+
+        // Sam is added to the first channel. Dana's computer is sent the
+        // channel as it is now with its epochs and Sam's key, and no
+        // message again; Sam's is sent its history too.
+        let everyone = ["dana", "priya", "sam"];
+        let (status, body, _) = change(
+            &org,
+            &priya,
+            &channel,
+            2,
+            &key,
+            &everyone,
+            &["sam"],
+            &everyone,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let changed = org.sync(&dana, made.cursor, 0).await;
+        assert_eq!(changed.conversations.len(), 1);
+        assert_eq!(changed.conversations[0].members.len(), 3);
+        assert_eq!(changed.epochs.len(), 2);
+        assert!(changed.messages.is_empty());
+        assert!(changed.keys.iter().any(|k| k.id == sam.key.id));
+        let joined = org.sync(&sam, changed.cursor - 1, 0).await;
+        assert_eq!(joined.conversations.len(), 1);
+        assert_eq!(joined.epochs.len(), 2);
+        assert_eq!(
+            joined.messages.len(),
+            1 + all
+                .messages
+                .iter()
+                .filter(|m| m.header().unwrap().conversation == channel)
+                .count(),
+            "the channel's history"
+        );
+        assert_eq!(ids(&joined.keys).len(), 3);
+        // And once Sam's computer has it, an answer is small for it too.
+        let after = org.sync(&sam, joined.cursor, 0).await;
+        assert!(after.conversations.is_empty() && after.keys.is_empty());
+
+        // Priya's computer makes its key again and posts: the new key
+        // goes with the message, since nothing else would bring it.
+        let again = org.computer("laptop-priya", "priya").await;
+        assert_ne!(again.key.id, priya.key.id);
+        let (status, body) = org.say(&again, &lunch, 1, &key, "from the new key").await;
+        // (Sealed under another channel's key: the console can't tell,
+        // and only who sent it matters here.)
+        assert_eq!(status, 200, "{body}");
+        let rekeyed = org.sync(&dana, changed.cursor, 0).await;
+        assert_eq!(rekeyed.messages.len(), 1);
+        assert_eq!(ids(&rekeyed.keys), ids(std::slice::from_ref(&again.key)));
     }
 
     /// IT sets how long chat is kept: the Chat release's version.

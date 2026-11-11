@@ -919,6 +919,9 @@ pub mod testing {
         blobs: Vec<crate::shared::SealedBlob>,
         /// (conversation, login, sequence number) for each person added.
         joined: Vec<(String, String, u64)>,
+        /// Each conversation's sequence number: when it was made, or its
+        /// members last changed.
+        changed: std::collections::HashMap<String, u64>,
     }
 
     #[derive(Debug)]
@@ -1138,9 +1141,11 @@ pub mod testing {
                 return refused("Every epoch is sealed to IT's compliance key too.");
             }
             kept.seq += 1;
+            let seq = kept.seq;
+            kept.changed.insert(request.conversation.id.clone(), seq);
             kept.conversations
                 .push((request.conversation.clone(), vec![request.epoch.clone()]));
-            Ok(kept.seq)
+            Ok(seq)
         }
 
         fn post(&self, request: &PostMessage) -> std::result::Result<u64, LinkError> {
@@ -1240,6 +1245,7 @@ pub mod testing {
             for login in added {
                 kept.joined.push((id.clone(), login, seq));
             }
+            kept.changed.insert(id.clone(), seq);
             let (conversation, epochs) = &mut kept.conversations[at];
             conversation.members = after;
             conversation.epoch = epoch.body.number;
@@ -1264,31 +1270,59 @@ pub mod testing {
                 .filter(|(c, _)| c.members.iter().any(|m| logins.contains(&m)))
                 .collect();
             let ids: Vec<&str> = theirs.iter().map(|(c, _)| c.id.as_str()).collect();
-            let people: Vec<&String> = theirs.iter().flat_map(|(c, _)| &c.members).collect();
-            Ok(ChatSyncResponse {
-                conversations: theirs.iter().map(|(c, _)| c.clone()).collect(),
-                epochs: theirs.iter().flat_map(|(_, e)| e.clone()).collect(),
-                messages: kept
-                    .messages
+            // As the console answers (glass-console's `ChatState::sync`):
+            // only what changed since the cursor. A conversation goes with
+            // its epochs when it was made or its members changed since, or
+            // someone here was added to it since; the keys that go are the
+            // ones those name, and the senders' of the answer's messages.
+            let added = |id: &str| {
+                kept.joined
                     .iter()
-                    .filter(|m| {
-                        m.header().is_ok_and(|h| {
-                            ids.contains(&h.conversation.as_str())
-                                && (m.seq > request.since
-                                    // Someone added since gets the history.
-                                    || kept.joined.iter().any(|(c, l, at)| {
-                                        *c == h.conversation
-                                            && logins.contains(&l)
-                                            && *at > request.since
-                                    }))
-                        })
-                    })
-                    .cloned()
-                    .collect(),
+                    .any(|(c, l, at)| c == id && logins.contains(&l) && *at > request.since)
+            };
+            let fresh: Vec<&(Conversation, Vec<Epoch>)> = theirs
+                .iter()
+                .copied()
+                .filter(|(c, _)| {
+                    kept.changed
+                        .get(&c.id)
+                        .is_some_and(|at| *at > request.since)
+                        || added(&c.id)
+                })
+                .collect();
+            let people: Vec<&String> = fresh.iter().flat_map(|(c, _)| &c.members).collect();
+            let mut named: Vec<String> = fresh
+                .iter()
+                .flat_map(|(_, epochs)| epochs)
+                .flat_map(|e| {
+                    e.body
+                        .envelopes
+                        .iter()
+                        .map(|envelope| envelope.key.clone())
+                        .chain([e.body.made_by.clone()])
+                })
+                .collect();
+            let mut messages = Vec::new();
+            for message in &kept.messages {
+                let Ok(header) = message.header() else {
+                    continue;
+                };
+                // Someone added since gets the history.
+                if ids.contains(&header.conversation.as_str())
+                    && (message.seq > request.since || added(&header.conversation))
+                {
+                    named.push(header.key);
+                    messages.push(message.clone());
+                }
+            }
+            Ok(ChatSyncResponse {
+                conversations: fresh.iter().map(|(c, _)| c.clone()).collect(),
+                epochs: fresh.iter().flat_map(|(_, e)| e.clone()).collect(),
+                messages,
                 keys: kept
                     .keys
                     .iter()
-                    .filter(|k| people.contains(&&k.login))
+                    .filter(|k| people.contains(&&k.login) || named.contains(&k.id))
                     .cloned()
                     .collect(),
                 cursor: kept.seq,

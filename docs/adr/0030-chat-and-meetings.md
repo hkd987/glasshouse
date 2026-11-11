@@ -892,11 +892,39 @@ the console's one lock.
   its cursor, and the messages since in them.
 
 Every waiting computer still looks at every change. Still open from the
-same finding: an answer carries every epoch of every conversation of the
-computer's people, not what changed since its cursor; and the other work
-done under the console's one lock (a kernel bundle read and encoded, the
-replay cache scanned on every request, the fleet file rewritten every two
-seconds).
+same finding: the other work done under the console's one lock (a kernel
+bundle read and encoded, the replay cache scanned on every request, the
+fleet file rewritten every two seconds).
+
+### The rest of 9.4 (2026-11-11): an answer carries only what changed
+An answer carried every conversation of the computer's people, every
+epoch of each and every member's key, at every message. With Priya and
+Dana in forty channels, the answer for one new message was 53 KB; a doc
+and an artifact are each a conversation, so people have hundreds. It is
+1 KB now (`cf91_an_answer_carries_only_what_changed_since_the_computer_asked`).
+
+- A conversation goes, with all its epochs, when it was made or its
+  members changed since the computer's cursor, or someone on the computer
+  was added to it since (who is sent its history too, as before).
+- The keys that go are the ones those conversations and epochs name
+  (members, each epoch's maker, whoever an epoch is sealed to), and the
+  senders' of the messages in the answer. The last matters when a
+  computer made its key again: nothing else would bring the new one.
+- A computer that starts over (someone new starts Chat there, or a store
+  was set aside as damaged) asks from 0 and is sent everything.
+
+It is safe because a computer only ever added what an answer held to
+what it kept, and moves its cursor only past what every store kept
+(`specs/tla/ChatSync.tla`, which models the messages; conversations,
+epochs and keys are kept by the same save). Nothing on a computer
+changed: one whose OS is from before this reads the smaller answers as
+it read the full ones. The stand-in console the computers' tests use
+(`glass_managed::chat::testing::MemoryLink`) answers the same way, so
+Chat's, Docs', Artifacts', Skills' and meetings' tests run against it.
+
+What it no longer does: an answer used to repeat everything, so a record
+a computer had refused was offered again at every sync. It is offered
+once now, and again only when the conversation changes.
 
 ## Amended 2026-11-11 (audit 5.3, the owner's decision): how long chat is kept, as built
 §4's retention is built, as §4 decided it: IT sets it on the console's
