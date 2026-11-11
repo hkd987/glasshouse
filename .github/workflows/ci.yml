@@ -39,8 +39,7 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - name: Host packages
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
+          tools/dev/ci-packages.sh \
             clang lld shellcheck python3 python3-pil xz-utils zstd curl \
             libssl-dev pkg-config libxkbcommon-dev libpixman-1-dev default-jre-headless
       - name: The pinned Rust toolchain
@@ -93,8 +92,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Host packages
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
+          tools/dev/ci-packages.sh \
             clang lld xz-utils zstd curl libssl-dev pkg-config libxkbcommon-dev libpixman-1-dev
       - name: The pinned Rust toolchain
         run: rustup show
@@ -128,8 +126,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Host packages
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends clang lld libssl-dev pkg-config
+          tools/dev/ci-packages.sh clang lld libssl-dev pkg-config
           # WebKitGTK and the tray's libraries: its window on Linux.
           sudo make agents-app-deps
       - name: The pinned Rust toolchain
@@ -153,8 +150,7 @@ jobs:
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - name: Host packages
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
+          tools/dev/ci-packages.sh \
             clang lld python3 xz-utils curl libssl-dev pkg-config
       - name: The pinned Rust toolchain
         run: rustup show
