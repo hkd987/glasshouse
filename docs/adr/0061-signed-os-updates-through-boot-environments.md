@@ -243,3 +243,35 @@ all done."
 - A whole image is gigabytes over the network: deltas keep most updates to
   megabytes, and the console's mirror means each image crosses the
   internet once per org.
+
+## Amended 2026-11-11 (audit 3.6): the lock is let go while the image downloads
+The runtime has one lock on the system's state: an OS update's check and
+staging, a kernel patch's set-up, and what reads them. It was held through
+the image's download too, up to 16 GiB of it. Waking from sleep takes the
+same lock (a kernel patch on probation counts the wake), and so do
+Settings' status and the system's own check: a computer woken while its
+update downloaded kept its agents paused until the download was done, and
+Settings' Computer page said nothing meanwhile. glassd's own download
+ahead of an install, which nobody asked for by hand, did the same.
+
+- `apply` and `fetch` are handed a way to let go of what their caller
+  holds for the download and take it again after (`osupdate::LetGo`); the
+  runtime lets go of its lock there (`Runtime::system_state`), and
+  nowhere else.
+- One image downloads at a time, whoever asks: the lock no longer keeps
+  two apart, and two would write the same file. The second finds the
+  first's image.
+- What the lock ruled out during the download can now happen: a kernel
+  patch set up, another update staged. So that nothing is in the way is
+  checked again once the image is in, with the lock held from there
+  through the staging, and the kernel patches' part is planned again
+  then. An update refused there changes nothing and keeps its image for
+  the next try. Just before the download the same is checked without the
+  lock, so that nothing is downloaded for an update that can no longer
+  be installed.
+- `system.resume` runs on the blocking pool, as the other calls that may
+  wait their turn do.
+
+`specs/tla/OsUpdate.tla` models the steps from the record on, with the
+check as one step before them; that step is now the second check, so
+the model is as it was.

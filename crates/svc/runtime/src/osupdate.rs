@@ -526,6 +526,47 @@ pub fn check(
     out
 }
 
+/// How a caller lets go of what it holds for as long as an image downloads,
+/// and takes it again after: it is handed the download to run.
+///
+/// The runtime holds its lock on the system's state through an update's
+/// check and its staging. Waking from sleep, Settings' status and the
+/// system's own check take that lock too, and they waited out the whole
+/// download with it, up to 16 GiB of it (audit 3.6): a computer woken
+/// while its update downloaded kept its agents paused until it was done.
+/// A caller that holds nothing passes [`held`].
+pub type LetGo<'a> = &'a mut dyn FnMut(&mut dyn FnMut());
+
+/// A [`LetGo`] for a caller with nothing to let go.
+pub fn held(download: &mut dyn FnMut()) {
+    download();
+}
+
+/// One image downloads at a time, whoever asks: two would write the same
+/// file. (Callers no longer hold a lock that kept them apart.)
+static DOWNLOADING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// [`download`], with what the caller holds let go for as long as it
+/// takes, and alone.
+fn download_let_go(
+    store: &Store,
+    hw: &hwpatch::Store,
+    channel: &Channel<'_>,
+    verified: &Verified,
+    let_go: LetGo<'_>,
+) -> Result<PathBuf, String> {
+    let mut copy = Err("the download didn't run".to_owned());
+    let_go(&mut || {
+        let _alone = DOWNLOADING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Whoever downloaded just before may have installed it, or set a
+        // kernel patch up: then there is nothing to download for.
+        copy = busy(store, hw).and_then(|()| download(store, channel, verified));
+    });
+    copy
+}
+
 /// Downloads the newest release's image ahead of installing it, when it's
 /// newer than the last taken and nothing blocks it: the install then reads
 /// it from glassd's state. What it says is the check's.
@@ -535,6 +576,7 @@ pub fn fetch(
     hw: &hwpatch::Store,
     config: &OsUpdates,
     patches: &HardwarePatches,
+    let_go: LetGo<'_>,
 ) -> UpdateStatus {
     let mut checked = check(envs, store, hw, config, patches);
     if checked
@@ -542,7 +584,7 @@ pub fn fetch(
         .as_ref()
         .is_some_and(|a| a.blocked.is_none())
         && let Ok((verified, channel)) = newest(store, config)
-        && let Err(why) = download(store, &channel, &verified)
+        && let Err(why) = download_let_go(store, hw, &channel, &verified, let_go)
     {
         checked.checked = Some(why);
     }
@@ -553,6 +595,9 @@ pub fn fetch(
 /// Installs the newest release in a boot environment of its own, which the
 /// next start uses once. A refusal changes nothing and is on the audit
 /// record; a failure after the record says "staging" removes what was made.
+// What it works on, what it is asked, how to wait and where to record: each
+// its own thing, and one caller.
+#[allow(clippy::too_many_arguments)]
 pub fn apply(
     envs: &dyn Envs,
     store: &Store,
@@ -560,6 +605,7 @@ pub fn apply(
     config: &OsUpdates,
     patches: &HardwarePatches,
     drop_patches: bool,
+    let_go: LetGo<'_>,
     audit: &mut dyn FnMut(AuditEvent),
 ) -> Result<OsUpdate, String> {
     let refuse = |why: String, audit: &mut dyn FnMut(AuditEvent)| {
@@ -602,13 +648,15 @@ pub fn apply(
         )?;
         Ok((verified, channel, running, env, notes, rebuilds))
     });
-    let (verified, channel, running, env, notes, rebuilds) = match checked {
+    // (What was planned for the kernel patches is planned again once the
+    // image is here: it refused early what would be refused then.)
+    let (verified, channel, running, env, _, _) = match checked {
         Ok(checked) => checked,
         Err(why) => return Err(refuse(why, audit)),
     };
     // The image, before anything is staged: a download that stops changes
     // nothing but what it downloaded, which the next try goes on from.
-    let copy = match download(store, &channel, &verified) {
+    let copy = match download_let_go(store, hw, &channel, &verified, let_go) {
         Ok(copy) => copy,
         Err(why) => {
             let mut event = AuditEvent::new(
@@ -622,6 +670,25 @@ pub fn apply(
             audit(event);
             return Err(why);
         }
+    };
+    // The computer as it is now. The download can take a long while, and
+    // whoever asked let go of the system's state for it: a kernel patch
+    // set up meanwhile, or another update begun, is found here, before
+    // anything is staged. The image stays, for the next try.
+    let planned = busy(store, hw).and_then(|()| {
+        plan_patches(
+            hw,
+            patches,
+            &verified,
+            &channel,
+            &running,
+            drop_patches,
+            true,
+        )
+    });
+    let (notes, rebuilds) = match planned {
+        Ok(planned) => planned,
+        Err(why) => return Err(refuse(why, audit)),
     };
     // 2. BeginStage.
     let mut record = Record {
@@ -1249,6 +1316,7 @@ mod tests {
             &config,
             &patches(),
             drop_patches,
+            &mut held,
             &mut |e| audit.push(e),
         )
     }
@@ -1396,6 +1464,7 @@ mod tests {
                 &none,
                 &patches(),
                 false,
+                &mut held,
                 &mut |_| {}
             )
             .unwrap_err()
@@ -1504,6 +1573,114 @@ mod tests {
         assert_eq!(status(&s.fake, &s.store, &config(&s)).restart_at, None);
     }
 
+    fn on_trial(id: &str) -> PatchTrial {
+        PatchTrial {
+            id: id.into(),
+            revision: 1,
+            summary: "Wi-Fi works again after sleep".into(),
+            review: "reviewed".into(),
+            env: "hw-wifi".into(),
+            from_env: "default".into(),
+            state: TrialState::Staged,
+            modules: vec!["if_iwlwifi.ko".into()],
+            staged_at: Timestamp::now(),
+            ended_at: None,
+            note: None,
+            ran_minutes: 0,
+            probation_minutes: 0,
+            woke: 0,
+            probation_resumes: 0,
+        }
+    }
+
+    // Audit 3.6: the runtime's lock on the system's state was held through
+    // the whole download, and waking from sleep waited for it. It is let
+    // go for the download now, so what could not happen meanwhile can: a
+    // kernel patch set up while the image comes. Found before anything is
+    // staged.
+    #[test]
+    fn adr0061_what_changed_while_the_image_downloaded_is_found_before_anything_is_staged() {
+        let mut s = setup();
+        publish(&s, 7, "2026.11.1", &[], |_| {});
+        let config = config(&s);
+        let (hw, audit) = (s.hw.clone(), &mut s.audit);
+        let mut let_go_for = 0;
+        let refused = apply(
+            &s.fake,
+            &s.store,
+            &s.hw,
+            &config,
+            &patches(),
+            false,
+            &mut |download| {
+                // Whoever holds the system's state lets go here, and
+                // someone sets a kernel patch up before the image is in.
+                let_go_for += 1;
+                download();
+                hw.begin_for_tests(on_trial("lkpi-wlan-suspend")).unwrap();
+            },
+            &mut |e| audit.push(e),
+        )
+        .unwrap_err();
+        assert_eq!(let_go_for, 1, "let go once, for the download");
+        assert!(
+            refused.contains("kernel patch lkpi-wlan-suspend is being tried"),
+            "{refused}"
+        );
+        // Nothing was staged, and the record says why.
+        assert!(s.store.record().is_none());
+        let env = osupdate::env_name("2026.11.1").unwrap();
+        assert!(!s.fake.exists(&env).unwrap(), "no boot environment made");
+        let last = s.audit.last().unwrap();
+        assert!(
+            last.summary.contains("OS update refused"),
+            "{}",
+            last.summary
+        );
+        assert_eq!(last.outcome, Some(Outcome::Blocked));
+        // The image is kept: once the patch is kept or taken back, the
+        // update installs without downloading it again.
+        let incoming: Vec<_> = std::fs::read_dir(s.store.dir.join("incoming"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(incoming.len(), 1, "{incoming:?}");
+    }
+
+    /// And one set up just before the download begins: nothing is
+    /// downloaded for an update that can't be installed.
+    #[test]
+    fn adr0061_nothing_is_downloaded_for_an_update_that_can_no_longer_be_installed() {
+        let mut s = setup();
+        publish(&s, 7, "2026.11.1", &[], |_| {});
+        let config = config(&s);
+        let (hw, audit) = (s.hw.clone(), &mut s.audit);
+        let refused = apply(
+            &s.fake,
+            &s.store,
+            &s.hw,
+            &config,
+            &patches(),
+            false,
+            &mut |download| {
+                hw.begin_for_tests(on_trial("lkpi-wlan-suspend")).unwrap();
+                download();
+            },
+            &mut |e| audit.push(e),
+        )
+        .unwrap_err();
+        assert!(refused.contains("is being tried"), "{refused}");
+        assert!(
+            !s.store.dir.join("incoming").exists()
+                || std::fs::read_dir(s.store.dir.join("incoming"))
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "no image was fetched"
+        );
+        assert!(s.store.record().is_none());
+    }
+
     /// A [`Folder`] that stops after `stop` bytes of an image, as a
     /// download does when the network goes, and keeps what it was asked.
     #[derive(Debug)]
@@ -1583,6 +1760,7 @@ mod tests {
                 &config,
                 &patches(),
                 false,
+                &mut held,
                 &mut |e| audit.push(e),
             )
         };
@@ -1663,7 +1841,7 @@ mod tests {
         assert_eq!(asked, ["release.json"]);
 
         // Fetched ahead: the image is downloaded, nothing is staged.
-        let fetched = fetch(&s.fake, &s.store, &s.hw, &config, &patches());
+        let fetched = fetch(&s.fake, &s.store, &s.hw, &config, &patches(), &mut held);
         assert_eq!(fetched.checked, None);
         assert!(s.store.record().is_none());
         assert!(

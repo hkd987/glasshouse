@@ -249,6 +249,16 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// Tests only: a patch on trial, as if set up just now.
+    #[cfg(test)]
+    pub(crate) fn begin_for_tests(&self, trial: PatchTrial) -> Result<(), String> {
+        self.keep(&Record {
+            trial,
+            modules: Vec::new(),
+            signer: String::new(),
+        })
+    }
+
     /// The trial's record, written whole.
     fn keep(&self, record: &Record) -> Result<(), String> {
         let text = serde_json::to_vec_pretty(record).map_err(|e| e.to_string())?;

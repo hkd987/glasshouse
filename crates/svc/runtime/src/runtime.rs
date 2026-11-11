@@ -1944,14 +1944,55 @@ impl Runtime {
     /// 0061). The update status says what it found; installing it is
     /// still root's.
     pub fn update_fetch(&self) -> glass_api::UpdateStatus {
-        let store = self.hardware_checked();
-        crate::osupdate::fetch(
-            &crate::hwpatch::System,
-            &self.updates,
-            &store,
-            &self.config.update,
-            &self.hardware_rules(),
-        )
+        self.system_state(|store, let_go| {
+            crate::osupdate::fetch(
+                &crate::hwpatch::System,
+                &self.updates,
+                store,
+                &self.config.update,
+                &self.hardware_rules(),
+                let_go,
+            )
+        })
+    }
+
+    /// Runs `work` with the lock on the system's state held
+    /// ([`Self::hardware_checked`]), and hands it a way to let go of the
+    /// lock for as long as an image downloads and take it again after
+    /// (audit 3.6). Waking from sleep, Settings' status and the system's
+    /// own check take the same lock: they waited out the whole download,
+    /// and a computer woken meanwhile kept its agents paused until it
+    /// was done.
+    ///
+    /// The store `work` is given is only where its files are; the lock is
+    /// what keeps a check, a staging and a wake apart.
+    fn system_state<T>(
+        &self,
+        work: impl FnOnce(&crate::hwpatch::Store, crate::osupdate::LetGo<'_>) -> T,
+    ) -> T {
+        let mut held = Some(self.hardware_checked());
+        let store = crate::hwpatch::Store::new(&self.config.state_dir);
+        let out = work(&store, &mut |download| {
+            held = None;
+            download();
+            held = Some(self.hardware_checked());
+        });
+        drop(held);
+        out
+    }
+
+    /// Tests only: what an OS update's download runs in, with `download`
+    /// in its place.
+    #[doc(hidden)]
+    pub fn system_state_let_go_for_tests(&self, download: impl FnOnce()) {
+        let mut download = Some(download);
+        self.system_state(|_, let_go| {
+            let_go(&mut || {
+                if let Some(download) = download.take() {
+                    download();
+                }
+            });
+        });
     }
 
     /// Restarts into the update installed now, sets it for tonight, or
@@ -2045,18 +2086,22 @@ impl Runtime {
         request: glass_api::UpdateApply,
     ) -> Result<glass_api::OsUpdate> {
         self.updates_admin(caller)?;
-        let store = self.hardware_checked();
-        crate::osupdate::apply(
-            &crate::hwpatch::System,
-            &self.updates,
-            &store,
-            &self.config.update,
-            &self.hardware_rules(),
-            request.drop_patches,
-            &mut |event| {
-                self.audit(event);
-            },
-        )
+        // Held through the check and the staging, and let go for the
+        // download between them.
+        self.system_state(|store, let_go| {
+            crate::osupdate::apply(
+                &crate::hwpatch::System,
+                &self.updates,
+                store,
+                &self.config.update,
+                &self.hardware_rules(),
+                request.drop_patches,
+                let_go,
+                &mut |event| {
+                    self.audit(event);
+                },
+            )
+        })
         .map_err(RuntimeError::Invalid)
     }
 

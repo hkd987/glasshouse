@@ -834,6 +834,34 @@ async fn sleep_leaves_tasks_the_user_paused_alone() {
 
 /// PM-5, found by the Approvals model (specs/tla): a task the person stops
 /// while it's paused for sleep stays stopped when the machine wakes.
+// Audit 3.6: an OS update's image downloaded with the lock on the system's
+// state held, up to 16 GiB of it, and waking from sleep takes that lock: a
+// computer woken meanwhile kept its agents paused until the download was
+// done. (What the download runs in is driven here by its test hook; that
+// an update's check and staging are outside it is osupdate's tests.)
+#[tokio::test]
+async fn pm5_waking_from_sleep_doesnt_wait_for_an_os_update_to_download() {
+    let h = harness();
+    let system = Caller {
+        uid: 0,
+        ..h.me.clone()
+    };
+    let rt = Arc::clone(&h.rt);
+    let mut woke = None;
+    let mut waker = None;
+    h.rt.system_state_let_go_for_tests(|| {
+        // The image is on its way. The computer wakes.
+        let (tell, told) = std::sync::mpsc::channel();
+        waker = Some(std::thread::spawn(move || {
+            let _ = tell.send(rt.wake(&system).is_ok());
+        }));
+        woke = told.recv_timeout(Duration::from_secs(5)).ok();
+    });
+    // Joined out here: had the wake waited, it waits no longer.
+    waker.unwrap().join().unwrap();
+    assert_eq!(woke, Some(true), "waking waited for the download to end");
+}
+
 #[tokio::test]
 async fn pm5_a_task_stopped_while_paused_for_sleep_stays_stopped_after_wake() {
     let h = harness();

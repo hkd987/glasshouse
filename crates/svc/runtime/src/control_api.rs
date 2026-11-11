@@ -225,7 +225,10 @@ impl Handler for ControlApi {
                 to_result(&blocking(|| rt.seat_active(peer))?)
             }
             methods::SYSTEM_SUSPEND => to_result(&rt.suspend(&caller).await?),
-            methods::SYSTEM_RESUME => to_result(&rt.wake(&caller)?),
+            // It waits its turn for the system's state (a kernel patch on
+            // probation counts the wake): never on the workers that answer
+            // everyone else.
+            methods::SYSTEM_RESUME => to_result(&blocking(|| rt.wake(&caller))?),
             methods::HARDWARE_PATCH_APPLY => {
                 let request: glass_api::PatchApply = parse_params(params)?;
                 to_result(&blocking(|| rt.hardware_patch_apply(&caller, request))?)
