@@ -237,8 +237,9 @@ and a host with KVM: run each against the real thing.
     second time from its last sleep and lose one copy's work.
 - **The store**:
   - parallel transfers when a computer wakes (saving has them, see the
-    amendments below), and connections kept open between requests: each
-    chunk is still a new TLS connection;
+    amendments below). Connections to S3 are kept open between requests
+    since the audit of 2026-11 (9.5; ADR 0018's amendment), so a wake's
+    chunks, one after another, share one;
   - a computer nobody has any more (its person left) stays in the bucket:
     there is no way to remove one yet;
   - manifests and computers' records signed by the host, so a bucket

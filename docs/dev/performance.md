@@ -452,8 +452,12 @@ least for a computer's first save, all of it new to the store, held in
 `make aws-local-test`. Against moto a 300 MB computer takes about 4 s.
 What keeps it there: a save asks S3 only about chunks its computer's last
 version doesn't name, sends new chunks four at a time, hashes each once,
-and a leaving host sleeps four computers at once. Each chunk is still its
-own TLS connection.
+and a leaving host sleeps four computers at once. Requests to S3 share
+connections (audit 9.5, ADR 0018's amendment): four at most for a save,
+one for a wake, where each request opened its own and paid a TLS
+handshake (3 ms against 0.3 ms for a small request over TLS on this
+machine; not measured against S3). moto closes every connection, so the
+4 s above is still a connection per request.
 
 ### glassd under a burst
 

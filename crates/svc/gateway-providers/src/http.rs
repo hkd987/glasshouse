@@ -1,14 +1,24 @@
-//! The one HTTP client in the workspace, and all it does: POST a JSON body
+//! The one HTTP client in the workspace, and all it does: send a request
 //! over HTTPS and read one reply (ADR 0018).
 //!
 //! TLS is the base system's OpenSSL through native-tls, verifying servers
 //! against the system trust store with hostname checks, so an org's own CAs
 //! and TLS-inspecting proxies work as they do for every base program.
 //! httparse reads the reply head; the body is framed by Content-Length,
-//! chunked encoding or the end of the connection, and capped. One request per
-//! connection (`Connection: close`), no redirects, no cookies, no
-//! compression. An HTTPS proxy in glassd's environment (`https_proxy`, set
-//! by its rc.d script, never by an agent) is used through CONNECT.
+//! chunked encoding or the end of the connection, read as it arrives, and
+//! capped. No redirects, no cookies, no compression. An HTTPS proxy in
+//! glassd's environment (`https_proxy`, set by its rc.d script, never by an
+//! agent) is used through CONNECT.
+//!
+//! Connections: one request each (`Connection: close`), unless a client
+//! keeps its own ([`Http::keeping_connections`]). S3's does: a computer
+//! going to sleep or waking is hundreds of requests to one host, and each
+//! paid for a TCP connection and a TLS handshake. A kept connection is used
+//! again only if its last reply was read to its end, it has sat unused for
+//! less than [`KEEP_IDLE`], and the far end has neither closed it nor said
+//! anything since. A model call, a call to the console and one to DynamoDB
+//! still take a connection each: they come one in a while, and their POSTs
+//! can't be sent a second time when a kept connection turns out closed.
 //!
 //! Time: connecting, the proxy's tunnel and the TLS handshake each have
 //! [`CONNECT_TIMEOUT`]. After that a client waits as long as its kind of
@@ -19,6 +29,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use glass_gateway::ProviderError;
@@ -59,6 +70,14 @@ const MAX_HEAD: usize = 64 * 1024;
 /// own call (ADR 0039: a computer's call through its console), so the far
 /// end gives up first and the near end hears why.
 const HOP_SLACK: Duration = Duration::from_secs(30);
+/// How long a kept connection may sit unused and still be used again. S3
+/// closes one that has been silent a while, and the request sent as it
+/// does is the one that goes unanswered; well inside that, a burst of
+/// requests shares its connections and nothing is held between bursts.
+const KEEP_IDLE: Duration = Duration::from_secs(15);
+/// The most connections a client keeps: a save sends four chunks at a
+/// time, beside leases being renewed and a listing.
+const KEEP_AT_MOST: usize = 8;
 
 #[derive(Debug)]
 pub(crate) struct Http {
@@ -72,6 +91,8 @@ pub(crate) struct Http {
     pub(crate) total: Duration,
     /// The most of a reply read.
     pub(crate) max_reply: usize,
+    /// Connections kept between requests, for a client that keeps them.
+    kept: Option<Box<Kept>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,8 +140,213 @@ pub(crate) struct Target {
     path: String,
 }
 
-pub(crate) trait Stream: Read + Write {}
-impl<T: Read + Write> Stream for T {}
+pub(crate) trait Stream: Read + Write + Send {}
+impl<T: Read + Write + Send> Stream for T {}
+
+/// A client's connections with no request on them, the one used last at
+/// the end.
+struct Kept {
+    idle: Mutex<Vec<Idle>>,
+    /// How long one may sit here.
+    for_at_most: Duration,
+}
+
+struct Idle {
+    to: Key,
+    conn: Conn,
+    since: Instant,
+}
+
+/// A server: over TLS or not, its host and its port.
+type Key = (bool, String, u16);
+
+impl std::fmt::Debug for Kept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Kept({})", self.idle().len())
+    }
+}
+
+impl Kept {
+    fn idle(&self) -> std::sync::MutexGuard<'_, Vec<Idle>> {
+        self.idle.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A connection to `to` that can take a request, if one is kept.
+    fn take(&self, to: &Key) -> Option<Conn> {
+        loop {
+            let conn = {
+                let mut idle = self.idle();
+                idle.retain(|kept| kept.since.elapsed() < self.for_at_most);
+                let at = idle.iter().rposition(|kept| kept.to == *to)?;
+                idle.remove(at).conn
+            };
+            if conn.quiet() {
+                return Some(conn);
+            }
+        }
+    }
+
+    /// Keeps `conn`, whose reply has been read to its end.
+    fn put(&self, to: Key, mut conn: Conn) {
+        conn.used = true;
+        let mut idle = self.idle();
+        idle.push(Idle {
+            to,
+            conn,
+            since: Instant::now(),
+        });
+        if idle.len() > KEEP_AT_MOST {
+            idle.remove(0);
+        }
+    }
+
+    /// Closes every connection kept to `to`: one of them was closed at
+    /// the far end, and the rest as likely.
+    fn forget(&self, to: &Key) {
+        self.idle().retain(|kept| kept.to != *to);
+    }
+}
+
+/// A connection to a server.
+struct Conn {
+    stream: Box<dyn Stream>,
+    /// The socket under it, to ask whether the far end closed it while it
+    /// sat unused. Only a client that keeps connections has one.
+    socket: Option<TcpStream>,
+    /// A reply has been read on it before: it was kept.
+    used: bool,
+}
+
+impl Conn {
+    /// Whether it is as its last reply left it: the far end hasn't closed
+    /// it, and nothing has arrived. Anything waiting on a connection with
+    /// no request on it is its end (TLS says goodbye in bytes) or isn't a
+    /// reply to anything asked, and either way it takes no more requests.
+    fn quiet(&self) -> bool {
+        let Some(socket) = &self.socket else {
+            return false;
+        };
+        if socket.set_nonblocking(true).is_err() {
+            return false;
+        }
+        let mut byte = [0u8; 1];
+        let silent = matches!(
+            socket.peek(&mut byte),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+        );
+        socket.set_nonblocking(false).is_ok() && silent
+    }
+}
+
+/// Why a request got no reply to read.
+enum Failed {
+    /// Not all of it went out: the server can't have acted on it.
+    Unsent(ProviderError),
+    /// It went out, and the connection ended before a byte of a reply.
+    Unanswered(ProviderError),
+    Other(ProviderError),
+}
+
+impl From<Failed> for ProviderError {
+    fn from(failed: Failed) -> Self {
+        match failed {
+            Failed::Unsent(e) | Failed::Unanswered(e) | Failed::Other(e) => e,
+        }
+    }
+}
+
+/// A reply whose head has been read: its body is still on the connection.
+struct Answer<'a> {
+    http: &'a Http,
+    status: u16,
+    /// The body's length, where the head says.
+    length: Option<u64>,
+    retry_after: Option<Duration>,
+    body: Body,
+    /// Where the connection is kept once the body has been read to its
+    /// end, if both ends will use it again.
+    keep: Option<Key>,
+}
+
+impl Answer<'_> {
+    /// The whole body, of at most `max` bytes, as text.
+    fn reply(&mut self, max: usize) -> Result<Reply, ProviderError> {
+        let body = String::from_utf8(self.body.all(max)?)
+            .map_err(|_| ProviderError::Unavailable("the reply isn't UTF-8".into()))?;
+        Ok(Reply {
+            status: self.status,
+            body,
+            retry_after: self.retry_after,
+        })
+    }
+
+    /// A 2xx body onto `to`, from byte `from` of what was asked for and
+    /// at most `max` bytes; another status's body as text.
+    fn save(
+        &mut self,
+        from: u64,
+        to: &mut dyn Write,
+        max: u64,
+    ) -> Result<Downloaded, ProviderError> {
+        if !(200..300).contains(&self.status) {
+            let mut text = Vec::new();
+            let _ = (&mut self.body)
+                .take(MAX_HEAD as u64)
+                .read_to_end(&mut text);
+            return Ok(Downloaded {
+                status: self.status,
+                written: 0,
+                body: String::from_utf8_lossy(&text).into_owned(),
+            });
+        }
+        let skip = if self.status == 206 { 0 } else { from };
+        let skipped = std::io::copy(&mut (&mut self.body).take(skip), &mut std::io::sink())
+            .map_err(|e| broken("downloading", &e))?;
+        if skipped < skip {
+            return Err(ProviderError::Unavailable(
+                "the reply ended before where the download stopped".into(),
+            ));
+        }
+        let mut written: u64 = 0;
+        let mut part = vec![0u8; 256 * 1024];
+        loop {
+            let n = self
+                .body
+                .read(&mut part)
+                .map_err(|e| broken("downloading", &e))?;
+            if n == 0 {
+                break;
+            }
+            if written + n as u64 > max {
+                return Err(ProviderError::Unavailable(format!(
+                    "the download is longer than the {max} bytes expected"
+                )));
+            }
+            to.write_all(&part[..n])
+                .map_err(|e| ProviderError::Unavailable(format!("writing the download: {e}")))?;
+            written += n as u64;
+        }
+        Ok(Downloaded {
+            status: self.status,
+            written,
+            body: String::new(),
+        })
+    }
+
+    /// Done with the reply. Its connection is kept for the next request
+    /// if the body was read to its end and nothing more came with it;
+    /// otherwise it's closed, as one that isn't to be kept always is.
+    fn done(self) {
+        let Answer {
+            http, body, keep, ..
+        } = self;
+        if let (Some(to), Some(kept)) = (keep, &http.kept)
+            && body.ended()
+        {
+            kept.put(to, body.conn);
+        }
+    }
+}
 
 impl Http {
     /// A client that only speaks HTTPS, through the environment's proxy if
@@ -166,6 +392,7 @@ impl Http {
             idle: IDLE_TIMEOUT,
             total: CALL_TIMEOUT,
             max_reply: MAX_REPLY,
+            kept: None,
         }
     }
 
@@ -204,6 +431,25 @@ impl Http {
         self
     }
 
+    /// Keeps connections open between requests and uses them again, up to
+    /// [`KEEP_AT_MOST`] of them, each for [`KEEP_IDLE`] after its last
+    /// reply.
+    ///
+    /// For a service that gets requests in bursts and whose GET, HEAD, PUT
+    /// and DELETE may each be sent twice, as HTTP means them: when a kept
+    /// connection turns out to have been closed at the far end and such a
+    /// request on it got no reply, it's sent once more on a new one.
+    /// Anything else is sent a second time only if the first never all
+    /// went out.
+    #[must_use]
+    pub fn keeping_connections(mut self) -> Self {
+        self.kept = Some(Box::new(Kept {
+            idle: Mutex::new(Vec::new()),
+            for_at_most: KEEP_IDLE,
+        }));
+        self
+    }
+
     /// POSTs `body` with `headers` and reads the reply. Network and TLS
     /// failures are outages (the next model on the route takes over); their
     /// text never carries a header or the body.
@@ -216,8 +462,8 @@ impl Http {
         self.send("POST", url, headers, body)
     }
 
-    /// Sends `method` (GET, POST, PATCH) with `headers` and `body`, as
-    /// [`Http::post`] does.
+    /// Sends `method` (GET, POST, PATCH, DELETE) with `headers` and
+    /// `body`, as [`Http::post`] does.
     pub fn send(
         &self,
         method: &str,
@@ -228,9 +474,35 @@ impl Http {
         if !matches!(method, "GET" | "POST" | "PATCH" | "DELETE") {
             return Err(ProviderError::Rejected(format!("no method {method:?}")));
         }
-        let deadline = Instant::now() + self.total;
-        let mut stream = self.request(method, url, headers, body)?;
-        read_reply(&mut *stream, deadline, self.max_reply)
+        let ask = Ask {
+            method,
+            url,
+            headers,
+            body,
+        };
+        let mut answer = self.exchange(&ask, Instant::now() + self.total, self.max_reply)?;
+        let reply = answer.reply(self.max_reply);
+        answer.done();
+        reply
+    }
+
+    /// Asks with HEAD: the reply's status, and the length it gives for
+    /// what a GET would send.
+    pub fn head(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<(u16, Option<u64>), ProviderError> {
+        let ask = Ask {
+            method: "HEAD",
+            url,
+            headers,
+            body: &[],
+        };
+        let answer = self.exchange(&ask, Instant::now() + self.total, usize::MAX)?;
+        let said = (answer.status, answer.length);
+        answer.done();
+        Ok(said)
     }
 
     /// Sends a request, as [`Http::send`] does, and streams a 2xx reply's
@@ -251,123 +523,114 @@ impl Http {
         if from > 0 {
             all.push(("Range", &range));
         }
-        let deadline = Instant::now() + self.total;
-        let mut stream = self.request(ask.method, ask.url, &all, ask.body)?;
-        let mut buf: Vec<u8> = Vec::new();
-        let mut chunk = [0u8; 16 * 1024];
-        let head = loop {
-            if let Some(head) = head(&buf, usize::MAX)? {
-                break head;
-            }
-            if buf.len() > MAX_HEAD {
-                return Err(ProviderError::Unavailable(
-                    "the reply head is too long".into(),
-                ));
-            }
-            match stream.read(&mut chunk) {
-                Ok(0) => {
-                    return Err(ProviderError::Unavailable(
-                        "the connection closed before the reply was complete".into(),
-                    ));
-                }
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                Err(e) => return Err(outage("reading the reply", &e)),
-            }
+        let ask = Ask {
+            headers: &all,
+            ..*ask
         };
-        let left = match head.framing {
-            Framing::Length(n) => Left::Length(n as u64),
-            Framing::Chunked => Left::ChunkSize,
-            Framing::Close => Left::Close,
-        };
-        let mut reply = Body {
-            stream: &mut *stream,
-            pending: buf.split_off(head.at),
-            at: 0,
-            left,
-            deadline,
-        };
-        if !(200..300).contains(&head.status) {
-            let mut text = Vec::new();
-            let _ = (&mut reply).take(MAX_HEAD as u64).read_to_end(&mut text);
-            return Ok(Downloaded {
-                status: head.status,
-                written: 0,
-                body: String::from_utf8_lossy(&text).into_owned(),
-            });
-        }
-        let skip = if head.status == 206 { 0 } else { from };
-        let skipped = std::io::copy(&mut (&mut reply).take(skip), &mut std::io::sink())
-            .map_err(|e| broken("downloading", &e))?;
-        if skipped < skip {
-            return Err(ProviderError::Unavailable(
-                "the reply ended before where the download stopped".into(),
-            ));
-        }
-        let mut written: u64 = 0;
-        let mut part = vec![0u8; 256 * 1024];
-        loop {
-            let n = reply
-                .read(&mut part)
-                .map_err(|e| broken("downloading", &e))?;
-            if n == 0 {
-                break;
-            }
-            if written + n as u64 > max {
-                return Err(ProviderError::Unavailable(format!(
-                    "the download is longer than the {max} bytes expected"
-                )));
-            }
-            to.write_all(&part[..n])
-                .map_err(|e| ProviderError::Unavailable(format!("writing the download: {e}")))?;
-            written += n as u64;
-        }
-        Ok(Downloaded {
-            status: head.status,
-            written,
-            body: String::new(),
-        })
+        let mut answer = self.exchange(&ask, Instant::now() + self.total, usize::MAX)?;
+        let got = answer.save(from, to, max);
+        answer.done();
+        got
     }
 
-    /// A connection with `method` sent on it, its headers and body.
-    pub(crate) fn request(
+    /// Sends `ask` and reads the head of its reply, by `deadline`; the
+    /// body is the caller's to read. `longest` is the longest body a reply
+    /// may say it has.
+    fn exchange(
         &self,
-        method: &str,
-        url: &str,
-        headers: &[(&str, &str)],
-        body: &[u8],
-    ) -> Result<Box<dyn Stream>, ProviderError> {
-        let target = Target::parse(url).ok_or_else(|| {
-            ProviderError::NotConfigured(format!("{url:?} is not an http(s) URL"))
+        ask: &Ask<'_>,
+        deadline: Instant,
+        longest: usize,
+    ) -> Result<Answer<'_>, ProviderError> {
+        let target = Target::parse(ask.url).ok_or_else(|| {
+            ProviderError::NotConfigured(format!("{:?} is not an http(s) URL", ask.url))
         })?;
         if self.https_only && !target.tls {
             return Err(ProviderError::NotConfigured(
                 "model endpoints must use HTTPS".into(),
             ));
         }
-        let mut head = format!(
-            "{method} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Glasshouse model gateway\r\nContent-Length: {}\r\nConnection: close\r\n",
+        let mut request = format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Glasshouse model gateway\r\nContent-Length: {}\r\n",
+            ask.method,
             target.path,
             target.authority(),
-            body.len()
+            ask.body.len()
         );
-        for (name, value) in headers {
+        if self.kept.is_none() {
+            request.push_str("Connection: close\r\n");
+        }
+        for (name, value) in ask.headers {
             if name.contains(['\r', '\n', ':']) || value.contains(['\r', '\n']) {
                 return Err(ProviderError::Rejected("a header has a line break".into()));
             }
-            head.push_str(&format!("{name}: {value}\r\n"));
+            request.push_str(&format!("{name}: {value}\r\n"));
         }
-        head.push_str("\r\n");
-        let mut stream = self.open(&target)?;
-        stream
-            .write_all(head.as_bytes())
-            .and_then(|()| stream.write_all(body))
-            .and_then(|()| stream.flush())
-            .map_err(|e| outage("sending", &e))?;
-        Ok(stream)
+        request.push_str("\r\n");
+        let to = target.key();
+        if let Some(kept) = &self.kept
+            && let Some(conn) = kept.take(&to)
+        {
+            match converse(conn, &request, ask, deadline, longest) {
+                Ok(heard) => return Ok(self.answer(to, ask.method, heard, deadline)),
+                // The far end closed it after this client last looked:
+                // the request goes on a new connection instead. One that
+                // went out whole and may have been acted on is sent again
+                // only if sending it twice is the same as sending it once.
+                Err(Failed::Unsent(_)) => {}
+                Err(Failed::Unanswered(_))
+                    if matches!(ask.method, "GET" | "HEAD" | "PUT" | "DELETE") => {}
+                Err(failed) => return Err(failed.into()),
+            }
+            kept.forget(&to);
+        }
+        let conn = self.open(&target)?;
+        let heard = converse(conn, &request, ask, deadline, longest)?;
+        Ok(self.answer(to, ask.method, heard, deadline))
+    }
+
+    /// What's heard, as a reply whose body is still to read.
+    fn answer(&self, to: Key, method: &str, heard: Heard, deadline: Instant) -> Answer<'_> {
+        let Heard { head, conn, rest } = heard;
+        // No body, whatever the head says of one (RFC 9112, 6.3): a reply
+        // to HEAD says how long a GET's would be.
+        let left = if method == "HEAD" || matches!(head.status, 204 | 304) {
+            Left::Done
+        } else {
+            match head.framing {
+                Framing::Length(n) => Left::Length(n as u64),
+                Framing::Chunked => Left::ChunkSize,
+                Framing::Close => Left::Close,
+            }
+        };
+        let keep = (self.kept.is_some()
+            && head.again
+            && conn.socket.is_some()
+            && !matches!(left, Left::Close))
+        .then_some(to);
+        Answer {
+            http: self,
+            status: head.status,
+            length: match head.framing {
+                Framing::Length(n) => Some(n as u64),
+                Framing::Chunked | Framing::Close => None,
+            },
+            retry_after: head.retry_after,
+            body: Body {
+                conn,
+                pending: rest,
+                at: 0,
+                left,
+                deadline,
+                to_its_end: keep.is_some(),
+                closed: false,
+            },
+            keep,
+        }
     }
 
     /// A connection to `target`, through the proxy and TLS as needed.
-    fn open(&self, target: &Target) -> Result<Box<dyn Stream>, ProviderError> {
+    fn open(&self, target: &Target) -> Result<Conn, ProviderError> {
         let via = self
             .proxy
             .as_ref()
@@ -389,9 +652,16 @@ impl Http {
                 .and_then(|()| tcp.set_write_timeout(Some(self.idle)))
                 .map_err(|e| outage("connecting", &e))
         };
+        // A second handle on the socket: a connection that can't have one
+        // isn't kept.
+        let socket = self.kept.as_ref().and_then(|_| tcp.try_clone().ok());
         if !target.tls {
             ready(&tcp)?;
-            return Ok(Box::new(tcp));
+            return Ok(Conn {
+                stream: Box::new(tcp),
+                socket,
+                used: false,
+            });
         }
         let connector = self.tls.as_ref().map_err(|e| {
             ProviderError::NotConfigured(format!("TLS isn't available on this computer: {e}"))
@@ -406,8 +676,74 @@ impl Http {
             })
         })?;
         ready(tls.get_ref())?;
-        Ok(Box::new(tls))
+        Ok(Conn {
+            stream: Box::new(tls),
+            socket,
+            used: false,
+        })
     }
+}
+
+/// A reply's head, the connection it came on, and what was read past it.
+struct Heard {
+    head: Head,
+    conn: Conn,
+    rest: Vec<u8>,
+}
+
+/// Sends `request` and `ask`'s body on `conn` and reads the reply's head.
+fn converse(
+    mut conn: Conn,
+    request: &str,
+    ask: &Ask<'_>,
+    deadline: Instant,
+    longest: usize,
+) -> Result<Heard, Failed> {
+    conn.stream
+        .write_all(request.as_bytes())
+        .and_then(|()| conn.stream.write_all(ask.body))
+        .and_then(|()| conn.stream.flush())
+        .map_err(|e| Failed::Unsent(outage("sending", &e)))?;
+    let early =
+        || ProviderError::Unavailable("the connection closed before the reply was complete".into());
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        if let Some(head) = reply_head(&buf, longest).map_err(Failed::Other)? {
+            let rest = buf.split_off(head.at);
+            return Ok(Heard { head, conn, rest });
+        }
+        if buf.len() > MAX_HEAD {
+            return Err(Failed::Other(ProviderError::Unavailable(
+                "the reply head is too long".into(),
+            )));
+        }
+        if Instant::now() > deadline {
+            return Err(Failed::Other(ProviderError::Unavailable(
+                "timed out reading the reply".into(),
+            )));
+        }
+        match conn.stream.read(&mut chunk) {
+            Ok(0) if buf.is_empty() => return Err(Failed::Unanswered(early())),
+            Ok(0) => return Err(Failed::Other(early())),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) if buf.is_empty() && ended(&e) => {
+                return Err(Failed::Unanswered(outage("reading the reply", &e)));
+            }
+            Err(e) => return Err(Failed::Other(outage("reading the reply", &e))),
+        }
+    }
+}
+
+/// Whether `e` is a connection's end, as against a wait that ran out.
+fn ended(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{
+        BrokenPipe, ConnectionAborted, ConnectionReset, NotConnected, UnexpectedEof,
+    };
+    matches!(
+        e.kind(),
+        BrokenPipe | ConnectionAborted | ConnectionReset | NotConnected | UnexpectedEof
+    )
 }
 
 fn outage(doing: &str, e: &std::io::Error) -> ProviderError {
@@ -446,6 +782,11 @@ fn dial(authority: &str, within: Duration) -> Result<TcpStream, ProviderError> {
                     .with_retries(KEEPALIVE_TRIES);
                 socket2::SockRef::from(&tcp)
                     .set_tcp_keepalive(&keep)
+                    // A request is written whole, its head and then its
+                    // body: neither waits in the kernel for the far end
+                    // to acknowledge the other, which on a connection in
+                    // use for a while is 40 ms a request.
+                    .and_then(|()| tcp.set_nodelay(true))
                     .and_then(|()| tcp.set_read_timeout(Some(within)))
                     .and_then(|()| tcp.set_write_timeout(Some(within)))
                     .map_err(|e| outage("connecting", &e))?;
@@ -496,83 +837,25 @@ fn tunnel(tcp: &mut TcpStream, target: &Target) -> Result<(), ProviderError> {
 }
 
 /// How a reply's body ends.
-pub(crate) enum Framing {
+enum Framing {
     Length(usize),
     Chunked,
     Close,
 }
 
 /// A reply's head, once it's all there.
-pub(crate) struct Head {
-    pub(crate) status: u16,
+struct Head {
+    status: u16,
     /// Where the body starts.
     at: usize,
-    pub(crate) framing: Framing,
+    framing: Framing,
     retry_after: Option<Duration>,
+    /// The server takes another request on this connection: it speaks
+    /// HTTP/1.1 and didn't say it's closing.
+    again: bool,
 }
 
-fn read_reply(
-    stream: &mut dyn Stream,
-    deadline: Instant,
-    max: usize,
-) -> Result<Reply, ProviderError> {
-    let mut buf: Vec<u8> = Vec::with_capacity(16 * 1024);
-    let mut chunk = [0u8; 16 * 1024];
-    let mut parsed: Option<Head> = None;
-    let mut closed = false;
-    loop {
-        if parsed.is_none() {
-            parsed = head(&buf, max)?;
-        }
-        if let Some(head) = &parsed {
-            let body = &buf[head.at..];
-            let done = match head.framing {
-                Framing::Length(n) if body.len() >= n => Some(body[..n].to_vec()),
-                Framing::Chunked => dechunk(body, max)?,
-                Framing::Close if closed => Some(body.to_vec()),
-                _ => None,
-            };
-            if let Some(body) = done {
-                let body = String::from_utf8(body)
-                    .map_err(|_| ProviderError::Unavailable("the reply isn't UTF-8".into()))?;
-                return Ok(Reply {
-                    status: head.status,
-                    body,
-                    retry_after: head.retry_after,
-                });
-            }
-        }
-        if closed {
-            return Err(ProviderError::Unavailable(
-                "the connection closed before the reply was complete".into(),
-            ));
-        }
-        if Instant::now() > deadline {
-            return Err(ProviderError::Unavailable(
-                "timed out reading the reply".into(),
-            ));
-        }
-        if buf.len() > max {
-            return Err(ProviderError::Unavailable("the reply is too large".into()));
-        }
-        match stream.read(&mut chunk) {
-            Ok(0) => closed = true,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            // A server that closes without TLS close_notify ends the body
-            // of a reply framed by the connection.
-            Err(_)
-                if parsed
-                    .as_ref()
-                    .is_some_and(|h| matches!(h.framing, Framing::Close)) =>
-            {
-                closed = true;
-            }
-            Err(e) => return Err(outage("reading the reply", &e)),
-        }
-    }
-}
-
-/// What's left of a body being streamed.
+/// What's left of a body being read.
 #[derive(Debug, Clone, Copy)]
 enum Left {
     Length(u64),
@@ -580,22 +863,30 @@ enum Left {
     ChunkSize,
     /// This much of a chunk, then its CRLF.
     Chunk(u64),
+    /// After the last chunk: any trailer lines, then an empty one.
+    Trailers,
     Close,
     Done,
 }
 
 /// A reply's body, read as it arrives: by its length, its chunks, or the
 /// connection's end.
-struct Body<'a> {
-    stream: &'a mut dyn Stream,
+struct Body {
+    conn: Conn,
     /// Bytes read and not yet given out, from `at`.
     pending: Vec<u8>,
     at: usize,
     left: Left,
     deadline: Instant,
+    /// Read a chunked body through the line that ends it, as a connection
+    /// to be used again needs. One that won't be is done at its last
+    /// chunk, as it always was, whatever a server sends after.
+    to_its_end: bool,
+    /// The connection has ended.
+    closed: bool,
 }
 
-impl Body<'_> {
+impl Body {
     fn waiting(&self) -> &[u8] {
         &self.pending[self.at..]
     }
@@ -611,15 +902,21 @@ impl Body<'_> {
         self.pending.drain(..self.at);
         self.at = 0;
         let mut chunk = [0u8; 64 * 1024];
-        match self.stream.read(&mut chunk) {
-            Ok(0) => Ok(false),
+        match self.conn.stream.read(&mut chunk) {
+            Ok(0) => {
+                self.closed = true;
+                Ok(false)
+            }
             Ok(n) => {
                 self.pending.extend_from_slice(&chunk[..n]);
                 Ok(true)
             }
             // A server that closes without TLS close_notify ends a body
             // framed by the connection.
-            Err(_) if matches!(self.left, Left::Close) => Ok(false),
+            Err(_) if matches!(self.left, Left::Close) => {
+                self.closed = true;
+                Ok(false)
+            }
             Err(e) => Err(e),
         }
     }
@@ -645,9 +942,35 @@ impl Body<'_> {
         self.at += n;
         n
     }
+
+    /// Whether the body was read to its end with the connection still
+    /// open and nothing more on it: the next request's reply starts clean.
+    fn ended(&self) -> bool {
+        !self.closed
+            && matches!(self.left, Left::Done | Left::Length(0))
+            && self.waiting().is_empty()
+    }
+
+    /// All of it, of at most `max` bytes.
+    fn all(&mut self, max: usize) -> Result<Vec<u8>, ProviderError> {
+        let mut out = Vec::new();
+        let most = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
+        match self.by_ref().take(most).read_to_end(&mut out) {
+            Ok(_) if out.len() > max => {
+                Err(ProviderError::Unavailable("the reply is too large".into()))
+            }
+            Ok(_) => Ok(out),
+            Err(e) => Err(match e.kind() {
+                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::InvalidData => {
+                    ProviderError::Unavailable(e.to_string())
+                }
+                _ => outage("reading the reply", &e),
+            }),
+        }
+    }
 }
 
-impl Read for Body<'_> {
+impl Read for Body {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         if out.is_empty() {
             return Ok(0);
@@ -669,10 +992,10 @@ impl Read for Body<'_> {
                 Left::ChunkSize => match httparse::parse_chunk_size(self.waiting()) {
                     Ok(httparse::Status::Complete((used, size))) => {
                         self.at += used;
-                        self.left = if size == 0 {
-                            Left::Done
-                        } else {
-                            Left::Chunk(size)
+                        self.left = match size {
+                            0 if self.to_its_end => Left::Trailers,
+                            0 => Left::Done,
+                            size => Left::Chunk(size),
                         };
                     }
                     Ok(httparse::Status::Partial) => {
@@ -706,6 +1029,25 @@ impl Read for Body<'_> {
                     self.left = Left::Chunk(left - n as u64);
                     return Ok(n);
                 }
+                Left::Trailers => match self.waiting().windows(2).position(|w| w == b"\r\n") {
+                    // The empty line: the body's end.
+                    Some(0) => {
+                        self.at += 2;
+                        self.left = Left::Done;
+                    }
+                    // A trailer field; nothing here reads them.
+                    Some(line) => self.at += line + 2,
+                    None => {
+                        if self.waiting().len() > 1024 {
+                            return Err(Self::bad_chunk());
+                        }
+                        // A server that closes here has sent the whole
+                        // body: it's the connection that's finished.
+                        if !self.fill()? {
+                            self.left = Left::Done;
+                        }
+                    }
+                },
                 Left::Close => {
                     if self.waiting().is_empty() && !self.fill()? {
                         self.left = Left::Done;
@@ -718,8 +1060,9 @@ impl Read for Body<'_> {
     }
 }
 
-/// The reply's head, once it's all there.
-pub(crate) fn head(buf: &[u8], max: usize) -> Result<Option<Head>, ProviderError> {
+/// The reply's head, once it's all there; `longest` is the longest body
+/// it may give a length for.
+fn reply_head(buf: &[u8], longest: usize) -> Result<Option<Head>, ProviderError> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut response = httparse::Response::new(&mut headers);
     let at = match response.parse(buf) {
@@ -745,7 +1088,7 @@ pub(crate) fn head(buf: &[u8], max: usize) -> Result<Option<Head>, ProviderError
         let n: usize = length
             .parse()
             .map_err(|_| ProviderError::Unavailable("bad Content-Length".into()))?;
-        if n > max {
+        if n > longest {
             return Err(ProviderError::Unavailable("the reply is too large".into()));
         }
         Framing::Length(n)
@@ -756,44 +1099,15 @@ pub(crate) fn head(buf: &[u8], max: usize) -> Result<Option<Head>, ProviderError
     let retry_after = value("retry-after")
         .and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_secs);
+    let again = response.version == Some(1)
+        && !value("connection").is_some_and(|v| v.split(',').any(|said| said.trim() == "close"));
     Ok(Some(Head {
         status,
         at,
         framing,
         retry_after,
+        again,
     }))
-}
-
-/// The body of a chunked reply, once its last chunk has arrived.
-fn dechunk(data: &[u8], max: usize) -> Result<Option<Vec<u8>>, ProviderError> {
-    let bad = || ProviderError::Unavailable("bad chunked encoding".into());
-    let mut out = Vec::new();
-    let mut at = 0;
-    loop {
-        match httparse::parse_chunk_size(&data[at..]) {
-            Ok(httparse::Status::Complete((used, size))) => {
-                at += used;
-                if size == 0 {
-                    return Ok(Some(out));
-                }
-                let size = usize::try_from(size).map_err(|_| bad())?;
-                if size > max || out.len() + size > max {
-                    return Err(ProviderError::Unavailable("the reply is too large".into()));
-                }
-                if data.len() < at + size + 2 {
-                    return Ok(None);
-                }
-                out.extend_from_slice(&data[at..at + size]);
-                at += size;
-                if &data[at..at + 2] != b"\r\n" {
-                    return Err(bad());
-                }
-                at += 2;
-            }
-            Ok(httparse::Status::Partial) => return Ok(None),
-            Err(_) => return Err(bad()),
-        }
-    }
 }
 
 impl Target {
@@ -820,6 +1134,11 @@ impl Target {
             port,
             path: path.to_owned(),
         })
+    }
+
+    /// Which server this is, for a connection kept to it.
+    fn key(&self) -> Key {
+        (self.tls, self.host.to_ascii_lowercase(), self.port)
     }
 
     /// `host:port`, to connect to (and for CONNECT).
@@ -1034,15 +1353,53 @@ mod tests {
         assert!(!proxy.bypasses("api.anthropic.com"));
     }
 
+    /// A connection that gives `reply` and takes whatever is sent.
+    struct Canned {
+        reply: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl Canned {
+        fn conn(reply: &[u8]) -> Conn {
+            Conn {
+                stream: Box::new(Self {
+                    reply: std::io::Cursor::new(reply.to_vec()),
+                }),
+                socket: None,
+                used: false,
+            }
+        }
+    }
+
+    impl Read for Canned {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.reply.read(out)
+        }
+    }
+
+    impl Write for Canned {
+        fn write(&mut self, sent: &[u8]) -> std::io::Result<usize> {
+            Ok(sent.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn replies_are_framed_by_length_chunks_or_close() {
-        let reply = |raw: &'static [u8]| {
-            let mut stream = std::io::Cursor::new(raw.to_vec());
-            read_reply(
-                &mut stream,
-                Instant::now() + Duration::from_secs(5),
-                MAX_REPLY,
-            )
+        let reply = |raw: &'static [u8]| -> Result<Reply, ProviderError> {
+            let http = Http::insecure_for_tests();
+            let ask = Ask {
+                method: "GET",
+                url: "http://test.invalid/",
+                headers: &[],
+                body: &[],
+            };
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let heard = converse(Canned::conn(raw), "", &ask, deadline, MAX_REPLY)?;
+            http.answer((false, "test.invalid".into(), 80), "GET", heard, deadline)
+                .reply(MAX_REPLY)
         };
         let r = reply(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello, and more").unwrap();
         assert_eq!((r.status, r.body.as_str()), (200, "hello"));
@@ -1056,6 +1413,289 @@ mod tests {
         assert!(reply(b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nshort").is_err());
         assert!(reply(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n").is_err());
         assert!(reply(b"NOT HTTP\r\n\r\n").is_err());
+    }
+
+    /// The path a request asks for.
+    fn path(request: &fake::Request) -> &str {
+        request.head.split(' ').nth(1).unwrap_or_default()
+    }
+
+    fn get(http: &Http, url: &str) -> String {
+        http.send("GET", url, &[], b"").unwrap().body
+    }
+
+    #[test]
+    fn adr0018_a_client_that_keeps_connections_sends_the_next_request_on_the_last_ones() {
+        use fake::Then;
+        let (url, had) = fake::serve_kept(|_, _, request| {
+            Then::Reply(match path(request) {
+                "/chunked" => b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n\
+                                6\r\nhello \r\n5\r\nworld\r\n0\r\nx-sum: 1\r\n\r\n"
+                    .to_vec(),
+                "/gone" => b"HTTP/1.1 204 No Content\r\n\r\n".to_vec(),
+                "/size" => b"HTTP/1.1 200 OK\r\ncontent-length: 1234\r\n\r\n".to_vec(),
+                "/missing" => b"HTTP/1.1 404 Not Found\r\ncontent-length: 4\r\n\r\nnone".to_vec(),
+                _ => fake::ok("hello"),
+            })
+        });
+        let http = Http::insecure_for_tests().keeping_connections();
+        assert_eq!(get(&http, &format!("{url}/length")), "hello");
+        // Chunks, and what follows the last of them, are read to the end.
+        assert_eq!(get(&http, &format!("{url}/chunked")), "hello world");
+        // No body and no length: nothing to wait for.
+        let gone = http
+            .send("DELETE", &format!("{url}/gone"), &[], b"")
+            .unwrap();
+        assert_eq!((gone.status, gone.body.as_str()), (204, ""));
+        // A HEAD reply's length is the object's, not a body's.
+        assert_eq!(
+            http.head(&format!("{url}/size"), &[]).unwrap(),
+            (200, Some(1234))
+        );
+        let ask = |method: &'static str, url: &str, body: &'static [u8]| {
+            let mut out = Vec::new();
+            let ask = Ask {
+                method,
+                url,
+                headers: &[],
+                body,
+            };
+            let got = http.download(&ask, 0, &mut out, 100).unwrap();
+            (got.status, got.body, out)
+        };
+        assert_eq!(
+            ask("PUT", &format!("{url}/thing"), b"bytes"),
+            (200, String::new(), b"hello".to_vec())
+        );
+        assert_eq!(
+            ask("GET", &format!("{url}/missing"), b""),
+            (404, "none".to_owned(), Vec::new())
+        );
+        assert_eq!(get(&http, &format!("{url}/length")), "hello");
+        let lines = fake::lines(&had);
+        assert_eq!(lines.len(), 7, "{lines:?}");
+        assert!(
+            lines.iter().all(|(connection, _)| *connection == 0),
+            "{lines:?}"
+        );
+        assert!(
+            had.lock()
+                .unwrap()
+                .iter()
+                .all(|(_, request)| !request.head.to_ascii_lowercase().contains("connection:")),
+            "a client that keeps its connections doesn't ask for them to be closed"
+        );
+
+        // A client that doesn't keep them takes one each, and says so.
+        let (url, had) = fake::serve_kept(|_, _, _| Then::Reply(fake::ok("hello")));
+        let http = Http::insecure_for_tests();
+        assert_eq!(get(&http, &format!("{url}/a")), "hello");
+        assert_eq!(get(&http, &format!("{url}/b")), "hello");
+        assert_eq!(
+            fake::lines(&had),
+            [(0, "GET /a".to_owned()), (1, "GET /b".to_owned())]
+        );
+        assert!(
+            had.lock()
+                .unwrap()
+                .iter()
+                .all(|(_, request)| request.head.contains("Connection: close\r\n"))
+        );
+    }
+
+    #[test]
+    fn adr0018_a_connection_the_server_closed_isnt_used_again() {
+        // The server answers and closes, without having said it would.
+        let (url, had) = fake::serve_kept(|_, _, _| fake::Then::ReplyAndClose(fake::ok("hello")));
+        let http = Http::insecure_for_tests().keeping_connections();
+        for name in ["a", "b", "c"] {
+            assert_eq!(get(&http, &format!("{url}/{name}")), "hello");
+        }
+        assert_eq!(
+            fake::lines(&had),
+            [
+                (0, "GET /a".to_owned()),
+                (1, "GET /b".to_owned()),
+                (2, "GET /c".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn adr0018_a_request_a_kept_connection_didnt_answer_is_sent_again_only_if_twice_is_once() {
+        use fake::Then;
+        // Each connection answers one request, and at its second closes
+        // without a word: a server that closed the connection as the
+        // request was on its way, which a client can't tell from one that
+        // acted on it and then went.
+        let (url, had) = fake::serve_kept(|_, before, _| {
+            if before == 0 {
+                Then::Reply(fake::ok("hello"))
+            } else {
+                Then::Close
+            }
+        });
+        let http = Http::insecure_for_tests().keeping_connections();
+        assert_eq!(get(&http, &format!("{url}/a")), "hello");
+        // A GET is sent again, on a new connection, and nobody hears of it.
+        assert_eq!(get(&http, &format!("{url}/b")), "hello");
+        // A POST is not: whoever sent it hears it failed, as on any
+        // connection that broke, and decides.
+        let err = http.post(&format!("{url}/c"), &[], b"once").unwrap_err();
+        assert!(err.fails_over(), "{err}");
+        assert!(err.to_string().contains("closed before the reply"), "{err}");
+        // Its connection is gone; the next request has a new one.
+        assert_eq!(
+            http.post(&format!("{url}/c"), &[], b"again").unwrap().body,
+            "hello"
+        );
+        // A DELETE, as a GET.
+        let deleted = http.send("DELETE", &format!("{url}/d"), &[], b"").unwrap();
+        assert_eq!(deleted.body, "hello");
+        let line = |connection: usize, line: &str| (connection, line.to_owned());
+        assert_eq!(
+            fake::lines(&had),
+            [
+                line(0, "GET /a"),
+                line(0, "GET /b"),
+                line(1, "GET /b"),
+                line(1, "POST /c"),
+                line(2, "POST /c"),
+                line(2, "DELETE /d"),
+                line(3, "DELETE /d"),
+            ]
+        );
+    }
+
+    #[test]
+    fn adr0018_a_request_that_didnt_go_out_goes_on_a_new_connection_whatever_it_is() {
+        /// A connection that takes nothing more.
+        struct Shut;
+        impl Read for Shut {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Ok(0)
+            }
+        }
+        impl Write for Shut {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (url, had) = fake::serve_kept(|_, _, _| fake::Then::Reply(fake::ok("hello")));
+        let http = Http::insecure_for_tests().keeping_connections();
+        // Kept, and quiet as far as its socket shows.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let near = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _far = listener.accept().unwrap();
+        let to = Target::parse(&format!("{url}/")).unwrap().key();
+        http.kept.as_ref().unwrap().put(
+            to,
+            Conn {
+                stream: Box::new(Shut),
+                socket: Some(near),
+                used: false,
+            },
+        );
+        // Not all of the request went out, so the server can't have acted
+        // on it: even a POST goes again.
+        let reply = http.post(&format!("{url}/b"), &[], b"once").unwrap();
+        assert_eq!(reply.body, "hello");
+        assert_eq!(fake::lines(&had), [(0, "POST /b".to_owned())]);
+    }
+
+    #[test]
+    fn adr0018_only_a_reply_read_to_its_end_leaves_its_connection_to_use() {
+        let (url, had) = fake::serve_kept(|_, _, request| {
+            fake::Then::Reply(match path(request) {
+                "/long" => fake::ok(&"0123456789".repeat(60_000)),
+                "/closing" => {
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\ncontent-length: 2\r\n\r\nok".to_vec()
+                }
+                "/old" => b"HTTP/1.0 200 OK\r\ncontent-length: 2\r\n\r\nok".to_vec(),
+                "/more" => b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok and more".to_vec(),
+                _ => fake::ok("hello"),
+            })
+        });
+        let http = Http::insecure_for_tests().keeping_connections();
+        // A reply given up on part way (it's longer than was to be
+        // taken): the rest of it is still on the connection, and must not
+        // be read as the next request's reply.
+        let long = format!("{url}/long");
+        let ask = Ask {
+            method: "GET",
+            url: &long,
+            headers: &[],
+            body: &[],
+        };
+        assert!(http.download(&ask, 0, &mut Vec::new(), 4).is_err());
+        assert_eq!(get(&http, &format!("{url}/next")), "hello");
+        // The server said it's closing; a server that speaks HTTP/1.0
+        // closes without saying; more arrived than the reply.
+        assert_eq!(get(&http, &format!("{url}/closing")), "ok");
+        assert_eq!(get(&http, &format!("{url}/old")), "ok");
+        assert_eq!(get(&http, &format!("{url}/more")), "ok");
+        assert_eq!(get(&http, &format!("{url}/last")), "hello");
+        let connections: Vec<usize> = fake::lines(&had).iter().map(|(c, _)| *c).collect();
+        assert_eq!(connections, [0, 1, 1, 2, 3, 4], "{:?}", fake::lines(&had));
+    }
+
+    #[test]
+    fn adr0018_a_connection_unused_too_long_is_closed() {
+        let (url, had) = fake::serve_kept(|_, _, _| fake::Then::Reply(fake::ok("hello")));
+        let mut http = Http::insecure_for_tests().keeping_connections();
+        http.kept.as_mut().unwrap().for_at_most = Duration::from_millis(50);
+        assert_eq!(get(&http, &format!("{url}/a")), "hello");
+        std::thread::sleep(Duration::from_millis(80));
+        assert_eq!(get(&http, &format!("{url}/b")), "hello");
+        assert_eq!(
+            fake::lines(&had),
+            [(0, "GET /a".to_owned()), (1, "GET /b".to_owned())]
+        );
+    }
+
+    #[test]
+    fn audit_9_5_a_long_chunked_reply_is_decoded_once_as_it_arrives() {
+        // 32 MiB in chunks of a little under 8 KiB, so chunks' edges fall
+        // anywhere in what a read gives.
+        let piece: Vec<u8> = (0..8191u32).map(|i| b'a' + (i % 26) as u8).collect();
+        let pieces = 32 * 1024 * 1024 / piece.len();
+        let mut reply = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n".to_vec();
+        for _ in 0..pieces {
+            reply.extend_from_slice(format!("{:x}\r\n", piece.len()).as_bytes());
+            reply.extend_from_slice(&piece);
+            reply.extend_from_slice(b"\r\n");
+        }
+        reply.extend_from_slice(b"0\r\n\r\n");
+        let (url, _requests) = fake::serve_raw(vec![reply]);
+        let began = Instant::now();
+        let got = Http::insecure_for_tests()
+            .with_max_reply(64 * 1024 * 1024)
+            .send("GET", &format!("{url}/bundle"), &[], b"")
+            .unwrap();
+        let took = began.elapsed();
+        assert_eq!(got.body.len(), pieces * piece.len());
+        assert!(got.body.as_bytes().chunks(piece.len()).all(|c| c == piece));
+        // Decoded again from its start at every read, this took 18 s (and
+        // a 160 MiB kernel bundle, minutes); read once, a fraction of one.
+        assert!(took < Duration::from_secs(6), "it took {took:?}");
+
+        // The cap still holds, without the reply being read past it.
+        let mut reply = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n".to_vec();
+        for _ in 0..3 {
+            reply.extend_from_slice(b"400\r\n");
+            reply.extend_from_slice(&[b'x'; 1024]);
+            reply.extend_from_slice(b"\r\n");
+        }
+        reply.extend_from_slice(b"0\r\n\r\n");
+        let (url, _requests) = fake::serve_raw(vec![reply]);
+        let err = Http::insecure_for_tests()
+            .with_max_reply(2048)
+            .send("GET", &format!("{url}/big"), &[], b"")
+            .unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
     }
 
     #[test]
@@ -1117,7 +1757,7 @@ pub(crate) mod fake {
 
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
-    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
 
     #[derive(Debug)]
@@ -1162,6 +1802,107 @@ pub(crate) mod fake {
             }
         });
         (url, rx)
+    }
+
+    /// What a [`serve_kept`] server does with a request.
+    pub enum Then {
+        /// Sends these bytes and waits for the connection's next request.
+        Reply(Vec<u8>),
+        /// Sends these bytes and closes the connection.
+        ReplyAndClose(Vec<u8>),
+        /// Closes the connection without a word.
+        Close,
+    }
+
+    /// The requests a [`serve_kept`] server has had, each with the number
+    /// of the connection it came on (the first is 0).
+    pub type Had = Arc<Mutex<Vec<(usize, Request)>>>;
+
+    /// A 200 with `body`, on a connection that stays open.
+    pub fn ok(body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// Serves any number of connections, and on each as many requests as
+    /// come, as a server that keeps connections does. `answer` is given
+    /// the connection's number, how many requests it had before this one,
+    /// and the request. Returns the base URL and the requests it has had.
+    pub fn serve_kept(
+        answer: impl Fn(usize, usize, &Request) -> Then + Send + Sync + 'static,
+    ) -> (String, Had) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let had: Had = Arc::default();
+        let (log, answer) = (Arc::clone(&had), Arc::new(answer));
+        thread::spawn(move || {
+            for (connection, stream) in listener.incoming().enumerate() {
+                let Ok(mut stream) = stream else { return };
+                let (log, answer) = (Arc::clone(&log), Arc::clone(&answer));
+                thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    for before in 0.. {
+                        let mut head = String::new();
+                        let mut length = 0;
+                        loop {
+                            let mut line = String::new();
+                            // The client closed it, or broke off.
+                            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            if let Some(v) =
+                                line.to_ascii_lowercase().strip_prefix("content-length:")
+                            {
+                                length = v.trim().parse().unwrap();
+                            }
+                            if line == "\r\n" {
+                                break;
+                            }
+                            head.push_str(&line);
+                        }
+                        let mut received = vec![0; length];
+                        if reader.read_exact(&mut received).is_err() {
+                            return;
+                        }
+                        let request = Request {
+                            head,
+                            body: String::from_utf8_lossy(&received).into_owned(),
+                        };
+                        let then = answer(connection, before, &request);
+                        log.lock().unwrap().push((connection, request));
+                        match then {
+                            Then::Reply(reply) => {
+                                if stream.write_all(&reply).is_err() {
+                                    return;
+                                }
+                            }
+                            Then::ReplyAndClose(reply) => {
+                                let _ = stream.write_all(&reply);
+                                return;
+                            }
+                            Then::Close => return,
+                        }
+                    }
+                });
+            }
+        });
+        (url, had)
+    }
+
+    /// What `had` holds: each request's connection and its first line
+    /// without the version (`GET /path`).
+    pub fn lines(had: &Had) -> Vec<(usize, String)> {
+        had.lock()
+            .unwrap()
+            .iter()
+            .map(|(connection, request)| {
+                let line = request.head.lines().next().unwrap_or_default();
+                (*connection, line.trim_end_matches(" HTTP/1.1").to_owned())
+            })
+            .collect()
     }
 
     /// Serves one request; returns the base URL and the request it got.

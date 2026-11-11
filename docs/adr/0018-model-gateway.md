@@ -77,8 +77,9 @@ OpenSSL 3.5, `libssl.so.35`), with a small HTTP/1.1 client of our own in
 `glass-gateway-providers`: `httparse` reads the reply head, the body is
 framed by Content-Length, chunked encoding or the connection's end and
 capped at 8 MiB, with connect and call timeouts, one request per
-connection, no redirects, HTTPS only, and CONNECT through an
-`https_proxy` set in glassd's environment by its rc.d script.
+connection (S3's client keeps its own since the amendment of 2026-11-11,
+below), no redirects, HTTPS only, and CONNECT through an `https_proxy`
+set in glassd's environment by its rc.d script.
 
 Why:
 - **Base system first (ADR 0007).** One TLS stack, patched with the base
@@ -196,3 +197,57 @@ the gateway, and the local model (DP-20).
   the higher of that and the file's own (DP-11), and a read's labels are
   read again after it, so a write landing meanwhile counts
   (`specs/tla/ModelGateway.tla`).
+
+## Amended 2026-11-11 (audit 9.5): replies read as they arrive, and S3's connections kept
+The client is still the one HTTP client in the workspace, and a model
+call is still one request on its own connection. Two things changed in
+`glass-gateway-providers/src/http.rs`:
+
+- **A reply's body is read once, as it arrives.** `send` held the whole
+  reply and decoded its chunks again from the start at every read: a
+  32 MiB chunked reply took 18 s, and a built kernel patch behind a proxy
+  that re-chunks, minutes. It reads through the same reader a download
+  does (0.15 s for the same reply), to the same caps.
+- **A client may keep its connections** (`Http::keeping_connections`),
+  and S3's does. S3, DynamoDB and the console came after this decision
+  and paid a TCP connection and a TLS handshake for every request; a
+  computer going to sleep is hundreds of requests to one host. A kept
+  connection is used again only when
+  - its last reply was read to its end and nothing more came with it;
+  - the server speaks HTTP/1.1 and didn't say it is closing;
+  - it has sat unused under 15 s;
+  - the far end hasn't closed it or said anything since (asked of the
+    socket just before the request goes out).
+
+  A request that a kept connection takes but doesn't answer is sent once
+  more on a new connection only if it is a GET, HEAD, PUT or DELETE,
+  which S3 may get twice (a put is the same bytes; a conditional one's
+  caller is told the key is taken and looks whose it is). Any request is
+  sent again if not all of it went out. A POST that went out is not: its
+  caller hears it failed.
+
+  That last rule is why DynamoDB and the console stay at a request per
+  connection. Their requests are POSTs that can't be sent twice (a
+  schedule's claim is a conditional write: sent twice, the second says
+  another host has it, and nobody runs it), and they come one in half a
+  minute, which a kept connection wouldn't outlast.
+- Connections have `TCP_NODELAY`: a request is written as its head and
+  then its body, and on a connection in use for a while the body waited
+  in the kernel for the far end to acknowledge the head, 40 ms a small
+  put.
+
+Not verified here: the saving against S3 itself. Over TLS on this machine
+a small put, HEAD or delete takes 3 ms on a new connection and 0.3 ms on a
+kept one; moto, which `make aws-local-test` uses, closes every
+connection, so that suite still runs a request per connection, and the
+kept path is tested against the Rust stand-in (`s3::testing::StandIn`)
+and a local TLS server by hand.
+
+One thing to measure on the first real deployment: a server that sends a
+reply's head and its body as two writes and waits for the first to be
+acknowledged holds a GET on a kept connection for the 40 ms this end
+takes to acknowledge (the Python server used by hand does; a new
+connection doesn't show it). Nothing says S3 does, and every AWS SDK
+keeps its connections to it, but it hasn't been seen from here. If it
+did, a wake's GETs would be slower kept than not, and
+`keeping_connections` on the S3 client is the one line to take out.

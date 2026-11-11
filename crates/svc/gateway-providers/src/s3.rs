@@ -12,7 +12,6 @@
 //! expire. A request that fails for a moment (S3's 503 SlowDown, a dropped
 //! connection) is tried again a few times, after a pause.
 
-use std::io::Read;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
@@ -22,7 +21,7 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::http::{self, Ask, Framing, Http, Target};
+use crate::http::{Ask, Http, Target};
 use crate::sigv4::{self, uri_encode};
 
 /// Tries of a request that fails for a moment, and the pause after the
@@ -172,8 +171,12 @@ impl S3Client {
         }
         Ok(Self {
             // A minute of silence is an outage; a large object takes as
-            // long as it takes.
-            http: http.for_downloads(),
+            // long as it takes. Requests come hundreds at a time (a
+            // computer's chunks), so connections are kept between them:
+            // every request here may be sent twice (a put is the same
+            // bytes again, and a conditional one's caller is told the key
+            // is taken, and looks whose it is).
+            http: http.for_downloads().keeping_connections(),
             bucket: bucket.to_owned(),
             region: region.to_owned(),
             base,
@@ -284,8 +287,7 @@ impl S3Client {
         self.retrying(&format!("check {key}"), || {
             let signed = self.signed("HEAD", Some(key), &[], &[], &[])?;
             let headers = signed.headers();
-            let mut stream = self.http.request("HEAD", &signed.url, &headers, &[])?;
-            match read_head(&mut *stream)? {
+            match self.http.head(&signed.url, &headers)? {
                 (200..=299, length) => Ok(Some(length.unwrap_or(0))),
                 (404, _) => Ok(None),
                 // A HEAD reply has no body to say why.
@@ -507,39 +509,6 @@ fn refused(status: u16, body: &str) -> Try {
         Try::Again(why)
     } else {
         Try::Stop(why)
-    }
-}
-
-/// Reads a reply's head and nothing more: a HEAD reply says how long the
-/// object is, and has no body.
-fn read_head<R: Read + ?Sized>(stream: &mut R) -> Result<(u16, Option<u64>), Try> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        if let Some(head) = http::head(&buf, usize::MAX)? {
-            let length = match head.framing {
-                Framing::Length(n) => Some(n as u64),
-                _ => None,
-            };
-            return Ok((head.status, length));
-        }
-        if buf.len() > 64 * 1024 {
-            return Err(Try::Stop("the reply's head is too long".into()));
-        }
-        match stream.read(&mut chunk) {
-            Ok(0) => {
-                return Err(Try::Again(
-                    "the connection closed before the reply's head was complete".into(),
-                ));
-            }
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            Err(e) => {
-                return Err(Try::Again(format!(
-                    "network error reading the reply: {}",
-                    e.kind()
-                )));
-            }
-        }
     }
 }
 
@@ -961,6 +930,8 @@ pub mod testing {
         page: usize,
         /// Statuses to answer the next requests with.
         failures: Vec<u16>,
+        /// Connections taken.
+        connections: usize,
     }
 
     /// A running stand-in, stopped when dropped.
@@ -1046,6 +1017,11 @@ pub mod testing {
             self.state().seen.clone()
         }
 
+        /// How many connections clients have opened to it.
+        pub fn connections(&self) -> usize {
+            self.state().connections
+        }
+
         /// Lists at most `n` keys a page.
         pub fn set_page_size(&self, n: usize) {
             self.state().page = n.max(1);
@@ -1072,13 +1048,21 @@ pub mod testing {
 
     type Request = (String, String, Vec<(String, String)>, Vec<u8>);
 
+    /// Answers a connection's requests, one after another, until the
+    /// client closes it or says nothing for ten seconds: S3 keeps
+    /// connections open between requests too.
     fn serve(mut stream: TcpStream, state: &Mutex<State>) {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-        let Some((method, target, headers, body)) = read_request(&mut stream) else {
-            return;
-        };
-        let reply = answer(state, &method, &target, &headers, &body);
-        let _ = stream.write_all(&reply);
+        state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .connections += 1;
+        while let Some((method, target, headers, body)) = read_request(&mut stream) {
+            let reply = answer(state, &method, &target, &headers, &body);
+            if stream.write_all(&reply).is_err() {
+                return;
+            }
+        }
     }
 
     fn read_request(stream: &mut TcpStream) -> Option<Request> {
@@ -1446,7 +1430,7 @@ pub mod testing {
 
     /// A reply: `body`, or for a HEAD request only its length.
     fn reply(status: u16, body: &[u8], head_only: bool) -> Vec<u8> {
-        let mut head = format!("HTTP/1.1 {status} Stand-in\r\nconnection: close\r\n");
+        let mut head = format!("HTTP/1.1 {status} Stand-in\r\n");
         if status != 204 {
             head.push_str(&format!("content-length: {}\r\n", body.len()));
         }
@@ -1468,6 +1452,50 @@ mod tests {
     use super::testing::{ACCESS_KEY_ID, StandIn};
     use super::*;
     use crate::http::fake;
+
+    #[test]
+    fn adr0066_s3_requests_share_connections() {
+        let s3 = StandIn::start();
+        let client = s3.client();
+        client.put("chunks/aa", b"one").unwrap();
+        assert!(client.put_new("leases/1", b"mine").unwrap());
+        assert!(!client.put_new("leases/1", b"theirs").unwrap());
+        assert_eq!(
+            client.get("chunks/aa", 100).unwrap().as_deref(),
+            Some(&b"one"[..])
+        );
+        assert_eq!(client.get("chunks/none", 100).unwrap(), None);
+        assert_eq!(client.head("chunks/aa").unwrap(), Some(3));
+        assert_eq!(client.head("chunks/none").unwrap(), None);
+        let listed = client.list("chunks/").unwrap();
+        assert_eq!(listed.len(), 1);
+        let tag = listed[0].etag.clone().unwrap();
+        assert!(!client.delete_if("chunks/aa", "\"another\"").unwrap());
+        assert!(client.delete_if("chunks/aa", &tag).unwrap());
+        client.delete("leases/1").unwrap();
+        assert!(s3.keys().is_empty(), "{:?}", s3.keys());
+        // Every kind of request and of reply (a body, none, a refusal),
+        // and the next request went on the same connection each time.
+        assert_eq!(s3.seen().len(), 11);
+        assert_eq!(s3.connections(), 1);
+
+        // Four chunks at a time, as a save sends them: a connection each
+        // at most, however many chunks.
+        std::thread::scope(|scope| {
+            for sender in 0..4 {
+                let client = &client;
+                scope.spawn(move || {
+                    for chunk in 0..10 {
+                        client
+                            .put(&format!("chunks/{sender}-{chunk}"), &[sender; 2000])
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(s3.keys().len(), 40);
+        assert!(s3.connections() <= 4, "{} connections", s3.connections());
+    }
 
     #[test]
     fn adr0065_s3_puts_gets_checks_deletes_and_lists_with_signed_requests() {

@@ -557,6 +557,15 @@ fn adr0065_s3_blobs_carry_a_computer_to_s3_and_back() {
             .filter(|r| r.method == "PUT")
             .all(|r| r.header("x-amz-server-side-encryption") == Some("aws:kms"))
     );
+    // Two saves and a restore on the few connections a save's chunks go
+    // out on at once (audit 9.5): it was a connection, and with S3 a TLS
+    // handshake, for every request.
+    let connections = s3.connections();
+    assert!(
+        connections <= CHUNKS_AT_ONCE + 1 && connections * 3 < seen.len(),
+        "{connections} connections for {} requests",
+        seen.len()
+    );
 }
 
 /// Against S3 and KMS on this machine (deploy/local, moto): the real
