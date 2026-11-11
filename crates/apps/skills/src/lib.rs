@@ -244,6 +244,19 @@ struct Local {
     results: Vec<Scores>,
 }
 
+/// The local record kept in `path`: empty where there is no file. One
+/// that isn't a record this version reads is set aside beside itself, not
+/// read as empty and written over.
+fn local_in(path: &std::path::Path) -> Result<Local, ActionError> {
+    glass_state::read_json_or_set_aside(path)
+        .map(Option::unwrap_or_default)
+        .map_err(|e| {
+            failed(format!(
+                "your skills on this computer couldn't be read: {e}"
+            ))
+        })
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NoInput {}
@@ -445,12 +458,20 @@ impl SkillsProvider {
         Ok(self.dir.join(format!("{login}.json")))
     }
 
+    /// `login`'s local record, to show: empty where there is none or it
+    /// can't be read.
     fn load(&self, login: &str) -> Local {
-        self.local_path(login)
-            .ok()
-            .and_then(|p| std::fs::read(p).ok())
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        self.read_local(login).unwrap_or_default()
+    }
+
+    /// `login`'s local record, to change. A file that isn't one (cut
+    /// short, or written by a newer version with fields this one doesn't
+    /// know, as after going back to an earlier system) is set aside
+    /// beside itself and they start again; it used to read as empty and
+    /// be written over, drafts and all. One that can't be read at all is
+    /// an error.
+    fn read_local(&self, login: &str) -> Result<Local, ActionError> {
+        local_in(&self.local_path(login)?)
     }
 
     /// Changes `login`'s local record, written whole, root's only.
@@ -461,25 +482,11 @@ impl SkillsProvider {
     ) -> Result<T, ActionError> {
         let path = self.local_path(login)?;
         let _write = self.write.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut local = self.load(login);
+        let mut local = self.read_local(login)?;
         let out = f(&mut local)?;
-        std::fs::create_dir_all(&self.dir).map_err(|e| failed(format!("keeping it: {e}")))?;
-        let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec(&local).map_err(failed)?;
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)
-                .map_err(|e| failed(format!("keeping it: {e}")))?;
-            file.write_all(&bytes)
-                .map_err(|e| failed(format!("keeping it: {e}")))?;
-        }
-        std::fs::rename(&tmp, &path).map_err(|e| failed(format!("keeping it: {e}")))?;
+        glass_state::write(&path, &bytes, glass_state::PRIVATE)
+            .map_err(|e| failed(format!("keeping it: {e}")))?;
         Ok(out)
     }
 

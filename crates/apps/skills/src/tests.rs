@@ -853,3 +853,29 @@ fn ga1_what_each_action_returns_is_what_it_declares() {
         assert!(a.skills.returns(&def.name).is_some(), "{}", def.name);
     }
 }
+
+// Audit 4.3: after going back to an earlier system, a record written by
+// the newer one read as empty here (it has a field this version doesn't
+// know), and the next change wrote over it: drafts gone.
+#[test]
+fn sk3_a_record_from_a_newer_version_is_kept_aside_not_wiped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dana.json");
+    assert!(local_in(&path).unwrap().drafts.is_empty());
+    let newer = br#"{"drafts":[],"results":[],"pinned":["standup"]}"#;
+    std::fs::write(&path, newer).unwrap();
+    let local = local_in(&path).unwrap();
+    assert!(local.drafts.is_empty() && local.results.is_empty());
+    assert!(!path.exists(), "out of the way of the next write");
+    let aside: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(aside.len(), 1);
+    assert_eq!(std::fs::read(&aside[0]).unwrap(), newer);
+    // There and not readable at all: an error, so nothing is written.
+    std::fs::create_dir(&path).unwrap();
+    let refused = local_in(&path).unwrap_err().to_string();
+    assert!(refused.contains("couldn't be read"), "{refused}");
+}

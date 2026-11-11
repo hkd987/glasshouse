@@ -196,7 +196,14 @@ impl Blobs for FolderBlobs {
                 Err(e) => return Err(failed(e)),
             };
             for entry in entries {
-                let entry = entry.map_err(failed)?;
+                // An object deleted while this lists (another host's, as
+                // S3 would simply not list it) is not there: never an
+                // error.
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(failed(e)),
+                };
                 let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                     continue;
                 };
@@ -209,7 +216,11 @@ impl Blobs for FolderBlobs {
                     format!("{key}/{name}")
                 };
                 // Doesn't follow a symlink.
-                let meta = entry.metadata().map_err(failed)?;
+                let meta = match entry.metadata() {
+                    Ok(meta) => meta,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(failed(e)),
+                };
                 if meta.is_dir() {
                     let below = format!("{key}/");
                     if below.starts_with(prefix) || prefix.starts_with(&below) {

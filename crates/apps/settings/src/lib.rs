@@ -15,7 +15,6 @@ pub mod wifi;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -620,11 +619,9 @@ impl SettingsHandle {
         if self.owner().is_none() {
             return BTreeMap::new();
         }
-        let Ok(text) = fs::read_to_string(self.computer_path()) else {
-            return BTreeMap::new();
-        };
-        let all: BTreeMap<String, SettingValue> = serde_json::from_str(&text).unwrap_or_default();
-        all.into_iter()
+        read_choices(&self.computer_path())
+            .unwrap_or_default()
+            .into_iter()
             .filter(|(id, value)| {
                 settings::def(id)
                     .is_some_and(|d| d.scope != Scope::Person && settings::check(d, value).is_ok())
@@ -733,11 +730,9 @@ impl SettingsHandle {
 
     /// `uid`'s own choices, those still valid.
     fn choices(&self, uid: u32) -> BTreeMap<String, SettingValue> {
-        let Ok(text) = fs::read_to_string(self.choices_path(uid)) else {
-            return BTreeMap::new();
-        };
-        let all: BTreeMap<String, SettingValue> = serde_json::from_str(&text).unwrap_or_default();
-        all.into_iter()
+        read_choices(&self.choices_path(uid))
+            .unwrap_or_default()
+            .into_iter()
             .filter(|(id, value)| {
                 settings::def(id)
                     .is_some_and(|d| d.scope == Scope::Person && settings::check(d, value).is_ok())
@@ -917,6 +912,9 @@ impl SettingsHandle {
             settings::check(def, v)
                 .map_err(|e| ActionError::InvalidInput(format!("{}: {e}", def.title)))?;
         }
+        // Never written over a file of choices that can't be read.
+        read_choices(&self.choices_path(uid))
+            .map_err(|e| ActionError::Failed(format!("your settings couldn't be read: {e}")))?;
         let mut choices = self.choices(uid);
         match value {
             Some(v) => {
@@ -990,6 +988,9 @@ impl SettingsHandle {
             settings::check(def, v)
                 .map_err(|e| ActionError::InvalidInput(format!("{}: {e}", def.title)))?;
         }
+        read_choices(&self.computer_path()).map_err(|e| {
+            ActionError::Failed(format!("the computer's settings couldn't be read: {e}"))
+        })?;
         let mut choices = self.computer_choices();
         match value {
             Some(v) => {
@@ -1011,35 +1012,19 @@ impl SettingsHandle {
     }
 }
 
-/// Writes `bytes` to `path` whole, readable by glassd only.
+/// A file of choices as it is: none where there is no file. One that isn't
+/// choices (cut short, edited into something else) is set aside beside
+/// itself and the choices start again; it used to read as none and be
+/// written over at the next change, with every other choice in it. One
+/// that can't be read at all is an error.
+fn read_choices(path: &Path) -> Result<BTreeMap<String, SettingValue>, glass_state::ReadError> {
+    Ok(glass_state::read_json_or_set_aside(path)?.unwrap_or_default())
+}
+
+/// Writes `bytes` to `path` whole, readable by glassd only: beside it,
+/// synced, renamed over it, and the folder synced (glass-state).
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(
-        ".{}.new",
-        path.file_name()
-            .map(|n| n.to_string_lossy())
-            .unwrap_or_default()
-    ));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode_private()
-        .open(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    fs::rename(&tmp, path)
-}
-
-trait PrivateMode {
-    fn mode_private(&mut self) -> &mut Self;
-}
-
-impl PrivateMode for fs::OpenOptions {
-    fn mode_private(&mut self) -> &mut Self {
-        std::os::unix::fs::OpenOptionsExt::mode(self, 0o600)
-    }
+    glass_state::write(path, bytes, glass_state::PRIVATE)
 }
 
 fn no_wifi() -> ActionError {
@@ -2398,6 +2383,48 @@ members = ["dana"]
         fs::write(&path, r#"{"clock.hour24": 7, "browser.camera": false}"#).unwrap();
         let all = handle.person("sam", 1002);
         assert!(all.iter().all(|e| e.from == SettingFrom::Default));
+    }
+
+    // Audit 4.3: a file of choices that didn't parse read as no choices,
+    // and the next change wrote over it with only the one being made.
+    #[test]
+    fn ux1_a_file_of_choices_that_cant_be_read_isnt_written_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = SettingsHandle::new(dir.path().join("settings"));
+        handle
+            .choose("sam", 1002, "clock.hour24", Some(SettingValue::Bool(true)))
+            .unwrap();
+        let path = dir.path().join("settings/1002.json");
+        // Cut short, as a power cut mid-write once left it.
+        let cut = br#"{"clock.hour24": tr"#;
+        fs::write(&path, cut).unwrap();
+        handle
+            .choose("sam", 1002, "clock.hour24", Some(SettingValue::Bool(false)))
+            .unwrap();
+        let aside: Vec<_> = fs::read_dir(dir.path().join("settings"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".damaged-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "what was there is kept beside it");
+        assert_eq!(fs::read(aside[0].path()).unwrap(), cut);
+        let kept: BTreeMap<String, SettingValue> =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(kept["clock.hour24"], SettingValue::Bool(false));
+
+        // There, and not readable at all: the change is refused, in words,
+        // and nothing is written.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let refused = handle
+            .choose("sam", 1002, "clock.hour24", Some(SettingValue::Bool(true)))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("your settings couldn't be read"),
+            "{refused}"
+        );
+        assert!(path.is_dir());
     }
 
     #[test]

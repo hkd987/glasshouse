@@ -55,12 +55,18 @@ struct Installs {
 /// What `home`'s person installed from the catalog. A missing or
 /// unreadable file is nothing installed.
 pub fn installed(home: &Path) -> BTreeSet<AgentId> {
-    ConfinedDir::open(home)
-        .and_then(|dir| dir.read(Path::new(INSTALLS), MAX_INSTALLS_BYTES))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Installs>(&bytes).ok())
-        .map(|i| i.installed)
-        .unwrap_or_default()
+    read_installs(home).unwrap_or_default()
+}
+
+/// What they installed, as their file has it. The file is theirs to edit:
+/// one that no longer reads (a typo) is set aside beside itself and they
+/// start again, where the next install used to write over it with only
+/// the app being installed. One that can't be read at all is an error.
+fn read_installs(home: &Path) -> std::io::Result<BTreeSet<AgentId>> {
+    Ok(ConfinedDir::open(home)?
+        .read_json_or_set_aside::<Installs>(Path::new(INSTALLS), MAX_INSTALLS_BYTES)?
+        .map(|installs| installs.installed)
+        .unwrap_or_default())
 }
 
 /// Whether the catalog lets `id` reach someone in `groups` who installed
@@ -252,7 +258,8 @@ pub(crate) fn invoke(
     }
     let home = ConfinedDir::open(&ctx.home).map_err(|e| ActionError::io("home folder", e))?;
     let mut installs = Installs {
-        installed: installed(&ctx.home),
+        installed: read_installs(&ctx.home)
+            .map_err(|e| ActionError::io("what you installed", e))?,
     };
     let install = action == INSTALL;
     let changed = if install {

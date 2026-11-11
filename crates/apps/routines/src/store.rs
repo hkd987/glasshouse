@@ -344,12 +344,21 @@ fn names(dir: &Path) -> Vec<String> {
     names
 }
 
+/// The person's choices, to show: none where there is no file, or it
+/// can't be read.
 fn mine(home: &Path) -> Mine {
-    ConfinedDir::open(home)
-        .and_then(|dir| dir.read(Path::new(MINE), MAX_MINE_BYTES))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Mine>(&bytes).ok())
-        .unwrap_or_default()
+    read_mine(home).unwrap_or_default()
+}
+
+/// The person's choices, to change. The file is one they may edit: one
+/// that no longer reads as choices (a typo) is set aside beside itself
+/// and they start again, where the next save used to write over it with
+/// only the routine being saved. One that can't be read at all is an
+/// error, and nothing is written over it.
+fn read_mine(home: &Path) -> io::Result<Mine> {
+    Ok(ConfinedDir::open(home)?
+        .read_json_or_set_aside(Path::new(MINE), MAX_MINE_BYTES)?
+        .unwrap_or_default())
 }
 
 /// The versions `home`'s person uses, by routine. Missing or unreadable:
@@ -367,7 +376,7 @@ pub fn change<T>(
     f: impl FnOnce(&mut BTreeMap<String, u32>) -> io::Result<T>,
 ) -> io::Result<T> {
     let _one = CHOICES.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut mine = mine(home);
+    let mut mine = read_mine(home)?;
     let done = f(&mut mine.routines)?;
     let routines = &mine.routines;
     mine.paused.retain(|id| routines.contains_key(id));
@@ -396,7 +405,7 @@ pub fn choose(home: &Path, owner: Owner, routines: BTreeMap<String, u32>) -> io:
 /// Pauses the schedule of `home`'s person's routine `id`, or resumes it.
 pub fn pause(home: &Path, owner: Owner, id: &str, on: bool) -> io::Result<()> {
     let _one = CHOICES.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut mine = mine(home);
+    let mut mine = read_mine(home)?;
     if !mine.routines.contains_key(id) {
         return Err(io::Error::new(io::ErrorKind::NotFound, "not one of theirs"));
     }
@@ -408,21 +417,21 @@ pub fn pause(home: &Path, owner: Owner, id: &str, on: bool) -> io::Result<()> {
     write_mine(home, owner, &mine)
 }
 
-/// glassd's own JSON, read whole; missing or unreadable: the default.
+/// glassd's own JSON, read whole; missing or unreadable: the default. A
+/// file that isn't what it should be is set aside beside itself, not
+/// written over.
 fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
     std::fs::metadata(path)
         .ok()
         .filter(|m| m.len() <= MAX_RUNS_BYTES)
-        .and_then(|_| std::fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .and_then(|_| glass_state::read_json_or_set_aside(path).ok().flatten())
         .unwrap_or_default()
 }
 
-/// Writes glassd's own JSON in `dir`, staged then renamed into place.
+/// Writes glassd's own JSON in `dir`: beside it, synced, renamed into
+/// place, the folder synced (glass-state).
 fn write_json(dir: &Path, name: &str, value: &impl Serialize) -> io::Result<()> {
-    let staged = dir.join(format!(".{}.new", name.trim_start_matches('.')));
-    std::fs::write(&staged, serde_json::to_vec(value)?)?;
-    std::fs::rename(staged, dir.join(name))
+    glass_state::write_json(&dir.join(name), value, glass_state::READABLE)
 }
 
 fn write_mine(home: &Path, owner: Owner, mine: &Mine) -> io::Result<()> {
@@ -434,4 +443,66 @@ fn write_mine(home: &Path, owner: Owner, mine: &Mine) -> io::Result<()> {
     }
     let bytes = serde_json::to_vec_pretty(mine).map_err(io::Error::other)?;
     dir.write(Path::new(MINE), &bytes, Some(owner)).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use std::os::unix::fs::MetadataExt;
+
+    use super::*;
+
+    // Audit 4.3: the file of a person's choices is theirs to edit. One
+    // with a typo read as "no routines", and the next save wrote a file
+    // with only the routine being saved.
+    #[test]
+    fn da4_a_typo_in_a_persons_choices_loses_nothing_they_had() {
+        let home = tempfile::tempdir().unwrap();
+        let meta = std::fs::metadata(home.path()).unwrap();
+        let me = Owner {
+            uid: meta.uid(),
+            gid: meta.gid(),
+        };
+        let both: BTreeMap<String, u32> =
+            [("standup".to_owned(), 3), ("digest".to_owned(), 1)].into();
+        choose(home.path(), me, both.clone()).unwrap();
+        assert_eq!(chosen(home.path()), both);
+
+        // Edited by hand, with a comma too many.
+        let file = home.path().join(MINE);
+        let typo = br#"{"routines":{"standup":3,"digest":1,}}"#;
+        std::fs::write(&file, typo).unwrap();
+        change(home.path(), me, |chosen| {
+            chosen.insert("review".to_owned(), 1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            chosen(home.path()),
+            [("review".to_owned(), 1)].into(),
+            "they start again"
+        );
+        // What they had is beside it, as they left it, to put right.
+        let aside: Vec<_> = std::fs::read_dir(file.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".damaged-"))
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(std::fs::read(aside[0].path()).unwrap(), typo);
+
+        // A file that can't be read at all is never written over.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert!(chosen(home.path()).is_empty());
+        assert!(
+            change(home.path(), me, |chosen| {
+                chosen.insert("review".to_owned(), 2);
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(pause(home.path(), me, "review", true).is_err());
+        assert!(file.is_dir());
+    }
 }

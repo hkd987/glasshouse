@@ -396,7 +396,7 @@ impl ChatProvider {
             .map_err(ChatFailure::Link)?;
         {
             let _write = self.handle.lock();
-            let mut store = self.handle.load(me);
+            let mut store = self.handle.load_to_change(me);
             store.conversations.insert(id.clone(), conversation.clone());
             store.epochs.entry(id).or_default().push(epoch);
             for key in keys {
@@ -522,7 +522,7 @@ impl ChatProvider {
                     message.at = Some(Timestamp::now().to_string());
                     {
                         let _write = self.handle.lock();
-                        let mut store = self.handle.load(me);
+                        let mut store = self.handle.load_to_change(me);
                         store.keep(&conversation.id, message);
                         self.handle.save(me, &store)?;
                     }
@@ -736,7 +736,7 @@ impl ChatProvider {
             && !input.peek
         {
             let _write = self.handle.lock();
-            let mut store = self.handle.load(me);
+            let mut store = self.handle.load_to_change(me);
             let seen = store.seen.entry(conversation.id.clone()).or_insert(0);
             let newest = folded.newest.min(fetched);
             if newest > *seen {
@@ -2429,7 +2429,7 @@ mod tests {
             cursor: 0,
         };
         let mut refused = Vec::new();
-        let mut store = b.handle.load("priya");
+        let mut store = b.handle.load_to_change("priya");
         store.absorb("acme", "priya", &response, &mut refused);
         assert_eq!(
             store.conversations[&id].members,
@@ -2777,10 +2777,9 @@ mod tests {
         )
         .unwrap();
         // Priya's store can't be written, as on a full disk.
-        let blocked = org.dir.path().join("dev-b/priya/.store.json.new");
-        std::fs::create_dir(&blocked).unwrap();
+        b.handle.fill_disk(true);
         let full = b.handle.sync_once(0);
-        std::fs::remove_dir(&blocked).unwrap();
+        b.handle.fill_disk(false);
         b.handle.sync_once(0).unwrap();
         let list = b.call("priya", LIST, json!({})).unwrap();
         assert_eq!(list.data["conversations"][0]["unread"], 1, "{}", list.text);
@@ -2970,5 +2969,124 @@ mod tests {
             .to_owned();
         let kept = &b.handle.load("priya").messages[&id];
         assert_eq!(kept.len(), 1);
+    }
+
+    // Audit 9.2: an action read the person's whole store from its file
+    // five to eight times, parsing all of it each time.
+    #[test]
+    fn adr0052_a_persons_store_is_parsed_once_however_often_an_action_asks_for_it() {
+        let org = org();
+        let (a, b) = (org.computer("dev-a"), org.computer("dev-b"));
+        b.call("priya", LIST, json!({})).unwrap();
+        a.call(
+            "dana",
+            POST,
+            json!({ "posts": [{ "to": ["priya"], "text": "The terms are in" }] }),
+        )
+        .unwrap();
+        b.handle.sync_once(0).unwrap();
+        b.call("priya", LIST, json!({})).unwrap();
+
+        // From here every store is in memory as its file has it: a post, a
+        // sync that brings it, a list and a read parse nothing.
+        let (before_a, before_b) = (a.handle.parses(), b.handle.parses());
+        a.call(
+            "dana",
+            POST,
+            json!({ "posts": [{ "to": ["priya"], "text": "Signed, both sides" }] }),
+        )
+        .unwrap();
+        b.handle.sync_once(0).unwrap();
+        let list = b.call("priya", LIST, json!({})).unwrap();
+        assert_eq!(list.data["conversations"][0]["unread"], 2, "{}", list.text);
+        assert_eq!(a.handle.parses(), before_a, "dana's posting");
+        assert_eq!(b.handle.parses(), before_b, "priya's sync and list");
+
+        // What is in memory is what the file holds: a handle that reads
+        // the file afresh (glassd started again) finds the same.
+        let again = org.computer("dev-b");
+        let list_again = again.call("priya", LIST, json!({})).unwrap();
+        assert_eq!(list_again.data, list.data);
+        assert!(again.handle.parses() > 0);
+
+        // A file written by anything else is read again, not answered
+        // from memory.
+        let path = org.dir.path().join("dev-b/priya/store.json");
+        let mut other = b.handle.load_to_change("priya");
+        other.seen.clear();
+        other.notify.insert("somewhere".into(), "none".into());
+        std::fs::write(&path, serde_json::to_vec(&other).unwrap()).unwrap();
+        let before = b.handle.parses();
+        assert_eq!(b.handle.load("priya").notify["somewhere"], "none");
+        assert_eq!(b.handle.parses(), before + 1);
+    }
+
+    // Audit 4.3: a store that couldn't be parsed was read as empty, and
+    // the next save wrote over the only copy.
+    #[test]
+    fn cf91_a_store_that_isnt_one_is_set_aside_and_one_that_cant_be_read_isnt_written_over() {
+        let org = org();
+        let (a, b) = (org.computer("dev-a"), org.computer("dev-b"));
+        b.call("priya", LIST, json!({})).unwrap();
+        a.call(
+            "dana",
+            POST,
+            json!({ "posts": [{ "to": ["priya"], "text": "The terms are in" }] }),
+        )
+        .unwrap();
+        b.handle.sync_once(0).unwrap();
+        let dir = org.dir.path().join("dev-b/priya");
+        let path = dir.join("store.json");
+        let whole = std::fs::read(&path).unwrap();
+
+        // Cut short, as a power cut mid-write once left it.
+        std::fs::write(&path, &whole[..whole.len() / 2]).unwrap();
+        let store = b.handle.load("priya");
+        assert!(store.conversations.is_empty());
+        let aside: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".damaged-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "what was there is kept beside it");
+        assert_eq!(
+            std::fs::read(aside[0].path()).unwrap(),
+            &whole[..whole.len() / 2]
+        );
+        // Chat starts again, and saves a new file.
+        {
+            let _write = b.handle.lock();
+            let store = b.handle.load_to_change("priya");
+            b.handle.save("priya", &store).unwrap();
+        }
+        assert!(path.is_file());
+
+        // There, and not readable at all (here: not a file). Nothing is
+        // written over it, and the person is told why.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("kept"), b"whatever this is").unwrap();
+        assert!(b.handle.load("priya").conversations.is_empty());
+        let refused = {
+            let _write = b.handle.lock();
+            let store = b.handle.load_to_change("priya");
+            b.handle.save("priya", &store).unwrap_err()
+        };
+        assert!(
+            matches!(&refused, ChatFailure::Local(why) if why.contains("couldn't be read, so nothing is written over it")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(path.join("kept")).unwrap(),
+            b"whatever this is"
+        );
+        // Once it reads again, chat goes on.
+        std::fs::remove_dir_all(&path).unwrap();
+        b.handle.load("priya");
+        {
+            let _write = b.handle.lock();
+            let store = b.handle.load_to_change("priya");
+            b.handle.save("priya", &store).unwrap();
+        }
     }
 }

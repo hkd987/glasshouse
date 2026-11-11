@@ -69,20 +69,29 @@ struct Mine {
 
 /// The versions `home`'s person uses, by app. Missing or unreadable: none.
 pub fn chosen(home: &Path) -> BTreeMap<AgentId, u32> {
-    ConfinedDir::open(home)
-        .and_then(|dir| dir.read(Path::new(MINE), MAX_MINE_BYTES))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Mine>(&bytes).ok())
-        .map(|m| m.apps)
-        .unwrap_or_default()
+    read_mine(home).unwrap_or_default()
+}
+
+/// The person's choices as their file has them. The file is one they may
+/// edit: one that no longer reads as choices (a typo) is set aside beside
+/// itself and they start again, where the next save used to write over it
+/// with only the app being saved. One that can't be read at all is an
+/// error.
+fn read_mine(home: &Path) -> io::Result<BTreeMap<AgentId, u32>> {
+    Ok(ConfinedDir::open(home)?
+        .read_json_or_set_aside::<Mine>(Path::new(MINE), MAX_MINE_BYTES)?
+        .map(|mine| mine.apps)
+        .unwrap_or_default())
 }
 
 /// Writes the person's choices through their confined home, as them.
+/// Never over a file of choices that can't be read.
 pub fn choose(
     home: &Path,
     owner: glass_platform::fs::Owner,
     apps: BTreeMap<AgentId, u32>,
 ) -> io::Result<()> {
+    read_mine(home)?;
     let dir = ConfinedDir::open(home)?;
     if let Some(folder) = Path::new(MINE).parent()
         && !dir.exists(folder)

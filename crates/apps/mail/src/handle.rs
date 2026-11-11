@@ -11,8 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant};
@@ -283,9 +282,12 @@ impl MailHandle {
         Ok(())
     }
 
+    /// `login`'s sign-in, if they have one here. A file that isn't a
+    /// sign-in is set aside beside itself (still root's alone), and they
+    /// sign in again.
     fn sign_in(&self, login: &str) -> Option<SignIn> {
         let path = self.person_dir(login)?.join("account.json");
-        serde_json::from_slice(&fs::read(path).ok()?).ok()
+        glass_state::read_json_or_set_aside(&path).ok().flatten()
     }
 
     /// Whether `login` has signed in to the org's service on this computer.
@@ -330,10 +332,16 @@ impl MailHandle {
         Some((remote, account))
     }
 
+    /// Where `login`'s folders had got to. Lost or damaged, they sync from
+    /// the start: the service has the mail, and what was there is kept
+    /// aside.
     fn load_state(&self, login: &str) -> SyncState {
         self.person_dir(login)
-            .and_then(|d| fs::read(d.join("sync.json")).ok())
-            .and_then(|b| serde_json::from_slice(&b).ok())
+            .and_then(|d| {
+                glass_state::read_json_or_set_aside(&d.join("sync.json"))
+                    .ok()
+                    .flatten()
+            })
             .unwrap_or_default()
     }
 
@@ -725,19 +733,6 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .recursive(true)
         .mode(0o700)
         .create(dir)?;
-    let tmp = dir.join(format!(
-        ".{}.new",
-        path.file_name()
-            .map(|n| n.to_string_lossy())
-            .unwrap_or_default()
-    ));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    fs::rename(&tmp, path)
+    // Beside it, synced, renamed over it, the folder synced (glass-state).
+    glass_state::write(path, bytes, glass_state::PRIVATE)
 }

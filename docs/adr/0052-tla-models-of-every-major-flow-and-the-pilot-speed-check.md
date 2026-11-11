@@ -330,3 +330,38 @@ Measured on the 4-core container:
   computer (one page in the model); the owner updating an artifact from two
   computers at once (the console would have to number versions).
 - **Tailoring** has no model: a layer only ever narrows, under one lock.
+
+## Amended 2026-11-11 (audit 9.2, 4.3): a person's chat store is parsed once
+
+"A computer's chat reads a person's whole store per action" was noted above
+for later. It was worse than one read: an action asked for the store five
+to eight times (a post: seven, and the sync that follows it about seven
+more), and each parsed all of a person's chat again. Docs' typing batches
+go through the same store, so Docs slowed as chat history grew.
+
+- The store as last read or saved is kept in memory with what its file
+  was (length, time, which file). Asked for again while the file is as it
+  was, it is the same store. Once read, a post, the sync that brings it, a
+  list and a read parse nothing (`adr0052_a_persons_store_is_parsed_once_
+  however_often_an_action_asks_for_it`). A file written by anything else
+  is read again. At most 64 people's stores are kept.
+- A change takes a copy of its own (`load_to_change`) and saves it, under
+  the same lock as before; what was saved is what is kept. The store is
+  still written whole at each change: an append log per conversation is
+  the next step if that shows up in measurements.
+- A file that isn't a store (cut short) is set aside beside itself and
+  chat starts again from what the console sends; it used to read as empty
+  and be written over. One that is there and can't be read at all leaves
+  chat empty for now, and nothing is saved over it.
+
+The models don't change: what a read returns is what the file holds, as
+before, and a store that can't be saved over is the full disk ChatSync
+already has.
+
+The same rule ("damaged is not empty") now holds for the other apps'
+files: a person's choices in their home (Routines, the apps they made,
+what they installed; `ConfinedDir::read_json_or_set_aside`) and glassd's
+own (Settings, Skills, Mail's sign-in and sync state, Routines' run
+records; `glass-state`). A typo in a file a person may edit no longer
+makes every routine vanish and the next save keep only the new one.
+

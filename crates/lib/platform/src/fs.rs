@@ -169,6 +169,48 @@ impl ConfinedDir {
         Ok(out)
     }
 
+    /// The JSON file at `rel`, a person's own, which they may have edited:
+    /// `None` if there is none.
+    ///
+    /// One that is there and isn't a `T` (a typo, a file cut short, one
+    /// from a newer version) is set aside beside itself as
+    /// `<name>.damaged-<unix seconds>`, still theirs, with a warning that
+    /// says where, and `None` comes back. The next write then makes a new
+    /// file; it used to write over the only copy of what couldn't be
+    /// read, and everything else in it was gone without a word. A file
+    /// that can't be read at all, or is larger than `max_bytes`, is an
+    /// error: starting again over it would be the same loss.
+    pub fn read_json_or_set_aside<T: serde::de::DeserializeOwned>(
+        &self,
+        rel: &Path,
+        max_bytes: u64,
+    ) -> io::Result<Option<T>> {
+        let bytes = match self.read(rel, max_bytes) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let reason = match serde_json::from_slice(&bytes) {
+            Ok(value) => return Ok(Some(value)),
+            Err(e) => e.to_string(),
+        };
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let mut name = rel.file_name().unwrap_or_default().to_os_string();
+        name.push(format!(".damaged-{at}"));
+        let aside = rel.with_file_name(name);
+        self.rename(rel, &aside)?;
+        tracing::warn!(
+            file = %self.root.join(rel).display(),
+            kept_as = %self.root.join(&aside).display(),
+            %reason,
+            "a file of a person's choices couldn't be read as what it should be; starting it \
+             again and keeping what was there"
+        );
+        Ok(None)
+    }
+
     /// Writes a file atomically: a temporary file in the same directory,
     /// then a rename over the target. Returns whether the file is new.
     pub fn write(&self, rel: &Path, data: &[u8], owner: Option<Owner>) -> io::Result<bool> {
@@ -499,6 +541,62 @@ mod tests {
             dir = dir.open_dir("d").unwrap();
         }
         dir.write("at-the-bottom", b"x").unwrap();
+    }
+
+    // Audit 4.3: a file of choices that didn't parse was read as no
+    // choices, and the next save wrote over it.
+    #[test]
+    fn a_persons_file_that_isnt_what_it_should_be_is_set_aside_not_read_as_empty() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        struct Mine {
+            routines: std::collections::BTreeMap<String, u32>,
+        }
+        let home = tempfile::tempdir().unwrap();
+        let dir = ConfinedDir::open(home.path()).unwrap();
+        let rel = Path::new("share/routines.json");
+        let read = || dir.read_json_or_set_aside::<Mine>(rel, 4096);
+        // None yet.
+        assert_eq!(read().unwrap(), None);
+        std::fs::create_dir(home.path().join("share")).unwrap();
+        let file = home.path().join(rel);
+        std::fs::write(&file, br#"{"routines":{"standup":3}}"#).unwrap();
+        assert_eq!(read().unwrap().unwrap().routines["standup"], 3);
+
+        // Edited by hand, with a comma too many.
+        let typo = br#"{"routines":{"standup":3,}}"#;
+        std::fs::write(&file, typo).unwrap();
+        assert_eq!(read().unwrap(), None);
+        assert!(!file.exists(), "out of the way of the next write");
+        let aside: Vec<_> = std::fs::read_dir(home.path().join("share"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(aside.len(), 1);
+        let name = aside[0].file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("routines.json.damaged-"), "{name}");
+        assert_eq!(std::fs::read(&aside[0]).unwrap(), typo);
+        // Asked again, there is none: a new one can be written.
+        assert_eq!(read().unwrap(), None);
+
+        // There, and not readable as a file at all, or too large to be
+        // one of these: an error, never "none", so nothing writes over it.
+        std::fs::create_dir(&file).unwrap();
+        assert!(read().is_err());
+        std::fs::remove_dir(&file).unwrap();
+        std::fs::write(&file, vec![b' '; 5000]).unwrap();
+        assert!(read().is_err());
+        assert_eq!(std::fs::read(&file).unwrap().len(), 5000);
+        // Nor does it follow a link out of the person's home.
+        std::fs::remove_file(&file).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("other.json"), b"{").unwrap();
+        symlink(outside.path().join("other.json"), &file).unwrap();
+        assert!(read().is_err());
+        assert_eq!(
+            std::fs::read(outside.path().join("other.json")).unwrap(),
+            b"{"
+        );
     }
 
     #[test]

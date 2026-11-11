@@ -11,6 +11,8 @@ publish.workspace = true
 glass-actions.workspace = true
 glass-api.workspace = true
 glass-platform.workspace = true
+# State files written whole and read back; a damaged one is set aside.
+glass-state.workspace = true
 glass-policy.workspace = true
 glass-types.workspace = true
 serde.workspace = true

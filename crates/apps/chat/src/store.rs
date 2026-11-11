@@ -94,7 +94,47 @@ struct Inner {
     folds: Mutex<HashMap<(String, String), Fold>>,
     /// Items' logs as read so far, by (login, item).
     item_logs: Mutex<HashMap<(String, String), ItemLog>>,
+    /// Each person's store as last read or saved, with what its file was
+    /// then: an action reads the store several times over, and each used
+    /// to parse all of it again (audit 9.2).
+    stores: Mutex<HashMap<String, Kept>>,
+    /// People whose store's file is there and couldn't be read: nothing
+    /// is saved over it until it can be.
+    unread: Mutex<HashMap<String, String>>,
+    /// How many times a store's file was parsed (for tests).
+    parses: AtomicU64,
+    /// Tests only: writes fail, as on a full disk.
+    full: std::sync::atomic::AtomicBool,
 }
+
+/// A store as last read or saved, and what its file was.
+struct Kept {
+    file: FileIs,
+    store: Arc<Store>,
+}
+
+/// What tells one writing of a file from the next.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileIs {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    ino: u64,
+}
+
+impl FileIs {
+    fn of(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(path).ok()?;
+        Some(Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            ino: meta.ino(),
+        })
+    }
+}
+
+/// How many people's stores are kept in memory at once.
+const STORES_KEPT: usize = 64;
 
 /// Where an item's messages are in its log, as read so far. A log only
 /// grows, so each read parses what was appended since, and a reader
@@ -123,7 +163,7 @@ impl std::fmt::Debug for ChatHandle {
 }
 
 /// What the console sent for one person, as kept.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub(crate) struct Store {
     /// The member key the console has for this person here.
     #[serde(default)]
@@ -187,6 +227,10 @@ impl ChatHandle {
             drafts: Mutex::new(HashMap::new()),
             folds: Mutex::new(HashMap::new()),
             item_logs: Mutex::new(HashMap::new()),
+            stores: Mutex::new(HashMap::new()),
+            unread: Mutex::new(HashMap::new()),
+            parses: AtomicU64::new(0),
+            full: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
@@ -359,17 +403,95 @@ impl ChatHandle {
         self.0.dir.join(login)
     }
 
-    /// `login`'s store; empty when there is none or it doesn't parse.
-    pub(crate) fn load(&self, login: &str) -> Store {
-        fs::read(self.person_dir(login).join("store.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+    /// `login`'s store, to read: empty when there is none.
+    ///
+    /// Parsed once and kept: asked for again while its file is as it was,
+    /// it is the same store, not read again. An action asks five to eight
+    /// times, and the store is all of a person's chat.
+    ///
+    /// A file that isn't a store (cut short, damaged) is set aside beside
+    /// itself and the store starts again; the console sends what it has
+    /// at the next sync. One that is there and can't be read at all leaves
+    /// the store empty for now, and nothing is saved over the file
+    /// ([`Self::save`] refuses) until it reads again.
+    pub(crate) fn load(&self, login: &str) -> Arc<Store> {
+        let path = self.person_dir(login).join("store.json");
+        let file = FileIs::of(&path);
+        if let Some(file) = file
+            && let Some(kept) = self
+                .0
+                .stores
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(login)
+            && kept.file == file
+        {
+            return Arc::clone(&kept.store);
+        }
+        if file.is_some() {
+            self.0.parses.fetch_add(1, Ordering::SeqCst);
+        }
+        let mut unread = self.0.unread.lock().unwrap_or_else(PoisonError::into_inner);
+        let store = match glass_state::read_json_or_set_aside::<Store>(&path) {
+            Ok(store) => {
+                unread.remove(login);
+                Arc::new(store.unwrap_or_default())
+            }
+            Err(e) => {
+                unread.insert(login.to_owned(), e.to_string());
+                return Arc::new(Store::default());
+            }
+        };
+        drop(unread);
+        // Kept as the file it was read from: one written since is read
+        // again.
+        if let Some(file) = file
+            && FileIs::of(&path) == Some(file)
+        {
+            self.keep(login, file, Arc::clone(&store));
+        }
+        store
+    }
+
+    /// `login`'s store, to change and [`Self::save`]: a copy of its own.
+    pub(crate) fn load_to_change(&self, login: &str) -> Store {
+        Store::clone(&self.load(login))
+    }
+
+    fn keep(&self, login: &str, file: FileIs, store: Arc<Store>) {
+        let mut stores = self.0.stores.lock().unwrap_or_else(PoisonError::into_inner);
+        if stores.len() >= STORES_KEPT && !stores.contains_key(login) {
+            stores.clear();
+        }
+        stores.insert(login.to_owned(), Kept { file, store });
+    }
+
+    /// How many times a store's file has been parsed.
+    #[cfg(test)]
+    pub(crate) fn parses(&self) -> u64 {
+        self.0.parses.load(Ordering::SeqCst)
+    }
+
+    /// Tests only: from now, nothing can be written, as on a full disk.
+    #[cfg(test)]
+    pub(crate) fn fill_disk(&self, full: bool) {
+        self.0.full.store(full, Ordering::SeqCst);
     }
 
     /// Saves `login`'s store, and appends what it kept for shared items to
     /// their logs first. Call with [`Self::lock`] held.
     pub(crate) fn save(&self, login: &str, store: &Store) -> Result<(), ChatFailure> {
+        if let Some(why) = self
+            .0
+            .unread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(login)
+        {
+            return Err(ChatFailure::Local(format!(
+                "chat on this computer couldn't be read, so nothing is written over it: {why}"
+            )));
+        }
         let mut logs: BTreeMap<&str, Vec<u8>> = BTreeMap::new();
         for (item, message) in &store.item_pending {
             let line = logs.entry(item.as_str()).or_default();
@@ -387,8 +509,23 @@ impl ChatHandle {
                 })?;
         }
         let bytes = serde_json::to_vec(store).map_err(|e| ChatFailure::Local(e.to_string()))?;
-        self.write_private(&self.person_dir(login).join("store.json"), &bytes)
-            .map_err(|e| ChatFailure::Local(format!("keeping chat on this computer: {e}")))
+        let path = self.person_dir(login).join("store.json");
+        // Not the kept store while the file is being replaced.
+        self.0
+            .stores
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(login);
+        self.write_private(&path, &bytes)
+            .map_err(|e| ChatFailure::Local(format!("keeping chat on this computer: {e}")))?;
+        // What was saved is what the next read finds: kept as that, with
+        // what was pending now in the items' logs.
+        if let Some(file) = FileIs::of(&path) {
+            let mut saved = store.clone();
+            saved.item_pending.clear();
+            self.keep(login, file, Arc::new(saved));
+        }
+        Ok(())
     }
 
     fn item_log(&self, login: &str, item: &str) -> PathBuf {
@@ -549,7 +686,7 @@ impl ChatHandle {
                 }
             };
             let key = secret.public(login, &connection.device)?;
-            let mut store = self.load(login);
+            let mut store = self.load_to_change(login);
             notice = if store.registered.as_deref() == Some(key.id.as_str()) {
                 None
             } else {
@@ -633,7 +770,7 @@ impl ChatHandle {
         {
             let _write = self.lock();
             for login in &logins {
-                let mut store = self.load(login);
+                let mut store = self.load_to_change(login);
                 let mut refused = Vec::new();
                 let news = store.absorb(&connection.org, login, &response, &mut refused);
                 for kind in &news {
@@ -695,21 +832,15 @@ impl ChatHandle {
             .recursive(true)
             .mode(0o700)
             .create(dir)?;
-        let tmp = dir.join(format!(
-            ".{}.new",
-            path.file_name()
-                .map(|n| n.to_string_lossy())
-                .unwrap_or_default()
-        ));
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&tmp, path)
+        if self.0.full.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "no space left on device (a test's)",
+            ));
+        }
+        // Beside it, synced, renamed over it, the folder synced: a power
+        // cut leaves the old file or the new one (glass-state).
+        glass_state::write(path, bytes, glass_state::PRIVATE)
     }
 }
 

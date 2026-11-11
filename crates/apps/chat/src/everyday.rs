@@ -677,7 +677,7 @@ impl ChatProvider {
         let me = &ctx.principal.on_behalf_of.name;
         let member = self.keys(ctx)?;
         let _write = self.handle.lock();
-        let mut store = self.handle.load(me);
+        let mut store = self.handle.load_to_change(me);
         let c = self.mine(&store, me, &input.conversation)?;
         let title = self.title(&store, Some(&member), me, &c);
         store.notify.insert(c.id.clone(), input.level.clone());
@@ -803,7 +803,7 @@ impl ChatProvider {
             .map_err(|e| not_added(e.to_string()))?;
         {
             let _write = self.handle.lock();
-            let mut store = self.handle.load(me);
+            let mut store = self.handle.load_to_change(me);
             if let Some(kept) = store.conversations.get_mut(&c.id) {
                 kept.members.clone_from(&after);
                 kept.epoch = epoch.body.number;
