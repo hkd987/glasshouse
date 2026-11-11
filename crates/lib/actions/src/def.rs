@@ -146,6 +146,23 @@ pub trait ActionProvider: Send + Sync + fmt::Debug {
         None
     }
 
+    /// Whether a step of `action`, declared reversible, can cross paths
+    /// with an undo: it changes the person's files (a snapshot restores
+    /// them) or records a change undo puts back
+    /// ([`ActionOutput::changes`]). Such a step has the person's writing
+    /// turn from its snapshot to its record (ADR 0051), and their other
+    /// tasks' steps wait for it.
+    ///
+    /// A provider says no for actions that do neither: the computer's own
+    /// settings, which the person changes back where they changed them.
+    /// Those took the turn all the same, and installing an OS update held
+    /// every one of the person's agents for as long as it ran (audit 9.6).
+    /// A step whose preview names files to snapshot has the turn whatever
+    /// this says.
+    fn takes_turn(&self, _action: &ActionName) -> bool {
+        true
+    }
+
     /// Puts back what undo can't restore from snapshots, for one reversible
     /// change `action` made: a message moved or marked on the person's mail
     /// server (ADR 0037, 0050). Undo calls it after the change's files are

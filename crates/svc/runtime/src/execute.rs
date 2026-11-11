@@ -254,18 +254,26 @@ impl Runtime {
         // record: what runs is what they saw (DA-11, ADR 0052). A model
         // call carries what it sends in its input, and holds no turn.
         let second_look = approval.is_some() && def.name.as_str() != MODEL_COMPLETE;
-        let _turn = if def.side_effect == SideEffect::LocalReversible || second_look {
+        // One that changes none of the person's files and records nothing
+        // an undo puts back has nothing to keep apart from an undo, and
+        // doesn't hold up the person's other tasks while it runs: a
+        // setting of the computer itself (audit 9.6).
+        let reversible = def.side_effect == SideEffect::LocalReversible
+            && (provider.takes_turn(&def.name) || !preview.snapshot_roots.is_empty());
+        let _turn = if reversible || second_look {
             Some(self.writing_turn(task.user.uid).await)
         } else {
             None
         };
-        // A release IT made while the call waited for its answer or the
-        // turn: it's decided again by the policy its session has now (an
-        // open app follows IT's; an agent's task keeps the one it started
-        // with). What that blocks doesn't run, nor what now asks unasked
-        // (AD-3, ADR 0053, PolicyApply.tla).
+        // A release IT made while the call waited (for its answer, the
+        // turn, or a pause to end): it's decided again by the policy its
+        // session has now (an open app follows IT's; an agent's task keeps
+        // the one it started with). What that blocks doesn't run, nor what
+        // now asks unasked (AD-3, ADR 0053, PolicyApply.tla). Whether or
+        // not it took the turn: a step that needs none may still have
+        // waited out a pause.
         let now = task.policy();
-        if _turn.is_some() && !Arc::ptr_eq(&now, &policy) {
+        if !Arc::ptr_eq(&now, &policy) {
             let refusal = match judge(&now, &def, &preview, &home) {
                 again @ Verdict::Block { .. } => Some(again),
                 Verdict::Ask { rule }

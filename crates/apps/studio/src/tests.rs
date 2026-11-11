@@ -552,6 +552,107 @@ fn new_app(f: &Fixture, declined: &[&str]) -> Value {
     })
 }
 
+/// The stand-in bundler, holding the first build it is asked for until the
+/// test lets it go: one person's long build.
+#[derive(Debug, Default)]
+struct HeldBuild {
+    inner: FakeBundler,
+    builds: std::sync::atomic::AtomicUsize,
+    gate: std::sync::Mutex<(bool, bool)>,
+    turned: std::sync::Condvar,
+}
+
+impl HeldBuild {
+    /// Whether the first build has started, waiting up to a few seconds.
+    fn started(&self) -> bool {
+        let gate = self.gate.lock().unwrap();
+        let (gate, _) = self
+            .turned
+            .wait_timeout_while(gate, std::time::Duration::from_secs(10), |g| !g.0)
+            .unwrap();
+        gate.0
+    }
+
+    fn release(&self) {
+        self.gate.lock().unwrap().1 = true;
+        self.turned.notify_all();
+    }
+}
+
+impl ToolRunner for HeldBuild {
+    fn run_tool(
+        &self,
+        run: &glass_platform::sandbox::ToolRun,
+    ) -> glass_platform::Result<glass_platform::sandbox::ToolOutput> {
+        let build = !run.program.ends_with("glass-app-try");
+        if build
+            && self
+                .builds
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+        {
+            let mut gate = self.gate.lock().unwrap();
+            gate.0 = true;
+            self.turned.notify_all();
+            while !gate.1 {
+                gate = self.turned.wait(gate).unwrap();
+            }
+        }
+        self.inner.run_tool(run)
+    }
+}
+
+// Audit 9.6: one lock covered every save on the computer, so on a host
+// many people share, one person's build (up to 80 s of it) held everyone
+// else's saves.
+#[test]
+fn ga8_one_persons_build_doesnt_hold_up_another_persons_save() {
+    let held = Arc::new(HeldBuild::default());
+    let dana = fixture_with(World::default(), held.clone(), "/nonexistent".into());
+    // Priya, on the same computer: her own home, the same Studio.
+    let home = dana._dir.path().join("home-priya");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut priya = glass_actions::testing::context(&home);
+    priya.principal.agent = "claude-code".parse().unwrap();
+    priya.principal.on_behalf_of.name = "priya".into();
+    priya.principal.on_behalf_of.uid += 1;
+    dana.provider.prepare(&priya).unwrap();
+    let app = new_app(&dana, &[]);
+    let create: ActionName = CREATE.parse().unwrap();
+
+    std::thread::scope(|scope| {
+        // Dana's save is in its build, which isn't coming back yet.
+        let hers = scope.spawn(|| dana.call(CREATE, app.clone()));
+        assert!(held.started(), "Dana's build started");
+        // Priya saves an app of her own meanwhile.
+        let (done, saved) = std::sync::mpsc::channel();
+        let (provider, priya, app) = (&dana.provider, &priya, &app);
+        let theirs = scope.spawn(move || {
+            provider.preview(priya, &create, app).unwrap();
+            let made = provider.invoke(priya, &create, app);
+            let _ = done.send(());
+            made
+        });
+        let waited = saved
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .is_err();
+        // Let go before anything is said: a test that fails mustn't leave
+        // Dana's build held for good.
+        held.release();
+        let (hers, theirs) = (hers.join().unwrap(), theirs.join().unwrap());
+        assert!(!waited, "Priya's save waited for Dana's build");
+        // Each has a first version of an app of their own.
+        assert_eq!(hers.unwrap().data["version"], 1);
+        assert_eq!(theirs.unwrap().data["version"], 1);
+    });
+    assert_eq!(
+        dana.studio
+            .store()
+            .versions("priya", &"my-vendor-disputes".parse().unwrap()),
+        [1]
+    );
+}
+
 #[test]
 fn ga12_the_store_first_then_a_remix_then_a_new_app() {
     let f = fixture(World {

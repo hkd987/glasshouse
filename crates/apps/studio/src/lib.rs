@@ -123,8 +123,11 @@ struct Inner {
     /// The org's console, and this computer's name in its fleet: where
     /// sharing goes (R2). Unset on a computer no org manages.
     share: OnceLock<(Arc<dyn ShareLink>, String)>,
-    /// One save at a time on this computer: versions are numbered.
-    saving: Mutex<()>,
+    /// One save at a time for each person: their versions are numbered,
+    /// and the versions they use are one file. People's saves are their
+    /// own: one lock for the computer made everyone on a shared host wait
+    /// out one person's build, up to 80 s of it (audit 9.6).
+    saving: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
 }
 
 /// One of a person's apps as they use it now.
@@ -143,7 +146,7 @@ impl Studio {
                 bundler: OnceLock::new(),
                 surroundings: OnceLock::new(),
                 share: OnceLock::new(),
-                saving: Mutex::new(()),
+                saving: Mutex::new(BTreeMap::new()),
             }),
         }
     }
@@ -722,13 +725,17 @@ impl StudioProvider {
     /// person uses.
     fn save(&self, ctx: &TaskContext, plan: Plan) -> Result<ActionOutput, ActionError> {
         let login = ctx.principal.on_behalf_of.name.as_str();
-        let _one_at_a_time = self
-            .studio
-            .inner
-            .saving
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        // Numbered under the lock: another save may have taken it.
+        let theirs = Arc::clone(
+            self.studio
+                .inner
+                .saving
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .entry(login.to_owned())
+                .or_default(),
+        );
+        let _one_at_a_time = theirs.lock().unwrap_or_else(|p| p.into_inner());
+        // Numbered under the lock: another save of theirs may have taken it.
         let version = self
             .studio
             .store()

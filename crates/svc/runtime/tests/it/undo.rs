@@ -389,15 +389,33 @@ impl ActionProvider for Gated {
         vec![
             def("files.gated_write", Tier::Notify),
             def("files.gated_note", Tier::Auto),
+            // A setting of the computer: no file of the person's, nothing
+            // an undo puts back, and it says so (`takes_turn`).
+            def("files.gated_setting", Tier::Auto),
+            // Says the same, and writes a file all the same.
+            def("files.gated_sloppy", Tier::Auto),
         ]
+    }
+
+    fn takes_turn(&self, action: &ActionName) -> bool {
+        !matches!(
+            action.as_str(),
+            "files.gated_setting" | "files.gated_sloppy"
+        )
     }
 
     fn preview(
         &self,
         ctx: &TaskContext,
-        _action: &ActionName,
+        action: &ActionName,
         input: &Value,
     ) -> Result<Preview, ActionError> {
+        if action.as_str() == "files.gated_setting" {
+            return Ok(Preview {
+                summary: "Change a setting".into(),
+                ..Preview::default()
+            });
+        }
         let r = ctx.resolve_writable(input["path"].as_str().unwrap_or_default())?;
         Ok(Preview {
             summary: format!("Write {}", r.display),
@@ -411,9 +429,19 @@ impl ActionProvider for Gated {
     fn invoke(
         &self,
         ctx: &TaskContext,
-        _action: &ActionName,
+        action: &ActionName,
         input: &Value,
     ) -> Result<ActionOutput, ActionError> {
+        if action.as_str() == "files.gated_setting" {
+            if input["hold"] == "before" {
+                self.hold();
+            }
+            return Ok(ActionOutput {
+                text: "Changed".into(),
+                data: json!({}),
+                changes: Vec::new(),
+            });
+        }
         let r = ctx.resolve_writable(input["path"].as_str().unwrap_or_default())?;
         if input["hold"] == "before" {
             self.hold();
@@ -469,6 +497,72 @@ async fn gated_write(agent: &Client, tool_name: &str, path: &str, content: &str,
 
 /// Long enough for another task's whole step, had it not waited its turn.
 const A_STEP: std::time::Duration = std::time::Duration::from_millis(300);
+
+// Audit 9.6: every step declared reversible held the person's writing
+// turn for as long as it ran, whether or not it touched anything an undo
+// takes back. Installing an OS update from Settings held every agent of
+// theirs that had a file to write, for minutes.
+#[tokio::test]
+async fn adr0051_a_step_that_changes_no_files_doesnt_hold_up_the_persons_other_tasks() {
+    let h = harness();
+    let gated = gated(&h);
+    let a = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let b = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let (agent_a, agent_b) = (h.agent(a).await, h.agent(b).await);
+    // A's step changes a setting of the computer, and takes its time.
+    let first = tokio::spawn(async move {
+        let done = tool(&agent_a, "files_gated_setting", json!({ "hold": "before" })).await;
+        assert!(!done.is_error, "{}", done.text());
+    });
+    gated.reached().await;
+    // B writes a file meanwhile, and isn't kept waiting. (Whatever is
+    // found, A's step is let go before it's said: a test that fails
+    // mustn't leave A waiting on its gate for good.)
+    let second = tokio::spawn(async move {
+        write(&agent_b, "Reports/b.csv", "b\n").await;
+    });
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(5), second)
+        .await
+        .is_err();
+    let going = !first.is_finished();
+    gated.release();
+    first.await.unwrap();
+    assert!(!waited, "B's write waited for a step that touches no file");
+    assert!(going, "A's step was still going while B wrote");
+    assert_eq!(read(&h, "Reports/b.csv"), "b\n");
+}
+
+#[tokio::test]
+async fn adr0051_a_step_that_names_files_has_the_turn_whatever_its_provider_says() {
+    // The turn is from a step's snapshot to its record. A provider that
+    // says its action needs none, and names files all the same, is not
+    // taken at its word.
+    let h = harness();
+    let gated = gated(&h);
+    let a = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let b = h.rt.start(&h.me, h.request(&[], &["Reports"])).unwrap().id;
+    let (agent_a, agent_b) = (h.agent(a).await, h.agent(b).await);
+    let first = tokio::spawn(async move {
+        gated_write(
+            &agent_a,
+            "files_gated_sloppy",
+            "Reports/shared.csv",
+            "a\n",
+            "before",
+        )
+        .await;
+    });
+    gated.reached().await;
+    let second = tokio::spawn(async move {
+        write(&agent_b, "Reports/shared.csv", "b\n").await;
+    });
+    tokio::time::sleep(A_STEP).await;
+    assert!(!second.is_finished(), "B's write waits its turn");
+    gated.release();
+    first.await.unwrap();
+    second.await.unwrap();
+    assert_eq!(read(&h, "Reports/shared.csv"), "b\n");
+}
 
 #[tokio::test]
 async fn adr0051_undoing_an_earlier_change_never_takes_back_another_tasks_later_one() {

@@ -1407,6 +1407,16 @@ impl ActionProvider for SettingsProvider {
         ]
     }
 
+    /// Nothing Settings does changes a person's files or records a change
+    /// an undo puts back: a setting is the computer's (ADR 0029), and the
+    /// person changes it back here, where they changed it. So none of it
+    /// holds their writing turn. Joining a network or installing an OS
+    /// update held it for as long as that took, and every agent of theirs
+    /// that had a file to write waited (audit 9.6).
+    fn takes_turn(&self, _action: &ActionName) -> bool {
+        false
+    }
+
     fn returns(&self, action: &ActionName) -> Option<Value> {
         Some(match action.as_str() {
             LIST => json!({

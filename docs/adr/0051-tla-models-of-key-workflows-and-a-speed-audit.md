@@ -210,6 +210,20 @@ another task's change:
   take turns, the provider's run time included (an IMAP move holds the
   turn), and an undo holds the turn through its revert hooks. Reads
   don't take turns.
+  - Amended 2026-11-11 (audit 9.6): nor does a step that changes none of
+    the person's files and records nothing an undo puts back, though it
+    is declared reversible. Its provider says so
+    (`ActionProvider::takes_turn`); Settings does for all it does (a
+    network joined, the brightness, an OS update installed), which the
+    person changes back where they changed it. Installing an update held
+    the turn for as long as it ran, and every agent of theirs with a file
+    to write waited. A step whose preview names files to snapshot has the
+    turn whatever its provider says. `specs/tla/Undo.tla` models steps
+    that write files, so it is as it was.
+  - And a call is decided again whenever its session's policy changed
+    while it waited, whether or not it took the turn (it was only where
+    it had): a step with no turn can still have waited out a pause
+    (`specs/tla/PolicyApply.tla`'s Check, for every call).
 - **The limit no lock can fix:** writers glassd doesn't run (the person's
   editor, other programs) can still land between a snapshot and a write.
   AU-20 promises snapshots before Notify steps only, and the Undo model

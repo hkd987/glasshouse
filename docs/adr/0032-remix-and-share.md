@@ -376,3 +376,12 @@ Modelled in `specs/tla/StudioVersions.tla`: saves, goings back and undos
 with time passing; the version in use always exists. Its Old switch is a
 removal by when a version was saved, and a Keep shorter than undo's reach
 breaks it too.
+
+## Amended 2026-11-11 (audit 9.6): a person's saves take turns, people's don't
+One lock covered every save on the computer, from numbering the version
+through the build and the tryout to keeping it. On a host many people
+share, one person's build (up to 80 s with its tryout) held everyone
+else's saves. The lock is each person's now: their versions are numbered
+and the versions they use are one file, so their own saves still go one
+at a time, and nobody else's wait. A build and a tryout each run in a
+folder and a jail of their own, so two at once share nothing.
