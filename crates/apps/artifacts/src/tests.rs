@@ -272,6 +272,59 @@ fn ar1_an_agent_shares_a_page_a_colleague_pins_a_comment_and_version_2_follows()
     assert_eq!(again.data["comments"][0]["resolved"], false);
 }
 
+// Audit 9.3: a page was fetched from the console every time it was read,
+// though a version's page never changes.
+#[test]
+fn ar2_a_page_fetched_once_is_read_again_without_the_console() {
+    let org = org();
+    let (a, b, id) = shared(&org);
+    let read = |c: &Computer, login: &str, version: Option<u32>| {
+        c.call(
+            login,
+            AGENT,
+            READ,
+            json!({ "artifact": id, "version": version }),
+        )
+    };
+    // Priya reads it: her computer fetches the page.
+    let first = read(&b, "priya", None).unwrap();
+    assert!(first.data["html"].as_str().unwrap().contains("Q3 forecast"));
+
+    // With the console out of reach, the page her computer has; and
+    // Dana's computer, which sent it, never needed it back.
+    org.chat.offline(true);
+    let again = read(&b, "priya", None).unwrap();
+    assert_eq!(again.data["html"], first.data["html"]);
+    assert_eq!(
+        read(&a, "dana", None).unwrap().data["html"],
+        first.data["html"]
+    );
+    org.chat.offline(false);
+
+    // A version her computer never fetched isn't one it can show then;
+    // the first still is.
+    a.call(
+        "dana",
+        AGENT,
+        UPDATE,
+        json!({ "artifact": id, "html": PAGE_2, "note": "Second cut" }),
+    )
+    .unwrap();
+    b.sync();
+    org.chat.offline(true);
+    let second = read(&b, "priya", None).unwrap_err();
+    assert!(
+        second.to_string().contains("Fetching Q3 forecast"),
+        "{second}"
+    );
+    assert_eq!(
+        read(&b, "priya", Some(1)).unwrap().data["html"],
+        first.data["html"]
+    );
+    org.chat.offline(false);
+    assert!(read(&b, "priya", None).unwrap().data["html"] != first.data["html"]);
+}
+
 #[test]
 fn ar2_only_its_people_open_it_and_the_console_reads_none_of_it() {
     let org = org();

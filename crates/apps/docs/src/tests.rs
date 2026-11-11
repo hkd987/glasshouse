@@ -947,6 +947,10 @@ fn dc1_opening_a_doc_with_10000_updates() {
     time("doc.read (Markdown)", &mut || {
         b.call("priya", AGENT, READ, json!({ "doc": id })).unwrap();
     });
+    time("doc.list (this doc and nothing else)", &mut || {
+        let out = b.with(&priya, LIST, json!({})).unwrap();
+        assert_eq!(out.data["docs"].as_array().unwrap().len(), 1);
+    });
 }
 
 #[test]
@@ -1026,6 +1030,9 @@ impl Shared for Slow {
     fn items(&self, login: &str, kind: ConversationKind) -> Vec<Item> {
         self.inner.items(login, kind)
     }
+    fn item_ids(&self, login: &str, kind: ConversationKind) -> Vec<String> {
+        self.inner.item_ids(login, kind)
+    }
     fn item(&self, login: &str, id: &str) -> Option<Item> {
         self.inner.item(login, id)
     }
@@ -1080,6 +1087,180 @@ impl Shared for Slow {
     ) -> Result<glass_managed::shared::SealedBlob, glass_managed::chat::ChatFailure> {
         self.inner.get_blob(login, item, id)
     }
+}
+
+/// The shared space, counting the messages it opened for whoever asked.
+#[derive(Debug)]
+struct Counted {
+    inner: Arc<dyn Shared>,
+    opened: std::sync::atomic::AtomicUsize,
+}
+
+impl Counted {
+    fn count(&self, messages: usize) {
+        self.opened
+            .fetch_add(messages, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn opened(&self) -> usize {
+        self.opened.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Shared for Counted {
+    fn ready(&self, login: &str, make: bool) -> Result<(), glass_managed::chat::ChatFailure> {
+        self.inner.ready(login, make)
+    }
+    fn items(&self, login: &str, kind: ConversationKind) -> Vec<Item> {
+        let items = self.inner.items(login, kind);
+        self.count(items.iter().map(|i| i.messages.len()).sum());
+        items
+    }
+    fn item_ids(&self, login: &str, kind: ConversationKind) -> Vec<String> {
+        self.inner.item_ids(login, kind)
+    }
+    fn item(&self, login: &str, id: &str) -> Option<Item> {
+        let item = self.inner.item(login, id);
+        self.count(item.as_ref().map_or(0, |i| i.messages.len()));
+        item
+    }
+    fn since(&self, login: &str, id: &str, seq: u64) -> Option<Item> {
+        let item = self.inner.since(login, id, seq);
+        self.count(item.as_ref().map_or(0, |i| i.messages.len()));
+        item
+    }
+    fn through(&self, login: &str) -> u64 {
+        self.inner.through(login)
+    }
+    fn create(
+        &self,
+        login: &str,
+        kind: ConversationKind,
+        title: &str,
+        label: Label,
+        members: &[String],
+    ) -> Result<String, glass_managed::chat::ChatFailure> {
+        self.inner.create(login, kind, title, label, members)
+    }
+    fn post(
+        &self,
+        login: &str,
+        to: &str,
+        text: &str,
+        part: Option<Part>,
+        attribution: Option<String>,
+        reply_to: Option<String>,
+    ) -> Result<String, glass_managed::chat::ChatFailure> {
+        self.inner
+            .post(login, to, text, part, attribution, reply_to)
+    }
+    fn put_blob(
+        &self,
+        login: &str,
+        blob: &glass_managed::shared::SealedBlob,
+    ) -> Result<(), glass_managed::chat::ChatFailure> {
+        self.inner.put_blob(login, blob)
+    }
+    fn get_blob(
+        &self,
+        login: &str,
+        item: &str,
+        id: &str,
+    ) -> Result<glass_managed::shared::SealedBlob, glass_managed::chat::ChatFailure> {
+        self.inner.get_blob(login, item, id)
+    }
+}
+
+// Audit 9.3, the rest: the list opened every message of every doc (every
+// edit ever made) to show when each last changed and who may do what.
+#[test]
+fn dc1_the_list_opens_a_docs_messages_once_and_then_only_what_is_new() {
+    let org = org();
+    let (a, mut b, _c, id) = planned(&org);
+    let counted = Arc::new(Counted {
+        inner: b.roster.clone(),
+        opened: std::sync::atomic::AtomicUsize::new(0),
+    });
+    b.docs = DocsProvider::new(counted.clone(), org.directory.clone());
+    let all = |c: &Computer| c.roster.item("priya", &id).unwrap().messages.len();
+    let listed = |c: &Computer| {
+        let out = c.call("priya", APP, LIST, json!({})).unwrap();
+        assert_eq!(out.data["docs"].as_array().unwrap().len(), 1);
+        out.data["docs"][0].clone()
+    };
+
+    // The first list reads the doc's messages; the next, none.
+    let first = listed(&b);
+    assert_eq!(first["title"], "Q3 plan");
+    assert_eq!(first["role"], "editor");
+    assert_eq!(first["owner"], "dana");
+    assert!(first["updated_at"].is_string(), "{first}");
+    let mut read = counted.opened();
+    assert_eq!(read, all(&b));
+    assert_eq!(listed(&b), first);
+    assert_eq!(counted.opened(), read, "nothing opened again");
+
+    // Dana types. The list opens what arrived, and nothing from before.
+    let dana = a.ctx("dana", APP);
+    let (state, _) = opened(&a, &dana, &id);
+    a.docs
+        .push(&dana, &id, "", &typed(&state, "One more thing."))
+        .unwrap();
+    b.sync();
+    let before = read;
+    listed(&b);
+    read = counted.opened();
+    assert!(read > before, "the new edit was looked at");
+    assert_eq!(read, all(&b), "each message once");
+
+    // The owner makes Priya a commenter: the list says so from that one
+    // message.
+    a.call(
+        "dana",
+        APP,
+        ROLES,
+        json!({ "doc": id, "editors": [], "commenters": ["priya"] }),
+    )
+    .unwrap();
+    b.sync();
+    let after = listed(&b);
+    assert_eq!(after["role"], "commenter");
+    assert_eq!(counted.opened(), read + 1);
+    read += 1;
+
+    // Roles from someone who isn't the owner count for nothing, here as
+    // in the doc itself.
+    b.roster
+        .post(
+            "priya",
+            &id,
+            "",
+            Some(Part::Roles {
+                editors: vec!["priya".into()],
+                commenters: Vec::new(),
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(listed(&b)["role"], "commenter");
+    assert_eq!(counted.opened(), read + 1);
+    // Her own post is ahead of what this computer has been sent up to
+    // (another computer's earlier message could still arrive before it),
+    // so it is looked at again until a sync is past it. Then no more.
+    b.sync();
+    listed(&b);
+    let settled = counted.opened();
+    assert_eq!(listed(&b)["role"], "commenter");
+    assert_eq!(counted.opened(), settled);
+
+    // As after glassd starts again: everything is read once more, and
+    // the list is the same.
+    let fresh = DocsProvider::new(b.roster.clone(), org.directory.clone());
+    let again = fresh
+        .invoke(&b.ctx("priya", APP), &LIST.parse().unwrap(), &json!({}))
+        .unwrap();
+    assert_eq!(again.data["docs"][0], listed(&b));
 }
 
 // Audit 9.3: one lock covered every doc, person and session, and a write

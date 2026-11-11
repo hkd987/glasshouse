@@ -208,6 +208,54 @@ type Place = Arc<Mutex<Option<Cached>>>;
 struct State {
     docs: BTreeMap<(String, String), Place>,
     sessions: BTreeMap<TaskId, BTreeMap<String, Opened>>,
+    /// What `doc.list` shows of each person's docs that takes reading a
+    /// doc's messages, by (person, doc).
+    listed: BTreeMap<(String, String), Listed>,
+}
+
+/// What the list shows of a doc that takes opening its messages: when it
+/// last changed, and who may do what. Kept, so a list opens only the
+/// messages since the last one.
+///
+/// A list used to open every message of every doc (audit 9.3): every edit
+/// ever made, to show a time and a role. With one doc of 10,000 edits it
+/// took 309 ms each time, as long as opening the doc for the first time.
+#[derive(Debug, Clone, Default)]
+struct Listed {
+    /// Every message up to here has been looked at, and none before it
+    /// can still arrive (`Shared::through`, ADR 0052): the next list
+    /// reads from here.
+    seq: u64,
+    /// The newest message looked at: its number, and its time.
+    last: Option<(u64, String)>,
+    /// The owner's newest roles: the message's number, the editors and
+    /// the commenters.
+    roles: Option<(u64, Vec<String>, Vec<String>)>,
+}
+
+impl Listed {
+    /// Takes in `item`'s messages, which are the ones after `self.seq`.
+    /// One looked at before (this computer's own post, ahead of a message
+    /// still on its way) changes nothing by being looked at again.
+    fn take_in(&mut self, item: &Item, through: u64) {
+        let mut newest = self.seq;
+        for m in &item.messages {
+            newest = newest.max(m.seq);
+            if self.last.as_ref().is_none_or(|(seq, _)| m.seq >= *seq) {
+                self.last = Some((m.seq, m.at.clone()));
+            }
+            if m.sender == item.created_by
+                && let Some(Part::Roles {
+                    editors,
+                    commenters,
+                }) = &m.part
+                && self.roles.as_ref().is_none_or(|(seq, ..)| m.seq >= *seq)
+            {
+                self.roles = Some((m.seq, editors.clone(), commenters.clone()));
+            }
+        }
+        self.seq = self.seq.max(newest.min(through));
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -735,10 +783,51 @@ impl DocsProvider {
     fn list(&self, ctx: &TaskContext) -> Result<ActionOutput, ActionError> {
         self.ready(ctx)?;
         let me = Self::me(ctx);
-        let mut docs: Vec<Item> = self.shared.items(me, ConversationKind::Doc);
+        // Each doc's name and people, and its messages since the last
+        // list (the first one reads them all). The place every message
+        // is here up to is read before the messages (ADR 0052).
+        let through = self.shared.through(me);
+        let ids = self.shared.item_ids(me, ConversationKind::Doc);
+        let had: BTreeMap<String, Listed> = {
+            let mut state = self.state();
+            state
+                .listed
+                .retain(|(login, id), _| login != me || ids.contains(id));
+            ids.iter()
+                .filter_map(|id| {
+                    let listed = state.listed.get(&(me.to_owned(), id.clone()))?;
+                    Some((id.clone(), listed.clone()))
+                })
+                .collect()
+        };
+        // Outside the lock: this reads the disk and opens messages.
+        let mut docs: Vec<(Item, Listed)> = ids
+            .iter()
+            .filter_map(|id| {
+                let mut listed = had.get(id).cloned().unwrap_or_default();
+                let item = self.shared.since(me, id, listed.seq)?;
+                listed.take_in(&item, through);
+                Some((item, listed))
+            })
+            .collect();
+        {
+            let mut state = self.state();
+            for (item, listed) in &docs {
+                let kept = state
+                    .listed
+                    .entry((me.to_owned(), item.id.clone()))
+                    .or_default();
+                // Two lists at once: the one that read further stands.
+                if listed.seq >= kept.seq {
+                    *kept = listed.clone();
+                }
+            }
+        }
+        let at = |listed: &Listed| listed.last.as_ref().map(|(_, at)| at.clone());
         docs.sort_by(|a, b| {
-            let at = |i: &Item| i.messages.last().map(|m| m.at.clone()).unwrap_or_default();
-            at(b).cmp(&at(a))
+            at(&b.1)
+                .unwrap_or_default()
+                .cmp(&at(&a.1).unwrap_or_default())
         });
         let mut text = format!(
             "{} doc{}.",
@@ -747,17 +836,12 @@ impl DocsProvider {
         );
         let views: Vec<Value> = docs
             .iter()
-            .map(|item| {
+            .map(|(item, listed)| {
                 // Roles from the owner's newest Roles part.
-                let roles = item
-                    .messages
-                    .iter()
-                    .rev()
-                    .filter(|m| m.sender == item.created_by)
-                    .find_map(|m| match &m.part {
-                        Some(Part::Roles { editors, commenters }) => Some((editors.clone(), commenters.clone())),
-                        _ => None,
-                    })
+                let roles = listed
+                    .roles
+                    .as_ref()
+                    .map(|(_, editors, commenters)| (editors.clone(), commenters.clone()))
                     .unwrap_or_default();
                 let role = |l: &str| {
                     if l == item.created_by {
@@ -786,7 +870,7 @@ impl DocsProvider {
                     "mine": item.created_by == me,
                     "role": role(me).as_str(),
                     "people": item.members.iter().map(|m| json!({ "login": m, "name": self.name(m), "role": role(m).as_str() })).collect::<Vec<_>>(),
-                    "updated_at": item.messages.last().map(|m| &m.at),
+                    "updated_at": at(listed),
                 })
             })
             .collect();

@@ -340,6 +340,13 @@ pub trait Shared: Send + Sync + std::fmt::Debug {
     fn ready(&self, login: &str, make: bool) -> std::result::Result<(), ChatFailure>;
     /// `login`'s items of `kind`, their messages opened.
     fn items(&self, login: &str, kind: ConversationKind) -> Vec<Item>;
+    /// The ids of `login`'s items of `kind`, with nothing opened: for a
+    /// list, which then reads each with [`Shared::since`] from where it
+    /// last read (audit 9.3: [`Shared::items`] opens every message of
+    /// every item, which for docs is every edit ever made to each).
+    fn item_ids(&self, login: &str, kind: ConversationKind) -> Vec<String> {
+        self.items(login, kind).into_iter().map(|i| i.id).collect()
+    }
     /// `login`'s item `id`, its messages opened; only that one is opened.
     fn item(&self, login: &str, id: &str) -> Option<Item>;
     /// Item `id` with only its messages after sequence number `seq`

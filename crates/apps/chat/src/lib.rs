@@ -1013,6 +1013,19 @@ impl glass_managed::shared::Shared for ChatProvider {
             .collect()
     }
 
+    fn item_ids(&self, login: &str, kind: ConversationKind) -> Vec<String> {
+        if self.handle.existing(login).is_none() {
+            return Vec::new();
+        }
+        self.handle
+            .load(login)
+            .conversations
+            .values()
+            .filter(|c| c.kind == kind && c.members.iter().any(|m| m == login))
+            .map(|c| c.id.clone())
+            .collect()
+    }
+
     fn item(&self, login: &str, id: &str) -> Option<glass_managed::shared::Item> {
         let member = self.handle.existing(login)?;
         let store = self.handle.load(login);
@@ -1105,7 +1118,10 @@ impl glass_managed::shared::Shared for ChatProvider {
                 login: login.to_owned(),
                 blob: blob.clone(),
             })
-            .map_err(ChatFailure::Link)
+            .map_err(ChatFailure::Link)?;
+        // What this computer sent it needn't fetch back.
+        self.handle.keep_blob(blob);
+        Ok(())
     }
 
     fn get_blob(
@@ -1115,7 +1131,13 @@ impl glass_managed::shared::Shared for ChatProvider {
         id: &str,
     ) -> Result<glass_managed::shared::SealedBlob, ChatFailure> {
         let connection = self.handle.connection()?;
-        connection
+        // A blob never changes, so one this computer has isn't fetched
+        // again (audit 9.3); it is still sealed, and whoever opens it
+        // checks it against the SHA-256 its message names.
+        if let Some(blob) = self.handle.kept_blob(login, item, id) {
+            return Ok(blob);
+        }
+        let blob = connection
             .link
             .get(&glass_managed::shared::GetBlob {
                 device: connection.device.clone(),
@@ -1123,7 +1145,11 @@ impl glass_managed::shared::Shared for ChatProvider {
                 conversation: item.to_owned(),
                 id: id.to_owned(),
             })
-            .map_err(ChatFailure::Link)
+            .map_err(ChatFailure::Link)?;
+        if blob.id == id && blob.conversation == item {
+            self.handle.keep_blob(&blob);
+        }
+        Ok(blob)
     }
 }
 

@@ -201,6 +201,27 @@ shared space. One call at a time still reads and changes a copy, which is
 what `specs/tla/DocsCollab.tla` models (one doc, two computers), so the
 model is as it was.
 
-Still open from the same finding: `doc.list` opens every message of every
-doc to find each doc's roles and when it last changed, and Docs and
-Artifacts fetch a blob again on every read, where Skills keeps them.
+### The rest of 9.3 (2026-11-11): the list, and blobs
+**The list reads what is new.** `doc.list` opened every message of every
+doc, which is every edit ever made to each, to show when a doc last
+changed and who may do what in it. With one doc of 10,000 edits it took
+309 ms each time, as long as opening the doc for the first time. It keeps
+what it found for each doc (`Listed`: the newest message's time, the
+owner's newest roles, and how far it has read) and asks the shared space
+only for a doc's messages since (`Shared::item_ids`, then `since`): 2 ms
+for the same doc. The first list after glassd starts still reads
+everything once. It reads from no further than `Shared::through`, as a
+doc's copy does (ADR 0052), so a message that arrives late from another
+computer isn't passed over; a person's own post ahead of that point is
+looked at again until a sync is past it.
+
+**A blob is fetched once.** A blob never changes: its id names it, and
+whoever opens it checks it against the SHA-256 its message names. An
+artifact's page was fetched from the console every time it was read, and
+a doc's snapshot every time the doc was loaded. The computer keeps the
+sealed blobs it sent or fetched (32 MiB of them, in memory, the one used
+longest ago going first), for people it knows to be in the item, which
+is the console's own check. So a page read once reads again with the
+console out of reach, and a version that was never fetched says it
+couldn't be. They are kept sealed, as they came: the key travels only in
+a sealed message. Skills still keeps its opened bundles as well.

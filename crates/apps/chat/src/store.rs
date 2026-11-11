@@ -19,6 +19,7 @@ use glass_managed::chat::{
     ChatLink, ChatSyncRequest, ChatSyncResponse, Conversation, ConversationKind, Epoch, KeptFor,
     LinkError, MemberKey, MemberSecret, Message, RegisterKey, is_conversation_id,
 };
+use glass_managed::shared::SealedBlob;
 use glass_types::Timestamp;
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +110,8 @@ struct Inner {
     /// How long the organization keeps chat (IT's Chat release, CF-61);
     /// for good until it sets a period.
     kept_for: Mutex<KeptFor>,
+    /// Sealed blobs this computer sent or fetched.
+    blobs: Mutex<Blobs>,
     /// How many times a store's file was parsed (for tests).
     parses: AtomicU64,
     /// Tests only: writes fail, as on a full disk.
@@ -156,6 +159,63 @@ struct ItemLog {
     /// Each message's sequence number, offset and length, in sequence
     /// order.
     at: Vec<(u64, u64, usize)>,
+}
+
+/// How much of the sealed blobs a computer sent or fetched it keeps in
+/// memory, as they travel (hex): room for ten of the largest.
+const BLOBS_KEPT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Sealed blobs this computer sent or fetched, the one used longest ago
+/// first. A blob never changes (its id names it, and whoever opens it
+/// checks its SHA-256), so one that is here isn't fetched again: an
+/// artifact's page was fetched from the console every time it was looked
+/// at, and a doc's snapshot every time the doc was loaded (audit 9.3).
+///
+/// They are kept sealed, as they came. Nothing here opens without the key,
+/// which travels only inside a sealed message.
+#[derive(Default)]
+struct Blobs {
+    held: std::collections::VecDeque<SealedBlob>,
+    bytes: usize,
+}
+
+impl Blobs {
+    fn size(blob: &SealedBlob) -> usize {
+        blob.ct.len() + blob.nonce.len() + blob.id.len() + blob.conversation.len()
+    }
+
+    fn get(&mut self, conversation: &str, id: &str) -> Option<SealedBlob> {
+        let at = self
+            .held
+            .iter()
+            .position(|b| b.id == id && b.conversation == conversation)?;
+        let blob = self.held.remove(at)?;
+        self.held.push_back(blob.clone());
+        Some(blob)
+    }
+
+    fn keep(&mut self, blob: SealedBlob) {
+        if self
+            .held
+            .iter()
+            .any(|b| b.id == blob.id && b.conversation == blob.conversation)
+        {
+            return;
+        }
+        let size = Self::size(&blob);
+        // One that wouldn't fit alone would only push out the rest.
+        if size > BLOBS_KEPT_BYTES {
+            return;
+        }
+        self.bytes += size;
+        self.held.push_back(blob);
+        while self.bytes > BLOBS_KEPT_BYTES {
+            let Some(oldest) = self.held.pop_front() else {
+                break;
+            };
+            self.bytes -= Self::size(&oldest);
+        }
+    }
 }
 
 /// Chat on this computer, shared by glassd's sync thread and the actions.
@@ -235,6 +295,7 @@ impl ChatHandle {
             drafts: Mutex::new(HashMap::new()),
             folds: Mutex::new(HashMap::new()),
             kept_for: Mutex::new(KeptFor::default()),
+            blobs: Mutex::new(Blobs::default()),
             item_logs: Mutex::new(HashMap::new()),
             stores: Mutex::new(HashMap::new()),
             unread: Mutex::new(HashMap::new()),
@@ -759,6 +820,40 @@ impl ChatHandle {
             .kept_for
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = kept_for;
+    }
+
+    /// Blob `id` of `conversation`, if this computer sent or fetched it
+    /// and `login` is in the conversation as far as this computer knows:
+    /// the console's own check for a blob, made here for one it isn't
+    /// asked for again.
+    pub(crate) fn kept_blob(
+        &self,
+        login: &str,
+        conversation: &str,
+        id: &str,
+    ) -> Option<SealedBlob> {
+        let member = self
+            .load(login)
+            .conversations
+            .get(conversation)
+            .is_some_and(|c| c.members.iter().any(|m| m == login));
+        if !member {
+            return None;
+        }
+        self.0
+            .blobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(conversation, id)
+    }
+
+    /// Keeps a sealed blob this computer sent or fetched.
+    pub(crate) fn keep_blob(&self, blob: &SealedBlob) {
+        self.0
+            .blobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keep(blob.clone());
     }
 
     /// The periods in force here.
@@ -1336,5 +1431,49 @@ impl Store {
             }
         }
         news
+    }
+}
+
+#[cfg(test)]
+mod blobs_kept {
+    use super::*;
+
+    fn blob(n: usize, bytes: usize) -> SealedBlob {
+        SealedBlob {
+            id: format!("b-{n}"),
+            conversation: "cv-1".into(),
+            nonce: "0".repeat(24),
+            ct: "a".repeat(bytes),
+        }
+    }
+
+    /// The blobs a computer keeps have a size: past it the one used
+    /// longest ago goes, and one just read is the last to go.
+    #[test]
+    fn ar2_kept_blobs_have_a_size_and_the_one_used_longest_ago_goes_first() {
+        let mut blobs = Blobs::default();
+        let each = BLOBS_KEPT_BYTES / 4;
+        for n in 0..4 {
+            blobs.keep(blob(n, each - 100));
+        }
+        assert_eq!(blobs.held.len(), 4);
+        // The same blob again is the same blob.
+        blobs.keep(blob(0, each - 100));
+        assert_eq!(blobs.held.len(), 4);
+        // The first is read, so the second is now the one used longest ago.
+        assert!(blobs.get("cv-1", "b-0").is_some());
+        assert!(blobs.get("cv-2", "b-0").is_none(), "another item's");
+        blobs.keep(blob(4, each - 100));
+        assert!(blobs.bytes <= BLOBS_KEPT_BYTES);
+        assert!(blobs.get("cv-1", "b-1").is_none(), "it went");
+        for n in [0, 2, 3, 4] {
+            assert!(blobs.get("cv-1", &format!("b-{n}")).is_some(), "b-{n}");
+        }
+        // One larger than all the room there is isn't kept, nor anything
+        // because of it.
+        blobs.keep(blob(9, BLOBS_KEPT_BYTES + 1));
+        assert!(blobs.bytes <= BLOBS_KEPT_BYTES);
+        assert!(blobs.get("cv-1", "b-9").is_none());
+        assert_eq!(blobs.held.len(), 4, "the others are still here");
     }
 }
