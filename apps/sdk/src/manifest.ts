@@ -47,6 +47,11 @@ export interface AppSession {
   user: string;
   actions: AppAction[];
   permissions: AppPermission[];
+  /**
+   * How many days the app may show what it kept to work offline: the
+   * organization's rule. Absent where there is none.
+   */
+  offline_days?: number;
 }
 
 /** What a call did. Refusals (undeclared, blocked, declined) are `ok: false`. */

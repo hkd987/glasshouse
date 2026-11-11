@@ -79,6 +79,8 @@ export interface BridgeOptions {
   app: string;
   transport?: Transport;
   store?: Store;
+  /** The time now, in ms since the epoch: the clock, unless a test's. */
+  now?: () => number;
 }
 
 function pageStore(): Store {
@@ -94,6 +96,7 @@ export class Bridge {
   readonly app: string;
   readonly #transport: Transport;
   readonly #cache: Cache;
+  readonly #now: () => number;
   #session: AppSession | null = null;
   /** True while the last request couldn't reach the system. */
   offline = false;
@@ -102,6 +105,7 @@ export class Bridge {
     this.app = options.app;
     this.#transport = options.transport ?? fetchTransport;
     this.#cache = new Cache(options.store ?? pageStore(), options.app);
+    this.#now = options.now ?? Date.now;
   }
 
   get session(): AppSession | null {
@@ -135,9 +139,17 @@ export class Bridge {
   async open(): Promise<AppSession> {
     try {
       this.#session = await this.#post<AppSession>("session", {}, ANSWER_LIMIT_MS);
-      this.#cache.put("session", this.#session);
+      // The organization's rule for what's kept to work offline, as of
+      // now: what is past it goes before anything is shown from it.
+      this.#cache.keepFor(this.#session.offline_days ?? null, this.#now());
+      this.#cache.put("session", this.#session, this.#now());
     } catch (error) {
-      const cached = error instanceof Offline ? this.#cache.get<AppSession>("session") : null;
+      if (!(error instanceof Offline)) throw error;
+      // Offline: the last session seen says how long what was kept may be
+      // shown, itself included. Past that, there is nothing to open with.
+      const last = this.#cache.get<AppSession>("session", this.#now());
+      if (last) this.#cache.keepFor(last.value.offline_days ?? null, this.#now());
+      const cached = this.#cache.get<AppSession>("session", this.#now());
       if (!cached) throw error;
       this.#session = cached.value;
     }
@@ -167,10 +179,11 @@ export class Bridge {
     const key = `read:${action}:${JSON.stringify(input)}`;
     try {
       const result = await this.call<T>(action, input);
-      if (result.ok) this.#cache.put(key, result);
+      if (result.ok) this.#cache.put(key, result, this.#now());
       return { result, offline: false };
     } catch (error) {
-      const cached = error instanceof Offline ? this.#cache.get<AppCallResult<T>>(key) : null;
+      const cached =
+        error instanceof Offline ? this.#cache.get<AppCallResult<T>>(key, this.#now()) : null;
       if (!cached) throw error;
       return { result: cached.value, offline: true, loadedAt: cached.at };
     }
@@ -195,7 +208,7 @@ export class Bridge {
     // A new policy reaches open apps: `tier` and `asks` answer by it.
     if (this.#session && status.actions) {
       this.#session = { ...this.#session, actions: status.actions };
-      this.#cache.put("session", this.#session);
+      this.#cache.put("session", this.#session, this.#now());
     }
     return status;
   }

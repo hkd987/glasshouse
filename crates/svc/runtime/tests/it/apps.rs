@@ -56,6 +56,25 @@ fn records(h: &Harness, session: TaskId) -> Vec<glass_audit::AuditRecord> {
     .unwrap()
 }
 
+// The user's decision of 2026-11-11: how long an app shows what it kept to
+// work offline is IT's to set, and unset it is kept.
+#[tokio::test]
+async fn ui5_an_app_is_told_how_long_it_may_show_what_it_kept_offline() {
+    let h = harness();
+    let apps = Client::connect(h.serve_apps()).await.unwrap();
+    assert_eq!(open(&apps, "mail").await.offline_days, None);
+    // Not named at all where there is no rule: an app built on an SDK from
+    // before the setting reads its session as it always did.
+    let plain: Value = apps
+        .call(app_methods::APP_OPEN, json!({ "app": "calendar" }))
+        .await
+        .unwrap();
+    assert!(plain.get("offline_days").is_none(), "{plain}");
+
+    h.apply_policy_replacing("offline_cache_days = 0", "offline_cache_days = 7", "");
+    assert_eq!(open(&apps, "mail").await.offline_days, Some(7));
+}
+
 #[tokio::test]
 async fn ui5_au10_an_app_acts_for_its_user_by_app_for_user() {
     let h = harness();

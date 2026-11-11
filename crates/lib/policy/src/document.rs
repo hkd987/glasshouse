@@ -424,6 +424,14 @@ pub struct OrgDefaults {
         skip_serializing_if = "is_default_audit_retention"
     )]
     pub audit_retention_days: u32,
+    /// How many days an app shows what it kept to work offline (UI-5): a
+    /// folder's mail, a day's calendar. Older entries are forgotten the
+    /// next time the app opens or reads. 0, the default, keeps them until
+    /// newer ones replace them. Written only where it is set, so a policy
+    /// that leaves it alone reads on a computer whose OS is from before
+    /// the setting.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub offline_cache_days: u32,
 }
 
 impl Default for OrgDefaults {
@@ -434,8 +442,14 @@ impl Default for OrgDefaults {
             tiers: BTreeMap::new(),
             apps_off: Vec::new(),
             audit_retention_days: default_audit_retention_days(),
+            offline_cache_days: 0,
         }
     }
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(days: &u32) -> bool {
+    *days == 0
 }
 
 /// The audit records a computer keeps unless IT says otherwise: thirteen

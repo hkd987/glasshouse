@@ -213,6 +213,12 @@ impl Policy {
         }
     }
 
+    /// How many days an app shows what it kept to work offline (UI-5);
+    /// `None` until newer entries replace them.
+    pub fn offline_cache_days(&self) -> Option<u32> {
+        Some(self.doc.org.offline_cache_days).filter(|days| *days > 0)
+    }
+
     pub fn document(&self) -> &PolicyDocument {
         &self.doc
     }
@@ -971,6 +977,34 @@ mod tests {
             .unwrap()
             .effective("demo", &"invoice-agent".parse().unwrap())
             .unwrap()
+    }
+
+    #[test]
+    fn ui5_what_apps_keep_offline_is_kept_until_it_sets_a_rule() {
+        let with = |org: &str| {
+            Policy::from_toml(&format!(
+                "version = 1\n[org]\n{org}\n[[group]]\nname = \"everyone\"\n"
+            ))
+            .unwrap()
+        };
+        // Unsaid, and in the policy the OS ships with: kept.
+        assert_eq!(with("").offline_cache_days(), None);
+        assert_eq!(
+            Policy::from_toml(crate::DEFAULT_POLICY)
+                .unwrap()
+                .offline_cache_days(),
+            None
+        );
+        // IT's own number.
+        let set = with("offline_cache_days = 7");
+        assert_eq!(set.offline_cache_days(), Some(7));
+        assert_eq!(with("offline_cache_days = 0").offline_cache_days(), None);
+        // A policy that leaves it alone doesn't name it when it's sent on,
+        // so a computer whose OS is from before it still reads the policy.
+        let unsaid = toml::to_string(with("").document()).unwrap();
+        assert!(!unsaid.contains("offline_cache_days"), "{unsaid}");
+        let said = toml::to_string(set.document()).unwrap();
+        assert!(said.contains("offline_cache_days = 7"), "{said}");
     }
 
     #[test]

@@ -231,6 +231,11 @@ pub struct AppSession {
     pub actions: Vec<AppAction>,
     #[serde(default)]
     pub permissions: Vec<AppPermission>,
+    /// How many days the app may show what it kept to work offline: the
+    /// organization's rule (policy `org.offline_cache_days`, UI-5). None
+    /// where there is no rule: kept until newer entries replace it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

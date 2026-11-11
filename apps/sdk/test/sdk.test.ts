@@ -159,6 +159,75 @@ test("ui5 reads show what was loaded when the system can't be reached", async ()
   await assert.rejects(again.call("mail.send", {}), Offline);
 });
 
+const DAY = 24 * 60 * 60 * 1000;
+
+test("ui5 what an app kept is forgotten after the organization's days, if it set any", () => {
+  const store = memoryStore();
+  const mail = new Cache(store, "mail");
+  const calendar = new Cache(store, "calendar");
+  mail.put("old", 1, 0);
+  mail.put("new", 2, 6 * DAY);
+  calendar.put("old", 3, 0);
+  // No rule: kept, however old.
+  assert.equal(mail.get("old", 400 * DAY)?.value, 1);
+  // Seven days: what is older goes as the rule arrives. Another app's
+  // entries are its own to forget, when it opens.
+  mail.keepFor(7, 8 * DAY);
+  assert.deepEqual(mail.keys(), ["new"]);
+  assert.equal(mail.get("old", 8 * DAY), null);
+  assert.equal(calendar.get("old", 8 * DAY)?.value, 3);
+  // And at a read later on, with the page open all the while.
+  assert.equal(mail.get("new", 13 * DAY)?.value, 2);
+  assert.equal(mail.get("new", 14 * DAY), null);
+  assert.deepEqual(mail.keys(), [], "an entry past the rule is removed, not only hidden");
+  // The rule lifted: kept until replaced, as before.
+  mail.put("again", 4, 14 * DAY);
+  mail.keepFor(null, 400 * DAY);
+  assert.equal(mail.get("again", 400 * DAY)?.value, 4);
+});
+
+test("ui5 offline, an app shows what it kept only within the organization's days", async () => {
+  const inbox = { ok: true, text: "1 message in Inbox", data: { messages: [{ id: "inbox/1.eml" }] } };
+  const store = memoryStore();
+  let now = 0;
+  const opened = (rule: object) => {
+    const transport = fake({
+      session: { status: 200, body: { ...session, ...rule } },
+      "call mail.list": { status: 200, body: inbox },
+    });
+    return { transport, bridge: () => new Bridge({ app: "mail", transport, store, now: () => now }) };
+  };
+
+  // The organization keeps seven days. Loaded on day 0, then no connection.
+  const week = opened({ offline_days: 7 });
+  const first = week.bridge();
+  assert.equal((await first.open()).offline_days, 7);
+  await first.read("mail.list", { folder: "inbox" });
+  week.transport.down = true;
+  // Day 3: the app opens on the last session seen, and shows the inbox.
+  now = 3 * DAY;
+  const soon = week.bridge();
+  await soon.open();
+  assert.equal((await soon.read("mail.list", { folder: "inbox" })).offline, true);
+  // Day 8: neither. The rule came with the session, so it holds with no
+  // connection to ask over, and what was kept is gone from the device.
+  now = 8 * DAY;
+  await assert.rejects(week.bridge().open(), Offline);
+  assert.deepEqual(new Cache(store, "mail").keys(), []);
+
+  // With no rule (the default), a year on it still opens and shows it.
+  const always = opened({});
+  now = 10 * DAY;
+  const live = always.bridge();
+  assert.equal((await live.open()).offline_days, undefined);
+  await live.read("mail.list", { folder: "inbox" });
+  always.transport.down = true;
+  now = 375 * DAY;
+  const later = always.bridge();
+  await later.open();
+  assert.equal((await later.read("mail.list", { folder: "inbox" })).offline, true);
+});
+
 test("ui5 a wait for news ends by itself; a call that may wait for a person doesn't", async () => {
   const transport = fake({
     session: { status: 200, body: session },

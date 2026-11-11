@@ -145,3 +145,25 @@ them with Playwright on the development host.
   sessions; a lower tier for sends inside the team (every send asks).
 - Third-party apps will use the same socket and SDK; their manifests will
   come from the catalog (DV-2) rather than the image.
+
+## Amended 2026-11-11: how long an app shows what it kept offline is IT's to set
+What an app loaded is kept on the device, 200 entries an app, so it can
+show it with no connection. Nothing aged it out: a folder's mail read
+once was there until 200 newer reads had replaced it.
+
+The owner's decision: IT may set a number of days (`[org]
+offline_cache_days` in policy); unset, the default, it is kept as before.
+
+- The rule travels with the app's session (`AppSession.offline_days`),
+  so a page has it from its last time online and holds to it with no
+  connection to ask over.
+- As a page opens, and at every read of an entry, what was kept longer
+  ago than the rule is removed from the device, the last session
+  included: past the rule, an app with no connection has nothing to open
+  on, as on a computer where it never ran.
+- A change of the rule reaches a page the next time it opens.
+
+What this doesn't do: an app nobody opens runs no code, so what it kept
+stays in the web runtime's storage until it is next opened. Clearing
+that from outside the page would be glassd's to do in the web runtime's
+profile, and isn't built.

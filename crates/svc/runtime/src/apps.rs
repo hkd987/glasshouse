@@ -447,6 +447,7 @@ impl Runtime {
             user: caller.name.clone(),
             actions,
             permissions: manifest.permissions.clone(),
+            offline_days: self.policy().offline_cache_days(),
         })
     }
 

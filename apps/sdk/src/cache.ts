@@ -49,20 +49,51 @@ function keptAt(raw: string | null): number {
   }
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 export class Cache {
   readonly #store: Store;
   readonly #prefix: string;
+  /** How long an entry is shown, where the organization has a rule. */
+  #keptForMs: number | null = null;
 
   constructor(store: Store, app: string) {
     this.#store = store;
     this.#prefix = `glass:${app}:`;
   }
 
-  get<T>(key: string): { value: T; at: number } | null {
+  /**
+   * The organization's rule for what an app keeps to work offline: entries
+   * kept more than `days` ago are forgotten, now and at every read from
+   * here on. `null` (no rule) keeps them until newer ones replace them.
+   *
+   * A page runs this when it opens, with the rule its session carries. An
+   * app nobody opens runs nothing, so what it kept stays until it is next
+   * opened.
+   */
+  keepFor(days: number | null, now = Date.now()): void {
+    this.#keptForMs = days !== null && days > 0 ? days * DAY_MS : null;
+    if (this.#keptForMs === null) return;
+    for (const key of this.#mine()) {
+      if (this.#past(keptAt(this.#store.getItem(this.#prefix + key)), now)) {
+        this.#store.removeItem(this.#prefix + key);
+      }
+    }
+  }
+
+  #past(at: number, now: number): boolean {
+    return this.#keptForMs !== null && now - at > this.#keptForMs;
+  }
+
+  get<T>(key: string, now = Date.now()): { value: T; at: number } | null {
     const raw = this.#store.getItem(this.#prefix + key);
     if (raw === null) return null;
     try {
       const entry = JSON.parse(raw) as Entry<T>;
+      if (this.#past(entry.at, now)) {
+        this.#store.removeItem(this.#prefix + key);
+        return null;
+      }
       return { value: entry.value, at: entry.at };
     } catch {
       return null;

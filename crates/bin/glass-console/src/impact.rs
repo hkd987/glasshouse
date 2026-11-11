@@ -362,6 +362,19 @@ pub fn preview(
             ),
         });
     }
+    if old.org.offline_cache_days != draft.org.offline_cache_days {
+        changes.push(match draft.org.offline_cache_days {
+            0 => "Everyone: what an app kept to work offline stays until newer entries replace it"
+                .to_owned(),
+            1 => "Everyone: what an app kept to work offline is forgotten after a day, the next \
+                  time the app opens"
+                .to_owned(),
+            days => format!(
+                "Everyone: what an app kept to work offline is forgotten after {days} days, the \
+                 next time the app opens"
+            ),
+        });
+    }
     if old.models != draft.models {
         changes.push("Everyone: models and where each label's data may go".into());
     }
@@ -806,6 +819,35 @@ mod tests {
             keeping(0),
             ["Everyone: every audit record is kept on each computer, for good"]
         );
+    }
+
+    #[test]
+    fn ui5_a_change_to_how_long_apps_keep_what_they_show_offline_says_so_before_its_published() {
+        let dir = LocalDirectory::starter("root");
+        let titles = Titles::first_party();
+        let base = doc(glass_policy::DEFAULT_POLICY);
+        let keeping = |from: u32, days: u32| {
+            let with = |days: u32| {
+                doc(&glass_policy::DEFAULT_POLICY.replace(
+                    "offline_cache_days = 0",
+                    &format!("offline_cache_days = {days}"),
+                ))
+            };
+            assert_ne!(with(7), base);
+            preview(Some((1, &with(from))), &with(days), &dir, &titles).changes
+        };
+        assert_eq!(
+            keeping(0, 7),
+            [
+                "Everyone: what an app kept to work offline is forgotten after 7 days, the next \
+              time the app opens"
+            ]
+        );
+        assert_eq!(
+            keeping(7, 0),
+            ["Everyone: what an app kept to work offline stays until newer entries replace it"]
+        );
+        assert!(keeping(7, 7).is_empty());
     }
 
     #[test]

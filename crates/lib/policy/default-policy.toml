@@ -20,6 +20,10 @@ approval_timeout_secs = 900
 # about a month at a time, and the log records each removal (ADR 0053).
 # 0 keeps every record; otherwise at least 30.
 audit_retention_days = 400
+# What an app kept to show while offline is forgotten after this many days,
+# the next time the app opens or reads (UI-5). 0 keeps it until newer
+# entries replace it.
+offline_cache_days = 0
 
 [org.tiers]
 "files.list" = "auto"
