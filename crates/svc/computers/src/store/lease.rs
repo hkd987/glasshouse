@@ -10,7 +10,13 @@
 //! - **Taking it** is making the next term's object, and only if it isn't
 //!   there ([`super::Blobs::put_new`], S3's `If-None-Match: *`). Of two
 //!   hosts that ask at once, the store lets one through. Nothing here
-//!   reads, decides and then writes over another host's object.
+//!   reads, decides and then writes over another host's object. A term
+//!   A term is a host's only once it has looked again after making it:
+//!   the store letting it make a number says the number wasn't there, not
+//!   that it is the newest. If a later term is there (the host stalled
+//!   between reading and making, or its listing missed terms), it removes
+//!   its own and is told who has the computer. The term before the newest
+//!   is kept, so a listing shows a term once there has been one.
 //! - **Keeping it** is the holder writing its own term's object again with
 //!   the time ([`Store::renew`]), every [`RENEW_EVERY`]. Only the holder
 //!   writes there.
@@ -137,8 +143,9 @@ impl Store {
     /// host ever took it.
     pub fn lease(&self, computer: &str) -> Result<Option<Lease>, String> {
         check_computer(computer)?;
-        // The newest term is never removed, but a newer one can be made,
-        // and this one removed, between the listing and the read.
+        // The newest term is never removed, nor the one before it, but
+        // two newer ones can be made, and this one removed, between the
+        // listing and the read.
         for _ in 0..3 {
             let Some(term) = self.terms(computer)?.pop() else {
                 return Ok(None);
@@ -218,21 +225,69 @@ impl Store {
             released: false,
         };
         let bytes = serde_json::to_vec(&mine).map_err(|e| format!("a lease: {e}"))?;
-        if self.blobs.put_new(&lease_key(computer, term), &bytes)? {
-            // Earlier terms have nothing more to say. One left behind is
-            // only a small object; the next claim removes it.
-            if let Ok(terms) = self.terms(computer) {
-                for earlier in terms.into_iter().filter(|earlier| *earlier < term) {
-                    let _ = self.blobs.delete(&lease_key(computer, earlier));
+        let key = lease_key(computer, term);
+        if self.blobs.put_new(&key, &bytes)? {
+            // A term is this host's only once it has looked again: the
+            // store let it make this number, which says the number wasn't
+            // there, not that it is the newest. If the look can't be had,
+            // the term isn't taken.
+            let terms = match self.terms(computer) {
+                Ok(terms) => terms,
+                Err(why) => {
+                    let _ = self.blobs.delete(&key);
+                    return Err(format!(
+                        "took a term of {computer}'s lease and couldn't make sure of it: {why}"
+                    ));
                 }
+            };
+            // A term above this one was there all along. This ask read
+            // the lease and then stalled while later terms came and the
+            // one it meant was removed, or its listing missed them (a
+            // folder's listing isn't one moment's; S3's is). The term it
+            // made was never the computer's: it goes, and the answer is
+            // the newest's.
+            if terms.iter().any(|other| *other > term) {
+                let _ = self.blobs.delete(&key);
+                return self.as_it_is(computer, host, now);
+            }
+            // Terms before the last one have nothing more to say. The
+            // last one stays: while any term is there, no listing comes
+            // back empty, and an empty listing is "never taken", which
+            // let a host make term 1 again beside another host's term.
+            for earlier in terms
+                .into_iter()
+                .filter(|earlier| earlier.saturating_add(1) < term)
+            {
+                let _ = self.blobs.delete(&lease_key(computer, earlier));
             }
             return Ok(Claim::Held(mine));
         }
         // Another asked at the same moment, and the store let it through.
+        self.as_it_is(computer, host, now)
+    }
+
+    /// Who has `computer` by its newest lease, as an answer to `host` at
+    /// `now`.
+    fn as_it_is(&self, computer: &str, host: &str, now: Timestamp) -> Result<Claim, String> {
         match self.lease(computer)? {
             // This host itself, asked twice at once (keeping its leases,
-            // and a sleep): both have the one term.
-            Some(lease) if lease.host == host && !lease.released => Ok(Claim::Held(lease)),
+            // and a sleep): both have the one term. (A moment apart, the
+            // later ask finds the first's lease and takes the next term;
+            // the first learns that at its next renewal, asks again, and
+            // is given the computer: the newest lease is its own.)
+            //
+            // Only a lease the store took word of lately: the host will
+            // trust this answer for TRUST_FOR from now, and an older
+            // lease could run out before that does.
+            Some(lease) if lease.host == host && !lease.released => {
+                if lease.holds(now, RENEW_EVERY) {
+                    Ok(Claim::Held(lease))
+                } else {
+                    Err(format!(
+                        "the lease of {computer} is this host's from a while ago: ask once more"
+                    ))
+                }
+            }
             Some(lease) => Ok(Claim::Elsewhere(lease)),
             None => Err(format!(
                 "the lease of {computer} was taken and is gone again: ask once more"

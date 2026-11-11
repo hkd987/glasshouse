@@ -462,3 +462,41 @@ Its Old switches are the save that relied on any chunk, GC deleting
 without checking the object, and GC judging age after it read the
 versions.
 
+## Amended 2026-11-11: a lease's term is never made twice
+Found after the fact, by a test of the lease that failed once in a few
+hundred runs. A term is an object in the store, made only if it isn't
+there, and a host that made one took the computer for its own. But the
+terms before the newest were removed, so "it isn't there" stopped
+meaning "nobody had it". Two ways a host made an old number again,
+beside the host that held the newest:
+
+- its listing of the terms came back empty while another host's take
+  removed the only term there, which reads as "never taken", so it made
+  term 1. A folder's listing isn't one moment's (S3's is), and this is
+  what the test hit;
+- it read the lease, stalled, and made "the next term" after later terms
+  had come and the one it meant had been removed. No listing need go
+  wrong for this one; the model found it once it had the terms' objects
+  in it, which it had taken for granted.
+
+Either way two hosts were sure of one computer, which is what the lease
+is for. It needed a host to stall for two takes of the same computer, or
+a store whose listing isn't consistent, so nothing here saw it in use.
+
+Now:
+
+- **A term is a host's only once it has looked again.** After making a
+  term it lists the terms; if a later one is there it removes its own and
+  is told who has the computer. If the store doesn't answer that look,
+  the term isn't taken and is removed.
+- **The term before the newest is kept**, so a listing shows a term once
+  there has been one.
+- **A host asking twice at once** is given the lease its other ask made
+  only if the store took word of that lease in the last half minute. An
+  older one it asks for again: it would have trusted it for longer than
+  the lease had left.
+
+`specs/tla/ComputerLease.tla` has the terms' objects, the stall and the
+empty listing. Without the second look it fails (its Old switch
+"noLookAfter"), also with the term before the newest kept; with the look,
+it holds even where every earlier term is removed ("removeAllBefore").

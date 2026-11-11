@@ -217,9 +217,12 @@ if grep -q "is awake on another host" <<<"$refused"; then
 else
 	fail "host A wasn't refused while host B has the computer: $refused"
 fi
+# The newest term and the one before it: with a term always there, no host's
+# listing of them comes back empty, which reads as "never taken" (ADR 0066,
+# amended 2026-11-11). Older ones are removed.
 leases=$(field objects <<<"$(s3 "computers/$key/lease/")")
-if [ "$leases" = 1 ]; then
-	pass "its lease is one object in the bucket, under the computer's key"
+if [ "$leases" = 1 ] || [ "$leases" = 2 ]; then
+	pass "its lease is $leases objects in the bucket (the newest term, and the one before), under the computer's key"
 else
 	fail "the bucket has $leases lease objects for the computer"
 fi

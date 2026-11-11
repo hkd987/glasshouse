@@ -951,8 +951,8 @@ fn adr0066_a_computer_is_one_hosts_until_that_host_gives_it_up() {
     let told = elsewhere(store.claim("dana", "host-b", at(219), LEASE_FOR).unwrap());
     assert_eq!(told.renewed, at(100));
 
-    // Given up, it's the next host's at once, as the next term; the terms
-    // before it are gone from the store.
+    // Given up, it's the next host's at once, as the next term; the term
+    // before it stays in the store, and the ones before that go.
     store.release("dana", &a, at(220)).unwrap();
     assert!(store.lease("dana").unwrap().unwrap().released);
     let b = held(store.claim("dana", "host-b", at(221), LEASE_FOR).unwrap());
@@ -963,7 +963,31 @@ fn adr0066_a_computer_is_one_hosts_until_that_host_gives_it_up() {
         .into_iter()
         .map(|l| l.key)
         .collect();
-    assert_eq!(kept, ["computers/dana/lease/00000000000000000002.json"]);
+    assert_eq!(
+        kept,
+        [
+            "computers/dana/lease/00000000000000000001.json",
+            "computers/dana/lease/00000000000000000002.json"
+        ]
+    );
+    // The third term removes the first: two are kept, never one alone
+    // between a term's making and the last one's removal.
+    store.release("dana", &b, at(222)).unwrap();
+    let c = held(store.claim("dana", "host-a", at(223), LEASE_FOR).unwrap());
+    let kept: Vec<String> = blobs
+        .list("computers/dana/lease/")
+        .unwrap()
+        .into_iter()
+        .map(|l| l.key)
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            "computers/dana/lease/00000000000000000002.json",
+            "computers/dana/lease/00000000000000000003.json"
+        ]
+    );
+    store.release("dana", &c, at(224)).unwrap();
     // A lease is nothing GC reads as a version.
     assert!(store.gc().is_ok());
     assert!(store.versions("dana").unwrap().is_empty());
@@ -1077,18 +1101,186 @@ fn adr0066_of_hosts_asking_at_once_one_gets_the_computer() {
         }
         store.release("dana", winners[0], now).unwrap();
     }
-    // One host asking twice at once (keeping its leases, and a sleep) has
-    // the one term both times.
-    let both: Vec<Lease> = std::thread::scope(|scope| {
-        let asks: Vec<_> = (0..2)
-            .map(|_| {
-                let store = &store;
-                scope.spawn(move || held(store.reclaim("solo", "host-a", at(0)).unwrap()))
-            })
-            .collect();
-        asks.into_iter().map(|ask| ask.join().unwrap()).collect()
-    });
-    assert_eq!(both[0], both[1]);
+    // One host asking twice at once (keeping its leases, and a sleep): it
+    // has the computer both times. At the same moment both have the one
+    // term; a moment apart, the later ask finds the first's lease, its
+    // own, and takes the next. Either way the newest is this host's, and
+    // a renewal of the older one finds that out and asks again.
+    for round in 0..20 {
+        let computer = format!("solo-{round}");
+        let both: Vec<Lease> = std::thread::scope(|scope| {
+            let asks: Vec<_> = (0..2)
+                .map(|_| {
+                    let (store, computer) = (&store, &computer);
+                    scope.spawn(move || held(store.reclaim(computer, "host-a", at(0)).unwrap()))
+                })
+                .collect();
+            asks.into_iter().map(|ask| ask.join().unwrap()).collect()
+        });
+        let newest = store.lease(&computer).unwrap().unwrap();
+        assert!(both.iter().all(|lease| lease.host == "host-a"), "{both:?}");
+        assert!(both.contains(&newest), "{newest:?} of {both:?}");
+        let (low, high) = (
+            both[0].term.min(both[1].term),
+            both[0].term.max(both[1].term),
+        );
+        assert!(low == 1 && high <= 2, "{both:?}");
+        if low != high {
+            // The older one's renewal says it isn't the newest; asked
+            // again, the host still has its computer.
+            let older = both.iter().find(|lease| lease.term == low).unwrap();
+            assert_eq!(store.renew(&computer, older, at(1)).unwrap(), None);
+            assert_eq!(
+                held(store.reclaim(&computer, "host-a", at(2)).unwrap()).term,
+                high + 1
+            );
+        }
+    }
+}
+
+// Found by the test above failing once in a few hundred runs: a term's
+// number could be made twice. Terms before the newest were removed, and a
+// host whose listing of them came back empty (a folder's listing isn't one
+// moment's) took "term 1" again, beside the host that had a later one.
+#[test]
+fn adr0066_a_term_is_never_made_twice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, folder) = folder_store(tmp.path());
+    let blobs = Meanwhile::over(folder.clone());
+    let store = Store::new(blobs.clone());
+    let terms = || -> Vec<String> {
+        folder
+            .list("computers/dana/lease/")
+            .unwrap()
+            .into_iter()
+            .map(|listed| listed.key)
+            .collect()
+    };
+    // Host A has had the computer three times; it has it now.
+    for round in 0..2 {
+        let lease = held(store.claim("dana", "host-a", at(round), LEASE_FOR).unwrap());
+        store.release("dana", &lease, at(round)).unwrap();
+    }
+    let third = held(store.claim("dana", "host-a", at(10), LEASE_FOR).unwrap());
+    assert_eq!(third.term, 3);
+    // The term before the newest stays, so there is always a term to list.
+    assert_eq!(terms().len(), 2, "{:?}", terms());
+    assert!(terms()[0].ends_with("2.json") && terms()[1].ends_with("3.json"));
+
+    // Host B asks, and its listing comes back empty: "never taken". Term 1
+    // is long gone, so the store lets B make it. B looks again, finds A's
+    // later term, and steps down.
+    blobs
+        .torn_lease_listings
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let told = elsewhere(store.claim("dana", "host-b", at(11), LEASE_FOR).unwrap());
+    assert_eq!(told, third, "B is told who has it");
+    assert_eq!(store.lease("dana").unwrap(), Some(third.clone()));
+    assert!(
+        terms().iter().all(|key| !key.ends_with("1.json")),
+        "the term B made is gone: {:?}",
+        terms()
+    );
+    // A's renewals go on as before.
+    assert!(store.renew("dana", &third, at(12)).unwrap().is_some());
+
+    // The same for a host asking about a computer it has: its own later
+    // term is the answer.
+    blobs
+        .torn_lease_listings
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let again = held(store.reclaim("dana", "host-a", at(13)).unwrap());
+    assert_eq!((again.term, again.host.as_str()), (3, "host-a"));
+}
+
+// Found by the lease's model once it had the terms' objects in it: no
+// listing need go wrong. A host reads the lease, stalls, and makes "the
+// next term" after later terms have come and the one it meant was removed.
+#[test]
+fn adr0066_a_host_that_stalled_doesnt_take_a_term_from_the_past() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (others, folder) = folder_store(tmp.path());
+    let blobs = Meanwhile::over(folder.clone());
+    let store = Store::new(blobs.clone());
+    let first = held(others.claim("dana", "host-a", at(0), LEASE_FOR).unwrap());
+    others.release("dana", &first, at(1)).unwrap();
+
+    // Host B reads term 1, given up, and means to make term 2. Before it
+    // does, the computer goes round the other hosts three times, and A
+    // has it as term 4: terms 1 and 2 are gone from the store.
+    *blobs.before_lease_put.lock().unwrap() = Some(Box::new({
+        let others = Store::new(folder.clone());
+        move || {
+            for (host, now) in [("host-a", 10), ("host-c", 20)] {
+                let lease = held(others.claim("dana", host, at(now), LEASE_FOR).unwrap());
+                others.release("dana", &lease, at(now + 1)).unwrap();
+            }
+            let fourth = held(others.claim("dana", "host-a", at(30), LEASE_FOR).unwrap());
+            assert_eq!(fourth.term, 4);
+        }
+    }));
+    let told = elsewhere(store.claim("dana", "host-b", at(31), LEASE_FOR).unwrap());
+    assert_eq!((told.term, told.host.as_str()), (4, "host-a"));
+    let kept: Vec<String> = folder
+        .list("computers/dana/lease/")
+        .unwrap()
+        .into_iter()
+        .map(|listed| listed.key)
+        .collect();
+    assert_eq!(kept.len(), 2, "terms 3 and 4, and not B's 2: {kept:?}");
+    assert!(kept[0].ends_with("3.json") && kept[1].ends_with("4.json"));
+}
+
+// A term is a host's once it has looked again. If the store doesn't
+// answer the look, the term isn't taken, and isn't left behind.
+#[test]
+fn adr0066_a_term_that_couldnt_be_made_sure_of_isnt_taken() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, folder) = folder_store(tmp.path());
+    let blobs = Meanwhile::over(folder.clone());
+    let store = Store::new(blobs.clone());
+    // The second listing of this claim is the look after the term's made.
+    blobs
+        .lease_listing_fails_in
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    let err = store.claim("dana", "host-a", at(0), LEASE_FOR).unwrap_err();
+    assert!(err.contains("couldn't make sure of it"), "{err}");
+    assert_eq!(store.lease("dana").unwrap(), None, "nothing is left of it");
+    // Asked again, with the store answering, it's taken.
+    assert_eq!(
+        held(store.claim("dana", "host-a", at(1), LEASE_FOR).unwrap()).term,
+        1
+    );
+}
+
+// One host asking twice at once is given the lease its other ask just
+// made. A lease of its own from a while ago isn't given that way: the
+// host would trust it for longer than it has left.
+#[test]
+fn adr0066_a_hosts_own_lease_is_its_answer_only_while_its_new() {
+    for (later, answer) in [(10, Some(1)), (40, None)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, folder) = folder_store(tmp.path());
+        let blobs = Meanwhile::over(folder.clone());
+        let store = Store::new(blobs.clone());
+        // This host's other ask makes the term first, at second 0.
+        *blobs.before_lease_put.lock().unwrap() = Some(Box::new({
+            let other = Store::new(folder.clone());
+            move || {
+                held(other.reclaim("dana", "host-a", at(0)).unwrap());
+            }
+        }));
+        let asked = store.reclaim("dana", "host-a", at(later));
+        match answer {
+            Some(term) => assert_eq!(held(asked.unwrap()).term, term),
+            None => assert!(asked.unwrap_err().contains("ask once more")),
+        }
+        // Either way it asks again and has its computer, as a new term.
+        assert_eq!(
+            held(store.reclaim("dana", "host-a", at(later + 1)).unwrap()).term,
+            2
+        );
+    }
 }
 
 #[test]
@@ -1163,7 +1355,11 @@ fn adr0066_s3_lets_one_host_take_a_computer() {
             .into_iter()
             .filter(|k| k.contains("/lease/"))
             .collect::<Vec<_>>(),
-        ["glasshouse/computers/dana/lease/00000000000000000002.json"]
+        [
+            "glasshouse/computers/dana/lease/00000000000000000001.json",
+            "glasshouse/computers/dana/lease/00000000000000000002.json"
+        ],
+        "the newest term, and the one before it"
     );
 }
 
@@ -1181,6 +1377,14 @@ struct Meanwhile {
     before_version: Hook,
     reading_a_version: Hook,
     after_listing_chunks: Hook,
+    /// The next listings of a lease's terms that come back empty, as a
+    /// folder's can while terms are made and removed under it.
+    torn_lease_listings: std::sync::atomic::AtomicUsize,
+    /// Which of the coming listings of a lease's terms fails (1: the
+    /// next); 0: none.
+    lease_listing_fails_in: std::sync::atomic::AtomicUsize,
+    /// Just before a lease's term is made: a host that stalled there.
+    before_lease_put: Hook,
 }
 
 impl std::fmt::Debug for Meanwhile {
@@ -1218,6 +1422,9 @@ impl Blobs for Meanwhile {
         self.inner().put_hashed(key, bytes, sha256)
     }
     fn put_new(&self, key: &str, bytes: &[u8]) -> Result<bool, String> {
+        if key.contains("/lease/") {
+            Self::run(&self.before_lease_put);
+        }
         self.inner().put_new(key, bytes)
     }
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
@@ -1239,6 +1446,26 @@ impl Blobs for Meanwhile {
         self.inner().delete_listed(listed)
     }
     fn list(&self, prefix: &str) -> Result<Vec<Listed>, String> {
+        use std::sync::atomic::Ordering;
+        if prefix.ends_with("/lease/")
+            && self
+                .torn_lease_listings
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+        {
+            return Ok(Vec::new());
+        }
+        if prefix.ends_with("/lease/")
+            && self.lease_listing_fails_in.fetch_update(
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            ) == Ok(1)
+        {
+            return Err("the store didn't answer".to_owned());
+        }
         let listed = self.inner().list(prefix);
         if prefix == "chunks/" {
             Self::run(&self.after_listing_chunks);

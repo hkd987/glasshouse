@@ -51,6 +51,35 @@
 (*  "noMargin"       TRUST_FOR as long as LEASE_FOR: a lease runs out      *)
 (*                   while its holder still acts on it.                    *)
 (* Each fails NothingSavedOverAnotherHostsWork.                            *)
+(*                                                                         *)
+(* A term is an object in the store, and a term's number must never be     *)
+(* made twice. The model once took that for granted (a term below the      *)
+(* newest was always there to refuse a late host), while the code removed  *)
+(* every term before the newest. Two ways a host then made an old number   *)
+(* again, beside the host that had the newest, and took itself to have the *)
+(* computer:                                                               *)
+(*   - it read the lease, stalled, and made "the next term" after two      *)
+(*     later terms had come and the one it meant had been removed;         *)
+(*   - its listing of the terms came back empty while a take removed the   *)
+(*     only term there (a folder's listing isn't one moment's; a test that *)
+(*     failed once in a few hundred runs showed it), which reads as        *)
+(*     "never taken", so it made term 1.                                   *)
+(* The code now does two things:                                           *)
+(*   - whoever makes a term looks again, and if a later term is there      *)
+(*     removes its own and answers by the newest. A host has a term only   *)
+(*     once it has looked. This is what the promises rest on;              *)
+(*   - the term before the newest stays (`low`), so no take removes every  *)
+(*     term that was there and no listing comes back empty.                *)
+(* Two more in Old undo them:                                              *)
+(*  "noLookAfter"      a host that made a term takes it as its own without *)
+(*                     looking again. Fails SureMeansHeld by itself: a     *)
+(*                     host that stalls for two takes still makes an old   *)
+(*                     number.                                             *)
+(*  "removeAllBefore"  a take removes every term before its own. Holds by  *)
+(*                     itself, as long as hosts look again; with           *)
+(*                     "noLookAfter" it is the code before.                *)
+(* (A listing may come back empty here at any time after a take removed    *)
+(* all that was there, which is more than a folder does.)                  *)
 (***************************************************************************)
 EXTENDS Naturals
 
@@ -64,6 +93,8 @@ CONSTANTS
 VARIABLES
     \* The store.
     lease,          \* the newest term: its number, its host, given up or not
+    low,            \* the lowest term whose object is still in the store
+    emptied,        \* a take once removed every term there before its own
     fresh,          \* it was renewed within the last LEASE_FOR
     recVer,         \* the version the computer's record names; 0: never slept
     nextVer,        \* versions saved so far
@@ -85,14 +116,16 @@ VARIABLES
                     \* from the version it named
     crashes
 
-vars == <<lease, fresh, recVer, nextVer, loc, base, remVer, pc, after, asking,
-          saved, myTerm, trusted, lost, forked, crashes>>
+vars == <<lease, low, emptied, fresh, recVer, nextVer, loc, base, remVer, pc,
+          after, asking, saved, myTerm, trusted, lost, forked, crashes>>
 
 Pcs == {"idle", "wakeTake", "restore", "wakeSure", "sleepSure", "recordSure",
         "clear", "release", "reclaim", "reclaimTake"}
 
 TypeOK ==
     /\ lease \in [term : 1..(MaxTerms + 1), host : Hosts, released : BOOLEAN]
+    /\ low \in 1..(MaxTerms + 1) /\ low <= lease.term
+    /\ emptied \in BOOLEAN
     /\ fresh \in BOOLEAN
     /\ recVer \in 0..MaxSaves /\ nextVer \in 0..MaxSaves
     /\ loc \in [Hosts -> {"none", "waking", "here", "gone"}]
@@ -113,6 +146,7 @@ TypeOK ==
 Init ==
     \E m \in Hosts :
         /\ lease = [term |-> 1, host |-> m, released |-> FALSE]
+        /\ low = 1 /\ emptied = FALSE
         /\ fresh = TRUE
         /\ recVer = 0 /\ nextVer = 0
         /\ loc = [h \in Hosts |-> IF h = m THEN "here" ELSE "none"]
@@ -145,31 +179,52 @@ StillOwn(h) ==
     \/ (lease.host = h /\ ~lease.released)
     \/ ("reclaimIfFree" \in Old /\ (lease.released \/ ~fresh))
 
-(* `take`: the next term's object is made only if it isn't there.          *)
+(* `take`: a term's object is made only if it isn't there. The terms       *)
+(* there are low to the newest. A host makes the term it read as next,     *)
+(* which by then may be one below those there.                             *)
+PutWorks(h) == NoLease \/ asking[h] > lease.term \/ asking[h] < low
 TakeWorks(h) == NoLease \/ lease.term + 1 = asking[h]
 
+(* It made the term after the newest: the computer is its own. The terms   *)
+(* before the last one are removed; before ADR 0066's amendment, the last  *)
+(* one too.                                                                *)
 Taken(h) ==
     /\ lease' = [term |-> lease.term + 1, host |-> h, released |-> FALSE]
+    /\ low' = IF "removeAllBefore" \in Old THEN lease.term + 1 ELSE lease.term
+    /\ emptied' = (emptied \/ "removeAllBefore" \in Old)
     /\ fresh' = TRUE
     /\ trusted' = [trusted EXCEPT ![h] = TRUE]
     /\ myTerm' = [myTerm EXCEPT ![h] = lease.term + 1]
+
+(* It made a term that was there before and removed since: not the next.   *)
+(* Having looked again it knows, and the term goes. Before, it took the    *)
+(* computer for its own.                                                   *)
+MadeAnOldTerm(h) == ~TakeWorks(h) /\ PutWorks(h)
+TookItAnyway(h) ==
+    /\ myTerm' = [myTerm EXCEPT ![h] = asking[h]]
+    /\ trusted' = [trusted EXCEPT ![h] = TRUE]
+    /\ UNCHANGED <<lease, low, emptied, fresh>>
+
+(* What a host reads as the term to make: the one after the newest, or,    *)
+(* from a listing that came back empty, the first.                         *)
+EmptyListing == emptied /\ lease.term > 1
 
 (* `adopt`: a host that never had the computer lists it from its record in *)
 (* the store, asleep, and keeps that as its own record of it.              *)
 Adopt(h) ==
     /\ loc[h] = "none" /\ pc[h] = "idle" /\ remVer[h] = 0 /\ recVer > 0
     /\ remVer' = [remVer EXCEPT ![h] = recVer]
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, loc, base, pc, after,
-                   asking, saved, myTerm, trusted, lost, forked, crashes>>
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, loc, base, pc,
+                   after, asking, saved, myTerm, trusted, lost, forked, crashes>>
 
 (* Wake: a task or its person, on a host that knows it asleep.             *)
 WakeAsk(h) ==
     /\ pc[h] = "idle" /\ loc[h] = "none" /\ remVer[h] > 0
-    /\ Takeable(h)
-    /\ asking' = [asking EXCEPT ![h] = lease.term + 1]
+    /\ \/ Takeable(h) /\ asking' = [asking EXCEPT ![h] = lease.term + 1]
+       \/ EmptyListing /\ asking' = [asking EXCEPT ![h] = 1]
     /\ pc' = [pc EXCEPT ![h] = "wakeTake"]
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, loc, base, remVer, after,
-                   saved, myTerm, trusted, lost, forked, crashes>>
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, loc, base,
+                   remVer, after, saved, myTerm, trusted, lost, forked, crashes>>
 
 WakeTake(h) ==
     /\ pc[h] = "wakeTake"
@@ -178,10 +233,14 @@ WakeTake(h) ==
           THEN /\ Taken(h)
                /\ pc' = [pc EXCEPT ![h] = "restore"]
                /\ loc' = [loc EXCEPT ![h] = "waking"]
-          \* Another host made that term first: refused, "awake on
-          \* another host".
+          ELSE IF MadeAnOldTerm(h) /\ "noLookAfter" \in Old
+          THEN /\ TookItAnyway(h)
+               /\ pc' = [pc EXCEPT ![h] = "restore"]
+               /\ loc' = [loc EXCEPT ![h] = "waking"]
+          \* Another host made that term first, or a later one: refused,
+          \* "awake on another host".
           ELSE /\ pc' = [pc EXCEPT ![h] = "idle"]
-               /\ UNCHANGED <<lease, fresh, trusted, myTerm, loc>>
+               /\ UNCHANGED <<lease, low, emptied, fresh, trusted, myTerm, loc>>
     /\ UNCHANGED <<recVer, nextVer, base, remVer, after, saved, lost, forked,
                    crashes>>
 
@@ -192,7 +251,7 @@ WakeRestore(h) ==
     /\ base' = [base EXCEPT ![h] =
                     IF "localRecord" \in Old THEN remVer[h] ELSE recVer]
     /\ pc' = [pc EXCEPT ![h] = "wakeSure"]
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, loc, remVer, after, asking,
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, loc, remVer, after, asking,
                    saved, myTerm, trusted, lost, forked, crashes>>
 
 (* Awake here, once the lease is surely still this host's: a wake can take *)
@@ -201,7 +260,7 @@ WakeDone(h) ==
     /\ pc[h] = "wakeSure" /\ Sure(h)
     /\ loc' = [loc EXCEPT ![h] = "here"]
     /\ pc' = [pc EXCEPT ![h] = "idle"]
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, base, remVer, after, asking,
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, base, remVer, after, asking,
                    saved, myTerm, trusted, lost, forked, crashes>>
 
 (* Sleep: nothing using it.                                                *)
@@ -209,7 +268,7 @@ SleepBegin(h) ==
     /\ pc[h] = "idle" /\ loc[h] = "here" /\ ~lost[h]
     /\ nextVer < MaxSaves
     /\ pc' = [pc EXCEPT ![h] = "sleepSure"]
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, loc, base, remVer, after,
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, loc, base, remVer, after,
                    asking, saved, myTerm, trusted, lost, forked, crashes>>
 
 (* All of its folder to the store, as a new version no record names yet.   *)
@@ -218,7 +277,7 @@ SleepSave(h) ==
     /\ nextVer' = nextVer + 1
     /\ saved' = [saved EXCEPT ![h] = nextVer + 1]
     /\ pc' = [pc EXCEPT ![h] = "recordSure"]
-    /\ UNCHANGED <<lease, fresh, recVer, loc, base, remVer, after, asking,
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, loc, base, remVer, after, asking,
                    myTerm, trusted, lost, forked, crashes>>
 
 (* The record names the new version: what any host wakes from now on.      *)
@@ -228,7 +287,7 @@ SleepRecord(h) ==
     /\ recVer' = saved[h]
     /\ base' = [base EXCEPT ![h] = saved[h]]
     /\ pc' = [pc EXCEPT ![h] = "clear"]
-    /\ UNCHANGED <<lease, fresh, nextVer, loc, remVer, after, asking, saved,
+    /\ UNCHANGED <<lease, low, emptied, fresh, nextVer, loc, remVer, after, asking, saved,
                    myTerm, trusted, lost, crashes>>
 
 (* Its own record says asleep, and the folder goes.                        *)
@@ -237,7 +296,7 @@ SleepClear(h) ==
     /\ loc' = [loc EXCEPT ![h] = "none"]
     /\ remVer' = [remVer EXCEPT ![h] = saved[h]]
     /\ pc' = [pc EXCEPT ![h] = "release"]
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, base, after, asking, saved,
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, base, after, asking, saved,
                    myTerm, trusted, lost, forked, crashes>>
 
 (* Its term is marked given up. A host writes only its own term's object:  *)
@@ -250,8 +309,8 @@ SleepRelease(h) ==
     /\ myTerm' = [myTerm EXCEPT ![h] = 0]
     /\ trusted' = [trusted EXCEPT ![h] = FALSE]
     /\ pc' = [pc EXCEPT ![h] = "idle"]
-    /\ UNCHANGED <<fresh, recVer, nextVer, loc, base, remVer, after, asking,
-                   saved, lost, forked, crashes>>
+    /\ UNCHANGED <<low, emptied, fresh, recVer, nextVer, loc, base, remVer,
+                   after, asking, saved, lost, forked, crashes>>
 
 (* A host that isn't sure asks again before it goes on: in a sleep, at the *)
 (* end of a wake, and every half minute for a computer awake on it.        *)
@@ -259,14 +318,14 @@ SureAsk(h) ==
     /\ pc[h] \in {"wakeSure", "sleepSure", "recordSure"} /\ ~Sure(h)
     /\ after' = [after EXCEPT ![h] = pc[h]]
     /\ pc' = [pc EXCEPT ![h] = "reclaim"]
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, loc, base, remVer, asking,
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, loc, base, remVer, asking,
                    saved, myTerm, trusted, lost, forked, crashes>>
 
 KeepAsk(h) ==
     /\ pc[h] = "idle" /\ loc[h] = "here" /\ ~lost[h] /\ ~Sure(h)
     /\ after' = [after EXCEPT ![h] = "idle"]
     /\ pc' = [pc EXCEPT ![h] = "reclaim"]
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, loc, base, remVer, asking,
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, loc, base, remVer, asking,
                    saved, myTerm, trusted, lost, forked, crashes>>
 
 (* `lose`, or a wake that fails: what this host has is not the computer.   *)
@@ -282,13 +341,17 @@ Gone(h) ==
 
 ReclaimAsk(h) ==
     /\ pc[h] = "reclaim"
-    /\ IF StillOwn(h)
-          THEN /\ asking' = [asking EXCEPT ![h] = lease.term + 1]
-               /\ pc' = [pc EXCEPT ![h] = "reclaimTake"]
-               /\ UNCHANGED <<loc, lost, myTerm>>
-          ELSE Gone(h)
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, base, remVer, after, saved,
-                   trusted, forked, crashes>>
+    /\ \/ IF StillOwn(h)
+             THEN /\ asking' = [asking EXCEPT ![h] = lease.term + 1]
+                  /\ pc' = [pc EXCEPT ![h] = "reclaimTake"]
+                  /\ UNCHANGED <<loc, lost, myTerm>>
+             ELSE Gone(h)
+       \/ /\ EmptyListing
+          /\ asking' = [asking EXCEPT ![h] = 1]
+          /\ pc' = [pc EXCEPT ![h] = "reclaimTake"]
+          /\ UNCHANGED <<loc, lost, myTerm>>
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, base, remVer,
+                   after, saved, trusted, forked, crashes>>
 
 ReclaimTake(h) ==
     /\ pc[h] = "reclaimTake"
@@ -297,8 +360,20 @@ ReclaimTake(h) ==
                /\ asking' = [asking EXCEPT ![h] = 0]
                /\ pc' = [pc EXCEPT ![h] = after[h]]
                /\ UNCHANGED <<loc, lost>>
+          ELSE IF MadeAnOldTerm(h) /\ "noLookAfter" \in Old
+          THEN /\ TookItAnyway(h)
+               /\ asking' = [asking EXCEPT ![h] = 0]
+               /\ pc' = [pc EXCEPT ![h] = after[h]]
+               /\ UNCHANGED <<loc, lost>>
+          \* It made an old term, looked again, and the newest is its own
+          \* and held: it asks once more.
+          ELSE IF MadeAnOldTerm(h) /\ lease.host = h /\ ~lease.released
+          THEN /\ asking' = [asking EXCEPT ![h] = 0]
+               /\ pc' = [pc EXCEPT ![h] = "reclaim"]
+               /\ UNCHANGED <<lease, low, emptied, fresh, trusted, myTerm, loc,
+                              lost>>
           \* Another host took the term in between: it has the computer.
-          ELSE Gone(h) /\ UNCHANGED <<lease, fresh, trusted>>
+          ELSE Gone(h) /\ UNCHANGED <<lease, low, emptied, fresh, trusted>>
     /\ UNCHANGED <<recVer, nextVer, base, remVer, after, saved, forked,
                    crashes>>
 
@@ -309,7 +384,7 @@ Renew(h) ==
     /\ lease.host = h /\ lease.term = myTerm[h] /\ ~lease.released
     /\ ~fresh
     /\ fresh' = TRUE
-    /\ UNCHANGED <<lease, recVer, nextVer, loc, base, remVer, pc, after,
+    /\ UNCHANGED <<lease, low, emptied, recVer, nextVer, loc, base, remVer, pc, after,
                    asking, saved, myTerm, trusted, lost, forked, crashes>>
 
 (* A lost copy is set aside once nothing runs in it, and the computer is   *)
@@ -319,7 +394,7 @@ SetAside(h) ==
     /\ loc' = [loc EXCEPT ![h] = "none"]
     /\ lost' = [lost EXCEPT ![h] = FALSE]
     /\ remVer' = [remVer EXCEPT ![h] = recVer]
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, base, pc, after, asking,
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, base, pc, after, asking,
                    saved, myTerm, trusted, forked, crashes>>
 
 (* Time passing. A host hasn't heard from the store for TRUST_FOR (it was  *)
@@ -327,7 +402,7 @@ SetAside(h) ==
 Distrust(h) ==
     /\ trusted[h]
     /\ trusted' = [trusted EXCEPT ![h] = FALSE]
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, loc, base, remVer, pc,
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, loc, base, remVer, pc,
                    after, asking, saved, myTerm, lost, forked, crashes>>
 
 (* The newest lease hasn't been renewed for LEASE_FOR: longer than its     *)
@@ -336,7 +411,7 @@ Expire ==
     /\ fresh /\ ~lease.released
     /\ ("noMargin" \in Old \/ ~trusted[lease.host])
     /\ fresh' = FALSE
-    /\ UNCHANGED <<lease, recVer, nextVer, loc, base, remVer, pc, after,
+    /\ UNCHANGED <<lease, low, emptied, recVer, nextVer, loc, base, remVer, pc, after,
                    asking, saved, myTerm, trusted, lost, forked, crashes>>
 
 (* glassd stops and starts again on a host: all it had in memory is gone.  *)
@@ -352,7 +427,7 @@ Crash(h) ==
     /\ trusted' = [trusted EXCEPT ![h] = FALSE]
     /\ lost' = [lost EXCEPT ![h] = FALSE]
     /\ loc' = [loc EXCEPT ![h] = IF @ = "waking" THEN "none" ELSE @]
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, base, remVer, saved, forked>>
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, base, remVer, saved, forked>>
 
 (* A host goes away for good, with whatever it had. One host stays.        *)
 Die(h) ==
@@ -366,7 +441,7 @@ Die(h) ==
     /\ myTerm' = [myTerm EXCEPT ![h] = 0]
     /\ trusted' = [trusted EXCEPT ![h] = FALSE]
     /\ lost' = [lost EXCEPT ![h] = FALSE]
-    /\ UNCHANGED <<lease, fresh, recVer, nextVer, base, remVer, saved, forked>>
+    /\ UNCHANGED <<lease, low, emptied, fresh, recVer, nextVer, base, remVer, saved, forked>>
 
 Next ==
     \/ \E h \in Hosts :
