@@ -876,3 +876,24 @@ Its models (`specs/tla/ChatSync.tla`, `ChatPost.tla`,
   a seat's stamp keeps that check from judging a join in progress; pages
   ask for keys once they're in, and for as long as a new key is due
   (`specs/tla/MeetKeys.tla`).
+
+## Amended 2026-11-11 (audit 9.4, first part): a post is answered to the computers it's for
+A computer's `chat/sync` waits at the console for news. One channel woke
+every waiting computer at every change in the organization, and each was
+then answered whether or not anything was for its people, with every
+conversation's epochs, and asked again: at 500 computers and a few people
+typing in a doc, over a thousand answers a second, each built twice under
+the console's one lock.
+
+- A computer woken by a change that isn't for its people goes on waiting,
+  to the end of its wait.
+- Whether there is news for it is found without making the answer
+  (`ChatState::news`): its people's conversations made or changed since
+  its cursor, and the messages since in them.
+
+Every waiting computer still looks at every change. Still open from the
+same finding: an answer carries every epoch of every conversation of the
+computer's people, not what changed since its cursor; and the other work
+done under the console's one lock (a kernel bundle read and encoded, the
+replay cache scanned on every request, the fleet file rewritten every two
+seconds).

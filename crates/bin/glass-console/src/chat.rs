@@ -493,17 +493,58 @@ impl ChatState {
         }
     }
 
-    /// Whether anything for `request` is newer than its cursor.
+    /// Whether anything for `request` is newer than its cursor: what
+    /// [`ChatState::sync`] would answer with has a message, or a
+    /// conversation made or changed since.
+    ///
+    /// Found without making the answer. Every waiting computer asks this
+    /// at every change in the organization (audit 9.4), and it used to
+    /// build the whole answer to look: every conversation's epochs,
+    /// copied.
     pub fn news(&self, request: &ChatSyncRequest) -> bool {
-        let answer = self.sync(request);
-        !answer.messages.is_empty()
-            || self.conversations.values().any(|s| {
-                s.created_seq.max(s.changed_seq) > request.since
-                    && answer
-                        .conversations
-                        .iter()
-                        .any(|c| c.id == s.conversation.id)
+        let logins: BTreeSet<&str> = self
+            .keys
+            .iter()
+            .filter(|k| k.device == request.device && request.logins.contains(&k.login))
+            .map(|k| k.login.as_str())
+            .collect();
+        if logins.is_empty() {
+            return false;
+        }
+        let theirs = |s: &Stored| {
+            s.conversation
+                .members
+                .iter()
+                .any(|m| logins.contains(m.as_str()))
+        };
+        // Conversations someone here was added to since: their history is
+        // news too, however old.
+        let mut joined: BTreeSet<&str> = BTreeSet::new();
+        for stored in self.conversations.values().filter(|s| theirs(s)) {
+            if stored.created_seq.max(stored.changed_seq) > request.since {
+                return true;
+            }
+            if stored
+                .joined
+                .iter()
+                .any(|(l, at)| logins.contains(l.as_str()) && *at > request.since)
+            {
+                joined.insert(stored.conversation.id.as_str());
+            }
+        }
+        let from = if joined.is_empty() {
+            self.messages.partition_point(|m| m.seq <= request.since)
+        } else {
+            0
+        };
+        self.messages[from..].iter().any(|m| {
+            m.header().is_ok_and(|h| {
+                self.conversations
+                    .get(h.conversation.as_str())
+                    .is_some_and(theirs)
+                    && (m.seq > request.since || joined.contains(h.conversation.as_str()))
             })
+        })
     }
 }
 
@@ -1412,6 +1453,108 @@ mod tests {
         let (answer, took) = waiting.await.unwrap();
         assert_eq!(answer.messages.len(), 1);
         assert!(took < Duration::from_secs(1), "{took:?}");
+    }
+
+    // Audit 9.4: one channel woke every waiting computer at every post in
+    // the organization, and each was answered whether or not anything was
+    // for it, with every conversation's epochs, and asked again.
+    #[tokio::test]
+    async fn cf91_a_post_is_answered_only_to_the_computers_its_for() {
+        let org = Arc::new(Org::new().await);
+        let priya = org.computer("laptop-priya", "priya").await;
+        let dana = org.computer("laptop-dana", "dana").await;
+        let sam = org.computer("laptop-sam", "sam").await;
+        let (_, deal, deal_key) = org.channel(&priya, &["priya", "dana"], "#deal").await;
+        let (_, lunch, lunch_key) = org.channel(&priya, &["priya", "sam"], "#lunch").await;
+        let since = org.sync(&dana, 0, 0).await.cursor;
+        let dana = Arc::new(dana);
+        let waiting = {
+            let (org, dana) = (Arc::clone(&org), Arc::clone(&dana));
+            tokio::spawn(async move {
+                let started = std::time::Instant::now();
+                let answer = org.sync(&dana, since, 3).await;
+                (answer, started.elapsed())
+            })
+        };
+        // Posts in a channel Dana isn't in: her computer goes on waiting.
+        for text in ["tacos?", "noon"] {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let (status, _) = org.say(&priya, &lunch, 1, &lunch_key, text).await;
+            assert_eq!(status, 200);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !waiting.is_finished(),
+            "answered for a post that isn't hers"
+        );
+        // Sam's, waiting from before them, has them at once.
+        let sams = org.sync(&sam, since, 3).await;
+        assert_eq!(sams.messages.len(), 2);
+        // One for her: answered within the second, with that one message.
+        let (status, _) = org.say(&priya, &deal, 1, &deal_key, "signed").await;
+        assert_eq!(status, 200);
+        let (answer, took) = waiting.await.unwrap();
+        assert_eq!(answer.messages.len(), 1);
+        assert!(took < Duration::from_secs(2), "{took:?}");
+
+        // With nothing for her at all, the wait runs its length and the
+        // answer has nothing new, as before.
+        let started = std::time::Instant::now();
+        let quiet = {
+            let (org, dana) = (Arc::clone(&org), Arc::clone(&dana));
+            let cursor = answer.cursor;
+            tokio::spawn(async move { org.sync(&dana, cursor, 1).await })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        org.say(&priya, &lunch, 1, &lunch_key, "one o'clock then")
+            .await;
+        let quiet = quiet.await.unwrap();
+        assert!(quiet.messages.is_empty());
+        assert!(started.elapsed() >= Duration::from_millis(900));
+    }
+
+    // The check that decides whether to answer says what the answer
+    // would: the two were one computation, and are two now.
+    #[tokio::test]
+    async fn cf91_news_is_what_the_answer_would_have() {
+        let org = Org::new().await;
+        let priya = org.computer("laptop-priya", "priya").await;
+        let dana = org.computer("laptop-dana", "dana").await;
+        let sam = org.computer("laptop-sam", "sam").await;
+        let (_, deal, deal_key) = org.channel(&priya, &["priya", "dana"], "#deal").await;
+        let mut cursors = vec![0, org.sync(&priya, 0, 0).await.cursor];
+        org.say(&priya, &deal, 1, &deal_key, "one").await;
+        cursors.push(org.sync(&priya, 0, 0).await.cursor);
+        let (_, lunch, lunch_key) = org.channel(&priya, &["priya", "sam"], "#lunch").await;
+        cursors.push(org.sync(&priya, 0, 0).await.cursor);
+        org.say(&priya, &lunch, 1, &lunch_key, "two").await;
+        org.say(&dana, &deal, 1, &deal_key, "three").await;
+        cursors.push(org.sync(&priya, 0, 0).await.cursor);
+
+        let state = org.console.state();
+        let chat = &state.chat;
+        for who in [&priya, &dana, &sam] {
+            for since in &cursors {
+                for logins in [vec![who.key.login.clone()], vec!["nobody".to_owned()]] {
+                    let request = glass_managed::chat::ChatSyncRequest {
+                        device: who.name.clone(),
+                        logins,
+                        since: *since,
+                        wait_secs: 0,
+                    };
+                    let answer = chat.sync(&request);
+                    let by_answer = !answer.messages.is_empty()
+                        || chat.conversations.values().any(|s| {
+                            s.created_seq.max(s.changed_seq) > request.since
+                                && answer
+                                    .conversations
+                                    .iter()
+                                    .any(|c| c.id == s.conversation.id)
+                        });
+                    assert_eq!(chat.news(&request), by_answer, "{} since {since}", who.name);
+                }
+            }
+        }
     }
 
     /// glassd's chat on two computers, through the console's device API

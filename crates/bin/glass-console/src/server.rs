@@ -1967,9 +1967,21 @@ impl Console {
                         serde_json::to_value(self.state().chat.sync(&sync)).unwrap_or_default()
                     );
                 }
-                // Long poll: answer as soon as chat changes, to a computer
-                // IT hasn't removed while it waited (ADR 0052).
-                let _ = tokio::time::timeout(wait, changed.changed()).await;
+                // Long poll: answered as soon as there's something for this
+                // computer's people, to a computer IT hasn't removed while
+                // it waited (ADR 0052). A change that is someone else's
+                // isn't an answer: every waiting computer was answered at
+                // every post in the organization, each with every
+                // conversation's epochs, and asked again (audit 9.4).
+                let until = tokio::time::Instant::now() + wait;
+                while tokio::time::timeout_at(until, changed.changed())
+                    .await
+                    .is_ok_and(|open| open.is_ok())
+                {
+                    if self.state().chat.news(&sync) {
+                        break;
+                    }
+                }
                 let state = self.state();
                 if let Some(gone) = signer_gone(state.still_signs(&device, &key)) {
                     return gone;
