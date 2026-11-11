@@ -993,3 +993,166 @@ fn dc3_the_page_knows_the_words_a_closed_session_is_told() {
         crate::NOT_OPEN
     );
 }
+
+/// The shared space, with posts to one item held until the test lets
+/// them go: a console that takes its time over one doc.
+#[derive(Debug)]
+struct Slow {
+    inner: Arc<dyn Shared>,
+    held: Mutex<Option<String>>,
+    let_go: (Mutex<bool>, std::sync::Condvar),
+    arrived: std::sync::atomic::AtomicUsize,
+}
+
+impl Slow {
+    fn hold(&self, item: &str) {
+        *self.held.lock().unwrap() = Some(item.to_owned());
+    }
+
+    fn release(&self) {
+        *self.let_go.0.lock().unwrap() = true;
+        self.let_go.1.notify_all();
+    }
+
+    fn arrived(&self) -> usize {
+        self.arrived.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Shared for Slow {
+    fn ready(&self, login: &str, make: bool) -> Result<(), glass_managed::chat::ChatFailure> {
+        self.inner.ready(login, make)
+    }
+    fn items(&self, login: &str, kind: ConversationKind) -> Vec<Item> {
+        self.inner.items(login, kind)
+    }
+    fn item(&self, login: &str, id: &str) -> Option<Item> {
+        self.inner.item(login, id)
+    }
+    fn since(&self, login: &str, id: &str, seq: u64) -> Option<Item> {
+        self.inner.since(login, id, seq)
+    }
+    fn through(&self, login: &str) -> u64 {
+        self.inner.through(login)
+    }
+    fn create(
+        &self,
+        login: &str,
+        kind: ConversationKind,
+        title: &str,
+        label: Label,
+        members: &[String],
+    ) -> Result<String, glass_managed::chat::ChatFailure> {
+        self.inner.create(login, kind, title, label, members)
+    }
+    fn post(
+        &self,
+        login: &str,
+        to: &str,
+        text: &str,
+        part: Option<Part>,
+        attribution: Option<String>,
+        reply_to: Option<String>,
+    ) -> Result<String, glass_managed::chat::ChatFailure> {
+        if self.held.lock().unwrap().as_deref() == Some(to) {
+            self.arrived
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut gone = self.let_go.0.lock().unwrap();
+            while !*gone {
+                gone = self.let_go.1.wait(gone).unwrap();
+            }
+        }
+        self.inner
+            .post(login, to, text, part, attribution, reply_to)
+    }
+    fn put_blob(
+        &self,
+        login: &str,
+        blob: &glass_managed::shared::SealedBlob,
+    ) -> Result<(), glass_managed::chat::ChatFailure> {
+        self.inner.put_blob(login, blob)
+    }
+    fn get_blob(
+        &self,
+        login: &str,
+        item: &str,
+        id: &str,
+    ) -> Result<glass_managed::shared::SealedBlob, glass_managed::chat::ChatFailure> {
+        self.inner.get_blob(login, item, id)
+    }
+}
+
+// Audit 9.3: one lock covered every doc, person and session, and a write
+// posted to the console inside it, so a slow console stalled every doc
+// operation on the computer.
+#[test]
+fn dc3_one_docs_slow_post_doesnt_hold_up_another_doc() {
+    let org = org();
+    let mut a = org.computer("dev-a");
+    let slow = Arc::new(Slow {
+        inner: a.roster.clone(),
+        held: Mutex::new(None),
+        let_go: (Mutex::new(false), std::sync::Condvar::new()),
+        arrived: std::sync::atomic::AtomicUsize::new(0),
+    });
+    a.docs = DocsProvider::new(slow.clone(), org.directory.clone());
+    a.call("dana", APP, LIST, json!({})).unwrap();
+    let make = |title: &str| {
+        let made = a
+            .call(
+                "dana",
+                AGENT,
+                CREATE,
+                json!({ "title": title, "markdown": "# Start\n" }),
+            )
+            .unwrap();
+        made.data["id"].as_str().unwrap().to_owned()
+    };
+    let (plan, notes) = (make("Q3 plan"), make("Notes"));
+
+    // A write to the plan is on its way to a console that doesn't answer.
+    slow.hold(&plan);
+    std::thread::scope(|scope| {
+        let stuck = scope.spawn(|| {
+            a.call(
+                "dana",
+                AGENT,
+                WRITE,
+                json!({ "doc": plan, "markdown": "Ship by Friday.", "at": "end" }),
+            )
+        });
+        while slow.arrived() == 0 {
+            std::thread::yield_now();
+        }
+
+        // Meanwhile the other doc is read and written, and the list of
+        // docs is given: none of it waits for the plan's post.
+        let (done, finished) = std::sync::mpsc::channel();
+        let (a, notes) = (&a, &notes);
+        scope.spawn(move || {
+            let wrote = a.call(
+                "dana",
+                AGENT,
+                WRITE,
+                json!({ "doc": notes, "markdown": "Call Priya.", "at": "end" }),
+            );
+            let read = a.call("dana", AGENT, READ, json!({ "doc": notes }));
+            let listed = a.call("dana", AGENT, LIST, json!({}));
+            let _ = done.send((wrote.is_ok(), read, listed.is_ok()));
+        });
+        let other = finished.recv_timeout(std::time::Duration::from_secs(20));
+        // Let go whatever came of it, or the scope would wait for good.
+        let still_stuck = !stuck.is_finished();
+        slow.release();
+        let (wrote, read, listed) =
+            other.expect("another doc waited for the plan's post to the console");
+        assert!(wrote && listed);
+        assert!(read.unwrap().text.contains("Call Priya."));
+        assert!(still_stuck, "the plan's write was held all the while");
+
+        // Let go, the plan's write lands as it was.
+        stuck.join().unwrap().unwrap();
+    });
+    assert!(a.markdown("dana", &plan).contains("Ship by Friday."));
+    assert!(a.markdown("dana", &notes).contains("Call Priya."));
+}

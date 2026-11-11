@@ -190,3 +190,17 @@ between computers:
   newest snapshot whose sender could edit when they posted it;
 - pages get what their computer's copy accepted, judged by who could edit
   when each edit was made.
+
+## Amended 2026-11-11 (audit 9.3): a lock for each doc
+One lock covered every doc, person and session on a computer, and a write
+posted to the console inside it: a slow console stalled every doc
+operation and every preview on the machine. Each person's copy of each
+doc has a lock of its own now (`with_doc`); the map of them and the
+sessions are locked only to find an entry, never across a call to the
+shared space. One call at a time still reads and changes a copy, which is
+what `specs/tla/DocsCollab.tla` models (one doc, two computers), so the
+model is as it was.
+
+Still open from the same finding: `doc.list` opens every message of every
+doc to find each doc's roles and when it last changed, and Docs and
+Artifacts fetch a blob again on every read, where Skills keeps them.

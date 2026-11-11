@@ -196,9 +196,17 @@ struct Opened {
     posted: Vec<(String, String)>,
 }
 
+/// Where one person's copy of one doc is kept: none until it's first
+/// read, and held while it's brought up to date and changed.
+type Place = Arc<Mutex<Option<Cached>>>;
+
+/// What this computer holds of docs. This lock is held only to find a
+/// doc's place or a session's entry, never across a call to the shared
+/// space: every doc, person and session waited behind one doc's post to a
+/// slow console (audit 9.3). A doc's own lock is held across its calls.
 #[derive(Debug, Default)]
 struct State {
-    docs: BTreeMap<(String, String), Cached>,
+    docs: BTreeMap<(String, String), Place>,
     sessions: BTreeMap<TaskId, BTreeMap<String, Opened>>,
 }
 
@@ -478,7 +486,9 @@ impl DocsProvider {
         Ok(self.load(login, item, through))
     }
 
-    /// Doc `id` for `login`, brought up to date, under the state lock.
+    /// Doc `id` for `login`, brought up to date, under the doc's own lock:
+    /// one call at a time reads and changes a person's copy of a doc, and
+    /// other docs (and other people's copies of this one) don't wait.
     fn with_doc<T>(
         &self,
         login: &str,
@@ -486,9 +496,14 @@ impl DocsProvider {
         f: impl FnOnce(&mut Cached) -> Result<T, ActionError>,
     ) -> Result<T, ActionError> {
         Self::check_id(id)?;
-        let key = (login.to_owned(), id.to_owned());
-        let mut state = self.state();
-        match state.docs.get_mut(&key) {
+        let place: Place = Arc::clone(
+            self.state()
+                .docs
+                .entry((login.to_owned(), id.to_owned()))
+                .or_default(),
+        );
+        let mut place = place.lock().unwrap_or_else(PoisonError::into_inner);
+        match place.as_mut() {
             Some(cached) => {
                 // Before the messages: nothing up to it can arrive later.
                 let through = self.shared.through(login);
@@ -499,16 +514,9 @@ impl DocsProvider {
                     }
                 }
             }
-            None => {
-                let cached = self.reload(login, id)?;
-                state.docs.insert(key.clone(), cached);
-            }
+            None => *place = Some(self.reload(login, id)?),
         }
-        let cached = state
-            .docs
-            .get_mut(&key)
-            .ok_or_else(|| failed("lost the doc"))?;
-        f(cached)
+        f(place.as_mut().ok_or_else(|| failed("lost the doc"))?)
     }
 
     /// A doc from its whole log, `through` read before it: its newest
