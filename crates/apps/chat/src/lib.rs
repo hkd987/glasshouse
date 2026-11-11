@@ -2111,8 +2111,89 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(refused.contains("only messages it posted"), "{refused}");
+        // Audit 6.5: what the action refuses, its preview refuses first, in
+        // the same words. Nobody is asked to approve an edit that fails.
+        let asked = |ctx: &TaskContext, action: &str, input: Value| {
+            a.provider.preview(ctx, &action.parse().unwrap(), &input)
+        };
+        for (action, input) in [
+            (
+                everyday::EDIT,
+                json!({ "conversation": id, "message": typed, "text": "changed" }),
+            ),
+            (
+                everyday::DELETE,
+                json!({ "conversation": id, "message": typed }),
+            ),
+            (
+                everyday::EDIT,
+                json!({ "conversation": id, "message": "0".repeat(64), "text": "changed" }),
+            ),
+            (
+                everyday::PIN,
+                json!({ "conversation": id, "message": "0".repeat(64), "pinned": true }),
+            ),
+            (
+                everyday::REACT,
+                json!({ "conversation": id, "message": "0".repeat(64), "emoji": "👍", "on": true }),
+            ),
+        ] {
+            let refused = asked(&agent, action, input.clone())
+                .unwrap_err()
+                .to_string();
+            let done = a
+                .provider
+                .invoke(&agent, &action.parse().unwrap(), &input)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(refused, done, "{action}");
+        }
+        // What it may change previews as before, with what was and will be.
+        let edit = asked(
+            &agent,
+            everyday::EDIT,
+            json!({ "conversation": id, "message": by_agent, "text": "Agenda: 1. Budget" }),
+        )
+        .unwrap();
+        assert!(
+            edit.summary.starts_with("Edit your message in"),
+            "{}",
+            edit.summary
+        );
+        assert_eq!(edit.items[0], "Was: changed");
         // The person edits either in Chat.
         a.call("dana", everyday::EDIT, json!({ "conversation": id, "message": by_agent, "text": "Agenda: 1. Budget 2. Hiring" })).unwrap();
+        // A deleted message can't be edited, pinned or reacted to, and
+        // the previews say so too.
+        a.call(
+            "dana",
+            everyday::DELETE,
+            json!({ "conversation": id, "message": typed }),
+        )
+        .unwrap();
+        let me = ctx("dana", APP);
+        for (action, input) in [
+            (
+                everyday::EDIT,
+                json!({ "conversation": id, "message": typed, "text": "again" }),
+            ),
+            (
+                everyday::PIN,
+                json!({ "conversation": id, "message": typed, "pinned": true }),
+            ),
+            (
+                everyday::REACT,
+                json!({ "conversation": id, "message": typed, "emoji": "👍", "on": true }),
+            ),
+        ] {
+            let refused = asked(&me, action, input.clone()).unwrap_err().to_string();
+            assert!(
+                refused.contains("that message was deleted"),
+                "{action}: {refused}"
+            );
+            let done = a.call("dana", action, input).unwrap_err().to_string();
+            assert_eq!(refused, done, "{action}");
+        }
     }
 
     #[test]

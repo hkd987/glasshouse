@@ -894,32 +894,11 @@ impl DocsProvider {
     fn write(&self, ctx: &TaskContext, input: WriteInput) -> Result<ActionOutput, ActionError> {
         self.ready(ctx)?;
         let me = Self::me(ctx);
-        if input.markdown.trim().is_empty() {
-            return Err(invalid("say what to write, as Markdown"));
-        }
-        check_markdown(&input.markdown)?;
-        let at = match input.at {
-            None => At::End,
-            Some(WhereInput::Named(s)) if s == "end" => At::End,
-            Some(WhereInput::Named(s)) if s == "replace" => At::Replace,
-            Some(WhereInput::After { after }) => At::AfterSection(after),
-            Some(WhereInput::Named(other)) => {
-                return Err(invalid(format!(
-                    "at is \"end\", \"replace\" or {{\"after\": \"<heading>\"}}, not {other:?}"
-                )));
-            }
-        };
+        let at = Self::write_at(&input)?;
         let blocks = markdown::parse(&input.markdown);
         let by = Self::attribution(ctx).unwrap_or_else(|| me.to_owned());
         self.with_doc(me, &input.doc, |cached| {
-            if !cached.role(me).edits() {
-                return Err(invalid(format!(
-                    "{} is {}'s; you can't edit it",
-                    cached.title,
-                    self.name(&cached.owner)
-                )));
-            }
-            Self::no_write_down(ctx, cached)?;
+            self.may(ctx, cached, &Doing::Write)?;
             let update = ydoc::write(&cached.doc, &blocks, &at, &by).map_err(invalid)?;
             let id = self.post_update(ctx, &input.doc, &update)?;
             cached.since_snapshot += 1;
@@ -940,32 +919,10 @@ impl DocsProvider {
     fn comment(&self, ctx: &TaskContext, input: CommentInput) -> Result<ActionOutput, ActionError> {
         self.ready(ctx)?;
         let me = Self::me(ctx);
+        Self::check_comment(&input)?;
         let text = input.text.trim();
-        if text.is_empty() || text.chars().count() > MAX_TEXT_CHARS {
-            return Err(invalid(format!(
-                "a comment is 1 to {MAX_TEXT_CHARS} characters"
-            )));
-        }
-        if let Some(anchor) = &input.anchor
-            && (anchor
-                .path
-                .as_ref()
-                .is_some_and(|p| p.len() > MAX_ANCHOR || base64::decode(p).is_none())
-                || anchor.x.is_some()
-                || anchor.y.is_some())
-        {
-            return Err(invalid(
-                "a doc comment's anchor is a Yjs relative position, base64",
-            ));
-        }
         self.with_doc(me, &input.doc, |cached| {
-            if !cached.role(me).comments() {
-                return Err(invalid(format!(
-                    "you can view {} but not comment",
-                    cached.title
-                )));
-            }
-            Self::no_write_down(ctx, cached)?;
+            self.may(ctx, cached, &Doing::Comment)?;
             if let Some(to) = &input.reply_to
                 && !cached.comments.iter().any(|c| &c.id == to)
             {
@@ -1045,13 +1002,7 @@ impl DocsProvider {
         self.ready(ctx)?;
         let me = Self::me(ctx);
         self.with_doc(me, &input.doc, |cached| {
-            if !cached.role(me).comments() || !cached.comments.iter().any(|c| c.id == input.comment)
-            {
-                return Err(invalid(format!(
-                    "{} has no comment {} you can resolve",
-                    cached.title, input.comment
-                )));
-            }
+            self.may(ctx, cached, &Doing::Resolve(&input.comment))?;
             self.shared
                 .post(
                     me,
@@ -1084,20 +1035,9 @@ impl DocsProvider {
     fn version(&self, ctx: &TaskContext, input: VersionInput) -> Result<ActionOutput, ActionError> {
         self.ready(ctx)?;
         let me = Self::me(ctx);
-        let name = input.name.trim().to_owned();
-        if name.is_empty() || name.chars().count() > MAX_NAME || name.chars().any(char::is_control)
-        {
-            return Err(invalid(format!(
-                "a version's name is one line of 1 to {MAX_NAME} characters"
-            )));
-        }
+        let name = Self::version_name(&input)?;
         self.with_doc(me, &input.doc, |cached| {
-            if !cached.role(me).edits() {
-                return Err(invalid(format!(
-                    "only {}'s editors name its versions",
-                    cached.title
-                )));
-            }
+            self.may(ctx, cached, &Doing::Version)?;
             let id = self
                 .maybe_snapshot(ctx, &input.doc, cached, Some(name.clone()))?
                 .ok_or_else(|| failed("this doc is too large to keep as one version yet"))?;
@@ -1113,30 +1053,7 @@ impl DocsProvider {
         self.ready(ctx)?;
         let me = Self::me(ctx);
         self.with_doc(me, &input.doc, |cached| {
-            if cached.owner != me {
-                return Err(invalid(format!(
-                    "{} is {}'s to share",
-                    cached.title,
-                    self.name(&cached.owner)
-                )));
-            }
-            let outside: Vec<&String> = input
-                .editors
-                .iter()
-                .chain(&input.commenters)
-                .filter(|l| !cached.members.contains(l))
-                .collect();
-            if !outside.is_empty() {
-                return Err(invalid(format!(
-                    "{} isn't in {}; who is in a doc is fixed when it's made, for now",
-                    outside
-                        .iter()
-                        .map(|l| self.name(l))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    cached.title
-                )));
-            }
+            self.may(ctx, cached, &Doing::Roles(&input))?;
             self.shared
                 .post(
                     me,
@@ -1158,11 +1075,148 @@ impl DocsProvider {
         })
     }
 
-    /// A doc's title and label for a preview.
-    fn about(&self, ctx: &TaskContext, id: &str) -> (String, Option<Label>) {
-        self.with_doc(Self::me(ctx), id, |c| Ok((c.title.clone(), Some(c.label))))
-            .unwrap_or_else(|_| ("a doc".into(), None))
+    /// Whether `ctx`'s person may do that to `cached`, in the words the
+    /// action refuses with. The action asks, and so does its preview:
+    /// nobody is asked to approve what would then be refused (audit 6.5).
+    fn may(
+        &self,
+        ctx: &TaskContext,
+        cached: &Cached,
+        doing: &Doing<'_>,
+    ) -> Result<(), ActionError> {
+        let me = Self::me(ctx);
+        match doing {
+            Doing::Write => {
+                if !cached.role(me).edits() {
+                    return Err(invalid(format!(
+                        "{} is {}'s; you can't edit it",
+                        cached.title,
+                        self.name(&cached.owner)
+                    )));
+                }
+                Self::no_write_down(ctx, cached)
+            }
+            Doing::Comment => {
+                if !cached.role(me).comments() {
+                    return Err(invalid(format!(
+                        "you can view {} but not comment",
+                        cached.title
+                    )));
+                }
+                Self::no_write_down(ctx, cached)
+            }
+            Doing::Resolve(comment) => {
+                if !cached.role(me).comments() || !cached.comments.iter().any(|c| c.id == *comment)
+                {
+                    return Err(invalid(format!(
+                        "{} has no comment {comment} you can resolve",
+                        cached.title
+                    )));
+                }
+                Ok(())
+            }
+            Doing::Version => {
+                if !cached.role(me).edits() {
+                    return Err(invalid(format!(
+                        "only {}'s editors name its versions",
+                        cached.title
+                    )));
+                }
+                Ok(())
+            }
+            Doing::Roles(input) => {
+                if cached.owner != me {
+                    return Err(invalid(format!(
+                        "{} is {}'s to share",
+                        cached.title,
+                        self.name(&cached.owner)
+                    )));
+                }
+                let outside: Vec<&String> = input
+                    .editors
+                    .iter()
+                    .chain(&input.commenters)
+                    .filter(|l| !cached.members.contains(l))
+                    .collect();
+                if !outside.is_empty() {
+                    return Err(invalid(format!(
+                        "{} isn't in {}; who is in a doc is fixed when it's made, for now",
+                        outside
+                            .iter()
+                            .map(|l| self.name(l))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        cached.title
+                    )));
+                }
+                Ok(())
+            }
+        }
     }
+
+    /// Where a write goes, once what it writes is checked.
+    fn write_at(input: &WriteInput) -> Result<At, ActionError> {
+        if input.markdown.trim().is_empty() {
+            return Err(invalid("say what to write, as Markdown"));
+        }
+        check_markdown(&input.markdown)?;
+        Ok(match &input.at {
+            None => At::End,
+            Some(WhereInput::Named(s)) if s == "end" => At::End,
+            Some(WhereInput::Named(s)) if s == "replace" => At::Replace,
+            Some(WhereInput::After { after }) => At::AfterSection(after.clone()),
+            Some(WhereInput::Named(other)) => {
+                return Err(invalid(format!(
+                    "at is \"end\", \"replace\" or {{\"after\": \"<heading>\"}}, not {other:?}"
+                )));
+            }
+        })
+    }
+
+    /// A comment's text and anchor, as a doc takes them.
+    fn check_comment(input: &CommentInput) -> Result<(), ActionError> {
+        let text = input.text.trim();
+        if text.is_empty() || text.chars().count() > MAX_TEXT_CHARS {
+            return Err(invalid(format!(
+                "a comment is 1 to {MAX_TEXT_CHARS} characters"
+            )));
+        }
+        if let Some(anchor) = &input.anchor
+            && (anchor
+                .path
+                .as_ref()
+                .is_some_and(|p| p.len() > MAX_ANCHOR || base64::decode(p).is_none())
+                || anchor.x.is_some()
+                || anchor.y.is_some())
+        {
+            return Err(invalid(
+                "a doc comment's anchor is a Yjs relative position, base64",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A version's name, as a doc takes one.
+    fn version_name(input: &VersionInput) -> Result<String, ActionError> {
+        let name = input.name.trim().to_owned();
+        if name.is_empty() || name.chars().count() > MAX_NAME || name.chars().any(char::is_control)
+        {
+            return Err(invalid(format!(
+                "a version's name is one line of 1 to {MAX_NAME} characters"
+            )));
+        }
+        Ok(name)
+    }
+}
+
+/// What someone asks to do to a doc, of the things not everyone in it may.
+enum Doing<'a> {
+    Write,
+    Comment,
+    /// A comment, by its id.
+    Resolve(&'a str),
+    Version,
+    Roles(&'a RolesInput),
 }
 
 impl ActionProvider for DocsProvider {
@@ -1418,15 +1472,21 @@ impl ActionProvider for DocsProvider {
         action: &ActionName,
         input: &Value,
     ) -> Result<Preview, ActionError> {
-        let titled = |summary: &str, id: &str, read: bool| {
-            let (title, label) = self.about(ctx, id);
-            Preview {
+        // A change to a doc is previewed only if the action would make it:
+        // the doc is found and this person may do that to it, in the
+        // action's own words (audit 6.5). One this couldn't find, or
+        // couldn't change, used to be "Write in a doc", approved, and then
+        // refused.
+        let change = |summary: &str, id: &str, doing: Doing<'_>| -> Result<Preview, ActionError> {
+            let title = self.with_doc(Self::me(ctx), id, |cached| {
+                self.may(ctx, cached, &doing)?;
+                Ok(cached.title.clone())
+            })?;
+            Ok(Preview {
                 summary: format!("{summary} {title}"),
                 targets: vec![title],
-                // Reading a doc raises the task's label to its own.
-                label: if read { label } else { None },
                 ..Preview::default()
-            }
+            })
         };
         // A read is judged by the doc's label, so the doc has to be found
         // here: one this couldn't find used to be "a doc" with no label,
@@ -1495,8 +1555,8 @@ impl ActionProvider for DocsProvider {
             }
             WRITE => {
                 let parsed: WriteInput = parse_input(input)?;
-                check_markdown(&parsed.markdown)?;
-                let mut preview = titled("Write in", &parsed.doc, false);
+                Self::write_at(&parsed)?;
+                let mut preview = change("Write in", &parsed.doc, Doing::Write)?;
                 preview.items = parsed
                     .markdown
                     .lines()
@@ -1508,25 +1568,28 @@ impl ActionProvider for DocsProvider {
             }
             COMMENT => {
                 let parsed: CommentInput = parse_input(input)?;
-                let mut preview = titled("Comment on", &parsed.doc, false);
+                Self::check_comment(&parsed)?;
+                let mut preview = change("Comment on", &parsed.doc, Doing::Comment)?;
                 preview.items = vec![parsed.text.trim().to_owned()];
                 Ok(preview)
             }
-            RESOLVE => Ok(titled(
-                "Resolve a comment on",
-                &parse_input::<ResolveInput>(input)?.doc,
-                false,
-            )),
-            VERSION => Ok(titled(
-                "Name a version of",
-                &parse_input::<VersionInput>(input)?.doc,
-                false,
-            )),
-            ROLES => Ok(titled(
-                "Change who edits",
-                &parse_input::<RolesInput>(input)?.doc,
-                false,
-            )),
+            RESOLVE => {
+                let parsed: ResolveInput = parse_input(input)?;
+                change(
+                    "Resolve a comment on",
+                    &parsed.doc,
+                    Doing::Resolve(&parsed.comment),
+                )
+            }
+            VERSION => {
+                let parsed: VersionInput = parse_input(input)?;
+                Self::version_name(&parsed)?;
+                change("Name a version of", &parsed.doc, Doing::Version)
+            }
+            ROLES => {
+                let parsed: RolesInput = parse_input(input)?;
+                change("Change who edits", &parsed.doc, Doing::Roles(&parsed))
+            }
             other => Err(ActionError::NotFound(format!("no action {other}"))),
         }
     }

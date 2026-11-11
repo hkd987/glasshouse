@@ -970,10 +970,27 @@ impl ChatProvider {
             items,
             ..Preview::default()
         };
+        // The message a change is asked for, as the action will find it.
+        // One that isn't there, was deleted, or isn't this caller's to
+        // change is refused here, with the action's own words, before
+        // anyone is asked to approve what would then fail (audit 6.5).
+        let found = |c: &Conversation, title: &str, id: &str| -> Result<Shown, ActionError> {
+            member
+                .as_ref()
+                .and_then(|member| self.folded(&store, member, me, c).get(id).cloned())
+                .ok_or_else(|| ActionError::NotFound(format!("no message {id} in {title}")))
+        };
+        let live = |m: &Shown| -> Result<(), ActionError> {
+            if m.deleted {
+                return Err(invalid("that message was deleted"));
+            }
+            Ok(())
+        };
         Ok(match action {
             REACT => {
                 let i: ReactInput = parse_input(input)?;
                 let (c, title) = titled(&i.conversation)?;
+                live(&found(&c, &title, &i.message)?)?;
                 let (who, text) = quote(&c, &i.message).unwrap_or_default();
                 let verb = if i.on { "React" } else { "Take back" };
                 preview(
@@ -985,6 +1002,7 @@ impl ChatProvider {
             EDIT => {
                 let i: EditInput = parse_input(input)?;
                 let (c, title) = titled(&i.conversation)?;
+                self.may_change(ctx, &found(&c, &title, &i.message)?)?;
                 let (_, was) = quote(&c, &i.message).unwrap_or_default();
                 preview(
                     format!("Edit your message in {title}"),
@@ -998,12 +1016,14 @@ impl ChatProvider {
             DELETE => {
                 let i: DeleteInput = parse_input(input)?;
                 let (c, title) = titled(&i.conversation)?;
+                self.may_change(ctx, &found(&c, &title, &i.message)?)?;
                 let (_, text) = quote(&c, &i.message).unwrap_or_default();
                 preview(format!("Delete your message in {title}"), title, vec![text])
             }
             PIN => {
                 let i: PinInput = parse_input(input)?;
                 let (c, title) = titled(&i.conversation)?;
+                live(&found(&c, &title, &i.message)?)?;
                 let (who, text) = quote(&c, &i.message).unwrap_or_default();
                 let verb = if i.pinned { "Pin" } else { "Unpin" };
                 preview(

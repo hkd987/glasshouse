@@ -275,7 +275,7 @@ fn ar1_an_agent_shares_a_page_a_colleague_pins_a_comment_and_version_2_follows()
 #[test]
 fn ar2_only_its_people_open_it_and_the_console_reads_none_of_it() {
     let org = org();
-    let (_a, b, id) = shared(&org);
+    let (a, b, id) = shared(&org);
     let c = org.computer("dev-c");
     c.call("sam", APP, LIST, json!({})).unwrap();
     c.sync();
@@ -302,6 +302,33 @@ fn ar2_only_its_people_open_it_and_the_console_reads_none_of_it() {
         matches!(update, Err(ActionError::InvalidInput(_))),
         "{update:?}"
     );
+    // Audit 6.5: and she isn't asked to approve it first. The preview
+    // refuses as the action does, as it does a comment with nothing in it
+    // and an artifact that isn't there.
+    for (who, action, input) in [
+        (
+            "priya",
+            UPDATE,
+            json!({ "artifact": id, "html": "<h1>mine now</h1>", "note": "x" }),
+        ),
+        ("priya", COMMENT, json!({ "artifact": id, "text": "   " })),
+        (
+            "dana",
+            UPDATE,
+            json!({ "artifact": format!("cv-{}", "0".repeat(32)), "html": "<p>x</p>", "note": "x" }),
+        ),
+    ] {
+        let computer = if who == "priya" { &b } else { &a };
+        let refused = computer
+            .preview(who, action, input.clone())
+            .unwrap_err()
+            .to_string();
+        let done = computer
+            .call(who, AGENT, action, input)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(refused, done, "{who} {action}");
+    }
     let forged = Part::Version {
         number: 2,
         blob: blob.clone(),

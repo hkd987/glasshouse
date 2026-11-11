@@ -695,17 +695,8 @@ impl ArtifactsProvider {
 
     fn update(&self, ctx: &TaskContext, input: UpdateInput) -> Result<ActionOutput, ActionError> {
         self.ready(ctx)?;
-        let me = Self::me(ctx);
         let _turn = self.updating.lock().unwrap_or_else(PoisonError::into_inner);
-        let artifact = self.artifact(me, &input.artifact)?;
-        if artifact.owner != me {
-            return Err(invalid(format!(
-                "{} is {}'s; comment on it, or share your own version",
-                artifact.title,
-                self.name(&artifact.owner)
-            )));
-        }
-        Self::no_write_down(ctx, &artifact)?;
+        let artifact = self.to_update(ctx, &input.artifact)?;
         let html = self.content(ctx, &input.content)?;
         let number = artifact.latest().map_or(1, |v| v.number + 1);
         self.add_version(ctx, &artifact.id, number, &html, input.note.trim())?;
@@ -716,10 +707,31 @@ impl ArtifactsProvider {
         })
     }
 
-    fn comment(&self, ctx: &TaskContext, input: CommentInput) -> Result<ActionOutput, ActionError> {
-        self.ready(ctx)?;
+    /// The artifact a new version is asked for, if this caller may share
+    /// one: it's theirs, and nothing they've read is above its label. The
+    /// preview asks the same, so nobody approves an update that would
+    /// then be refused (audit 6.5).
+    fn to_update(&self, ctx: &TaskContext, id: &str) -> Result<Artifact, ActionError> {
         let me = Self::me(ctx);
-        let artifact = self.artifact(me, &input.artifact)?;
+        let artifact = self.artifact(me, id)?;
+        if artifact.owner != me {
+            return Err(invalid(format!(
+                "{} is {}'s; comment on it, or share your own version",
+                artifact.title,
+                self.name(&artifact.owner)
+            )));
+        }
+        Self::no_write_down(ctx, &artifact)?;
+        Ok(artifact)
+    }
+
+    /// The artifact a comment is asked for, if the comment may be made.
+    fn to_comment_on(
+        &self,
+        ctx: &TaskContext,
+        input: &CommentInput,
+    ) -> Result<Artifact, ActionError> {
+        let artifact = self.artifact(Self::me(ctx), &input.artifact)?;
         Self::no_write_down(ctx, &artifact)?;
         let text = input.text.trim();
         if text.is_empty() || text.chars().count() > MAX_TEXT_CHARS {
@@ -727,6 +739,14 @@ impl ArtifactsProvider {
                 "a comment is 1 to {MAX_TEXT_CHARS} characters"
             )));
         }
+        Ok(artifact)
+    }
+
+    fn comment(&self, ctx: &TaskContext, input: CommentInput) -> Result<ActionOutput, ActionError> {
+        self.ready(ctx)?;
+        let me = Self::me(ctx);
+        let artifact = self.to_comment_on(ctx, &input)?;
+        let text = input.text.trim();
         if let Some(anchor) = &input.anchor {
             let bad_point = |v: Option<u16>| v.is_some_and(|v| v > 1000);
             if anchor
@@ -1175,7 +1195,7 @@ impl ActionProvider for ArtifactsProvider {
             }
             UPDATE => {
                 let input: UpdateInput = parse_input(input)?;
-                let title = self.title_of(ctx, &input.artifact);
+                let title = self.to_update(ctx, &input.artifact)?.title;
                 Ok(Preview {
                     summary: format!("Share a new version of {title}"),
                     targets: vec![title],
@@ -1186,7 +1206,7 @@ impl ActionProvider for ArtifactsProvider {
             }
             COMMENT => {
                 let input: CommentInput = parse_input(input)?;
-                let title = self.title_of(ctx, &input.artifact);
+                let title = self.to_comment_on(ctx, &input)?.title;
                 Ok(Preview {
                     summary: format!("Comment on {title}"),
                     targets: vec![title],

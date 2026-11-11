@@ -254,6 +254,22 @@ fn ga3_every_save_is_a_version_and_going_back_is_choosing_one() {
         f.call(REVERT, json!({ "app": "my-mail", "version": 7 }))
             .is_err()
     );
+    // Audit 6.5: nobody is asked to approve going back to a version that
+    // isn't there; the preview refuses as the action does.
+    let asked = |version: u32| {
+        f.provider.preview(
+            &f.ctx,
+            &REVERT.parse().unwrap(),
+            &json!({ "app": "my-mail", "version": version }),
+        )
+    };
+    assert_eq!(
+        asked(7).unwrap_err().to_string(),
+        f.call(REVERT, json!({ "app": "my-mail", "version": 7 }))
+            .unwrap_err()
+            .to_string()
+    );
+    assert!(asked(2).unwrap().summary.starts_with("Use version 2 of "));
 }
 
 /// Mail's compose button, as its source has it.

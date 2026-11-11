@@ -312,6 +312,73 @@ fn dc4_roles_hold_on_every_computer() {
     assert!(refused.to_string().contains("not edit"), "{refused}");
 }
 
+// Audit 6.5: a preview named the doc and asked nothing else, so a person
+// was asked to approve a change that was then refused.
+#[test]
+fn dc4_a_change_someone_may_not_make_is_refused_before_anyone_is_asked_to_approve_it() {
+    let org = org();
+    let (a, _b, c, id) = planned(&org);
+    let asked = |computer: &Computer, login: &str, action: &str, input: &Value| {
+        computer
+            .docs
+            .preview(&computer.ctx(login, AGENT), &action.parse().unwrap(), input)
+    };
+    // Sam can view it. Whatever the action refuses him, its preview
+    // refuses him first, in the same words.
+    for (action, input) in [
+        (WRITE, json!({ "doc": id, "markdown": "x" })),
+        (COMMENT, json!({ "doc": id, "text": "x" })),
+        (VERSION, json!({ "doc": id, "name": "Draft 1" })),
+        (ROLES, json!({ "doc": id, "editors": [] })),
+        (RESOLVE, json!({ "doc": id, "comment": "nope" })),
+    ] {
+        let refused = asked(&c, "sam", action, &input).unwrap_err().to_string();
+        let done = c.call("sam", AGENT, action, input).unwrap_err().to_string();
+        assert_eq!(refused, done, "{action}");
+    }
+    // And what the action refuses anyone, for what was asked.
+    for (action, input) in [
+        (WRITE, json!({ "doc": id, "markdown": "   " })),
+        (WRITE, json!({ "doc": id, "markdown": "x", "at": "middle" })),
+        (COMMENT, json!({ "doc": id, "text": "" })),
+        (VERSION, json!({ "doc": id, "name": "" })),
+        (
+            ROLES,
+            json!({ "doc": id, "editors": ["priya"], "commenters": ["root"] }),
+        ),
+        (RESOLVE, json!({ "doc": id, "comment": "nope" })),
+        (
+            WRITE,
+            json!({ "doc": format!("cv-{}", "0".repeat(32)), "markdown": "x" }),
+        ),
+    ] {
+        let refused = asked(&a, "dana", action, &input).unwrap_err().to_string();
+        let done = a
+            .call("dana", AGENT, action, input)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(refused, done, "{action}");
+    }
+    // What its owner may do is previewed as it was, by the doc's name.
+    let write = asked(
+        &a,
+        "dana",
+        WRITE,
+        &json!({ "doc": id, "markdown": "## Next\n\nShip it" }),
+    )
+    .unwrap();
+    assert_eq!(write.summary, "Write in Q3 plan");
+    assert_eq!(write.items, ["## Next", "Ship it"]);
+    let roles = asked(
+        &a,
+        "dana",
+        ROLES,
+        &json!({ "doc": id, "editors": ["priya"] }),
+    )
+    .unwrap();
+    assert_eq!(roles.summary, "Change who edits Q3 plan");
+}
+
 #[test]
 fn dc6_an_agents_write_lands_after_the_section_and_is_marked_as_its() {
     let org = org();

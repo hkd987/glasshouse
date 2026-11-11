@@ -1293,13 +1293,21 @@ impl StudioProvider {
         })
     }
 
-    fn revert(&self, ctx: &TaskContext, input: RevertInput) -> Result<ActionOutput, ActionError> {
+    /// The version of their app a person asks to use again.
+    fn version_to_use(
+        &self,
+        ctx: &TaskContext,
+        input: &RevertInput,
+    ) -> Result<store::Record, ActionError> {
         let login = ctx.principal.on_behalf_of.name.as_str();
-        let record = self
-            .studio
+        self.studio
             .store()
             .record(login, &input.app, input.version)
-            .ok_or_else(|| invalid(format!("{} has no version {}", input.app, input.version)))?;
+            .ok_or_else(|| invalid(format!("{} has no version {}", input.app, input.version)))
+    }
+
+    fn revert(&self, ctx: &TaskContext, input: RevertInput) -> Result<ActionOutput, ActionError> {
+        let record = self.version_to_use(ctx, &input)?;
         let mut chosen = store::chosen(&ctx.home);
         chosen.insert(input.app.clone(), input.version);
         store::choose(&ctx.home, ctx.owner, chosen)
@@ -1748,9 +1756,13 @@ impl ActionProvider for StudioProvider {
             }
             REVERT => {
                 let input: RevertInput = parse_input(input)?;
+                // The version has to be there, as the action finds it:
+                // nobody is asked to approve going back to one that isn't
+                // (audit 6.5).
+                let record = self.version_to_use(ctx, &input)?;
                 Ok(choice_preview(
                     ctx,
-                    format!("Use version {} of {}", input.version, input.app),
+                    format!("Use version {} of {}", record.version, record.name),
                     Vec::new(),
                 ))
             }
