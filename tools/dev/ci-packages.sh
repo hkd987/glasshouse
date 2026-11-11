@@ -15,8 +15,30 @@ set -eu
 
 tries=${CI_PACKAGE_TRIES:-3}
 pause=${CI_PACKAGE_PAUSE:-20}
+# The machine's package mirrors, first choice first. GitHub's machines list
+# their cloud's own mirror, then Ubuntu's.
+mirrors=${CI_PACKAGE_MIRRORS:-/etc/apt/apt-mirrors.txt}
+
+# Takes a first-choice mirror that can't be looked up out of the list,
+# while there is another. The package tool doesn't go on to the next by
+# itself: through that outage every download failed on the first mirror's
+# name, Ubuntu's own servers answering all the while.
+skip_lost_mirror() {
+	[ -f "$mirrors" ] || return 0
+	while [ "$(grep -c . "$mirrors")" -gt 1 ]; do
+		first=$(sed -n '1s|^[a-z+]*://\([^/[:space:]]*\).*|\1|p' "$mirrors")
+		[ -n "$first" ] || return 0
+		if getent hosts "$first" >/dev/null 2>&1; then
+			return 0
+		fi
+		echo "ci-packages: $first can't be looked up; using the machine's other mirrors" >&2
+		sudo sed -i '1d' "$mirrors"
+	done
+}
+
 n=1
 while :; do
+	skip_lost_mirror
 	# `apt-get update` exits 0 with its lists unread, so the install is
 	# what tells whether the servers answered.
 	if sudo apt-get update -qq &&
