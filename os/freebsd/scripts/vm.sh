@@ -15,6 +15,8 @@
 #                      device's suspend and resume, without the firmware's sleep (see cmd_sleep_wake)
 #   clear-snapshots    destroy the tasks' `@glass-` snapshots test runs piled up (they slow every
 #                      snapshot, docs/dev/performance.md), with glassd stopped meanwhile
+#   clear-tasks [user] dismiss the finished tasks test runs left a person (demo): glassd keeps a
+#                      person's newest 200 across restarts, and a long list is a slower `task.list`
 #   console-log [-f]   print (or follow) the serial console log
 #   screendump <out.png>     save what the VM's display shows right now (boot screens, splash)
 #   point <x> <y>            move the pointer to screen pixel (x, y) (the USB tablet)
@@ -392,6 +394,20 @@ for i in \$(jot 120); do glassctl status >/dev/null 2>&1 && break; sleep 0.5; do
 echo \"destroyed \$n snapshots\""
 }
 
+# As the person: only they (and the desktop's "Clear finished") dismiss
+# their tasks. Tasks still going are left.
+cmd_clear_tasks() {
+	local user=${1:-demo}
+	[[ $user =~ ^[a-z_][a-z0-9_-]*$ ]] || die "'$user' isn't a login"
+	vm_ssh "n=0
+for id in \$(su $user -c 'glassctl --json tasks' | awk '
+	/^    \"id\": / { gsub(/[\",]/, \"\", \$2); id = \$2 }
+	/^    \"state\": \"(done|stopped|failed)\"/ { print id }'); do
+	su $user -c \"glassctl dismiss \$id\" >/dev/null 2>&1 && n=\$((n + 1))
+done
+echo \"dismissed \$n finished tasks of $user's\""
+}
+
 # A power cut: the VM restarts at once, as if unplugged (nothing is shut down
 # or written first), and boots again.
 cmd_power_cut() {
@@ -463,6 +479,7 @@ reset) cmd_reset ;;
 power-cut) cmd_power_cut ;;
 sleep-wake) cmd_sleep_wake "$@" ;;
 clear-snapshots) cmd_clear_snapshots ;;
+clear-tasks) cmd_clear_tasks "$@" ;;
 console-log)
 	[[ ${1:-} == -f ]] && exec tail -F "$VM_CONSOLE"
 	cat "$VM_CONSOLE"

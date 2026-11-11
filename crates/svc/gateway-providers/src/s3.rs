@@ -721,9 +721,21 @@ impl S3Credentials {
                 {
                     return Ok(keys.clone());
                 }
-                let keys = from_instance(http, base)?;
-                *cached = Some(keys.clone());
-                Ok(keys)
+                match from_instance(http, base) {
+                    Ok(keys) => {
+                        *cached = Some(keys.clone());
+                        Ok(keys)
+                    }
+                    // Asked early so there's time to ask again: the keys
+                    // it has work until they expire, and one failed
+                    // asking in their last minutes isn't a failed save
+                    // (audit 3.6).
+                    Err(why) => cached
+                        .as_ref()
+                        .filter(|k| k.expires.is_none_or(|at| at > now))
+                        .cloned()
+                        .ok_or(why),
+                }
             }
         }
     }
@@ -1917,6 +1929,42 @@ mod tests {
         let keys = creds.keys(datetime!(2026-10-27 17:58 UTC)).unwrap();
         assert_eq!(keys.access_key_id.expose(), "ASIASECOND");
         assert_eq!(keys.secret_access_key.expose(), "secret-2");
+    }
+
+    // Audit 3.6: keys are asked for again five minutes before they
+    // expire, and one failed asking then failed the save under way,
+    // though the keys it had were good for minutes yet.
+    #[test]
+    fn adr0065_s3_keys_still_good_are_used_when_asking_again_fails() {
+        let first = r#"{"Code":"Success","LastUpdated":"2026-10-27T11:00:00Z","Type":"AWS-HMAC","AccessKeyId":"ASIAFIRST","SecretAccessKey":"secret-1","Token":"token-1","Expiration":"2026-10-27T18:00:00Z"}"#;
+        let second = r#"{"Code":"Success","LastUpdated":"2026-10-27T17:00:00Z","Type":"AWS-HMAC","AccessKeyId":"ASIASECOND","SecretAccessKey":"secret-2","Token":"token-2","Expiration":"2026-10-28T00:00:00Z"}"#;
+        let (url, _got) = fake::serve_each(vec![
+            (200, "imds-token"),
+            (200, "glass-agent-host\n"),
+            (200, first),
+            // The metadata service has a bad moment.
+            (500, "try later"),
+            (200, "imds-token-2"),
+            (200, "glass-agent-host\n"),
+            (200, second),
+            (500, "try later"),
+        ]);
+        let creds = S3Credentials::instance_role_at(&url);
+        let key = |at| {
+            creds
+                .keys(at)
+                .map(|keys: Keys| keys.access_key_id.expose().to_owned())
+        };
+        assert_eq!(key(datetime!(2026-10-27 12:00 UTC)).unwrap(), "ASIAFIRST");
+        // Three minutes before they expire: asked again, refused, and the
+        // keys it has are still the ones to sign with.
+        assert_eq!(key(datetime!(2026-10-27 17:57 UTC)).unwrap(), "ASIAFIRST");
+        // The next call asks again, and gets the new ones.
+        assert_eq!(key(datetime!(2026-10-27 17:58 UTC)).unwrap(), "ASIASECOND");
+        // Keys that have expired are never used: with nothing newer to be
+        // had, the call fails and says why.
+        let err = key(datetime!(2026-10-28 00:00:01 UTC)).unwrap_err();
+        assert!(err.contains("metadata service"), "{err}");
     }
 
     #[test]

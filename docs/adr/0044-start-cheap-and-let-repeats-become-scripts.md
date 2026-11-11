@@ -125,9 +125,16 @@ on ADR 0018 (the gateway), 0041 (tool use, the desktop agent) and 0043
      - Loops stop at 100,000 iterations, calls at 256 deep, and tool
        calls at 100 a script.
      - A broken socket stops the script even inside a `catch`.
-     - Memory is the jail's limit. A script stuck inside one built-in,
-       such as a runaway regular expression, runs until the task is
-       stopped; its tile shows "Running a script" meanwhile.
+     - A script has a minute of its own time (`MAX_RUN`), not counting
+       its waits for tool calls, which may ask the person. The engine
+       counts each call's loops apart, so loops that call each other
+       passed no limit and a routine could run for good (audit 2.10).
+       Past the minute the run fails and says so. A thread can't be
+       stopped from outside: the script is told at its next tool call,
+       and one that makes none (a runaway regular expression) runs on in
+       its sandbox until its task ends, and no other script runs in
+       that task meanwhile.
+     - Memory is the jail's limit.
      - Whole numbers cross as integers, as tools' schemas ask.
      - A script may `return` its result or `await` its calls, as models
        write them: either runs as an async function's body. Haiku's

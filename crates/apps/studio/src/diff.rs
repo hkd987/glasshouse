@@ -70,14 +70,47 @@ enum Edit {
 /// The shortest edit script from `a` to `b` (Myers, 1986), or `None` past
 /// [`MAX_EDITS`].
 fn script(a: &[&str], b: &[&str]) -> Option<Vec<Edit>> {
+    script_counted(a, b).map(|(edits, _)| edits)
+}
+
+/// [`script`], and how many numbers the search kept to walk back through.
+///
+/// The search saves where it stood after each step. It saved the whole of
+/// its working row every time, 8,003 numbers of eight bytes whatever the
+/// step: 256 MB for one file at the limit, and 190 KB for a file with
+/// three changed lines (audit 2.10). A step `d` only ever reads the
+/// `2d - 1` numbers the step before it wrote, so those are what is kept,
+/// as `u32` (a line number).
+fn script_counted(a: &[&str], b: &[&str]) -> Option<(Vec<Edit>, usize)> {
+    // A file added or removed whole: nothing to search for, and it was the
+    // costliest search there is, every line an edit.
+    if a.is_empty() || b.is_empty() {
+        let edits = (0..a.len())
+            .map(Edit::Delete)
+            .chain((0..b.len()).map(Edit::Insert))
+            .collect();
+        return Some((edits, 0));
+    }
     let (n, m) = (a.len() as isize, b.len() as isize);
     let max = (n + m).min(MAX_EDITS as isize);
     let offset = max + 1;
     let mut v = vec![0isize; (2 * max + 3) as usize];
-    let mut trace: Vec<Vec<isize>> = Vec::new();
-    let mut found = false;
+    // `fronts[d]`: the row as step `d` found it, diagonals `-(d - 1)` to
+    // `d - 1`.
+    let mut fronts: Vec<Vec<u32>> = Vec::new();
+    let front = |v: &[isize], d: isize| -> Vec<u32> {
+        if d == 0 {
+            return Vec::new();
+        }
+        let (from, to) = ((offset - (d - 1)) as usize, (offset + (d - 1)) as usize);
+        v[from..=to]
+            .iter()
+            .map(|x| u32::try_from(*x).unwrap_or(u32::MAX))
+            .collect()
+    };
+    let mut found = None;
     for d in 0..=max {
-        trace.push(v.clone());
+        fronts.push(front(&v, d));
         let mut k = -d;
         while k <= d {
             let at = (k + offset) as usize;
@@ -93,32 +126,30 @@ fn script(a: &[&str], b: &[&str]) -> Option<Vec<Edit>> {
             }
             v[at] = x;
             if x >= n && y >= m {
-                found = true;
+                found = Some(d);
                 break;
             }
             k += 2;
         }
-        if found {
-            trace.push(v.clone());
+        if found.is_some() {
             break;
         }
     }
-    if !found {
-        return None;
-    }
+    let found = found?;
+    let kept = fronts.iter().map(Vec::len).sum();
     // Walk back through the saved fronts.
     let mut edits = Vec::new();
     let (mut x, mut y) = (n, m);
-    for d in (1..trace.len() as isize - 1).rev() {
-        let v = &trace[d as usize];
+    for d in (1..=found).rev() {
+        let row = &fronts[d as usize];
+        let at = |k: isize| row[(k + d - 1) as usize] as isize;
         let k = x - y;
-        let at = |k: isize| (k + offset) as usize;
-        let prev_k = if k == -d || (k != d && v[at(k - 1)] < v[at(k + 1)]) {
+        let prev_k = if k == -d || (k != d && at(k - 1) < at(k + 1)) {
             k + 1
         } else {
             k - 1
         };
-        let prev_x = v[at(prev_k)];
+        let prev_x = at(prev_k);
         let prev_y = prev_x - prev_k;
         while x > prev_x && y > prev_y {
             x -= 1;
@@ -139,7 +170,7 @@ fn script(a: &[&str], b: &[&str]) -> Option<Vec<Edit>> {
         edits.push(Edit::Same(x as usize, y as usize));
     }
     edits.reverse();
-    Some(edits)
+    Some((edits, kept))
 }
 
 /// `old` to `new` as unified hunks: the text, lines added, lines removed.
@@ -262,6 +293,113 @@ mod tests {
         );
         assert!(main.unified.contains("-line 19\n"), "{}", main.unified);
         assert_eq!(out[2].unified, "@@ -0,0 +1,1 @@\n+y\n");
+    }
+
+    /// `edits` applied to `a`: what they make of it.
+    fn applied<'a>(edits: &[Edit], a: &[&'a str], b: &[&'a str]) -> Vec<&'a str> {
+        edits
+            .iter()
+            .filter_map(|edit| match *edit {
+                Edit::Same(x, y) => {
+                    assert_eq!(a[x], b[y]);
+                    Some(a[x])
+                }
+                Edit::Insert(y) => Some(b[y]),
+                Edit::Delete(_) => None,
+            })
+            .collect()
+    }
+
+    /// The longest run of lines `a` and `b` share in order, the slow way.
+    fn shared(a: &[&str], b: &[&str]) -> usize {
+        let mut row = vec![0usize; b.len() + 1];
+        for x in a {
+            let mut diagonal = 0;
+            for (j, y) in b.iter().enumerate() {
+                let up = row[j + 1];
+                row[j + 1] = if x == y { diagonal + 1 } else { up.max(row[j]) };
+                diagonal = up;
+            }
+        }
+        row[b.len()]
+    }
+
+    // Audit 2.10: the search kept its whole working row at every step,
+    // 256 MB for one file at the limit.
+    #[test]
+    fn ga8_the_search_keeps_only_what_it_reads_back() {
+        // Every pair of short files over three kinds of line: the edits
+        // make the new file of the old, and none fewer would.
+        let lines = ["a", "b", "c"];
+        let mut files: Vec<Vec<&str>> = vec![Vec::new()];
+        for len in 1..=5 {
+            for n in 0..3usize.pow(len) {
+                files.push((0..len).map(|i| lines[n / 3usize.pow(i) % 3]).collect());
+            }
+        }
+        for a in &files {
+            for b in files.iter().step_by(7) {
+                let (edits, _) = script_counted(a, b).unwrap();
+                assert_eq!(&applied(&edits, a, b), b, "{a:?} to {b:?}");
+                let changed = edits
+                    .iter()
+                    .filter(|e| !matches!(e, Edit::Same(..)))
+                    .count();
+                assert_eq!(
+                    changed,
+                    a.len() + b.len() - 2 * shared(a, b),
+                    "{a:?} to {b:?}"
+                );
+            }
+        }
+
+        // Three changed lines in a long file: a few numbers kept, where it
+        // was four rows of 8,003.
+        let old: Vec<String> = (0..6000).map(|n| format!("line {n}")).collect();
+        let mut new = old.clone();
+        new[10] = "changed".into();
+        new.remove(3000);
+        let (a, b): (Vec<&str>, Vec<&str>) = (
+            old.iter().map(String::as_str).collect(),
+            new.iter().map(String::as_str).collect(),
+        );
+        let (edits, kept) = script_counted(&a, &b).unwrap();
+        assert_eq!(applied(&edits, &a, &b), b);
+        assert_eq!(
+            edits
+                .iter()
+                .filter(|e| !matches!(e, Edit::Same(..)))
+                .count(),
+            3
+        );
+        assert!(kept <= 9, "{kept} numbers kept for three edits");
+
+        // At the limit: every line of 2,000 replaced. A sixteenth of what
+        // it kept, in numbers half the size.
+        let other: Vec<String> = (0..2000).map(|n| format!("other {n}")).collect();
+        let (a, b): (Vec<&str>, Vec<&str>) = (
+            old[..2000].iter().map(String::as_str).collect(),
+            other.iter().map(String::as_str).collect(),
+        );
+        let (edits, kept) = script_counted(&a, &b).unwrap();
+        assert_eq!(applied(&edits, &a, &b), b);
+        assert!(kept <= 4000 * 4000, "{kept}");
+        // One more edit than the limit reads as replaced whole.
+        let (a, b): (Vec<&str>, Vec<&str>) = (
+            old[..2001].iter().map(String::as_str).collect(),
+            other.iter().map(String::as_str).collect(),
+        );
+        assert_eq!(script_counted(&a, &b), None);
+
+        // A file added or removed whole is searched for nothing, however
+        // long: it was the costliest search of all.
+        let (edits, kept) = script_counted(&[], &b).unwrap();
+        assert_eq!((edits.len(), kept), (2000, 0));
+        assert!(edits.iter().all(|e| matches!(e, Edit::Insert(_))));
+        let long: Vec<&str> = old.iter().map(String::as_str).collect();
+        let (edits, kept) = script_counted(&long, &[]).unwrap();
+        assert_eq!((edits.len(), kept), (6000, 0));
+        assert!(edits.iter().all(|e| matches!(e, Edit::Delete(_))));
     }
 
     #[test]

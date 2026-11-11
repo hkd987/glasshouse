@@ -20,7 +20,7 @@ goes over its budget:
 | glassd's check of the system's files at its start, before the first agent (ADR 0064) | none yet; 2 s on a laptop | EP-1 | 7.0–7.6 s for 4,195 files under emulation (`tests/system/verify-vm.sh`, the files in memory; 48 s listing them from disk the first time). No laptop number yet |
 | Start to the agent's first step | 4 s | ceiling | 1.7 / 2.6 s; 1.8–2.0 / 2.2–2.4 s on 2026-10-23, the old build 2.1 / 2.4 s. The first run after the VM boots is slower (3.7 / 5.7 s): its emulated CPU translates every program afresh |
 | Undo preview (`task.undo` dry run) | 150 ms | ceiling | 6–9 / 58–94 ms (0.8–1.3 s before ADR 0017) |
-| Tiles while two busy agents run (`load`) | 100 ms | ceiling | 5–6 / 13–43 ms |
+| Tiles while two busy agents run (`load`) | 100 ms | ceiling | 5–6 / 13–43 ms; 14 / 55 ms on 2026-11-11. The list is every finished task the person has, 200 at most, kept across restarts since 2026-11: with 167 of them a call was 33 / 43 ms idle and 42–43 / 67–122 ms here, over in one run of three. A long-lived dev VM gathers them; `vm.sh clear-tasks` dismisses them (then wait a minute: their snapshots go in the background) |
 | Expanded view while two busy agents run (`load`) | 200 ms | AW-10 | 5–8 / 19–117 ms |
 
 The VM emulates its CPU (no KVM in the cloud containers), so it's several

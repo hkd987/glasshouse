@@ -249,3 +249,79 @@ fn adr0044_scripts_as_models_write_them() {
     assert!(err.starts_with("Error: no invoices"), "{err}");
     assert!(err.contains(":2:7"), "line 2, as the script has it: {err}");
 }
+
+// Audit 2.10: the engine counts each call's loops apart, so loops that
+// call each other ran for as long as anyone waited. All in one test: the
+// count of scripts left running is the process's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adr0044_a_script_has_a_minute_of_its_own_time_and_waits_dont_count() {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    let answer = |name: String, _input: Value| async move {
+        Ok(Reply {
+            ok: true,
+            text: name,
+            data: Value::Null,
+        })
+    };
+    let today = || "2026-11-11".to_owned();
+
+    // Each call waits longer than the script has in all, as a call does
+    // when it asks the person: that isn't the script's time.
+    let slow = |name: String, _input: Value| async move {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        Ok(Reply {
+            ok: true,
+            text: name,
+            data: Value::Null,
+        })
+    };
+    let patient = "call('a', {}); call('b', {}); call('c', {}).text";
+    let ran = run_with(patient.into(), today(), Duration::from_millis(300), slow)
+        .await
+        .unwrap();
+    assert_eq!((ran.result, ran.calls), (json!("c"), 3));
+
+    // Loops that call each other: no one loop passes the engine's limit,
+    // and together they'd take longer than anyone would wait. A tool call
+    // now and then, as a real script makes.
+    let endless = "function f(n) {
+        for (let i = 0; i < 20000; i++) { if (n < 40) { f(n + 1); } }
+        call('progress', {});
+    }
+    f(0);";
+    let began = Instant::now();
+    let err = run_with(endless.into(), today(), Duration::from_millis(500), answer)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ScriptError::Script(why) if why.contains("without finishing")),
+        "{err}"
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        began.elapsed()
+    );
+
+    // Told at its next tool call, its thread ends; until it has, no other
+    // script runs here.
+    let waited = Instant::now();
+    while LEFT_RUNNING.load(Ordering::SeqCst) > 0 {
+        assert!(waited.elapsed() < Duration::from_secs(60), "it never ended");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    LEFT_RUNNING.fetch_add(1, Ordering::SeqCst);
+    let refused = run_with("1 + 1".into(), today(), MAX_RUN, answer)
+        .await
+        .unwrap_err();
+    LEFT_RUNNING.fetch_sub(1, Ordering::SeqCst);
+    assert!(refused.to_string().contains("still running"), "{refused}");
+
+    // And once it has, the next one does.
+    let ran = run_with("1 + 1".into(), today(), MAX_RUN, answer)
+        .await
+        .unwrap();
+    assert_eq!(ran.result, json!(2));
+}

@@ -932,6 +932,7 @@ dependencies = [
  "glass-types",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -102,3 +102,7 @@ no sysroot (`make freebsd-sysroot`), glassd refusing a bad config
 (`make vm-run CMD="glassd --check"`), or a deploy that hung on a daemon.
 `perf` over budget on "action with snapshot first" or "take over": the VM
 has piled up test snapshots; `os/freebsd/scripts/vm.sh clear-snapshots`.
+`load` over budget on "tiles": the demo person has piled up finished tasks
+(up to 200 are kept, across restarts); `os/freebsd/scripts/vm.sh
+clear-tasks`, wait a minute, run it again. The first run after a deploy is
+the slowest.

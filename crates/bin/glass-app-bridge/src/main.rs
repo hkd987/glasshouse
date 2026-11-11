@@ -229,8 +229,10 @@ struct Bridge {
     /// Installed apps whose worker may run WebAssembly, for speech (ADR
     /// 0045 T2): their own files, never an edition's or a person's.
     speech: BTreeSet<String>,
-    /// One session per app, opened on first use.
-    sessions: Mutex<BTreeMap<String, Arc<Open>>>,
+    /// One session per app, opened on first use. Each app has a place of
+    /// its own: the map is held only to find it, never while a session
+    /// opens (audit 3.6: one app opening held up every other app's calls).
+    sessions: Mutex<BTreeMap<String, Place>>,
     /// The person's own apps' and org apps' files (ADR 0032), from glassd:
     /// asked for again with each page, so a new version shows on reload.
     own: Mutex<BTreeMap<String, Arc<AppFiles>>>,
@@ -240,6 +242,10 @@ struct Open {
     client: Client,
     session: AppSession,
 }
+
+/// Where one app's session is kept: none until it first opens, and held
+/// while it does.
+type Place = Arc<Mutex<Option<Arc<Open>>>>;
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -554,10 +560,23 @@ impl Bridge {
         }
     }
 
-    /// The app's session, opening one if it has none.
+    /// Where `app`'s session is kept.
+    async fn place(&self, app: &str) -> Place {
+        Arc::clone(
+            self.sessions
+                .lock()
+                .await
+                .entry(app.to_owned())
+                .or_default(),
+        )
+    }
+
+    /// The app's session, opening one if it has none. The app's other
+    /// calls wait for it to open; other apps' don't.
     async fn session(&self, app: &str) -> Result<Arc<Open>, Relay> {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(open) = sessions.get(app) {
+        let place = self.place(app).await;
+        let mut place = place.lock().await;
+        if let Some(open) = place.as_ref() {
             return Ok(Arc::clone(open));
         }
         let client = Client::connect(&self.socket)
@@ -568,8 +587,18 @@ impl Bridge {
             .await
             .map_err(relay_error)?;
         let open = Arc::new(Open { client, session });
-        sessions.insert(app.to_owned(), Arc::clone(&open));
+        *place = Some(Arc::clone(&open));
         Ok(open)
+    }
+
+    /// Forgets `gone`, a session of `app`'s that glassd no longer has,
+    /// unless another call has opened a new one since.
+    async fn forget(&self, app: &str, gone: &Arc<Open>) {
+        let place = self.place(app).await;
+        let mut place = place.lock().await;
+        if place.as_ref().is_some_and(|open| Arc::ptr_eq(open, gone)) {
+            *place = None;
+        }
     }
 
     /// One call through the app's session. A session glassd no longer has
@@ -592,7 +621,7 @@ impl Bridge {
                 Err(ClientError::Closed) if attempt == 0 => {}
                 Err(e) => return Err(relay_error(e)),
             }
-            self.sessions.lock().await.remove(app);
+            self.forget(app, &open).await;
         }
         Err(Relay::Down)
     }
@@ -824,6 +853,125 @@ fn content_type(rel: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// glassd, as far as opening an app goes: `slow` isn't answered until
+    /// the test says, any other app at once.
+    struct Glassd {
+        release: tokio::sync::Notify,
+        opened: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl glass_rpc::Handler for Glassd {
+        async fn call(
+            &self,
+            _conn: Arc<glass_rpc::Connection>,
+            method: String,
+            params: Value,
+        ) -> Result<Value, glass_rpc::RpcError> {
+            assert_eq!(method, app_methods::APP_OPEN);
+            let app = params["app"].as_str().unwrap_or_default().to_owned();
+            self.opened
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(app.clone());
+            if app == "slow" {
+                self.release.notified().await;
+            }
+            Ok(json!({
+                "session": glass_types::TaskId::new(),
+                "app": app,
+                "name": app,
+                "version": "1",
+                "user": "demo",
+                "actions": [],
+            }))
+        }
+    }
+
+    // Audit 3.6: the map of every app's session was held while one app's
+    // session opened, so every other app's calls waited for it.
+    #[tokio::test]
+    async fn ui5_one_app_opening_doesnt_hold_up_the_others() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let socket = dir.path().join("glassd.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap_or_else(|e| panic!("{e}"));
+        let glassd = Arc::new(Glassd {
+            release: tokio::sync::Notify::new(),
+            opened: std::sync::Mutex::default(),
+        });
+        tokio::spawn(glass_rpc::serve(listener, Arc::clone(&glassd)));
+        let bridge = Arc::new(Bridge {
+            socket,
+            port: 0,
+            apps: BTreeMap::new(),
+            speech: BTreeSet::new(),
+            sessions: Mutex::new(BTreeMap::new()),
+            own: Mutex::new(BTreeMap::new()),
+        });
+
+        // Mail's page asks first, and glassd takes its time over it.
+        let slow = {
+            let bridge = Arc::clone(&bridge);
+            tokio::spawn(async move {
+                bridge
+                    .session("slow")
+                    .await
+                    .map(|open| open.session.name.clone())
+            })
+        };
+        let opening = || {
+            glassd
+                .opened
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        };
+        while !opening().contains(&"slow".to_owned()) {
+            tokio::task::yield_now().await;
+        }
+        // Calendar's session opens meanwhile, and a second call of
+        // Calendar's uses it.
+        let within = std::time::Duration::from_secs(10);
+        let fast = tokio::time::timeout(within, bridge.session("fast"))
+            .await
+            .unwrap_or_else(|_| panic!("another app's session waited for the slow one"))
+            .unwrap_or_else(|_| panic!("the fast app didn't open"));
+        let again = tokio::time::timeout(within, bridge.session("fast"))
+            .await
+            .unwrap_or_else(|_| panic!("a second call waited"))
+            .unwrap_or_else(|_| panic!("the fast app's session was lost"));
+        assert!(Arc::ptr_eq(&fast, &again));
+        assert!(!slow.is_finished());
+
+        // A session glassd no longer has is forgotten, once: a call that
+        // comes back late with the old one doesn't close the new.
+        bridge.forget("fast", &fast).await;
+        let reopened = bridge
+            .session("fast")
+            .await
+            .unwrap_or_else(|_| panic!("reopen"));
+        assert!(!Arc::ptr_eq(&fast, &reopened));
+        bridge.forget("fast", &fast).await;
+        let kept = bridge
+            .session("fast")
+            .await
+            .unwrap_or_else(|_| panic!("kept"));
+        assert!(Arc::ptr_eq(&reopened, &kept));
+
+        // Two calls of the slow app's: one open between them.
+        let second = {
+            let bridge = Arc::clone(&bridge);
+            tokio::spawn(async move { bridge.session("slow").await.is_ok() })
+        };
+        // Released whenever the open comes to wait, before or after now.
+        glassd.release.notify_one();
+        assert_eq!(
+            slow.await.unwrap_or_else(|e| panic!("{e}")).ok().as_deref(),
+            Some("slow")
+        );
+        assert!(second.await.unwrap_or_else(|e| panic!("{e}")));
+        assert_eq!(opening(), ["slow", "fast", "fast"]);
+    }
 
     fn apps() -> BTreeMap<String, PathBuf> {
         ["mail", "calendar"]

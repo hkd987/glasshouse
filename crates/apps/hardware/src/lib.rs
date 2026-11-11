@@ -1170,18 +1170,25 @@ mod tests {
         assert_eq!(proposed.data["state"], "staged");
         assert_eq!(kernel.applied.lock().unwrap().len(), 1);
 
-        // The same patch built again is the same build, and the newest.
-        let again = call(
+        // One more build, and the oldest of the four goes: never the one
+        // just made. (A patch built again is a build of its own: a bundle
+        // carries when it was signed.)
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let one_more = call(
             &provider,
             &ctx,
             PATCH_BUILD,
             build_input("fixed, attempt 2"),
         )
         .unwrap();
-        assert_eq!(again.data["build"].as_str().unwrap(), made[2]);
-        call(&provider, &ctx, PATCH_BUILD, build_input("fixed, one more")).unwrap();
-        assert!(builds.join(format!("{}.bundle.json", made[2])).exists());
-        assert!(!builds.join(format!("{}.bundle.json", made[3])).exists());
+        let one_more = one_more.data["build"].as_str().unwrap().to_owned();
+        assert!(builds.join(format!("{one_more}.bundle.json")).exists());
+        if one_more != made[2] {
+            assert!(!builds.join(format!("{}.bundle.json", made[2])).exists());
+        }
+        assert!(builds.join(format!("{}.bundle.json", made[3])).exists());
+        let kept = std::fs::read_dir(&builds).unwrap().count();
+        assert_eq!(kept, 2 * BUILDS_KEPT, "four builds, each with its request");
     }
 
     /// IT's console, as a managed computer reaches it.

@@ -13,7 +13,11 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use boa_engine::builtins::promise::PromiseState;
 use boa_engine::module::IdleModuleLoader;
@@ -26,6 +30,9 @@ use serde_json::{Value, json};
 
 /// Tool calls one script may make.
 pub const MAX_CALLS: u32 = 100;
+/// A script's own time, not counting its waits for tool calls: what one
+/// does between calls is arithmetic on what they returned.
+pub const MAX_RUN: Duration = Duration::from_secs(60);
 /// Iterations of any one loop, and calls deep: a runaway script stops.
 const MAX_LOOP: u64 = 100_000;
 const MAX_RECURSION: usize = 256;
@@ -328,41 +335,150 @@ impl Tools for Bridge {
 
 /// Runs `source` for `agent`, on a thread of its own, its calls made on
 /// the agent's task socket to the tools in `allowed` only; any other is a
-/// failed call the script sees.
+/// failed call the script sees. It has [`MAX_RUN`] of its own time.
 pub async fn run_on(
     agent: &Agent,
     source: String,
     today: String,
     allowed: BTreeSet<String>,
 ) -> Result<Run, ScriptError> {
-    let (calls, mut requests) = tokio::sync::mpsc::channel::<Request>(1);
-    let mut worker =
-        tokio::task::spawn_blocking(move || run(&source, &today, Box::new(Bridge(calls))));
-    loop {
-        tokio::select! {
-            request = requests.recv() => {
-                let Some((name, input, back)) = request else { break };
-                let reply = if allowed.contains(&name) {
-                    agent.call(&name, input).await.map_err(|e| e.to_string()).map(|r| Reply {
-                        ok: !r.is_error,
-                        text: r.text(),
-                        data: r.structured_content.unwrap_or(Value::Null),
-                    })
-                } else {
-                    Ok(Reply {
-                        ok: false,
-                        text: format!("There's no tool {name:?} here."),
-                        data: Value::Null,
-                    })
-                };
-                let _ = back.send(reply);
+    run_with(source, today, MAX_RUN, |name, input| {
+        let allowed = allowed.contains(&name);
+        async move {
+            if !allowed {
+                return Ok(Reply {
+                    ok: false,
+                    text: format!("There's no tool {name:?} here."),
+                    data: Value::Null,
+                });
             }
-            done = &mut worker => {
-                return done.map_err(|e| ScriptError::Host(e.to_string()))?;
+            agent
+                .call(&name, input)
+                .await
+                .map_err(|e| e.to_string())
+                .map(|r| Reply {
+                    ok: !r.is_error,
+                    text: r.text(),
+                    data: r.structured_content.unwrap_or(Value::Null),
+                })
+        }
+    })
+    .await
+}
+
+/// Scripts given up on whose threads haven't ended yet.
+static LEFT_RUNNING: AtomicUsize = AtomicUsize::new(0);
+
+/// Where a script's thread and whoever waits for it agree on how it
+/// went: given up on, ended, or both.
+#[derive(Default)]
+struct Fate {
+    given_up: bool,
+    ended: bool,
+}
+
+/// A script's thread: counted as left running from when its time is up
+/// until it ends.
+struct Running(Arc<Mutex<Fate>>);
+
+impl Drop for Running {
+    /// The thread's end.
+    fn drop(&mut self) {
+        let mut fate = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        fate.ended = true;
+        if fate.given_up {
+            LEFT_RUNNING.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// A script's time is up: counted as left running, unless it has ended.
+fn give_up(fate: &Mutex<Fate>) {
+    let mut fate = fate.lock().unwrap_or_else(PoisonError::into_inner);
+    if !fate.ended && !fate.given_up {
+        fate.given_up = true;
+        LEFT_RUNNING.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// [`run_on`], its calls made by `call` and its own time `limit`.
+///
+/// The engine stops a loop after [`MAX_LOOP`] turns and calls
+/// [`MAX_RECURSION`] deep, but it counts each call's loops apart, so loops
+/// that call each other run for as long as anyone waits (audit 2.10): a
+/// routine that never ended, holding its task. A script's own time is
+/// what the clock here counts, between its tool calls: a call may wait
+/// for the person to answer an ask, for as long as that takes.
+///
+/// A thread can't be stopped from outside. One whose time is up is told
+/// at its next tool call (the call fails, and that ends the script) and
+/// otherwise runs on, in its task's sandbox and under its limits, until
+/// its task ends; while it does, this process runs no other script.
+async fn run_with<F, Fut>(
+    source: String,
+    today: String,
+    limit: Duration,
+    mut call: F,
+) -> Result<Run, ScriptError>
+where
+    F: FnMut(String, Value) -> Fut,
+    Fut: Future<Output = Result<Reply, String>>,
+{
+    if LEFT_RUNNING.load(Ordering::SeqCst) > 0 {
+        return Err(ScriptError::Script(
+            "an earlier script here ran past its time and is still running, so no other \
+             can run in this task"
+                .into(),
+        ));
+    }
+    let (calls, mut requests) = tokio::sync::mpsc::channel::<Request>(1);
+    let (done, mut finished) = tokio::sync::oneshot::channel();
+    let fate = Arc::new(Mutex::new(Fate::default()));
+    let running = Running(Arc::clone(&fate));
+    // A thread of its own, not one of the runtime's: the process can end
+    // while a script given up on still runs.
+    std::thread::Builder::new()
+        .name("glass-script".into())
+        .spawn(move || {
+            let _counted = running;
+            let _ = done.send(run(&source, &today, Box::new(Bridge(calls))));
+        })
+        .map_err(|e| ScriptError::Host(format!("no thread for the script: {e}")))?;
+    let mut left = limit;
+    loop {
+        let began = Instant::now();
+        let next = tokio::time::timeout(left, async {
+            tokio::select! {
+                // First, so a script that finished in time is never
+                // counted as out of it.
+                biased;
+                done = &mut finished => Err(done),
+                request = requests.recv() => Ok(request),
+            }
+        })
+        .await;
+        left = left.saturating_sub(began.elapsed());
+        match next {
+            Ok(Err(done)) => {
+                return done
+                    .map_err(|_| ScriptError::Host("the script's thread stopped".into()))?;
+            }
+            Ok(Ok(Some((name, input, back)))) => {
+                // Not on the script's clock.
+                let _ = back.send(call(name, input).await);
+            }
+            // The script is done with its tools: its result is on its way.
+            Ok(Ok(None)) => {}
+            Err(_) => {
+                give_up(&fate);
+                return Err(ScriptError::Script(format!(
+                    "the script ran for more than {} seconds of its own time without finishing; \
+                     a loop that doesn't end?",
+                    limit.as_secs().max(1)
+                )));
             }
         }
     }
-    worker.await.map_err(|e| ScriptError::Host(e.to_string()))?
 }
 
 #[cfg(test)]
