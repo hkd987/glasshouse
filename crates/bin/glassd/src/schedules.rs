@@ -324,6 +324,7 @@ mod tests {
             failures: 0,
             last: None,
             created_at: glass_types::Timestamp::now(),
+            other: std::collections::BTreeMap::new(),
         }
     }
 
@@ -431,6 +432,8 @@ mod tests {
         let mut made = schedule(true);
         made.id = format!("s{:012x}", rand_id());
         made.version = 1;
+        // With something a version on might add to it.
+        made.other.insert("catch_up".into(), true.into());
         a.make(&made).unwrap();
         assert_eq!(
             b.make(&made),
@@ -462,7 +465,9 @@ mod tests {
         assert!(a.of(&made.owner).unwrap().iter().any(|s| s.id == made.id));
         let due = b.due(made.next_run).unwrap();
         assert!(due.iter().any(|s| s.id == made.id), "{due:?}");
-        let mut claim = made.clone();
+        // The claim is what a host read, a version on: with it goes what
+        // this version doesn't know (audit 4.11).
+        let mut claim = due.into_iter().find(|s| s.id == made.id).unwrap();
         claim.version = 2;
         claim.next_run += 86_400;
         a.replace(&claim, 1).unwrap();
@@ -470,6 +475,13 @@ mod tests {
             b.replace(&claim, 1),
             Err(StoreError::Changed),
             "one claim holds"
+        );
+        let raw = a.client.get(&table, &key(&made.owner, &made.id)).unwrap();
+        let body: Value =
+            serde_json::from_str(raw.unwrap()["body"]["S"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            (&body["version"], &body["catch_up"]),
+            (&json!(2), &json!(true))
         );
         let mut off = claim.clone();
         off.version = 3;

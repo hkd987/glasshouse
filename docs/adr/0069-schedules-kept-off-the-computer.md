@@ -155,9 +155,14 @@ nor add schedules there. An item damaged by hand did the same for good.
   unreadable, it is an error as before, never read as less than it holds
   and written over.
 
-Still open from the same finding: the body is written whole, so a host
-that reads a schedule with a field it doesn't know and claims its run
-writes it back without that field; and nothing says which version of the
+- A host keeps what it doesn't know in a schedule it does read, and
+  writes it back with the rest (`StoredSchedule::other`). A claim writes
+  the whole schedule, and an older host wrote it back without what the
+  newer one had added. This is for the schedule's own fields: one added
+  inside who it runs as, or inside its last run, an older host still
+  drops when it writes those.
+
+Still open from the same finding: nothing says which version of the
 format an item is.
 
 `tests/local-aws/schedules.sh` runs its two hosts with such a schedule in

@@ -16,6 +16,7 @@
 //!   it off, with why; turning it on again forgets them.
 //! - A person keeps [`SCHEDULES_MAX`] on.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -69,6 +70,13 @@ pub struct StoredSchedule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<LastRun>,
     pub created_at: Timestamp,
+    /// What a newer version wrote here that this one doesn't know: kept,
+    /// and written back with the rest (audit 4.11). Hosts are a version
+    /// apart while an update goes round, and a host claims a run by
+    /// writing the whole schedule: an older one wrote it back without the
+    /// newer one's fields.
+    #[serde(flatten)]
+    pub other: BTreeMap<String, serde_json::Value>,
 }
 
 /// Who a schedule runs as: what a host that never saw them needs to act
@@ -447,6 +455,7 @@ impl Runtime {
             failures: 0,
             last: None,
             created_at: at(now),
+            other: BTreeMap::new(),
         };
         blocking(|| store.make(&made)).map_err(|e| failed(e.to_string()))?;
         self.schedule_event(
@@ -861,6 +870,7 @@ mod tests {
             failures: 0,
             last: None,
             created_at: Timestamp::now(),
+            other: BTreeMap::new(),
         }
     }
 
@@ -920,5 +930,46 @@ mod tests {
         assert!(!store.remove("p2", "s1").unwrap(), "only its owner's");
         assert!(store.remove("p1", "s1").unwrap());
         assert!(store.of("p1").unwrap().is_empty());
+    }
+
+    // Audit 4.11: hosts are a version apart while an update goes round,
+    // and a claim writes the whole schedule. An older host wrote it back
+    // without what the newer one had added.
+    #[test]
+    fn a_claim_writes_back_what_a_newer_version_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schedules.json");
+        // As a version on might keep it: two things this one doesn't know.
+        let mut newer = serde_json::to_value(kept("s1", 100)).unwrap();
+        newer["catch_up"] = true.into();
+        newer["limits"] = serde_json::json!({ "minutes": 30, "tools": ["files.read"] });
+        std::fs::write(&path, serde_json::to_vec(&[&newer]).unwrap()).unwrap();
+        let store = FileSchedules::new(path.clone());
+        let seen = store.due(100).unwrap().remove(0);
+        assert_eq!(seen.other.len(), 2, "{:?}", seen.other);
+        // This host claims the run, as `take_turn` does: what it read,
+        // a version on, with what it changed.
+        let mut claim = seen.clone();
+        claim.version += 1;
+        claim.next_run = 200;
+        claim.last = Some(LastRun {
+            at: 100,
+            outcome: "running".into(),
+            task: None,
+            note: String::new(),
+        });
+        store.replace(&claim, seen.version).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let written = &written[0];
+        assert_eq!(written["version"], 2);
+        assert_eq!(written["last"]["outcome"], "running");
+        assert_eq!(written["catch_up"], newer["catch_up"]);
+        assert_eq!(written["limits"], newer["limits"]);
+        // And nothing is added to one that has nothing more.
+        let plain = serde_json::to_value(kept("s2", 100)).unwrap();
+        let read: StoredSchedule = serde_json::from_value(plain.clone()).unwrap();
+        assert!(read.other.is_empty());
+        assert_eq!(serde_json::to_value(&read).unwrap(), plain);
     }
 }
