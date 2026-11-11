@@ -298,6 +298,11 @@ pub struct State {
     pub fleet: FleetState,
     /// The fleet changed since it was last written.
     pub fleet_dirty: bool,
+    /// Computers were heard from since the fleet was written: their
+    /// last-seen times and reports, nothing IT did. Written at most once
+    /// a minute ([`State::save_fleet`]).
+    fleet_heard: bool,
+    fleet_written: std::time::Instant,
     /// Model credits (ADR 0039): what the org bought, and its key.
     pub credits: crate::credits::Credits,
     /// What each computer spent on them.
@@ -356,6 +361,8 @@ impl State {
             chat: read_json(&dir.join("chat.json"))?.unwrap_or_default(),
             fleet: read_json(&dir.join("fleet.json"))?.unwrap_or_default(),
             fleet_dirty: false,
+            fleet_heard: false,
+            fleet_written: std::time::Instant::now(),
             credits: crate::credits::Credits::load(dir)?,
             usage: crate::credits::Usage::load(dir)?,
             support: std::sync::Mutex::new(None),
@@ -1054,9 +1061,12 @@ impl State {
         self.kept(before, done)
     }
 
-    /// A reviewed patch's bundle, for a computer, only at the revision the
-    /// signed catalog gives computers.
-    pub fn patch_bundle(&self, fetch: &PatchFetch) -> Result<PatchBundle, Refused> {
+    /// Where a reviewed patch's bundle is kept, for a computer, only at
+    /// the revision the signed catalog gives computers; and what to answer
+    /// if it isn't there. The server reads it with the console's state let
+    /// go: a bundle is up to 40 MB, and every other request waited while
+    /// it was read and made into JSON again (audit 9.4).
+    pub fn patch_bundle_at(&self, fetch: &PatchFetch) -> Result<(PathBuf, Refused), Refused> {
         let gone = || {
             Refused::NotFound(format!(
                 "{} revision {} isn't in the catalog",
@@ -1075,14 +1085,11 @@ impl State {
                     .is_some_and(|p| p.revision == fetch.revision)
             })
             .ok_or_else(gone)?;
-        read_json(
-            &self
-                .patch_dir(&live.id, &live.version)
+        Ok((
+            self.patch_dir(&live.id, &live.version)
                 .join("reviewed.json"),
-        )
-        .ok()
-        .flatten()
-        .ok_or_else(gone)
+            gone(),
+        ))
     }
 
     /// IT blocks an item: it leaves the catalog devices get.
@@ -1429,9 +1436,11 @@ impl State {
         .unwrap_or_default()
     }
 
-    /// The console's bundle of a shared app, for a computer, only at the
-    /// version the signed catalog gives computers.
-    pub fn org_bundle(&self, request: &BundleRequest) -> Result<Bundle, Refused> {
+    /// Where the console's bundle of a shared app is kept, for a computer,
+    /// only at the version the signed catalog gives computers; and what to
+    /// answer if it isn't there. Read by the server with the console's
+    /// state let go.
+    pub fn org_bundle_at(&self, request: &BundleRequest) -> Result<(PathBuf, Refused), Refused> {
         let gone = || {
             Refused::NotFound(format!(
                 "{} {} isn't in the catalog",
@@ -1446,10 +1455,10 @@ impl State {
             .and_then(ConsoleItem::live)
             .filter(|live| live.app.is_some() && live.version == request.version)
             .ok_or_else(gone)?;
-        read_json(&self.shared_dir(&live.id, &live.version).join("bundle.json"))
-            .ok()
-            .flatten()
-            .ok_or_else(gone)
+        Ok((
+            self.shared_dir(&live.id, &live.version).join("bundle.json"),
+            gone(),
+        ))
     }
 
     // ---- people (AD-1) ---------------------------------------------------
@@ -1490,7 +1499,13 @@ impl State {
 
     /// A device's ring; one IT hasn't seen yet joins the broad ring.
     fn device(&mut self, id: &str) -> &mut Device {
-        self.fleet_dirty = true;
+        // A computer the console hasn't seen before is written down at
+        // once; one only heard from again, within the minute.
+        if self.fleet.devices.contains_key(id) {
+            self.fleet_heard = true;
+        } else {
+            self.fleet_dirty = true;
+        }
         self.fleet
             .devices
             .entry(id.to_owned())
@@ -1581,9 +1596,16 @@ impl State {
         self.dir.join("blobs").join(format!("{id}.json"))
     }
 
-    /// Keeps a sealed blob for a conversation its sender's computer is in.
-    /// The console stores its ciphertext and can't open it.
-    pub fn put_blob(&self, request: &glass_managed::shared::PutBlob) -> Result<(), Refused> {
+    /// Whether a sealed blob may be kept for a conversation its sender's
+    /// computer is in, and where. The console stores its ciphertext and
+    /// can't open it. Checked with the console's state, then written
+    /// without it ([`State::write_blob`]) and given its name with it again
+    /// ([`State::keep_blob`]): a blob is megabytes, and writing it held up
+    /// every other request.
+    pub fn blob_to_keep(
+        &self,
+        request: &glass_managed::shared::PutBlob,
+    ) -> Result<PathBuf, Refused> {
         request
             .blob
             .check()
@@ -1595,14 +1617,36 @@ impl State {
             return Err(Refused::Rule("That blob is kept already.".into()));
         }
         std::fs::create_dir_all(self.dir.join("blobs")).map_err(internal)?;
-        write_json(&path, &request.blob).map_err(internal)
+        Ok(path)
     }
 
-    /// A blob, for a computer of someone in its conversation.
-    pub fn get_blob(
-        &self,
-        request: &glass_managed::shared::GetBlob,
-    ) -> Result<glass_managed::shared::SealedBlob, Refused> {
+    /// Writes `blob` beside where it will be kept, whole and on disk; the
+    /// file to give its name to.
+    pub fn write_blob(
+        path: &Path,
+        blob: &glass_managed::shared::SealedBlob,
+    ) -> Result<PathBuf, Refused> {
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let written = path.with_extension(format!("{}-{n}.part", std::process::id()));
+        write_json(&written, blob).map_err(internal)?;
+        Ok(written)
+    }
+
+    /// Gives a written blob its name, unless one took it meanwhile: the
+    /// first kept stands, as when the check and the write were one step.
+    pub fn keep_blob(&self, written: &Path, path: &Path) -> Result<(), Refused> {
+        if path.exists() {
+            let _ = std::fs::remove_file(written);
+            return Err(Refused::Rule("That blob is kept already.".into()));
+        }
+        std::fs::rename(written, path).map_err(internal)
+    }
+
+    /// Where a blob is kept, once whoever asks is known to be in its
+    /// conversation: read by the server with the console's state let go.
+    /// What is read must still be that conversation's.
+    pub fn blob_at(&self, request: &glass_managed::shared::GetBlob) -> Result<PathBuf, Refused> {
         if !glass_managed::shared::is_blob_id(&request.id) {
             return Err(Refused::Invalid(vec![
                 "a blob's id is bl- and 32 hex digits".into(),
@@ -1610,11 +1654,7 @@ impl State {
         }
         self.chat
             .member_here(&request.device, &request.login, &request.conversation)?;
-        read_json::<glass_managed::shared::SealedBlob>(&self.blob_path(&request.id))
-            .ok()
-            .flatten()
-            .filter(|b| b.conversation == request.conversation)
-            .ok_or_else(|| Refused::NotFound("No such blob.".into()))
+        Ok(self.blob_path(&request.id))
     }
 
     /// Chat's keys, conversations and epochs; its messages have a log of
@@ -1765,6 +1805,8 @@ impl State {
         let device = self.device(id);
         device.key = Some(registration.key.clone());
         device.last_seen = Timestamp::now();
+        // The key a computer signs with from now on: written at once.
+        self.fleet_dirty = true;
         Ok(())
     }
 
@@ -1903,11 +1945,37 @@ impl State {
         Ok(())
     }
 
+    /// Writes the fleet down if it changed. The server asks every two
+    /// seconds.
+    ///
+    /// A change IT made, a computer new to the console and a key
+    /// registered are written then. Computers only having been heard from
+    /// (a last-seen time, a report) are written at most once a minute:
+    /// every computer is heard from every few seconds, so the whole file,
+    /// every computer's report in it, was written and synced to disk
+    /// every two, with the console's state held (audit 9.4). After a
+    /// restart a last-seen time can be up to a minute behind.
     pub fn save_fleet(&mut self) -> anyhow::Result<()> {
-        if self.fleet_dirty {
-            write_json(&self.dir.join("fleet.json"), &self.fleet)?;
-            self.fleet_dirty = false;
+        let heard = self.fleet_heard && self.fleet_written.elapsed() >= FLEET_HEARD_EVERY;
+        if self.fleet_dirty || heard {
+            self.write_fleet()?;
         }
+        Ok(())
+    }
+
+    /// Tests only: as if the fleet was last written `ago` ago.
+    #[cfg(test)]
+    pub fn fleet_written_ago(&mut self, ago: std::time::Duration) {
+        self.fleet_written = std::time::Instant::now()
+            .checked_sub(ago)
+            .expect("a machine up longer than the test asks for");
+    }
+
+    fn write_fleet(&mut self) -> anyhow::Result<()> {
+        write_json(&self.dir.join("fleet.json"), &self.fleet)?;
+        self.fleet_dirty = false;
+        self.fleet_heard = false;
+        self.fleet_written = std::time::Instant::now();
         Ok(())
     }
 }
@@ -1957,6 +2025,9 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<Opti
 /// Writes a sibling file and renames it over `path`.
 /// Chat's sealed messages, a line each (ADR 0052).
 const CHAT_LOG: &str = "chat-messages.jsonl";
+/// How often the fleet is written down when computers have only been
+/// heard from.
+const FLEET_HEARD_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     glass_state::write_json(path, value, glass_state::READABLE)

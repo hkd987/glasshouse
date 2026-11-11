@@ -8,6 +8,7 @@
 //! admins or support staff, state as JSON files in a folder. Production adds TLS at our web
 //! servers, the org's SSO and a managed database (not built).
 
+#![warn(clippy::significant_drop_in_scrutinee)]
 mod access;
 mod chat;
 mod credits;

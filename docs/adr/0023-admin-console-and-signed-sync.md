@@ -260,3 +260,35 @@ slice's plan:
 - An open app's call that waited for an answer or for the person's turn is
   decided again by its session's policy once it has the turn; an agent's
   task keeps the policy it started with (`specs/tla/PolicyApply.tla`).
+
+## Amended 2026-11-11 (audit 9.4, the last part): nothing slow under the console's lock
+The console has one lock over all its state. Three things were done with
+it held that had no need of it, and every other request waited:
+
+- **Files read and written.** A kernel patch's bundle (up to 40 MB), an
+  app's bundle and a blob were read from disk and parsed with the lock
+  held, then made into JSON twice more to send; a blob was written with
+  it held. Now the lock is held to decide (is it in the catalog at that
+  revision; is whoever asks in the conversation) and to find where the
+  file is; the file is read after, and sent as it is kept. A blob is
+  checked with the lock, written without it to a file of its own, and
+  given its name with the lock again: of two sendings of one blob the
+  first kept stands, as before.
+- **The fleet file.** Every sync marked the fleet as changed, so the
+  whole file, every computer's report in it, was written and synced to
+  disk every two seconds. What IT does, a computer new to the console and
+  a key registered are still written within two seconds. Computers only
+  having been heard from (a last-seen time, a report) are written at most
+  once a minute; after a restart a last-seen time can be that far behind.
+- **Signatures seen.** To refuse a request sent twice, the console keeps
+  the signatures of the last ten minutes, and went through all of them at
+  every request to forget the old ones. It does that every half minute.
+
+And where a result was matched on with the lock taken in the same
+expression, the lock lasted through every arm of the match (sixteen
+places). Each takes its result first now, and clippy's
+`significant_drop_in_scrutinee` is on for the console, so a new one
+doesn't pass lint.
+
+Still under the lock, and small beside these: a forwarded model call reads
+the policies its ring runs again each time.

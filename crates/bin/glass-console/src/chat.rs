@@ -2241,6 +2241,69 @@ mod tests {
         assert_eq!(chat.sync(&request).messages.len(), 6);
     }
 
+    /// A blob is checked with the console's state held, written without
+    /// it, and given its name with it again (audit 9.4). Two computers
+    /// sending the same blob at once: the first kept stands, and the other
+    /// is told so, with nothing of its own left behind.
+    #[tokio::test]
+    async fn ar1_of_two_sendings_of_one_blob_the_first_kept_stands() {
+        let org = Org::new().await;
+        let priya = org.computer("laptop-priya", "priya").await;
+        let _dana = org.computer("laptop-dana", "dana").await;
+        let (_, channel, _) = org.channel(&priya, &["dana", "priya"], "#deal").await;
+        let key = glass_managed::shared::BlobKey::generate().unwrap();
+        let id = glass_managed::shared::new_blob_id().unwrap();
+        let sealed = |page: &[u8]| key.seal(&channel, &id, page).unwrap();
+        let put = |blob| glass_managed::shared::PutBlob {
+            device: priya.name.clone(),
+            login: "priya".into(),
+            blob,
+        };
+        let (one, two) = (put(sealed(b"first")), put(sealed(b"second")));
+        // Both pass the check before either is kept.
+        let (path, same) = {
+            let state = org.console.state();
+            (
+                state.blob_to_keep(&one).unwrap(),
+                state.blob_to_keep(&two).unwrap(),
+            )
+        };
+        assert_eq!(path, same);
+        let first = State::write_blob(&path, &one.blob).unwrap();
+        let second = State::write_blob(&path, &two.blob).unwrap();
+        assert_ne!(first, second, "each written to a file of its own");
+        org.console.state().keep_blob(&first, &path).unwrap();
+        let late = org.console.state().keep_blob(&second, &path);
+        assert!(
+            matches!(&late, Err(Refused::Rule(m)) if m.contains("kept already")),
+            "{late:?}"
+        );
+        assert!(!second.exists(), "nothing left behind");
+        // What a member's computer is sent is the first, as it was sent.
+        let get = glass_managed::shared::GetBlob {
+            device: priya.name.clone(),
+            login: "priya".into(),
+            conversation: channel.clone(),
+            id: id.clone(),
+        };
+        let (status, got) = org.post("blobs/get", &get).await;
+        assert_eq!(status, 200, "{got}");
+        let got: glass_managed::shared::SealedBlob = serde_json::from_value(got).unwrap();
+        assert_eq!(got, one.blob);
+        // Asked for as another conversation's, it isn't there.
+        let (_, other, _) = org.channel(&priya, &["dana", "priya"], "#other").await;
+        let (status, _) = org
+            .post(
+                "blobs/get",
+                &glass_managed::shared::GetBlob {
+                    conversation: other,
+                    ..get
+                },
+            )
+            .await;
+        assert_eq!(status, 404);
+    }
+
     /// An answer carries what changed since the computer asked, not all
     /// the computer's people have (audit 9.4, the rest).
     #[tokio::test]

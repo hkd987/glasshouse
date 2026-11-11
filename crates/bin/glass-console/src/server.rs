@@ -88,7 +88,7 @@ pub struct Console {
     rooms: Mutex<crate::meet::Rooms>,
     /// Signatures of device requests seen lately, with their times: one
     /// sent again is refused (ADR 0030 slice P).
-    seen: Mutex<HashMap<String, i64>>,
+    seen: Mutex<Seen>,
     /// The relay that carries meetings' media, beside the console.
     relay: std::sync::OnceLock<crate::relay::Relay>,
     /// What checks and builds the apps people share (ADR 0032).
@@ -160,6 +160,17 @@ const MEETINGS_SWEEP: Duration = Duration::from_secs(30);
 /// How often the console's chat is checked against the organization's
 /// rule for how long chat is kept (CF-61).
 const CHAT_TRIM: Duration = Duration::from_secs(24 * 3600);
+
+/// Signatures of device requests seen lately, and when the old ones were
+/// last forgotten.
+#[derive(Default)]
+struct Seen {
+    at: HashMap<String, i64>,
+    pruned: i64,
+}
+
+/// How often signatures past the window are forgotten.
+const SEEN_PRUNE_SECS: i64 = 30;
 
 /// `POST /api/chat/keep`: how long chat is kept (CF-61).
 #[derive(Deserialize)]
@@ -303,6 +314,26 @@ fn ok(value: Value) -> Response {
     Response::json(200, &value)
 }
 
+/// A file the console keeps as JSON, as a computer's answer: read with
+/// the console's state let go, and sent as it is kept. It was read and
+/// parsed with the state held, then made into JSON twice more to send
+/// (audit 9.4); a kernel patch's bundle is up to 40 MB. `gone` is the
+/// answer if it isn't there, or isn't what `wanted` says was asked for.
+async fn kept_file(
+    path: &std::path::Path,
+    gone: Refused,
+    wanted: impl FnOnce(&[u8]) -> bool,
+) -> Response {
+    match tokio::fs::read(path).await {
+        Ok(bytes) if wanted(&bytes) => {
+            let mut response = Response::new(200, "application/json", bytes);
+            response.headers.push(("Cache-Control", "no-store".into()));
+            response
+        }
+        _ => refused(gone),
+    }
+}
+
 fn error(status: u16, message: &str) -> Response {
     Response::json(status, &json!({ "error": message }))
 }
@@ -399,7 +430,7 @@ impl Console {
             chat_changed,
             chat_kept_changed: tokio::sync::Notify::new(),
             rooms: Mutex::new(crate::meet::Rooms::default()),
-            seen: Mutex::new(HashMap::new()),
+            seen: Mutex::new(Seen::default()),
             relay: std::sync::OnceLock::new(),
             builder: std::sync::OnceLock::new(),
             patch_builder: std::sync::OnceLock::new(),
@@ -1215,7 +1246,8 @@ impl Console {
         let Some(mut jobs) = lock(&self.patch_jobs).take() else {
             return;
         };
-        for job in self.state().patches_to_build() {
+        let waiting = self.state().patches_to_build();
+        for job in waiting {
             let _ = self.patch_queue.send(job);
         }
         while let Some((id, version, request)) = jobs.recv().await {
@@ -1228,7 +1260,8 @@ impl Console {
                 .await
                 .unwrap_or_else(|e| Err(format!("the build stopped: {e}")));
             let ok = result.as_ref().is_ok_and(|r| r.ok);
-            if let Err(e) = self.state().patch_built(&id, &version, result, &key) {
+            let kept = self.state().patch_built(&id, &version, result, &key);
+            if let Err(e) = kept {
                 tracing::warn!(%id, %version, "keeping a patch's build: {e:?}");
             }
             tracing::info!(
@@ -1570,24 +1603,31 @@ impl Console {
         match (request.method.as_str(), segments.as_slice()) {
             // Decided again with the page, from one read of the roles in
             // force: a publish between can't mix two policies on it.
-            ("GET", ["support"]) => match views::support(&self.state(), directory, &user) {
-                Some(page) => ok(page),
-                None => error(403, "Only support staff can open remote help."),
-            },
+            ("GET", ["support"]) => {
+                let page = views::support(&self.state(), directory, &user);
+                match page {
+                    Some(page) => ok(page),
+                    None => error(403, "Only support staff can open remote help."),
+                }
+            }
             ("GET", ["settings"]) => {
                 let group = query(request, "group").unwrap_or(crate::directory::EVERYONE);
                 if group != crate::directory::EVERYONE && directory.group(group).is_none() {
                     return error(404, &format!("no group {group}"));
                 }
-                match views::settings(&self.state(), directory, group) {
+                let page = views::settings(&self.state(), directory, group);
+                match page {
                     Ok(v) => ok(v),
                     Err(e) => error(500, &format!("{e:#}")),
                 }
             }
-            ("GET", ["roles"]) => match views::roles(&self.state(), directory) {
-                Ok(v) => ok(v),
-                Err(e) => error(500, &format!("{e:#}")),
-            },
+            ("GET", ["roles"]) => {
+                let page = views::roles(&self.state(), directory);
+                match page {
+                    Ok(v) => ok(v),
+                    Err(e) => error(500, &format!("{e:#}")),
+                }
+            }
             ("GET", ["policy"]) => {
                 let group = query(request, "group").unwrap_or(crate::directory::EVERYONE);
                 let state = self.state();
@@ -1596,10 +1636,13 @@ impl Console {
                     Err(e) => error(500, &format!("{e:#}")),
                 }
             }
-            ("GET", ["mail"]) => match views::mail(&self.state()) {
-                Ok(v) => ok(v),
-                Err(e) => error(500, &format!("{e:#}")),
-            },
+            ("GET", ["mail"]) => {
+                let page = views::mail(&self.state());
+                match page {
+                    Ok(v) => ok(v),
+                    Err(e) => error(500, &format!("{e:#}")),
+                }
+            }
             ("GET", ["chat"]) => ok(views::chat(&self.state())),
             // How long chat is kept (CF-61). Asked first without `confirm`:
             // IT is told how many messages would go and nothing changes.
@@ -1653,15 +1696,19 @@ impl Console {
                         "Accept the model providers' terms on Model credits first.",
                     );
                 }
-                match self.state().edit_draft(edit) {
+                let edited = self.state().edit_draft(edit);
+                match edited {
                     Ok(()) => ok(json!({})),
                     Err(r) => refused(r),
                 }
             }
-            ("POST", ["policy", "discard"]) => match self.state().discard_draft() {
-                Ok(()) => ok(json!({})),
-                Err(r) => refused(r),
-            },
+            ("POST", ["policy", "discard"]) => {
+                let discarded = self.state().discard_draft();
+                match discarded {
+                    Ok(()) => ok(json!({})),
+                    Err(r) => refused(r),
+                }
+            }
             ("POST", ["policy", "preview"]) => {
                 let state = self.state();
                 let draft = match state.draft() {
@@ -1789,10 +1836,13 @@ impl Console {
                     Err(r) => refused(r),
                 }
             }
-            ("POST", ["catalog", id, "public"]) => match self.state().publish_public(id) {
-                Ok(()) => ok(json!({})),
-                Err(r) => refused(r),
-            },
+            ("POST", ["catalog", id, "public"]) => {
+                let published = self.state().publish_public(id);
+                match published {
+                    Ok(()) => ok(json!({})),
+                    Err(r) => refused(r),
+                }
+            }
             ("GET", ["fleet"]) => {
                 let mut page = views::fleet(&self.state(), directory, &self.url);
                 // What each ring is offered (ADR 0061), and IT's holds.
@@ -1805,7 +1855,8 @@ impl Console {
                     Ok(b) => b,
                     Err(r) => return r,
                 };
-                match self.state().set_ring(device, set.ring) {
+                let set = self.state().set_ring(device, set.ring);
+                match set {
                     Ok(()) => {
                         // The device may now be owed another version.
                         self.released();
@@ -1869,7 +1920,8 @@ impl Console {
                     Ok(b) => b,
                     Err(r) => return r,
                 };
-                match self.state().set_kind(device, set.kind) {
+                let set = self.state().set_kind(device, set.kind);
+                match set {
                     Ok(()) => ok(json!({})),
                     Err(r) => refused(r),
                 }
@@ -2094,7 +2146,22 @@ impl Console {
                     Ok(b) => b,
                     Err(r) => return r,
                 };
-                match self.state().put_blob(&put) {
+                // Checked with the console's state, written without it,
+                // and given its name with it again: a blob is megabytes.
+                let path = self.state().blob_to_keep(&put);
+                let path = match path {
+                    Ok(path) => path,
+                    Err(r) => return refused(r),
+                };
+                let (blob, to) = (put.blob, path.clone());
+                let written =
+                    tokio::task::spawn_blocking(move || State::write_blob(&to, &blob)).await;
+                let kept = match written {
+                    Ok(Ok(written)) => self.state().keep_blob(&written, &path),
+                    Ok(Err(r)) => Err(r),
+                    Err(e) => Err(Refused::Unavailable(format!("keeping a blob: {e}"))),
+                };
+                match kept {
                     Ok(()) => ok(json!({})),
                     Err(r) => refused(r),
                 }
@@ -2104,8 +2171,22 @@ impl Console {
                     Ok(b) => b,
                     Err(r) => return r,
                 };
-                match self.state().get_blob(&get) {
-                    Ok(blob) => ok(serde_json::to_value(blob).unwrap_or_default()),
+                let path = self.state().blob_at(&get);
+                let gone = || Refused::NotFound("No such blob.".into());
+                match path {
+                    // As it is kept, which is as it is sent; but only if
+                    // it is this conversation's.
+                    Ok(path) => {
+                        kept_file(&path, gone(), |bytes| {
+                            #[derive(Deserialize)]
+                            struct Of<'a> {
+                                conversation: &'a str,
+                            }
+                            serde_json::from_slice::<Of<'_>>(bytes)
+                                .is_ok_and(|of| of.conversation == get.conversation)
+                        })
+                        .await
+                    }
                     Err(r) => refused(r),
                 }
             }
@@ -2151,8 +2232,9 @@ impl Console {
                     Ok(b) => b,
                     Err(r) => return r,
                 };
-                match self.state().patch_bundle(&fetch) {
-                    Ok(bundle) => ok(serde_json::to_value(bundle).unwrap_or_default()),
+                let at = self.state().patch_bundle_at(&fetch);
+                match at {
+                    Ok((path, gone)) => kept_file(&path, gone, |_| true).await,
                     Err(r) => refused(r),
                 }
             }
@@ -2161,8 +2243,9 @@ impl Console {
                     Ok(b) => b,
                     Err(r) => return r,
                 };
-                match self.state().org_bundle(&wanted) {
-                    Ok(bundle) => ok(serde_json::to_value(bundle).unwrap_or_default()),
+                let at = self.state().org_bundle_at(&wanted);
+                match at {
+                    Ok((path, gone)) => kept_file(&path, gone, |_| true).await,
                     Err(r) => refused(r),
                 }
             }
@@ -2238,8 +2321,17 @@ impl Console {
         // Each signature is good once: within the window, a copy of a
         // request someone saw is refused.
         let mut seen = lock(&self.seen);
-        seen.retain(|_, at| (now - *at).abs() <= 2 * MAX_SKEW_SECS);
-        if seen.insert(signature.to_owned(), time).is_some() {
+        // Signatures older than the window are forgotten every so often,
+        // not at every request: each request went through every signature
+        // of the last ten minutes, with every other request waiting
+        // (audit 9.4). One not yet forgotten is refused all the same, as
+        // it would have been in the window.
+        if now - seen.pruned >= SEEN_PRUNE_SECS {
+            seen.at
+                .retain(|_, at| (now - *at).abs() <= 2 * MAX_SKEW_SECS);
+            seen.pruned = now;
+        }
+        if seen.at.insert(signature.to_owned(), time).is_some() {
             return Err(error(401, "This request was already received."));
         }
         Ok((device.to_owned(), hex))
@@ -4379,6 +4471,102 @@ mod tests {
         // lab-07 itself is fine.
         let r = t.device("/device/v1/sync", body.clone()).await;
         assert_eq!(r.status, 200);
+    }
+
+    // Audit 9.4: every request went through every signature of the last
+    // ten minutes to forget the old ones, with the others waiting.
+    #[tokio::test]
+    async fn adr0030_old_signatures_are_forgotten_every_so_often_and_a_replay_is_still_refused() {
+        let t = console().await;
+        let body = json!({ "device": "lab-07" });
+        let first = t.signed("/device/v1/sync", &body).await;
+        assert_eq!(t.console.handle(&first).await.status, 200);
+        let now = glass_types::Timestamp::now().unix_seconds();
+        // One from before the window, as if left from eleven minutes ago.
+        {
+            let mut seen = lock(&t.console.seen);
+            seen.at.insert("an-old-signature".into(), now - 660);
+            assert!(now - seen.pruned < SEEN_PRUNE_SECS, "just looked through");
+        }
+        // The next request doesn't look through them all: the old one is
+        // still there. A replay is refused all the same.
+        let second = t.signed("/device/v1/sync", &body).await;
+        assert_eq!(t.console.handle(&second).await.status, 200);
+        assert!(lock(&t.console.seen).at.contains_key("an-old-signature"));
+        assert_eq!(t.console.handle(&first).await.status, 401);
+        assert_eq!(t.console.handle(&second).await.status, 401);
+
+        // Half a minute on, the old one goes; the two in the window stay,
+        // and are still refused.
+        lock(&t.console.seen).pruned = now - SEEN_PRUNE_SECS;
+        let third = t.signed("/device/v1/sync", &body).await;
+        assert_eq!(t.console.handle(&third).await.status, 200);
+        {
+            let seen = lock(&t.console.seen);
+            assert!(!seen.at.contains_key("an-old-signature"));
+            assert!(seen.at.len() >= 3, "{}", seen.at.len());
+        }
+        assert_eq!(t.console.handle(&first).await.status, 401);
+    }
+
+    // Audit 9.4: every sync marked the fleet as changed, so the whole
+    // file, every computer's report in it, was written and synced to disk
+    // every two seconds.
+    #[tokio::test]
+    async fn ad4_a_computer_only_heard_from_is_written_down_within_the_minute() {
+        let t = console().await;
+        let fleet = t._dir.path().join("fleet.json");
+        let kept = || -> Value {
+            serde_json::from_str(&std::fs::read_to_string(&fleet).unwrap_or("{}".into())).unwrap()
+        };
+        let flush = || t.console.state().save_fleet().unwrap();
+
+        // A computer the console hasn't seen before: written at once.
+        t.sync("d", None, 0).await;
+        flush();
+        let first = kept();
+        assert!(first["devices"]["d"]["last_seen"].is_string(), "{first}");
+
+        // Heard from again, and it reports: not written yet.
+        t.sync("d", None, 0).await;
+        let report = json!({
+            "device": "d",
+            "name": "Dana's laptop",
+            "os_version": "Glasshouse 1.0",
+            "reported_at": "2026-10-19T23:00:00Z",
+        });
+        let r = t.device("/device/v1/report", report).await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        assert!(t.console.state().fleet.devices["d"].report.is_some());
+        flush();
+        assert_eq!(kept(), first, "nothing IT did, and under a minute");
+
+        // What IT does is written at once, with what was heard meanwhile.
+        let (status, _) = t
+            .call("POST", "/api/fleet/d/ring", json!({ "ring": "pilot" }))
+            .await;
+        assert_eq!(status, 200);
+        flush();
+        let second = kept();
+        assert_eq!(second["devices"]["d"]["ring"], "pilot");
+
+        // Heard from again; a minute on, that is written too.
+        t.sync("d", None, 0).await;
+        flush();
+        assert_eq!(kept(), second);
+        t.console.state().fleet_written_ago(Duration::from_secs(61));
+        flush();
+        let third = kept();
+        assert_eq!(third["devices"]["d"]["ring"], "pilot");
+        assert_eq!(
+            third["devices"]["d"]["report"]["os_version"],
+            "Glasshouse 1.0"
+        );
+        // And with nothing heard since, nothing is written again.
+        std::fs::remove_file(&fleet).unwrap();
+        t.console.state().fleet_written_ago(Duration::from_secs(61));
+        flush();
+        assert!(!fleet.exists(), "nothing changed, nothing written");
     }
 
     #[tokio::test]

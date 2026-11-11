@@ -3,10 +3,11 @@
 #
 # It tries again when the package servers can't be reached. On 2026-11-11
 # runs failed on every job with "Temporary failure resolving
-# 'azure.archive.ubuntu.com'": the machines GitHub runs this on couldn't
-# look up their own package mirror for over an hour, nothing was installed,
-# and nothing of ours was tested. A short outage is ridden out here; a long
-# one still fails, and says that is what it was.
+# 'azure.archive.ubuntu.com'": for more than two hours the machines GitHub
+# runs this on couldn't look up any of their three package mirrors (their
+# cloud's, then archive.ubuntu.com and security.ubuntu.com), nothing was
+# installed, and nothing of ours was tested. A short outage is ridden out
+# here; a long one still fails, and says that is what it was.
 #
 # The package tool isn't asked to try again itself: with the servers away
 # one attempt already takes it minutes, and the job's step has a time limit
@@ -20,9 +21,11 @@ pause=${CI_PACKAGE_PAUSE:-20}
 mirrors=${CI_PACKAGE_MIRRORS:-/etc/apt/apt-mirrors.txt}
 
 # Takes a first-choice mirror that can't be looked up out of the list,
-# while there is another. The package tool doesn't go on to the next by
-# itself: through that outage every download failed on the first mirror's
-# name, Ubuntu's own servers answering all the while.
+# while there is another: the package tool names the first mirror in its
+# errors whichever of them failed, and whether it goes on to the next by
+# itself wasn't to be seen in that outage, where none of the three could
+# be looked up (this took two out and failed on the third). It is for the
+# day only the first is lost.
 skip_lost_mirror() {
 	[ -f "$mirrors" ] || return 0
 	while [ "$(grep -c . "$mirrors")" -gt 1 ]; do

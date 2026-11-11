@@ -891,10 +891,10 @@ the console's one lock.
   (`ChatState::news`): its people's conversations made or changed since
   its cursor, and the messages since in them.
 
-Every waiting computer still looks at every change. Still open from the
-same finding: the other work done under the console's one lock (a kernel
-bundle read and encoded, the replay cache scanned on every request, the
-fleet file rewritten every two seconds).
+Every waiting computer still looks at every change. The other work the
+finding named under the console's one lock (a kernel bundle read and
+encoded, the replay cache scanned on every request, the fleet file
+rewritten every two seconds) is in ADR 0023's amendment of the same day.
 
 ### The rest of 9.4 (2026-11-11): an answer carries only what changed
 An answer carried every conversation of the computer's people, every
