@@ -80,7 +80,11 @@ use crate::hypervisor::TaskRun;
 pub const EXEC_PORT: u32 = 10_000;
 
 /// Host ports a task's socket is forwarded from, one per task running.
-pub const FORWARD_PORTS: Range<u32> = 20_000..30_000;
+/// Two thousand million of them, handed out in turn from a start chosen
+/// when glassd starts (audit 6.6): with ten thousand, the 10,001st task on
+/// a host got the first one's port again, and a long task still running on
+/// it had its socket's connections taken by the new one.
+pub const FORWARD_PORTS: Range<u32> = 20_000..2_000_020_000;
 
 /// The longest request line read.
 pub const MAX_REQUEST: usize = 1024 * 1024;

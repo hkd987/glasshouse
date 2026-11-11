@@ -314,14 +314,29 @@ fn adr0065_an_unprivileged_guest_service_gives_tasks_their_socket_too() {
     );
 }
 
+/// The processes with `marker` in their command line, the dead left out.
+/// A task has a process namespace of its own (audit 6.6), so the numbers
+/// it knows its processes by aren't the ones they have out here.
+fn with_marker(marker: &str) -> Vec<u32> {
+    fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|&pid| alive(pid))
+        .filter(|pid| {
+            fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|line| String::from_utf8_lossy(&line).contains(marker))
+        })
+        .collect()
+}
+
 #[test]
 fn adr0065_when_the_helper_goes_its_task_goes() {
     let guest = Guest::new("gone");
-    let pids = guest.dir.join("pids");
-    let script = format!(
-        "sleep 300 & echo $$ $! > {}; echo started; wait",
-        pids.display()
-    );
+    // A length of sleep no other process has: the task's shell and its
+    // sleep both carry it in their command lines.
+    let marker = format!("300.{}7", std::process::id());
+    let script = format!("sleep {marker} & echo started; wait");
     let mut helper = guest
         .helper(&guest.request(&script))
         .stdout(Stdio::piped())
@@ -341,21 +356,23 @@ fn adr0065_when_the_helper_goes_its_task_goes() {
         let _ = helper.wait();
     }
     assert_eq!(started.as_deref(), Ok("started\n"));
-    let pids: Vec<u32> = fs::read_to_string(&pids)
-        .unwrap()
-        .split_whitespace()
-        .map(|pid| pid.parse().unwrap())
-        .collect();
-    assert_eq!(pids.len(), 2);
-    assert!(pids.iter().all(|&pid| alive(pid)));
+    let running = with_marker(&marker);
+    assert!(running.len() >= 2, "its shell and its sleep: {running:?}");
 
     // The task ends (glassd kills the helper): its process group goes,
     // what it started in the background too (PA-2).
     helper.kill().unwrap();
     helper.wait().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while pids.iter().any(|&pid| alive(pid)) {
-        assert!(Instant::now() < deadline, "the task outlived its helper");
+    loop {
+        let left = with_marker(&marker);
+        if left.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the task outlived its helper: {left:?}"
+        );
         thread::sleep(Duration::from_millis(20));
     }
 }

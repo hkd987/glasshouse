@@ -967,6 +967,10 @@ fn adr0065_a_task_runs_in_the_guest_through_the_exec_helper() {
     assert_eq!(given.len(), 8);
     assert!(!given[7].contains('\n'));
     let request: Value = serde_json::from_str(&given[7]).unwrap();
+    // The port is one of the forwarding ports, from where this glassd
+    // began (audit 6.6); the rest is as the task said.
+    let port = request["socket"]["port"].as_u64().unwrap();
+    assert!(exec::FORWARD_PORTS.contains(&u32::try_from(port).unwrap()));
     assert_eq!(
         request,
         json!({
@@ -974,7 +978,7 @@ fn adr0065_a_task_runs_in_the_guest_through_the_exec_helper() {
             "args": ["--task", "t-1"],
             "env": [["HOME", "/root"], ["NOTE", "two\nlines"]],
             "workdir": "/work/t-1",
-            "socket": {"path": "/run/glasshouse/agent.sock", "port": 20000},
+            "socket": {"path": "/run/glasshouse/agent.sock", "port": port},
         })
     );
     let parsed: exec::ExecRequest = serde_json::from_str(&given[7]).unwrap();
@@ -983,11 +987,36 @@ fn adr0065_a_task_runs_in_the_guest_through_the_exec_helper() {
     // Each task its own forwarding port.
     let next = args(&hypervisor.command(computer, &run).unwrap());
     let next: Value = serde_json::from_str(&next[7]).unwrap();
-    assert_eq!(next["socket"]["port"], 20001);
+    assert_ne!(next["socket"]["port"], port, "not the last task's");
+    assert!(
+        exec::FORWARD_PORTS
+            .contains(&u32::try_from(next["socket"]["port"].as_u64().unwrap()).unwrap())
+    );
 
     // Files go through the guest; a VM is a boundary.
     assert_eq!(hypervisor.host_path(computer, Path::new("/work/t-1")), None);
     assert_eq!(hypervisor.kind(), "Firecracker microVM");
     assert!(hypervisor.contained());
     hypervisor.suspend(computer).unwrap();
+}
+
+// Audit 6.6: with ten thousand ports, the 10,001st task on a host was
+// given the first one's again.
+#[test]
+fn a_forwarding_port_doesnt_come_again_for_a_very_long_time() {
+    let ports = super::exec::FORWARD_PORTS;
+    // Wherever a glassd began, the end of the range included.
+    for first in [0, 7, u32::MAX - 3, 1_999_999_990] {
+        let given: std::collections::HashSet<u32> =
+            (0..50_000).map(|n| super::port_after(first, n)).collect();
+        assert_eq!(given.len(), 50_000, "each task its own, from {first}");
+        assert!(
+            given.iter().all(|port| ports.contains(port)),
+            "from {first}"
+        );
+    }
+    // In turn: all of them before any comes again.
+    assert_eq!(super::port_after(0, 0), ports.start);
+    assert_eq!(super::port_after(0, 1), ports.start + 1);
+    assert!(ports.end - ports.start > 1_000_000_000);
 }

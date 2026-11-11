@@ -199,15 +199,22 @@ struct Running {
 #[derive(Debug)]
 pub struct FirecrackerHypervisor {
     config: FirecrackerConfig,
-    /// The next task's forwarding port, from [`exec::FORWARD_PORTS`].
+    /// How many tasks have been given a forwarding port.
     next_port: AtomicU32,
+    /// Where in [`exec::FORWARD_PORTS`] this glassd began: not where the
+    /// one before it did, whose tasks' helpers may still be listening.
+    first_port: u32,
 }
 
 impl FirecrackerHypervisor {
     pub fn new(config: FirecrackerConfig) -> Self {
+        let chance = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos() ^ d.as_secs() as u32);
         Self {
             config,
             next_port: AtomicU32::new(0),
+            first_port: chance ^ std::process::id().rotate_left(16),
         }
     }
 
@@ -509,10 +516,20 @@ impl FirecrackerHypervisor {
 
     /// The next task's forwarding port.
     fn forward_port(&self) -> u32 {
-        let ports = exec::FORWARD_PORTS;
         let n = self.next_port.fetch_add(1, Ordering::Relaxed);
-        ports.start + n % (ports.end - ports.start)
+        port_after(self.first_port, n)
     }
+}
+
+/// The forwarding port of the `n`th task since a glassd that began at
+/// `first`: each of [`exec::FORWARD_PORTS`] in turn, so none comes again
+/// until all of them have. The helper refuses a port another task's helper
+/// still answers on (`vmexec`); this is what keeps that from happening.
+fn port_after(first: u32, n: u32) -> u32 {
+    let ports = exec::FORWARD_PORTS;
+    let span = u64::from(ports.end - ports.start);
+    let at = (u64::from(first) + u64::from(n)) % span;
+    ports.start + u32::try_from(at).unwrap_or(0)
 }
 
 impl Hypervisor for FirecrackerHypervisor {

@@ -171,7 +171,16 @@ impl Forward {
         name.push(format!("_{port}"));
         let path = uds.with_file_name(name);
         match fs::symlink_metadata(&path) {
-            // Left by a helper that was killed.
+            // Another task's helper is listening there: its port. Taking
+            // the path would hand that task's connections to this task's
+            // socket, and with them what this task may do (audit 6.6).
+            Ok(meta) if meta.file_type().is_socket() && http::connect(&path).is_ok() => {
+                return Err(format!(
+                    "port {port} is another task's: its helper answers at {}",
+                    path.display()
+                ));
+            }
+            // Left by a helper that was killed: nothing answers.
             Ok(meta) if meta.file_type().is_socket() => {
                 let _ = fs::remove_file(&path);
             }
@@ -219,5 +228,59 @@ impl Forward {
             let _ = self.accepting.join();
         }
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::os::unix::net::UnixListener;
+
+    use super::*;
+
+    // Audit 6.6: a forwarding port given to a second task while the first
+    // still ran had the first's helper's socket removed and bound again,
+    // and the first task's connections arrived at the second's socket.
+    #[test]
+    fn a_port_another_tasks_helper_answers_on_is_refused_and_one_left_behind_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let uds = dir.path().join("vsock");
+        // Each task's own socket, saying whose it is to whoever connects.
+        let task = |name: &'static str| {
+            let path = dir.path().join(format!("{name}.sock"));
+            let listener = UnixListener::bind(&path).unwrap();
+            thread::spawn(move || {
+                for mut conn in listener.incoming().flatten() {
+                    let _ = conn.write_all(name.as_bytes());
+                }
+            });
+            path
+        };
+        let reached = |path: &Path| {
+            let mut said = String::new();
+            let _ = UnixStream::connect(path).unwrap().read_to_string(&mut said);
+            said
+        };
+        let first = Forward::start(&uds, 20_007, &task("first")).unwrap();
+        let port = dir.path().join("vsock_20007");
+        assert_eq!(reached(&port), "first");
+
+        // A second task given the same port, the first still running.
+        let second = task("second");
+        let Err(why) = Forward::start(&uds, 20_007, &second) else {
+            panic!("the second task took the first's port");
+        };
+        assert!(why.contains("another task's"), "{why}");
+        assert_eq!(reached(&port), "first", "the first task's, as it was");
+        first.stop();
+        assert!(!port.exists());
+
+        // A socket nothing answers on, as a killed helper leaves: taken.
+        drop(UnixListener::bind(&port).unwrap());
+        assert!(port.exists());
+        let second = Forward::start(&uds, 20_007, &second).unwrap();
+        assert_eq!(reached(&port), "second");
+        second.stop();
     }
 }

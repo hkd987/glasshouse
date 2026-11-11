@@ -315,3 +315,32 @@ deploys on their own AWS" (2026-10-27): the hosted form is decided, §9.
   screen says why. Kept, it was tried again at every start and the
   computer never started. A snapshot that couldn't be moved into the
   jail is not that: it stays, and the start fails.
+
+## Amended 2026-11-11 (audit 6.6): what a task starts goes with it, and a port is one task's
+Two ways a task in a guest reached past its own end, or into another
+task.
+
+- **A process that left the task's group outlived the task.** The guest
+  service ended a task by killing its process group; `setsid`, or a
+  daemon's double fork, takes a process out of it. One that also held the
+  task's output kept the service waiting for good. A task now has a
+  process namespace of its own (`unshare --pid --fork --kill-child`).
+  Its first process is a small shell of ours that runs the task and
+  waits; when it ends, or is killed with the group, the kernel ends every
+  process in the namespace. The task isn't the first process itself: a
+  first process isn't ended by a signal it has no handler for, its own
+  included, and a task that ends itself with one must still end. It ends
+  with 128 and the signal's number, which is what the helper made of a
+  signal already. `/proc` shows the namespace's own processes where one
+  can be mounted there, and is as before where not.
+- **A forwarding port came round again after 10,000 tasks on a host.**
+  The helper of the task given it then removed the socket of the task
+  still using it and listened in its place, so the first task's
+  connections arrived at the second task's socket, with what that task
+  may do. There are two thousand million ports now, handed out in turn
+  from a start chosen when glassd starts, and the helper refuses a port
+  another task's helper still answers on; one nothing answers on (a
+  killed helper's) it takes, as before.
+
+Tested with the guest service and the helper as they run in a guest, on
+this machine; not inside a microVM, which needs KVM.

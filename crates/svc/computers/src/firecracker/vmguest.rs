@@ -20,6 +20,17 @@
 //! folder of `socket.path`, and a process group of its own, which is killed
 //! when the helper's connection ends and when the process does.
 //!
+//! It also gets a process namespace of its own (`--pid`), so that what it
+//! starts goes with it whatever it does (PA-2, audit 6.6). Killing the
+//! group missed a process that had left the group (`setsid`, a daemon's
+//! double fork): it outlived the task, and one that held the task's output
+//! kept the service waiting for it. In the namespace the first process is
+//! a small one of ours that runs the task and waits for it; when that one
+//! ends, or is killed with the group, the kernel ends every process in the
+//! namespace. The task itself isn't the first process: a first process is
+//! not ended by a signal it has no handler for, its own included, and a
+//! task that ends itself with one must still end.
+//!
 //! The binary is `crates/bin/glass-vmguest`; the work is here so tests can
 //! drive it beside the host's side.
 
@@ -61,9 +72,18 @@ tools=$1 run=$2 dir=$3 work=$4 started=$5
 shift 5
 PATH=$tools mkdir -p "$dir" "$work"
 PATH=$tools mount --bind "$run" "$dir"
+# The namespace's own processes in /proc, where it lets one be mounted;
+# where not, the view from before, as it was.
+PATH=$tools mount -t proc proc /proc 2>/dev/null || :
 cd "$work"
 : > "$started"
-exec "$@"
+# Not `exec`: this shell is the namespace's first process, and stays to
+# wait. How the task ended is how this ends (128 and the signal's number
+# for a signal, as the helper reports one anyway).
+set +e
+"$@" &
+wait "$!"
+exit "$?"
 "#;
 
 /// How a connection to a task's socket reaches the host's port.
@@ -218,6 +238,11 @@ fn spawn(
             "--mount",
             "--propagation",
             "private",
+            // A process namespace: its first process is ENTER's shell,
+            // which goes if this `unshare` does.
+            "--pid",
+            "--fork",
+            "--kill-child",
             "--",
             "/bin/sh",
             "-c",
