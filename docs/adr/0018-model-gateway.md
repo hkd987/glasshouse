@@ -251,3 +251,41 @@ connection doesn't show it). Nothing says S3 does, and every AWS SDK
 keeps its connections to it, but it hasn't been seen from here. If it
 did, a wake's GETs would be slower kept than not, and
 `keeping_connections` on the S3 client is the one line to take out.
+
+## Amended 2026-11-11 (audit 3.6): one rule for sending a model call again
+Each model client had its own idea. Anthropic's sent a rate-limited,
+overloaded or failed call twice more (ADR 0043, item 8) and nothing
+else; Bedrock's and OpenRouter's sent nothing again, so the same 429
+from them failed over at once, or ended the step where the route has one
+model. The rule is in the HTTP client now (`http::Again`), and all three
+use it.
+
+A call is sent again, twice at most, when:
+- the reply is a 408, a 429 or a 5xx (529 among them), after the wait it
+  asks for (`retry-after`, up to a minute) or 1 s and then 4 s, each up to
+  a quarter longer by chance so computers refused together don't come
+  back together;
+- the connection was made and ended before any of a reply came, within
+  the time connecting is allowed. That is a load balancer's reset or a
+  server going away; a task used to fail on it. The call may have been
+  acted on, so a model's answer can be paid for twice. It changes
+  nothing else: a model call does nothing in the world.
+
+And not when:
+- no connection could be made. The next model on the route takes over at
+  once, as before: a computer off the network would otherwise wait five
+  seconds at every call before its local model answered;
+- a wait ran out (trying again would wait as long again);
+- a reply came and was cut off, too long or unreadable.
+
+Left as they are, on purpose:
+- S3 has its own (`s3.rs`, four tries, pauses that triple): every one of
+  its requests may be sent twice, which a model call's may not without
+  saying so, and it knows which of S3's errors are worth it.
+- DynamoDB has none. What reads the schedules table comes round again
+  every half minute by itself. And its writes are conditional: one sent
+  twice, when the first did go through, reads as another host having
+  claimed the run, and nobody runs it.
+
+`tools/dev/fake-model.sh hangup2` runs the desktop agent with one
+connection closed with no reply.

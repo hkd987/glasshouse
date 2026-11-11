@@ -12,7 +12,7 @@ use glass_gateway::{ModelProvider, ProviderError, ProviderReply, ProviderRequest
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::http::{Http, classify};
+use crate::http::{Again, Http, classify};
 
 /// The public endpoint, unless policy names another.
 pub const DEFAULT_ENDPOINT: &str = "https://openrouter.ai/api";
@@ -24,6 +24,8 @@ pub struct OpenRouterProvider {
     http: Http,
     endpoint: String,
     key: Secret,
+    /// When a call is sent again (at once in tests).
+    again: Again,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +78,7 @@ impl OpenRouterProvider {
                 .trim_end_matches('/')
                 .to_owned(),
             key,
+            again: Again::usual(),
         }
     }
 }
@@ -92,7 +95,9 @@ impl ModelProvider for OpenRouterProvider {
             body["tools"] = crate::tools::openai_tools(request.tools);
         }
         let bearer = format!("Bearer {}", self.key.expose());
-        let reply = self.http.post(
+        // Sent again as every model client's calls are ([`Again`]): one
+        // 429 or 503 used to fail over at once, or end the step.
+        let reply = self.http.post_again(
             &format!("{}/v1/chat/completions", self.endpoint),
             &[
                 ("authorization", bearer.as_str()),
@@ -100,6 +105,7 @@ impl ModelProvider for OpenRouterProvider {
                 ("x-title", "Glasshouse"),
             ],
             body.to_string().as_bytes(),
+            &self.again,
         )?;
         if reply.status != 200 {
             let message = serde_json::from_str::<ErrorBody>(&reply.body)
@@ -469,16 +475,50 @@ mod tests {
                 status,
                 r#"{"error":{"code":402,"message":"Insufficient credits"}}"#,
             );
-            let provider = OpenRouterProvider::with_http(
+            let mut provider = OpenRouterProvider::with_http(
                 Http::insecure_for_tests(),
                 Some(&url),
                 Secret::new("k"),
             );
+            // What a status means, once its further tries are spent.
+            provider.again = Again::never();
             let messages = hello();
             let got = provider.complete(&request(&messages));
             assert_eq!(got, Err(expected.clone()));
             assert_eq!(got.unwrap_err().fails_over(), expected.fails_over());
         }
+    }
+
+    // Audit 3.6: one rate-limited call failed over at once, or ended the
+    // step, where the same from Anthropic was tried again.
+    #[test]
+    fn a_rate_limited_call_is_sent_again_and_used_up_credits_are_not() {
+        const SLOW_DOWN: &str = r#"{"error":{"code":429,"message":"Rate limited"}}"#;
+        const OK: &str = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+        let again = |url: &str| {
+            let mut provider = OpenRouterProvider::with_http(
+                Http::insecure_for_tests(),
+                Some(url),
+                Secret::new("k"),
+            );
+            provider.again = Again::at_once(2);
+            provider
+        };
+        let (url, got) = fake::serve_each(vec![(429, SLOW_DOWN), (502, SLOW_DOWN), (200, OK)]);
+        let messages = hello();
+        let reply = again(&url).complete(&request(&messages)).unwrap();
+        assert_eq!(reply.text, "ok");
+        assert_eq!(got.iter().take(3).count(), 3, "twice more, then the reply");
+
+        // No credit left: asking again changes nothing, and the next
+        // model on the route may still answer.
+        let (url, got) = fake::serve(
+            402,
+            r#"{"error":{"code":402,"message":"Insufficient credits"}}"#,
+        );
+        let err = again(&url).complete(&request(&messages)).unwrap_err();
+        assert!(err.fails_over(), "{err}");
+        assert_eq!(got.iter().count(), 1, "asked once");
     }
 
     #[test]

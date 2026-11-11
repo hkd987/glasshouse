@@ -1,24 +1,16 @@
 //! The Anthropic Messages API with an org or team key (MP-4).
 
-use std::time::Duration;
-
 use glass_gateway::{ModelProvider, ProviderError, ProviderReply, ProviderRequest, Secret};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::http::{Http, Reply, classify};
+use crate::http::{Again, Http, Reply, classify};
 
 /// The public endpoint, unless policy names another.
 pub const DEFAULT_ENDPOINT: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 /// The beta that lets a call ask for the thinking-history check (ADR 0043).
 const HISTORY_CHECK_BETA: &str = "thinking-binding-controls-2026-08-01";
-/// How long to wait before each retry of a rate-limited, overloaded or
-/// failed call, unless the reply says how long: a few seconds usually
-/// clears them, where failing over or ending the task would not need to.
-const WAITS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
-/// The longest `retry-after` honored; past it, the usual wait.
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub struct AnthropicProvider {
@@ -32,8 +24,8 @@ pub struct AnthropicProvider {
     /// Ask the API to refuse thinking sent back after a different
     /// conversation (policy's `check_history`).
     check_history: bool,
-    /// The waits before each retry ([`WAITS`]; shorter in tests).
-    waits: Vec<Duration>,
+    /// When a call is sent again (at once in tests).
+    again: Again,
 }
 
 #[derive(Deserialize)]
@@ -104,7 +96,7 @@ impl AnthropicProvider {
             endpoint,
             key,
             check_history: false,
-            waits: WAITS.to_vec(),
+            again: Again::usual(),
         }
     }
 
@@ -114,8 +106,9 @@ impl AnthropicProvider {
         self
     }
 
-    /// Posts `body`, retrying what Anthropic asks callers to retry: rate
-    /// limits (429), overload (529) and server errors, as its own SDKs do.
+    /// Posts `body`, sent again as every model client's calls are
+    /// ([`Again`]): rate limits (429), overload (529), server errors and a
+    /// connection that ended before a reply, as Anthropic's own SDKs do.
     fn post(&self, body: &[u8]) -> Result<Reply, ProviderError> {
         let url = format!("{}/v1/messages", self.endpoint);
         let mut headers = vec![
@@ -126,26 +119,8 @@ impl AnthropicProvider {
         if self.check_history {
             headers.push(("anthropic-beta", HISTORY_CHECK_BETA));
         }
-        let mut tries = 0;
-        loop {
-            let reply = self.http.post(&url, &headers, body)?;
-            let retried = matches!(reply.status, 408 | 429 | 500..=599);
-            let Some(wait) = self.waits.get(tries).filter(|_| retried) else {
-                return Ok(reply);
-            };
-            std::thread::sleep(wait_for(&reply, *wait));
-            tries += 1;
-        }
+        self.http.post_again(&url, &headers, body, &self.again)
     }
-}
-
-/// The wait before retrying `reply`: what the server asked for, within
-/// reason, else `usual`.
-fn wait_for(reply: &Reply, usual: Duration) -> Duration {
-    reply
-        .retry_after
-        .filter(|asked| *asked <= MAX_RETRY_AFTER)
-        .unwrap_or(usual)
 }
 
 impl ModelProvider for AnthropicProvider {
@@ -438,7 +413,7 @@ mod tests {
                 Some(&url),
                 Secret::new("k"),
             );
-            provider.waits = Vec::new();
+            provider.again = Again::never();
             let messages = hello();
             assert_eq!(provider.complete(&request(&messages)), Err(expected));
         }
@@ -451,7 +426,7 @@ mod tests {
     fn retrying(url: &str) -> AnthropicProvider {
         let mut provider =
             AnthropicProvider::with_http(Http::insecure_for_tests(), Some(url), Secret::new("k"));
-        provider.waits = vec![Duration::ZERO; 2];
+        provider.again = Again::at_once(2);
         provider
     }
 
@@ -492,26 +467,6 @@ mod tests {
             Err(ProviderError::Rejected("HTTP 400: bad".into()))
         );
         assert_eq!(got.iter().count(), 1);
-    }
-
-    #[test]
-    fn a_retry_waits_as_long_as_the_server_asks_within_reason() {
-        let reply = |retry_after| Reply {
-            status: 429,
-            body: String::new(),
-            retry_after,
-        };
-        let usual = Duration::from_secs(1);
-        assert_eq!(
-            wait_for(&reply(Some(Duration::from_secs(20))), usual),
-            Duration::from_secs(20)
-        );
-        assert_eq!(
-            wait_for(&reply(Some(Duration::from_secs(600))), usual),
-            usual
-        );
-        assert_eq!(wait_for(&reply(None), usual), usual);
-        assert_eq!(WAITS.len(), 2, "as Anthropic's SDKs: two retries");
     }
 
     #[test]

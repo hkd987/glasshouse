@@ -81,7 +81,7 @@ make vm-status            # "running: pid …, ssh … up" or not running
   `tools/dev/fake-model.sh [--it] [--ladder] <scenario> [request]` runs the
   agent on the dev host against `tools/dev/fake-anthropic.py`. That is a
   local stand-in for the Messages API that checks requests as the API does,
-  over the real provider, gateway and TLS. Scenarios include `overload2`,
+  over the real provider, gateway and TLS. Scenarios include `overload2`, `hangup2` (a connection closed with no reply),
   `ratelimit2`, `refusal2`, `maxtokens`, `credit` and `billing`.
   `build/dev-fake-model/requests.jsonl` keeps every request and reply.
 

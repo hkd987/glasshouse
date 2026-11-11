@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::http::{Http, classify};
+use crate::http::{Again, Http, classify};
 use crate::sigv4::{self, Credentials, uri_encode};
 
 /// Temporary AWS credentials (MP-1).
@@ -96,6 +96,8 @@ pub struct BedrockProvider {
     base: String,
     host: String,
     credentials: AwsCredentials,
+    /// When a call is sent again (at once in tests).
+    again: Again,
 }
 
 #[derive(Deserialize)]
@@ -158,6 +160,7 @@ impl BedrockProvider {
             base: base.split('/').take(3).collect::<Vec<_>>().join("/"),
             host,
             credentials,
+            again: Again::usual(),
         }
     }
 
@@ -204,10 +207,14 @@ impl BedrockProvider {
         );
         let mut all: Vec<(&str, &str)> = headers.to_vec();
         all.extend(signed.iter().map(|(k, v)| (*k, v.as_str())));
-        let reply = self.http.post(
+        // Sent again as every model client's calls are ([`Again`]), with
+        // the same signature: it holds for minutes. One throttled call
+        // used to fail over at once, or end the step.
+        let reply = self.http.post_again(
             &format!("{}/model/{segment}/converse", self.base),
             &all,
             body.as_bytes(),
+            &self.again,
         )?;
         if reply.status != 200 {
             let message = serde_json::from_str::<Value>(&reply.body)
@@ -269,6 +276,9 @@ mod tests {
         ))
         .unwrap()
     }
+
+    /// What Bedrock answers a call with.
+    const OK_REPLY: &str = r#"{"output":{"message":{"role":"assistant","content":[{"text":"Hi"},{"text":" there"}]}},"stopReason":"end_turn","usage":{"inputTokens":9,"outputTokens":2,"totalTokens":11}}"#;
 
     fn temporary() -> AwsCredentials {
         AwsCredentials::from_secrets(
@@ -364,12 +374,14 @@ mod tests {
     fn throttling_fails_over_and_validation_errors_stop() {
         for (status, fails_over) in [(429, true), (503, true), (403, true), (400, false)] {
             let (url, _got) = fake::serve(status, r#"{"message":"nope"}"#);
-            let provider = BedrockProvider::with_http(
+            let mut provider = BedrockProvider::with_http(
                 Http::insecure_for_tests(),
                 "us-east-1",
                 &url,
                 temporary(),
             );
+            // What a status means, once its further tries are spent.
+            provider.again = Again::never();
             let messages = vec![Message::text(Role::User, "Hello")];
             let err = provider
                 .send(
@@ -386,6 +398,43 @@ mod tests {
             assert_eq!(err.fails_over(), fails_over, "{status}: {err}");
             assert!(err.to_string().contains("nope"));
         }
+    }
+
+    // Audit 3.6: one throttled call failed over at once, or ended the
+    // step, where the same from Anthropic was tried again.
+    #[test]
+    fn a_throttled_call_is_sent_again_with_the_same_signature() {
+        const THROTTLED: &str = r#"{"message":"Too many requests"}"#;
+        let (url, got) =
+            fake::serve_each(vec![(429, THROTTLED), (503, THROTTLED), (200, OK_REPLY)]);
+        let mut provider =
+            BedrockProvider::with_http(Http::insecure_for_tests(), "us-east-1", &url, temporary());
+        provider.again = Again::at_once(2);
+        let messages = vec![Message::text(Role::User, "Hello")];
+        let reply = provider
+            .send(
+                &ProviderRequest {
+                    model: "m",
+                    system: None,
+                    messages: &messages,
+                    max_tokens: 8,
+                    tools: &[],
+                },
+                datetime!(2026-10-18 22:00 UTC),
+            )
+            .unwrap();
+        assert!(!reply.text.is_empty());
+        let sent: Vec<_> = got.iter().take(3).collect();
+        assert_eq!(sent.len(), 3, "twice more, then the reply");
+        let signature = |r: &fake::Request| {
+            r.head
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+                .map(str::to_owned)
+        };
+        assert!(signature(&sent[0]).is_some());
+        assert_eq!(signature(&sent[0]), signature(&sent[2]));
+        assert_eq!(sent[0].body, sent[2].body);
     }
 
     #[test]

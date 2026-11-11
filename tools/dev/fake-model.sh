@@ -5,7 +5,7 @@
 # Messages API (tools/dev/fake-anthropic.py): the real Anthropic provider, gateway, HTTP and TLS
 # path, for no credits. The stand-in checks requests as the API documents (thinking blocks bound
 # to the conversation before them, tool results answering the calls before them, strict fields)
-# and can fail on purpose. Scenarios: desktop parallel overload2 ratelimit2 refusal2 maxtokens1
+# and can fail on purpose. Scenarios: desktop parallel overload2 ratelimit2 hangup2 refusal2 maxtokens1
 # maxtokens credit billing triage (see fake-anthropic.py). --ladder approves Haiku, Sonnet and
 # Opus 5.5 with by_cost on (ADR 0044), to watch a task step up.
 #
@@ -98,5 +98,8 @@ for n, line in enumerate(open(sys.argv[1]), 1):
     r = json.loads(line)
     reply, model, status = r["reply"], r["body"]["model"], r["status"]
     how = reply.get("stop_reason") or reply.get("error", {}).get("type")
+    if status == 0:
+        print(f"  {n}. {model:20} the connection closed with no reply")
+        continue
     print(f"  {n}. {model:20} HTTP {status} {how}")
 ' "$out/requests.jsonl"

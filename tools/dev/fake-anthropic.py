@@ -21,6 +21,8 @@ Scenarios (the model's behavior), by --scenario:
   parallel    the same, but reads every file in one turn (parallel tool_use)
   overload2   desktop, but the second call gets 529 overloaded_error once
   ratelimit2  desktop, but the second call gets 429 with retry-after once
+  hangup2     desktop, but the second call's connection is closed once with
+              no reply at all, as a load balancer's reset is
   refusal2    desktop, but the second call is declined (stop_reason refusal)
   maxtokens1  the first step runs out of max_tokens while thinking
   maxtokens   every call does
@@ -321,11 +323,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise Bad(402, "billing_error", "There is a problem with your organization's billing.")
             previous = check(body, headers)
             turn = sum(1 for m in body["messages"] if m["role"] == "assistant")
-            fault = scenario if scenario in ("overload2", "ratelimit2", "refusal2") and turn == 1 else None
+            fault = scenario if scenario in ("overload2", "ratelimit2", "refusal2", "hangup2") and turn == 1 else None
             with lock:
                 first_time = fault and fault not in state["faults"]
                 if first_time:
                     state["faults"].add(fault)
+            if fault == "hangup2" and first_time:
+                # The request was read whole; nothing is said back.
+                record["status"], record["reply"] = 0, {"closed": "with no reply"}
+                with open(self.server.log, "a") as f:
+                    f.write(json.dumps(record) + "\n")
+                self.close_connection = True
+                return
             if fault == "overload2" and first_time:
                 raise Bad(529, "overloaded_error", "Overloaded")
             if fault == "ratelimit2" and first_time:

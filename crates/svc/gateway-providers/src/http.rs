@@ -44,6 +44,88 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// The longest a connection may sit silent. Without streaming, a reply
 /// says nothing until it's whole.
 const IDLE_TIMEOUT: Duration = CALL_TIMEOUT;
+/// How long to wait before each time a model call is sent again
+/// ([`Again`]), unless the reply says how long: a few seconds usually
+/// clears a rate limit or an overload, where failing over or ending the
+/// task would not need to. Two more tries, as Anthropic's own SDKs make.
+const WAITS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
+/// The longest `retry-after` honored; past it, the usual wait.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// When a model call is sent again, and how long after: one rule for
+/// every model client (audit 3.6). Anthropic's client had its own, and
+/// tried a rate-limited or overloaded call twice more; Bedrock's and
+/// OpenRouter's had none, so the same 429 from them failed over at once
+/// or ended the step.
+///
+/// A call is sent again when:
+/// - the reply is a 408, a 429 or a 5xx (529, overloaded, among them),
+///   after the wait the reply asks for (`retry-after`, up to a minute) or
+///   the usual one;
+/// - the connection was made, and ended before any of a reply came, and
+///   that within the time connecting is allowed: a load balancer's reset,
+///   a server going away. The call may have been acted on, and a model's
+///   answer paid for twice; it changes nothing else.
+///
+/// And not when:
+/// - no connection could be made (no network, no such name, refused): the
+///   next model on the route takes over at once, as before, which is what
+///   a computer off the network needs at every call;
+/// - a wait ran out: trying again would wait as long again;
+/// - a reply came and was cut off, too long or unreadable.
+///
+/// The waits are a little longer each time by chance, so that computers
+/// refused together don't all come back together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Again {
+    /// The wait before each further try.
+    waits: Vec<Duration>,
+}
+
+impl Again {
+    /// Twice more, after [`WAITS`].
+    pub fn usual() -> Self {
+        Self {
+            waits: WAITS.to_vec(),
+        }
+    }
+
+    /// `times` more, with no wait between.
+    #[cfg(test)]
+    pub fn at_once(times: usize) -> Self {
+        Self {
+            waits: vec![Duration::ZERO; times],
+        }
+    }
+
+    /// Once and no more.
+    #[cfg(test)]
+    pub fn never() -> Self {
+        Self::at_once(0)
+    }
+}
+
+/// The wait before sending again after `reply`: what the server asked for,
+/// within reason, else `usual`.
+fn wait_for(reply: &Reply, usual: Duration) -> Duration {
+    reply
+        .retry_after
+        .filter(|asked| *asked <= MAX_RETRY_AFTER)
+        .unwrap_or(usual)
+}
+
+/// `wait` and up to a quarter more, by the clock's own nanoseconds.
+fn with_jitter(wait: Duration) -> Duration {
+    let quarter = u64::try_from(wait.as_millis() / 4).unwrap_or(0);
+    if quarter == 0 {
+        return wait;
+    }
+    let chance = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_nanos()));
+    wait + Duration::from_millis(chance % (quarter + 1))
+}
+
 /// A download may sit silent this long before it's an outage; it may take
 /// as long as it takes in all (ADR 0061: an image is gigabytes).
 const DOWNLOAD_IDLE: Duration = Duration::from_secs(60);
@@ -462,6 +544,36 @@ impl Http {
         self.send("POST", url, headers, body)
     }
 
+    /// [`Http::post`] for a model call, sent again as `again` says: see
+    /// [`Again`] for when and when not.
+    pub(crate) fn post_again(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+        again: &Again,
+    ) -> Result<Reply, ProviderError> {
+        let mut tries = 0;
+        loop {
+            let usual = again.waits.get(tries).copied();
+            let began = Instant::now();
+            let wait = match (self.send_how("POST", url, headers, body), usual) {
+                (Ok(reply), Some(usual)) if matches!(reply.status, 408 | 429 | 500..=599) => {
+                    wait_for(&reply, usual)
+                }
+                (Ok(reply), _) => return Ok(reply),
+                (Err(Failed::Unsent(_) | Failed::Unanswered(_)), Some(usual))
+                    if began.elapsed() < self.connect =>
+                {
+                    usual
+                }
+                (Err(failed), _) => return Err(failed.into()),
+            };
+            std::thread::sleep(with_jitter(wait));
+            tries += 1;
+        }
+    }
+
     /// Sends `method` (GET, POST, PATCH, DELETE) with `headers` and
     /// `body`, as [`Http::post`] does.
     pub fn send(
@@ -471,8 +583,22 @@ impl Http {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> Result<Reply, ProviderError> {
+        self.send_how(method, url, headers, body)
+            .map_err(Into::into)
+    }
+
+    /// [`Http::send`], with how it failed when no reply came.
+    fn send_how(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<Reply, Failed> {
         if !matches!(method, "GET" | "POST" | "PATCH" | "DELETE") {
-            return Err(ProviderError::Rejected(format!("no method {method:?}")));
+            return Err(Failed::Other(ProviderError::Rejected(format!(
+                "no method {method:?}"
+            ))));
         }
         let ask = Ask {
             method,
@@ -480,10 +606,10 @@ impl Http {
             headers,
             body,
         };
-        let mut answer = self.exchange(&ask, Instant::now() + self.total, self.max_reply)?;
+        let mut answer = self.exchange_how(&ask, Instant::now() + self.total, self.max_reply)?;
         let reply = answer.reply(self.max_reply);
         answer.done();
-        reply
+        reply.map_err(Failed::Other)
     }
 
     /// Asks with HEAD: the reply's status, and the length it gives for
@@ -542,13 +668,28 @@ impl Http {
         deadline: Instant,
         longest: usize,
     ) -> Result<Answer<'_>, ProviderError> {
-        let target = Target::parse(ask.url).ok_or_else(|| {
-            ProviderError::NotConfigured(format!("{:?} is not an http(s) URL", ask.url))
-        })?;
+        self.exchange_how(ask, deadline, longest)
+            .map_err(Into::into)
+    }
+
+    /// [`Http::exchange`], with how it failed: a connection that couldn't
+    /// be made is [`Failed::Other`], as is anything wrong with the request
+    /// itself.
+    fn exchange_how(
+        &self,
+        ask: &Ask<'_>,
+        deadline: Instant,
+        longest: usize,
+    ) -> Result<Answer<'_>, Failed> {
+        let target = Target::parse(ask.url)
+            .ok_or_else(|| {
+                ProviderError::NotConfigured(format!("{:?} is not an http(s) URL", ask.url))
+            })
+            .map_err(Failed::Other)?;
         if self.https_only && !target.tls {
-            return Err(ProviderError::NotConfigured(
+            return Err(Failed::Other(ProviderError::NotConfigured(
                 "model endpoints must use HTTPS".into(),
-            ));
+            )));
         }
         let mut request = format!(
             "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Glasshouse model gateway\r\nContent-Length: {}\r\n",
@@ -562,7 +703,9 @@ impl Http {
         }
         for (name, value) in ask.headers {
             if name.contains(['\r', '\n', ':']) || value.contains(['\r', '\n']) {
-                return Err(ProviderError::Rejected("a header has a line break".into()));
+                return Err(Failed::Other(ProviderError::Rejected(
+                    "a header has a line break".into(),
+                )));
             }
             request.push_str(&format!("{name}: {value}\r\n"));
         }
@@ -580,11 +723,11 @@ impl Http {
                 Err(Failed::Unsent(_)) => {}
                 Err(Failed::Unanswered(_))
                     if matches!(ask.method, "GET" | "HEAD" | "PUT" | "DELETE") => {}
-                Err(failed) => return Err(failed.into()),
+                Err(failed) => return Err(failed),
             }
             kept.forget(&to);
         }
-        let conn = self.open(&target)?;
+        let conn = self.open(&target).map_err(Failed::Other)?;
         let heard = converse(conn, &request, ask, deadline, longest)?;
         Ok(self.answer(to, ask.method, heard, deadline))
     }
@@ -1199,6 +1342,9 @@ mod tests {
 
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
 
     use super::*;
 
@@ -1747,6 +1893,159 @@ mod tests {
         assert!(classify(403, String::new()).fails_over());
         assert!(!classify(400, String::new()).fails_over());
         assert!(!classify(302, String::new()).fails_over(), "no redirects");
+    }
+
+    const FINE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+
+    // Audit 3.6: one rule for every model client. Anthropic's tried a
+    // refused status again and nothing else; the others tried nothing.
+    #[test]
+    fn a_model_call_is_sent_again_after_a_status_that_asks_for_it() {
+        let (url, got) = fake::serve_headed(vec![
+            (529, "", "{}"),
+            (429, "retry-after: 0\r\n", "{}"),
+            (200, "", "{}"),
+        ]);
+        let http = Http::insecure_for_tests();
+        let reply = http
+            .post_again(&url, &[], b"{}", &Again::at_once(2))
+            .unwrap();
+        assert_eq!(reply.status, 200);
+        assert_eq!(got.iter().take(3).count(), 3, "twice more, then the reply");
+
+        // Still refused after the tries it has: the last reply is the answer.
+        let (url, got) = fake::serve_each(vec![(503, "{}"); 3]);
+        let reply = http
+            .post_again(&url, &[], b"{}", &Again::at_once(2))
+            .unwrap();
+        assert_eq!(reply.status, 503);
+        assert_eq!(got.iter().take(3).count(), 3);
+
+        // What trying again wouldn't change is answered at once.
+        for status in [400, 401, 402, 404] {
+            let (url, got) = fake::serve(status, "{}");
+            let reply = http
+                .post_again(&url, &[], b"{}", &Again::at_once(2))
+                .unwrap();
+            assert_eq!(reply.status, status);
+            assert_eq!(got.iter().count(), 1, "HTTP {status}");
+        }
+    }
+
+    #[test]
+    fn a_model_call_whose_connection_ended_before_a_reply_is_sent_again() {
+        // The server takes the request and closes: nothing of a reply.
+        let (url, got) = fake::serve_raw(vec![Vec::new(), FINE.to_vec()]);
+        let http = Http::insecure_for_tests();
+        let reply = http
+            .post_again(&url, &[], b"{\"n\":1}", &Again::at_once(2))
+            .unwrap();
+        assert_eq!(reply.status, 200);
+        let sent: Vec<String> = got.iter().take(2).map(|r| r.body).collect();
+        assert_eq!(sent, [r#"{"n":1}"#, r#"{"n":1}"#], "the same call, twice");
+        // And as `post` alone it is the outage it always was.
+        let (url, _got) = fake::serve_raw(vec![Vec::new(), FINE.to_vec()]);
+        assert!(http.post(&url, &[], b"{}").is_err());
+    }
+
+    #[test]
+    fn a_model_call_is_not_sent_again_when_that_would_not_help() {
+        let http = Http::insecure_for_tests();
+        // No connection: nothing listens here. Answered at once, with the
+        // usual waits untouched, as a computer off the network needs at
+        // every call (the next model on the route takes over).
+        let asked = Instant::now();
+        let err = http
+            .post_again("http://127.0.0.1:9/v1", &[], b"{}", &Again::usual())
+            .unwrap_err();
+        assert!(err.fails_over(), "{err}");
+        assert!(
+            asked.elapsed() < Duration::from_millis(900),
+            "{:?}",
+            asked.elapsed()
+        );
+
+        // A reply that came and was cut off.
+        let cut = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"half\":".to_vec();
+        let (url, got) = fake::serve_raw(vec![cut, FINE.to_vec()]);
+        assert!(
+            http.post_again(&url, &[], b"{}", &Again::at_once(2))
+                .is_err()
+        );
+        assert_eq!(got.try_iter().count(), 1, "asked once");
+
+        // A wait that ran out: the server takes the request and says
+        // nothing. Trying again would wait as long again.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let taken = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&taken);
+        thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                count.fetch_add(1, Ordering::SeqCst);
+                held.push(stream);
+            }
+        });
+        let mut impatient = Http::insecure_for_tests();
+        impatient.idle = Duration::from_millis(150);
+        impatient.total = Duration::from_millis(150);
+        let err = impatient
+            .post_again(&url, &[], b"{}", &Again::at_once(2))
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert_eq!(taken.load(Ordering::SeqCst), 1, "asked once");
+
+        // A connection that ended with no reply, but only after longer
+        // than connecting is allowed: the call had been waiting a while.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let taken = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&taken);
+        thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                count.fetch_add(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(250));
+                drop(stream);
+            }
+        });
+        let mut http = Http::insecure_for_tests();
+        http.connect = Duration::from_millis(100);
+        assert!(
+            http.post_again(&url, &[], b"{}", &Again::at_once(2))
+                .is_err()
+        );
+        assert_eq!(taken.load(Ordering::SeqCst), 1, "asked once");
+    }
+
+    #[test]
+    fn a_wait_is_what_the_server_asks_within_reason_and_a_little_more_by_chance() {
+        let reply = |retry_after| Reply {
+            status: 429,
+            body: String::new(),
+            retry_after,
+        };
+        let usual = Duration::from_secs(1);
+        assert_eq!(
+            wait_for(&reply(Some(Duration::from_secs(20))), usual),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            wait_for(&reply(Some(Duration::from_secs(600))), usual),
+            usual
+        );
+        assert_eq!(wait_for(&reply(None), usual), usual);
+        assert_eq!(
+            Again::usual().waits.len(),
+            2,
+            "as Anthropic's SDKs: twice more"
+        );
+        // Up to a quarter more, never less, and nothing added to nothing.
+        assert_eq!(with_jitter(Duration::ZERO), Duration::ZERO);
+        for _ in 0..200 {
+            let wait = with_jitter(Duration::from_secs(4));
+            assert!((Duration::from_secs(4)..=Duration::from_secs(5)).contains(&wait));
+        }
     }
 }
 
