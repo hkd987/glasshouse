@@ -134,7 +134,7 @@ Parameters:
       - r8i.96xlarge
   MinHosts:
     Type: Number
-    Description: Agent hosts kept running. Keep it at 1 for now. Until hosts route each person to the host their computers are awake on, a second host can wake a computer that is awake on the first (ADR 0066).
+    Description: Agent hosts kept running. Keep it at 1 for now. A computer is awake on one host at a time, and until hosts pass each person's requests on to the host their computer is awake on, a request that reaches another host is refused (ADR 0066).
     Default: 1
     MinValue: 1
     MaxValue: 100

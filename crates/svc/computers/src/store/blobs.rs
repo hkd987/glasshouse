@@ -30,6 +30,10 @@ pub trait Blobs: Send + Sync + fmt::Debug {
         let _ = sha256;
         self.put(key, bytes)
     }
+    /// Puts `bytes` at `key` only if nothing is there, and says whether it
+    /// did. Of several asking at once for one key, one does: what a claim
+    /// is made of (a computer's lease, ADR 0066).
+    fn put_new(&self, key: &str, bytes: &[u8]) -> Result<bool, String>;
     /// The object at `key`, or `None` if there's none.
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
     fn exists(&self, key: &str) -> Result<bool, String>;
@@ -78,7 +82,8 @@ impl FolderBlobs {
         Ok(self.root.join(key))
     }
 
-    fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    /// `bytes` whole in a file beside `path`, under a name of its own.
+    fn staged(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
         let parent = path.parent().unwrap_or(Path::new("."));
         let name = path
             .file_name()
@@ -93,14 +98,34 @@ impl FolderBlobs {
             }
             other => other?,
         };
-        let written = file
-            .write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .and_then(|()| fs::rename(&temp, path));
+        if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            let _ = fs::remove_file(&temp);
+            return Err(e);
+        }
+        Ok(temp)
+    }
+
+    fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let temp = Self::staged(path, bytes)?;
+        let written = fs::rename(&temp, path);
         if written.is_err() {
             let _ = fs::remove_file(&temp);
         }
         written
+    }
+
+    /// Writes `path` only if it isn't there. A link to the whole file fails
+    /// if the name is taken, for whoever asks second, in this process or
+    /// another; a reader never sees half of it.
+    fn write_new(path: &Path, bytes: &[u8]) -> io::Result<bool> {
+        let temp = Self::staged(path, bytes)?;
+        let linked = fs::hard_link(&temp, path);
+        let _ = fs::remove_file(&temp);
+        match linked {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -108,6 +133,12 @@ impl Blobs for FolderBlobs {
     fn put(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
         let path = self.path(key)?;
         Self::write(&path, bytes).map_err(|e| format!("can't write {key} in the store folder: {e}"))
+    }
+
+    fn put_new(&self, key: &str, bytes: &[u8]) -> Result<bool, String> {
+        let path = self.path(key)?;
+        Self::write_new(&path, bytes)
+            .map_err(|e| format!("can't write {key} in the store folder: {e}"))
     }
 
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
@@ -235,6 +266,10 @@ impl Blobs for S3Blobs {
 
     fn put_hashed(&self, key: &str, bytes: &[u8], sha256: &str) -> Result<(), String> {
         self.client.put_hashed(&self.key(key), bytes, sha256)
+    }
+
+    fn put_new(&self, key: &str, bytes: &[u8]) -> Result<bool, String> {
+        self.client.put_new(&self.key(key), bytes)
     }
 
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {

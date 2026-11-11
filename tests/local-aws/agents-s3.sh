@@ -18,6 +18,11 @@
 #      it). It puts the computer to sleep by itself and refuses new tasks.
 #   5. Another host, which never had it, lists it asleep and wakes it with
 #      every file the same.
+#   6. One host at a time has it awake (its lease in the bucket, made with
+#      a put S3 refuses if the term is there). The first host, back with
+#      its own record of the computer from before, is refused while the
+#      second has it; once it sleeps there, the first wakes what the
+#      second saved, not the version it remembers.
 #
 # The scripted model runs the commands (no network, no key): a prompt that
 # names computer_run calls it with the JSON after the name. The bytes are
@@ -52,10 +57,15 @@ s3() { curl -fsS "$GLASS_LOCAL_METERING/_fake/s3?prefix=$1"; }
 field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
 
 # Starts host $1 (glassd and the front) on port $2, in its own process
-# group, so stopping it stops both.
+# group, so stopping it stops both. With a third argument the host starts
+# again with what it had on disk.
 start_host() {
 	host="$repo/build/local-aws/$1"
-	rm -rf "$host"
+	if [ -n "${3:-}" ]; then
+		rm -f "$host/agents.json"
+	else
+		rm -rf "$host"
+	fi
 	mkdir -p "$host"
 	GLASS_DEV_DIR=$host GLASS_DEV_RUN=$host/run GLASS_DEV_STORE=s3 GLASS_DEV_SKIP_BUILD=1 \
 		GLASS_DEV_HOST=$1 GLASS_AGENTS_LISTEN=127.0.0.1:$2 GLASS_AGENTS_TOKEN_FILE=$host/agents.json \
@@ -78,7 +88,8 @@ stop_host() {
 	kill -TERM -- "-$stack" 2>/dev/null || true
 	wait "$stack" 2>/dev/null || true
 }
-trap 'kill -TERM -- "-$stack" 2>/dev/null || true' EXIT
+other=""
+trap 'kill -TERM -- "-$stack" 2>/dev/null || true; [ -z "$other" ] || kill -TERM -- "-$other" 2>/dev/null || true' EXIT
 
 # Runs a command on the agent's computer; prints what the screen showed.
 run() {
@@ -192,6 +203,36 @@ if [ "$after" = "$before" ]; then
 else
 	fail "host B woke it, but the files differ: before $before; after $after"
 fi
+
+# 6. One host at a time. Host B has it awake and works on it; host A comes
+# back as it was, its own record of the computer from before B's work.
+run "printf 'on host b\n' >~/work/note.txt" >/dev/null
+b_url=$GLASS_AGENTS_URL
+b_token=$GLASS_AGENTS_TOKEN
+other=$stack
+start_host host-a "$port" again
+refused=$(run 'true' 2>&1 || true)
+if grep -q "is awake on another host" <<<"$refused"; then
+	pass "host A, back, doesn't wake it while host B has it: \"$(grep -o '[A-Z][A-Za-z ]* is awake on another host ([^)]*)' <<<"$refused" | head -1)\""
+else
+	fail "host A wasn't refused while host B has the computer: $refused"
+fi
+leases=$(field objects <<<"$(s3 "computers/$key/lease/")")
+if [ "$leases" = 1 ]; then
+	pass "its lease is one object in the bucket, under the computer's key"
+else
+	fail "the bucket has $leases lease objects for the computer"
+fi
+GLASS_AGENTS_URL=$b_url GLASS_AGENTS_TOKEN=$b_token "$glass" sleep keeper >/dev/null
+note=$(run 'cat ~/work/note.txt' 2>&1 || true)
+if grep -q "on host b" <<<"$note"; then
+	pass "asleep on host B, host A wakes what B saved, not the version it remembered"
+else
+	fail "host A woke it without host B's work: $note"
+fi
+stop_host
+stack=$other
+other=""
 stop_host
 trap - EXIT
 

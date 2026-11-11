@@ -132,6 +132,9 @@ impl Blobs for Counting {
         self.puts.lock().unwrap().push(key.to_owned());
         self.inner.put(key, bytes)
     }
+    fn put_new(&self, key: &str, bytes: &[u8]) -> Result<bool, String> {
+        self.inner.put_new(key, bytes)
+    }
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         self.inner.get(key)
     }
@@ -782,6 +785,9 @@ impl Blobs for Slow {
         self.flying.fetch_sub(1, SeqCst);
         result
     }
+    fn put_new(&self, key: &str, bytes: &[u8]) -> Result<bool, String> {
+        self.inner().put_new(key, bytes)
+    }
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         self.inner().get(key)
     }
@@ -892,4 +898,259 @@ fn adr0066_a_chunk_the_store_refuses_fails_the_save_and_leaves_no_version() {
     assert_eq!(blobs.flying.load(SeqCst), 0);
     assert!(blobs.chunk_puts.load(SeqCst) < 10);
     assert!(store.versions("dana").unwrap().is_empty());
+}
+
+// One host at a time per computer (ADR 0066): the lease.
+
+fn at(secs: i64) -> glass_types::Timestamp {
+    glass_types::Timestamp::from_unix_seconds(1_800_000_000 + secs).unwrap()
+}
+
+fn held(claim: Claim) -> Lease {
+    match claim {
+        Claim::Held(lease) => lease,
+        Claim::Elsewhere(lease) => panic!("{} has it: {lease:?}", lease.host),
+    }
+}
+
+fn elsewhere(claim: Claim) -> Lease {
+    match claim {
+        Claim::Elsewhere(lease) => lease,
+        Claim::Held(lease) => panic!("it was taken: {lease:?}"),
+    }
+}
+
+#[test]
+fn adr0066_a_computer_is_one_hosts_until_that_host_gives_it_up() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, blobs) = folder_store(tmp.path());
+    assert_eq!(store.lease("dana").unwrap(), None);
+
+    let a = held(store.claim("dana", "host-a", at(0), LEASE_FOR).unwrap());
+    assert_eq!((a.term, a.host.as_str(), a.released), (1, "host-a", false));
+    // Another host is told who has it, and nothing changes.
+    let told = elsewhere(store.claim("dana", "host-b", at(5), LEASE_FOR).unwrap());
+    assert_eq!(told, a);
+    assert_eq!(store.lease("dana").unwrap(), Some(a.clone()));
+
+    // Renewed, it holds on from the renewal.
+    let a = store.renew("dana", &a, at(100)).unwrap().unwrap();
+    assert_eq!((a.term, a.since, a.renewed), (1, at(0), at(100)));
+    let told = elsewhere(store.claim("dana", "host-b", at(219), LEASE_FOR).unwrap());
+    assert_eq!(told.renewed, at(100));
+
+    // Given up, it's the next host's at once, as the next term; the terms
+    // before it are gone from the store.
+    store.release("dana", &a, at(220)).unwrap();
+    assert!(store.lease("dana").unwrap().unwrap().released);
+    let b = held(store.claim("dana", "host-b", at(221), LEASE_FOR).unwrap());
+    assert_eq!((b.term, b.host.as_str()), (2, "host-b"));
+    let kept: Vec<String> = blobs
+        .list("computers/dana/lease/")
+        .unwrap()
+        .into_iter()
+        .map(|l| l.key)
+        .collect();
+    assert_eq!(kept, ["computers/dana/lease/00000000000000000002.json"]);
+    // A lease is nothing GC reads as a version.
+    assert!(store.gc().is_ok());
+    assert!(store.versions("dana").unwrap().is_empty());
+
+    // A name that isn't a host's is no host.
+    assert!(store.claim("dana", "host b", at(300), LEASE_FOR).is_err());
+    assert!(store.claim("dana", "", at(300), LEASE_FOR).is_err());
+}
+
+#[test]
+fn adr0066_a_lease_runs_out_only_once_its_host_stopped_renewing_for_all_of_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, _) = folder_store(tmp.path());
+    let a = held(store.claim("dana", "host-a", at(0), LEASE_FOR).unwrap());
+    let lease_for = i64::try_from(LEASE_FOR.as_secs()).unwrap();
+    // A second short of the whole lease: still host A's.
+    elsewhere(
+        store
+            .claim("dana", "host-b", at(lease_for - 1), LEASE_FOR)
+            .unwrap(),
+    );
+    // Host A went away with it awake. Once the lease has run out another
+    // host takes the computer, to wake it as it last slept.
+    let b = held(
+        store
+            .claim("dana", "host-b", at(lease_for), LEASE_FOR)
+            .unwrap(),
+    );
+    assert_eq!(b.term, 2);
+    // Host A, back, is told at its next renewal, and when it asks again.
+    assert_eq!(store.renew("dana", &a, at(lease_for + 1)).unwrap(), None);
+    let told = elsewhere(store.reclaim("dana", "host-a", at(lease_for + 2)).unwrap());
+    assert_eq!(told.host, "host-b");
+    assert_eq!(store.lease("dana").unwrap().unwrap().host, "host-b");
+    // A clock that's behind the renewal reads the lease as holding.
+    assert!(b.holds(at(0), LEASE_FOR));
+}
+
+#[test]
+fn adr0066_a_host_asking_again_keeps_its_computer_only_if_no_other_host_had_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, _) = folder_store(tmp.path());
+    // Never taken (a computer from before leases): it's the host's.
+    let first = held(store.reclaim("dana", "host-a", at(0)).unwrap());
+    assert_eq!(first.term, 1);
+    // Its glassd started again, or it was out of reach for a while, and
+    // nobody took the computer meanwhile: a new term, however long it was.
+    let again = held(store.reclaim("dana", "host-a", at(10_000)).unwrap());
+    assert_eq!((again.term, again.since), (2, at(10_000)));
+
+    // Out of reach again; host B takes the computer, works on it, puts it
+    // to sleep and gives it up. Host A's copy is from before all that: it
+    // isn't told "nobody has it, go on", though nobody has.
+    let b = held(
+        store
+            .claim("dana", "host-b", at(20_000), LEASE_FOR)
+            .unwrap(),
+    );
+    store.release("dana", &b, at(20_100)).unwrap();
+    let told = elsewhere(store.reclaim("dana", "host-a", at(20_200)).unwrap());
+    assert_eq!((told.host.as_str(), told.released), ("host-b", true));
+    assert_eq!(
+        store.lease("dana").unwrap().unwrap().term,
+        3,
+        "nothing taken"
+    );
+    // To wake it from the store, as any host may, it asks as any host does.
+    let woke = held(
+        store
+            .claim("dana", "host-a", at(20_300), LEASE_FOR)
+            .unwrap(),
+    );
+    assert_eq!(woke.term, 4);
+    // A lease this host gave up itself isn't one it still has.
+    store.release("dana", &woke, at(20_400)).unwrap();
+    elsewhere(store.reclaim("dana", "host-a", at(20_500)).unwrap());
+}
+
+#[test]
+fn adr0066_of_hosts_asking_at_once_one_gets_the_computer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, _) = folder_store(tmp.path());
+    for round in 0..5 {
+        let now = at(round * 1000);
+        let claims: Vec<Claim> = std::thread::scope(|scope| {
+            let asks: Vec<_> = (0..8)
+                .map(|n| {
+                    let store = &store;
+                    scope.spawn(move || {
+                        store
+                            .claim("dana", &format!("host-{n}"), now, LEASE_FOR)
+                            .unwrap()
+                    })
+                })
+                .collect();
+            asks.into_iter().map(|ask| ask.join().unwrap()).collect()
+        });
+        let winners: Vec<&Lease> = claims
+            .iter()
+            .filter_map(|claim| match claim {
+                Claim::Held(lease) => Some(lease),
+                Claim::Elsewhere(_) => None,
+            })
+            .collect();
+        assert_eq!(winners.len(), 1, "round {round}: {claims:?}");
+        // Everyone else was told it's the winner's.
+        for claim in &claims {
+            if let Claim::Elsewhere(lease) = claim {
+                assert_eq!(&lease, winners.first().unwrap());
+            }
+        }
+        store.release("dana", winners[0], now).unwrap();
+    }
+    // One host asking twice at once (keeping its leases, and a sleep) has
+    // the one term both times.
+    let both: Vec<Lease> = std::thread::scope(|scope| {
+        let asks: Vec<_> = (0..2)
+            .map(|_| {
+                let store = &store;
+                scope.spawn(move || held(store.reclaim("solo", "host-a", at(0)).unwrap()))
+            })
+            .collect();
+        asks.into_iter().map(|ask| ask.join().unwrap()).collect()
+    });
+    assert_eq!(both[0], both[1]);
+}
+
+#[test]
+fn adr0066_a_lease_that_cant_be_read_is_nobodys_to_take() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (store, blobs) = folder_store(tmp.path());
+    held(store.claim("dana", "host-a", at(0), LEASE_FOR).unwrap());
+    blobs
+        .put("computers/dana/lease/00000000000000000001.json", b"{")
+        .unwrap();
+    let failed = store
+        .claim("dana", "host-b", at(100_000), LEASE_FOR)
+        .unwrap_err();
+    assert!(failed.contains("nobody takes this computer"), "{failed}");
+    // Nor one that says it's another term than its name.
+    let other = serde_json::to_vec(&Lease {
+        term: 7,
+        host: "host-a".into(),
+        since: at(0),
+        renewed: at(0),
+        released: true,
+    })
+    .unwrap();
+    blobs
+        .put("computers/dana/lease/00000000000000000001.json", &other)
+        .unwrap();
+    assert!(store.reclaim("dana", "host-a", at(1)).is_err());
+}
+
+#[test]
+fn adr0066_s3_lets_one_host_take_a_computer() {
+    let s3 = StandIn::start();
+    let store = Store::new(Arc::new(S3Blobs::new(s3.client(), "/glasshouse/")));
+    let claims: Vec<Claim> = std::thread::scope(|scope| {
+        let asks: Vec<_> = (0..6)
+            .map(|n| {
+                let store = &store;
+                scope.spawn(move || {
+                    store
+                        .claim("dana", &format!("i-0host{n}"), at(0), LEASE_FOR)
+                        .unwrap()
+                })
+            })
+            .collect();
+        asks.into_iter().map(|ask| ask.join().unwrap()).collect()
+    });
+    let mine: Vec<Lease> = claims
+        .into_iter()
+        .filter_map(|claim| match claim {
+            Claim::Held(lease) => Some(lease),
+            Claim::Elsewhere(_) => None,
+        })
+        .collect();
+    assert_eq!(mine.len(), 1);
+    let seen = s3.seen();
+    assert!(seen.iter().all(|r| r.refused.is_none()), "{seen:?}");
+    // Every take was a put that S3 was told to refuse if the term is
+    // there. (A host that asked after the winner was through never put.)
+    let takes: Vec<_> = seen
+        .iter()
+        .filter(|r| r.method == "PUT" && r.target.contains("/lease/"))
+        .collect();
+    assert!(!takes.is_empty());
+    assert!(takes.iter().all(|r| r.header("if-none-match") == Some("*")));
+
+    let renewed = store.renew("dana", &mine[0], at(30)).unwrap().unwrap();
+    store.release("dana", &renewed, at(60)).unwrap();
+    let next = held(store.claim("dana", "i-0other", at(61), LEASE_FOR).unwrap());
+    assert_eq!(next.term, 2);
+    assert_eq!(
+        s3.keys()
+            .into_iter()
+            .filter(|k| k.contains("/lease/"))
+            .collect::<Vec<_>>(),
+        ["glasshouse/computers/dana/lease/00000000000000000002.json"]
+    );
 }

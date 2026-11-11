@@ -90,6 +90,9 @@ pub struct Runtime {
     pub(crate) desk: ApprovalDesk,
     pub(crate) sandbox: Arc<dyn Sandbox>,
     pub(crate) computers: Option<Arc<glass_computers::sandbox::ComputerSandbox>>,
+    /// Computers whose lease the store didn't take word of on the last
+    /// pass: said in the log once, not every pass.
+    pub(crate) lease_trouble: Mutex<std::collections::HashSet<(u32, String)>>,
     pub(crate) snapshots: Arc<dyn Snapshotter>,
     /// Each person's turn to change their files, by uid: a reversible step
     /// from its snapshot to its record, and an undo (ADR 0051).
@@ -226,6 +229,7 @@ impl Runtime {
             desk: ApprovalDesk::new(),
             sandbox: parts.sandbox,
             computers: parts.computers,
+            lease_trouble: Mutex::default(),
             snapshots: parts.snapshots,
             writing: Mutex::new(std::collections::HashMap::new()),
             gateway: RwLock::new(parts.gateway),

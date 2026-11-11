@@ -640,6 +640,16 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             if let Some((store, place)) = computer_store(settings)? {
                 tracing::info!(%place, "agent computers sleep in the store");
                 made = made.with_store(Arc::new(store), place);
+                // Its name in computers' leases (ADR 0066): on AWS its
+                // instance id, which is what an operator looks a host up
+                // by. Elsewhere the name it made for itself stays.
+                if settings.store == Some(crate::config::StoreKind::S3)
+                    && let Ok(Some(instance)) =
+                        glass_gateway_providers::s3::instance_metadata("instance-id")
+                {
+                    made = made.with_host(instance);
+                }
+                tracing::info!(host = %made.host(), "this host's name in computers' leases");
             }
             // People's computers are theirs in the store by their sign-in,
             // the same on every host (ADR 0067, ADR 0068).
@@ -917,6 +927,22 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
             loop {
                 tick.tick().await;
                 runtime.sleep_idle_computers(idle).await;
+            }
+        });
+    }
+
+    // One host at a time has a computer awake (ADR 0066): this one says
+    // so in the store for each it has, every half minute.
+    if config.sandbox.backend == SandboxBackend::Computers
+        && config.sandbox.computers.store.is_some()
+    {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(glass_computers::store::RENEW_EVERY);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                runtime.keep_computer_leases().await;
             }
         });
     }

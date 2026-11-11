@@ -213,8 +213,8 @@ aws cloudformation deploy \
 | `OidcClientSecretArn` | The Secrets Manager ARN of the sign-in app's client secret. |
 | `HostAmiId` | The Glasshouse Agents host image for this Region. |
 | `HostInstanceType` | A C8i, M8i or R8i size. The default is `m8i.xlarge` (4 vCPUs, 16 GiB). More memory per host means more computers awake at once; R8i has the most per vCPU. |
-| `MinHosts` | Hosts always running. The default is 1; 2 keeps the service up if one Availability Zone fails. |
-| `MaxHosts` | The most hosts the group grows to when busy. The default is 4. Must be at least `MinHosts`. |
+| `MinHosts` | Hosts always running. The default is 1. Keep it at 1 for now: an agent's computer is awake on one host at a time, and a request that reaches another host is refused until hosts pass requests on to each other. |
+| `MaxHosts` | The most hosts the group grows to when busy. The default is 1, for the same reason. Must be at least `MinHosts`. |
 | `HostDiskGiB` | Each host's disk, a cache of the computers that are awake. The default is 200. |
 | `IdleMinutesBeforeSleep` | Minutes an agent's computer may sit idle before it is saved to S3 and stops costing anything but storage. The default is 15. |
 | `TeamsAppId` | Your Teams bot's Microsoft App ID, or empty for no Teams. |
@@ -276,6 +276,9 @@ There is no NAT gateway, so there are no NAT charges.
     takes 20 minutes or more.
   - Someone using a computer while its host is replaced sees it pause and
     come back on a new host, with its programs where they were.
+  - A computer is awake on one host at a time. Until the old host has put
+    one to sleep, the new host won't wake it: its person is told it's awake
+    on the other host, and to ask again in a moment.
   - Not even a one-host stack goes down for an update.
 - **To change the sign-in client secret:**
   - CloudFormation reads the secret only when the load balancer's listener
@@ -369,6 +372,13 @@ For your security review:
   - If it fails, its group starts another in a few minutes.
   - Until then, Teams messages wait, and so does a sign-in that needs a
     signing key the service hasn't fetched before.
+- **One host.** With more than one, a request can reach a host other than
+  the one a person's computer is awake on, and is refused there ("awake on
+  another host") instead of passed on. Keep `MinHosts` and `MaxHosts` at 1
+  until hosts pass requests on to each other.
+- **A host that fails with computers awake** takes what they did since they
+  last slept. Another host wakes each from its last sleep, two minutes
+  after the failed host last answered.
 
 ## What only AWS can confirm
 
@@ -388,6 +398,10 @@ and some a Marketplace listing:
     internet gateway.
 - **The S3 endpoint policy.** Does it leave Systems Manager and the host
   image's package updates working?
+- **S3's conditional put.** A host takes a computer with a put that S3
+  must refuse when the object is there (`If-None-Match: *`). It was run
+  here against moto. On AWS: is it refused with 412 under the bucket's
+  policy and KMS key, through the S3 endpoint?
 - **The listing.** Does it take contract pricing with a metered
   `agent_computer_hours` dimension? Do the AMI and template pass AWS's scans?
 - **The Bot Framework and TLS.** Does Microsoft's Bot Framework connect under

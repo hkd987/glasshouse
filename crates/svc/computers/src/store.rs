@@ -28,6 +28,7 @@
 //! file of its own, their chunks shared) and symlinks' own times.
 
 mod blobs;
+mod lease;
 mod manifest;
 mod tree;
 
@@ -48,6 +49,7 @@ use time::macros::format_description;
 use time::{OffsetDateTime, PrimitiveDateTime};
 
 pub use blobs::{Blobs, FolderBlobs, Listed, S3Blobs};
+pub use lease::{Claim, LEASE_FOR, Lease, RENEW_EVERY, TRUST_FOR};
 use manifest::{Entry, FORMAT, Kind, Manifest, Of, Stamp};
 
 /// The most of a file one chunk holds.
@@ -478,6 +480,12 @@ impl Store {
     pub fn put_record(&self, computer: &str, record: &[u8]) -> Result<(), String> {
         check_computer(computer)?;
         self.blobs.put(&record_key(computer), record)
+    }
+
+    /// `computer`'s record, or `None` if the store has none.
+    pub fn record(&self, computer: &str) -> Result<Option<Vec<u8>>, String> {
+        check_computer(computer)?;
+        self.blobs.get(&record_key(computer))
     }
 
     /// The records of the computers whose ids start with `prefix`: each

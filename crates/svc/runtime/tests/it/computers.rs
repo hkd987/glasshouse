@@ -121,6 +121,9 @@ impl glass_computers::store::Blobs for MeetingStore {
         }
         self.inner.put(key, bytes)
     }
+    fn put_new(&self, key: &str, bytes: &[u8]) -> Result<bool, String> {
+        self.inner.put_new(key, bytes)
+    }
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         self.inner.get(key)
     }
@@ -212,6 +215,119 @@ async fn adr0066_a_host_being_replaced_sleeps_several_computers_at_once() {
             .count(),
         names.len(),
         "each on the record"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adr0066_a_computer_another_host_took_stops_its_tasks_and_goes_aside_on_the_record() {
+    use glass_computers::store::{Blobs, Claim, LEASE_FOR};
+    let h = harness();
+    if let Err(why) = NamespaceHypervisor::available() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let dir = h.dir.path().join("computers");
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(h.dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    let blobs = Arc::new(FolderBlobs::new(h.dir.path().join("store")).unwrap());
+    let store = Arc::new(Store::new(blobs.clone()));
+    let computers = Arc::new(
+        ComputerSandbox::new(
+            dir.clone(),
+            Arc::new(NamespaceHypervisor::new(Vec::new())),
+            1024,
+            1,
+        )
+        .unwrap()
+        .with_store(store.clone(), "S3: acme-agents"),
+    );
+    let rt = common::rebuild_on(
+        &h,
+        glass_policy::DEFAULT_POLICY,
+        vec![reconciler()],
+        computers.clone(),
+        Some(computers.clone()),
+    );
+    rt.computer_make(
+        &h.me,
+        ComputerNew {
+            id: "reconciler".into(),
+            name: "Reconciler".into(),
+            role: "Matches invoices to payments".into(),
+            agent: "invoice-demo".parse().unwrap(),
+        },
+    )
+    .unwrap();
+    // Kept: nothing to say.
+    rt.keep_computer_leases().await;
+    let key = store.records(&format!("u{}-", h.me.uid)).unwrap()[0]
+        .0
+        .clone();
+    let mine = store.lease(&key).unwrap().unwrap();
+    assert_eq!(mine.host, computers.host());
+
+    // A task is working on it when this host loses the store for longer
+    // than a lease lasts, and another host takes the computer.
+    let task = rt.start(&h.me, ask("Hold on to it")).unwrap();
+    eventually(|| rt.get(&h.me, task.id).unwrap().view.state == TileState::Working).await;
+    let mut stale = mine.clone();
+    stale.renewed =
+        glass_types::Timestamp::from_unix_seconds(mine.renewed.unix_seconds() - 600).unwrap();
+    blobs
+        .put(
+            &format!("computers/{key}/lease/{:020}.json", stale.term),
+            &serde_json::to_vec(&stale).unwrap(),
+        )
+        .unwrap();
+    let taken = store
+        .claim(&key, "host-b", glass_types::Timestamp::now(), LEASE_FOR)
+        .unwrap();
+    assert!(matches!(taken, Claim::Held(_)), "{taken:?}");
+
+    // This host's next renewal finds out. The task stops and says why;
+    // nothing new starts in the copy; and once the task has ended the copy
+    // is set aside. All of it is on the record.
+    rt.keep_computer_leases().await;
+    eventually(|| rt.get(&h.me, task.id).unwrap().view.state == TileState::Stopped).await;
+    let refused = rt.start(&h.me, ask("How many are left?"));
+    let aside = dir.join(".aside");
+    for _ in 0..100 {
+        rt.keep_computer_leases().await;
+        if aside.is_dir() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(fs::read_dir(&aside).unwrap().count(), 1);
+    let audit = fs::read_to_string(h.audit_path()).unwrap();
+    for said in [
+        "Reconciler's computer was taken by another host (host-b)",
+        "Stopped: its computer was woken on another host",
+        "Set this host's copy of Reconciler's computer aside: another host (host-b) has it",
+    ] {
+        assert_eq!(audit.matches(said).count(), 1, "{said}: once on the record");
+    }
+    // A task asked for meanwhile was refused, or failed to start, saying
+    // which: it never ran in the copy.
+    if let Ok(started) = refused {
+        eventually(|| !rt.get(&h.me, started.id).unwrap().view.state.is_live()).await;
+        assert_ne!(
+            rt.get(&h.me, started.id).unwrap().view.state,
+            TileState::Done
+        );
+    }
+    // The other host's lease is as it left it, and this host says nothing
+    // more of it.
+    let theirs = store.lease(&key).unwrap().unwrap();
+    assert_eq!((theirs.host.as_str(), theirs.released), ("host-b", false));
+    rt.keep_computer_leases().await;
+    let again = fs::read_to_string(h.audit_path()).unwrap();
+    assert_eq!(
+        again
+            .matches("Reconciler's computer was taken by another host")
+            .count(),
+        1,
+        "said once"
     );
 }
 

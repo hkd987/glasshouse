@@ -11,7 +11,7 @@ use glass_api::{
     ScreenInput, ScreenRequest, ScreenView,
 };
 use glass_audit::{AuditEvent, EventKind};
-use glass_computers::sandbox::ComputerSandbox;
+use glass_computers::sandbox::{ComputerSandbox, LeaseNews};
 
 use crate::error::Result;
 use crate::runtime::blocking;
@@ -316,6 +316,103 @@ impl Runtime {
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
+    }
+
+    /// Keeps this host's leases on the computers awake here (ADR 0066):
+    /// one host at a time has a computer, and says so in the store every
+    /// [`glass_computers::store::RENEW_EVERY`]. glassd calls it that often.
+    ///
+    /// A computer another host took while this one couldn't reach the
+    /// store has its tasks here stopped, and this host's copy of it set
+    /// aside: both go on the record.
+    pub async fn keep_computer_leases(&self) {
+        let Some(computers) = self.computers.as_ref().map(Arc::clone) else {
+            return;
+        };
+        let news = tokio::task::spawn_blocking(move || computers.keep_leases())
+            .await
+            .unwrap_or_default();
+        let mut troubled = std::collections::HashSet::new();
+        for item in news {
+            let (uid, id, summary, detail) = match item {
+                LeaseNews::Lost {
+                    uid,
+                    id,
+                    name,
+                    host,
+                } => {
+                    // What still runs in it works on a copy that's saved
+                    // nowhere: it stops, and says why.
+                    let live: Vec<_> = self
+                        .tasks()
+                        .values()
+                        .filter(|t| {
+                            t.user.uid == uid
+                                && t.sandbox.computer.as_deref() == Some(id.as_str())
+                                && t.lock().tile.is_live()
+                        })
+                        .cloned()
+                        .collect();
+                    for task in &live {
+                        self.stop_task(
+                            task,
+                            "Stopped: its computer was woken on another host while this one \
+                             couldn't reach the store",
+                        );
+                    }
+                    (
+                        uid,
+                        id,
+                        format!(
+                            "{name}'s computer was taken by another host ({host}) while this \
+                             one couldn't reach the store: nothing of this host's copy is \
+                             saved over it"
+                        ),
+                        serde_json::json!({ "taken_by": host, "tasks_stopped": live.len() }),
+                    )
+                }
+                LeaseNews::SetAside {
+                    uid,
+                    id,
+                    name,
+                    host,
+                    aside,
+                } => (
+                    uid,
+                    id,
+                    format!(
+                        "Set this host's copy of {name}'s computer aside: another host \
+                         ({host}) has it"
+                    ),
+                    serde_json::json!({ "taken_by": host, "aside": aside }),
+                ),
+                LeaseNews::Trouble { uid, id, name, why } => {
+                    // The store out of reach: said once per computer until
+                    // it's back, not every half minute.
+                    let first = !self
+                        .lease_trouble
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .contains(&(uid, id.clone()));
+                    troubled.insert((uid, id.clone()));
+                    if first {
+                        tracing::warn!(
+                            computer = %id,
+                            name = %name,
+                            "couldn't tell the store this host still has a computer awake: {why}"
+                        );
+                    }
+                    continue;
+                }
+            };
+            let mut event = AuditEvent::new(EventKind::Computer, summary);
+            event.user = glass_platform::users::by_uid(uid).map(|u| u.name);
+            let mut detail = detail;
+            detail["computer"] = serde_json::json!(id);
+            event.detail = detail;
+            self.audit(event);
+        }
+        *self.lease_trouble.lock().unwrap_or_else(|e| e.into_inner()) = troubled;
     }
 
     /// Puts to sleep the computers nobody used for `idle`, so nothing stays

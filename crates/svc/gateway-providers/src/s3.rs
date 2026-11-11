@@ -194,8 +194,31 @@ impl S3Client {
     /// body isn't hashed again here, for the header or for the signature,
     /// nor again for each attempt. S3 checks it against what arrives.
     pub fn put_hashed(&self, key: &str, body: &[u8], sha256: &str) -> Result<(), String> {
+        self.put_with(key, body, sha256, false).map(|_| ())
+    }
+
+    /// Puts `body` at `key` only if nothing is there (`If-None-Match: *`),
+    /// and says whether it did. Of several asking at once for one key, S3
+    /// lets one through: what a claim is made of (a computer's lease, ADR
+    /// 0066).
+    pub fn put_new(&self, key: &str, body: &[u8]) -> Result<bool, String> {
+        self.put_with(key, body, &hex::encode(Sha256::digest(body)), true)
+    }
+
+    /// A put, replacing what's there or (`only_new`) refused if anything
+    /// is: `Ok(false)` then.
+    fn put_with(
+        &self,
+        key: &str,
+        body: &[u8],
+        sha256: &str,
+        only_new: bool,
+    ) -> Result<bool, String> {
         check_key(key)?;
         let mut extra: Vec<(&str, &str)> = Vec::new();
+        if only_new {
+            extra.push(("if-none-match", "*"));
+        }
         if let Some(kms) = &self.kms_key_id {
             extra.extend([
                 ("x-amz-server-side-encryption", "aws:kms"),
@@ -218,7 +241,12 @@ impl S3Client {
                 .http
                 .download(&ask, 0, &mut std::io::sink(), REPLY_MAX)?;
             match got.status {
-                200..=299 => Ok(()),
+                200..=299 => Ok(true),
+                // Something is there already.
+                412 if only_new => Ok(false),
+                // Another put of this key is under way (S3 says to ask
+                // again): once it's done, this one is told which it was.
+                409 if only_new => Err(Try::Again("another write of it was under way".to_owned())),
                 status => Err(refused(status, &got.body)),
             }
         })
@@ -1112,6 +1140,20 @@ pub mod testing {
         match (method, rest.strip_prefix('/')) {
             ("GET", None | Some("")) => list(&state, query),
             ("PUT", Some(key)) => {
+                // A put for a key that must be new (`If-None-Match: *`).
+                let only_new = headers
+                    .iter()
+                    .any(|(name, value)| name == "if-none-match" && value == "*");
+                if only_new && state.objects.contains_key(key) {
+                    return reply(
+                        412,
+                        &error(
+                            "PreconditionFailed",
+                            "At least one of the pre-conditions you specified did not hold",
+                        ),
+                        false,
+                    );
+                }
                 state
                     .objects
                     .insert(key.to_owned(), (body.to_vec(), SystemTime::now()));
@@ -1523,6 +1565,61 @@ mod tests {
             None,
             "only puts"
         );
+    }
+
+    #[test]
+    fn adr0066_s3_puts_a_key_only_if_nothing_is_there() {
+        let s3 = StandIn::start();
+        let client = s3.client();
+        assert!(
+            client
+                .put_new("computers/c/lease/1.json", b"host a")
+                .unwrap()
+        );
+        assert!(
+            !client
+                .put_new("computers/c/lease/1.json", b"host b")
+                .unwrap(),
+            "taken: said so, and nothing written"
+        );
+        assert_eq!(
+            client
+                .get("computers/c/lease/1.json", 100)
+                .unwrap()
+                .unwrap(),
+            b"host a"
+        );
+        let seen = s3.seen();
+        assert!(seen.iter().all(|r| r.refused.is_none()), "{seen:?}");
+        // The condition is in what's signed: nothing between here and S3
+        // can drop it and have the put replace what's there.
+        assert_eq!(seen[0].header("if-none-match"), Some("*"));
+        let auth = seen[0].header("authorization").unwrap();
+        assert!(
+            auth.contains("SignedHeaders=host;if-none-match;x-amz-content-sha256;x-amz-date,"),
+            "{auth}"
+        );
+        // A plain put carries no condition, and replaces.
+        client.put("computers/c/lease/1.json", b"renewed").unwrap();
+        assert_eq!(s3.seen().last().unwrap().header("if-none-match"), None);
+
+        // Of many asking at once, one makes it.
+        let made: usize = std::thread::scope(|scope| {
+            let asks: Vec<_> = (0..8)
+                .map(|n| {
+                    let client = &client;
+                    scope.spawn(move || {
+                        client
+                            .put_new("computers/c/lease/2.json", format!("host {n}").as_bytes())
+                            .unwrap()
+                    })
+                })
+                .collect();
+            asks.into_iter()
+                .map(|ask| usize::from(ask.join().unwrap()))
+                .sum()
+        });
+        assert_eq!(made, 1);
     }
 
     #[test]

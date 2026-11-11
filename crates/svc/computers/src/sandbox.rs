@@ -28,6 +28,18 @@
 //! versions, and a host that never had it lists it and wakes it from
 //! there ([`ComputerSandbox::adopt`]): a host replaced, or another host
 //! of the stack.
+//!
+//! One host at a time has a computer awake (ADR 0066): the host that makes
+//! or wakes one takes its lease in the store ([`crate::store::Lease`]),
+//! renews it while the computer is awake here
+//! ([`ComputerSandbox::keep_leases`]) and gives it up once it's asleep.
+//! What a computer is, asleep, is what the store's record says, not what a
+//! host remembers of it: a wake reads the record, and a change to a
+//! sleeping computer's record is made there. Only the host that holds the
+//! lease writes a version or the record. A host that finds another has
+//! taken a computer it still has awake (it was cut off from the store for
+//! longer than a lease lasts) saves nothing over it: its copy is set aside
+//! on this host, and the record says so.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -52,13 +64,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::hypervisor::{ComputerSpec, Frame, Hypervisor, TaskRun};
-use crate::store::Store;
+use crate::store::{Claim, LEASE_FOR, Lease, Store, TRUST_FOR};
 
 /// Where a task works inside its computer: kept, like the rest of it.
 pub const WORK: &str = "/work";
 
 /// Versions of a computer kept in the store: the newest, and two before.
 const VERSIONS_KEPT: usize = 3;
+
+/// Where a copy of a computer goes that another host took over while
+/// this one had it awake, under the computers' folder; and for how long.
+const ASIDE: &str = ".aside";
+const ASIDE_KEPT: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// What a screen read returns at most.
 const SCREEN_READ_MAX: u64 = 64 * 1024;
@@ -129,6 +146,13 @@ pub struct ComputerSandbox {
     vcpus: u32,
     /// Where computers sleep (ADR 0065 §11), and its name for people.
     store: Option<(Arc<Store>, String)>,
+    /// This host's name in computers' leases (ADR 0066): its own, for as
+    /// long as it lives.
+    host: String,
+    /// How long another host's lease holds after its last renewal, and for
+    /// how long this host acts on its own without asking the store again.
+    lease_for: Duration,
+    trust_for: Duration,
     owners: OwnerKeys,
     state: Mutex<State>,
     /// Computers with a display booting in the background, by folder: one
@@ -152,6 +176,48 @@ struct State {
     /// This host is being replaced: its computers go to sleep, and none
     /// starts or wakes here again.
     leaving: bool,
+    /// The leases this host holds, on the computers awake here.
+    held: HashMap<(u32, String), Held>,
+    /// Computers awake here that another host has taken: no task starts
+    /// in one, and it's set aside once its tasks have ended.
+    lost: HashMap<(u32, String), Lease>,
+}
+
+/// A lease this host holds, and when the store last took word of it.
+#[derive(Debug, Clone)]
+struct Held {
+    lease: Lease,
+    confirmed: Instant,
+}
+
+/// What keeping this host's leases found, for the record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseNews {
+    /// Another host took a computer this one still has awake: nothing of
+    /// it is saved from here, and its tasks here should stop.
+    Lost {
+        uid: u32,
+        id: String,
+        name: String,
+        /// The host that has it now.
+        host: String,
+    },
+    /// This host's copy of such a computer is now in `aside`, and the
+    /// computer is listed here as the store has it.
+    SetAside {
+        uid: u32,
+        id: String,
+        name: String,
+        host: String,
+        aside: PathBuf,
+    },
+    /// A lease couldn't be renewed or asked for: the store didn't answer.
+    Trouble {
+        uid: u32,
+        id: String,
+        name: String,
+        why: String,
+    },
 }
 
 fn fail(context: impl Into<String>, why: impl std::fmt::Display) -> PlatformError {
@@ -198,12 +264,16 @@ impl ComputerSandbox {
                 )));
             }
         }
+        let host = own_host_name(&dir)?;
         Ok(Self {
             dir,
             hypervisor,
             memory_mib,
             vcpus,
             store: None,
+            host,
+            lease_for: LEASE_FOR,
+            trust_for: TRUST_FOR,
             owners: OwnerKeys::by_uid(),
             state: Mutex::new(State::default()),
             booting: Arc::default(),
@@ -214,6 +284,26 @@ impl ComputerSandbox {
     #[must_use]
     pub fn with_owner_keys(mut self, owners: OwnerKeys) -> Self {
         self.owners = owners;
+        self
+    }
+
+    /// This host's name in computers' leases: its instance id on AWS. By
+    /// default it's a name made once and kept under the computers' folder,
+    /// so two hosts never share one.
+    #[must_use]
+    pub fn with_host(mut self, host: impl Into<String>) -> Self {
+        self.host = host.into();
+        self
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// A host that asks the store every time, for tests.
+    #[cfg(test)]
+    fn trusting_for(mut self, trust_for: Duration) -> Self {
+        self.trust_for = trust_for;
         self
     }
 
@@ -321,6 +411,17 @@ impl ComputerSandbox {
                 new.id
             )));
         }
+        // Made on another host and awake there since: its record is in the
+        // store, though nothing of it is, to bring here.
+        if self
+            .stored_records(uid)
+            .is_ok_and(|records| records.iter().any(|record| record.id == new.id))
+        {
+            return Err(refuse(format!(
+                "you already have a computer called {}: it's awake on another host",
+                new.id
+            )));
+        }
         let computer = self.spec(uid, &new.id);
         let key = format!("{}-{}", self.owners.of(uid)?, random_hex()?);
         self.make_folder(&computer, uid, gid)?;
@@ -336,6 +437,12 @@ impl ComputerSandbox {
             personas: Vec::new(),
         };
         Self::write_meta(&computer, &meta)?;
+        // Its lease and its record in the store from the start: another
+        // host knows the id is taken and that it's awake here. A store
+        // that doesn't answer now is asked again as leases are kept.
+        if let Some((store, _)) = &self.store {
+            let _ = self.announce(store, uid, &meta);
+        }
         Ok(self.view_of(uid, &computer, meta))
     }
 
@@ -372,70 +479,104 @@ impl ComputerSandbox {
                 },
             )?;
         }
-        let (computer, _) = self.find(uid, id)?;
-        // Its record changes only while nothing else rewrites it: a sleep
-        // or a wake takes it first (`moving`), under this same lock.
-        let state = self.state();
-        if state.moving.contains(&(uid, id.to_owned())) {
-            return Err(refuse(
-                "your computer is going to sleep or waking; try again in a moment",
-            ));
-        }
-        let mut meta = Self::read_meta(&computer)
-            .ok_or_else(|| PlatformError::Unsupported(format!("a computer called {id} for you")))?;
-        if meta.personas.iter().any(|p| p.id == new.id) {
-            return Err(refuse(format!(
-                "you already have an agent called {}",
-                new.id
-            )));
-        }
-        if meta
-            .personas
-            .iter()
-            .any(|p| p.name.eq_ignore_ascii_case(&name))
-        {
-            return Err(refuse(format!("you already have an agent named {name}")));
-        }
-        if meta.personas.len() >= PERSONAS_MAX {
-            return Err(refuse(format!(
-                "you have {PERSONAS_MAX} agents, the most a computer keeps: remove one first"
-            )));
-        }
-        meta.personas.push(PersonaView {
+        let persona = PersonaView {
             id: new.id.clone(),
             name,
             role: glass_api::display_line(new.role.trim()).into_owned(),
             agent: new.agent.clone(),
             created_at: Timestamp::now(),
-        });
-        Self::write_meta(&computer, &meta)?;
-        drop(state);
+        };
+        let (computer, meta) = self.change_record(uid, id, |meta| {
+            if meta.personas.iter().any(|p| p.id == persona.id) {
+                return Err(refuse(format!(
+                    "you already have an agent called {}",
+                    persona.id
+                )));
+            }
+            if meta
+                .personas
+                .iter()
+                .any(|p| p.name.eq_ignore_ascii_case(&persona.name))
+            {
+                return Err(refuse(format!(
+                    "you already have an agent named {}",
+                    persona.name
+                )));
+            }
+            if meta.personas.len() >= PERSONAS_MAX {
+                return Err(refuse(format!(
+                    "you have {PERSONAS_MAX} agents, the most a computer keeps: remove one first"
+                )));
+            }
+            meta.personas.push(persona.clone());
+            Ok(())
+        })?;
         Ok(self.view_of(uid, &computer, meta))
     }
 
     /// The agent goes from the person's computer; what it left there stays.
     pub fn remove_persona(&self, uid: u32, id: &str) -> Result<ComputerView> {
-        let computer_id = glass_api::PERSON_COMPUTER;
-        let (computer, _) = self.find(uid, computer_id)?;
-        let state = self.state();
-        if state.moving.contains(&(uid, computer_id.to_owned())) {
-            return Err(refuse(
-                "your computer is going to sleep or waking; try again in a moment",
-            ));
-        }
-        let mut meta = Self::read_meta(&computer).ok_or_else(|| {
-            PlatformError::Unsupported(format!("a computer called {computer_id} for you"))
+        let (computer, meta) = self.change_record(uid, glass_api::PERSON_COMPUTER, |meta| {
+            let before = meta.personas.len();
+            meta.personas.retain(|p| p.id != id);
+            if meta.personas.len() == before {
+                return Err(PlatformError::Unsupported(format!(
+                    "an agent called {id} for you"
+                )));
+            }
+            Ok(())
         })?;
-        let before = meta.personas.len();
-        meta.personas.retain(|p| p.id != id);
-        if meta.personas.len() == before {
-            return Err(PlatformError::Unsupported(format!(
-                "an agent called {id} for you"
-            )));
-        }
-        Self::write_meta(&computer, &meta)?;
-        drop(state);
         Ok(self.view_of(uid, &computer, meta))
+    }
+
+    /// Changes a computer's record where the record lives.
+    ///
+    /// Awake here, that's this host: the store's record follows as it
+    /// next sleeps. Asleep, it's the store's record, which a wake on any
+    /// host goes by: the change is made there, holding the computer's
+    /// lease for as long as it takes, so no other host wakes it or changes
+    /// it in the middle (ADR 0066).
+    fn change_record(
+        &self,
+        uid: u32,
+        id: &str,
+        change: impl FnOnce(&mut ComputerMeta) -> Result<()>,
+    ) -> Result<(ComputerSpec, ComputerMeta)> {
+        let (computer, meta) = self.find(uid, id)?;
+        let asleep_in_store = meta.stored.is_some() && !meta.key.is_empty();
+        let Some((store, _)) = self.store.as_ref().filter(|_| asleep_in_store) else {
+            // Its record changes only while nothing else rewrites it: a
+            // sleep or a wake takes it first (`moving`), under this lock.
+            let state = self.state();
+            if state.moving.contains(&(uid, id.to_owned())) {
+                return Err(refuse(
+                    "your computer is going to sleep or waking; try again in a moment",
+                ));
+            }
+            let mut meta = Self::read_meta(&computer).ok_or_else(|| {
+                PlatformError::Unsupported(format!("a computer called {id} for you"))
+            })?;
+            change(&mut meta)?;
+            Self::write_meta(&computer, &meta)?;
+            drop(state);
+            return Ok((computer, meta));
+        };
+        let moving = self.moving(uid, id)?;
+        let key = Self::store_key(uid, &meta);
+        self.take(store, uid, &meta)?;
+        let changed = (|| {
+            let mut meta = Self::stored_record(store, &key, id)?.unwrap_or(meta);
+            change(&mut meta)?;
+            let record = serde_json::to_vec(&meta).map_err(|e| fail("a computer's record", e))?;
+            store
+                .put_record(&key, &record)
+                .map_err(|e| fail(format!("keeping {}'s record", meta.name), e))?;
+            Self::write_meta(&computer, &meta)?;
+            Ok(meta)
+        })();
+        self.release(store, uid, id, &key);
+        drop(moving);
+        Ok((computer, changed?))
     }
 
     /// One of the person's agents on one of their computers.
@@ -505,30 +646,55 @@ impl ComputerSandbox {
         )))
     }
 
-    /// Brings the owner's computers this host doesn't have from the
-    /// store, asleep: every one, or only `only`. A computer here by the
-    /// same id stays as it is. Returns how many it brought.
-    pub fn adopt(&self, uid: u32, only: Option<&str>) -> Result<usize> {
+    /// The owner's computers' records in the store: each names its own
+    /// computer, an agent's (a task's own computer never sleeps).
+    fn stored_records(&self, uid: u32) -> Result<Vec<ComputerMeta>> {
         let Some((store, _)) = &self.store else {
-            return Ok(0);
+            return Ok(Vec::new());
         };
         let owner = self.owners.of(uid)?;
         let records = store
             .records(&format!("{owner}-"))
             .map_err(|e| fail("looking for your computers in the store", e))?;
+        Ok(records
+            .into_iter()
+            .filter_map(|(key, record)| {
+                let meta = serde_json::from_slice::<ComputerMeta>(&record).ok()?;
+                (meta.key == key && valid_computer_id(&meta.id) && !meta.fresh).then_some(meta)
+            })
+            .collect())
+    }
+
+    /// `id`'s record in the store under `key`, if the store has one.
+    fn stored_record(store: &Store, key: &str, id: &str) -> Result<Option<ComputerMeta>> {
+        let Some(record) = store
+            .record(key)
+            .map_err(|e| fail(format!("reading {id}'s record in the store"), e))?
+        else {
+            return Ok(None);
+        };
+        let meta: ComputerMeta = serde_json::from_slice(&record)
+            .map_err(|e| fail(format!("reading {id}'s record in the store"), e))?;
+        if meta.key != key || meta.id != id || meta.fresh {
+            return Err(refuse(format!(
+                "{id}'s record in the store is another computer's"
+            )));
+        }
+        Ok(Some(meta))
+    }
+
+    /// Brings the owner's computers this host doesn't have from the
+    /// store, asleep: every one, or only `only`. A computer here by the
+    /// same id stays as it is. Returns how many it brought.
+    pub fn adopt(&self, uid: u32, only: Option<&str>) -> Result<usize> {
+        if self.store.is_none() {
+            return Ok(0);
+        }
         let gid = glass_platform::users::by_uid(uid).map_or(uid, |u| u.gid);
         let mut adopted = 0;
-        for (key, record) in records {
-            let Ok(meta) = serde_json::from_slice::<ComputerMeta>(&record) else {
-                continue;
-            };
-            // A record names only its own computer, asleep, its owner's.
-            let fits = meta.key == key
-                && valid_computer_id(&meta.id)
-                && !meta.fresh
-                && meta.stored.is_some()
-                && only.is_none_or(|id| id == meta.id);
-            if !fits {
+        for meta in self.stored_records(uid)? {
+            // Asleep: one that never slept is all on the host that made it.
+            if meta.stored.is_none() || only.is_some_and(|id| id != meta.id) {
                 continue;
             }
             let computer = self.spec(uid, &meta.id);
@@ -879,6 +1045,43 @@ impl ComputerSandbox {
         }
     }
 
+    /// The rest of a task's start, its run counted: the computer started,
+    /// the task's folder made.
+    fn start_run(&self, spec: &SandboxSpec, computer: &ComputerSpec, name: &str) -> Result<()> {
+        // Its record as it is now nothing moves it: it was looked at
+        // before its run counted, and may have gone to sleep or been set
+        // aside since. A wake just now brought the store's record, with
+        // the agents it has there.
+        let meta = Self::read_meta(computer)
+            .filter(|meta| meta.stored.is_none())
+            .ok_or_else(|| {
+                refuse(format!(
+                    "{name} went to sleep as its task started; try again in a moment"
+                ))
+            })?;
+        self.hypervisor
+            .start(computer)
+            .map_err(|e| fail(format!("starting {}", meta.name), e))?;
+        // A persona's task, its person's agent on this computer.
+        let persona = match &spec.persona {
+            Some(id) => Some(
+                meta.personas
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .ok_or_else(|| refuse(format!("there's no agent {id} on {}", meta.name)))?
+                    .name
+                    .clone(),
+            ),
+            None => None,
+        };
+        let task = Self::task_dir(computer, spec);
+        fs::create_dir_all(&task).map_err(|e| fail(format!("creating {}", task.display()), e))?;
+        Self::trim_screen(computer);
+        let by = persona.map(|name| format!(" {name}")).unwrap_or_default();
+        self.screen_line(computer, &format!("\n── task {} ──{by}\n", spec.name));
+        Ok(())
+    }
+
     /// Marks it moving for as long as the guard lives.
     fn moving(&self, uid: u32, id: &str) -> Result<Moving<'_>> {
         let key = (uid, id.to_owned());
@@ -898,6 +1101,10 @@ impl ComputerSandbox {
     /// Puts it to sleep (ADR 0065 §11): stops it, saves all of its folder
     /// to the store as a new version, and removes it from this host, all
     /// but its record. Nothing of it stays here to keep warm.
+    ///
+    /// Only the host that has its lease saves it (ADR 0066): one that
+    /// another host took the computer from saves nothing over that
+    /// host's.
     pub fn sleep(&self, uid: u32, id: &str) -> Result<ComputerView> {
         let (store, place) = self
             .store
@@ -910,6 +1117,7 @@ impl ComputerSandbox {
         let moving = self.moving(uid, id)?;
         // Read again now it's ours: an agent added since is kept.
         let mut meta = Self::read_meta(&computer).unwrap_or(meta);
+        self.sure(store, uid, &meta)?;
         self.hypervisor
             .suspend(&computer)
             .map_err(|e| fail(format!("stopping {}", meta.name), e))?;
@@ -923,6 +1131,10 @@ impl ComputerSandbox {
             at: Timestamp::now(),
             place: place.clone(),
         });
+        // A save can take minutes, and the record is what a wake goes by:
+        // it's written only if the computer is still this host's. If it
+        // isn't, the version just saved is one no record names.
+        self.sure(store, uid, &meta)?;
         // Its record in the store, naming a version that's there, so any
         // host can wake it; then here: from now it wakes from the store.
         if !meta.key.is_empty() {
@@ -940,6 +1152,8 @@ impl ComputerSandbox {
                 let _ = store.remove_version(&key, version);
             }
         }
+        // Asleep in the store: any host may wake it.
+        self.release(store, uid, id, &key);
         drop(moving);
         Ok(self.view_of(uid, &computer, meta))
     }
@@ -961,21 +1175,95 @@ impl ComputerSandbox {
     }
 
     /// Brings it back from the store as it was, its files its owner's.
+    ///
+    /// What wakes is what the store's record says, not what this host
+    /// remembers: another host may have woken it and put it to sleep
+    /// again since, as a newer version, with agents added. And it wakes
+    /// on one host at a time (ADR 0066): this one takes its lease first,
+    /// and is refused while another has it.
     pub fn wake(&self, uid: u32, gid: u32, id: &str) -> Result<ComputerView> {
         let (store, _) = self
             .store
             .as_ref()
             .ok_or_else(|| refuse("this host has nowhere computers sleep"))?;
         let (computer, meta) = self.find(uid, id)?;
-        let Some(stored) = meta.stored.clone() else {
+        if meta.stored.is_none() {
             return Ok(self.view_of(uid, &computer, meta));
-        };
+        }
         self.refuse_if_leaving()?;
         let moving = self.moving(uid, id)?;
-        let mut meta = Self::read_meta(&computer).unwrap_or(meta);
+        let meta = Self::read_meta(&computer).unwrap_or(meta);
+        let key = Self::store_key(uid, &meta);
+        self.take(store, uid, &meta)?;
+        let woken = self
+            .wake_taken(store, &computer, meta, &key, uid, gid)
+            .and_then(|mut record| {
+                // A long wake's lease is renewed as it goes (`keep_leases`).
+                // One this host couldn't renew for the whole of a lease may
+                // be another host's by now: then it isn't awake here.
+                match self.still_ours(store, uid, &record)? {
+                    Ok(_) => {
+                        record.stored = None;
+                        Self::write_meta(&computer, &record)?;
+                        Ok(record)
+                    }
+                    Err(theirs) => Err(refuse(format!(
+                        "{} was taken by another host ({}) while it was waking here: \
+                         ask again in a moment",
+                        record.name, theirs.host
+                    ))),
+                }
+            });
+        let meta = match woken {
+            Ok(meta) => meta,
+            Err(e) => {
+                // Not awake here after all: what came of it goes, and
+                // another host may try.
+                let _ = Self::clear_but_record(&computer);
+                self.release(store, uid, id, &key);
+                return Err(e);
+            }
+        };
+        drop(moving);
+        self.state()
+            .used
+            .insert((uid, id.to_owned()), Instant::now());
+        Ok(self.view_of(uid, &computer, meta))
+    }
+
+    /// The rest of a wake, with the computer's lease held: all of it back
+    /// in its folder. Returns the store's record of it; this host's own
+    /// still says asleep.
+    fn wake_taken(
+        &self,
+        store: &Store,
+        computer: &ComputerSpec,
+        local: ComputerMeta,
+        key: &str,
+        uid: u32,
+        gid: u32,
+    ) -> Result<ComputerMeta> {
+        // The store's record, now nobody else can be writing it. A
+        // computer from before records were kept has only this host's.
+        let meta = match Self::stored_record(store, key, &computer.id)? {
+            Some(record) => record,
+            None if local.key.is_empty() => local,
+            None => {
+                return Err(refuse(format!(
+                    "{} has no record in the store any more: there's nothing to wake",
+                    local.name
+                )));
+            }
+        };
+        let Some(stored) = meta.stored.clone() else {
+            return Err(refuse(format!(
+                "{} never slept: the host it was on went away with all of it",
+                meta.name
+            )));
+        };
         // Asleep, the store holds all of it: anything here is what a wake
         // or a sleep that glassd didn't live through left, and goes.
-        Self::clear_but_record(&computer).map_err(|e| {
+        Self::clear_but_record(computer).map_err(|e| {
             fail(
                 format!("clearing what an earlier wake left of {}", meta.name),
                 e,
@@ -983,7 +1271,7 @@ impl ComputerSandbox {
         })?;
         let waking = computer.dir.join(".waking");
         store
-            .restore_tree(&Self::store_key(uid, &meta), &stored.version, &waking)
+            .restore_tree(key, &stored.version, &waking)
             .map_err(|e| fail(format!("waking {}", meta.name), e))?;
         let entries = fs::read_dir(&waking).map_err(|e| fail("reading what woke", e))?;
         for entry in entries.flatten() {
@@ -998,13 +1286,361 @@ impl ComputerSandbox {
         // The store keeps modes, not owners: all of it is its owner's.
         crate::namespaces::chown_all(&computer.dir, uid, gid)
             .map_err(|e| fail(format!("giving {} back to its owner", meta.name), e))?;
-        meta.stored = None;
-        Self::write_meta(&computer, &meta)?;
-        drop(moving);
+        Ok(meta)
+    }
+
+    /// Asks the store for `meta`'s lease for this host, which doesn't have
+    /// the computer awake: refused, in words, while another host has.
+    fn take(&self, store: &Store, uid: u32, meta: &ComputerMeta) -> Result<Lease> {
+        let key = Self::store_key(uid, meta);
+        let asked = Instant::now();
+        let claim = store
+            .claim(&key, &self.host, Timestamp::now(), self.lease_for)
+            .map_err(|e| fail(format!("asking the store who has {}", meta.name), e))?;
+        match claim {
+            Claim::Held(lease) => {
+                self.hold(uid, &meta.id, lease.clone(), asked);
+                Ok(lease)
+            }
+            Claim::Elsewhere(lease) => Err(refuse(format!(
+                "{} is awake on another host ({}). It can wake here once it sleeps there, \
+                 or a couple of minutes after that host goes away: ask again then",
+                meta.name, lease.host
+            ))),
+        }
+    }
+
+    /// Makes sure `meta`, awake here, is still this host's before anything
+    /// of it is written to the store. Another host having had it since is
+    /// the end of this host's copy ([`Self::lose`]).
+    fn sure(&self, store: &Store, uid: u32, meta: &ComputerMeta) -> Result<Lease> {
+        let lost = self.state().lost.get(&(uid, meta.id.clone())).cloned();
+        if let Some(lease) = lost {
+            return Err(refuse(taken_words(&meta.name, &lease)));
+        }
+        match self.still_ours(store, uid, meta)? {
+            Ok(lease) => Ok(lease),
+            Err(theirs) => {
+                let why = taken_words(&meta.name, &theirs);
+                self.lose(uid, &meta.id, theirs);
+                Err(refuse(why))
+            }
+        }
+    }
+
+    /// Whether `meta`'s lease is still this host's: it's held and the
+    /// store took word of it lately, or it's asked for again, which the
+    /// store grants only if no other host has had the computer since.
+    /// `Ok(Err(lease))` is that host's lease.
+    fn still_ours(
+        &self,
+        store: &Store,
+        uid: u32,
+        meta: &ComputerMeta,
+    ) -> Result<std::result::Result<Lease, Lease>> {
+        let at = (uid, meta.id.clone());
+        let held = self.state().held.get(&at).cloned();
+        if let Some(held) = held
+            && held.confirmed.elapsed() < self.trust_for
+        {
+            return Ok(Ok(held.lease));
+        }
+        let key = Self::store_key(uid, meta);
+        let asked = Instant::now();
+        let claim = store
+            .reclaim(&key, &self.host, Timestamp::now())
+            .map_err(|e| fail(format!("asking the store who has {}", meta.name), e))?;
+        Ok(match claim {
+            Claim::Held(lease) => {
+                self.hold(uid, &meta.id, lease.clone(), asked);
+                Ok(lease)
+            }
+            Claim::Elsewhere(lease) => {
+                self.state().held.remove(&at);
+                Err(lease)
+            }
+        })
+    }
+
+    fn hold(&self, uid: u32, id: &str, lease: Lease, confirmed: Instant) {
         self.state()
-            .used
-            .insert((uid, id.to_owned()), Instant::now());
-        Ok(self.view_of(uid, &computer, meta))
+            .held
+            .insert((uid, id.to_owned()), Held { lease, confirmed });
+    }
+
+    /// Another host has the computer: nothing of this host's copy is saved
+    /// from now, no task starts in it, and its person's keyboard is theirs
+    /// no longer. It's set aside once its tasks have ended
+    /// ([`Self::keep_leases`]).
+    fn lose(&self, uid: u32, id: &str, lease: Lease) {
+        let at = (uid, id.to_owned());
+        let mut state = self.state();
+        state.held.remove(&at);
+        state.taken_over.remove(&at);
+        state.lost.insert(at, lease);
+    }
+
+    /// Gives up this host's lease on a computer it no longer has awake. A
+    /// store that doesn't take it leaves the lease to run out: another
+    /// host waits a couple of minutes longer to wake the computer.
+    fn release(&self, store: &Store, uid: u32, id: &str, key: &str) {
+        let held = self.state().held.remove(&(uid, id.to_owned()));
+        if let Some(held) = held {
+            let _ = store.release(key, &held.lease, Timestamp::now());
+        }
+    }
+
+    /// Takes a computer's lease as it's made here, and puts its record in
+    /// the store.
+    fn announce(
+        &self,
+        store: &Store,
+        uid: u32,
+        meta: &ComputerMeta,
+    ) -> std::result::Result<(), String> {
+        self.sure(store, uid, meta).map_err(|e| e.to_string())?;
+        if meta.key.is_empty() {
+            return Ok(());
+        }
+        let key = Self::store_key(uid, meta);
+        if store.record(&key)?.is_none() {
+            let record = serde_json::to_vec(meta).map_err(|e| e.to_string())?;
+            store.put_record(&key, &record)?;
+        }
+        Ok(())
+    }
+
+    /// Keeps this host's leases (ADR 0066): glassd calls it every
+    /// [`crate::store::RENEW_EVERY`].
+    ///
+    /// - A lease the store took word of lately is renewed: a computer
+    ///   awake here, or one on its way (a wake or a save can take minutes).
+    /// - One it didn't (the store was out of reach for a while), or a
+    ///   computer awake from before this glassd started, is asked for
+    ///   again: it's still this host's only if no other host has had it.
+    /// - A computer another host has taken is set aside once nothing runs
+    ///   in it: its folder goes to `.aside/` under the computers' folder,
+    ///   kept a week, and the computer is listed here as the store has
+    ///   it.
+    ///
+    /// Returns what it found that belongs on the record.
+    pub fn keep_leases(&self) -> Vec<LeaseNews> {
+        let mut news = Vec::new();
+        let Some((store, _)) = &self.store else {
+            return news;
+        };
+        let mut all = self.awake_here();
+        for at in self.state().held.keys() {
+            if !all.contains(at) {
+                all.push(at.clone());
+            }
+        }
+        for (uid, id) in all {
+            let computer = self.spec(uid, &id);
+            let at = (uid, id.clone());
+            let Some(meta) = Self::read_meta(&computer) else {
+                self.state().held.remove(&at);
+                continue;
+            };
+            let key = Self::store_key(uid, &meta);
+            let trouble = |why: String| LeaseNews::Trouble {
+                uid,
+                id: id.clone(),
+                name: meta.name.clone(),
+                why,
+            };
+            let (held, lost, moving) = {
+                let state = self.state();
+                (
+                    state.held.get(&at).cloned(),
+                    state.lost.get(&at).cloned(),
+                    state.moving.contains(&at),
+                )
+            };
+            if meta.stored.is_some() {
+                match held {
+                    // On its way here, or its record being changed: the
+                    // lease is kept while that takes. One the store says
+                    // is taken is forgotten, and the wake finds out.
+                    Some(held) if moving => {
+                        if held.confirmed.elapsed() < self.trust_for {
+                            let asked = Instant::now();
+                            match store.renew(&key, &held.lease, Timestamp::now()) {
+                                Ok(Some(lease)) => self.renewed(store, &at, &key, lease, asked),
+                                Ok(None) => {
+                                    self.state().held.remove(&at);
+                                }
+                                Err(why) => news.push(trouble(why)),
+                            }
+                        }
+                    }
+                    // Asleep, with nothing under way: a lease still in hand
+                    // is given up.
+                    _ => self.release(store, uid, &id, &key),
+                }
+                continue;
+            }
+            if let Some(lease) = lost {
+                match self.set_aside(uid, &computer, &meta, &lease) {
+                    Ok(Some(aside)) => news.push(aside),
+                    Ok(None) => {}
+                    Err(e) => news.push(trouble(e.to_string())),
+                }
+                continue;
+            }
+            let first = held.is_none();
+            let kept = match held {
+                Some(held) if held.confirmed.elapsed() < self.trust_for => {
+                    let asked = Instant::now();
+                    match store.renew(&key, &held.lease, Timestamp::now()) {
+                        Ok(Some(lease)) => {
+                            self.renewed(store, &at, &key, lease, asked);
+                            Ok(())
+                        }
+                        // Taken, though this host renewed in time by its
+                        // own clock: the next ask finds who has it.
+                        Ok(None) => {
+                            self.state().held.remove(&at);
+                            self.sure(store, uid, &meta).map(|_| ())
+                        }
+                        Err(why) => {
+                            news.push(trouble(why));
+                            continue;
+                        }
+                    }
+                }
+                _ => self.sure(store, uid, &meta).map(|_| ()),
+            };
+            match kept {
+                Ok(()) => {
+                    // Went to sleep while this asked: it isn't held awake.
+                    let asleep = Self::read_meta(&computer).is_none_or(|m| m.stored.is_some());
+                    if asleep && !self.state().moving.contains(&at) {
+                        self.release(store, uid, &id, &key);
+                    } else if first && !meta.key.is_empty() {
+                        // Made while the store didn't answer, or before
+                        // records were kept from the start.
+                        if let Ok(None) = store.record(&key)
+                            && let Ok(record) = serde_json::to_vec(&meta)
+                        {
+                            let _ = store.put_record(&key, &record);
+                        }
+                    }
+                }
+                Err(e) => match self.state().lost.get(&at) {
+                    Some(lease) => news.push(LeaseNews::Lost {
+                        uid,
+                        id: id.clone(),
+                        name: meta.name.clone(),
+                        host: lease.host.clone(),
+                    }),
+                    None => news.push(trouble(e.to_string())),
+                },
+            }
+        }
+        news
+    }
+
+    /// A renewal the store took: kept, unless the computer went to sleep
+    /// (and its lease was given up) while the renewal was on its way, which
+    /// wrote the lease as held again.
+    fn renewed(&self, store: &Store, at: &(u32, String), key: &str, lease: Lease, asked: Instant) {
+        let mut state = self.state();
+        match state.held.get_mut(at) {
+            Some(held) if held.lease.term == lease.term => {
+                held.lease = lease;
+                held.confirmed = asked;
+            }
+            _ => {
+                drop(state);
+                let _ = store.release(key, &lease, Timestamp::now());
+            }
+        }
+    }
+
+    /// Agents' computers awake on this host: every owner's.
+    fn awake_here(&self) -> Vec<(u32, String)> {
+        let mut out = Vec::new();
+        let Ok(owners) = fs::read_dir(&self.dir) else {
+            return out;
+        };
+        for owner in owners.flatten() {
+            let Some(uid) = owner_uid(&owner) else {
+                continue;
+            };
+            let Ok(computers) = fs::read_dir(owner.path()) else {
+                continue;
+            };
+            for entry in computers.flatten() {
+                let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let awake = Self::read_meta(&self.spec(uid, &id))
+                    .is_some_and(|meta| !meta.fresh && meta.stored.is_none());
+                if awake {
+                    out.push((uid, id));
+                }
+            }
+        }
+        out
+    }
+
+    /// Sets this host's copy of a computer another host has taken aside,
+    /// once nothing runs in it, and lists the computer here as the store
+    /// has it. `None` while something still runs in it.
+    fn set_aside(
+        &self,
+        uid: u32,
+        computer: &ComputerSpec,
+        meta: &ComputerMeta,
+        lease: &Lease,
+    ) -> Result<Option<LeaseNews>> {
+        let at = (uid, computer.id.clone());
+        {
+            let mut state = self.state();
+            if state.runs.values().any(|run| *run == at) || !state.moving.insert(at.clone()) {
+                return Ok(None);
+            }
+        }
+        let moving = Moving {
+            sandbox: self,
+            key: at.clone(),
+        };
+        self.hypervisor
+            .suspend(computer)
+            .map_err(|e| fail(format!("stopping {}", meta.name), e))?;
+        let aside = self.dir.join(ASIDE);
+        if !aside.is_dir() {
+            fs::create_dir(&aside).map_err(|e| fail(format!("creating {}", aside.display()), e))?;
+            fs::set_permissions(&aside, fs::Permissions::from_mode(0o700))
+                .map_err(|e| fail(format!("chmod {}", aside.display()), e))?;
+        }
+        let to = aside.join(format!(
+            "{uid}-{}-{}",
+            computer.id,
+            Timestamp::now().unix_seconds()
+        ));
+        fs::rename(&computer.dir, &to)
+            .map_err(|e| fail(format!("setting {} aside", meta.name), e))?;
+        {
+            let mut state = self.state();
+            state.lost.remove(&at);
+            state.used.remove(&at);
+            // Its owner's computers are looked for in the store again.
+            state.adopted.remove(&uid);
+        }
+        drop(moving);
+        // Here it is what the store says again: asleep, wherever it's
+        // awake. A store that doesn't answer now is asked as it's next
+        // looked for.
+        let _ = self.adopt(uid, Some(&computer.id));
+        Ok(Some(LeaseNews::SetAside {
+            uid,
+            id: computer.id.clone(),
+            name: meta.name.clone(),
+            host: lease.host.clone(),
+            aside: to,
+        }))
     }
 
     /// Computers awake and unused for `idle`: nothing running, nobody at
@@ -1041,6 +1677,7 @@ impl ComputerSandbox {
                     state.runs.values().any(|run| *run == key)
                         || state.taken_over.contains(&key)
                         || state.moving.contains(&key)
+                        || state.lost.contains_key(&key)
                         || state.used.get(&key).is_some_and(|at| at.elapsed() < idle)
                 };
                 if meta.fresh || meta.stored.is_some() || busy {
@@ -1083,6 +1720,40 @@ impl Drop for Moving<'_> {
 }
 
 /// 64 random bits, in hex: a computer's own part of its key.
+/// What a person is told of a computer awake here that another host took.
+fn taken_words(name: &str, lease: &Lease) -> String {
+    format!(
+        "{name} was taken by another host ({}) while this one couldn't reach the store: \
+         nothing of this host's copy is saved over it, and the copy is set aside. Ask again \
+         in a moment",
+        lease.host
+    )
+}
+
+/// This host's own name for computers' leases: made once, kept in
+/// `<dir>/.host`.
+fn own_host_name(dir: &Path) -> Result<String> {
+    let path = dir.join(".host");
+    let fits = |name: &str| {
+        (1..=64).contains(&name.len())
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    if let Ok(kept) = fs::read_to_string(&path)
+        && fits(kept.trim())
+    {
+        return Ok(kept.trim().to_owned());
+    }
+    let name = format!("host-{}", random_hex()?);
+    let making = dir.join(".host.new");
+    fs::write(&making, &name)
+        .and_then(|()| fs::set_permissions(&making, fs::Permissions::from_mode(0o600)))
+        .and_then(|()| fs::rename(&making, &path))
+        .map_err(|e| fail(format!("saving {}", path.display()), e))?;
+    Ok(name)
+}
+
 fn random_hex() -> Result<String> {
     let mut bytes = [0u8; 8];
     fs::File::open("/dev/urandom")
@@ -1155,6 +1826,9 @@ impl Sandbox for ComputerSandbox {
             let id = spec.computer.as_deref().unwrap_or_default();
             self.find(spec.uid, id)?.1
         };
+        if let Some(lease) = self.state().lost.get(&key) {
+            return Err(refuse(taken_words(&meta.name, lease)));
+        }
         if self.state().taken_over.contains(&key) {
             return Err(refuse(format!(
                 "{} is taken over: hand it back for its tasks to run",
@@ -1171,28 +1845,33 @@ impl Sandbox for ComputerSandbox {
         if meta.stored.is_some() {
             self.wake(spec.uid, spec.gid, &computer.id)?;
         }
-        self.hypervisor
-            .start(&computer)
-            .map_err(|e| fail(format!("starting {}", meta.name), e))?;
-        // A persona's task, its person's agent on this computer.
-        let persona = match &spec.persona {
-            Some(id) => Some(
-                meta.personas
-                    .iter()
-                    .find(|p| &p.id == id)
-                    .ok_or_else(|| refuse(format!("there's no agent {id} on {}", meta.name)))?
-                    .name
-                    .clone(),
-            ),
-            None => None,
-        };
-        let task = Self::task_dir(&computer, spec);
-        fs::create_dir_all(&task).map_err(|e| fail(format!("creating {}", task.display()), e))?;
-        Self::trim_screen(&computer);
-        let by = persona.map(|name| format!(" {name}")).unwrap_or_default();
-        self.screen_line(&computer, &format!("\n── task {} ──{by}\n", spec.name));
-        self.state().runs.insert(spec.name.clone(), key);
-        Ok(())
+        // From here its run counts, in one step with the checks: no sleep
+        // begins under it, and its folder stays where it is (a copy
+        // another host took is set aside only once nothing runs in it).
+        {
+            let mut state = self.state();
+            if let Some(lease) = state.lost.get(&key) {
+                return Err(refuse(taken_words(&meta.name, lease)));
+            }
+            if state.taken_over.contains(&key) {
+                return Err(refuse(format!(
+                    "{} is taken over: hand it back for its tasks to run",
+                    meta.name
+                )));
+            }
+            if state.moving.contains(&key) {
+                return Err(refuse(format!(
+                    "{} is going to sleep or waking; try again in a moment",
+                    meta.name
+                )));
+            }
+            state.runs.insert(spec.name.clone(), key);
+        }
+        let started = self.start_run(spec, &computer, &meta.name);
+        if started.is_err() {
+            self.state().runs.remove(&spec.name);
+        }
+        started
     }
 
     fn command(&self, spec: &SandboxSpec, process: &ProcessSpec) -> Command {
@@ -1262,6 +1941,26 @@ impl Sandbox for ComputerSandbox {
     fn cleanup_stale(&self) -> Result<Swept> {
         // Before anything: no process of an earlier glassd's runs is left.
         let mut cleaned = self.hypervisor.stop_leftovers(&self.dir);
+        // Copies set aside (another host took their computer) are kept a
+        // week.
+        if let Ok(aside) = fs::read_dir(self.dir.join(ASIDE)) {
+            let now = Timestamp::now().unix_seconds();
+            for entry in aside.flatten() {
+                // Its name ends with when it was set aside.
+                let old = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.rsplit('-').next()?.parse::<i64>().ok())
+                    .and_then(|at| u64::try_from(now.saturating_sub(at)).ok())
+                    .is_some_and(|age| age >= ASIDE_KEPT.as_secs());
+                if old && glass_platform::fs::remove_tree(&entry.path()).is_ok() {
+                    cleaned.push(format!(
+                        "{} (set aside)",
+                        entry.file_name().to_string_lossy()
+                    ));
+                }
+            }
+        }
         let Ok(owners) = fs::read_dir(&self.dir) else {
             return Ok(Swept {
                 removed: cleaned,
@@ -2002,5 +2701,490 @@ mod tests {
             };
             assert!(sandbox.make(uid, gid, &new).is_err(), "{bad}");
         }
+    }
+
+    // One host at a time per computer (ADR 0066). The hosts here keep
+    // computers that are folders, with nothing running in them: what's
+    // tested is who may wake, save and change one.
+
+    type Hosts = (
+        tempfile::TempDir,
+        Arc<Store>,
+        Arc<crate::store::FolderBlobs>,
+    );
+
+    fn shared_store() -> Hosts {
+        let dir = tempfile::Builder::new()
+            .prefix("glass-computers-store")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let blobs = Arc::new(crate::store::FolderBlobs::new(dir.path().join("s3")).unwrap());
+        (dir, Arc::new(Store::new(blobs.clone())), blobs)
+    }
+
+    fn host_in(dir: &Path, store: &Arc<Store>) -> ComputerSandbox {
+        ComputerSandbox::new(dir.join("computers"), Arc::new(Display::default()), 1024, 1)
+            .unwrap()
+            .with_store(store.clone(), "S3")
+    }
+
+    fn host(store: &Arc<Store>) -> (tempfile::TempDir, ComputerSandbox) {
+        let dir = tempfile::Builder::new()
+            .prefix("glass-computers-host")
+            .tempdir_in("/tmp")
+            .unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let sandbox = host_in(dir.path(), store);
+        (dir, sandbox)
+    }
+
+    /// The file a test keeps in a computer awake on `host`.
+    fn work(host: &ComputerSandbox, id: &str) -> PathBuf {
+        host.computer(me().0, id).dir.join("work.txt")
+    }
+
+    /// The one computer's key in the store.
+    fn key_in(store: &Store) -> String {
+        let records = store.records(&format!("u{}-", me().0)).unwrap();
+        assert_eq!(records.len(), 1);
+        records[0].0.clone()
+    }
+
+    fn record_in(store: &Store) -> ComputerMeta {
+        let records = store.records(&format!("u{}-", me().0)).unwrap();
+        serde_json::from_slice(&records[0].1).unwrap()
+    }
+
+    /// The lease as it is ten minutes after its host last renewed it: the
+    /// host went away, or can't reach the store.
+    fn unrenewed(store: &Store, blobs: &crate::store::FolderBlobs, key: &str) {
+        use crate::store::Blobs;
+        let mut lease = store.lease(key).unwrap().unwrap();
+        lease.renewed =
+            Timestamp::from_unix_seconds(Timestamp::now().unix_seconds() - 600).unwrap();
+        blobs
+            .put(
+                &format!("computers/{key}/lease/{:020}.json", lease.term),
+                &serde_json::to_vec(&lease).unwrap(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn adr0066_a_wake_goes_by_the_stores_record_not_what_the_host_remembers() {
+        let (_s3, store, _) = shared_store();
+        let (_a, host_a) = host(&store);
+        let (_b, host_b) = host(&store);
+        let (uid, gid) = me();
+
+        host_a.make(uid, gid, &reconciler()).unwrap();
+        fs::write(work(&host_a, "reconciler"), "one").unwrap();
+        let first = host_a.sleep(uid, "reconciler").unwrap().stored.unwrap();
+
+        // Another host wakes it, works on it and puts it to sleep, four
+        // times: the version host A put there is no longer kept.
+        for words in ["two", "three", "four", "five"] {
+            host_b.wake(uid, gid, "reconciler").unwrap();
+            fs::write(work(&host_b, "reconciler"), words).unwrap();
+            host_b.sleep(uid, "reconciler").unwrap();
+        }
+        let key = key_in(&store);
+        let versions = store.versions(&key).unwrap();
+        assert_eq!(versions.len(), VERSIONS_KEPT);
+        assert!(!versions.contains(&first.version), "{versions:?}");
+
+        // Host A still remembers the version it saved. It wakes what the
+        // store's record says: the newest, with the work done since.
+        let remembered = host_a.get(uid, "reconciler").unwrap().stored.unwrap();
+        assert_eq!(remembered.version, first.version);
+        let woke = host_a.wake(uid, gid, "reconciler").unwrap();
+        assert_eq!(woke.state, ComputerState::Ready);
+        assert_eq!(
+            fs::read_to_string(work(&host_a, "reconciler")).unwrap(),
+            "five"
+        );
+    }
+
+    #[test]
+    fn adr0066_a_computer_is_awake_on_one_host_at_a_time() {
+        let (_s3, store, _) = shared_store();
+        let (_a, host_a) = host(&store);
+        let (_b, host_b) = host(&store);
+        let (uid, gid) = me();
+        host_a.make(uid, gid, &reconciler()).unwrap();
+        fs::write(work(&host_a, "reconciler"), "one").unwrap();
+        host_a.sleep(uid, "reconciler").unwrap();
+
+        host_b.wake(uid, gid, "reconciler").unwrap();
+        // While host B has it, host A doesn't wake it: not for its person,
+        // and not for a task. It's told which host has it.
+        let refused = host_a.wake(uid, gid, "reconciler").unwrap_err().to_string();
+        assert!(refused.contains("is awake on another host"), "{refused}");
+        assert!(refused.contains(host_b.host()), "{refused}");
+        let refused = host_a
+            .create(&task("glass-0021", Some("reconciler")))
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("is awake on another host"), "{refused}");
+        // Nothing of it came to host A: its record, and no more.
+        let here: Vec<_> = fs::read_dir(host_a.computer(uid, "reconciler").dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(here, ["computer.json"]);
+        assert_eq!(
+            host_a.get(uid, "reconciler").unwrap().state,
+            ComputerState::Asleep
+        );
+
+        // Asleep again, it's any host's to wake, and then that host's.
+        fs::write(work(&host_b, "reconciler"), "two").unwrap();
+        host_b.sleep(uid, "reconciler").unwrap();
+        host_a.wake(uid, gid, "reconciler").unwrap();
+        assert_eq!(
+            fs::read_to_string(work(&host_a, "reconciler")).unwrap(),
+            "two"
+        );
+        let refused = host_b.wake(uid, gid, "reconciler").unwrap_err().to_string();
+        assert!(refused.contains(host_a.host()), "{refused}");
+    }
+
+    #[test]
+    fn adr0066_a_host_that_went_away_keeps_its_computer_only_for_as_long_as_its_lease() {
+        let (_s3, store, blobs) = shared_store();
+        let (_a, host_a) = host(&store);
+        let (_b, host_b) = host(&store);
+        let (uid, gid) = me();
+        host_a.make(uid, gid, &reconciler()).unwrap();
+        fs::write(work(&host_a, "reconciler"), "as it last slept").unwrap();
+        host_a.sleep(uid, "reconciler").unwrap();
+        host_a.wake(uid, gid, "reconciler").unwrap();
+        fs::write(work(&host_a, "reconciler"), "since, and never saved").unwrap();
+        // Host A is gone, with the computer awake on it.
+        drop(host_a);
+
+        let refused = host_b.wake(uid, gid, "reconciler").unwrap_err().to_string();
+        assert!(refused.contains("is awake on another host"), "{refused}");
+        // Its lease runs out, unrenewed, and the computer wakes elsewhere as
+        // it last slept.
+        unrenewed(&store, &blobs, &key_in(&store));
+        host_b.wake(uid, gid, "reconciler").unwrap();
+        assert_eq!(
+            fs::read_to_string(work(&host_b, "reconciler")).unwrap(),
+            "as it last slept"
+        );
+    }
+
+    #[test]
+    fn adr0066_a_host_cut_off_saves_nothing_over_the_host_that_took_its_computer() {
+        let (_s3, store, blobs) = shared_store();
+        let (_a, host_a) = host(&store);
+        // Host A asks the store each time, as a host does that hasn't
+        // heard from it for a while.
+        let host_a = host_a.trusting_for(Duration::ZERO);
+        let (_b, host_b) = host(&store);
+        let (uid, gid) = me();
+        host_a.make(uid, gid, &reconciler()).unwrap();
+        fs::write(work(&host_a, "reconciler"), "one").unwrap();
+        host_a.sleep(uid, "reconciler").unwrap();
+        host_a.wake(uid, gid, "reconciler").unwrap();
+        fs::write(work(&host_a, "reconciler"), "host a's, while cut off").unwrap();
+
+        // Host A can't reach the store for ten minutes. Host B takes the
+        // computer, works on it, and puts it to sleep.
+        let key = key_in(&store);
+        unrenewed(&store, &blobs, &key);
+        host_b.wake(uid, gid, "reconciler").unwrap();
+        fs::write(work(&host_b, "reconciler"), "host b's").unwrap();
+        let slept = host_b.sleep(uid, "reconciler").unwrap().stored.unwrap();
+        assert!(store.lease(&key).unwrap().unwrap().released);
+
+        // Host A is back, with its copy from before all that. Nobody has
+        // the computer now, and still it saves nothing over host B's.
+        let versions = store.versions(&key).unwrap();
+        let refused = host_a.sleep(uid, "reconciler").unwrap_err().to_string();
+        assert!(refused.contains("was taken by another host"), "{refused}");
+        assert!(refused.contains(host_b.host()), "{refused}");
+        assert_eq!(store.versions(&key).unwrap(), versions);
+        assert_eq!(record_in(&store).stored.unwrap().version, slept.version);
+        // No task starts in its copy.
+        let refused = host_a
+            .create(&task("glass-0031", Some("reconciler")))
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("was taken by another host"), "{refused}");
+        assert!(host_a.idle(Duration::ZERO).is_empty());
+
+        // The copy is set aside, whole, and said so for the record.
+        let news = host_a.keep_leases();
+        let [
+            LeaseNews::SetAside {
+                id,
+                name,
+                host: by,
+                aside,
+                ..
+            },
+        ] = news.as_slice()
+        else {
+            panic!("{news:?}");
+        };
+        assert_eq!(
+            (id.as_str(), name.as_str(), by.as_str()),
+            ("reconciler", "Reconciler", host_b.host())
+        );
+        assert_eq!(
+            fs::read_to_string(aside.join("work.txt")).unwrap(),
+            "host a's, while cut off"
+        );
+        let mode = fs::metadata(aside.parent().unwrap()).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o700, "only glassd reads what's set aside");
+
+        // Host A lists the computer as the store has it, and wakes that.
+        let view = host_a.get(uid, "reconciler").unwrap();
+        assert_eq!(view.state, ComputerState::Asleep);
+        assert_eq!(view.stored.unwrap().version, slept.version);
+        host_a.wake(uid, gid, "reconciler").unwrap();
+        assert_eq!(
+            fs::read_to_string(work(&host_a, "reconciler")).unwrap(),
+            "host b's"
+        );
+        assert_eq!(host_a.keep_leases(), []);
+        assert_eq!(store.lease(&key).unwrap().unwrap().host, host_a.host());
+    }
+
+    #[test]
+    fn adr0066_a_host_keeps_its_leases_and_is_told_of_one_it_lost() {
+        let (_s3, store, blobs) = shared_store();
+        let (dir_a, host_a) = host(&store);
+        let (_b, host_b) = host(&store);
+        let (uid, gid) = me();
+
+        // Made here: its lease is this host's and its record is in the
+        // store from the start, though it never slept.
+        host_a.make(uid, gid, &reconciler()).unwrap();
+        let key = key_in(&store);
+        let made = store.lease(&key).unwrap().unwrap();
+        assert_eq!((made.term, made.host.as_str()), (1, host_a.host()));
+        assert_eq!(record_in(&store).stored, None);
+        host_a.sleep(uid, "reconciler").unwrap();
+        host_a.wake(uid, gid, "reconciler").unwrap();
+        let woken = store.lease(&key).unwrap().unwrap();
+        assert_eq!((woken.term, woken.released), (2, false));
+
+        // Kept: renewed, the same term.
+        unrenewed(&store, &blobs, &key);
+        assert_eq!(host_a.keep_leases(), []);
+        let kept = store.lease(&key).unwrap().unwrap();
+        assert_eq!(kept.term, 2);
+        assert!(kept.holds(Timestamp::now(), LEASE_FOR));
+
+        // glassd starts again on the same host, with the computer awake:
+        // the host's name is the same, and it asks for its lease again.
+        let name = host_a.host().to_owned();
+        drop(host_a);
+        let host_a = host_in(dir_a.path(), &store);
+        assert_eq!(host_a.host(), name);
+        assert_eq!(host_a.keep_leases(), []);
+        let again = store.lease(&key).unwrap().unwrap();
+        assert_eq!((again.term, again.host.as_str()), (3, name.as_str()));
+
+        // A task is running in it when host A is cut off, and host B
+        // takes the computer.
+        let spec = task("glass-0041", Some("reconciler"));
+        host_a.create(&spec).unwrap();
+        fs::write(work(&host_a, "reconciler"), "cut off").unwrap();
+        unrenewed(&store, &blobs, &key);
+        host_b.wake(uid, gid, "reconciler").unwrap();
+
+        // Host A's next renewal finds out: said once, for the record and
+        // for its tasks to be stopped.
+        let news = host_a.keep_leases();
+        assert_eq!(
+            news,
+            [LeaseNews::Lost {
+                uid,
+                id: "reconciler".into(),
+                name: "Reconciler".into(),
+                host: host_b.host().to_owned(),
+            }]
+        );
+        // Its copy stays where it is while the task ends.
+        assert_eq!(host_a.keep_leases(), []);
+        assert!(work(&host_a, "reconciler").exists());
+        host_a.destroy(&spec).unwrap();
+        let news = host_a.keep_leases();
+        assert!(
+            matches!(news.as_slice(), [LeaseNews::SetAside { aside, .. }]
+                if fs::read_to_string(aside.join("work.txt")).unwrap() == "cut off"),
+            "{news:?}"
+        );
+        // Host B's lease was never touched.
+        let theirs = store.lease(&key).unwrap().unwrap();
+        assert_eq!((theirs.term, theirs.host.as_str()), (4, host_b.host()));
+        assert_eq!(host_a.keep_leases(), []);
+    }
+
+    #[test]
+    fn adr0066_an_agent_added_while_its_computer_sleeps_goes_where_it_wakes() {
+        let (_s3, store, _) = shared_store();
+        let (_a, host_a) = host(&store);
+        let (_b, host_b) = host(&store);
+        let (uid, gid) = me();
+        let id = glass_api::PERSON_COMPUTER;
+        host_a
+            .add_persona(uid, gid, "Dana's computer", &persona("scout", "Scout"))
+            .unwrap();
+        host_a.sleep(uid, id).unwrap();
+
+        // Added while it sleeps: the change is made in the store's record,
+        // and the computer is nobody's again after.
+        let view = host_a
+            .add_persona(uid, gid, "Dana's computer", &persona("writer", "Writer"))
+            .unwrap();
+        assert_eq!(view.state, ComputerState::Asleep);
+        let names = |meta: &ComputerMeta| -> Vec<String> {
+            meta.personas.iter().map(|p| p.id.clone()).collect()
+        };
+        assert_eq!(names(&record_in(&store)), ["scout", "writer"]);
+        assert!(store.lease(&key_in(&store)).unwrap().unwrap().released);
+
+        // It wakes on another host with both.
+        let woke = host_b.wake(uid, gid, id).unwrap();
+        assert_eq!(woke.personas.len(), 2);
+        // Awake there, its record isn't host A's to change.
+        for refused in [
+            host_a.add_persona(uid, gid, "Dana's computer", &persona("third", "Third")),
+            host_a.remove_persona(uid, "scout"),
+        ] {
+            let refused = refused.unwrap_err().to_string();
+            assert!(refused.contains("is awake on another host"), "{refused}");
+        }
+        assert_eq!(names(&record_in(&store)), ["scout", "writer"]);
+
+        // Removed where it's awake, then asleep: host A, which remembers
+        // two agents, wakes it with the one.
+        host_b.remove_persona(uid, "scout").unwrap();
+        host_b.sleep(uid, id).unwrap();
+        assert_eq!(host_a.get(uid, id).unwrap().personas.len(), 2);
+        let woke = host_a.wake(uid, gid, id).unwrap();
+        assert_eq!(woke.personas.len(), 1);
+        assert_eq!(woke.personas[0].id, "writer");
+        // One the same name is refused in the store's record as here.
+        host_a.sleep(uid, id).unwrap();
+        let refused = host_a
+            .add_persona(uid, gid, "Dana's computer", &persona("writer", "Writer"))
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("already have an agent"), "{refused}");
+        assert!(store.lease(&key_in(&store)).unwrap().unwrap().released);
+    }
+
+    #[test]
+    fn adr0066_an_id_awake_on_another_host_is_taken() {
+        let (_s3, store, _) = shared_store();
+        let (_a, host_a) = host(&store);
+        let (_b, host_b) = host(&store);
+        let (uid, gid) = me();
+        host_a.make(uid, gid, &reconciler()).unwrap();
+        // It never slept: nothing of it is in the store to list or wake.
+        assert!(host_b.list(uid).is_empty());
+        assert!(host_b.wake(uid, gid, "reconciler").is_err());
+        // But its id is its person's already.
+        let refused = host_b
+            .make(uid, gid, &reconciler())
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("awake on another host"), "{refused}");
+        assert_eq!(store.records(&format!("u{uid}-")).unwrap().len(), 1);
+    }
+
+    /// A store in which something happens, once, as a version is read:
+    /// what another host does while this one is in the middle of a wake.
+    struct Meanwhile {
+        inner: Arc<crate::store::FolderBlobs>,
+        then: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl std::fmt::Debug for Meanwhile {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Meanwhile")
+        }
+    }
+
+    impl crate::store::Blobs for Meanwhile {
+        fn put(&self, key: &str, bytes: &[u8]) -> std::result::Result<(), String> {
+            self.inner.put(key, bytes)
+        }
+        fn put_new(&self, key: &str, bytes: &[u8]) -> std::result::Result<bool, String> {
+            self.inner.put_new(key, bytes)
+        }
+        fn get(&self, key: &str) -> std::result::Result<Option<Vec<u8>>, String> {
+            if key.contains("/versions/") {
+                let then = self.then.lock().unwrap().take();
+                if let Some(then) = then {
+                    then();
+                }
+            }
+            self.inner.get(key)
+        }
+        fn exists(&self, key: &str) -> std::result::Result<bool, String> {
+            self.inner.exists(key)
+        }
+        fn delete(&self, key: &str) -> std::result::Result<(), String> {
+            self.inner.delete(key)
+        }
+        fn list(&self, prefix: &str) -> std::result::Result<Vec<crate::store::Listed>, String> {
+            self.inner.list(prefix)
+        }
+    }
+
+    #[test]
+    fn adr0066_a_computer_taken_while_it_wakes_isnt_awake_here() {
+        let (_s3, plain, blobs) = shared_store();
+        let meanwhile = Arc::new(Meanwhile {
+            inner: blobs.clone(),
+            then: Mutex::new(None),
+        });
+        let store = Arc::new(Store::new(meanwhile.clone()));
+        let (_a, host_a) = host(&store);
+        let host_a = host_a.trusting_for(Duration::ZERO);
+        let (uid, gid) = me();
+        host_a.make(uid, gid, &reconciler()).unwrap();
+        fs::write(work(&host_a, "reconciler"), "one").unwrap();
+        host_a.sleep(uid, "reconciler").unwrap();
+        let key = key_in(&plain);
+
+        // In the middle of its wake host A loses the store for longer than
+        // a lease lasts, and another host takes the computer.
+        *meanwhile.then.lock().unwrap() = Some(Box::new({
+            let (plain, blobs, key) = (plain.clone(), blobs.clone(), key.clone());
+            move || {
+                unrenewed(&plain, &blobs, &key);
+                let taken = plain
+                    .claim(&key, "host-b", Timestamp::now(), LEASE_FOR)
+                    .unwrap();
+                assert!(matches!(taken, Claim::Held(_)), "{taken:?}");
+            }
+        }));
+        let refused = host_a.wake(uid, gid, "reconciler").unwrap_err().to_string();
+        assert!(
+            refused.contains("was taken by another host (host-b) while it was waking here"),
+            "{refused}"
+        );
+        // It isn't awake on host A: nothing of it is here, no task starts
+        // in it, and host B's lease is as host B left it.
+        let view = host_a.get(uid, "reconciler").unwrap();
+        assert_eq!(view.state, ComputerState::Asleep);
+        let here: Vec<_> = fs::read_dir(host_a.computer(uid, "reconciler").dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(here, ["computer.json"]);
+        assert_eq!(host_a.keep_leases(), []);
+        let lease = plain.lease(&key).unwrap().unwrap();
+        assert_eq!((lease.host.as_str(), lease.released), ("host-b", false));
     }
 }

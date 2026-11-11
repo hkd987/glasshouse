@@ -225,17 +225,16 @@ and a host with KVM: run each against the real thing.
   - one front for many people (below).
 - **Confidential asks**: glassd says which asks carry labelled data, so
   their detail stays out of Teams.
-- **One host at a time per computer** (a lease): the host that wakes a
-  computer claims it in S3 (a conditional put), renews the claim while
-  it's awake, and gives it up once it's asleep. Another host refuses to
-  wake it while the claim is fresh. Modelled in `AgentComputers.tla`
-  with two hosts first.
+- **The front forwards to the host that has the computer** (below): a
+  computer is awake on one host at a time (the lease, built; see the
+  amendment of 2026-11-10), and a request that lands on another host is
+  refused in words until the fronts pass it on.
   - Until then, the stack defaults to one host (`MinHosts` and
     `MaxHosts` 1).
   - In an instance refresh the old and new hosts overlap for a few
-    minutes. A computer still busy on the old host can meanwhile be woken
-    from its last sleep on the new one, and one of the two copies' work is
-    lost.
+    minutes. A computer still busy on the old host is refused on the new
+    one until the old one has put it to sleep, where it used to wake a
+    second time from its last sleep and lose one copy's work.
 - **The store**:
   - parallel transfers when a computer wakes (saving has them, see the
     amendment below), and connections kept open between requests: each
@@ -250,12 +249,12 @@ and a host with KVM: run each against the real thing.
 - **The template**: it's over CloudFormation's inline size, so it's
   deployed from S3 (Marketplace does).
 
-## Which host serves a person (open: to settle before more than one host)
+## Which host serves a person (decided: the front forwards; to build before more than one host)
 The load balancer spreads requests over the hosts, with no stickiness, so
 a person's next request can land on a host other than the one their
 computer is awake on. Teams' calls and the CLI's carry no browser cookie.
-The lease above makes a second host refuse, which is safe but not useful.
-The options:
+The lease makes a second host refuse, which is safe but not useful.
+The options were:
 1. **The front forwards to the host that holds the lease.** Any host takes
    any request; the lease names the host, and the fronts forward over the
    VPC. Works for the browser, the CLI and Teams alike, and needs no new
@@ -267,8 +266,23 @@ The options:
    costs a host per person, and Marketplace bills computer hours, not
    hosts.
 
-Recommended: 1. It builds on the lease, keeps one rule for every way in,
-and lets the group scale on load.
+**Decided: 1.** It builds on the lease, keeps one rule for every way in,
+and lets the group scale on load. What it still needs, in order:
+
+- **Each host's address in its lease**, and the fronts reachable from each
+  other over the VPC only.
+- **A request a front can pass on and the next front can trust.** The
+  load balancer's signed `x-amzn-oidc-data` header says who the person is;
+  a front that checks it (under "Next") can check it again when another
+  front hands it over, so no host has to believe another about who is
+  asking. This is why forwarding waits for that check.
+- **The list from the store.** A host lists the computers it has and the
+  ones asleep in the store. One awake on another host and never yet asleep
+  is in the store only as its record and lease: the list has to show it,
+  as awake elsewhere.
+- **Two computers made at once by one id on two hosts** (a form sent
+  twice): each gets a key of its own today. The id needs a claim in the
+  store like the lease's.
 
 ## Identity on a host (to settle before many people share one)
 Here, the front acts for the one person who runs it, as the apps' bridge
@@ -313,3 +327,82 @@ against S3 itself or on a host with real computers on it. `AgentComputers.tla`
 is one computer and one glassd, and nothing in it changes: a save is still
 all in the store before its version is, or not there at all.
 
+## Amended 2026-11-10 (audit 7.3): one host at a time per computer, and a wake goes by the store
+
+Two things were wrong, and one fix needed the other.
+
+**A wake restored the version the host remembered.** Each host keeps a
+record of the computers it has seen (`computer.json`), with the version
+each last slept as. A wake restored that version. A host that put a
+computer to sleep on Monday, after another host had woken it and put it to
+sleep again on Tuesday, woke Monday's: Tuesday's work was gone from what
+the person saw, with nothing said. Once the store had trimmed Monday's
+version (it keeps three), the wake failed instead. Agents added to the
+computer in between were lost the same way.
+
+**Nothing said which host had a computer awake.** A second host could wake
+it from its last sleep while the first still had it; whichever slept later
+replaced the other's work. With one host this happens only while a host
+is being replaced, when old and new overlap for minutes.
+
+What a computer is, asleep, is now what the store says, and one host at a
+time has it awake:
+
+- **A wake reads the store's record** (`computers/<key>/record.json`) and
+  restores the version it names. A host's own record is what it lists the
+  computer by until then. A computer's record is in the store from when
+  it's made, not from its first sleep, so its id is taken on every host.
+- **A lease per computer, in the store** (`store/lease.rs`): an object per
+  term, `computers/<key>/lease/<term>.json`, saying which host, since
+  when, and when it last renewed. Taking a computer is making the next
+  term's object, with a put S3 refuses if the object is there
+  (`If-None-Match: *`): of two hosts that ask at once, S3 lets one
+  through. No host reads, decides and writes over another's object.
+  - The host that makes or wakes a computer takes its lease, renews it
+    every 30 seconds while it's awake or on its way (`keep_leases`), and
+    marks it released once it's asleep in the store.
+  - Another host leaves the computer alone until the lease is released, or
+    hasn't been renewed for 2 minutes (`LEASE_FOR`): a host that died with
+    it awake. The person is told which host has it.
+  - A host's name is its EC2 instance id; off AWS, a name it makes once
+    and keeps beside its computers.
+- **Only the holder writes.** A host acts on its lease for 75 seconds
+  after the store last took a renewal (`TRUST_FOR`), well short of the
+  lease. Past that it takes a new term before it writes a version or the
+  record, and it's given one only if the newest term is still its own. If
+  another host has had the computer since, even one that has put it to
+  sleep and released it, this host's copy is no longer the computer.
+- **A copy that lost its computer is set aside, not saved and not
+  deleted.** No task starts in it, the tasks in it are stopped and say
+  why, and once they've ended its folder moves to `.aside/` under the
+  computers' folder (root only, kept a week). The host then lists the
+  computer as the store has it. Both steps are on the audit record. This
+  happens to a host cut off from S3 for more than two minutes while
+  another host could reach it; work done in that copy since its last sleep
+  is what's set aside.
+- **A change to a sleeping computer's record** (an agent added or removed)
+  is made in the store's record, holding the lease for as long as it
+  takes. It was written to the host's own record only, and lost when
+  another host woke the computer.
+
+What it costs: one small put and one check per awake computer every 30
+seconds (well under a tenth of a cent per computer-hour in S3 requests),
+and one list and one put per wake.
+
+What it leans on: the hosts' clocks agree to within the 45 seconds between
+`TRUST_FOR` and `LEASE_FOR` (they keep time with the same service), and
+the write of a computer's record follows its check by less than that.
+
+Not changed: a host that dies with a computer awake still loses what the
+computer did since it last slept. The lease only decides when another host
+may wake it from there.
+
+Modelled as `specs/tla/ComputerLease.tla`: two hosts, wakes and sleeps
+step by step, hosts cut off, glassd restarting, a host going away. It
+checks that no save replaces work another host did, that a host sure of
+its lease has it, and that what is awake is the version the record names.
+Its Old switches are the code before (no lease; the host's own record)
+and two ways the lease could have been wrong (a cut-off host given the
+lease back because nobody held it; trust as long as the lease): each
+breaks the first of those. `AgentComputers.tla` is still the computer on
+one host.
