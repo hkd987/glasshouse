@@ -347,3 +347,32 @@ edition of it (decision 6). On a computer:
   takes `version`).
 - A computer whose fetch of an approved bundle failed fetches it again at
   a later sync, at most once a minute (`specs/tla/StoreShare.tla`).
+
+## Amended 2026-11-11 (audit 5.3): old versions go
+Every `apps.save` kept the app's whole source and build as a version, for
+good. A version now goes when all of these hold (`Store::moved`,
+`glass_state::kept`):
+
+- it isn't one of the app's newest 20;
+- it isn't the one in use;
+- it wasn't in use at any time in the last three months.
+
+The last is for undo: undoing a save or a going back puts the choice
+back to the version in use before it, which must still be there. Each
+save and each going back notes the version it leaves and the one it
+moves to as in use at that moment; a version with no note counts from
+when it was saved, and nothing saved before notes were kept goes for
+three months. Undo reaches back 30 days for a task that has ended.
+
+A save says which versions it removed. One that's gone isn't listed and
+can't be gone back to; versions keep their numbers.
+
+Not covered: a task still open can be undone further back than that. One
+open for more than three months, whose change of version is undone after
+twenty newer versions were saved, names a version that is gone, and the
+app isn't offered until the person picks a version.
+
+Modelled in `specs/tla/StudioVersions.tla`: saves, goings back and undos
+with time passing; the version in use always exists. Its Old switch is a
+removal by when a version was saved, and a Keep shorter than undo's reach
+breaks it too.

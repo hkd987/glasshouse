@@ -451,3 +451,10 @@ patch first and says what it makes of it, beside IT's own reading.
   never by the trial.
 - **The image turns off the kernel debugger on panic**
   (`debug.debugger_on_panic=0`).
+
+## Amended 2026-11-11 (audit 5.3): the newest four builds are kept
+`hardware.patch_build` kept every build it made under glassd's state, 40
+to 160 MB each, for good. It keeps the newest four (`BUILDS_KEPT`): a
+build is what the agent proposes next and what the person is asked
+about, not a record. Proposing one that has gone since says to build the
+patch again. What a build that never finished left is removed with them.

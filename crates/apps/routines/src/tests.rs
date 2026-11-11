@@ -180,6 +180,70 @@ fn da4_every_save_is_a_version_and_removing_one_is_undoable() {
     );
 }
 
+// Audit 5.3: every version saved stayed for good. Through the actions: a
+// save removes what's past keeping, and what's gone can't be gone back to.
+#[test]
+fn da4_a_save_removes_versions_past_keeping() {
+    use std::time::{Duration, SystemTime};
+
+    const ID: &str = "overdue-invoices";
+    let f = fixture();
+    let root = f._dir.path().join("state/routines");
+    // The store has kept its notes for four months.
+    let then = SystemTime::now() - Duration::from_secs(120 * 24 * 3600);
+    glass_state::kept::since(&root, then).unwrap();
+
+    f.call(SAVE, overdue()).unwrap();
+    let save = |n: usize| {
+        f.call(
+            SAVE,
+            json!({
+                "routine": ID,
+                "request": "Tell me which invoices are unpaid, oldest first.",
+                "script": OVERDUE.replace("Unpaid", &format!("Owed, take {n}")),
+                "note": format!("Change {n}"),
+            }),
+        )
+        .unwrap()
+    };
+    for n in 2..=store::VERSIONS_KEPT + 1 {
+        save(n);
+    }
+    // One more than are kept whatever their age, all of today: undoing
+    // any of those saves names the version before it, so all stay.
+    assert_eq!(
+        f.routines.versions("demo", ID).len(),
+        store::VERSIONS_KEPT + 1
+    );
+
+    // Version 1 was last in use four months ago.
+    let note = store::used_note(&root.join("demo").join(ID), 1);
+    assert!(note.exists(), "noted when the second save left it");
+    glass_state::kept::note_used(&note, then).unwrap();
+    save(store::VERSIONS_KEPT + 2);
+    assert_eq!(
+        f.routines.versions("demo", ID),
+        (2..=52).collect::<Vec<u32>>()
+    );
+    let gone = f
+        .call(USE, json!({ "routine": ID, "version": 1 }))
+        .unwrap_err();
+    assert!(gone.to_string().contains("has no version 1"), "{gone}");
+    let read = f.call(READ, json!({ "routine": ID })).unwrap();
+    let listed = read.data["versions"].as_array().unwrap();
+    assert_eq!(listed.len(), store::VERSIONS_KEPT);
+    assert_eq!(listed.last().unwrap()["version"], 3);
+
+    // Removing the routine notes the version it had, and the choices file
+    // put back (what undo does) has it running that version again.
+    let choices = f.ctx.home.join(store::MINE);
+    let before = std::fs::read(&choices).unwrap();
+    f.call(DELETE, json!({ "routine": ID })).unwrap();
+    assert!(store::used_note(&root.join("demo").join(ID), 52).exists());
+    std::fs::write(&choices, before).unwrap();
+    assert_eq!(f.routines.current("demo", &f.ctx.home)[0].version, 52);
+}
+
 #[test]
 fn da4_a_routine_that_wont_do_says_why() {
     let f = fixture();

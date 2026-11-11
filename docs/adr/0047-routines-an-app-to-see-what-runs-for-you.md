@@ -124,4 +124,11 @@ for users to see their routines maybe a routines app on our os". PRD DA-4
 ## Not built yet
 - Editing a routine's code in the app. A new version still comes from the
   agent, with an approval.
-- Removing a version for good: versions are kept, never changed.
+- Removing a version by hand. Versions are never changed, and since the
+  audit of 2026-11 (5.3) the old ones go by themselves: a version stays
+  while it is one of the routine's newest 50 (what `routines.read`
+  lists), the one in use, or was in use in the last three months, which
+  is what undoing a save, a going back or a removal can name
+  (`Routines::moved`; the rule and its model are ADR 0032's amendment of
+  2026-11-11). A removed routine's last versions stay: undo puts it back,
+  and nothing removes the folder after.

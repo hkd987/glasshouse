@@ -10,6 +10,11 @@
 //! (`runs.json`, ADR 0047), with the runs going now (`.running.json`) so a
 //! run a restart cut off is kept too.
 //!
+//! Not every version is kept for good (audit 5.3): the newest
+//! [`VERSIONS_KEPT`] of a routine are, the one in use is, and any that was
+//! in use in the last three months, which is what undoing a change can
+//! name ([`Routines::moved`], [`glass_state::kept`]).
+//!
 //! Every change to the choices file reads and writes it under one lock,
 //! and a scheduled start checks it under the same lock, so no call's
 //! change is lost to another's and a routine paused is never started by
@@ -74,6 +79,9 @@ struct Mine {
 
 /// The runs of a routine glassd keeps, newest first.
 pub const KEPT_RUNS: usize = 20;
+/// The newest versions of a routine that are kept whatever their age: as
+/// many as `routines.read` lists.
+pub const VERSIONS_KEPT: usize = 50;
 const MAX_RUNS_BYTES: u64 = 256 * 1024;
 const RUNS: &str = "runs.json";
 /// The runs of a routine going now: kept at their end, or as cut off when
@@ -293,6 +301,64 @@ impl Routines {
         Ok(true)
     }
 
+    /// Notes that `login`'s routine `id` went from version `from` to `to`
+    /// as the one in use (`to` none: the routine was removed), and removes
+    /// its versions that are past keeping ([`glass_state::kept`]): not one
+    /// of the newest [`VERSIONS_KEPT`], not in use, and not in use in the
+    /// last three months, which is what undo can name. Which went.
+    ///
+    /// Every version was kept for good (audit 5.3). Nothing is removed if
+    /// a note can't be kept: a version without one would look unused.
+    pub fn moved(&self, login: &str, id: &str, from: Option<u32>, to: Option<u32>) -> Vec<u32> {
+        self.moved_at(login, id, from, to, std::time::SystemTime::now())
+    }
+
+    pub(crate) fn moved_at(
+        &self,
+        login: &str,
+        id: &str,
+        from: Option<u32>,
+        to: Option<u32>,
+        now: std::time::SystemTime,
+    ) -> Vec<u32> {
+        use glass_state::kept;
+
+        let Some(dir) = self.dir(login, id) else {
+            return Vec::new();
+        };
+        let file = |version: u32| dir.join(format!("{version}.json"));
+        let note = |version: u32| used_note(&dir, version);
+        let noted = from
+            .into_iter()
+            .chain(to)
+            .filter(|v| file(*v).is_file())
+            .try_for_each(|v| kept::note_used(&note(v), now));
+        let Ok(since) = noted.and_then(|()| kept::since(&self.root, now)) else {
+            return Vec::new();
+        };
+        let versions: Vec<kept::Version> = self
+            .versions(login, id)
+            .into_iter()
+            .filter_map(|number| {
+                let used = kept::last_used(&note(number)).or_else(|| {
+                    // When it was saved.
+                    std::fs::metadata(file(number))
+                        .and_then(|m| m.modified())
+                        .ok()
+                })?;
+                Some(kept::Version { number, used })
+            })
+            .collect();
+        kept::past_keeping(&versions, to, VERSIONS_KEPT, since, now)
+            .into_iter()
+            .filter(|version| {
+                let gone = std::fs::remove_file(file(*version)).is_ok();
+                let _ = std::fs::remove_file(note(*version));
+                gone
+            })
+            .collect()
+    }
+
     /// Keeps `routine` as the next version of its id, numbered here, and
     /// returns that number.
     pub(crate) fn save(&self, mut routine: Routine) -> io::Result<Routine> {
@@ -311,6 +377,12 @@ impl Routines {
         std::fs::rename(staged, path)?;
         Ok(routine)
     }
+}
+
+/// Beside a routine's versions in `dir`: when `version` was last known to
+/// be the one in use.
+pub(crate) fn used_note(dir: &Path, version: u32) -> PathBuf {
+    dir.join(format!(".{version}.used"))
 }
 
 /// A login as one path part: never `..`, a separator or empty.
@@ -451,6 +523,77 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
 
     use super::*;
+
+    // Audit 5.3: every version of every routine stayed for good, a file
+    // for each change of schedule.
+    #[test]
+    fn da4_a_routines_old_versions_go_once_nothing_can_name_them() {
+        use std::time::{Duration, SystemTime};
+
+        const NONE: [u32; 0] = [];
+        let state = tempfile::tempdir().unwrap();
+        let routines = Routines::new(state.path().join("routines"));
+        let dir = routines.dir("dana", "standup").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = |from: u32, upto: u32| {
+            for version in from..=upto {
+                std::fs::write(dir.join(format!("{version}.json")), b"{}").unwrap();
+            }
+        };
+        let day = |n: u32| SystemTime::now() + Duration::from_secs(24 * 3600) * n;
+        let versions = || routines.versions("dana", "standup");
+        let moved = |from, to, on| routines.moved_at("dana", "standup", from, to, day(on));
+
+        // More than are kept whatever their age, all saved lately: any of
+        // them may be what an undo puts back, so none goes.
+        saved(1, VERSIONS_KEPT as u32 + 5);
+        assert_eq!(moved(Some(54), Some(55), 0), NONE);
+        saved(56, 56);
+        assert_eq!(moved(Some(55), Some(56), 60), NONE);
+        assert_eq!(versions().len(), 56);
+        // What ran and what's running are beside them, and stay.
+        std::fs::write(dir.join(RUNS), b"[]").unwrap();
+
+        // Past three months, the ones before the newest fifty go, each
+        // with its note.
+        saved(57, 57);
+        assert_eq!(moved(Some(56), Some(57), 100), [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(versions(), (8..=57).collect::<Vec<u32>>());
+        assert!(dir.join(RUNS).exists());
+
+        // The person goes back to version 8; a save then leaves it. It was
+        // in use until that moment, so it stays as 9 goes.
+        assert_eq!(moved(Some(57), Some(8), 100), NONE);
+        saved(58, 59);
+        assert_eq!(moved(Some(8), Some(59), 150), [9]);
+        assert!(versions().contains(&8));
+        assert!(used_note(&dir, 8).exists());
+
+        // They remove the routine: nothing of it is in use, and undo puts
+        // back the version it had, so that one is noted as in use until
+        // now.
+        assert_eq!(moved(Some(59), None, 150), NONE);
+        assert_eq!(
+            glass_state::kept::last_used(&used_note(&dir, 59)).map(|at| at > day(149)),
+            Some(true)
+        );
+        assert!(!used_note(&dir, 9).exists(), "a note goes with its version");
+
+        // Another routine, and another person's, are their own.
+        let other = routines.dir("sam", "standup").unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("1.json"), b"{}").unwrap();
+        assert_eq!(
+            routines.moved_at("sam", "standup", None, Some(1), day(400)),
+            NONE
+        );
+        assert_eq!(routines.versions("sam", "standup"), [1]);
+        // And an id that isn't one names no folder.
+        assert_eq!(
+            routines.moved_at("dana", "../sam", Some(1), None, day(400)),
+            NONE
+        );
+    }
 
     // Audit 4.3: the file of a person's choices is theirs to edit. One
     // with a typo read as "no routines", and the next save wrote a file

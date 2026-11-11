@@ -67,8 +67,9 @@ const MAX_REQUEST_CHARS: usize = 2_000;
 const MAX_NOTE_CHARS: usize = 300;
 /// The script lines an approval shows before saying how many more.
 const SHOWN_LINES: usize = 40;
-/// The versions `routines.read` lists, newest first.
-const MAX_VERSIONS_LISTED: usize = 50;
+/// The versions `routines.read` lists, newest first: as many as are kept
+/// whatever their age.
+const MAX_VERSIONS_LISTED: usize = store::VERSIONS_KEPT;
 
 fn invalid(why: impl Into<String>) -> ActionError {
     ActionError::InvalidInput(why.into())
@@ -211,7 +212,10 @@ impl Routines {
                 ));
             }
             let saved = self.save(routine)?;
-            chosen.insert(saved.id.clone(), saved.version);
+            let before = chosen.insert(saved.id.clone(), saved.version);
+            // The version left was in use until now: undoing this names
+            // it. Ones long out of use go.
+            self.moved(&saved.owner, &saved.id, before, Some(saved.version));
             Ok(saved)
         })
     }
@@ -1335,7 +1339,9 @@ impl ActionProvider for RoutinesProvider {
                 let found = self.mine(ctx, &routine)?;
                 let target = self.used(&found, version)?;
                 store::change(&ctx.home, ctx.owner, |chosen| {
-                    chosen.insert(target.id.clone(), target.version);
+                    let before = chosen.insert(target.id.clone(), target.version);
+                    self.routines
+                        .moved(&target.owner, &target.id, before, Some(target.version));
                     Ok(())
                 })
                 .map_err(|e| ActionError::io("your routines", e))?;
@@ -1362,7 +1368,9 @@ impl ActionProvider for RoutinesProvider {
                 let Named { routine } = parse_input(input)?;
                 let found = self.mine(ctx, &routine)?;
                 store::change(&ctx.home, ctx.owner, |chosen| {
-                    chosen.remove(&found.id);
+                    // In use until now: undo puts it back by its number.
+                    let before = chosen.remove(&found.id);
+                    self.routines.moved(&found.owner, &found.id, before, None);
                     Ok(())
                 })
                 .map_err(|e| ActionError::io("your routines", e))?;

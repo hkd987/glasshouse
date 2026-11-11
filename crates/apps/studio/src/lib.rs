@@ -796,9 +796,10 @@ impl StudioProvider {
             .save(&record, &manifest, &plan.files, &dist)
             .map_err(|e| ActionError::Failed(format!("saving {}: {e}", plan.name)))?;
         let mut chosen = store::chosen(&ctx.home);
-        chosen.insert(plan.app.clone(), version);
+        let before = chosen.insert(plan.app.clone(), version);
         store::choose(&ctx.home, ctx.owner, chosen)
             .map_err(|e| ActionError::io("choosing the new version", e))?;
+        let removed = self.studio.store().moved(login, &plan.app, before, version);
 
         let based = plan
             .base
@@ -822,6 +823,16 @@ impl StudioProvider {
             .filter(|n| !n.starts_with("when tried: "))
         {
             text.push_str(&format!(" Note: {note}."));
+        }
+        if !removed.is_empty() {
+            text.push_str(&format!(
+                " {} removed: not one of the newest {}, and not in use for three months.",
+                match removed.as_slice() {
+                    [one] => format!("Version {one} was"),
+                    many => format!("{} older versions were", many.len()),
+                },
+                store::VERSIONS_KEPT
+            ));
         }
         if let Some(tried) = &tried {
             text.push_str("\n\n");
@@ -1309,9 +1320,14 @@ impl StudioProvider {
     fn revert(&self, ctx: &TaskContext, input: RevertInput) -> Result<ActionOutput, ActionError> {
         let record = self.version_to_use(ctx, &input)?;
         let mut chosen = store::chosen(&ctx.home);
-        chosen.insert(input.app.clone(), input.version);
+        let before = chosen.insert(input.app.clone(), input.version);
         store::choose(&ctx.home, ctx.owner, chosen)
             .map_err(|e| ActionError::io("choosing the version", e))?;
+        // The one left was in use until now: undoing this names it.
+        let login = ctx.principal.on_behalf_of.name.as_str();
+        self.studio
+            .store()
+            .moved(login, &input.app, before, input.version);
         Ok(ActionOutput {
             text: format!("{} is back to version {}.", record.name, record.version),
             data: json!({ "app": input.app, "version": input.version }),

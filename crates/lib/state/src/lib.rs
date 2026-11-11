@@ -19,7 +19,10 @@
 //!   is for those that start again empty, and keeps what was there.
 //!
 //! This crate owns no store and knows no schema: it is the two halves
-//! every store repeats.
+//! every store repeats, and for stores that keep versions of a thing, the
+//! rule for which of them are kept ([`kept`]).
+
+pub mod kept;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};

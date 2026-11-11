@@ -48,6 +48,11 @@ pub const SOURCE_READ: &str = "hardware.source_read";
 pub const PATCH_BUILD: &str = "hardware.patch_build";
 pub const PATCH_PROPOSE: &str = "hardware.patch_propose";
 
+/// Built patches kept (audit 5.3). A build is what an agent proposes
+/// next, and what the person is asked about; it carries its modules and,
+/// for some patches, a kernel: 40 to 160 MB. Every one was kept for good.
+pub const BUILDS_KEPT: usize = 4;
+
 /// The kernel patch build service (ADR 0057): glassd's client for it.
 pub trait BuildService: Send + Sync {
     fn search(&self, request: &SourceSearch) -> Result<SourceFound, String>;
@@ -148,8 +153,7 @@ impl HardwareHandle {
     /// What `build` was built from.
     fn request(&self, build: &str) -> Result<BuildRequest, ActionError> {
         let path = self.0.builds.join(format!("{build}.request.json"));
-        let bytes = std::fs::read(&path)
-            .map_err(|_| ActionError::NotFound(format!("build {build}: build the patch first")))?;
+        let bytes = std::fs::read(&path).map_err(|_| not_kept(build))?;
         serde_json::from_slice(&bytes)
             .map_err(|e| ActionError::Failed(format!("build {build}: {e}")))
     }
@@ -205,8 +209,7 @@ impl HardwareHandle {
             )));
         }
         let path = self.0.builds.join(format!("{build}.bundle.json"));
-        let bytes = std::fs::read(&path)
-            .map_err(|_| ActionError::NotFound(format!("build {build}: build the patch first")))?;
+        let bytes = std::fs::read(&path).map_err(|_| not_kept(build))?;
         let bundle = serde_json::from_slice(&bytes)
             .map_err(|e| ActionError::Failed(format!("build {build}: {e}")))?;
         Ok((bytes, bundle))
@@ -227,8 +230,60 @@ impl HardwareHandle {
         write_private(&path, &source).map_err(|e| ActionError::io(path.display(), e))?;
         let path = self.0.builds.join(format!("{id}.bundle.json"));
         write_private(&path, &bytes).map_err(|e| ActionError::io(path.display(), e))?;
+        self.trim(&id);
         Ok(id)
     }
+
+    /// Removes all but the newest [`BUILDS_KEPT`] builds, `kept` (the one
+    /// just written) among them, and what a build that was never finished
+    /// left. Best effort: a build that can't be removed is tried again
+    /// after the next one.
+    fn trim(&self, kept: &str) {
+        let Ok(entries) = std::fs::read_dir(&self.0.builds) else {
+            return;
+        };
+        let mut builds: Vec<(std::time::SystemTime, String)> = Vec::new();
+        let mut requests: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if let Some(id) = name.strip_suffix(".bundle.json") {
+                if id != kept
+                    && let Ok(written) = entry.metadata().and_then(|m| m.modified())
+                {
+                    builds.push((written, id.to_owned()));
+                }
+            } else if let Some(id) = name.strip_suffix(".request.json") {
+                requests.push(id.to_owned());
+            }
+        }
+        builds.sort();
+        let over = (builds.len() + 1).saturating_sub(BUILDS_KEPT);
+        let remove = |id: &str, part: &str| {
+            let _ = std::fs::remove_file(self.0.builds.join(format!("{id}.{part}")));
+        };
+        for (_, id) in builds.iter().take(over) {
+            remove(id, "bundle.json");
+            remove(id, "request.json");
+        }
+        // What a build was made from is written first: one whose bundle
+        // never followed (glassd stopped between the two) is nobody's.
+        for id in requests {
+            if id != kept && !self.0.builds.join(format!("{id}.bundle.json")).exists() {
+                remove(&id, "request.json");
+            }
+        }
+    }
+}
+
+/// A build that isn't here: never made, or made before the newest
+/// [`BUILDS_KEPT`].
+fn not_kept(build: &str) -> ActionError {
+    ActionError::NotFound(format!(
+        "build {build} isn't kept here (the newest {BUILDS_KEPT} builds are): build the patch, \
+         then propose that build"
+    ))
 }
 
 /// Where an agent's patch goes (slice 3).
@@ -1054,6 +1109,79 @@ mod tests {
         )
         .unwrap();
         assert_eq!(applied[0], bytes, "what's set up is what was built");
+    }
+
+    // Audit 5.3: every build an agent made stayed on the disk, a kernel's
+    // worth each.
+    #[test]
+    fn adr0057_only_the_newest_builds_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (provider, _, kernel) = setup(dir.path());
+        let ctx = glass_actions::testing::context(dir.path());
+        let builds = dir.path().join("builds");
+        // What a build that never finished left: what it was made from,
+        // and no bundle.
+        std::fs::create_dir_all(&builds).unwrap();
+        std::fs::write(builds.join("00000000deadbeef.request.json"), b"{}").unwrap();
+
+        let mut made = Vec::new();
+        for attempt in 0..BUILDS_KEPT + 2 {
+            let built = call(
+                &provider,
+                &ctx,
+                PATCH_BUILD,
+                build_input(&format!("fixed, attempt {attempt}")),
+            )
+            .unwrap();
+            made.push(built.data["build"].as_str().unwrap().to_owned());
+            // Builds take minutes apart; these, long enough to tell which
+            // came first.
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        let mut kept: Vec<String> = std::fs::read_dir(&builds)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        kept.sort();
+        let mut newest: Vec<String> = made[2..]
+            .iter()
+            .flat_map(|id| [format!("{id}.bundle.json"), format!("{id}.request.json")])
+            .collect();
+        newest.sort();
+        assert_eq!(
+            kept, newest,
+            "the newest {BUILDS_KEPT}, each with its request"
+        );
+
+        // The newest is proposed as before; one that's gone says what to do.
+        let action: ActionName = PATCH_PROPOSE.parse().unwrap();
+        let gone = provider
+            .preview(&ctx, &action, &json!({ "build": made[0] }))
+            .unwrap_err();
+        assert!(matches!(gone, ActionError::NotFound(_)), "{gone}");
+        assert!(gone.to_string().contains("build the patch"), "{gone}");
+        let proposed = call(
+            &provider,
+            &ctx,
+            PATCH_PROPOSE,
+            json!({ "build": made.last().unwrap() }),
+        )
+        .unwrap();
+        assert_eq!(proposed.data["state"], "staged");
+        assert_eq!(kernel.applied.lock().unwrap().len(), 1);
+
+        // The same patch built again is the same build, and the newest.
+        let again = call(
+            &provider,
+            &ctx,
+            PATCH_BUILD,
+            build_input("fixed, attempt 2"),
+        )
+        .unwrap();
+        assert_eq!(again.data["build"].as_str().unwrap(), made[2]);
+        call(&provider, &ctx, PATCH_BUILD, build_input("fixed, one more")).unwrap();
+        assert!(builds.join(format!("{}.bundle.json", made[2])).exists());
+        assert!(!builds.join(format!("{}.bundle.json", made[3])).exists());
     }
 
     /// IT's console, as a managed computer reaches it.

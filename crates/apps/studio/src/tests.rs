@@ -272,6 +272,75 @@ fn ga3_every_save_is_a_version_and_going_back_is_choosing_one() {
     assert!(asked(2).unwrap().summary.starts_with("Use version 2 of "));
 }
 
+// Audit 5.3: every version saved stayed for good. Through the actions: a
+// save removes what's past keeping and says so, and what's gone isn't
+// offered or gone back to.
+#[test]
+fn ga3_a_save_removes_versions_past_keeping_and_says_which() {
+    use std::time::{Duration, SystemTime};
+
+    let f = fixture(World::default());
+    let app: AgentId = "my-mail".parse().unwrap();
+    let store = f.studio.store();
+    // The store has kept its notes for four months.
+    let then = SystemTime::now() - Duration::from_secs(120 * 24 * 3600);
+    glass_state::kept::since(store.root(), then).unwrap();
+
+    f.call(SAVE, mail_remix(&f)).unwrap();
+    let save = |note: String| {
+        let mut next = mail_remix(&f);
+        next.as_object_mut().unwrap().remove("base");
+        next["app"] = json!("my-mail");
+        next["note"] = json!(note);
+        f.call(SAVE, next).unwrap()
+    };
+    for n in 2..=store::VERSIONS_KEPT + 1 {
+        let saved = save(format!("Change {n}"));
+        assert!(!saved.text.contains("removed"), "{}", saved.text);
+    }
+    // One more than are kept whatever their age, all of today: undoing
+    // any of those saves names the version before it, so all stay.
+    assert_eq!(store.versions("demo", &app).len(), store::VERSIONS_KEPT + 1);
+
+    // Version 1 was last in use four months ago.
+    let note = store.root().join("demo/my-mail/1").join(store::USED);
+    assert!(
+        note.exists(),
+        "noted as in use when the second save left it"
+    );
+    glass_state::kept::note_used(&note, then).unwrap();
+    let saved = save("One more".into());
+    assert!(
+        saved
+            .text
+            .contains("Version 1 was removed: not one of the newest 20"),
+        "{}",
+        saved.text
+    );
+    let versions = store.versions("demo", &app);
+    assert_eq!(versions.first(), Some(&2), "{versions:?}");
+    assert_eq!(versions.len(), store::VERSIONS_KEPT + 1);
+    assert!(!store.root().join("demo/my-mail/1").exists());
+
+    // It isn't listed, and going back to it is refused before anyone is
+    // asked; the one after it is still there to go back to.
+    let listed = f.call(VERSIONS, json!({ "app": "my-mail" })).unwrap();
+    let listed = listed.data["versions"].as_array().unwrap();
+    assert!(listed.iter().all(|v| v["version"] != 1), "{listed:?}");
+    let gone = f
+        .provider
+        .preview(
+            &f.ctx,
+            &REVERT.parse().unwrap(),
+            &json!({ "app": "my-mail", "version": 1 }),
+        )
+        .unwrap_err();
+    assert!(gone.to_string().contains("has no version 1"), "{gone}");
+    f.call(REVERT, json!({ "app": "my-mail", "version": 2 }))
+        .unwrap();
+    assert_eq!(f.studio.served("demo", &f.ctx.home, &app).unwrap().0, 2);
+}
+
 /// Mail's compose button, as its source has it.
 const COMPOSE: &str = "\"data-test\": \"compose\" },\n      \"New message\"";
 

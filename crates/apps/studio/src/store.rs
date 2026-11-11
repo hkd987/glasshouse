@@ -7,6 +7,13 @@
 //! person's choice, a file in their home ([`MINE`]) written as them, so undo
 //! restores it like any file a call changed (GA-3). Writing it by hand only
 //! picks among versions that passed the checks.
+//!
+//! Not every version is kept for good (audit 5.3; each is the app's whole
+//! source and build): the newest [`VERSIONS_KEPT`] of an app are, the one
+//! in use is, and any that was in use in the last three months, which is
+//! what undoing a change of version can name ([`glass_state::kept`]).
+//! [`Store::moved`] notes each change of the version in use and removes
+//! the rest.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -19,6 +26,10 @@ use serde::{Deserialize, Serialize};
 
 /// Which version of each of their apps a person uses, under their home.
 pub const MINE: &str = ".local/share/glasshouse/apps/mine.json";
+/// The newest versions of an app that are kept whatever their age.
+pub const VERSIONS_KEPT: usize = 20;
+/// In a version's folder: when it was last known to be the one in use.
+pub(crate) const USED: &str = ".used";
 const MAX_MINE_BYTES: u64 = 64 * 1024;
 
 /// The app a remix starts from.
@@ -228,6 +239,70 @@ impl Store {
         Ok(files)
     }
 
+    /// Notes that `login` went from version `from` of `app` to `to` as
+    /// the one in use, and removes the versions that are past keeping
+    /// ([`glass_state::kept`]). Which went, lowest first.
+    ///
+    /// Call it after the person's choice is written. Nothing is removed
+    /// if a note can't be kept: a version without one would look unused.
+    pub fn moved(&self, login: &str, app: &AgentId, from: Option<u32>, to: u32) -> Vec<u32> {
+        self.moved_at(login, app, from, to, std::time::SystemTime::now())
+    }
+
+    pub(crate) fn moved_at(
+        &self,
+        login: &str,
+        app: &AgentId,
+        from: Option<u32>,
+        to: u32,
+        now: std::time::SystemTime,
+    ) -> Vec<u32> {
+        use glass_state::kept;
+
+        let note = |version: u32| self.version_dir(login, app, version).join(USED);
+        let noted = from
+            .into_iter()
+            .chain([to])
+            .filter(|v| self.version_dir(login, app, *v).is_dir())
+            .try_for_each(|v| kept::note_used(&note(v), now));
+        let Ok(since) = noted.and_then(|()| kept::since(&self.root, now)) else {
+            return Vec::new();
+        };
+        let versions: Vec<kept::Version> = self
+            .versions(login, app)
+            .into_iter()
+            .filter_map(|number| {
+                let used = kept::last_used(&note(number)).or_else(|| {
+                    // When it was saved.
+                    std::fs::metadata(self.version_dir(login, app, number).join("record.json"))
+                        .and_then(|m| m.modified())
+                        .ok()
+                })?;
+                Some(kept::Version { number, used })
+            })
+            .collect();
+        let app_dir = self.app_dir(login, app);
+        // What a removal that glassd stopped in the middle of left.
+        for entry in std::fs::read_dir(&app_dir).into_iter().flatten().flatten() {
+            if entry.file_name().to_string_lossy().starts_with(".gone-") {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+        kept::past_keeping(&versions, Some(to), VERSIONS_KEPT, since, now)
+            .into_iter()
+            .filter(|version| {
+                // Out of the way whole, then removed: a version either
+                // exists complete or not at all.
+                let gone = app_dir.join(format!(".gone-{version}"));
+                let _ = std::fs::remove_dir_all(&gone);
+                std::fs::rename(self.version_dir(login, app, *version), &gone).is_ok_and(|()| {
+                    let _ = std::fs::remove_dir_all(&gone);
+                    true
+                })
+            })
+            .collect()
+    }
+
     /// Writes a new version whole, then puts it in place: a version either
     /// exists complete or not at all.
     pub fn save(
@@ -271,4 +346,109 @@ impl Store {
 
 fn json<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
     serde_json::to_vec_pretty(value).map_err(io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::time::{Duration, SystemTime};
+
+    use super::*;
+
+    const DAY: Duration = Duration::from_secs(24 * 3600);
+    /// No version removed.
+    const NONE: [u32; 0] = [];
+
+    /// A store with `demo`'s app saved up to version `upto`, each as a
+    /// save leaves it.
+    fn saved(store: &Store, app: &AgentId, from: u32, upto: u32) {
+        for version in from..=upto {
+            let dir = store.version_dir("demo", app, version);
+            std::fs::create_dir_all(dir.join("dist")).unwrap();
+            std::fs::write(dir.join("record.json"), b"{}").unwrap();
+            std::fs::write(dir.join("dist/app.js"), b"// the app").unwrap();
+        }
+    }
+
+    // Audit 5.3: every version of every app a person made stayed for good,
+    // its whole source and build.
+    #[test]
+    fn ga3_an_apps_old_versions_go_once_nothing_can_name_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("apps"));
+        let app: AgentId = "my-mail".parse().unwrap();
+        let day = |n: u32| SystemTime::now() + DAY * n;
+        let versions = |store: &Store| store.versions("demo", &app);
+
+        // Twenty-five saves in a day: nothing goes. Any of them may be
+        // what an undo puts back.
+        saved(&store, &app, 1, 25);
+        assert_eq!(store.moved_at("demo", &app, Some(24), 25, day(0)), NONE);
+        assert_eq!(versions(&store).len(), 25);
+
+        // Still nothing two months on.
+        saved(&store, &app, 26, 26);
+        assert_eq!(store.moved_at("demo", &app, Some(25), 26, day(60)), NONE);
+
+        // Past three months, the ones before the newest twenty go, whole.
+        saved(&store, &app, 27, 27);
+        assert_eq!(
+            store.moved_at("demo", &app, Some(26), 27, day(100)),
+            [1, 2, 3, 4, 5, 6, 7]
+        );
+        assert_eq!(versions(&store), (8..=27).collect::<Vec<u32>>());
+        let left: Vec<String> = std::fs::read_dir(store.app_dir("demo", &app))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.parse::<u32>().is_err())
+            .collect();
+        assert_eq!(left, Vec::<String>::new(), "nothing half removed");
+
+        // The person goes back to version 8, and uses it for a while.
+        assert_eq!(store.moved_at("demo", &app, Some(27), 8, day(100)), NONE);
+        // A save moves away from it: 8 was in use until this moment, so
+        // undoing the save names it. It stays; 9, unused all along, goes.
+        saved(&store, &app, 28, 29);
+        assert_eq!(store.moved_at("demo", &app, Some(8), 29, day(150)), [9]);
+        assert!(versions(&store).contains(&8));
+        // Fifty days after it was last in use it's still there, as the
+        // next unused one goes; three months after, it goes too.
+        saved(&store, &app, 30, 30);
+        assert_eq!(store.moved_at("demo", &app, Some(29), 30, day(200)), [10]);
+        assert!(versions(&store).contains(&8));
+        saved(&store, &app, 31, 31);
+        assert_eq!(
+            store.moved_at("demo", &app, Some(30), 31, day(250)),
+            [8, 11]
+        );
+
+        // The one in use is never one of them, however old.
+        assert_eq!(store.moved_at("demo", &app, Some(31), 12, day(250)), NONE);
+        saved(&store, &app, 32, 33);
+        // (Noted as in use on day 250, and still the one in use.)
+        assert_eq!(store.moved_at("demo", &app, None, 12, day(400)), [13]);
+        assert!(versions(&store).contains(&12));
+
+        // Another app of theirs, and another person's, are their own.
+        let other: AgentId = "my-notes".parse().unwrap();
+        saved(&store, &other, 1, 3);
+        assert_eq!(store.moved_at("demo", &other, Some(2), 3, day(400)), NONE);
+        assert_eq!(store.versions("demo", &other), [1, 2, 3]);
+    }
+
+    // What glassd left when it stopped in the middle of removing one.
+    #[test]
+    fn ga3_a_removal_cut_short_is_finished_at_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("apps"));
+        let app: AgentId = "my-mail".parse().unwrap();
+        saved(&store, &app, 1, 2);
+        let half = store.app_dir("demo", &app).join(".gone-0");
+        std::fs::create_dir_all(half.join("dist")).unwrap();
+        assert_eq!(store.versions("demo", &app), [1, 2]);
+        store.moved_at("demo", &app, Some(1), 2, SystemTime::now());
+        assert!(!half.exists());
+        assert_eq!(store.versions("demo", &app), [1, 2]);
+    }
 }
