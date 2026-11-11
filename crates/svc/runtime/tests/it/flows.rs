@@ -73,8 +73,15 @@ async fn play(h: &Harness, task: TaskId) -> glass_rpc::Client {
     agent
 }
 
+/// The repeater is `sleep 3`: its task is done three seconds after it
+/// started, and then its sandbox is taken down. Five seconds for that
+/// left under two to spare, which a two-processor machine running the
+/// whole suite once took (CI's run 38).
 async fn done(h: &Harness, task: TaskId) {
-    eventually(|| h.rt.get(&h.me, task).unwrap().view.state == TileState::Done).await;
+    common::eventually_within(std::time::Duration::from_secs(30), || {
+        h.rt.get(&h.me, task).unwrap().view.state == TileState::Done
+    })
+    .await;
 }
 
 fn notes(h: &Harness, task: TaskId) -> Vec<String> {

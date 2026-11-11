@@ -197,14 +197,25 @@ pub async fn tool(client: &Client, name: &str, arguments: Value) -> CallToolResu
 }
 
 /// Polls until `check` holds, failing after five seconds.
-pub async fn eventually(mut check: impl FnMut() -> bool) {
-    for _ in 0..500 {
+pub async fn eventually(check: impl FnMut() -> bool) {
+    eventually_within(Duration::from_secs(5), check).await;
+}
+
+/// Polls until `check` holds, failing after `limit`: for what takes
+/// seconds by design, such as an agent that is `sleep 3` coming to its
+/// end, where five leave too little on a busy machine.
+pub async fn eventually_within(limit: Duration, mut check: impl FnMut() -> bool) {
+    let until = std::time::Instant::now() + limit;
+    loop {
         if check() {
             return;
         }
+        assert!(
+            std::time::Instant::now() < until,
+            "condition never became true in {limit:?}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("condition never became true");
 }
 
 /// The default policy, the test home's Finance folder labeled confidential,
