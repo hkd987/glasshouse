@@ -13,7 +13,7 @@ use std::fs;
 use glass_audit::{AuditRecord, EventKind};
 use serde_json::json;
 
-use crate::common::{Harness, harness, tool};
+use crate::common::{self, Harness, eventually, harness, tool};
 
 fn actions(h: &Harness, task: glass_types::TaskId) -> Vec<AuditRecord> {
     h.rt.audit_task(&h.me, task)
@@ -511,4 +511,114 @@ async fn au1_a_run_that_fails_refuses_the_change_in_it_and_every_record_is_there
     assert!(all[1].event.detail.get("happened_at").is_some());
     let report = glass_audit::verify(&h.audit_path()).unwrap();
     assert_eq!(report.unfinished, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn au3_records_past_its_retention_rule_go_on_the_record_and_the_log_still_verifies() {
+    use glass_audit::{AuditEvent, Segments};
+    use glass_types::Timestamp;
+    let h = harness();
+    // IT's rule: thirty days. And a log closed into a segment every few
+    // records, as a month of use does.
+    let rule = |days: u32| {
+        let policy = glass_policy::DEFAULT_POLICY.replace(
+            "audit_retention_days = 400",
+            &format!("audit_retention_days = {days}"),
+        );
+        assert_ne!(policy, glass_policy::DEFAULT_POLICY);
+        policy
+    };
+    let segments = Segments {
+        bytes: 1500,
+        age: std::time::Duration::from_secs(3600),
+    };
+    let rt = common::rebuild_segmenting(&h, &rule(30), segments);
+    let root = glass_runtime::Caller {
+        name: "root".into(),
+        uid: 0,
+        gid: 0,
+        home: "/root".into(),
+    };
+
+    // A task whose records start in the log's first segment and end in
+    // its last.
+    let task = rt
+        .start(&h.me, h.request(&["Invoices"], &["Reports"]))
+        .unwrap()
+        .id;
+    for n in 0..40 {
+        rt.append_audit(AuditEvent::new(
+            EventKind::DaemonStarted,
+            format!("something else on the record, {n}"),
+        ));
+    }
+    rt.stop(&h.me, task).unwrap();
+    eventually(|| !rt.get(&h.me, task).unwrap().view.state.is_live()).await;
+    eventually(|| {
+        glass_audit::read(&h.audit_path(), |r| r.event.kind == EventKind::TaskFinished)
+            .unwrap()
+            .len()
+            == 1
+    })
+    .await;
+
+    let whole = |task| glass_audit::read(&h.audit_path(), |r| r.event.task == Some(task)).unwrap();
+    let before = rt.audit_verify(&root).unwrap();
+    assert!(before.files > 3, "{before:?}");
+    assert_eq!(before.first_seq, 0);
+    let mine = rt.audit_task(&h.me, task).unwrap();
+    assert!(mine.len() >= 3, "{mine:?}");
+    assert_eq!(mine, whole(task));
+
+    // Today nothing is thirty days old.
+    assert_eq!(rt.trim_audit(), None);
+    assert_eq!(rt.audit_verify(&root).unwrap(), before);
+
+    // Thirty-one days on, every segment closed by now is past the rule.
+    let later = Timestamp::from_unix_seconds(Timestamp::now().unix_seconds() + 31 * 24 * 3600);
+    let trimmed = rt.trim_audit_as_of(later.unwrap()).unwrap();
+    assert!(trimmed.records > 30, "{trimmed:?}");
+    let after = rt.audit_verify(&root).unwrap();
+    assert_eq!(after.first_seq, trimmed.through_seq + 1);
+    assert!(after.files < before.files, "{after:?}");
+    // What went is on the record, with the rule it went under.
+    let all = glass_audit::read(&h.audit_path(), |_| true).unwrap();
+    let note = all.last().unwrap();
+    assert_eq!(note.event.kind, EventKind::LogTrimmed);
+    assert!(
+        note.event.summary.contains("older than 30 days"),
+        "{}",
+        note.event.summary
+    );
+    assert_eq!(note.event.detail["through_seq"], trimmed.through_seq);
+    // The task's records are those still kept.
+    let kept = rt.audit_task(&h.me, task).unwrap();
+    assert!(kept.len() < mine.len());
+    assert_eq!(kept, whole(task));
+    // The record of a removal can be what fills the file, which is then
+    // closed, and (in this test, where everything is "old") goes at the
+    // next pass. After that there is nothing more to remove, and nothing
+    // more is said.
+    let mut passes = 0;
+    while rt.trim_audit_as_of(later.unwrap()).is_some() {
+        passes += 1;
+        assert!(passes < 5);
+    }
+    let after = rt.audit_verify(&root).unwrap();
+    assert_eq!(rt.trim_audit_as_of(later.unwrap()), None);
+    assert_eq!(rt.audit_verify(&root).unwrap(), after);
+
+    // An org that keeps everything: nothing goes, however old.
+    let rt = common::rebuild_segmenting(&h, &rule(0), segments);
+    for n in 0..20 {
+        rt.append_audit(AuditEvent::new(
+            EventKind::DaemonStarted,
+            format!("kept for good, {n}"),
+        ));
+    }
+    let ages_on = Timestamp::from_unix_seconds(Timestamp::now().unix_seconds() + 4000 * 24 * 3600);
+    assert_eq!(rt.trim_audit_as_of(ages_on.unwrap()), None);
+    let report = rt.audit_verify(&root).unwrap();
+    assert_eq!(report.first_seq, after.first_seq);
+    assert!(report.records > after.records);
 }

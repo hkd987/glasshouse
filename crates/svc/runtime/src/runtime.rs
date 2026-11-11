@@ -2297,7 +2297,47 @@ impl Runtime {
             records: report.records,
             last_hash: report.last_hash,
             unfinished: report.unfinished,
+            first_seq: report.first_seq,
+            files: report.files,
         })
+    }
+
+    /// Removes the audit records older than the org's retention rule
+    /// (ADR 0053): whole segments of the log, oldest first, each removal
+    /// on the record. glassd calls it as it starts and once a day. With no
+    /// rule (0 days), nothing is ever removed.
+    pub fn trim_audit(&self) -> Option<glass_audit::Trimmed> {
+        self.trim_audit_as_of(glass_types::Timestamp::now())
+    }
+
+    /// [`Runtime::trim_audit`] as it would be at `now`.
+    #[doc(hidden)]
+    pub fn trim_audit_as_of(&self, now: glass_types::Timestamp) -> Option<glass_audit::Trimmed> {
+        // Said here, once a day, since nothing else looks: the log goes
+        // on without it, but it grows as one file until it's put right.
+        if let Some(why) = self.audit.unsealed() {
+            tracing::warn!("the audit log's file couldn't be closed as a segment: {why}");
+        }
+        let days = self.policy().audit_retention_days()?;
+        let before = glass_types::Timestamp::from_unix_seconds(
+            now.unix_seconds() - i64::from(days) * 24 * 3600,
+        )?;
+        match blocking(|| self.audit.trim(before, &format!("{days} days"))) {
+            Ok(trimmed) => {
+                if let Some(trimmed) = &trimmed {
+                    tracing::info!(
+                        records = trimmed.records,
+                        through = trimmed.through_seq,
+                        "removed audit records older than {days} days"
+                    );
+                }
+                trimmed
+            }
+            Err(e) => {
+                tracing::warn!("couldn't remove audit records older than {days} days: {e}");
+                None
+            }
+        }
     }
 
     // ---- snapshots -------------------------------------------------------

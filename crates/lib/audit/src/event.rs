@@ -57,6 +57,11 @@ impl AuditEvent {
 pub enum EventKind {
     /// The log was opened after an unacknowledged partial write was dropped.
     LogRecovered,
+    /// Records older than the retention rule were removed (whole segments,
+    /// oldest first). `detail` says through which record (`through_seq`)
+    /// and its hash (`last_hash`): what the oldest record still kept
+    /// chains onto, so the log verifies from there (ADR 0053).
+    LogTrimmed,
     DaemonStarted,
     PolicyLoaded,
     TaskPlanned,

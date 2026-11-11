@@ -16,6 +16,10 @@ version = 1
 max_label = "internal"
 # An unanswered Ask holds the agent; after this the task pauses (DA-13).
 approval_timeout_secs = 900
+# Audit records older than this many days are removed from the computer,
+# about a month at a time, and the log records each removal (ADR 0053).
+# 0 keeps every record; otherwise at least 30.
+audit_retention_days = 400
 
 [org.tiers]
 "files.list" = "auto"

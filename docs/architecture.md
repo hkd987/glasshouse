@@ -224,6 +224,15 @@ its body, each body carrying the previous record's hash. `glassctl verify`
 proves nothing was edited, dropped or reordered. If an append fails, the
 pipeline refuses further side effects (fail closed).
 
+The log is written to `audit.log` and kept as segments beside it
+(`audit.log.seg-<seq>`): the file is closed as one at a month or 32 MiB,
+and the chain goes on in the next. Records older than the org's rule
+(`[org] audit_retention_days` in policy: 400 by default, 0 keeps
+everything) are removed a segment at a time, each removal a `log_trimmed`
+record that says through which record and its hash, so the log verifies
+from the oldest record kept and a removal nothing accounts for still
+shows (ADR 0053).
+
 ## Constraints from the PRD that shape new code
 
 - **US-only, x86-only for V1.** One target: `x86_64-unknown-freebsd`.

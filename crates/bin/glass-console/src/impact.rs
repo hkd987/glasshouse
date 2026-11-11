@@ -354,6 +354,14 @@ pub fn preview(
             draft.org.approval_timeout_secs / 60
         ));
     }
+    if old.org.audit_retention_days != draft.org.audit_retention_days {
+        changes.push(match draft.org.audit_retention_days {
+            0 => "Everyone: every audit record is kept on each computer, for good".to_owned(),
+            days => format!(
+                "Everyone: audit records are kept on each computer for {days} days, then removed"
+            ),
+        });
+    }
     if old.models != draft.models {
         changes.push("Everyone: models and where each label's data may go".into());
     }
@@ -775,6 +783,28 @@ mod tests {
             impact.changes[0].contains("Ask → Never"),
             "{:?}",
             impact.changes
+        );
+    }
+
+    #[test]
+    fn adr0053_a_change_to_how_long_audit_records_are_kept_says_so_before_its_published() {
+        let dir = LocalDirectory::starter("root");
+        let titles = Titles::first_party();
+        let base = doc(glass_policy::DEFAULT_POLICY);
+        let keeping = |days: u32| {
+            let draft = doc(&glass_policy::DEFAULT_POLICY.replace(
+                "audit_retention_days = 400",
+                &format!("audit_retention_days = {days}"),
+            ));
+            preview(Some((1, &base)), &draft, &dir, &titles).changes
+        };
+        assert_eq!(
+            keeping(90),
+            ["Everyone: audit records are kept on each computer for 90 days, then removed"]
+        );
+        assert_eq!(
+            keeping(0),
+            ["Everyone: every audit record is kept on each computer, for good"]
         );
     }
 

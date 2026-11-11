@@ -206,9 +206,8 @@ Two more ways the log's end can be wrong, neither of which stops it now:
   are more than a damaged end: glassd still refuses to start, and says
   what a person can do (`glassctl verify`, then move the log aside).
 
-Still open: the log is one file for as long as the computer is used
-(segments chained by hash, with a retention rule). How long records are
-kept is a rule for whoever answers for compliance to set, not the code.
+The log being one file for as long as the computer is used is the next
+amendment's.
 
 ## Amended 2026-11-10 (audit 9.1): records share disk syncs
 
@@ -255,4 +254,96 @@ snapshot 167 ms median, 216 ms p95, against 750). A person's own changing
 actions still take turns from snapshot to record (ADR 0051), so it is
 reads, asks, state changes, apps' sessions and other people's tasks that
 share syncs with them.
+
+## Amended 2026-11-11 (audit 4.7): the log in segments, and how long records are kept
+
+The log was one file for as long as the computer was used: it only grew,
+and nothing could ever be removed from it without breaking the chain.
+
+**Segments.** The log is written to one file, `audit.log`, as before. Once
+that file is a month old or 32 MiB it is closed as a **segment**: renamed
+beside the log as `audit.log.seg-<its first record's seq>`, and a new file
+begun whose first record chains onto the segment's last.
+
+- It happens under the writer's lock, between two runs of records, so a
+  segment ends at a record that was acknowledged. Nothing in a segment
+  changes again.
+- glassd stopped between the rename and the new file leaves no file. The
+  next start makes one and reads where the chain stands from the newest
+  segment. (Before, an empty file meant "the log's first record".)
+- A segment is never written over. If a file by its name is there, or the
+  rename is refused, the file stays as it is and goes on taking records:
+  nothing is lost and the log isn't stopped for it. It is closed at the
+  first record after the way is clear, and glassd's log says why
+  meanwhile, once a day. (Renamed and then unable to make the new file,
+  there is nothing to write to: records are refused, fail closed, until
+  there is.)
+- Reading reads all of it as one chain: `glassctl verify`, the console's
+  report of the last day (from the end back, through as many files as it
+  takes) and a task's records. Each segment's index of its tasks is kept
+  beside it (`.tasks`), worked out once: a task's records don't cost a
+  read of the whole log after a restart. It is only a help to reading;
+  every record read through it is checked against its own hash.
+
+**How long records are kept.** A policy setting, `[org]
+audit_retention_days`, which IT publishes from the console like any other
+policy change (the preview says "audit records are kept on each computer
+for N days, then removed").
+
+- **The default is 400 days**: thirteen months and a few days. A year is
+  what an audit of a year's controls, and the common rules for audit
+  trails, ask to be on hand; the rest is room for the audit itself.
+- **0 keeps every record.** Anything else is at least 30 days, so nothing
+  goes before it has been reported and looked at. An org that must keep
+  records for years sets the number, or keeps them in its own store of
+  them (AU-2) and leaves this alone.
+- The setting is written into a policy only where it isn't the default.
+  A policy that leaves it alone still reads on a computer whose OS is
+  from before the setting; one that changes it is refused there, whole,
+  as any policy with a setting the computer doesn't know is (audit 4.11).
+  Change it once the computers have this OS.
+
+**What removing does.** glassd looks as it starts and once a day. Whole
+segments go, oldest first, each only once its newest record is older than
+the rule; the file being written never does. So records are kept between
+the rule and about a month longer.
+
+- A `log_trimmed` record is written first, and on disk: how many records,
+  through which one (`through_seq`), that record's hash, and the rule.
+  Then the segments are removed, one at a time.
+- **The log still verifies.** The oldest record kept must be the log's
+  first, or one a `log_trimmed` record covers; where it is exactly the
+  record after `through_seq`, it must chain onto the hash that record
+  gives. A `log_trimmed` record is a record like any other: it can't be
+  added or changed without breaking the chain from there on.
+- **Removing records any other way still shows.** A segment deleted by
+  hand leaves the log starting at a record nothing accounts for, or a
+  break in the middle. `glassctl verify` says which.
+- Stopped after the record and before the last segment went, the log
+  verifies as it is, and the next pass removes the rest with a record of
+  its own.
+- `glassctl verify` says how many files the records are in and, once any
+  have been removed, which record is the oldest kept.
+
+**Reading beside the writer.** `verify` opens the file being written,
+lists and opens the segments, and opens the file being written again; a
+file renamed or removed meanwhile still reads to its end, and files are
+told apart by what they are, not what they're called. If it then finds a
+break and the files changed under it, it looks again, and reports only a
+break that is there with the files at rest.
+
+What this doesn't do: export records before they go (AU-2's stream to the
+SIEM is still not started), or let IT set the rule per group: it is the
+computer's log, and one rule.
+
+Modelled as `specs/tla/AuditSegments.tla` (the writing of records into the
+one file stays `AuditLog.tla`): the log on disk verifies at every step,
+through closing a segment, a removal and glassd stopping anywhere; only
+records past the rule go; `verify` reports no break that isn't there. Its
+Old switches are the ways this was or could have been wrong: the chain
+begun again on an empty file, segments removed before the record of it,
+`verify` asking for exactly the record after `through_seq` (wrong while
+segments go one by one, and for good after a stop part way; the tests
+found it), and `verify` reporting a break it found while the files
+changed.
 

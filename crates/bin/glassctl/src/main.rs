@@ -830,8 +830,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     0 => String::new(),
                     n => format!(", then {n} bytes of a record not finished"),
                 };
+                let files = match r.files {
+                    0 | 1 => String::new(),
+                    n => format!(" in {n} files"),
+                };
+                // Older records removed under the retention rule: the log
+                // itself says which, and from where it is checked.
+                let kept_from = match r.first_seq {
+                    0 => String::new(),
+                    seq => format!(
+                        "\nThe oldest kept is record {seq}: those before it were removed \
+                         under the retention rule, as the log records."
+                    ),
+                };
                 format!(
-                    "Audit log intact: {} records, chain head {}{unfinished}\n",
+                    "Audit log intact: {} records{files}, chain head {}{unfinished}{kept_from}\n",
                     r.records,
                     r.last_hash.get(..16).unwrap_or(&r.last_hash)
                 )

@@ -679,12 +679,18 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
     // A damaged last record is set aside and the log goes on (it says so
     // itself). More damage than that stops glassd here, fail closed: with
     // what a person can do about it, which the error alone didn't say.
+    let mut segments = glass_audit::Segments::default();
+    if let Some(bytes) = config.audit_segment_bytes {
+        segments.bytes = bytes;
+    }
     let audit = Arc::new(
-        AuditLog::open(&audit_path, Durability::Sync).map_err(|e| match e {
+        AuditLog::open_with(&audit_path, Durability::Sync, segments).map_err(|e| match e {
             glass_audit::AuditError::Corrupt { .. } => anyhow::anyhow!(
                 "{e}\nglassd doesn't start on an audit log it can't continue. \
                  `glassctl verify` says where it stops checking out. To start a new log, \
-                 move {} aside (keep it: it is the record up to now) and start glassd again.",
+                 move {} and the segments beside it ({}.seg-*) aside (keep them: they are \
+                 the record up to now) and start glassd again.",
+                audit_path.display(),
                 audit_path.display()
             ),
             other => other.into(),
@@ -909,6 +915,21 @@ async fn run(prepared: Prepared) -> anyhow::Result<()> {
                 if let Err(e) = slept {
                     tracing::warn!("couldn't sleep the computer: {e}");
                 }
+            }
+        });
+    }
+
+    // Audit records older than the org's retention rule are removed, as
+    // glassd starts and once a day (ADR 0053): whole segments of the log,
+    // each removal on the record. The rule is read each time, so one IT
+    // changes is the one the next pass keeps.
+    {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+            loop {
+                tick.tick().await;
+                runtime.trim_audit();
             }
         });
     }

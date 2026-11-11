@@ -41,6 +41,12 @@ pub struct Config {
     /// Defaults to `<state_dir>/audit/audit.log`.
     #[serde(default)]
     pub audit_log: Option<PathBuf>,
+    /// How large the audit log's file gets before it is closed as a
+    /// segment and a new one begun (ADR 0053). Unset, 32 MiB (or a month,
+    /// whichever comes first): what suits a computer in use. Tests set it
+    /// small.
+    #[serde(default)]
+    pub audit_segment_bytes: Option<u64>,
     /// Policy file. When it doesn't exist the built-in default policy is
     /// enforced (it is designed to be safe to ship unchanged).
     #[serde(default = "default_policy")]

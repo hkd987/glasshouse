@@ -120,6 +120,36 @@ service glassd restart </dev/null >>/tmp/glassd-models.log 2>&1
 for i in \$(jot 120); do glassctl status >/dev/null 2>&1 && break; sleep 0.5; done
 exit \$status"
 
+step "the audit log in segments (AU-1, AU-2, ADR 0053)"
+# The log's file is closed as a segment at 32 MiB or a month; here at 4 kB,
+# so a task's records run through several. The chain is checked through all
+# of them, a task's records are found in all of them, and glassd starts on
+# them again.
+conf=/usr/local/etc/glasshouse/glassd.toml
+"$vm" run "set -e
+cp $conf $conf.e2e-saved
+{ echo 'audit_segment_bytes = 4000'; cat $conf.e2e-saved; } >$conf
+service glassd restart </dev/null >/tmp/glassd-segments.log 2>&1
+for i in \$(jot 120); do glassctl status >/dev/null 2>&1 && break; sleep 0.5; done"
+task=$("$vm" run "su demo -c '$e2e hold'" | tail -1)
+"$vm" run "su demo -c '$e2e release $task'"
+said=$("$vm" run "status=0
+glassctl verify || status=\$?
+ls /var/db/glasshouse/audit | grep -c 'audit.log.seg-[0-9]*\$'
+su demo -c 'glassctl audit $task' | grep -c .
+mv $conf.e2e-saved $conf
+service glassd restart </dev/null >>/tmp/glassd-segments.log 2>&1
+for i in \$(jot 120); do glassctl status >/dev/null 2>&1 && break; sleep 0.5; done
+glassctl verify || status=\$?
+exit \$status")
+echo "$said"
+[[ $said == *"Audit log intact:"*" files, "* ]] || { echo "FAIL the audit log isn't in several files, or doesn't verify"; exit 1; }
+segments=$(sed -n 2p <<<"$said")
+records=$(sed -n 3p <<<"$said")
+[[ $segments -ge 2 && $records -ge 3 ]] || { echo "FAIL $segments segments, and $records lines of the task's records"; exit 1; }
+[[ $(tail -1 <<<"$said") == "Audit log intact:"* ]] || { echo "FAIL the log doesn't verify after glassd started on its segments"; exit 1; }
+echo "PASS the audit log runs through $segments segments, verifies, and finds a task's records in them"
+
 step "branding (BR-1, BR-2)"
 "$vm" scp-in "$repo/tests/e2e/check-branding.sh" /tmp/check-branding.sh
 "$vm" run "sh /tmp/check-branding.sh"

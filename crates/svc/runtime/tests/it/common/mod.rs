@@ -516,6 +516,36 @@ pub fn rebuild_on(
     sandbox: Arc<dyn glass_platform::sandbox::Sandbox>,
     computers: Option<Arc<glass_computers::sandbox::ComputerSandbox>>,
 ) -> Arc<Runtime> {
+    rebuild_logging(
+        h,
+        policy,
+        catalog,
+        sandbox,
+        computers,
+        glass_audit::Segments::default(),
+    )
+}
+
+/// A new runtime on the same state whose audit log is closed into
+/// segments as `segments` says.
+pub fn rebuild_segmenting(
+    h: &Harness,
+    policy: &str,
+    segments: glass_audit::Segments,
+) -> Arc<Runtime> {
+    let mut demo = invoice_demo();
+    demo.plan = Vec::new();
+    rebuild_logging(h, policy, vec![demo], Arc::new(HostSandbox), None, segments)
+}
+
+fn rebuild_logging(
+    h: &Harness,
+    policy: &str,
+    catalog: Vec<CatalogEntry>,
+    sandbox: Arc<dyn glass_platform::sandbox::Sandbox>,
+    computers: Option<Arc<glass_computers::sandbox::ComputerSandbox>>,
+    segments: glass_audit::Segments,
+) -> Arc<Runtime> {
     let mut registry = Registry::new();
     registry.register(Arc::new(FilesProvider)).unwrap();
     registry
@@ -543,7 +573,9 @@ pub fn rebuild_on(
         registry,
         sandbox,
         snapshots: Arc::new(CopySnapshotter::new(h.dir.path().join("snapshots"))),
-        audit: Arc::new(AuditLog::open(h.audit_path(), Durability::Buffered).unwrap()),
+        audit: Arc::new(
+            AuditLog::open_with(h.audit_path(), Durability::Buffered, segments).unwrap(),
+        ),
         gateway: Arc::new(Gateway::new()),
         settings: SettingsHandle::new(h.dir.path().join("state/settings")),
         computers,

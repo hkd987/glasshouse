@@ -47,6 +47,12 @@ impl Policy {
         if doc.org.approval_timeout_secs == 0 {
             errors.push("org.approval_timeout_secs must be greater than zero".into());
         }
+        if (1..crate::document::MIN_AUDIT_RETENTION_DAYS).contains(&doc.org.audit_retention_days) {
+            errors.push(format!(
+                "org.audit_retention_days must be 0 (keep every record) or at least {}",
+                crate::document::MIN_AUDIT_RETENTION_DAYS
+            ));
+        }
         let mut seen_groups = std::collections::BTreeSet::new();
         for group in &doc.groups {
             if !seen_groups.insert(group.name.as_str()) {
@@ -195,6 +201,15 @@ impl Policy {
             Ok(Self { doc })
         } else {
             Err(PolicyError::Invalid(errors))
+        }
+    }
+
+    /// How many days of audit records this computer keeps (ADR 0053);
+    /// `None` keeps every record.
+    pub fn audit_retention_days(&self) -> Option<u32> {
+        match self.doc.org.audit_retention_days {
+            0 => None,
+            days => Some(days),
         }
     }
 
@@ -956,6 +971,54 @@ mod tests {
             .unwrap()
             .effective("demo", &"invoice-agent".parse().unwrap())
             .unwrap()
+    }
+
+    #[test]
+    fn adr0053_audit_records_are_kept_400_days_unless_it_says_otherwise() {
+        let with = |org: &str| {
+            Policy::from_toml(&format!(
+                "version = 1\n[org]\n{org}\n[[group]]\nname = \"everyone\"\n"
+            ))
+        };
+        // Unsaid, and in the policy the OS ships with: thirteen months.
+        assert_eq!(with("").unwrap().audit_retention_days(), Some(400));
+        assert_eq!(
+            Policy::from_toml(crate::DEFAULT_POLICY)
+                .unwrap()
+                .audit_retention_days(),
+            Some(400)
+        );
+        // IT's own number, or everything.
+        assert_eq!(
+            with("audit_retention_days = 2555")
+                .unwrap()
+                .audit_retention_days(),
+            Some(2555)
+        );
+        assert_eq!(
+            with("audit_retention_days = 30")
+                .unwrap()
+                .audit_retention_days(),
+            Some(30)
+        );
+        assert_eq!(
+            with("audit_retention_days = 0")
+                .unwrap()
+                .audit_retention_days(),
+            None
+        );
+        // Less than a month is refused, saying what is allowed.
+        let refused = with("audit_retention_days = 7").unwrap_err().to_string();
+        assert!(
+            refused.contains("audit_retention_days must be 0 (keep every record) or at least 30"),
+            "{refused}"
+        );
+        // A policy that leaves it alone doesn't name it when it's sent on,
+        // so a computer whose OS is from before the setting still reads it.
+        let unsaid = toml::to_string(with("").unwrap().document()).unwrap();
+        assert!(!unsaid.contains("audit_retention_days"), "{unsaid}");
+        let said = toml::to_string(with("audit_retention_days = 90").unwrap().document()).unwrap();
+        assert!(said.contains("audit_retention_days = 90"), "{said}");
     }
 
     #[test]

@@ -367,6 +367,17 @@ pub struct AuditVerifyResult {
     /// crash or a full disk cut short. Not corruption (AU-2, ADR 0053).
     #[serde(default)]
     pub unfinished: u64,
+    /// The seq of the oldest record kept: 0 unless the retention rule has
+    /// removed older ones, which the log's own records account for.
+    #[serde(default)]
+    pub first_seq: u64,
+    /// How many files the records are in.
+    #[serde(default = "one")]
+    pub files: u64,
+}
+
+fn one() -> u64 {
+    1
 }
 
 /// What subscribers are told. The shell redraws a tile per `TaskUpdated`.

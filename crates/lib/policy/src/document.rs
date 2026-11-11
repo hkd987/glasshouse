@@ -414,6 +414,16 @@ pub struct OrgDefaults {
     /// group a person is in turns one back on (`apps_on`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub apps_off: Vec<AgentId>,
+    /// How many days of audit records each computer keeps (ADR 0053):
+    /// older ones are removed, about a month at a time, and the log says
+    /// so. 0 keeps everything; otherwise at least 30. Written only where
+    /// it isn't the default, so a policy that leaves it alone reads on a
+    /// computer whose OS is from before the setting.
+    #[serde(
+        default = "default_audit_retention_days",
+        skip_serializing_if = "is_default_audit_retention"
+    )]
+    pub audit_retention_days: u32,
 }
 
 impl Default for OrgDefaults {
@@ -423,8 +433,28 @@ impl Default for OrgDefaults {
             approval_timeout_secs: default_approval_timeout_secs(),
             tiers: BTreeMap::new(),
             apps_off: Vec::new(),
+            audit_retention_days: default_audit_retention_days(),
         }
     }
+}
+
+/// The audit records a computer keeps unless IT says otherwise: thirteen
+/// months and a few days. A year is what audits of a year's controls and
+/// the common rules for audit trails ask to be on hand; the rest is room
+/// for the audit itself. Records an org must keep longer belong in its
+/// own store of them (AU-2), or it sets this higher, or to 0.
+pub const DEFAULT_AUDIT_RETENTION_DAYS: u32 = 400;
+
+/// The fewest days a retention rule may keep: a month, so nothing goes
+/// before it has been reported and looked at.
+pub const MIN_AUDIT_RETENTION_DAYS: u32 = 30;
+
+fn default_audit_retention_days() -> u32 {
+    DEFAULT_AUDIT_RETENTION_DAYS
+}
+
+fn is_default_audit_retention(days: &u32) -> bool {
+    *days == DEFAULT_AUDIT_RETENTION_DAYS
 }
 
 fn default_max_label() -> Label {

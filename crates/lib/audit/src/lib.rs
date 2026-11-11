@@ -10,7 +10,8 @@ mod log;
 
 pub use event::{ApprovalRef, AuditEvent, EventKind, Outcome, PolicyDecision};
 pub use log::{
-    AuditError, AuditLog, AuditRecord, Durability, GENESIS, VerifyReport, read, read_since, verify,
+    AuditError, AuditLog, AuditRecord, Durability, GENESIS, Segments, Trimmed, VerifyReport, read,
+    read_since, verify,
 };
 
 #[cfg(test)]
