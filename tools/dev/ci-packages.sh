@@ -2,21 +2,25 @@
 # Installs host packages on a CI machine: `tools/dev/ci-packages.sh clang lld`.
 #
 # It tries again when the package servers can't be reached. On 2026-11-11
-# two runs in a row failed on every job with "Temporary failure resolving
+# runs failed on every job with "Temporary failure resolving
 # 'azure.archive.ubuntu.com'": the machines GitHub runs this on couldn't
-# look up their own package mirror for half an hour, nothing was installed,
+# look up their own package mirror for over an hour, nothing was installed,
 # and nothing of ours was tested. A short outage is ridden out here; a long
 # one still fails, and says that is what it was.
+#
+# The package tool isn't asked to try again itself: with the servers away
+# one attempt already takes it minutes, and the job's step has a time limit
+# (ci.yml) so a long outage fails in a quarter of an hour, not an hour.
 set -eu
 
-tries=${CI_PACKAGE_TRIES:-4}
-pause=${CI_PACKAGE_PAUSE:-30}
+tries=${CI_PACKAGE_TRIES:-3}
+pause=${CI_PACKAGE_PAUSE:-20}
 n=1
 while :; do
 	# `apt-get update` exits 0 with its lists unread, so the install is
 	# what tells whether the servers answered.
-	if sudo apt-get update -qq -o Acquire::Retries=3 &&
-		sudo apt-get install -y -qq --no-install-recommends -o Acquire::Retries=3 "$@"; then
+	if sudo apt-get update -qq &&
+		sudo apt-get install -y -qq --no-install-recommends "$@"; then
 		exit 0
 	fi
 	if [ "$n" -ge "$tries" ]; then
