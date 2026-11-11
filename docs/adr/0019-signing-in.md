@@ -120,3 +120,19 @@ environment, `setlogin`, PAM session modules, lastlog.
   interrupted setup or undoes it, and `setup.toml` is written whole.
 - The sign-in screen tells glassd who signed in until glassd hears, every
   2 s, and stops when the session ends (`specs/tla/Boot.tla`).
+
+## Amended 2026-11-11 (audit 8.3)
+- The sign-in screen checks the password off its own loop, as unlocking
+  already did. PAM blocks, and with accounts from a directory for as long
+  as the network takes: checked on the loop, the clock stood still and a
+  stop from the supervisor waited for it. The screen says "Checking…"
+  and takes nothing typed until the answer, as the lock screen does.
+- The numeric keypad types its digits and signs on the sign-in and lock
+  screens (and everywhere the shell's own key table is used), whatever
+  Num Lock says. It typed nothing, so a password with a digit typed there
+  was refused with nothing to say why. Nothing in the shell reads or sets
+  the Num Lock light, and a password field shows nothing of what was
+  typed, so a mode nobody can see doesn't decide what goes in.
+- Not done: Caps Lock. The table ignores it, here and in first-run setup,
+  so a capital typed with Caps Lock goes in as a small letter in both
+  places. Following it needs the screen to say when it is on.

@@ -1,6 +1,14 @@
 //! evdev key codes to iced keys and the text they type, for a US keyboard.
 //! The compositor replaces this with xkbcommon and the user's layout
 //! (ADR 0016).
+//!
+//! The numeric keypad always types its digits and signs, whatever Num Lock
+//! says (audit 8.3: it typed nothing, so a password with a digit typed
+//! there was refused on the sign-in and lock screens with nothing to say
+//! why). Nothing here reads or sets the Num Lock light, and where it
+//! matters most, a password, nothing shows what was typed: a mode nobody
+//! can see mustn't decide what goes in. The arrows, Home and End have keys
+//! of their own.
 
 use iced_core::keyboard::key::{Named, NativeCode, Physical};
 use iced_core::keyboard::{Key, Location, Modifiers};
@@ -45,6 +53,16 @@ fn kind(code: u16) -> Option<Kind> {
         53 => Some(Char('/', '?')),
         56 | 100 => Some(Modifier(Modifiers::ALT, Named::Alt)),
         57 => named(Named::Space),
+        // The keypad (KEY_KPASTERISK, KEY_KP7 to KEY_KPDOT, KEY_KPSLASH,
+        // KEY_KPEQUAL, KEY_KPCOMMA; its Enter is with the other, above).
+        55 => Some(keypad('*')),
+        71..=83 => Some(keypad(b"789-456+1230."[usize::from(code - 71)] as char)),
+        98 => Some(keypad('/')),
+        117 => Some(keypad('=')),
+        121 => Some(keypad(',')),
+        // KEY_102ND, the key beside the left Shift on keyboards that have
+        // one: what the US layout gives it.
+        86 => Some(Char('<', '>')),
         59..=68 => named(
             [
                 Named::F1,
@@ -80,6 +98,20 @@ fn kind(code: u16) -> Option<Kind> {
 
 fn letter(lower: u8) -> Kind {
     Kind::Char(lower as char, lower.to_ascii_uppercase() as char)
+}
+
+/// A keypad key: the same character with Shift and without.
+fn keypad(c: char) -> Kind {
+    Kind::Char(c, c)
+}
+
+/// Where on the keyboard `code` is, for what tells the keypad's keys from
+/// the others.
+fn location(code: u16) -> Location {
+    match code {
+        55 | 71..=83 | 96 | 98 | 117 | 121 => Location::Numpad,
+        _ => Location::Standard,
+    }
 }
 
 /// The keyboard state: which modifiers are held.
@@ -130,12 +162,13 @@ impl Keyboard {
         // evdev codes are the Linux keycodes, which X numbers 8 higher.
         let physical = Physical::Unidentified(NativeCode::Xkb(u32::from(code) + 8));
         let modifiers = self.modifiers;
+        let location = location(code);
         let event = if down {
             iced_core::keyboard::Event::KeyPressed {
                 key: key.clone(),
                 modified_key: key.clone(),
                 physical_key: physical,
-                location: Location::Standard,
+                location,
                 modifiers,
                 // Ctrl and the logo key make shortcuts, not text.
                 text: text
@@ -148,7 +181,7 @@ impl Keyboard {
                 key: key.clone(),
                 modified_key: key.clone(),
                 physical_key: physical,
-                location: Location::Standard,
+                location,
                 modifiers,
             }
         };
@@ -186,6 +219,57 @@ mod tests {
         assert_eq!(typed(&mut keyboard, 3).as_deref(), Some("@"));
         keyboard.key(42, 0);
         assert_eq!(typed(&mut keyboard, 52).as_deref(), Some("."));
+    }
+
+    // Audit 8.3: the keypad typed nothing, so a password with a digit
+    // typed there was refused on the sign-in and lock screens.
+    #[test]
+    fn the_keypad_types_its_digits_and_signs_with_shift_or_without() {
+        let mut keyboard = Keyboard::default();
+        // KEY_KP7 to KEY_KPDOT as they lie on the keypad, then the rest.
+        let keys = [
+            (71, "7"),
+            (72, "8"),
+            (73, "9"),
+            (74, "-"),
+            (75, "4"),
+            (76, "5"),
+            (77, "6"),
+            (78, "+"),
+            (79, "1"),
+            (80, "2"),
+            (81, "3"),
+            (82, "0"),
+            (83, "."),
+            (55, "*"),
+            (98, "/"),
+            (117, "="),
+        ];
+        for (code, types) in keys {
+            assert_eq!(typed(&mut keyboard, code).as_deref(), Some(types));
+        }
+        keyboard.key(42, 1);
+        for (code, types) in keys {
+            assert_eq!(
+                typed(&mut keyboard, code).as_deref(),
+                Some(types),
+                "with Shift"
+            );
+        }
+        keyboard.key(42, 0);
+        // Its Enter is Enter, and both say where they are.
+        let enter = keyboard.key(96, 1).pop().expect("a press");
+        assert_eq!(enter.key, Key::Named(Named::Enter));
+        for (code, on_the_keypad) in [(96, true), (75, true), (28, false), (5, false)] {
+            let press = keyboard.key(code, 1).pop().expect("a press");
+            let iced_core::keyboard::Event::KeyPressed { location, .. } = press.event else {
+                panic!("a key going down");
+            };
+            assert_eq!(location == Location::Numpad, on_the_keypad, "key {code}");
+        }
+        // Num Lock itself types nothing and changes nothing.
+        assert!(keyboard.key(69, 1).is_empty());
+        assert_eq!(typed(&mut keyboard, 75).as_deref(), Some("4"));
     }
 
     #[test]

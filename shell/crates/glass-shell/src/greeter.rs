@@ -140,7 +140,13 @@ impl Greeter {
             managed_by: "Signs in with this computer's accounts".into(),
             battery_percent: None,
             password: self.password.clone(),
-            message: self.message.clone(),
+            // As the lock screen says it: nothing typed is taken until the
+            // answer, and the person should see why.
+            message: if self.busy {
+                Some("Checking…".to_owned())
+            } else {
+                self.message.clone()
+            },
             // No fingerprint sign-in yet.
             fingerprint: false,
             switch_user: true,
@@ -211,8 +217,16 @@ mod tests {
                 .password
                 .is_empty()
         );
-        // While it's being checked, nothing else gets in.
+        // While it's being checked, nothing else gets in, and the screen
+        // says so.
         assert_eq!(greeter.update(Message::PasswordChanged("x".into())), None);
+        assert_eq!(
+            greeter
+                .screen(OffsetDateTime::UNIX_EPOCH)
+                .message
+                .as_deref(),
+            Some("Checking…")
+        );
         assert_eq!(greeter.update(Message::SignIn), None);
     }
 

@@ -580,6 +580,11 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
     let mut terminate = signal(SignalKind::terminate())?;
     let orphaned = orphaned();
     tokio::pin!(orphaned);
+    // The password being checked, off this loop (audit 8.3). PAM blocks,
+    // and with accounts from a directory for as long as the network takes:
+    // checked here, the clock stood still meanwhile and a stop from the
+    // supervisor waited. The screen takes nothing typed until the answer.
+    let mut checking: Option<Checking> = None;
     loop {
         tokio::select! {
             Some(first) = inputs.recv() => {
@@ -606,23 +611,10 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
                             let sign_in = greeter.screen(now());
                             display.focus(login::view(&theme, &sign_in, display.size()), id);
                         }
-                        Some(Effect::SignIn { user, mut password }) => {
-                            draw(&mut display, &greeter);
-                            let checked = auth::check_password(PAM_SERVICE, &user, &tty_name, &password);
-                            auth::wipe(&mut password);
+                        Some(Effect::SignIn { user, password }) => {
                             auth::wipe(greeter.password_mut());
-                            match checked {
-                                Ok(()) => {
-                                    // Up until the desktop draws over it.
-                                    display.hand_over();
-                                    return Ok(user);
-                                }
-                                Err(AuthError::Refused) => {
-                                    tokio::time::sleep(AFTER_REFUSAL).await;
-                                    greeter.refused("That password didn't work. Try again.");
-                                }
-                                Err(other) => greeter.refused(sentence(&other.to_string())),
-                            }
+                            let password = session::Password::new(password);
+                            checking = Some(check(user, tty_name.clone(), password));
                         }
                         None => {}
                     }
@@ -630,6 +622,20 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
                 if redraw {
                     draw(&mut display, &greeter);
                 }
+            }
+            (user, checked) = answer(&mut checking) => {
+                match checked {
+                    Ok(()) => {
+                        // Up until the desktop draws over it.
+                        display.hand_over();
+                        return Ok(user);
+                    }
+                    Err(AuthError::Refused) => {
+                        greeter.refused("That password didn't work. Try again.");
+                    }
+                    Err(other) => greeter.refused(sentence(&other.to_string())),
+                }
+                draw(&mut display, &greeter);
             }
             () = tokio::time::sleep(Duration::from_secs(60 - u64::from(now().second()))) => {
                 draw(&mut display, &greeter);
@@ -644,6 +650,48 @@ async fn screen(tty: &Path, offset: UtcOffset) -> anyhow::Result<String> {
             () = &mut orphaned => bail!("the sign-in screen's own supervisor is gone"),
         }
     }
+}
+
+/// A password being checked: who for, and what PAM said.
+type Checking = tokio::task::JoinHandle<(String, Result<(), AuthError>)>;
+
+/// Checks `user`'s password where blocking is allowed, and answers who it
+/// was for with what PAM said, a refusal after [`AFTER_REFUSAL`]. The
+/// password is wiped when the check is done with it.
+fn check(user: String, tty_name: String, password: session::Password) -> Checking {
+    check_with(user, password, AFTER_REFUSAL, move |user, password| {
+        auth::check_password(PAM_SERVICE, user, &tty_name, password)
+    })
+}
+
+/// [`check`], given what checks and how long a refusal waits.
+fn check_with(
+    user: String,
+    password: session::Password,
+    after_refusal: Duration,
+    checker: impl FnOnce(&str, &str) -> Result<(), AuthError> + Send + 'static,
+) -> Checking {
+    tokio::spawn(async move {
+        let name = user.clone();
+        let checked = tokio::task::spawn_blocking(move || checker(&name, password.as_str()))
+            .await
+            .unwrap_or_else(|e| Err(AuthError::Unavailable(e.to_string())));
+        if checked == Err(AuthError::Refused) {
+            tokio::time::sleep(after_refusal).await;
+        }
+        (user, checked)
+    })
+}
+
+/// The answer to the password being checked, once; never, while none is.
+/// Dropped before the answer, it leaves the check to be asked again.
+async fn answer(checking: &mut Option<Checking>) -> (String, Result<(), AuthError>) {
+    let Some(check) = checking.as_mut() else {
+        return std::future::pending().await;
+    };
+    let answer = check.await;
+    *checking = None;
+    answer.unwrap_or_else(|e| (String::new(), Err(AuthError::Unavailable(e.to_string()))))
 }
 
 /// glassd's settings: a `[managed]` section means an organization manages
@@ -945,6 +993,63 @@ mod tests {
             !super::wants_setup(true, false, None),
             "a config it can't read might be an enrolled computer's"
         );
+    }
+
+    // Audit 8.3: the sign-in screen checked the password on its own
+    // loop, so for as long as PAM took (with a directory, as long as the
+    // network) the clock stood still and a stop from the supervisor
+    // waited.
+    #[tokio::test]
+    async fn a_slow_password_check_leaves_the_sign_in_screen_its_loop() {
+        use std::time::Duration;
+
+        use glass_platform::auth::AuthError;
+        use glass_shell::session::Password;
+
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let pause = Duration::from_millis(1);
+        let slow = move |user: &str, password: &str| {
+            // Not for ever, so that a loop it does hold up is a failure
+            // here and not a test that never ends.
+            held.recv_timeout(Duration::from_secs(5)).ok();
+            assert_eq!((user, password), ("dana", "hunter2"));
+            Ok(())
+        };
+        let mut checking = Some(super::check_with(
+            "dana".into(),
+            Password::new("hunter2".into()),
+            pause,
+            slow,
+        ));
+        // The loop's other turns come round while PAM is at it.
+        for _ in 0..3 {
+            tokio::select! {
+                biased;
+                _ = super::answer(&mut checking) => panic!("an answer before PAM gave one"),
+                () = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+        assert!(checking.is_some(), "still to be answered");
+        release.send(()).expect("the check is waiting");
+        let (user, checked) = super::answer(&mut checking).await;
+        assert_eq!((user.as_str(), checked), ("dana", Ok(())));
+        // Answered once: with nothing being checked there is no answer.
+        assert!(checking.is_none());
+        let none = tokio::time::timeout(Duration::from_millis(20), super::answer(&mut checking));
+        assert!(none.await.is_err());
+
+        // A refusal is answered after its pause, and says who it was for.
+        let asked = std::time::Instant::now();
+        let pause = Duration::from_millis(150);
+        let mut checking = Some(super::check_with(
+            "dana".into(),
+            Password::new("wrong".into()),
+            pause,
+            |_, _| Err(AuthError::Refused),
+        ));
+        let (user, checked) = super::answer(&mut checking).await;
+        assert_eq!((user.as_str(), checked), ("dana", Err(AuthError::Refused)));
+        assert!(asked.elapsed() >= pause, "{:?}", asked.elapsed());
     }
 
     /// Boot.tla's "noJournal": a power cut between setup's steps left a
